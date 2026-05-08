@@ -12,6 +12,7 @@ import type {
   TextRun,
   PathCmd,
   Shadow,
+  Glow,
   RenderOptions,
   TabStop,
 } from './types';
@@ -435,6 +436,19 @@ function applyShadow(ctx: CanvasRenderingContext2D, shadow: Shadow | null, scale
   ctx.shadowOffsetY = Math.sin(dirRad) * dist;
 }
 
+/**
+ * ECMA-376 §20.1.8.17 — apply glow as a coloured halo. The Canvas shadow
+ * primitive is a fine fit: zero offset + the glow's blur radius produces a
+ * symmetric coloured blur centred on every drawn pixel.
+ */
+function applyGlow(ctx: CanvasRenderingContext2D, glow: Glow | null | undefined, scale: number) {
+  if (!glow) return;
+  ctx.shadowColor = hexToRgba(glow.color, glow.alpha);
+  ctx.shadowBlur = emuToPx(glow.radius, scale);
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+}
+
 function clearShadow(ctx: CanvasRenderingContext2D) {
   ctx.shadowColor = 'transparent';
   ctx.shadowBlur = 0;
@@ -479,8 +493,13 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const geom = el.geometry.toLowerCase();
   const fillStyle = resolveShapeFill(el.fill, ctx, x, y, w, h);
 
-  // Apply shadow before fill/stroke drawing; ctx.restore() will clear it
+  // Apply shadow before fill/stroke drawing; ctx.restore() will clear it.
+  // The Canvas API exposes a single shadow slot, so when both an outer shadow
+  // and a glow are configured we let the outer shadow win (visually dominant)
+  // and fall back to the glow only when no outer shadow is present. This is
+  // a common — and conservative — interpretation of layered effectLst.
   applyShadow(ctx, el.shadow ?? null, scale);
+  if (!el.shadow) applyGlow(ctx, el.glow ?? null, scale);
 
   const CONNECTOR_GEOMS = new Set([
     'line', 'straightconnector1',

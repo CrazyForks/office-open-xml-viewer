@@ -227,6 +227,14 @@ struct ShapeElement {
     adj8: Option<f64>,
     /// Drop shadow from spPr > effectLst > outerShdw (None if not present).
     shadow: Option<Shadow>,
+    /// Inner (inset) shadow from spPr > effectLst > innerShdw.
+    /// ECMA-376 §20.1.8.21 (CT_InnerShadowEffect).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inner_shadow: Option<Shadow>,
+    /// Coloured glow halo from spPr > effectLst > glow.
+    /// ECMA-376 §20.1.8.17 (CT_GlowEffect).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    glow: Option<Glow>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -349,6 +357,18 @@ struct Shadow {
     dist: i64,
     /// direction in degrees, clockwise from East
     dir: f64,
+}
+
+/// ECMA-376 §20.1.8.17 (CT_GlowEffect) — coloured halo with blur radius.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Glow {
+    /// hex color (6 chars)
+    color: String,
+    /// opacity 0.0–1.0
+    alpha: f64,
+    /// blur radius in EMU
+    radius: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -936,8 +956,26 @@ fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
                 bf = linear_to_srgb(nb_l.clamp(0.0, 1.0));
             }
             "alpha" => {
-                // alpha=100000 → fully opaque, alpha=0 → fully transparent
+                // ECMA-376 §20.1.2.3.1 — sets absolute alpha. val=100000 → opaque.
                 alpha = attr_f64(&t, "val").unwrap_or(100_000.0) / 100_000.0;
+            }
+            "alphaModFix" => {
+                // ECMA-376 §20.1.8.4 — fixed (absolute) alpha modulation; amt
+                // is in thousandths of a percent like alpha @val. PowerPoint
+                // uses this inside effectLst > outerShdw / innerShdw / glow
+                // colours rather than @val, so without handling it here those
+                // effects render at full opacity.
+                alpha = attr_f64(&t, "amt").unwrap_or(100_000.0) / 100_000.0;
+            }
+            "alphaMod" => {
+                // ECMA-376 §20.1.2.3.2 — multiply current alpha by val/100000.
+                let factor = attr_f64(&t, "val").unwrap_or(100_000.0) / 100_000.0;
+                alpha *= factor;
+            }
+            "alphaOff" => {
+                // ECMA-376 §20.1.2.3.3 — additive offset to alpha; val/100000
+                // can be positive or negative. Clamp at write time below.
+                alpha += attr_f64(&t, "val").unwrap_or(0.0) / 100_000.0;
             }
             _ => {}
         }
@@ -1131,14 +1169,30 @@ fn parse_shadow(
     effect_lst: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Shadow> {
-    let outer_shdw = child(effect_lst, "outerShdw")?;
-    let blur = attr_i64(&outer_shdw, "blurRad").unwrap_or(0);
-    let dist = attr_i64(&outer_shdw, "dist").unwrap_or(0);
-    // dir: 60000ths of a degree, clockwise from East (positive x-axis)
-    let dir = attr_f64(&outer_shdw, "dir").unwrap_or(0.0) / 60_000.0;
+    parse_shadow_node(child(effect_lst, "outerShdw")?, theme)
+}
 
-    // Color with optional alpha (8-char hex when alpha != 1)
-    let color_str = parse_color_node(outer_shdw, theme).unwrap_or_else(|| "000000".to_owned());
+/// Parse spPr > effectLst > innerShdw into a Shadow. ECMA-376 §20.1.8.21
+/// (CT_InnerShadowEffect) — same field shape as outerShdw, semantics differ
+/// at render time (cast inward).
+fn parse_inner_shadow(
+    effect_lst: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<Shadow> {
+    parse_shadow_node(child(effect_lst, "innerShdw")?, theme)
+}
+
+/// Shared field reader for innerShdw / outerShdw. Both elements expose
+/// blurRad, dist, dir, and a color child with optional alphaModFix.
+fn parse_shadow_node(
+    n: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<Shadow> {
+    let blur = attr_i64(&n, "blurRad").unwrap_or(0);
+    let dist = attr_i64(&n, "dist").unwrap_or(0);
+    let dir = attr_f64(&n, "dir").unwrap_or(0.0) / 60_000.0;
+
+    let color_str = parse_color_node(n, theme).unwrap_or_else(|| "000000".to_owned());
     let (color, alpha) = if color_str.len() >= 8 {
         let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
         (color_str[..6].to_owned(), a)
@@ -1147,6 +1201,24 @@ fn parse_shadow(
     };
 
     Some(Shadow { color, alpha, blur, dist, dir })
+}
+
+/// Parse spPr > effectLst > glow into a Glow effect — ECMA-376 §20.1.8.17
+/// (CT_GlowEffect): a coloured halo with a blur radius, no offset.
+fn parse_glow(
+    effect_lst: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<Glow> {
+    let g = child(effect_lst, "glow")?;
+    let radius = attr_i64(&g, "rad").unwrap_or(0);
+    let color_str = parse_color_node(g, theme).unwrap_or_else(|| "000000".to_owned());
+    let (color, alpha) = if color_str.len() >= 8 {
+        let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
+        (color_str[..6].to_owned(), a)
+    } else {
+        (color_str, 1.0)
+    };
+    Some(Glow { color, alpha, radius })
 }
 
 // ===========================
@@ -2987,16 +3059,19 @@ fn parse_shape(
     let text_body = child(sp_node, "txBody")
         .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing));
 
-    // Shadow from spPr > effectLst > outerShdw
-    let shadow = sp_pr
-        .and_then(|p| child(p, "effectLst"))
-        .and_then(|n| parse_shadow(n, theme));
+    // Effects from spPr > effectLst (outerShdw / innerShdw / glow are
+    // independent siblings — ECMA-376 §20.1.8.16). Pull each separately.
+    let effect_lst = sp_pr.and_then(|p| child(p, "effectLst"));
+    let shadow = effect_lst.and_then(|n| parse_shadow(n, theme));
+    let inner_shadow = effect_lst.and_then(|n| parse_inner_shadow(n, theme));
+    let glow = effect_lst.and_then(|n| parse_glow(n, theme));
 
     Some(ShapeElement {
         x: t.x, y: t.y, width: t.cx, height: cy,
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
         geometry, fill, stroke, text_body, default_text_color, cust_geom,
-        adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8, shadow,
+        adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8,
+        shadow, inner_shadow, glow,
     })
 }
 
@@ -4125,6 +4200,8 @@ fn parse_connector(
         adj7: None,
         adj8: None,
         shadow,
+        inner_shadow: None,
+        glow: None,
     })
 }
 
@@ -4539,5 +4616,42 @@ mod tests {
             let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
             assert_eq!(r.letter_spacing, expected, "spc={raw}");
         }
+    }
+
+    /// ECMA-376 §20.1.8.21 — innerShdw shares the field shape of outerShdw
+    /// (blurRad, dist, dir, color child). parse_inner_shadow should round-trip
+    /// all of them, including the alphaModFix encoded as 8-char hex.
+    #[test]
+    fn test_parse_inner_shadow_extracts_fields() {
+        let xml = r#"<effectLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <innerShdw blurRad="50800" dist="38100" dir="2700000">
+                <srgbClr val="000000"><alphaModFix amt="50000"/></srgbClr>
+            </innerShdw>
+        </effectLst>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let s = parse_inner_shadow(doc.root_element(), &theme).expect("innerShdw should resolve");
+        assert_eq!(s.blur, 50_800);
+        assert_eq!(s.dist, 38_100);
+        assert!((s.dir - 45.0).abs() < 0.001);
+        assert!((s.alpha - 0.5).abs() < 0.01);
+        assert_eq!(s.color.to_lowercase(), "000000");
+    }
+
+    /// ECMA-376 §20.1.8.17 — glow has a single rad attribute and a colour
+    /// child. parse_glow should preserve the radius and resolve alphaModFix.
+    #[test]
+    fn test_parse_glow_extracts_radius_and_color() {
+        let xml = r#"<effectLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <glow rad="38100">
+                <srgbClr val="FF0000"><alphaModFix amt="80000"/></srgbClr>
+            </glow>
+        </effectLst>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let g = parse_glow(doc.root_element(), &theme).expect("glow should resolve");
+        assert_eq!(g.radius, 38_100);
+        assert_eq!(g.color.to_uppercase(), "FF0000");
+        assert!((g.alpha - 0.8).abs() < 0.01);
     }
 }

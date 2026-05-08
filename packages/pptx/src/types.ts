@@ -3,6 +3,7 @@ export type {
   PathCmd,
   Fill, SolidFill, NoFill, GradientFill, GradientStop,
   Shadow,
+  Glow,
   Stroke,
   TextBody,
   SpaceLine,
@@ -18,7 +19,7 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Fill, Stroke, TextBody, Shadow, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+import type { Fill, Stroke, TextBody, Shadow, Glow, PathCmd, ChartSeries } from '@silurus/ooxml-core';
 
 export interface Presentation {
   slideWidth: number;
@@ -101,6 +102,10 @@ export interface ShapeElement {
   adj8: number | null;
   /** Drop shadow from effectLst > outerShdw (null if not present). */
   shadow: Shadow | null;
+  /** Inner (inset) shadow from effectLst > innerShdw. ECMA-376 §20.1.8.21. */
+  innerShadow?: Shadow;
+  /** Coloured glow halo from effectLst > glow. ECMA-376 §20.1.8.17. */
+  glow?: Glow;
 }
 
 export interface TableElement {

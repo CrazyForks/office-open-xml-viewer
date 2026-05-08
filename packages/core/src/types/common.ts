@@ -56,6 +56,14 @@ export interface Shadow {
   dir: number;
 }
 
+/** ECMA-376 §20.1.8.17 (CT_GlowEffect) — coloured halo with blur radius. */
+export interface Glow {
+  color: string;  // hex 6 chars
+  alpha: number;  // 0.0–1.0
+  /** Blur radius in EMU. */
+  radius: number;
+}
+
 export interface ArrowEnd {
   /** OOXML type: "none" | "triangle" | "stealth" | "diamond" | "oval" | "arrow" */
   type: string;
