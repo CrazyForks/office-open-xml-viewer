@@ -1,4 +1,5 @@
-import type { Fill, Stroke } from '../types/common';
+import type { Fill, PatternFill, Stroke } from '../types/common';
+import { buildPatternBitmap } from './pattern-bitmaps';
 
 /**
  * Convert a 6- or 8-char hex colour to a CSS `rgba()` string.
@@ -22,9 +23,12 @@ export function resolveFill(
   fill: Fill | null,
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-): string | CanvasGradient | null {
+): string | CanvasGradient | CanvasPattern | null {
   if (!fill || fill.fillType === 'none') return null;
   if (fill.fillType === 'solid') return hexToRgba(fill.color);
+  if (fill.fillType === 'pattern') {
+    return resolvePatternFill(fill, ctx);
+  }
   if (fill.fillType === 'gradient') {
     const stops = fill.stops;
     if (stops.length === 0) return null;
@@ -52,6 +56,37 @@ export function resolveFill(
     return gradient;
   }
   return null;
+}
+
+/**
+ * Build a tiling CanvasPattern for an OOXML preset pattern fill.
+ * Falls back to the foreground colour string when the preset name is unknown
+ * or the OffscreenCanvas / Canvas environment cannot create a pattern.
+ *
+ * Cached per (preset, fg, bg) tuple — patterns are immutable bitmaps so the
+ * same backing canvas can be reused across many shapes.
+ */
+const patternCache = new WeakMap<CanvasRenderingContext2D, Map<string, CanvasPattern>>();
+
+function resolvePatternFill(
+  fill: PatternFill,
+  ctx: CanvasRenderingContext2D,
+): CanvasPattern | string {
+  const key = `${fill.preset}|${fill.fg}|${fill.bg}`;
+  let perCtx = patternCache.get(ctx);
+  if (!perCtx) {
+    perCtx = new Map();
+    patternCache.set(ctx, perCtx);
+  }
+  const cached = perCtx.get(key);
+  if (cached) return cached;
+
+  const bitmap = buildPatternBitmap(fill.preset, fill.fg, fill.bg);
+  if (!bitmap) return hexToRgba(fill.fg);
+  const pat = ctx.createPattern(bitmap, 'repeat');
+  if (!pat) return hexToRgba(fill.fg);
+  perCtx.set(key, pat);
+  return pat;
 }
 
 const DASH_PATTERNS: Record<string, number[]> = {

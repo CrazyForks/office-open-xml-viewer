@@ -8,7 +8,7 @@ export type PathCmd =
   | { cmd: 'arcTo';      wr: number; hr: number; stAng: number; swAng: number }
   | { cmd: 'close' };
 
-export type Fill = SolidFill | NoFill | GradientFill;
+export type Fill = SolidFill | NoFill | GradientFill | PatternFill;
 
 export interface SolidFill {
   fillType: 'solid';
@@ -31,6 +31,20 @@ export interface GradientFill {
   angle: number;
   /** 'linear' | 'radial' */
   gradType: string;
+}
+
+/**
+ * Preset pattern fill — ECMA-376 §20.1.8.40 (CT_PatternFillProperties)
+ * with `preset` drawn from §20.1.10.59 (ST_PresetPatternVal).
+ */
+export interface PatternFill {
+  fillType: 'pattern';
+  /** Foreground hex colour — used for the "1" pixels of the preset bitmap. */
+  fg: string;
+  /** Background hex colour — used for the "0" pixels. */
+  bg: string;
+  /** Preset name, e.g. "pct25", "horz", "diagCross", "lgGrid". */
+  preset: string;
 }
 
 export interface Shadow {

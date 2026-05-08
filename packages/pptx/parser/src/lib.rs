@@ -355,6 +355,16 @@ enum Fill {
         /// "linear" | "radial"
         grad_type: String,
     },
+    /// Preset pattern fill — ECMA-376 §20.1.8.40 / §20.1.10.59 (ST_PresetPatternVal).
+    #[serde(rename_all = "camelCase")]
+    Pattern {
+        /// Foreground colour (hex). Used for the "1" pixels of the pattern bitmap.
+        fg: String,
+        /// Background colour (hex). Used for the "0" pixels.
+        bg: String,
+        /// Preset value: pct5/pct10/.../horz/vert/cross/diagCross/lgGrid/smGrid etc.
+        preset: String,
+    },
 }
 
 /// Arrow end descriptor for headEnd / tailEnd on a line.
@@ -1013,6 +1023,17 @@ fn parse_fill(
                 // Unresolvable → don't default to black; let fallback logic handle it
             }
             "noFill" => return Some(Fill::None),
+            "pattFill" => {
+                // ECMA-376 §20.1.8.40 — preset pattern with fg/bg colours.
+                let preset = attr(&c, "prst").unwrap_or_else(|| "pct50".to_owned());
+                let fg = child(c, "fgClr")
+                    .and_then(|n| parse_color_node(n, theme))
+                    .unwrap_or_else(|| "000000".to_owned());
+                let bg = child(c, "bgClr")
+                    .and_then(|n| parse_color_node(n, theme))
+                    .unwrap_or_else(|| "ffffff".to_owned());
+                return Some(Fill::Pattern { fg, bg, preset });
+            }
             "gradFill" => {
                 let mut stops: Vec<GradStop> = child(c, "gsLst")
                     .map(|gs_lst| {
@@ -4375,5 +4396,49 @@ mod tests {
         let rels = HashMap::new();
         let parsed = parse_run(doc.root_element(), None, &theme, &rels).expect("run should parse");
         assert!(parsed.hyperlink.is_none());
+    }
+
+    /// ECMA-376 §20.1.8.40 — pattFill produces a Fill::Pattern carrying the
+    /// preset name and the resolved fg/bg colours.
+    #[test]
+    fn test_parse_fill_pattern_extracts_fg_bg_preset() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <pattFill prst="pct25">
+                <fgClr><srgbClr val="C00000"/></fgClr>
+                <bgClr><srgbClr val="FFFF00"/></bgClr>
+            </pattFill>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let fill = parse_fill(doc.root_element(), &theme).expect("pattFill should resolve");
+        match fill {
+            Fill::Pattern { fg, bg, preset } => {
+                assert_eq!(preset, "pct25");
+                assert_eq!(fg.to_uppercase(), "C00000");
+                assert_eq!(bg.to_uppercase(), "FFFF00");
+            }
+            other => panic!("expected Fill::Pattern, got {:?}", other),
+        }
+    }
+
+    /// pattFill missing fg/bg colours should fall back to black/white rather
+    /// than dropping the fill entirely — keeps shapes recognisable when the
+    /// theme cannot resolve the slot.
+    #[test]
+    fn test_parse_fill_pattern_defaults_when_colors_missing() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <pattFill prst="horz"/>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let fill = parse_fill(doc.root_element(), &theme).expect("pattFill should still resolve");
+        match fill {
+            Fill::Pattern { fg, bg, preset } => {
+                assert_eq!(preset, "horz");
+                assert_eq!(fg.to_lowercase(), "000000");
+                assert_eq!(bg.to_lowercase(), "ffffff");
+            }
+            other => panic!("expected Fill::Pattern, got {:?}", other),
+        }
     }
 }

@@ -79,22 +79,27 @@ function emuToPx(emu: number, scale: number): number {
 const hexToRgba = hexToRgbaCore;
 
 /** Simple fill resolver that returns a CSS color string.
- *  For gradient fills, returns the first stop's color (used by table cells etc.) */
+ *  For gradient/pattern fills, returns a flat colour (used by table cells etc.,
+ *  where we don't have ctx scope to build a CanvasPattern). */
 function resolveFill(fill: Fill | null): string | null {
   if (!fill || fill.fillType === 'none') return null;
   if (fill.fillType === 'solid') return hexToRgba(fill.color);
   if (fill.fillType === 'gradient') {
     return fill.stops.length > 0 ? hexToRgba(fill.stops[0].color) : null;
   }
+  // Pattern fills degrade to their foreground colour outside the canvas-aware
+  // path; full bitmap rendering happens via resolveShapeFill (core resolveFill).
+  if (fill.fillType === 'pattern') return hexToRgba(fill.fg);
   return null;
 }
 
-/** Context-aware fill resolver that creates a CanvasGradient for gradient fills. */
+/** Context-aware fill resolver that creates a CanvasGradient for gradient
+ * fills and a CanvasPattern for preset pattern fills. */
 function resolveShapeFill(
   fill: Fill | null,
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-): string | CanvasGradient | null {
+): string | CanvasGradient | CanvasPattern | null {
   return resolveFillCore(fill, ctx, x, y, w, h);
 }
 
