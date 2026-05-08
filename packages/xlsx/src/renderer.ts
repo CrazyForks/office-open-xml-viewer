@@ -4051,9 +4051,14 @@ function renderBorder(
 }
 
 function borderStyleWidth(style: string): number {
+  // Widths follow Excel's pt convention so medium and thick read as visibly
+  // distinct from thin (and from each other) — thin=1pt, medium=2pt, thick=3pt.
+  // Earlier values (1.5 / 2) compressed medium and thick to roughly the same
+  // 2-row antialiased band, which made e.g. sample-27 row 9 appear to have
+  // top (medium) and bottom (thick) of equal weight.
   switch (style) {
-    case 'thick': return 2;
-    case 'medium': case 'mediumDashed': case 'mediumDashDot': case 'mediumDashDotDot': case 'slantDashDot': return 1.5;
+    case 'thick': return 3;
+    case 'medium': case 'mediumDashed': case 'mediumDashDot': case 'mediumDashDotDot': case 'slantDashDot': return 2;
     case 'hair': return 0.5;
     default: return 1;
   }
