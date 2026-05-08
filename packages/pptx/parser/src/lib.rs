@@ -60,6 +60,15 @@ struct Presentation {
     major_font: Option<String>,
     /// Theme minor (body) font resolved name (e.g. "Aptos", "Nunito Sans").
     minor_font: Option<String>,
+    /// Theme hyperlink colour (hex 6 chars). Used by the renderer to colour
+    /// hyperlink runs whose rPr does not specify an explicit colour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hlink_color: Option<String>,
+    /// Theme followed-hyperlink colour (hex 6 chars). Reserved for visited-link
+    /// styling — emitted so the renderer can colour visited hyperlinks once
+    /// click history is wired up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fol_hlink_color: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -525,12 +534,22 @@ struct TextRunData {
     underline: bool,
     /// true when strike == "sngStrike" or "dblStrike"
     strikethrough: bool,
+    /// true only when strike == "dblStrike" (renderer draws two parallel lines)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    strike_double: bool,
     font_size: Option<f64>,
     color: Option<String>,
     font_family: Option<String>,
     /// Baseline shift in thousandths of a point. Positive = superscript, negative = subscript.
     #[serde(skip_serializing_if = "Option::is_none")]
     baseline: Option<i32>,
+    /// Capitalisation transform — ECMA-376 §21.1.2.3.13 (ST_TextCapsType).
+    /// "none" | "small" | "all". None = inherit / no transform.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caps: Option<String>,
+    /// Letter spacing (rPr @spc). 100ths of a point. Positive = looser, negative = tighter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    letter_spacing: Option<f64>,
     /// Set for OOXML field elements (e.g. "slidenum" for slide number fields)
     field_type: Option<String>,
     /// Hyperlink target URL resolved from rPr > hlinkClick @r:id via slide _rels.
@@ -2139,10 +2158,13 @@ fn parse_paragraph(
                     italic,
                     underline: false,
                     strikethrough: false,
+                    strike_double: false,
                     font_size,
                     color,
                     font_family,
                     baseline: None,
+                    caps: None,
+                    letter_spacing: None,
                     field_type: if fld_type == "slidenum" { Some("slidenum".to_string()) } else { None },
                     hyperlink: None,
                 }));
@@ -2231,11 +2253,24 @@ fn parse_run(
         .or_else(|| def_rpr.and_then(|n| attr(&n, "u")))
         .map(|v| v != "none").unwrap_or(false);
 
-    // strikethrough: "sngStrike" or "dblStrike" → true
-    let strikethrough = r_pr.and_then(|n| attr(&n, "strike"))
-        .or_else(|| def_rpr.and_then(|n| attr(&n, "strike")))
-        .map(|v| v == "sngStrike" || v == "dblStrike")
-        .unwrap_or(false);
+    // strikethrough: "sngStrike" or "dblStrike" → true; double tracked separately
+    let strike_attr = r_pr.and_then(|n| attr(&n, "strike"))
+        .or_else(|| def_rpr.and_then(|n| attr(&n, "strike")));
+    let strikethrough = strike_attr.as_deref().map(|v| v == "sngStrike" || v == "dblStrike").unwrap_or(false);
+    let strike_double = strike_attr.as_deref() == Some("dblStrike");
+
+    // ECMA-376 §21.1.2.3.13 ST_TextCapsType: "none" | "small" | "all". Treat
+    // "none" as not set (no transform) so the field stays absent in JSON.
+    let caps = r_pr.and_then(|n| attr(&n, "cap"))
+        .or_else(|| def_rpr.and_then(|n| attr(&n, "cap")))
+        .filter(|v| v == "small" || v == "all");
+
+    // ECMA-376 §21.1.2.3.5 rPr @spc — letter spacing in 100ths of a point.
+    // Negative values are valid (tightening). Non-zero only.
+    let letter_spacing = r_pr.and_then(|n| attr_f64(&n, "spc"))
+        .or_else(|| def_rpr.and_then(|n| attr_f64(&n, "spc")))
+        .map(|v| v / 100.0)
+        .filter(|v| v.abs() > f64::EPSILON);
 
     // sz in hundredths of a point
     let font_size = r_pr.and_then(|n| attr_f64(&n, "sz"))
@@ -2266,7 +2301,12 @@ fn parse_run(
         .and_then(|rid| rels.get(&rid).cloned())
         .filter(|s| !s.is_empty());
 
-    Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family, baseline, field_type: None, hyperlink })
+    Some(TextRunData {
+        text, bold, italic, underline, strikethrough, strike_double,
+        font_size, color, font_family, baseline,
+        caps, letter_spacing,
+        field_type: None, hyperlink,
+    })
 }
 
 // ===========================
@@ -4257,7 +4297,9 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
     let default_text_color = theme.get("dk1").cloned();
     let major_font = theme.get("+mj-lt").cloned();
     let minor_font = theme.get("+mn-lt").cloned();
-    Ok(Presentation { slide_width, slide_height, slides, default_text_color, major_font, minor_font })
+    let hlink_color = theme.get("hlink").cloned();
+    let fol_hlink_color = theme.get("folHlink").cloned();
+    Ok(Presentation { slide_width, slide_height, slides, default_text_color, major_font, minor_font, hlink_color, fol_hlink_color })
 }
 
 #[cfg(test)]
@@ -4439,6 +4481,63 @@ mod tests {
                 assert_eq!(bg.to_lowercase(), "ffffff");
             }
             other => panic!("expected Fill::Pattern, got {:?}", other),
+        }
+    }
+
+    /// ECMA-376 §21.1.2.3.10 — strike="dblStrike" produces strike_double=true,
+    /// while strike="sngStrike" leaves strike_double=false. The plain
+    /// `strikethrough` flag is true in both cases.
+    #[test]
+    fn test_parse_run_strike_double_distinguishes_dbl() {
+        let dbl = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr strike="dblStrike"/><t>x</t></r>"#;
+        let sng = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr strike="sngStrike"/><t>x</t></r>"#;
+        let none = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr/><t>x</t></r>"#;
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+
+        let doc_d = roxmltree::Document::parse(dbl).unwrap();
+        let r_d = parse_run(doc_d.root_element(), None, &theme, &rels).unwrap();
+        assert!(r_d.strikethrough && r_d.strike_double);
+
+        let doc_s = roxmltree::Document::parse(sng).unwrap();
+        let r_s = parse_run(doc_s.root_element(), None, &theme, &rels).unwrap();
+        assert!(r_s.strikethrough && !r_s.strike_double);
+
+        let doc_n = roxmltree::Document::parse(none).unwrap();
+        let r_n = parse_run(doc_n.root_element(), None, &theme, &rels).unwrap();
+        assert!(!r_n.strikethrough && !r_n.strike_double);
+    }
+
+    /// ECMA-376 §21.1.2.3.13 — cap="all" / "small" are passed through;
+    /// cap="none" or omitted yields None so the field stays absent in JSON.
+    #[test]
+    fn test_parse_run_caps_attribute() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let cases = [("all", Some("all")), ("small", Some("small")), ("none", None)];
+        for (val, expected) in cases {
+            let xml = format!(
+                r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr cap="{val}"/><t>x</t></r>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+            assert_eq!(r.caps.as_deref(), expected, "caps={val}");
+        }
+    }
+
+    /// ECMA-376 §21.1.2.3.5 — rPr @spc encodes letter spacing in 100ths of a
+    /// point; positive widens, negative tightens. Zero rounds away (None).
+    #[test]
+    fn test_parse_run_letter_spacing() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        for (raw, expected) in [("100", Some(1.0)), ("-50", Some(-0.5)), ("0", None)] {
+            let xml = format!(
+                r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr spc="{raw}"/><t>x</t></r>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+            assert_eq!(r.letter_spacing, expected, "spc={raw}");
         }
     }
 }

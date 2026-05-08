@@ -30,6 +30,10 @@ export interface Presentation {
   majorFont: string | null;
   /** Theme minor (body) font family name (e.g. "Aptos", "Nunito Sans"). Null if not set. */
   minorFont: string | null;
+  /** Theme hyperlink colour (hex 6 chars). Used to colour hyperlink runs that have no explicit colour. */
+  hlinkColor?: string;
+  /** Theme followed-hyperlink colour. Reserved for future visited-link styling. */
+  folHlinkColor?: string;
 }
 
 export interface Slide {

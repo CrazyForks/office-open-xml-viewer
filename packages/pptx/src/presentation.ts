@@ -191,6 +191,7 @@ export class PptxPresentation {
         defaultTextColor: this._presentation.defaultTextColor,
         majorFont: this._presentation.majorFont,
         minorFont: this._presentation.minorFont,
+        hlinkColor: this._presentation.hlinkColor ?? null,
         fetchMedia: (path) => this.getMedia(path),
         skipMediaControls: opts.skipMediaControls,
       },

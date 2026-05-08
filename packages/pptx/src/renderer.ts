@@ -32,6 +32,8 @@ const PT_TO_EMU = 12700;
 export interface RenderContext {
   themeMajorFont: string | null;
   themeMinorFont: string | null;
+  /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
+  themeHlinkColor?: string | null;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -105,7 +107,19 @@ function resolveShapeFill(
 
 // ===== Text layout helpers =====
 
-type LayoutSegment = { text: string; font: string; sizePx: number; color: string; underline: boolean; strikethrough: boolean; baseline?: number };
+type LayoutSegment = {
+  text: string;
+  font: string;
+  sizePx: number;
+  color: string;
+  underline: boolean;
+  strikethrough: boolean;
+  /** Two parallel strike lines (rPr strike="dblStrike"). */
+  strikeDouble?: boolean;
+  /** Extra inter-character spacing in px (already scaled). */
+  letterSpacingPx?: number;
+  baseline?: number;
+};
 
 interface LayoutLine {
   segments: LayoutSegment[];
@@ -224,25 +238,49 @@ function layoutParagraph(
   };
 
   // Push to the active segment list (main or tab-stop group)
-  const push = (text: string, font: string, sizePx: number, color: string, underline: boolean, strikethrough: boolean, baseline?: number) => {
+  const push = (
+    text: string,
+    font: string,
+    sizePx: number,
+    color: string,
+    underline: boolean,
+    strikethrough: boolean,
+    baseline?: number,
+    extras?: { strikeDouble?: boolean; letterSpacingPx?: number },
+  ) => {
     if (!text) return;
     ctx.font = font;
-    const w = ctx.measureText(text).width;
+    const lsPx = extras?.letterSpacingPx ?? 0;
+    const baseW = ctx.measureText(text).width;
+    // Letter spacing adds an extra gap between every character, including
+    // after the last one — matches the "advance width" semantics of OOXML
+    // spc (each glyph's advance grows by spc points). Tab stops measure the
+    // same way so this stays consistent with measureText below.
+    const w = baseW + lsPx * text.length;
+    const strikeDouble = extras?.strikeDouble;
+    const sameMeta = (a: LayoutSegment) =>
+      a.font === font &&
+      a.color === color &&
+      a.underline === underline &&
+      a.strikethrough === strikethrough &&
+      (a.strikeDouble ?? false) === (strikeDouble ?? false) &&
+      (a.letterSpacingPx ?? 0) === lsPx &&
+      a.baseline === baseline;
     if (tabActive && currentLine.tabStop) {
       const segs = currentLine.tabStop.segments;
       const last = segs.at(-1);
-      if (last && last.font === font && last.color === color && last.underline === underline && last.strikethrough === strikethrough && last.baseline === baseline) {
+      if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        segs.push({ text, font, sizePx, color, underline, strikethrough, baseline });
+        segs.push({ text, font, sizePx, color, underline, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
       }
     } else {
       lineW += w;
       const last = currentLine.segments.at(-1);
-      if (last && last.font === font && last.color === color && last.underline === underline && last.strikethrough === strikethrough && last.baseline === baseline) {
+      if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        currentLine.segments.push({ text, font, sizePx, color, underline, strikethrough, baseline });
+        currentLine.segments.push({ text, font, sizePx, color, underline, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
       }
     }
   };
@@ -256,17 +294,44 @@ function layoutParagraph(
     const sizePx = run.fontSize != null ? run.fontSize * PT_TO_EMU * scale * fontScale : defaultFontSizePx;
     // Font family cascade: run → paragraph defFontFamily → theme minor font → 'sans-serif'
     const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
-    const color  = run.color ? hexToRgba(run.color) : defaultColor;
+    // Hyperlink runs without an explicit colour pick up the theme hlink colour
+    // (ECMA-376 §20.1.2.3.5 — hyperlinks inherit theme hyperlink slot).
+    let color: string;
+    if (run.color) {
+      color = hexToRgba(run.color);
+    } else if (run.hyperlink && rc.themeHlinkColor) {
+      color = hexToRgba(rc.themeHlinkColor);
+    } else {
+      color = defaultColor;
+    }
     // Cascade: run → paragraph defRPr → body/layout default → false
     const isBold   = run.bold   ?? para.defBold   ?? defaultBold;
     const isItalic = run.italic ?? para.defItalic ?? defaultItalic;
     const font   = buildFont(isBold, isItalic, sizePx, family, rc);
     ctx.font = font;
 
+    // ECMA-376 §21.1.2.3.13 — caps transforms the rendered glyphs without
+    // changing the underlying text. "small" emulated as upper-case glyphs at
+    // ~80% size is the long-established Office fallback when the font lacks
+    // smcp; we just upper-case for now and rely on the configured size.
+    const caps = run.caps;
+    let baseText = run.text;
+    if (caps === 'all' || caps === 'small') baseText = baseText.toUpperCase();
+
     // Resolve field values (e.g. slidenum → actual slide number)
     const runText = (run.fieldType === 'slidenum' && slideNumber !== undefined)
       ? String(slideNumber)
-      : run.text;
+      : baseText;
+
+    // Hyperlink runs render underlined unless an explicit u attribute already
+    // says otherwise. Spec: ECMA-376 §20.1.2.3.5 (hyperlinks default to the
+    // hlink character style, which underlines).
+    const segUnderline = run.underline || (run.hyperlink !== undefined);
+    const segStrikeDouble = run.strikeDouble === true;
+    // letterSpacing arrives in points; convert to canvas px using the same
+    // EMU→px scale the renderer applies to font sizes.
+    const lsPx = run.letterSpacing != null ? run.letterSpacing * PT_TO_EMU * scale : 0;
+    const segExtras = { strikeDouble: segStrikeDouble, letterSpacingPx: lsPx };
 
     // Split on whitespace boundaries, keeping the whitespace tokens
     const tokens = runText.split(/(\s+)/);
@@ -293,7 +358,7 @@ function layoutParagraph(
           }
         } else {
           // No matching tab stop — treat as a single space
-          push(' ', font, sizePx, color, run.underline, run.strikethrough);
+          push(' ', font, sizePx, color, segUnderline, run.strikethrough, undefined, segExtras);
         }
         continue;
       }
@@ -304,7 +369,7 @@ function layoutParagraph(
 
       // If already in tab mode, collect all text into tabStop.segments (no wrap)
       if (tabActive) {
-        push(token, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
+        push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         continue;
       }
 
@@ -317,13 +382,13 @@ function layoutParagraph(
           ctx.font = font;
           const chW = ctx.measureText(ch).width;
           if (lineW + chW > maxWidthPx && lineW > 0) newLine();
-          push(ch, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
+          push(ch, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
         continue;
       }
 
       if (lineW + tokW <= maxWidthPx) {
-        push(token, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
+        push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       } else if (isWhitespace) {
         if (lineW > 0) newLine();
       } else if (tokW > maxWidthPx) {
@@ -332,11 +397,11 @@ function layoutParagraph(
           ctx.font = font;
           const chW = ctx.measureText(ch).width;
           if (lineW + chW > maxWidthPx && lineW > 0) newLine();
-          push(ch, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
+          push(ch, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
       } else {
         newLine();
-        push(token, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
+        push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       }
     }
   }
@@ -3005,7 +3070,8 @@ function renderTextBody(
     for (const seg of line.segments) {
       ctx.font = seg.font;
       const m = ctx.measureText(seg.text || 'M');
-      lineWidth += seg.text ? m.width : 0;
+      const ls = seg.letterSpacingPx ?? 0;
+      lineWidth += seg.text ? m.width + ls * seg.text.length : 0;
       if (m.actualBoundingBoxAscent > 0) {
         maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent);
       }
@@ -3035,10 +3101,23 @@ function renderTextBody(
       // baseline shift: OOXML baseline in thousandths of a point; positive = superscript (up)
       const baselineShift = seg.baseline ? -(seg.baseline / 100000) * seg.sizePx : 0;
       const segBaseline = baseline + baselineShift;
-      ctx.fillText(seg.text, penX, segBaseline);
+      const ls = seg.letterSpacingPx ?? 0;
+      if (ls > 0 && seg.text.length > 1) {
+        // Draw glyph-by-glyph so each character advance is `measure + ls`.
+        // Matches OOXML rPr @spc semantics — extra space added to each
+        // character's advance, including after the last one.
+        let cx = penX;
+        for (const ch of seg.text) {
+          ctx.fillText(ch, cx, segBaseline);
+          cx += ctx.measureText(ch).width + ls;
+        }
+      } else {
+        ctx.fillText(seg.text, penX, segBaseline);
+      }
 
       ctx.font = seg.font;
-      const segW = ctx.measureText(seg.text).width;
+      const baseW = ctx.measureText(seg.text).width;
+      const segW = baseW + (ls > 0 ? ls * seg.text.length : 0);
 
       if (onTextRun && seg.text) {
         onTextRun({
@@ -3068,13 +3147,28 @@ function renderTextBody(
       }
 
       if (seg.strikethrough) {
-        ctx.beginPath();
-        ctx.moveTo(penX, segBaseline - seg.sizePx * 0.32);
-        ctx.lineTo(penX + segW, segBaseline - seg.sizePx * 0.32);
+        const lineW = Math.max(1, seg.sizePx * 0.05);
         ctx.strokeStyle = seg.color;
-        ctx.lineWidth = Math.max(1, seg.sizePx * 0.05);
+        ctx.lineWidth = lineW;
         ctx.setLineDash([]);
-        ctx.stroke();
+        if (seg.strikeDouble) {
+          // Two parallel lines straddling the standard strike position,
+          // separated by ~ 1.5× the line weight (visually distinct yet
+          // staying inside the glyph's central band).
+          const offset = lineW * 0.9;
+          const yMid = segBaseline - seg.sizePx * 0.32;
+          ctx.beginPath();
+          ctx.moveTo(penX, yMid - offset);
+          ctx.lineTo(penX + segW, yMid - offset);
+          ctx.moveTo(penX, yMid + offset);
+          ctx.lineTo(penX + segW, yMid + offset);
+          ctx.stroke();
+        } else {
+          ctx.beginPath();
+          ctx.moveTo(penX, segBaseline - seg.sizePx * 0.32);
+          ctx.lineTo(penX + segW, segBaseline - seg.sizePx * 0.32);
+          ctx.stroke();
+        }
       }
 
       penX += segW;
@@ -3086,7 +3180,8 @@ function renderTextBody(
       let totalTabW = 0;
       for (const seg of line.tabStop.segments) {
         ctx.font = seg.font;
-        totalTabW += ctx.measureText(seg.text).width;
+        const ls = seg.letterSpacingPx ?? 0;
+        totalTabW += ctx.measureText(seg.text).width + ls * seg.text.length;
       }
       let tabPenX: number;
       if (line.tabStop.algn === 'r') {
@@ -3099,9 +3194,18 @@ function renderTextBody(
       for (const seg of line.tabStop.segments) {
         ctx.font = seg.font;
         ctx.fillStyle = seg.color;
-        ctx.fillText(seg.text, tabPenX, baseline);
+        const tabLs = seg.letterSpacingPx ?? 0;
+        if (tabLs > 0 && seg.text.length > 1) {
+          let cx = tabPenX;
+          for (const ch of seg.text) {
+            ctx.fillText(ch, cx, baseline);
+            cx += ctx.measureText(ch).width + tabLs;
+          }
+        } else {
+          ctx.fillText(seg.text, tabPenX, baseline);
+        }
         ctx.font = seg.font;
-        const tabSegW = ctx.measureText(seg.text).width;
+        const tabSegW = ctx.measureText(seg.text).width + tabLs * seg.text.length;
         if (onTextRun && seg.text) {
           onTextRun({
             text: seg.text,
@@ -3428,6 +3532,7 @@ export async function renderSlide(
   const rc: RenderContext = {
     themeMajorFont: opts.majorFont ?? null,
     themeMinorFont: opts.minorFont ?? null,
+    themeHlinkColor: opts.hlinkColor ?? null,
   };
 
   renderBackground(ctx, slide.background, canvasW, canvasH);

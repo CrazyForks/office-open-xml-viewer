@@ -152,14 +152,31 @@ export interface TextRunData {
   /** null = not set, inherit from paragraph/body defaults */
   italic: boolean | null;
   underline: boolean;
-  /** true when rPr strike = "sngStrike" or "dblStrike" */
+  /** True when rPr strike is sngStrike or dblStrike. */
   strikethrough: boolean;
+  /**
+   * True only when rPr strike = "dblStrike". Lets the renderer draw two parallel
+   * lines instead of one. ECMA-376 §21.1.2.3.10 (ST_TextStrikeType).
+   */
+  strikeDouble?: boolean;
   /** Font size in points */
   fontSize: number | null;
   color: string | null;
   fontFamily: string | null;
   /** Baseline shift in thousandths of a point. Positive = superscript, negative = subscript. */
   baseline?: number;
+  /**
+   * Capitalisation transform — ECMA-376 §21.1.2.3.13 (ST_TextCapsType).
+   * 'all' renders text in upper case; 'small' uses small caps (rendered as
+   * upper case at ~80% size when no smcp font feature is available).
+   * 'none' or omitted leaves the text unchanged.
+   */
+  caps?: 'none' | 'small' | 'all';
+  /**
+   * Inter-character spacing in 100ths of a point — ECMA-376 §21.1.2.3.5
+   * (rPr @spc). Positive values add space, negative values tighten.
+   */
+  letterSpacing?: number;
   /** Set for OOXML field runs (e.g. "slidenum"). When set, renderer replaces text with field value. */
   fieldType?: string;
   /**
@@ -179,6 +196,8 @@ export interface RenderOptions {
   dpr?: number;
   majorFont?: string | null;
   minorFont?: string | null;
+  /** Theme hyperlink colour (hex 6 chars). Used to colour hyperlink runs without an explicit colour. */
+  hlinkColor?: string | null;
   /**
    * Lazily resolve an archive-internal asset (by zip path) to a Blob. The
    * renderer uses this to fetch posters and other large embedded assets on
