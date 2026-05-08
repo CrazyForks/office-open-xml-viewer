@@ -2574,25 +2574,34 @@ function renderQuadrant(
         };
       }
       // Inherit the cell-above's bottom edge as our top, and the cell-left's
-      // right edge as our left, when our own edge is unset. The neighbor's
-      // edge was drawn during its row/col iteration, but our cell's fill
-      // (drawn just above) over-painted the half of that line lying inside
-      // our cell. Re-drawing it as our top/left (after our fill) restores
-      // the boundary line. Without this, e.g. a row whose every cell defines
-      // a medium bottom but the row below leaves top unset (sample-7 row 2)
-      // ends up with the bottom border half-erased on every cell except the
-      // ones whose row-below cell happens to define a top border — making
-      // the row look uneven.
-      if (!mergedBorder.top?.style) {
-        const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
-        const aboveBottom = aboveCell
-          ? resolveXf(styles, aboveCell.styleIndex).border.bottom
-          : null;
-        if (aboveBottom?.style) {
-          mergedBorder = { ...mergedBorder, top: aboveBottom };
-        }
+      // right edge as our left. Two adjacent cells share an edge along the row
+      // / column boundary; the upper cell drew its bottom during its own
+      // iteration, but our cell's fill (drawn just above) over-paints the
+      // half of that line lying inside our cell. Re-drawing it as our top
+      // (after our fill) restores the boundary line.
+      //
+      // When *both* cells define an edge, Excel renders the stronger style at
+      // a conflict (e.g. a medium bottom is not erased by a thin top below
+      // it). `pickStrongerEdge` returns the higher-precedence edge so the
+      // inherit picks the visually dominant style instead of always favouring
+      // the lower cell's own.
+      const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
+      const aboveBottom = aboveCell
+        ? resolveXf(styles, aboveCell.styleIndex).border.bottom
+        : null;
+      let invertedTop = false;
+      if (aboveBottom?.style) {
+        const before = mergedBorder.top;
+        const picked = pickStrongerEdge(before, aboveBottom);
+        mergedBorder = { ...mergedBorder, top: picked };
+        // We only invert the double-border drawing when the top edge ends up
+        // being a *redraw* of the upper cell's bottom (rather than a fresh
+        // line for our own xf.top). That is true when the picked edge came
+        // from the neighbour — i.e. our own top was unset or weaker.
+        invertedTop = picked === aboveBottom && before !== aboveBottom;
       }
-      if (!mergedBorder.left?.style && !suppressLeftGridCol.has(ci)) {
+      let invertedLeft = false;
+      if (!suppressLeftGridCol.has(ci)) {
         // Skip the inherit when the left edge was deliberately suppressed for
         // a centerContinuous run (ECMA-376 §18.18.40) — otherwise the
         // neighbour's xf.right re-introduces the internal vertical that we
@@ -2602,10 +2611,13 @@ function renderQuadrant(
           ? resolveXf(styles, leftCell.styleIndex).border.right
           : null;
         if (leftRight?.style) {
-          mergedBorder = { ...mergedBorder, left: leftRight };
+          const before = mergedBorder.left;
+          const picked = pickStrongerEdge(before, leftRight);
+          mergedBorder = { ...mergedBorder, left: picked };
+          invertedLeft = picked === leftRight && before !== leftRight;
         }
       }
-      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH);
+      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft);
 
       // Excel Table style overlay: thin horizontal rules between rows and a
       // thicker bottom edge under the header row (ECMA-376 §18.5). Drawn on
@@ -3955,7 +3967,21 @@ function mergeBorders(base: Border, overlay: Border | undefined): Border {
   };
 }
 
-function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, y: number, w: number, h: number): void {
+function renderBorder(
+  ctx: CanvasRenderingContext2D,
+  border: Border,
+  x: number, y: number, w: number, h: number,
+  /** When set, the cell's top edge was inherited from the cell above's bottom
+   *  to redraw the part over-painted by this cell's fill. Double-border
+   *  rendering uses inverted "outer / inner" extensions in that case so the
+   *  line that the upper cell drew as its bottom *outer* (extended past the
+   *  corner, at y + 1 from this cell's perspective) is the one we extend
+   *  here too — otherwise the inherited redraw shortens that line and
+   *  leaves a 1-px gap at every outer corner of the upper cell's double box.
+   *  Same idea for `invertedLeft` (inherited from the left cell's right). */
+  invertedTop = false,
+  invertedLeft = false,
+): void {
   type EdgeRef = {
     edge: BorderEdge | null | undefined;
     x1: number; y1: number; x2: number; y2: number;
@@ -3991,14 +4017,21 @@ function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, 
       ctx.beginPath();
       if (kind === 'h') {
         const isTop = y1 === y;
-        const outerY = isTop ? y - off : y + h + off;
-        const innerY = isTop ? y + off : y + h - off;
+        // For an inherited top, the line at y - off is the upper cell's
+        // bottom *inner* (which survives our fill, sitting above the fill
+        // band) and the line at y + off is the upper cell's bottom *outer*
+        // (which our fill erased and which we are restoring). Swap which
+        // side gets the extension so the restored line is the extended one.
+        const swap = isTop && invertedTop;
+        const outerY = isTop ? (swap ? y + off : y - off) : y + h + off;
+        const innerY = isTop ? (swap ? y - off : y + off) : y + h - off;
         ctx.moveTo(x - off, outerY);   ctx.lineTo(x + w + off, outerY);
         ctx.moveTo(x + off, innerY);   ctx.lineTo(x + w - off, innerY);
       } else {
         const isLeft = x1 === x;
-        const outerX = isLeft ? x - off : x + w + off;
-        const innerX = isLeft ? x + off : x + w - off;
+        const swap = isLeft && invertedLeft;
+        const outerX = isLeft ? (swap ? x + off : x - off) : x + w + off;
+        const innerX = isLeft ? (swap ? x - off : x + off) : x + w - off;
         ctx.moveTo(outerX, y - off);   ctx.lineTo(outerX, y + h + off);
         ctx.moveTo(innerX, y + off);   ctx.lineTo(innerX, y + h - off);
       }
@@ -4018,9 +4051,14 @@ function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, 
 }
 
 function borderStyleWidth(style: string): number {
+  // Widths follow Excel's pt convention so medium and thick read as visibly
+  // distinct from thin (and from each other) — thin=1pt, medium=2pt, thick=3pt.
+  // Earlier values (1.5 / 2) compressed medium and thick to roughly the same
+  // 2-row antialiased band, which made e.g. sample-27 row 9 appear to have
+  // top (medium) and bottom (thick) of equal weight.
   switch (style) {
-    case 'thick': return 2;
-    case 'medium': case 'mediumDashed': case 'mediumDashDot': case 'mediumDashDotDot': case 'slantDashDot': return 1.5;
+    case 'thick': return 3;
+    case 'medium': case 'mediumDashed': case 'mediumDashDot': case 'mediumDashDotDot': case 'slantDashDot': return 2;
     case 'hair': return 0.5;
     default: return 1;
   }
@@ -4028,6 +4066,11 @@ function borderStyleWidth(style: string): number {
 
 function borderStyleDash(style: string): number[] {
   switch (style) {
+    // ECMA-376 §18.18.3 ST_BorderStyle "hair" — Excel renders this as a very
+    // fine dashed line (the finest dashing in the border style picker). A 1-px
+    // on / 1-px off pattern at the hair lineWidth (0.5) reproduces that look;
+    // without a dash pattern, hair would read as a faint solid line.
+    case 'hair': return [1, 1];
     case 'dashed': case 'mediumDashed': return [4, 3];
     case 'dotted': return [2, 2];
     case 'dashDot': case 'mediumDashDot': return [4, 2, 1, 2];
@@ -4035,6 +4078,43 @@ function borderStyleDash(style: string): number[] {
     case 'slantDashDot': return [5, 3, 1, 3];
     default: return [];
   }
+}
+
+/**
+ * Visual precedence per ECMA-376 ST_BorderStyle. Higher = stronger / more
+ * visually prominent. Excel's behaviour at a shared edge between two adjacent
+ * cells that both define a border is to render the stronger one — this lets
+ * the renderer pick a single edge to draw instead of stacking two strokes
+ * (which compounds antialiasing and visually thickens the line).
+ */
+function borderPrecedence(style: string | null | undefined): number {
+  switch (style) {
+    case 'double': return 13;
+    case 'thick': return 12;
+    case 'medium': return 11;
+    case 'mediumDashed': return 10;
+    case 'mediumDashDot': return 9;
+    case 'slantDashDot': return 8;
+    case 'mediumDashDotDot': return 7;
+    case 'thin': return 6;
+    case 'dashed': return 5;
+    case 'dashDot': return 4;
+    case 'dashDotDot': return 3;
+    case 'dotted': return 2;
+    case 'hair': return 1;
+    default: return 0;
+  }
+}
+
+function pickStrongerEdge(
+  a: BorderEdge | null | undefined,
+  b: BorderEdge | null | undefined,
+): BorderEdge | null {
+  const aP = borderPrecedence(a?.style);
+  const bP = borderPrecedence(b?.style);
+  if (aP === 0 && bP === 0) return null;
+  if (aP >= bP) return a ?? null;
+  return b ?? null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
