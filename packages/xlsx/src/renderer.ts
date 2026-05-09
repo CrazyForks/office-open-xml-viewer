@@ -165,8 +165,12 @@ function patternCoverage(pt: string): number {
 }
 
 /**
- * Cache of (pattern, fg, bg) → CanvasPattern. Keyed by a compound string so
- * that the same pattern across thousands of cells only builds the tile once.
+ * Cache of (pattern, fg, bg, ctx scale) → CanvasPattern. Keyed by a compound
+ * string so the same pattern across thousands of cells only builds the tile
+ * once *for a given destination scale*. The ctx scale is part of the key
+ * because pat.setTransform() pre-bakes the inverse-scale transform into the
+ * pattern, and we don't want a Storybook scale=1.5 cell to reuse a cached
+ * pattern from a previous scale=2 render.
  */
 const PATTERN_CACHE = new Map<string, CanvasPattern | null>();
 
@@ -196,19 +200,22 @@ const PATTERN_CACHE = new Map<string, CanvasPattern | null>();
  */
 const PATTERN_BITMAPS: Record<string, number[]> = {
   // ── 8×8 — gray-family dot patterns ────────────────────────────────────
-  // Tuned by sight against Excel's actual rendering of these names. The
-  // ECMA-376 verbal coverages (12.5% / 6.25% / 25% / 50% / 75%) give cells
-  // that read distinctly darker than Excel's anti-aliased output, so each
-  // tier is dropped one step (≈ 6% → 3%, 12% → 6%, 25% → 12%, 50% → 25%,
-  // 75% → 50%). The relative ordering is preserved so users can still
-  // tell darkGray > mediumGray > lightGray > gray125 > gray0625.
-  gray0625:   [0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b00000000, 0b00000000, 0b00000000], // ≈ 3%
-  gray125:    [0b10000000, 0b00000000, 0b00001000, 0b00000000, 0b10000000, 0b00000000, 0b00001000, 0b00000000], // ≈ 6%
-  lightGray:  [0b10001000, 0b00000000, 0b00100010, 0b00000000, 0b10001000, 0b00000000, 0b00100010, 0b00000000], // ≈ 12%
-  mediumGray: [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000], // ≈ 25%
-  // 50% checker — distributed evenly so the cell reads as solid grey at
-  // typical zoom rather than alternating black / dot stripes.
-  darkGray:   [0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101], // ≈ 50%
+  // Tuned by sight against Excel's actual rendering. With dots forced to
+  // 1 device pixel each (see hatchPattern), the visual density tracks the
+  // bitmap coverage almost linearly. Excel renders even the sparsest preset
+  // (gray0625) as a clearly visible stipple — roughly the density of a
+  // mediumGray cell at our prior 25% bitmap — so the whole family is
+  // pulled denser, with each tier still distinctly darker than the next.
+  // Relative ordering: darkGray > mediumGray > lightGray > gray125 > gray0625.
+  gray0625:   [0b10001000, 0b00000000, 0b00100010, 0b00000000, 0b10001000, 0b00000000, 0b00100010, 0b00000000], // ≈ 12%
+  gray125:    [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000], // ≈ 25%
+  lightGray:  [0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101], // ≈ 50%
+  // 65% — a 25% sparse mask added on top of the 50% checker so the cell
+  // reads visibly denser than lightGray without horizontal banding.
+  mediumGray: [0b11101010, 0b01010101, 0b10111010, 0b01010101, 0b10101110, 0b01010101, 0b10101011, 0b01010101], // ≈ 65%
+  // 80% — solid rows alternated with a checker so it reads as near-black
+  // grey at typical zoom while still showing the texture.
+  darkGray:   [0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101], // ≈ 75%
 
   // ── 12×12 — horizontal / vertical / grid (matched line count) ─────────
   // 4 lines per tile in both dark and light variants. dark uses a 2-px-thick
@@ -269,7 +276,17 @@ function hatchPattern(
   fgHex: string,
   bgHex: string,
 ): CanvasPattern | null {
-  const key = `${pt}|${fgHex}|${bgHex}`;
+  // Pre-bake the inverse of the destination context's current scale into the
+  // pattern transform so each source bit lands on exactly one destination
+  // *device* pixel — the visual minimum the user can perceive. Without this,
+  // a Storybook scale=1.5 (or DPR=2 retina) draws our 1-pixel source bits at
+  // 1.5–2 device px each, producing the chunky-looking dots / lines the user
+  // flagged. Scale is part of the cache key below so two render passes at
+  // different scales don't reuse each other's matrices.
+  const t = ctx.getTransform();
+  const sx = Math.hypot(t.a, t.b) || 1;
+  const sy = Math.hypot(t.c, t.d) || 1;
+  const key = `${pt}|${fgHex}|${bgHex}|${sx.toFixed(3)}|${sy.toFixed(3)}`;
   if (PATTERN_CACHE.has(key)) return PATTERN_CACHE.get(key)!;
 
   const rows = PATTERN_BITMAPS[pt];
@@ -298,6 +315,11 @@ function hatchPattern(
   }
 
   const pat = ctx.createPattern(off, 'repeat');
+  if (pat && typeof DOMMatrix !== 'undefined') {
+    const m = new DOMMatrix();
+    m.scaleSelf(1 / sx, 1 / sy);
+    pat.setTransform(m);
+  }
   PATTERN_CACHE.set(key, pat);
   return pat;
 }
