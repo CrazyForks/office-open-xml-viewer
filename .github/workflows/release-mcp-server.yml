@@ -34,8 +34,14 @@ jobs:
             os: macos-14
             binary: ooxml-mcp-server
             asset: ooxml-mcp-server-aarch64-apple-darwin
+          # Build the x86_64 macOS binary by cross-compiling from the
+          # arm64 runner. Apple Silicon's clang / ld handle the x86_64
+          # target natively, so no extra linker setup is needed — and
+          # this avoids the macos-13 (Intel) runner queue, which GitHub
+          # Actions has stopped scheduling reliably (jobs sit in
+          # `queued` for 30+ minutes before dispatch).
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             binary: ooxml-mcp-server
             asset: ooxml-mcp-server-x86_64-apple-darwin
           - target: x86_64-unknown-linux-gnu
