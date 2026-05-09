@@ -400,10 +400,13 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Formula results (from cached `<v>`) | ✅ |
 | | Dates (ECMA-376 date format codes) | ✅ |
 | | Rich text (per-run formatting) | ✅ |
-| **Formatting** | Bold, italic, underline, strikethrough | ✅ |
+| **Formatting** | Bold, italic, underline (`single` / `double` / `singleAccounting` / `doubleAccounting`), strikethrough | ✅ |
+| | Superscript / subscript (`vertAlign`) | ✅ |
 | | Font family, size, color | ✅ |
-| | Cell background color | ✅ |
-| | Borders | ✅ |
+| | Cell background color (solid + gradient) | ✅ |
+| | Pattern fills (`gray125` / `gray0625` / `lightGray` / `mediumGray` / `darkGray` and the 12 `light*` / `dark*` directional hatches) | ✅ |
+| | Borders (thin, medium, thick, hair, double, dashed, dotted, dashDotDot, …) | ✅ |
+| | Diagonal borders (`diagonalUp` / `diagonalDown`, single + double) | ✅ |
 | | Horizontal / vertical alignment | ✅ |
 | | Text wrapping | ✅ |
 | | Number formats (`0.00`, `%`, `#,##0`, custom date/time) | ✅ |
@@ -440,7 +443,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Slide background (solid, gradient, image) | ✅ |
 | | Slide numbers | ✅ |
 | | Notes pages | ❌ |
-| | Animations / transitions | ❌ |
+| | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`) | ✅ |
 | | Groups (`grpSp`) with nested transforms | ✅ |
@@ -459,19 +462,26 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | **Fills** | Solid fill (`solidFill`) | ✅ |
 | | Linear / radial gradient (`gradFill`) | ✅ |
 | | No fill (`noFill`) | ✅ |
-| | Pattern fill (`pattFill`) | ❌ |
+| | Pattern fill (`pattFill`) — 30 preset bitmaps incl. pct5–pct90 / horz / vert / cross / diag / grid / brick / check / trellis | ✅ |
 | | Image fill on shapes (`blipFill` in `sp`) | ✅ |
 | **Strokes** | Solid line color and width | ✅ |
 | | Dash / dot styles | ✅ |
 | | Arrow heads (`headEnd` / `tailEnd`) | ✅ |
 | | Compound / double lines | ❌ |
 | **Shape effects** | Drop shadow (`outerShdw`) | ✅ |
-| | Inner shadow / glow / reflection | ❌ |
+| | Glow (`glow` — radius + colour) | ✅ |
+| | Inner shadow (`innerShdw` — parsed; rendering follow-up) | ⚠️ |
+| | Reflection / soft edge | ❌ |
 | | Bevel / 3D extrusion | ❌ |
-| **Text — characters** | Bold, italic, underline, strikethrough | ✅ |
+| **Text — characters** | Bold, italic, strikethrough (incl. `dblStrike`) | ✅ |
+| | Underline styles (`sng` / `dbl` / `dotted` / `dash` / `dashLong` / `dotDash` / `dotDotDash` / `wavy` / `wavyDbl` and `*Heavy` variants) | ✅ |
+| | Per-run underline colour (`uFill` / `uFillTx`) | ✅ |
 | | Font family, size, color | ✅ |
+| | East Asian font (`rPr > a:ea` — separate typeface for CJK glyphs) | ✅ |
+| | Caps transform (`all` / `small`) | ✅ |
+| | Letter spacing (`spc`) | ✅ |
 | | Superscript / subscript | ✅ |
-| | Hyperlinks | ❌ |
+| | Hyperlinks (`hlinkClick` — theme `hlink` colour + auto underline) | ✅ |
 | | Text shadow / outline effects | ❌ |
 | **Text — paragraphs** | Horizontal alignment (left / center / right / justify) | ✅ |
 | | Vertical anchor (top / center / bottom) | ✅ |
