@@ -200,26 +200,19 @@ const PATTERN_CACHE = new Map<string, CanvasPattern | null>();
  */
 const PATTERN_BITMAPS: Record<string, number[]> = {
   // ── 8×8 — gray-family dot patterns ────────────────────────────────────
-  // Tuned by sight against Excel's actual rendering. With dots forced to
-  // 1 device pixel each (see hatchPattern), the visual density tracks the
-  // bitmap coverage almost linearly. Excel renders even the sparsest preset
-  // (gray0625) as a clearly visible stipple — roughly the density of a
-  // mediumGray cell at our prior 25% bitmap — so the whole family is
-  // pulled denser, with each tier still distinctly darker than the next.
-  // Relative ordering: darkGray > mediumGray > lightGray > gray125 > gray0625.
-  gray0625:   [0b10001000, 0b00000000, 0b00100010, 0b00000000, 0b10001000, 0b00000000, 0b00100010, 0b00000000], // ≈ 12%
-  gray125:    [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000], // ≈ 25%
-  // ≈ 37% — sits clearly between gray125 (25%) and mediumGray (65%) so the
-  // five gray tiers stay visually distinguishable. The earlier 50% checker
-  // had E17 reading nearly as dark as the mediumGray cell next to it.
-  lightGray:  [0b10101010, 0b00100010, 0b01010101, 0b00100010, 0b10101010, 0b00100010, 0b01010101, 0b00100010], // ≈ 37%
-  // 50% — clean 1×1 checker. Earlier "65%" attempts that added an extra
-  // bit per row caused a visible diagonal moiré at typical cell sizes
-  // because the offset bit shifted by one column on each lit row.
+  // Constructed as a single dot motif scaled up tier-by-tier — each pattern
+  // is the previous one with extra dots interleaved at the same 4-row pitch.
+  // gray0625 is the reference seed (4 dots / 64 ≈ 6%) and the cascade roughly
+  // doubles density at each step, so all five tiers read as the same stipple
+  // texture at progressively higher coverage. Some moiré at intermediate
+  // zooms is acceptable per user preference; the visual continuity wins.
+  gray0625:   [0b10000000, 0b00000000, 0b00001000, 0b00000000, 0b10000000, 0b00000000, 0b00001000, 0b00000000], // ≈ 6%
+  gray125:    [0b10001000, 0b00000000, 0b00100010, 0b00000000, 0b10001000, 0b00000000, 0b00100010, 0b00000000], // ≈ 12%
+  lightGray:  [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000], // ≈ 25%
   mediumGray: [0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101], // ≈ 50%
-  // 80% — solid rows alternated with a checker so it reads as near-black
-  // grey at typical zoom while still showing the texture.
-  darkGray:   [0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101, 0b11111111, 0b01010101], // ≈ 75%
+  // 75% — distribute the empty pixels evenly across rows so the cell reads
+  // as a solid darker grey instead of alternating bands.
+  darkGray:   [0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101], // ≈ 75%
 
   // ── 12×12 — horizontal / vertical (matched line count) ───────────────
   // dark* and light* share the same 4-line-per-tile count and 3-px pitch;
