@@ -225,47 +225,92 @@ export class XlsxViewer {
     return { row, col };
   }
 
-  /** Returns the CSS-pixel rect of a cell within canvasArea, or null if not computable. */
+  /** Returns the CSS-pixel rect of a cell within canvasArea, or null if not
+   *  computable. Mirrors the renderer's per-cell rounding (Math.round(px * cs))
+   *  so the selection overlay sits exactly on the canvas's drawn cell borders;
+   *  multiplying logical accumulators by `cs` once at the end (the previous
+   *  approach) drifted by up to 1 px per cell at non-integer scales.
+   */
   private getCellRect(row: number, col: number): { x: number; y: number; w: number; h: number } | null {
     const ws = this.currentWorksheet;
     if (!ws) return null;
     const cs = this.opts.cellScale ?? 1;
+    const mdw = getMdwForWorksheet(ws);
+    const sp = (px: number) => Math.round(px * cs);
+    const colW = (c: number) => sp(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw));
+    const rowH = (r: number) => sp(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight));
 
     const freezeRows = ws.freezeRows ?? 0;
     const freezeCols = ws.freezeCols ?? 0;
 
-    // Compute x
+    // Compute x. The renderer draws the scrollable area starting at
+    // `scrollAreaX = sp(HEADER_W) + Σ sp(frozenWidth)` and offsets each
+    // cell by `-(offsetX * cs)` where offsetX is the *logical* partial
+    // visibility of the leftmost visible column.
     let x: number;
     if (col <= freezeCols) {
-      let acc = HEADER_W;
-      for (let c = 1; c < col; c++) acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-      x = acc * cs;
+      let acc = sp(HEADER_W);
+      for (let c = 1; c < col; c++) acc += colW(c);
+      x = acc;
     } else {
       let frozenW = 0;
-      for (let c = 1; c <= freezeCols; c++) frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-      let acc = HEADER_W + frozenW;
-      for (let c = freezeCols + 1; c < col; c++) acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-      x = (acc - this.scrollHost.scrollLeft / cs) * cs;
+      for (let c = 1; c <= freezeCols; c++) frozenW += colW(c);
+      const scrollAreaX = sp(HEADER_W) + frozenW;
+
+      // Mirror renderCurrentSheet's startCol / offsetX search.
+      const logicalScrollX = this.scrollHost.scrollLeft / cs;
+      let startCol = freezeCols + 1;
+      let xAcc = 0;
+      let offsetX = 0;
+      while (startCol <= 16384) {
+        const cw = colWidthToPx(ws.colWidths[startCol] ?? ws.defaultColWidth, mdw);
+        if (xAcc + cw > logicalScrollX) { offsetX = logicalScrollX - xAcc; break; }
+        xAcc += cw;
+        startCol++;
+      }
+
+      let acc = scrollAreaX - offsetX * cs;
+      if (col >= startCol) {
+        for (let c = startCol; c < col; c++) acc += colW(c);
+      } else {
+        // Cell scrolled off to the left of startCol — subtract instead.
+        for (let c = col; c < startCol; c++) acc -= colW(c);
+      }
+      x = acc;
     }
 
-    // Compute y
+    // Compute y, same logic as x.
     let y: number;
     if (row <= freezeRows) {
-      let acc = HEADER_H;
-      for (let r = 1; r < row; r++) acc += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-      y = acc * cs;
+      let acc = sp(HEADER_H);
+      for (let r = 1; r < row; r++) acc += rowH(r);
+      y = acc;
     } else {
       let frozenH = 0;
-      for (let r = 1; r <= freezeRows; r++) frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-      let acc = HEADER_H + frozenH;
-      for (let r = freezeRows + 1; r < row; r++) acc += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-      y = (acc - this.scrollHost.scrollTop / cs) * cs;
+      for (let r = 1; r <= freezeRows; r++) frozenH += rowH(r);
+      const scrollAreaY = sp(HEADER_H) + frozenH;
+
+      const logicalScrollY = this.scrollHost.scrollTop / cs;
+      let startRow = freezeRows + 1;
+      let yAcc = 0;
+      let offsetY = 0;
+      while (startRow <= 1048576) {
+        const rh = rowHeightToPx(ws.rowHeights[startRow] ?? ws.defaultRowHeight);
+        if (yAcc + rh > logicalScrollY) { offsetY = logicalScrollY - yAcc; break; }
+        yAcc += rh;
+        startRow++;
+      }
+
+      let acc = scrollAreaY - offsetY * cs;
+      if (row >= startRow) {
+        for (let r = startRow; r < row; r++) acc += rowH(r);
+      } else {
+        for (let r = row; r < startRow; r++) acc -= rowH(r);
+      }
+      y = acc;
     }
 
-    const w = colWidthToPx(ws.colWidths[col] ?? ws.defaultColWidth, getMdwForWorksheet(ws)) * cs;
-    const h = rowHeightToPx(ws.rowHeights[row] ?? ws.defaultRowHeight) * cs;
-
-    return { x, y, w, h };
+    return { x, y, w: colW(col), h: rowH(row) };
   }
 
   /** Returns the current selection, including mode. */
@@ -414,29 +459,34 @@ export class XlsxViewer {
     const ws = this.currentWorksheet;
     const freezeRows = ws?.freezeRows ?? 0;
     const freezeCols = ws?.freezeCols ?? 0;
+    // Same per-cell rounding as getCellRect / the renderer, so clamp
+    // boundaries land on the canvas's actual pixel edges.
+    const sp = (px: number) => Math.round(px * cs);
+    const headerW = sp(HEADER_W);
+    const headerH = sp(HEADER_H);
 
     let frozenH = 0;
-    if (ws) for (let r = 1; r <= freezeRows; r++) frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+    if (ws) for (let r = 1; r <= freezeRows; r++) frozenH += sp(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight));
     let frozenW = 0;
-    if (ws) for (let c = 1; c <= freezeCols; c++) frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
+    if (ws) for (let c = 1; c <= freezeCols; c++) frozenW += sp(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws)));
 
     let x: number, y: number, w: number, h: number;
     let selR1 = 1, selC1 = 1;
 
     if (this.selectionMode === 'all') {
-      x = HEADER_W * cs;
-      y = HEADER_H * cs;
-      w = this.canvasArea.clientWidth - HEADER_W * cs;
-      h = this.canvasArea.clientHeight - HEADER_H * cs;
+      x = headerW;
+      y = headerH;
+      w = this.canvasArea.clientWidth - headerW;
+      h = this.canvasArea.clientHeight - headerH;
     } else if (this.selectionMode === 'rows') {
       selR1 = Math.min(this.anchorCell.row, this.activeCell.row);
       const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
       const top = this.getCellRect(selR1, 1);
       const bot = this.getCellRect(r2, 1);
       if (!top || !bot) return;
-      x = HEADER_W * cs;
+      x = headerW;
       y = top.y;
-      w = this.canvasArea.clientWidth - HEADER_W * cs;
+      w = this.canvasArea.clientWidth - headerW;
       h = bot.y + bot.h - top.y;
     } else if (this.selectionMode === 'cols') {
       selC1 = Math.min(this.anchorCell.col, this.activeCell.col);
@@ -445,9 +495,9 @@ export class XlsxViewer {
       const right = this.getCellRect(1, c2);
       if (!left || !right) return;
       x = left.x;
-      y = HEADER_H * cs;
+      y = headerH;
       w = right.x + right.w - left.x;
-      h = this.canvasArea.clientHeight - HEADER_H * cs;
+      h = this.canvasArea.clientHeight - headerH;
     } else {
       selR1 = Math.min(this.anchorCell.row, this.activeCell.row);
       const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
@@ -462,14 +512,14 @@ export class XlsxViewer {
     }
 
     // Clamp to header boundaries so the overlay never overlaps fixed headers.
-    if (x < HEADER_W * cs) { w -= HEADER_W * cs - x; x = HEADER_W * cs; }
-    if (y < HEADER_H * cs) { h -= HEADER_H * cs - y; y = HEADER_H * cs; }
+    if (x < headerW) { w -= headerW - x; x = headerW; }
+    if (y < headerH) { h -= headerH - y; y = headerH; }
 
     // Clamp scrollable-region selections at the frozen pane boundary.
     // Frozen cells legitimately live inside the frozen area; scrollable cells
     // that have scrolled behind the frozen area must be clipped there instead.
-    const frozenBoundX = (HEADER_W + frozenW) * cs;
-    const frozenBoundY = (HEADER_H + frozenH) * cs;
+    const frozenBoundX = headerW + frozenW;
+    const frozenBoundY = headerH + frozenH;
     if (selC1 > freezeCols && x < frozenBoundX) { w -= frozenBoundX - x; x = frozenBoundX; }
     if (selR1 > freezeRows && y < frozenBoundY) { h -= frozenBoundY - y; y = frozenBoundY; }
 
@@ -660,18 +710,13 @@ export class XlsxViewer {
 
   private updateSpacerSize(ws: Worksheet): void {
     const cs = this.opts.cellScale ?? 1;
+    const mdw = getMdwForWorksheet(ws);
+    // Match getCellRect / the renderer: round each cell's scaled width
+    // independently so the scrollbar's max scroll lines up with the
+    // canvas's furthest-right / furthest-down drawn cell edge.
+    const sp = (px: number) => Math.round(px * cs);
     const freezeRows = ws.freezeRows ?? 0;
     const freezeCols = ws.freezeCols ?? 0;
-
-    // Compute frozen area pixel size
-    let frozenW = 0;
-    for (let c = 1; c <= freezeCols; c++) {
-      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-    }
-    let frozenH = 0;
-    for (let r = 1; r <= freezeRows; r++) {
-      frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-    }
 
     // Find actual scrollable data extent
     let maxRow = Math.max(50, freezeRows);
@@ -685,18 +730,18 @@ export class XlsxViewer {
     maxRow += 30;
     maxCol += 10;
 
-    // Spacer = header + frozen area + scrollable area (all in logical px, then scale)
-    let totalW = HEADER_W + frozenW;
-    for (let c = freezeCols + 1; c <= maxCol; c++) {
-      totalW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
+    // Spacer = sp(header) + Σ sp(width) for every visible col, same for rows.
+    let totalW = sp(HEADER_W);
+    for (let c = 1; c <= maxCol; c++) {
+      totalW += sp(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw));
     }
-    let totalH = HEADER_H + frozenH;
-    for (let r = freezeRows + 1; r <= maxRow; r++) {
-      totalH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+    let totalH = sp(HEADER_H);
+    for (let r = 1; r <= maxRow; r++) {
+      totalH += sp(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight));
     }
 
-    this.spacer.style.width = `${Math.round(totalW * cs)}px`;
-    this.spacer.style.height = `${Math.round(totalH * cs)}px`;
+    this.spacer.style.width = `${totalW}px`;
+    this.spacer.style.height = `${totalH}px`;
   }
 
   private async renderCurrentSheet(): Promise<void> {
