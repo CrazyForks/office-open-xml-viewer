@@ -63,7 +63,11 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/mcp-server
+          # The repository's Cargo.toml declares a workspace at the root,
+          # so cargo's target directory is `<repo>/target`, not
+          # `packages/mcp-server/target` — point the cache action at the
+          # workspace root accordingly.
+          workspaces: . -> target
           key: ${{ matrix.target }}
 
       - name: Install cross-compile linker (aarch64-linux)
@@ -76,14 +80,16 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
 
       - name: Build
-        working-directory: packages/mcp-server
-        run: cargo build --release --target ${{ matrix.target }}
+        # `-p ooxml-mcp-server` so cargo builds only this crate; the target
+        # directory is the workspace's `<repo>/target/` regardless of which
+        # subdir we run from.
+        run: cargo build --release --target ${{ matrix.target }} -p ooxml-mcp-server
 
       - name: Stage binary
         shell: bash
         run: |
           mkdir -p staging
-          cp "packages/mcp-server/target/${{ matrix.target }}/release/${{ matrix.binary }}" "staging/${{ matrix.asset }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "staging/${{ matrix.asset }}"
 
       - name: Compute SHA256
         shell: bash
