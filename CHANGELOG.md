@@ -4,6 +4,33 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.28.0 — 2026-05-10
+
+### Features
+
+- **pptx**: parse `a:hlinkClick` on text runs and resolve to URLs via slide _rels (ECMA-376 §21.1.2.3.5). Hyperlink runs now also pick up the theme `hlink` colour and render with a forced underline. `Presentation.hlinkColor` / `RenderContext.themeHlinkColor` are exposed to consumers.
+- **pptx**: full `rPr` underline-style enum (`single` / `double` / `singleAccounting` / `doubleAccounting` / `dotted` / `dotDash` / `dotDotDash` / `dash` / `dashLong` / `wavy` / `wavyDbl` and the `*Heavy` variants — ECMA-376 §21.1.2.3.16). New `drawTextDecoLine` helper handles dashed / dotted / wavy / double / heavy in both rich-text and plain-text paths.
+- **pptx**: per-run `uFill` underline colour (§21.1.2.3.20) — the line can render in a separate colour from the glyph.
+- **pptx**: `vertAlign` superscript / subscript (§21.1.2.3.13), caps `all` / `small` (§21.1.2.3.13), letter spacing `spc` (§21.1.2.3.5), and `strike="dblStrike"` two-line strikethrough (§21.1.2.3.10) all flow through to the renderer.
+- **pptx**: `rPr > a:ea` East Asian typeface (§21.1.2.3.7) — CJK glyphs in mixed-script runs now use the theme / explicit ea font instead of falling back to the latin one.
+- **pptx**: pattern fill (`a:pattFill`, §20.1.8.40 / §20.1.10.59) ships 30 preset bitmaps (`pct5`–`pct90` / `horz` / `vert` / `cross` / `diag*` / `grid` / `brick` / `check` / `trellis` etc.) tiled via `CanvasPattern`.
+- **pptx**: `a:glow` (§20.1.8.17) renders as a coloured Canvas shadow with zero offset; `a:innerShdw` (§20.1.8.21), `a:softEdge` (§20.1.8.31), and `a:reflection` (§20.1.8.27) are now parsed (rendering for those three lands in a follow-up release). `apply_color_transforms` also gained `alphaModFix` / `alphaMod` / `alphaOff` so existing `outerShdw` colours emitted with `alphaModFix` honour their alpha.
+- **pptx**: compound stroke styles `<a:ln cmpd="dbl|thinThick|thickThin|tri">` (§20.1.8.42) are parsed for every shape and rendered for straight lines / connectors. The base centre stroke is erased with `destination-out` before the sub-lines paint so dash / arrow heads / glow remain consistent.
+- **pptx**: `formatAutoNum` (§20.1.10.61) covers all symmetric Plain / Period / ParenR / ParenBoth variants for arabic, alphaLc / Uc, romanLc / Uc, plus arabicDb (full-width digits). 8 → 22 schemes.
+- **xlsx**: rPr / cell font `<vertAlign>` (§18.4.6) and `<u>` enum (§18.4.13) — superscript / subscript apply `~65%` size + baseline shift; `double` / `doubleAccounting` underline draws as two parallel lines via the new `drawTextDecoLine`.
+
+### Fixes
+
+- **xlsx renderer**: default `fg` / `bg` colours for `<patternFill>` when the colour children are absent (ECMA-376 §18.8.20). Excel emits `darkHorizontal` / `darkVertical` etc. without explicit colours; the prior truthy-check on `fgColor` rendered them as nothing. Same fix flows through merged-anchor cells via the new `paintCellPatternFill` helper.
+- **xlsx renderer**: every preset `patternType` now ships an explicit 8×8 (or 12×12 for matched-line-count `*Horizontal` / `*Vertical` / `*Grid`) bitmap tuned by sight against Excel's actual output. Gray family (`gray0625` → `darkGray`) reads as a continuous dot-density gradient (~6% → ~75%) starting from the `gray0625` motif and adding dots at each tier; directional hatches (`*Horizontal` / `*Vertical`) match dark / light line counts at the same pitch with `dark*` using a 2-px-thick bar and `light*` a 1-px line; `darkGrid` renders as a 2×2 checker, `lightGrid` as a wider 4-px-pitch grid.
+- **xlsx renderer**: `hatchPattern` now pre-bakes `pat.setTransform(scale(1/sx, 1/sy))` so each source bit lands on exactly one destination *device* pixel at integer scales (`scale=2`, retina), and tiles at native resolution at non-integer scales (`scale=1.5`) instead of triggering Canvas's bilinear pattern resampler — which previously smeared `lightHorizontal` into a uniform half-tone. Cache key includes the rounded scale so two render passes at different scales don't collide.
+- **xlsx renderer**: render `<diagonal style="double"/>` borders as two parallel lines along the diagonal's perpendicular (ECMA-376 §18.18.3). Diagonals previously fell back to a single line.
+- **xlsx viewer**: selection overlay aligns with cell borders at any `cellScale`. The renderer rounds each cell's scaled width per-cell; `viewer.getCellRect` / `updateSelectionOverlay` / `updateSpacerSize` now mirror the same per-cell rounding, eliminating the up-to-several-pixel drift visible at non-integer scales.
+
+### Docs
+
+- README feature support table reflects all of the above. PowerPoint animations / transitions are explicitly marked "Not planned" per scope.
+
 ## 0.27.0 — 2026-05-08
 
 ### Features
