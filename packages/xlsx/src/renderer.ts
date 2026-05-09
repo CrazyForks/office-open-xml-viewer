@@ -209,7 +209,10 @@ const PATTERN_BITMAPS: Record<string, number[]> = {
   // Relative ordering: darkGray > mediumGray > lightGray > gray125 > gray0625.
   gray0625:   [0b10001000, 0b00000000, 0b00100010, 0b00000000, 0b10001000, 0b00000000, 0b00100010, 0b00000000], // ≈ 12%
   gray125:    [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000], // ≈ 25%
-  lightGray:  [0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101], // ≈ 50%
+  // ≈ 37% — sits clearly between gray125 (25%) and mediumGray (65%) so the
+  // five gray tiers stay visually distinguishable. The earlier 50% checker
+  // had E17 reading nearly as dark as the mediumGray cell next to it.
+  lightGray:  [0b10101010, 0b00100010, 0b01010101, 0b00100010, 0b10101010, 0b00100010, 0b01010101, 0b00100010], // ≈ 37%
   // 65% — a 25% sparse mask added on top of the 50% checker so the cell
   // reads visibly denser than lightGray without horizontal banding.
   mediumGray: [0b11101010, 0b01010101, 0b10111010, 0b01010101, 0b10101110, 0b01010101, 0b10101011, 0b01010101], // ≈ 65%
