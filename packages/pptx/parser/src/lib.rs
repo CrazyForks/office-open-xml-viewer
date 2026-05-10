@@ -1590,6 +1590,14 @@ impl LayoutPlaceholders {
     /// Look up inherited blipFill from the layout placeholder spPr. Used when a slide
     /// references a picture placeholder (e.g. ph type="pic") without its own blipFill —
     /// the image defined on the layout's matching placeholder should render through.
+    ///
+    /// NOTE: this lookup currently falls back to the by_type map even when the
+    /// slide explicitly carried an idx — same pattern that broke `lookup_fill`
+    /// in sample-2 (a sibling placeholder of the same type but a different idx
+    /// would bleed its blipFill onto the wrong slot). It hasn't manifested in
+    /// real samples yet because layouts rarely have two picture placeholders
+    /// with distinct blipFills, but the fix should mirror `lookup_fill`'s
+    /// idx-strict semantics when that case appears.
     fn lookup_blip_fill(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<InheritedBlipFill> {
         ph_idx
             .and_then(|i| self.by_idx_blip_fill.get(&i).cloned())
@@ -1616,12 +1624,27 @@ impl LayoutPlaceholders {
 
     /// Look up the inherited shape fill from the layout placeholder's `<p:spPr>`.
     /// Used when the slide-level shape leaves `<p:spPr>` empty (or with no fill
-    /// elements) and is bound to a placeholder — the layout fill is the
-    /// authoritative default per ECMA-376 §19.3.1.36.
+    /// elements) and is bound to a placeholder.
+    ///
+    /// ECMA-376 §19.7.16 (placeholder inheritance) is asymmetric: when the
+    /// slide-level shape declares `<p:ph idx="N">` it is bound to *that*
+    /// specific layout slot — the only valid inheritance source is the layout
+    /// shape with idx=N. Falling back to `by_type_fill` here would let a
+    /// sibling body placeholder (a different idx, different region of the
+    /// layout) bleed its fill onto a placeholder that the spec says should
+    /// have no fill. This is exactly what regressed sample-2 slide-4: layout10
+    /// has `body[idx=12]` (header, no fill) and `body[idx=13]` (bullet box,
+    /// gray fill) — the type fallback was leaking the bullet box's gray onto
+    /// the header.
+    ///
+    /// The type-only fallback only applies when the slide-level shape itself
+    /// has no idx, in which case "first body placeholder we found" is the
+    /// best we can do.
     fn lookup_fill(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<Fill> {
-        ph_idx
-            .and_then(|i| self.by_idx_fill.get(&i).cloned())
-            .or_else(|| self.by_type_fill.get(ph_type).cloned())
+        if let Some(i) = ph_idx {
+            return self.by_idx_fill.get(&i).cloned();
+        }
+        self.by_type_fill.get(ph_type).cloned()
             .or_else(|| if ph_type == "body" { self.by_type_fill.get("").cloned() } else { None })
     }
 
