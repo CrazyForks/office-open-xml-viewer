@@ -471,12 +471,18 @@ pub struct ImageRun {
 
 fn is_zero_f64(v: &f64) -> bool { *v == 0.0 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum BreakType {
     Line,
     Page,
     Column,
+    /// ECMA-376 §17.3.1.20 — Word's saved hint about where the previous
+    /// render placed a page break. Distinguished from `Page` so the
+    /// renderer can honor it conditionally (currently: only inside
+    /// paragraphs that carry ruby, where our own line-height calc tends
+    /// to drift from Word's). Serialized as `renderedPage` for the TS side.
+    RenderedPage,
 }
 
 // ===== Table =====
