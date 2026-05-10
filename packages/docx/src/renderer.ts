@@ -2143,20 +2143,64 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
 
 function normalizeFontFamily(family: string | null): string {
   if (!family) return '"Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif';
+
+  // 1) Always lead with the requested family verbatim. If the user has it
+  //    installed (or a webfont is registered for it) the canvas resolver
+  //    picks it up; downstream entries are fallbacks for missing fonts.
+  // 2) Detect serif (Mincho) vs sans-serif (Gothic / Sans) from the family
+  //    name. ECMA-376 doesn't carry a generic-family hint, so we inspect
+  //    the typeface name for the well-known Japanese / Latin serif
+  //    markers ("明朝", "Mincho", "Times", "Caladea", …) and the
+  //    sans-serif ones ("ゴシック", "Gothic", "Sans", "Calibri", "Meiryo", …).
+  //    Without this, every Japanese font fell through the heuristic and
+  //    rendered as Gothic — sample-5 dream text in 游明朝 came out in
+  //    Yu Gothic instead of the requested Mincho serif.
+  const escape = (s: string) => s.replace(/"/g, '\\"');
+  const head = `"${escape(family)}"`;
   const lower = family.toLowerCase();
-  if (lower.includes('meiryo') || lower.includes('メイリオ')) {
-    return '"Meiryo UI", "Meiryo", "Noto Sans JP", sans-serif';
+
+  const isSerif =
+    family.includes('明朝') ||
+    family.includes('明朝体') ||
+    /\bmincho\b/i.test(family) ||
+    /\bmin\s*cho\b/i.test(family) ||
+    family.includes('ＭＳ 明朝') ||
+    family.includes('MS Mincho') ||
+    family.includes('Yu Mincho') ||
+    family.includes('游明朝') ||
+    family.includes('Hiragino Mincho') ||
+    family.includes('ヒラギノ明朝') ||
+    family.includes('Cambria') ||
+    family.includes('Caladea') ||
+    family.includes('Times') ||
+    family.includes('Georgia') ||
+    family.includes('Bodoni') ||
+    family.includes('Garamond') ||
+    family.includes('Playfair') ||
+    family.includes('Source Serif') ||
+    family.includes('Noto Serif');
+
+  if (isSerif) {
+    // Japanese serif fallback chain — prefers Yu Mincho (Japan) → Hiragino
+    // Mincho ProN (macOS) → MS Mincho (Windows) → Noto Serif JP (web).
+    return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", serif`;
   }
-  if (lower.includes('游') || lower.includes('yu ')) {
-    return '"Yu Gothic", "YuGothic", "Noto Sans JP", sans-serif';
+
+  // Sans-serif specific known fonts.
+  if (lower.includes('meiryo') || family.includes('メイリオ')) {
+    return `${head}, "Meiryo UI", "Meiryo", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+  }
+  if (family.includes('游ゴシック') || /\byu\s*gothic\b/i.test(family) || lower.includes('yugothic')) {
+    return `${head}, "Yu Gothic", "YuGothic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
   }
   if (lower.includes('ipa')) {
-    return '"IPAexGothic", "Noto Sans JP", sans-serif';
+    return `${head}, "IPAexGothic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
   }
   if (lower.includes('segoe')) {
-    return '"Segoe UI", sans-serif';
+    return `${head}, "Segoe UI", sans-serif`;
   }
-  return `"${family}", sans-serif`;
+  // Generic Japanese / Latin sans-serif fallback chain.
+  return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif`;
 }
 
 function getDefaultFontSize(para: DocParagraph): number {
