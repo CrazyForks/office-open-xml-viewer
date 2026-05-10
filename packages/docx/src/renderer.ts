@@ -1764,16 +1764,53 @@ function resolveAnchorY(
 
 function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
   const { ctx, scale } = state;
-  const w = shape.widthPt * scale;
-  const h = shape.heightPt * scale;
+  // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
+  // the static wp:extent for that axis. The size is `relativeFrom` container
+  // size × pct.
+  //
+  // For a wgp group with sizeRelH, the parent group resizes and every child
+  // shape scales proportionally — so a grouped child's effective width is
+  // `original_width × (new_group_w / old_group_w)`, and its within-group
+  // offset (carried by anchorXPt) scales by the same ratio. Standalone
+  // shapes simply take `container × pct` as their width.
+  let w = shape.widthPt * scale;
+  let h = shape.heightPt * scale;
+  let offsetXPt = shape.anchorXPt;
+  let offsetYPt = shape.anchorYPt;
+  let alignWidthPt = shape.groupWidthPt ?? null;
+  let alignHeightPt = shape.groupHeightPt ?? null;
+  if (shape.widthPct != null) {
+    const c = xContainer(shape.widthRelativeFrom, false, state);
+    const newSizePt = ((c.end - c.start) * shape.widthPct) / scale;
+    if (shape.groupWidthPt != null && shape.groupWidthPt > 0) {
+      const ratio = newSizePt / shape.groupWidthPt;
+      w = shape.widthPt * scale * ratio;
+      offsetXPt = shape.anchorXPt * ratio;
+    } else {
+      w = newSizePt * scale;
+    }
+    alignWidthPt = newSizePt;
+  }
+  if (shape.heightPct != null) {
+    const c = yContainer(shape.heightRelativeFrom, false, paragraphTopPx, state);
+    const newSizePt = ((c.end - c.start) * shape.heightPct) / scale;
+    if (shape.groupHeightPt != null && shape.groupHeightPt > 0) {
+      const ratio = newSizePt / shape.groupHeightPt;
+      h = shape.heightPt * scale * ratio;
+      offsetYPt = shape.anchorYPt * ratio;
+    } else {
+      h = newSizePt * scale;
+    }
+    alignHeightPt = newSizePt;
+  }
   if (w <= 0 || h <= 0) return;
   const x = resolveAnchorX(
-    shape.anchorXAlign, shape.anchorXFromMargin, shape.anchorXPt, w, state,
-    shape.anchorXRelativeFrom, shape.pctPosH, shape.groupWidthPt,
+    shape.anchorXAlign, shape.anchorXFromMargin, offsetXPt, w, state,
+    shape.anchorXRelativeFrom, shape.pctPosH, alignWidthPt,
   );
   const y = resolveAnchorY(
-    shape.anchorYAlign, shape.anchorYFromPara, shape.anchorYPt, h, paragraphTopPx, state,
-    shape.anchorYRelativeFrom, shape.pctPosV, shape.groupHeightPt,
+    shape.anchorYAlign, shape.anchorYFromPara, offsetYPt, h, paragraphTopPx, state,
+    shape.anchorYRelativeFrom, shape.pctPosV, alignHeightPt,
   );
 
   const rot = shape.rotation ?? 0;

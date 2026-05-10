@@ -180,6 +180,14 @@ export interface ShapeRun {
    *  for both pctPos* and anchor*Align positioning. */
   anchorXRelativeFrom?: string | null;
   anchorYRelativeFrom?: string | null;
+  /** ECMA-376 §20.4.2.18 wp14:sizeRelH/sizeRelV — width/height as a
+   *  fraction of the relativeFrom container. When set, the renderer uses
+   *  this in place of `widthPt` / `heightPt` for layout. `pct == 0` from
+   *  the source is dropped at parse time (treated as "use extent"). */
+  widthPct?: number | null;
+  heightPct?: number | null;
+  widthRelativeFrom?: string | null;
+  heightRelativeFrom?: string | null;
   /** Parent wgp group dimensions (pt) — set only when this shape is a child
    *  of a `<wpg:wgp>`. Used by `resolveAnchor*` so align/pctPos resolve the
    *  GROUP's origin, then `anchor[XY]Pt` adds the within-group offset. */

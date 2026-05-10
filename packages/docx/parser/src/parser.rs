@@ -1098,6 +1098,7 @@ fn parse_inline_drawing(
     let (pos_x, x_from_margin, x_align) = parse_anchor_pos_h(&container);
     let (pos_y, y_from_para,   y_align) = parse_anchor_pos_v(&container);
     let (pct_h, pct_v, rel_h, rel_v) = parse_anchor_pct_pos(&container);
+    let (size_w_pct, size_h_pct, size_w_rel, size_h_rel) = parse_anchor_size_rel(&container);
     let anchor_meta = parse_anchor_wrap(&container);
 
     // behindDoc="1" flag — renderer uses this to draw shapes before text
@@ -1110,6 +1111,10 @@ fn parse_inline_drawing(
         shp.pct_pos_v = pct_v;
         shp.anchor_x_relative_from = rel_h.clone();
         shp.anchor_y_relative_from = rel_v.clone();
+        shp.width_pct = size_w_pct;
+        shp.height_pct = size_h_pct;
+        shp.width_relative_from = size_w_rel.clone();
+        shp.height_relative_from = size_h_rel.clone();
     };
 
     // Check for wgp (Word Graphics Group) — expands to multiple per-element entries
@@ -1315,6 +1320,32 @@ fn parse_anchor_pct_pos(
         h_node.and_then(read_rel),
         v_node.and_then(read_rel),
     )
+}
+
+/// Read ECMA-376 §20.4.2.18 wp14:sizeRelH / sizeRelV — width/height as a
+/// fraction of the relativeFrom container. Returns
+/// `(width_pct, height_pct, width_relative_from, height_relative_from)`.
+/// `pct == 0` is treated as None (fall back to extent), matching Word.
+fn parse_anchor_size_rel(
+    container: &roxmltree::Node,
+) -> (Option<f64>, Option<f64>, Option<String>, Option<String>) {
+    let read = |outer_tag: &str, inner_tag: &str| -> (Option<f64>, Option<String>) {
+        let node = container.children().find(|n| n.tag_name().name() == outer_tag);
+        let pct = node
+            .and_then(|n| {
+                n.descendants()
+                    .find(|c| c.is_element() && c.tag_name().name() == inner_tag)
+                    .and_then(|c| c.text())
+                    .and_then(|t| t.parse::<f64>().ok())
+            })
+            .map(|v| v / 100_000.0)
+            .filter(|v| *v > 0.0);
+        let rel = node.and_then(|n| n.attribute("relativeFrom").map(|s| s.to_string()));
+        (pct, rel)
+    };
+    let (w_pct, w_rel) = read("sizeRelH", "pctWidth");
+    let (h_pct, h_rel) = read("sizeRelV", "pctHeight");
+    (w_pct, h_pct, w_rel, h_rel)
 }
 
 /// Expand a wp:wgp group into individual ImageRun entries.

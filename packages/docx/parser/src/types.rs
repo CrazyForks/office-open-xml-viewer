@@ -256,6 +256,21 @@ pub struct ShapeRun {
     pub anchor_x_relative_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_relative_from: Option<String>,
+    /// ECMA-376 §20.4.2.18 wp14:sizeRelH/sizeRelV — width/height as a
+    /// fraction of the relativeFrom container, in 1/100,000ths of a percent.
+    /// When set, the renderer uses this in place of `width_pt` / `height_pt`
+    /// for layout (text frame, align centering, shape draw rect). The
+    /// container is resolved by `width_relative_from` / `height_relative_from`
+    /// using the same rules as anchor positioning. `pct == 0` is treated as
+    /// "fall back to extent" (matches Word's empirical behavior).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_relative_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_relative_from: Option<String>,
     /// Parent wgp group dimensions (pt). Set only when this shape is a child
     /// of a `<wpg:wgp>` group; `None` for standalone wsp anchors. The renderer
     /// uses these for align/pctPos math so the GROUP is positioned within
