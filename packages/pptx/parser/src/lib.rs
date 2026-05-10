@@ -2518,28 +2518,18 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
         }));
 
-    // val axis max / min
+    // val axis max / min and visibility — shared helpers in ooxml-common
+    // so xlsx & pptx stay in sync (`<c:scaling><c:min|max val>` and
+    // `<c:delete val>` ECMA-376 §21.2.2.40 / §21.2.2.43).
     let val_ax = root.descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "valAx");
-    let val_max = val_ax
-        .and_then(|ax| ax.descendants().find(|n| n.is_element() && n.tag_name().name() == "max"))
-        .and_then(|n| attr(&n, "val"))
-        .and_then(|v| v.parse::<f64>().ok());
-    let val_min = val_ax
-        .and_then(|ax| ax.descendants().find(|n| n.is_element() && n.tag_name().name() == "min"))
-        .and_then(|n| attr(&n, "val"))
-        .and_then(|v| v.parse::<f64>().ok());
-
-    // Axis visibility: <c:catAx>/<c:valAx><c:delete val="1"/> hides the entire axis
-    let axis_hidden = |ax_name: &str| -> bool {
-        root.descendants()
-            .filter(|n| n.is_element() && n.tag_name().name() == ax_name)
-            .any(|ax| ax.children().any(|c|
-                c.is_element() && c.tag_name().name() == "delete"
-                    && attr(&c, "val").as_deref() == Some("1")))
-    };
-    let cat_axis_hidden = axis_hidden("catAx");
-    let val_axis_hidden = axis_hidden("valAx");
+    let cat_ax = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "catAx");
+    let (val_min, val_max) = val_ax
+        .map(ooxml_common::chart::extract_axis_min_max)
+        .unwrap_or((None, None));
+    let val_axis_hidden = val_ax.map(ooxml_common::chart::axis_is_deleted).unwrap_or(false);
+    let cat_axis_hidden = cat_ax.map(ooxml_common::chart::axis_is_deleted).unwrap_or(false);
 
     // Series
     let plot_area = root.descendants()
@@ -2669,16 +2659,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
         .and_then(|fill| parse_color_node(fill, theme));
 
-    // <c:legend> determines whether the legend is shown; <c:legendPos val>
-    // (ECMA-376 §21.2.2.10) picks the side ("r" default | "l" | "t" | "b" | "tr").
-    let legend_node = root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "legend");
-    let show_legend = legend_node.is_some();
-    let legend_pos = legend_node.and_then(|ln| {
-        ln.children()
-            .find(|n| n.is_element() && n.tag_name().name() == "legendPos")
-            .and_then(|p| attr(&p, "val"))
-    });
+    // <c:legend> + <c:legendPos val> — shared helper.
+    let (show_legend, legend_pos) = ooxml_common::chart::extract_legend(root);
 
     // ECMA-376 §21.2.2.35: `<c:crossBetween>` lives on the VALUE axis (not cat),
     // and describes whether value gridlines land between or on category ticks.
@@ -2689,102 +2671,47 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         .and_then(|n| attr(&n, "val"))
         .unwrap_or_else(|| "between".to_string());
 
-    let read_major_tick_mark = |ax_name: &str| -> String {
-        root.descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == ax_name)
-            .and_then(|ax| ax.children().find(|n| n.is_element() && n.tag_name().name() == "majorTickMark"))
-            .and_then(|n| attr(&n, "val"))
-            // ECMA-376 default for majorTickMark is "cross".
+    // Major tick marks (ECMA-376 §21.2.2.49 ST_TickMark, default "cross").
+    let read_major_tick_mark = |ax: Option<roxmltree::Node>| -> String {
+        ax.and_then(|n| ooxml_common::chart::extract_axis_tick_mark(n, "majorTickMark"))
             .unwrap_or_else(|| "cross".to_string())
     };
-    let val_axis_major_tick_mark = read_major_tick_mark("valAx");
-    let cat_axis_major_tick_mark = read_major_tick_mark("catAx");
+    let val_axis_major_tick_mark = read_major_tick_mark(val_ax);
+    let cat_axis_major_tick_mark = read_major_tick_mark(cat_ax);
 
-    // <c:catAx>/<c:valAx><c:txPr> → defRPr/rPr@sz gives axis label font size
-    // in OOXML hundredths of a point. This drives both font rendering and
-    // the bottom/left padding so the plot area shrinks to leave room.
-    let read_axis_font_hpt = |ax_name: &str| -> Option<i32> {
-        root.descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == ax_name)
-            .and_then(|ax| ax.children().find(|n| n.is_element() && n.tag_name().name() == "txPr"))
-            .and_then(|tx| tx.descendants().find_map(|n| {
-                if !n.is_element() { return None; }
-                let tag = n.tag_name().name();
-                if tag != "defRPr" && tag != "rPr" { return None; }
-                attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
-            }))
-    };
-    let cat_axis_font_size_hpt = read_axis_font_hpt("catAx");
-    let val_axis_font_size_hpt = read_axis_font_hpt("valAx");
+    // Axis tick-label font size from `<c:txPr>` (in OOXML hundredths of a point).
+    let cat_axis_font_size_hpt = cat_ax.and_then(ooxml_common::chart::extract_axis_tick_label_size);
+    let val_axis_font_size_hpt = val_ax.and_then(ooxml_common::chart::extract_axis_tick_label_size);
 
-    // First <c:dLbls> we can find — per-series or plotArea-level. Drill down
-    // to the defRPr@sz the same way we do for axes.
-    let data_label_font_size_hpt = root.descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
-        .find_map(|dl| {
-            dl.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "txPr")
-                .and_then(|tx| tx.descendants().find_map(|n| {
-                    if !n.is_element() { return None; }
-                    let tag = n.tag_name().name();
-                    if tag != "defRPr" && tag != "rPr" { return None; }
-                    attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
-                }))
-        });
+    // Data-label font size — first `<c:dLbls><c:txPr>` defRPr/rPr@sz we find.
+    let data_label_font_size_hpt = ooxml_common::chart::extract_data_label_font_size(root);
 
-    // ECMA-376 §21.2.2.13 / §21.2.2.25 — `<c:gapWidth val>` and `<c:overlap val>`
-    // are siblings of `<c:ser>` inside the bar/area chart-type wrapper. Default
-    // gapWidth=150 (per spec). overlap default 0; +100 = stacked.
-    let bar_gap_width = root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "gapWidth")
-        .and_then(|n| attr(&n, "val"))
-        .and_then(|v| v.parse::<i32>().ok());
-    let bar_overlap = root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "overlap")
-        .and_then(|n| attr(&n, "val"))
-        .and_then(|v| v.parse::<i32>().ok());
+    // Bar gap / overlap, dLblPos and numFmt — all shared helpers so any new
+    // chart property added to the xlsx side stays applied to pptx without
+    // a manual port (the slide-7 / sample-2 issue this PR avoids).
+    let (bar_gap_width, bar_overlap) = ooxml_common::chart::extract_bar_gap_overlap(root);
+    let data_label_position = ooxml_common::chart::extract_data_label_position(root);
+    let data_label_format_code = ooxml_common::chart::extract_data_label_format_code(root);
 
-    // Walk every `<c:dLbls>` (chart-level + per-series) and pick the first
-    // dLblPos / numFmt / fill that we find. ECMA-376 §21.2.2.49: dLblPos values
-    // include "ctr" | "inEnd" | "outEnd" | "inBase" | "l" | "r" | "t" | "b".
-    let mut data_label_position: Option<String> = None;
-    let mut data_label_format_code: Option<String> = None;
+    // Data-label font color still needs theme-aware color resolution, which
+    // pptx does via parse_color_node + a HashMap theme map. Keep that part
+    // local until ooxml-common gains a generic ColorResolver.
     let mut data_label_font_color: Option<String> = None;
     for dlbls in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "dLbls") {
-        for child in dlbls.children().filter(|n| n.is_element()) {
-            match child.tag_name().name() {
-                "dLblPos" => {
-                    if data_label_position.is_none() {
-                        data_label_position = attr(&child, "val");
-                    }
+        if let Some(txpr) = dlbls.children().find(|n| n.is_element() && n.tag_name().name() == "txPr") {
+            for desc in txpr.descendants().filter(|n| n.is_element()) {
+                if desc.tag_name().name() != "solidFill" { continue; }
+                if let Some(c) = parse_color_node(desc, theme) {
+                    data_label_font_color = Some(c);
+                    break;
                 }
-                "numFmt" => {
-                    if data_label_format_code.is_none() {
-                        data_label_format_code = attr(&child, "formatCode")
-                            .filter(|s| !s.is_empty() && s != "General");
-                    }
-                }
-                "txPr" => {
-                    if data_label_font_color.is_none() {
-                        for desc in child.descendants().filter(|n| n.is_element()) {
-                            if desc.tag_name().name() != "solidFill" { continue; }
-                            if let Some(c) = parse_color_node(desc, theme) {
-                                data_label_font_color = Some(c);
-                                break;
-                            }
-                        }
-                    }
-                }
-                _ => {}
             }
+            if data_label_font_color.is_some() { break; }
         }
     }
 
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
-    let val_axis_format_code = val_ax
-        .and_then(|ax| ax.children().find(|n| n.is_element() && n.tag_name().name() == "numFmt"))
-        .and_then(|n| attr(&n, "formatCode"))
-        .filter(|s| !s.is_empty() && s != "General");
+    let val_axis_format_code = val_ax.and_then(ooxml_common::chart::extract_axis_format_code);
 
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,
@@ -2890,19 +2817,10 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         data_point_colors: None,
     }];
 
-    // ChartEx axis visibility — `<cx:axis hidden="1">`. Each axis carries either
-    // `<cx:catScaling>` or `<cx:valScaling>` so we can disambiguate even when
-    // the spec doesn't declare `id` semantics. Default visible.
-    let mut cat_axis_hidden = false;
-    let mut val_axis_hidden = false;
-    for ax in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "axis") {
-        let hidden = attr(&ax, "hidden").as_deref() == Some("1");
-        if !hidden { continue; }
-        let is_val = ax.children().any(|c| c.is_element() && c.tag_name().name() == "valScaling");
-        let is_cat = ax.children().any(|c| c.is_element() && c.tag_name().name() == "catScaling");
-        if is_val { val_axis_hidden = true; }
-        if is_cat { cat_axis_hidden = true; }
-    }
+    // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
+    // with its `<cx:catScaling>` / `<cx:valScaling>` child to disambiguate cat
+    // vs. val (chartEx doesn't declare axis kind via the `id` attribute).
+    let (cat_axis_hidden, val_axis_hidden) = ooxml_common::chart::extract_chartex_axis_hidden(root);
 
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,

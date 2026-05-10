@@ -3758,16 +3758,12 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
 
     // Legend presence: <c:chart><c:legend> is the authoritative signal. Absence
     // means Excel hides the legend (default for a single-series chart with no
-    // explicit legend element). When present, `<c:legendPos val>` picks a side
-    // ("r"|"l"|"t"|"b"|"tr") — default "r" per ECMA-376 §21.2.2.10.
+    // explicit legend element). `<c:legendPos val>` picks a side per
+    // ECMA-376 §21.2.2.10 — both parts come from the shared ooxml-common helper
+    // so pptx & xlsx stay in lockstep.
+    let (show_legend, legend_pos) = ooxml_common::chart::extract_legend(chart_root);
     let legend_node = chart_root.children()
         .find(|n| n.tag_name().name() == "legend" && n.tag_name().namespace() == Some(c_ns));
-    let show_legend = legend_node.is_some();
-    let legend_pos = legend_node.and_then(|ln| {
-        ln.children()
-            .find(|n| n.tag_name().name() == "legendPos" && n.tag_name().namespace() == Some(c_ns))
-            .and_then(|p| p.attribute("val").map(|s| s.to_string()))
-    });
     // Legend <c:layout><c:manualLayout> (ECMA-376 §21.2.2.31) — when present,
     // gives explicit x/y/w/h fractions of the chart space. Used by the Excel
     // templates that position a top legend into a narrow band, e.g. over the
@@ -4222,21 +4218,17 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     })
 }
 
-/// `<c:catAx|valAx><c:numFmt@formatCode>` (ECMA-376 §21.2.2.21).
-fn extract_axis_format_code(axis_node: &roxmltree::Node, c_ns: &str) -> Option<String> {
-    axis_node.children()
-        .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
-        .and_then(|n| n.attribute("formatCode").map(|s| s.to_string()))
-        .filter(|s| !s.is_empty() && s != "General")
+/// `<c:catAx|valAx><c:numFmt@formatCode>` (ECMA-376 §21.2.2.21). Thin
+/// wrapper around `ooxml_common::chart::extract_axis_format_code` so the
+/// pptx and xlsx parsers stay in lockstep on the format-code rules.
+fn extract_axis_format_code(axis_node: &roxmltree::Node, _c_ns: &str) -> Option<String> {
+    ooxml_common::chart::extract_axis_format_code(*axis_node)
 }
 
 /// `<c:catAx|valAx><c:majorTickMark val>` / `<c:minorTickMark val>` —
 /// `none` / `out` / `in` / `cross` (ECMA-376 §21.2.2.49 ST_TickMark).
-fn extract_axis_tick_mark(axis_node: &roxmltree::Node, c_ns: &str, name: &str) -> Option<String> {
-    axis_node.children()
-        .find(|n| n.tag_name().name() == name && n.tag_name().namespace() == Some(c_ns))
-        .and_then(|n| n.attribute("val"))
-        .map(|s| s.to_string())
+fn extract_axis_tick_mark(axis_node: &roxmltree::Node, _c_ns: &str, name: &str) -> Option<String> {
+    ooxml_common::chart::extract_axis_tick_mark(*axis_node, name)
 }
 
 /// `<c:catAx|valAx><c:spPr><a:ln>` — resolved color (no `#`) and width
@@ -4285,31 +4277,17 @@ fn extract_axis_crosses(axis_node: &roxmltree::Node, c_ns: &str) -> (Option<Stri
 
 /// Read explicit `<c:scaling><c:min>` / `<c:scaling><c:max>` values, returning
 /// `(min, max)` where each is `None` if the axis didn't override that bound.
-fn extract_axis_scaling(axis_node: &roxmltree::Node, c_ns: &str) -> Option<(Option<f64>, Option<f64>)> {
-    let scaling = axis_node.children()
-        .find(|n| n.tag_name().name() == "scaling" && n.tag_name().namespace() == Some(c_ns))?;
-    let mn = scaling.children()
-        .find(|n| n.tag_name().name() == "min" && n.tag_name().namespace() == Some(c_ns))
-        .and_then(|n| n.attribute("val"))
-        .and_then(|v| v.parse::<f64>().ok());
-    let mx = scaling.children()
-        .find(|n| n.tag_name().name() == "max" && n.tag_name().namespace() == Some(c_ns))
-        .and_then(|n| n.attribute("val"))
-        .and_then(|v| v.parse::<f64>().ok());
-    if mn.is_some() || mx.is_some() {
-        Some((mn, mx))
-    } else {
-        None
-    }
+/// Returns `None` only when neither bound is set (matches the prior xlsx
+/// callsite shape `if let Some((mn, mx)) = …`).
+fn extract_axis_scaling(axis_node: &roxmltree::Node, _c_ns: &str) -> Option<(Option<f64>, Option<f64>)> {
+    let (mn, mx) = ooxml_common::chart::extract_axis_min_max(*axis_node);
+    if mn.is_some() || mx.is_some() { Some((mn, mx)) } else { None }
 }
 
-/// `<c:catAx|valAx><c:delete val="1"/>` — true when the axis is hidden.
-fn axis_is_deleted(axis_node: &roxmltree::Node, c_ns: &str) -> bool {
-    axis_node.children()
-        .find(|n| n.tag_name().name() == "delete" && n.tag_name().namespace() == Some(c_ns))
-        .and_then(|n| n.attribute("val"))
-        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false)
+/// `<c:catAx|valAx><c:delete val="1"/>` — true when the axis is hidden
+/// (ECMA-376 §21.2.2.40). Thin wrapper around the shared helper.
+fn axis_is_deleted(axis_node: &roxmltree::Node, _c_ns: &str) -> bool {
+    ooxml_common::chart::axis_is_deleted(*axis_node)
 }
 
 /// Extract a `<c:layout><c:manualLayout>` block. The given `layout_node` is
@@ -4344,16 +4322,8 @@ fn extract_manual_layout(layout_node: &roxmltree::Node, c_ns: &str) -> Option<Ma
 /// Extract a category/value axis tick-label font size (hundredths of a point)
 /// from the first `a:defRPr@sz` (or `a:rPr@sz`) inside the axis' `c:txPr`.
 /// ECMA-376 §21.2.2.17 — `<c:txPr>` controls tick label text properties.
-fn extract_axis_tick_label_size(axis_node: &roxmltree::Node, c_ns: &str, a_ns: &str) -> Option<i32> {
-    let txpr = axis_node.children()
-        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))?;
-    txpr.descendants().find_map(|n| {
-        if !n.is_element() { return None; }
-        if n.tag_name().namespace() != Some(a_ns) { return None; }
-        let tag = n.tag_name().name();
-        if tag != "defRPr" && tag != "rPr" { return None; }
-        n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
-    })
+fn extract_axis_tick_label_size(axis_node: &roxmltree::Node, _c_ns: &str, _a_ns: &str) -> Option<i32> {
+    ooxml_common::chart::extract_axis_tick_label_size(*axis_node)
 }
 
 /// Extract the chart title's font size (hundredths of a point) from the first

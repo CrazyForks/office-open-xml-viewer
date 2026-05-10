@@ -1,0 +1,296 @@
+//! Shared OOXML chart-XML extractors used by both the xlsx and pptx Rust
+//! parsers.
+//!
+//! Both crates parse a chart `<c:chartSpace>` (and the modern
+//! `<cx:chartSpace>` for waterfall / treemap / box-and-whisker etc.) but
+//! historically did so with two near-identical bodies sitting in
+//! `packages/xlsx/parser/src/lib.rs` and `packages/pptx/parser/src/lib.rs`.
+//! The result was that fields added on one side stayed missing on the other
+//! until somebody noticed (e.g. PowerPoint sample-2 slide-7 displaying its
+//! legend on the right because the pptx adapter had a hard-coded
+//! `legendPos: null` while xlsx already passed it through).
+//!
+//! This module hosts the helpers that don't need any crate-private state:
+//! they're pure XML probes that take a roxmltree node and return the parsed
+//! property. The data-structure layer (xlsx's `ChartData`, pptx's
+//! `ChartElement`) intentionally stays in each crate so we don't pull
+//! schema-specific types into the shared one.
+//!
+//! ## Namespace handling
+//!
+//! All helpers match elements by local name only. Real chart documents put
+//! everything under either the `c:` (chart 2006) or `cx:` (chartEx 2014)
+//! namespace and never mix non-chart elements at these paths, so the strict
+//! `tag_name().namespace() == Some(c_ns)` check in xlsx adds nothing in
+//! practice — this module drops it for symmetry with the pptx side and to
+//! keep the API simple. If a future format wedges a non-chart element into
+//! `<c:plotArea>` the caller can pre-filter before delegating here.
+//!
+//! All field references are to ECMA-376 / ISO-29500 part 1 §21.2 (DrawingML
+//! Charts) unless stated otherwise.
+
+use roxmltree::Node;
+
+/// Find a direct child of `parent` whose local name is `name`.
+fn child<'a, 'i>(parent: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
+    parent.children().find(|n| n.is_element() && n.tag_name().name() == name)
+}
+
+/// `<c:legend>` presence + `<c:legendPos val>` (ECMA-376 §21.2.2.10).
+///
+/// `(show_legend, legend_pos)`. When the chart omits `<c:legend>` Office
+/// hides the legend even if a default position would otherwise apply, so
+/// `show_legend = false` is the authoritative "no legend" signal.
+pub fn extract_legend(root: Node) -> (bool, Option<String>) {
+    // The legend can sit anywhere inside `<c:chart>` but in practice it's a
+    // direct child of `<c:chart>`. Use descendants to be tolerant of either
+    // structure — there's only one `<c:legend>` element per chart.
+    let legend = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "legend");
+    let show = legend.is_some();
+    let pos = legend.and_then(|ln| {
+        child(ln, "legendPos").and_then(|p| p.attribute("val")).map(|s| s.to_string())
+    });
+    (show, pos)
+}
+
+/// `<c:barChart><c:gapWidth val>` / `<c:overlap val>` (ECMA-376 §21.2.2.13,
+/// §21.2.2.25). Returns `(gap%, overlap%)`. Defaults to (None, None) when
+/// the file relies on Office's defaults (gap 150, overlap 0).
+pub fn extract_bar_gap_overlap(root: Node) -> (Option<i32>, Option<i32>) {
+    let gap = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "gapWidth")
+        .and_then(|n| n.attribute("val").and_then(|v| v.parse::<i32>().ok()));
+    let ov = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "overlap")
+        .and_then(|n| n.attribute("val").and_then(|v| v.parse::<i32>().ok()));
+    (gap, ov)
+}
+
+/// First `<c:dLbls><c:dLblPos val>` found anywhere in the chart (chart-level
+/// or per-series). ECMA-376 §21.2.2.49.
+pub fn extract_data_label_position(root: Node) -> Option<String> {
+    root.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .find_map(|dlbls| {
+            child(dlbls, "dLblPos").and_then(|n| n.attribute("val")).map(|s| s.to_string())
+        })
+}
+
+/// First non-`General` `<c:dLbls><c:numFmt formatCode>` in the chart.
+/// ECMA-376 §21.2.2.37.
+pub fn extract_data_label_format_code(root: Node) -> Option<String> {
+    root.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .find_map(|dlbls| {
+            child(dlbls, "numFmt")
+                .and_then(|n| n.attribute("formatCode"))
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty() && s != "General")
+        })
+}
+
+/// `<c:catAx|valAx><c:numFmt formatCode>` — the value-axis tick label
+/// number format (ECMA-376 §21.2.2.21). Caller passes the already-located
+/// `<c:catAx>` / `<c:valAx>` node.
+pub fn extract_axis_format_code(axis_node: Node) -> Option<String> {
+    child(axis_node, "numFmt")
+        .and_then(|n| n.attribute("formatCode"))
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty() && s != "General")
+}
+
+/// `<c:catAx|valAx><c:scaling>` — read explicit `<c:min val>` / `<c:max val>`.
+/// Returns `(min, max)`; either can be `None` when the file leaves Excel to
+/// pick the auto bound.
+pub fn extract_axis_min_max(axis_node: Node) -> (Option<f64>, Option<f64>) {
+    let Some(scaling) = child(axis_node, "scaling") else {
+        return (None, None);
+    };
+    let mn = child(scaling, "min")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok());
+    let mx = child(scaling, "max")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok());
+    (mn, mx)
+}
+
+/// `<c:catAx|valAx><c:delete val="1"/>` — true when the axis (labels, ticks
+/// and line) should be hidden. ECMA-376 §21.2.2.40.
+pub fn axis_is_deleted(axis_node: Node) -> bool {
+    child(axis_node, "delete")
+        .and_then(|n| n.attribute("val"))
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
+/// `<c:catAx|valAx><c:majorTickMark val>` / `<c:minorTickMark val>`. Values
+/// are the ECMA-376 §21.2.2.49 ST_TickMark enum: `none` | `out` | `in` |
+/// `cross`. Returns the raw string.
+pub fn extract_axis_tick_mark(axis_node: Node, name: &str) -> Option<String> {
+    child(axis_node, name)
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string())
+}
+
+/// First `<a:defRPr@sz>` or `<a:rPr@sz>` found inside the axis's `<c:txPr>`.
+/// Sizes are OOXML hundredths of a point (e.g. 1200 = 12 pt).
+pub fn extract_axis_tick_label_size(axis_node: Node) -> Option<i32> {
+    let txpr = child(axis_node, "txPr")?;
+    txpr.descendants().find_map(|n| {
+        if !n.is_element() { return None; }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" { return None; }
+        n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+    })
+}
+
+/// First `<c:dLbls><c:txPr>` font size (hpt). Mirrors the per-series + chart
+/// fallback chain: walk every `<c:dLbls>` in document order, returning the
+/// first inner `<a:defRPr@sz>` / `<a:rPr@sz>` we find.
+pub fn extract_data_label_font_size(root: Node) -> Option<i32> {
+    root.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .find_map(|dl| {
+            child(dl, "txPr").and_then(|tx| tx.descendants().find_map(|n| {
+                if !n.is_element() { return None; }
+                let tag = n.tag_name().name();
+                if tag != "defRPr" && tag != "rPr" { return None; }
+                n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+            }))
+        })
+}
+
+/// chartEx (`<cx:chartSpace>`) axis visibility. ChartEx encodes the
+/// scale type via a `<cx:catScaling>` / `<cx:valScaling>` child rather
+/// than separate `<c:catAx>` / `<c:valAx>` elements, so callers can't just
+/// reuse `axis_is_deleted` — this helper walks `<cx:axis hidden="1">` and
+/// pairs each one with its scaling kind.
+///
+/// Returns `(cat_hidden, val_hidden)`. Defaults to `(false, false)` when no
+/// `<cx:axis>` declares `hidden`.
+pub fn extract_chartex_axis_hidden(root: Node) -> (bool, bool) {
+    let mut cat_hidden = false;
+    let mut val_hidden = false;
+    for ax in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "axis") {
+        let hidden = ax.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+        if !hidden { continue; }
+        let is_val = ax.children().any(|c| c.is_element() && c.tag_name().name() == "valScaling");
+        let is_cat = ax.children().any(|c| c.is_element() && c.tag_name().name() == "catScaling");
+        if is_val { val_hidden = true; }
+        if is_cat { cat_hidden = true; }
+    }
+    (cat_hidden, val_hidden)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roxmltree::Document;
+
+    fn root_of(xml: &str) -> Document<'_> {
+        Document::parse(xml).expect("parse fixture")
+    }
+
+    #[test]
+    fn legend_present_with_pos() {
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:legend><c:legendPos val="t"/></c:legend>
+        </c:chart>"#;
+        let d = root_of(xml);
+        let (show, pos) = extract_legend(d.root_element());
+        assert!(show);
+        assert_eq!(pos.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn legend_absent() {
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        let (show, pos) = extract_legend(d.root_element());
+        assert!(!show);
+        assert!(pos.is_none());
+    }
+
+    #[test]
+    fn bar_gap_overlap_default_to_none() {
+        let xml = r#"<c:barChart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        assert_eq!(extract_bar_gap_overlap(d.root_element()), (None, None));
+    }
+
+    #[test]
+    fn bar_gap_overlap_explicit() {
+        let xml = r#"<c:barChart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:gapWidth val="50"/>
+            <c:overlap val="100"/>
+        </c:barChart>"#;
+        let d = root_of(xml);
+        assert_eq!(extract_bar_gap_overlap(d.root_element()), (Some(50), Some(100)));
+    }
+
+    #[test]
+    fn data_label_position() {
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:plotArea><c:dLbls><c:dLblPos val="ctr"/></c:dLbls></c:plotArea>
+        </c:chart>"#;
+        let d = root_of(xml);
+        assert_eq!(extract_data_label_position(d.root_element()).as_deref(), Some("ctr"));
+    }
+
+    #[test]
+    fn axis_delete_truthy_variants() {
+        for (val, expect) in [("1", true), ("0", false), ("true", true), ("false", false), ("True", true)] {
+            let xml = format!(r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+                <c:delete val="{val}"/>
+            </c:valAx>"#);
+            let d = root_of(&xml);
+            assert_eq!(axis_is_deleted(d.root_element()), expect, "val={val}");
+        }
+    }
+
+    #[test]
+    fn axis_delete_default_false() {
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        assert!(!axis_is_deleted(d.root_element()));
+    }
+
+    #[test]
+    fn axis_min_max() {
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:scaling><c:max val="2500"/><c:min val="0"/></c:scaling>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        assert_eq!(extract_axis_min_max(d.root_element()), (Some(0.0), Some(2500.0)));
+    }
+
+    #[test]
+    fn axis_format_code_skips_general() {
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:numFmt formatCode="General"/>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        assert!(extract_axis_format_code(d.root_element()).is_none());
+    }
+
+    #[test]
+    fn axis_format_code_passes_through() {
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:numFmt formatCode="0.0%"/>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        assert_eq!(extract_axis_format_code(d.root_element()).as_deref(), Some("0.0%"));
+    }
+
+    #[test]
+    fn chartex_axis_hidden_value_only() {
+        let xml = r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex">
+            <cx:axis id="0"><cx:catScaling/></cx:axis>
+            <cx:axis id="1" hidden="1"><cx:valScaling/></cx:axis>
+        </cx:chartSpace>"#;
+        let d = root_of(xml);
+        assert_eq!(extract_chartex_axis_hidden(d.root_element()), (false, true));
+    }
+}
