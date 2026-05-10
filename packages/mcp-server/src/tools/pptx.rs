@@ -115,29 +115,43 @@ fn extract_text_runs(node: &Value, out: &mut String) {
     }
 }
 
-/// Heuristic title extraction: the parser does not surface
-/// `<p:nvSpPr><p:nvPr><p:ph type="title">` (placeholder type) on its
-/// ShapeElement JSON, so we can't filter for the title placeholder. Fall back
-/// to the first `shape` element that carries non-empty text — typically the
-/// title placeholder in z-order on standard layouts. Imperfect but usable; will
-/// be replaced once pptx-parser exposes `placeholder_type` on shapes.
+/// Title extraction backed by the parser-emitted `placeholderType`. Looks for
+/// shapes whose `placeholderType` is "title" or "ctrTitle"
+/// (ECMA-376 §19.7.10), falling back to the first shape with non-empty text
+/// for slides that don't carry an explicit title placeholder (e.g. blank
+/// layout, decorative slides).
 fn slide_title(slide: &Value) -> Option<String> {
     let elements = slide["elements"].as_array()?;
-    for el in elements {
-        if el["type"].as_str() != Some("shape") {
-            continue;
-        }
-        let Some(tb) = el.get("textBody") else { continue };
-        let Some(paras) = tb["paragraphs"].as_array() else { continue };
+
+    let read_text = |el: &Value| -> String {
         let mut text = String::new();
-        for para in paras {
-            extract_text_runs(para, &mut text);
-            text.push(' ');
+        if let Some(tb) = el.get("textBody") {
+            if let Some(paras) = tb["paragraphs"].as_array() {
+                for para in paras {
+                    extract_text_runs(para, &mut text);
+                    text.push(' ');
+                }
+            }
         }
-        let trimmed = text.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
+        text.trim().to_string()
+    };
+
+    // First pass: prefer the explicit title placeholder.
+    for el in elements {
+        if el["type"].as_str() != Some("shape") { continue }
+        let Some(ph) = el["placeholderType"].as_str() else { continue };
+        if ph == "title" || ph == "ctrTitle" {
+            let trimmed = read_text(el);
+            if !trimmed.is_empty() { return Some(trimmed); }
         }
+    }
+
+    // Fallback: first non-empty shape text. Same heuristic the previous
+    // implementation used; kept for slides without a title placeholder.
+    for el in elements {
+        if el["type"].as_str() != Some("shape") { continue }
+        let trimmed = read_text(el);
+        if !trimmed.is_empty() { return Some(trimmed); }
     }
     None
 }
@@ -870,6 +884,70 @@ impl PptxTools {
         .to_string()
     }
 
+    #[tool(description = "Return speaker-notes text for one or all slides. Each entry: { slideIndex, slideNumber, notes }. Slides without a notesSlide part are omitted")]
+    pub fn pptx_get_notes(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let pres_json = match pptx_parser::parse_pptx_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let pres: Value = match serde_json::from_str(&pres_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let mut notes: Vec<Value> = Vec::new();
+        for (slide_idx, slide) in slides.iter().enumerate() {
+            if let Some(filter) = p.slide_index {
+                if slide_idx != filter { continue }
+            }
+            let Some(text) = slide["notes"].as_str() else { continue };
+            notes.push(serde_json::json!({
+                "slideIndex": slide_idx,
+                "slideNumber": slide["slideNumber"],
+                "notes": text,
+            }));
+        }
+        serde_json::json!({ "notes": notes }).to_string()
+    }
+
+    #[tool(description = "Return legacy (non-threaded) slide comments. Each entry: { slideIndex, slideNumber, author?, date?, text }. Office365 modern threaded comments are not yet supported")]
+    pub fn pptx_get_comments(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let pres_json = match pptx_parser::parse_pptx_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let pres: Value = match serde_json::from_str(&pres_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let mut comments: Vec<Value> = Vec::new();
+        for (slide_idx, slide) in slides.iter().enumerate() {
+            if let Some(filter) = p.slide_index {
+                if slide_idx != filter { continue }
+            }
+            let Some(arr) = slide["comments"].as_array() else { continue };
+            for c in arr {
+                comments.push(serde_json::json!({
+                    "slideIndex": slide_idx,
+                    "slideNumber": slide["slideNumber"],
+                    "author": c["author"],
+                    "date": c["date"],
+                    "text": c["text"],
+                }));
+            }
+        }
+        serde_json::json!({ "comments": comments }).to_string()
+    }
+
     #[tool(description = "Infer geometric relations between shapes on a slide: connector hookups (with arrow direction when stroke ends are arrows), containment, overlap, axis-aligned alignment groups, and equal distribution. Detection is purely spatial — `confidence: \"inferred\"` flags this — until the parser exposes ECMA-376 §20.5.2.2 stCxn/endCxn references")]
     pub fn pptx_get_shape_relations(Parameters(p): Parameters<PptxRelationsParam>) -> String {
         let data = match read_file(&p.path) {
@@ -1219,6 +1297,58 @@ mod sample_tests {
             any_title,
             "no slide reported a title — slide_title heuristic is broken"
         );
+    }
+
+    /// sample-1.pptx slide 8 is a pull-quote layout — its first shape is the
+    /// decorative "“" glyph. Before placeholder_type was exposed by the parser
+    /// the heuristic returned that quote. With placeholder_type the title
+    /// resolver now skips non-title placeholders and either finds the real
+    /// title placeholder or falls through to the first non-empty shape text.
+    /// Either way the result must NOT be a single decorative character.
+    #[test]
+    fn pptx_get_slides_skips_decorative_quote_for_title() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = PptxTools::pptx_get_slides(pp(&path));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        let slides = v["slides"].as_array().expect("must have 'slides'");
+        if let Some(s8) = slides.iter().find(|s| s["slideNumber"].as_u64() == Some(8)) {
+            let title = s8["title"].as_str().unwrap_or("");
+            assert!(
+                title.chars().count() > 1,
+                "slide 8 title was '{title}' — placeholder_type filter likely not applied"
+            );
+        }
+    }
+
+    #[test]
+    fn pptx_get_notes_smoke() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = PptxTools::pptx_get_notes(Parameters(PptxOptSlideParam {
+            path,
+            slide_index: None,
+        }));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        assert!(v["notes"].as_array().is_some(), "missing 'notes' array");
+    }
+
+    #[test]
+    fn pptx_get_comments_smoke() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = PptxTools::pptx_get_comments(Parameters(PptxOptSlideParam {
+            path,
+            slide_index: None,
+        }));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        assert!(v["comments"].as_array().is_some(), "missing 'comments' array");
     }
 
     #[test]

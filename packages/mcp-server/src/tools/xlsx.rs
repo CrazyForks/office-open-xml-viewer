@@ -794,6 +794,73 @@ impl XlsxTools {
         serde_json::json!({ "sheet": name, "formats": formats }).to_string()
     }
 
+    #[tool(description = "Return all `<dataValidation>` rules on a worksheet: affected ranges, type, operator, formulas, and the optional prompt / error messages")]
+    pub fn xlsx_get_data_validations(Parameters(p): Parameters<XlsxSheetParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let wb_json = match xlsx_parser::parse_workbook_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let (idx, name) = match resolve_sheet(&wb_json, &p.sheet) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let ws_json = match xlsx_parser::parse_sheet_native(&data, idx, &name) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let ws: Value = match serde_json::from_str(&ws_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        serde_json::json!({
+            "sheet": name,
+            "validations": ws["dataValidations"].as_array().cloned().unwrap_or_default(),
+        })
+        .to_string()
+    }
+
+    #[tool(description = "Return all comments on a worksheet (or all sheets if `sheet` is omitted) with full text and resolved author. Each entry: { sheet, cellRef, author?, text }")]
+    pub fn xlsx_get_comments(Parameters(p): Parameters<XlsxOptSheetParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let wb_json = match xlsx_parser::parse_workbook_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let targets = match target_sheets(&wb_json, p.sheet.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let mut all_comments: Vec<Value> = Vec::new();
+        for (idx, name) in targets {
+            let ws_json = match xlsx_parser::parse_sheet_native(&data, idx, &name) {
+                Ok(j) => j,
+                Err(e) => return format!("Error parsing sheet '{}': {}", name, e),
+            };
+            let ws: Value = match serde_json::from_str(&ws_json) {
+                Ok(v) => v,
+                Err(e) => return format!("Error: {}", e),
+            };
+            let Some(comments) = ws["comments"].as_array() else { continue };
+            for c in comments {
+                all_comments.push(serde_json::json!({
+                    "sheet": name,
+                    "cellRef": c["cellRef"],
+                    "author": c["author"],
+                    "text": c["text"],
+                }));
+            }
+        }
+        serde_json::json!({ "comments": all_comments }).to_string()
+    }
+
     #[tool(description = "Return per-sheet layout: explicit column widths, row heights, freeze panes, gridline visibility, default sizes, and tab color")]
     pub fn xlsx_get_sheet_layout(Parameters(p): Parameters<XlsxSheetParam>) -> String {
         let data = match read_file(&p.path) {
@@ -948,6 +1015,34 @@ mod sample_tests {
         assert!(v["sheet"].is_string(), "missing 'sheet' name in {out}");
         assert!(v["colWidths"].as_array().is_some(), "missing 'colWidths'");
         assert!(v["rowHeights"].as_array().is_some(), "missing 'rowHeights'");
+    }
+
+    #[test]
+    fn xlsx_get_data_validations_smoke() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = XlsxTools::xlsx_get_data_validations(Parameters(XlsxSheetParam {
+            path,
+            sheet: "0".into(),
+        }));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        assert!(v["validations"].as_array().is_some(), "missing 'validations'");
+    }
+
+    #[test]
+    fn xlsx_get_comments_smoke() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = XlsxTools::xlsx_get_comments(Parameters(XlsxOptSheetParam {
+            path,
+            sheet: None,
+        }));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        assert!(v["comments"].as_array().is_some(), "missing 'comments'");
     }
 
     #[test]

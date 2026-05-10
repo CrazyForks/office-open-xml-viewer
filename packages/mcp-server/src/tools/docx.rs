@@ -496,6 +496,92 @@ impl DocxTools {
         }
         serde_json::json!({ "shapes": shapes }).to_string()
     }
+
+    #[tool(description = "Return the heading outline of the document. Each entry has the body index, outlineLevel (0-8), styleId, and visible text. Levels come from the parser's resolved `outlineLevel` (style chain + direct pPr) — useful for building TOCs without parsing styleId strings")]
+    pub fn docx_get_outline(Parameters(p): Parameters<DocxPathParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc_json = match docx_parser::parse_docx_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc: Value = match serde_json::from_str(&doc_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let body = doc["body"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+        let mut outline: Vec<Value> = Vec::new();
+        for (idx, el) in body.iter().enumerate() {
+            if el["type"].as_str() != Some("paragraph") { continue }
+            let Some(level) = el["outlineLevel"].as_u64() else { continue };
+            let mut text = String::new();
+            collect_run_texts(&el["runs"], &mut text);
+            outline.push(serde_json::json!({
+                "bodyIndex": idx,
+                "level": level,
+                "styleId": el["styleId"],
+                "text": text.trim(),
+            }));
+        }
+        serde_json::json!({ "outline": outline }).to_string()
+    }
+
+    #[tool(description = "List all `<w:comment>` entries from word/comments.xml: id, author, initials, date, plain text. Empty when the document has no comments part")]
+    pub fn docx_get_comments(Parameters(p): Parameters<DocxPathParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc_json = match docx_parser::parse_docx_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc: Value = match serde_json::from_str(&doc_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        serde_json::json!({ "comments": doc["comments"].as_array().cloned().unwrap_or_default() }).to_string()
+    }
+
+    #[tool(description = "List footnote and endnote bodies from word/footnotes.xml and word/endnotes.xml. Each entry has the id (matches `<w:footnoteReference w:id>` in body) and concatenated plain text")]
+    pub fn docx_get_footnotes(Parameters(p): Parameters<DocxPathParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc_json = match docx_parser::parse_docx_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc: Value = match serde_json::from_str(&doc_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        serde_json::json!({
+            "footnotes": doc["footnotes"].as_array().cloned().unwrap_or_default(),
+            "endnotes": doc["endnotes"].as_array().cloned().unwrap_or_default(),
+        })
+        .to_string()
+    }
+
+    #[tool(description = "Return all track-changes events found in the body: insertions and deletions with author, date, and the text. Empty when the document has no tracked changes")]
+    pub fn docx_get_revisions(Parameters(p): Parameters<DocxPathParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc_json = match docx_parser::parse_docx_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc: Value = match serde_json::from_str(&doc_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        serde_json::json!({ "revisions": doc["revisions"].as_array().cloned().unwrap_or_default() }).to_string()
+    }
 }
 
 #[cfg(test)]
@@ -570,6 +656,51 @@ mod sample_tests {
     fn docx_invalid_path_returns_error_string() {
         let out = DocxTools::docx_extract_text(pp("/nonexistent/x.docx"));
         assert!(out.starts_with("Error:"), "expected error, got: {out}");
+    }
+
+    #[test]
+    fn docx_get_outline_smoke() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = DocxTools::docx_get_outline(pp(&path));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        assert!(v["outline"].as_array().is_some(), "missing 'outline'");
+    }
+
+    #[test]
+    fn docx_get_comments_smoke() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = DocxTools::docx_get_comments(pp(&path));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        assert!(v["comments"].as_array().is_some(), "missing 'comments'");
+    }
+
+    #[test]
+    fn docx_get_revisions_smoke() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = DocxTools::docx_get_revisions(pp(&path));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        assert!(v["revisions"].as_array().is_some(), "missing 'revisions'");
+    }
+
+    #[test]
+    fn docx_get_footnotes_smoke() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = DocxTools::docx_get_footnotes(pp(&path));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        assert!(v["footnotes"].as_array().is_some(), "missing 'footnotes'");
+        assert!(v["endnotes"].as_array().is_some(), "missing 'endnotes'");
     }
 
     #[test]

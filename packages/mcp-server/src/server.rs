@@ -104,6 +104,16 @@ impl OoxmlServer {
         XlsxTools::xlsx_get_sheet_layout(Parameters(p))
     }
 
+    #[tool(description = "Return all `<dataValidation>` rules on a worksheet (ECMA-376 §18.3.1.32)")]
+    fn xlsx_get_data_validations(&self, Parameters(p): Parameters<XlsxSheetParam>) -> String {
+        XlsxTools::xlsx_get_data_validations(Parameters(p))
+    }
+
+    #[tool(description = "Return all comments (text + resolved author) on a worksheet, or across every sheet when `sheet` is omitted")]
+    fn xlsx_get_comments(&self, Parameters(p): Parameters<XlsxOptSheetParam>) -> String {
+        XlsxTools::xlsx_get_comments(Parameters(p))
+    }
+
     // ── docx tools ────────────────────────────────────────────────────────────
 
     #[tool(description = "Extract all plain text from a DOCX file")]
@@ -149,6 +159,26 @@ impl OoxmlServer {
     #[tool(description = "List all drawn shapes embedded in paragraphs. Returns each shape's preset geometry, fill, stroke, dimensions, anchor offsets, rotation, and embedded text blocks")]
     fn docx_get_shapes(&self, Parameters(p): Parameters<DocxPathParam>) -> String {
         DocxTools::docx_get_shapes(Parameters(p))
+    }
+
+    #[tool(description = "Return the heading outline of the document built from each paragraph's resolved `outlineLevel`")]
+    fn docx_get_outline(&self, Parameters(p): Parameters<DocxPathParam>) -> String {
+        DocxTools::docx_get_outline(Parameters(p))
+    }
+
+    #[tool(description = "List all comments from word/comments.xml: id, author, initials, date, plain text")]
+    fn docx_get_comments(&self, Parameters(p): Parameters<DocxPathParam>) -> String {
+        DocxTools::docx_get_comments(Parameters(p))
+    }
+
+    #[tool(description = "List footnote and endnote bodies from word/footnotes.xml and word/endnotes.xml")]
+    fn docx_get_footnotes(&self, Parameters(p): Parameters<DocxPathParam>) -> String {
+        DocxTools::docx_get_footnotes(Parameters(p))
+    }
+
+    #[tool(description = "List all track-changes events (insertions and deletions) with author, date, and text")]
+    fn docx_get_revisions(&self, Parameters(p): Parameters<DocxPathParam>) -> String {
+        DocxTools::docx_get_revisions(Parameters(p))
     }
 
     // ── pptx tools ────────────────────────────────────────────────────────────
@@ -201,6 +231,16 @@ impl OoxmlServer {
     #[tool(description = "Return presentation-level metadata: slide width/height (EMU), slide count, default text color, theme major/minor fonts, and hyperlink colors")]
     fn pptx_get_presentation_meta(&self, Parameters(p): Parameters<PptxPathParam>) -> String {
         PptxTools::pptx_get_presentation_meta(Parameters(p))
+    }
+
+    #[tool(description = "Return speaker-notes text for one or all slides")]
+    fn pptx_get_notes(&self, Parameters(p): Parameters<PptxOptSlideParam>) -> String {
+        PptxTools::pptx_get_notes(Parameters(p))
+    }
+
+    #[tool(description = "Return legacy slide comments with text, author, and date")]
+    fn pptx_get_comments(&self, Parameters(p): Parameters<PptxOptSlideParam>) -> String {
+        PptxTools::pptx_get_comments(Parameters(p))
     }
 
     #[tool(description = "Infer geometric relations between shapes on a slide: connector hookups (with arrow direction when stroke ends are arrows), containment, overlap, and axis-aligned alignment groups. Detection is purely spatial — see `confidence: \"inferred\"` on each emitted relation")]
