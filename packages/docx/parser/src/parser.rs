@@ -236,7 +236,17 @@ fn parse_body_elements(
                     body.push(BodyElement::PageBreak { parity: None });
                     continue;
                 }
-                body.push(BodyElement::Paragraph(result));
+                // Mid-paragraph page breaks come from <w:br w:type="page"/>
+                // and from <w:lastRenderedPageBreak/>. Split the paragraph
+                // around them and emit BodyElement::PageBreak between the
+                // pieces — each piece keeps the same pPr so layout
+                // continues correctly on the next page.
+                for piece in split_para_on_page_breaks(result) {
+                    match piece {
+                        ParaPiece::Para(p) => body.push(BodyElement::Paragraph(p)),
+                        ParaPiece::PageBreak => body.push(BodyElement::PageBreak { parity: None }),
+                    }
+                }
                 // ECMA-376 §17.6.1: a section break inside pPr defines the
                 // section that ENDS at this paragraph. The break TYPE
                 // (`<w:type w:val>`) controls how the next section starts:
@@ -272,6 +282,107 @@ fn parse_body_elements(
         }
     }
     body
+}
+
+enum ParaPiece {
+    Para(DocParagraph),
+    PageBreak,
+}
+
+/// Split a parsed paragraph at every internal page-break run. The split
+/// pieces all share the source paragraph's pPr, so layout (alignment,
+/// indents, line spacing, …) is preserved across the page boundary. The
+/// page-break run itself is consumed; downstream code emits
+/// BodyElement::PageBreak instead.
+///
+/// Two break flavors are recognized:
+///   - `BreakType::Page`         — hard `<w:br w:type="page"/>`, always honored.
+///   - `BreakType::RenderedPage` — Word's `<w:lastRenderedPageBreak/>` hint
+///     (ECMA-376 §17.3.1.20). Only honored inside paragraphs that carry
+///     ruby annotations, where our own line-height calc tends to drift
+///     from Word's; outside that context the marker is ignored to avoid
+///     introducing breaks that conflict with our paginator's own
+///     measurement.
+///
+/// `<w:lastRenderedPageBreak/>` is often emitted by Word at the very
+/// start of a paragraph too (echoing the page break that produced the
+/// preceding paragraph break). To avoid emitting two consecutive page
+/// breaks we drop chunks that contain no visible text.
+///
+/// Pure-page-break paragraphs are handled upstream as
+/// BodyElement::PageBreak before this function ever sees them.
+fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
+    let para_has_ruby = para.runs.iter().any(|r| matches!(r, DocRun::Text(t) if t.ruby.is_some()));
+    let is_break_run = |r: &DocRun| match r {
+        DocRun::Break { break_type: BreakType::Page } => true,
+        DocRun::Break { break_type: BreakType::RenderedPage } => para_has_ruby,
+        _ => false,
+    };
+    let has_break = para.runs.iter().any(is_break_run);
+    if !has_break {
+        // Strip RenderedPage runs we're not honoring so they don't pollute
+        // downstream layout (treated as no-op).
+        let mut p = para;
+        p.runs.retain(|r| !matches!(r, DocRun::Break { break_type: BreakType::RenderedPage }));
+        return vec![ParaPiece::Para(p)];
+    }
+
+    // Collect run chunks split on page breaks. RenderedPage runs we don't
+    // honor get filtered out instead of triggering a split.
+    let mut chunks: Vec<Vec<DocRun>> = vec![Vec::new()];
+    for run in para.runs.iter().cloned() {
+        match (&run, para_has_ruby) {
+            (DocRun::Break { break_type: BreakType::Page }, _) => chunks.push(Vec::new()),
+            (DocRun::Break { break_type: BreakType::RenderedPage }, true) => chunks.push(Vec::new()),
+            (DocRun::Break { break_type: BreakType::RenderedPage }, false) => { /* skip */ }
+            _ => chunks.last_mut().unwrap().push(run),
+        }
+    }
+
+    let has_visible = |runs: &Vec<DocRun>| {
+        runs.iter().any(|r| matches!(r,
+            DocRun::Text(t) if !t.text.trim().is_empty())
+            || matches!(r, DocRun::Field(_) | DocRun::Image(_) | DocRun::Shape(_)))
+    };
+
+    // Drop trailing chunks that carry no visible content too — this
+    // happens when the paragraph ends with `<w:br w:type="page"/>`
+    // (Word's anchored shapes paragraph at the cover commonly does this
+    // to force the cover onto its own page; the trailing empty chunk
+    // would otherwise emit an extra blank paragraph + page break).
+    let chunks: Vec<Vec<DocRun>> = {
+        let mut c = chunks;
+        while c.last().map(|r| !has_visible(r)).unwrap_or(false) && c.len() > 1 {
+            c.pop();
+            // Each pop also drops the preceding break that produced this
+            // empty trailing chunk — modelled here by NOT emitting a break
+            // before the (now removed) chunk.
+        }
+        c
+    };
+
+    let mut out: Vec<ParaPiece> = Vec::new();
+    let mut emitted_para = false;
+    for (i, runs) in chunks.into_iter().enumerate() {
+        // Drop the leading chunk when it carries no visible content — this
+        // happens when the paragraph starts with <w:lastRenderedPageBreak/>
+        // (Word's hint duplicating a paragraph-level break that the
+        // surrounding section break already covers).
+        if i == 0 && !has_visible(&runs) {
+            continue;
+        }
+        if emitted_para {
+            out.push(ParaPiece::PageBreak);
+        }
+        let mut chunk = para.clone();
+        chunk.runs = runs;
+        out.push(ParaPiece::Para(chunk));
+        emitted_para = true;
+    }
+    if out.is_empty() {
+        out.push(ParaPiece::Para(para));
+    }
+    out
 }
 
 /// Read `<w:type w:val>` from a sectPr node, normalized to the ECMA-376
@@ -819,6 +930,14 @@ fn parse_run_inner(
                     _ => BreakType::Line,
                 }).unwrap_or(BreakType::Line);
                 runs.push(DocRun::Break { break_type });
+            }
+            "lastRenderedPageBreak" => {
+                // ECMA-376 §17.3.1.20: Word stores a hint at the location
+                // where the previous render placed a page break. We mark
+                // it as a separate `RenderedPage` break type so the
+                // paragraph splitter can decide whether to honor it
+                // (currently: only inside ruby-bearing paragraphs).
+                runs.push(DocRun::Break { break_type: BreakType::RenderedPage });
             }
             "ruby" => {
                 // ECMA-376 §17.3.3.25 w:ruby — phonetic guide (furigana).
