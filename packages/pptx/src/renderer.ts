@@ -320,6 +320,13 @@ function layoutParagraph(
   const lines: LayoutLine[] = [];
   let currentLine: LayoutLine = { segments: [] };
   let lineW = 0; // current line's accumulated width
+  // ECMA-376 §17.18.93 ST_TextWrappingType "square" is whitespace-aware: a
+  // non-whitespace token is never broken away from the preceding non-whitespace
+  // content. We only allow a wrap before a token if at least one whitespace
+  // run has appeared on the current line — otherwise the line overflows the
+  // shape (PowerPoint's actual behavior, e.g. "YoY+11.9%" mixed-size runs in
+  // sample-2 slide-7 stay on one line even though the bbox is tight).
+  let hasWhitespaceOnLine = false;
 
   // Tab stop state: once we hit a \t we switch to collecting tabStop.segments
   let tabActive = false;
@@ -330,6 +337,7 @@ function layoutParagraph(
     currentLine = { segments: [] };
     lineW = 0;
     tabActive = false; // reset tab state per line
+    hasWhitespaceOnLine = false;
   };
 
   // Push to the active segment list (main or tab-stop group)
@@ -506,6 +514,7 @@ function layoutParagraph(
 
       if (lineW + tokW <= maxWidthPx) {
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+        if (isWhitespace) hasWhitespaceOnLine = true;
       } else if (isWhitespace) {
         if (lineW > 0) newLine();
       } else if (tokW > maxWidthPx) {
@@ -516,6 +525,13 @@ function layoutParagraph(
           if (lineW + chW > maxWidthPx && lineW > 0) newLine();
           push(ch, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
+      } else if (!hasWhitespaceOnLine) {
+        // No whitespace yet on this line — wrapping here would tear an
+        // unbroken sequence of non-whitespace text (e.g. "YoY+11.9%" split
+        // across mixed-size runs). Office never breaks mid-sequence in that
+        // case; it lets the shape overflow and relies on spAutoFit / lIns to
+        // size the bbox correctly. Match that behavior.
+        push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
       } else {
         newLine();
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
@@ -1275,6 +1291,14 @@ async function renderPicture(
       ctx.beginPath();
       ctx.roundRect(x, y, w, h, r);
       ctx.clip();
+    } else if (el.custGeom && el.custGeom.length > 0) {
+      // ECMA-376 §20.1.9.8: a `<p:pic>` may carry `<a:custGeom>` (the same
+      // path model as a shape) that defines a non-rectangular silhouette.
+      // The bitmap is then trimmed to that path — e.g. the laptop frame on
+      // sample-2 slide-12 keeps the surrounding bezel visible because the
+      // image is clipped to just the screen + body shape.
+      buildCustomPath(ctx, el.custGeom, x, y, w, h);
+      ctx.clip();
     }
     // ECMA-376 a:srcRect — draw a sub-rectangle of the source image.
     // Edge values are fractions of source dims (negative values mean extend past
@@ -1678,7 +1702,7 @@ export async function renderSlide(
           plotAreaBg: el.plotAreaBg,
           chartBg: el.chartBg,
           showLegend: el.showLegend,
-          legendPos: null,
+          legendPos: el.legendPos ?? null,
           catAxisCrossBetween: el.catAxisCrossBetween,
           valAxisMajorTickMark: el.valAxisMajorTickMark,
           catAxisMajorTickMark: el.catAxisMajorTickMark,
@@ -1689,6 +1713,12 @@ export async function renderSlide(
           valAxisFontSizeHpt: el.valAxisFontSizeHpt,
           dataLabelFontSizeHpt: el.dataLabelFontSizeHpt,
           subtotalIndices: el.subtotalIndices,
+          barGapWidth: el.barGapWidth ?? null,
+          barOverlap: el.barOverlap ?? null,
+          dataLabelPosition: el.dataLabelPosition ?? null,
+          dataLabelFontColor: el.dataLabelFontColor ?? null,
+          dataLabelFormatCode: el.dataLabelFormatCode ?? null,
+          valAxisFormatCode: el.valAxisFormatCode ?? null,
         },
         {
           x: emuToPx(el.x, scale),
