@@ -203,6 +203,11 @@ pub struct NumberingInfo {
 pub enum DocRun {
     Text(TextRun),
     Image(ImageRun),
+    /// `rename_all` on the enum only renames variant tags; the field
+    /// `break_type` would otherwise serialize as snake_case while the TS
+    /// side reads `breakType`. Re-apply camelCase at the variant level so
+    /// the JSON tag matches.
+    #[serde(rename_all = "camelCase")]
     Break { break_type: BreakType },
     Field(FieldRun),
     Shape(ShapeRun),
