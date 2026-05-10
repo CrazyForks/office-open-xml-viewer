@@ -180,6 +180,11 @@ export interface ShapeRun {
    *  for both pctPos* and anchor*Align positioning. */
   anchorXRelativeFrom?: string | null;
   anchorYRelativeFrom?: string | null;
+  /** Parent wgp group dimensions (pt) — set only when this shape is a child
+   *  of a `<wpg:wgp>`. Used by `resolveAnchor*` so align/pctPos resolve the
+   *  GROUP's origin, then `anchor[XY]Pt` adds the within-group offset. */
+  groupWidthPt?: number | null;
+  groupHeightPt?: number | null;
   /** Draw behind text when true (wp:anchor behindDoc="1"). */
   behindDoc?: boolean;
   /** Document-order index within a group; lower values render first. */

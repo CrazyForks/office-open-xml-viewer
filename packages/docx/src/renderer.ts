@@ -1697,6 +1697,10 @@ function yContainer(
   }
 }
 
+/** Resolve the page X for an anchor or anchor-group child. `offsetPx` carries
+ *  the shape's offset (within the group for wgp children, 0 for standalone
+ *  anchors). `alignWidthPx` is the width used when aligning — the GROUP's
+ *  width for wgp children, the shape's own width for standalone anchors. */
 function resolveAnchorX(
   align: string | null | undefined,
   fromMargin: boolean,
@@ -1705,21 +1709,23 @@ function resolveAnchorX(
   state: RenderState,
   relativeFrom?: string | null,
   pctPos?: number | null,
+  alignWidthPt?: number | null,
 ): number {
   const { scale } = state;
   const c = xContainer(relativeFrom, fromMargin, state);
+  const offsetPx = offsetPt * scale;
   if (pctPos != null) {
-    return c.start + (c.end - c.start) * pctPos;
+    return c.start + (c.end - c.start) * pctPos + offsetPx;
   }
   if (!align) {
-    return c.start + offsetPt * scale;
+    return c.start + offsetPx;
   }
   const containerW = c.end - c.start;
-  const offsetPx = offsetPt * scale;
+  const aw = alignWidthPt != null ? alignWidthPt * scale : widthPx;
   switch (align) {
-    case 'center': return c.start + (containerW - widthPx) / 2 + offsetPx;
+    case 'center': return c.start + (containerW - aw) / 2 + offsetPx;
     case 'right':
-    case 'outside': return c.end - widthPx + offsetPx;
+    case 'outside': return c.end - aw + offsetPx;
     case 'inside':
     case 'left':
     default:        return c.start + offsetPx;
@@ -1735,20 +1741,22 @@ function resolveAnchorY(
   state: RenderState,
   relativeFrom?: string | null,
   pctPos?: number | null,
+  alignHeightPt?: number | null,
 ): number {
   const { scale } = state;
   const c = yContainer(relativeFrom, fromPara, paragraphTopPx, state);
+  const offsetPx = offsetPt * scale;
   if (pctPos != null) {
-    return c.start + (c.end - c.start) * pctPos;
+    return c.start + (c.end - c.start) * pctPos + offsetPx;
   }
   if (!align) {
-    return c.start + offsetPt * scale;
+    return c.start + offsetPx;
   }
   const containerH = c.end - c.start;
-  const offsetPx = offsetPt * scale;
+  const ah = alignHeightPt != null ? alignHeightPt * scale : heightPx;
   switch (align) {
-    case 'center': return c.start + (containerH - heightPx) / 2 + offsetPx;
-    case 'bottom': return c.end - heightPx + offsetPx;
+    case 'center': return c.start + (containerH - ah) / 2 + offsetPx;
+    case 'bottom': return c.end - ah + offsetPx;
     case 'top':
     default:       return c.start + offsetPx;
   }
@@ -1761,11 +1769,11 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   if (w <= 0 || h <= 0) return;
   const x = resolveAnchorX(
     shape.anchorXAlign, shape.anchorXFromMargin, shape.anchorXPt, w, state,
-    shape.anchorXRelativeFrom, shape.pctPosH,
+    shape.anchorXRelativeFrom, shape.pctPosH, shape.groupWidthPt,
   );
   const y = resolveAnchorY(
     shape.anchorYAlign, shape.anchorYFromPara, shape.anchorYPt, h, paragraphTopPx, state,
-    shape.anchorYRelativeFrom, shape.pctPosV,
+    shape.anchorYRelativeFrom, shape.pctPosV, shape.groupHeightPt,
   );
 
   const rot = shape.rotation ?? 0;

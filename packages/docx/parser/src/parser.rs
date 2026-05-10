@@ -1440,9 +1440,16 @@ fn parse_wgp_shapes(
     let group_page_off_x_emu = off_x - ch_off_x * sx;
     let group_page_off_y_emu = off_y - ch_off_y * sy;
 
+    // Outer group dimensions in pt — passed to each child so the renderer can
+    // resolve align/pctPos against the GROUP's bounding box, then offset each
+    // child within it. Falls back to the child-coord-space ext when the group
+    // omits an outer ext (rare).
+    let group_w_pt = (if ext_cx > 0.0 { ext_cx } else { ch_ext_cx }) / 12700.0;
+    let group_h_pt = (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0;
+
     let mut results = Vec::new();
     for (idx, wsp) in wgp.descendants().filter(|n| n.is_element() && n.tag_name().name() == "wsp").enumerate() {
-        if let Some(shape) = parse_wsp_shape(
+        if let Some(mut shape) = parse_wsp_shape(
             wsp, theme,
             anchor_pos_x, x_from_margin,
             anchor_pos_y, y_from_para,
@@ -1451,6 +1458,8 @@ fn parse_wgp_shapes(
             group_page_off_x_emu / 12700.0, group_page_off_y_emu / 12700.0,
             idx as u32,
         ) {
+            shape.group_width_pt = Some(group_w_pt);
+            shape.group_height_pt = Some(group_h_pt);
             results.push(shape);
         }
     }

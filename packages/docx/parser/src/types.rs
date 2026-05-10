@@ -256,6 +256,15 @@ pub struct ShapeRun {
     pub anchor_x_relative_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_relative_from: Option<String>,
+    /// Parent wgp group dimensions (pt). Set only when this shape is a child
+    /// of a `<wpg:wgp>` group; `None` for standalone wsp anchors. The renderer
+    /// uses these for align/pctPos math so the GROUP is positioned within
+    /// the relativeFrom container, and per-shape offsets (`anchor_x_pt` /
+    /// `anchor_y_pt`) carry the child's offset within the group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_width_pt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_height_pt: Option<f64>,
     /// If true, draw the shape behind text (wp:anchor behindDoc="1"). Renderer
     /// should draw background shapes BEFORE body text.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
