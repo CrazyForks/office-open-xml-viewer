@@ -55,6 +55,14 @@ interface RenderState {
   dryRun: boolean;
   /** section left margin in pt — used to convert margin-relative anchor X to page-absolute */
   marginLeft: number;
+  /** section right/top/bottom margins in pt — used by anchor positioning to
+   *  resolve `<wp:positionH/V relativeFrom="margin">` and the
+   *  `*Margin` family containers. */
+  marginRight: number;
+  marginTop: number;
+  marginBottom: number;
+  /** Section page width in pt. */
+  pageWidth: number;
   /** Active anchor-image floats that constrain text layout on the current page. */
   floats: FloatRect[];
   /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
@@ -233,6 +241,10 @@ export async function renderDocumentToCanvas(
     images,
     dryRun: false,
     marginLeft: sec.marginLeft,
+    marginRight: sec.marginRight,
+    marginTop: sec.marginTop,
+    marginBottom: sec.marginBottom,
+    pageWidth: sec.pageWidth,
     floats: [],
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
     onTextRun: opts.onTextRun,
@@ -425,6 +437,10 @@ function buildMeasureState(
     images: new Map(),
     dryRun: true,
     marginLeft: section.marginLeft,
+    marginRight: section.marginRight,
+    marginTop: section.marginTop,
+    marginBottom: section.marginBottom,
+    pageWidth: section.pageWidth,
     floats: [],
     docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
   };
@@ -1619,35 +1635,94 @@ function renderAnchorImages(
 /** Draw a wps:wsp shape via core's custGeom primitive. */
 /** Resolve a shape's page X by combining the explicit `anchorXPt` offset with
  *  any `anchorXAlign` (ECMA-376 §20.4.3.1 wp:align). When align is set we
- *  position the shape inside the container indicated by `anchorXFromMargin`:
- *  the page margin area when true, the full page rect when false. */
-/** Resolve the page X for an anchored shape. With `align` unset the result is
- *  the existing offset semantics; with `align` set we interpret `offsetPt` as
- *  a child offset RELATIVE to the aligned origin of the group container. */
+ *  position the shape inside the container indicated by `relativeFrom` (or
+ *  `anchorXFromMargin` for the legacy two-state hint). When `pctPos` is set
+ *  we ignore the explicit offset and place the shape at `pct` of the
+ *  container's width / height (ECMA-376 §20.4.2.7 wp14:pctPosH/VOffset).
+ *
+ *  relativeFrom containers (ECMA-376 §20.4.3.4):
+ *    - "page"          → full page rect
+ *    - "margin"        → printable area between margins
+ *    - "leftMargin"    → strip from x=0 to x=marginLeft
+ *    - "rightMargin"   → strip from x=pageW-marginRight to x=pageW
+ *    - "insideMargin"  → on odd pages = leftMargin, even = rightMargin
+ *                        (we approximate as leftMargin)
+ *    - "outsideMargin" → on odd pages = rightMargin, even = leftMargin
+ *                        (we approximate as rightMargin)
+ *    - "character"     → degrade to "margin" (no run-relative anchor data)
+ *    - "topMargin"     → strip from y=0 to y=marginTop
+ *    - "bottomMargin"  → strip from y=pageH-marginBottom to y=pageH
+ *    - "paragraph"/"line" → relative to paragraph top (V only) */
+function xContainer(
+  relativeFrom: string | null | undefined,
+  fromMarginHint: boolean,
+  state: RenderState,
+): { start: number; end: number } {
+  const { scale } = state;
+  const pageW = state.pageWidth * scale;
+  const ml = state.marginLeft * scale;
+  const mr = state.marginRight * scale;
+  const rf = relativeFrom ?? (fromMarginHint ? 'margin' : 'page');
+  switch (rf) {
+    case 'page':          return { start: 0, end: pageW };
+    case 'leftMargin':    return { start: 0, end: ml };
+    case 'rightMargin':   return { start: pageW - mr, end: pageW };
+    case 'insideMargin':  return { start: 0, end: ml };
+    case 'outsideMargin': return { start: pageW - mr, end: pageW };
+    case 'margin':
+    case 'character':
+    case 'column':
+    default:              return { start: ml, end: pageW - mr };
+  }
+}
+
+function yContainer(
+  relativeFrom: string | null | undefined,
+  fromParaHint: boolean,
+  paragraphTopPx: number,
+  state: RenderState,
+): { start: number; end: number } {
+  const { scale } = state;
+  const mt = state.marginTop * scale;
+  const mb = state.marginBottom * scale;
+  const rf = relativeFrom ?? (fromParaHint ? 'paragraph' : 'page');
+  switch (rf) {
+    case 'page':         return { start: 0, end: state.pageH };
+    case 'topMargin':    return { start: 0, end: mt };
+    case 'bottomMargin': return { start: state.pageH - mb, end: state.pageH };
+    case 'paragraph':
+    case 'line':         return { start: paragraphTopPx, end: state.pageH };
+    case 'margin':
+    default:             return { start: mt, end: state.pageH - mb };
+  }
+}
+
 function resolveAnchorX(
   align: string | null | undefined,
   fromMargin: boolean,
   offsetPt: number,
   widthPx: number,
   state: RenderState,
+  relativeFrom?: string | null,
+  pctPos?: number | null,
 ): number {
   const { scale } = state;
-  if (!align) {
-    return fromMargin ? (state.marginLeft + offsetPt) * scale : offsetPt * scale;
+  const c = xContainer(relativeFrom, fromMargin, state);
+  if (pctPos != null) {
+    return c.start + (c.end - c.start) * pctPos;
   }
-  const containerStart = fromMargin ? state.marginLeft * scale : 0;
-  const containerEnd = fromMargin
-    ? state.marginLeft * scale + state.contentW
-    : state.marginLeft * scale + state.contentW + state.marginLeft * scale; // page width
-  const containerW = containerEnd - containerStart;
+  if (!align) {
+    return c.start + offsetPt * scale;
+  }
+  const containerW = c.end - c.start;
   const offsetPx = offsetPt * scale;
   switch (align) {
-    case 'center': return containerStart + (containerW - widthPx) / 2 + offsetPx;
-    case 'right':  return containerEnd - widthPx + offsetPx;
+    case 'center': return c.start + (containerW - widthPx) / 2 + offsetPx;
+    case 'right':
+    case 'outside': return c.end - widthPx + offsetPx;
     case 'inside':
-    case 'outside':
     case 'left':
-    default:       return containerStart + offsetPx;
+    default:        return c.start + offsetPx;
   }
 }
 
@@ -1658,20 +1733,24 @@ function resolveAnchorY(
   heightPx: number,
   paragraphTopPx: number,
   state: RenderState,
+  relativeFrom?: string | null,
+  pctPos?: number | null,
 ): number {
   const { scale } = state;
-  if (!align) {
-    return fromPara ? paragraphTopPx + offsetPt * scale : offsetPt * scale;
+  const c = yContainer(relativeFrom, fromPara, paragraphTopPx, state);
+  if (pctPos != null) {
+    return c.start + (c.end - c.start) * pctPos;
   }
-  const containerStart = fromPara ? paragraphTopPx : 0;
-  const containerEnd = state.pageH;
-  const containerH = containerEnd - containerStart;
+  if (!align) {
+    return c.start + offsetPt * scale;
+  }
+  const containerH = c.end - c.start;
   const offsetPx = offsetPt * scale;
   switch (align) {
-    case 'center': return containerStart + (containerH - heightPx) / 2 + offsetPx;
-    case 'bottom': return containerEnd - heightPx + offsetPx;
+    case 'center': return c.start + (containerH - heightPx) / 2 + offsetPx;
+    case 'bottom': return c.end - heightPx + offsetPx;
     case 'top':
-    default:       return containerStart + offsetPx;
+    default:       return c.start + offsetPx;
   }
 }
 
@@ -1680,8 +1759,14 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   const w = shape.widthPt * scale;
   const h = shape.heightPt * scale;
   if (w <= 0 || h <= 0) return;
-  const x = resolveAnchorX(shape.anchorXAlign, shape.anchorXFromMargin, shape.anchorXPt, w, state);
-  const y = resolveAnchorY(shape.anchorYAlign, shape.anchorYFromPara, shape.anchorYPt, h, paragraphTopPx, state);
+  const x = resolveAnchorX(
+    shape.anchorXAlign, shape.anchorXFromMargin, shape.anchorXPt, w, state,
+    shape.anchorXRelativeFrom, shape.pctPosH,
+  );
+  const y = resolveAnchorY(
+    shape.anchorYAlign, shape.anchorYFromPara, shape.anchorYPt, h, paragraphTopPx, state,
+    shape.anchorYRelativeFrom, shape.pctPosV,
+  );
 
   const rot = shape.rotation ?? 0;
   ctx.save();

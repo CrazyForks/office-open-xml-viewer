@@ -1097,10 +1097,20 @@ fn parse_inline_drawing(
     // Parse positionH / positionV with relativeFrom
     let (pos_x, x_from_margin, x_align) = parse_anchor_pos_h(&container);
     let (pos_y, y_from_para,   y_align) = parse_anchor_pos_v(&container);
+    let (pct_h, pct_v, rel_h, rel_v) = parse_anchor_pct_pos(&container);
     let anchor_meta = parse_anchor_wrap(&container);
 
     // behindDoc="1" flag — renderer uses this to draw shapes before text
     let behind_doc = container.attribute("behindDoc").map(|v| v == "1" || v == "true").unwrap_or(false);
+
+    let apply_pos_meta = |shp: &mut ShapeRun| {
+        shp.anchor_x_align = x_align.clone();
+        shp.anchor_y_align = y_align.clone();
+        shp.pct_pos_h = pct_h;
+        shp.pct_pos_v = pct_v;
+        shp.anchor_x_relative_from = rel_h.clone();
+        shp.anchor_y_relative_from = rel_v.clone();
+    };
 
     // Check for wgp (Word Graphics Group) — expands to multiple per-element entries
     if let Some(wgp) = container.descendants().find(|n| n.tag_name().name() == "wgp") {
@@ -1110,8 +1120,7 @@ fn parse_inline_drawing(
         }
         for mut shp in parse_wgp_shapes(wgp, theme, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta) {
             shp.behind_doc = behind_doc;
-            shp.anchor_x_align = x_align.clone();
-            shp.anchor_y_align = y_align.clone();
+            apply_pos_meta(&mut shp);
             out.push(DocRun::Shape(shp));
         }
         return out;
@@ -1121,8 +1130,7 @@ fn parse_inline_drawing(
     if let Some(wsp) = container.descendants().find(|n| n.tag_name().name() == "wsp") {
         if let Some(mut shp) = parse_wsp_shape(wsp, theme, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta, 1.0, 1.0, 0.0, 0.0, 0) {
             shp.behind_doc = behind_doc;
-            shp.anchor_x_align = x_align;
-            shp.anchor_y_align = y_align;
+            apply_pos_meta(&mut shp);
             return vec![DocRun::Shape(shp)];
         }
     }
@@ -1209,8 +1217,30 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
 
 /// Parse positionH — returns (posOffset_pt, needs_margin_offset).
 /// "column" and "margin" relative offsets both mean: add marginLeft in the renderer.
+/// `<wp:positionH>` / `<wp:positionV>` may live directly under `<wp:anchor>`,
+/// or be wrapped in `<mc:AlternateContent>` for Word 2010+ pct-based positioning.
+/// In the wrapped form `<mc:Choice>` holds the wp14 pct-based variant and
+/// `<mc:Fallback>` holds a posOffset variant. Always pick Choice (matches what
+/// Word renders in 2010+); never read from Fallback.
+fn find_position_node<'a, 'i>(
+    container: &roxmltree::Node<'a, 'i>,
+    name: &str,
+) -> Option<roxmltree::Node<'a, 'i>> {
+    if let Some(n) = container.children().find(|n| n.tag_name().name() == name) {
+        return Some(n);
+    }
+    for ac in container.children().filter(|n| n.tag_name().name() == "AlternateContent") {
+        if let Some(choice) = ac.children().find(|n| n.tag_name().name() == "Choice") {
+            if let Some(n) = choice.descendants().find(|n| n.is_element() && n.tag_name().name() == name) {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
 fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool, Option<String>) {
-    let pos = match container.children().find(|n| n.tag_name().name() == "positionH") {
+    let pos = match find_position_node(container, "positionH") {
         Some(p) => p,
         None => return (0.0, false, None),
     };
@@ -1234,7 +1264,7 @@ fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool, Option<String>
 
 /// Parse positionV — returns (posOffset_pt, is_paragraph_relative, align).
 fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool, Option<String>) {
-    let pos = match container.children().find(|n| n.tag_name().name() == "positionV") {
+    let pos = match find_position_node(container, "positionV") {
         Some(p) => p,
         None => return (0.0, false, None),
     };
@@ -1252,6 +1282,39 @@ fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool, Option<String>
         .filter(|s| !s.is_empty());
     let from_para = matches!(rel, "paragraph" | "line");
     (offset, from_para, align)
+}
+
+/// Read ECMA-376 §20.4.2.7 wp14:pctPos{H,V}Offset and the positionH/V
+/// relativeFrom strings. Both values are normalized into a fraction in
+/// `[0, 1]`; the renderer multiplies them by the relative container's
+/// dimension. The relativeFrom string is captured raw ("page", "margin",
+/// "topMargin", "rightMargin", "insideMargin", "paragraph", "line", …)
+/// so the renderer can pick the right container and edge.
+fn parse_anchor_pct_pos(
+    container: &roxmltree::Node,
+) -> (Option<f64>, Option<f64>, Option<String>, Option<String>) {
+    let read_pct = |pos_node: roxmltree::Node| -> Option<f64> {
+        // <wp14:pctPos*Offset> may be wrapped in <mc:AlternateContent>/<mc:Choice>
+        // — search descendants under positionH/V to be safe.
+        pos_node
+            .descendants()
+            .filter(|n| n.is_element())
+            .find(|n| matches!(n.tag_name().name(), "pctPosHOffset" | "pctPosVOffset"))
+            .and_then(|n| n.text())
+            .and_then(|t| t.parse::<f64>().ok())
+            .map(|v| v / 100_000.0)
+    };
+    let read_rel = |pos_node: roxmltree::Node| -> Option<String> {
+        pos_node.attribute("relativeFrom").map(|s| s.to_string())
+    };
+    let h_node = find_position_node(container, "positionH");
+    let v_node = find_position_node(container, "positionV");
+    (
+        h_node.and_then(read_pct),
+        v_node.and_then(read_pct),
+        h_node.and_then(read_rel),
+        v_node.and_then(read_rel),
+    )
 }
 
 /// Expand a wp:wgp group into individual ImageRun entries.

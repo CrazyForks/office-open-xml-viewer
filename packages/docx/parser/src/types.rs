@@ -238,6 +238,24 @@ pub struct ShapeRun {
     /// Values: "top", "center", "bottom".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_align: Option<String>,
+    /// ECMA-376 §20.4.2.7 wp14:pctPosHOffset / pctPosVOffset — fraction
+    /// of the relativeFrom container's width / height in 1/100,000ths of
+    /// a percent. When set, renderer ignores anchor_x_pt / anchor_y_pt
+    /// and computes the offset as `container_size * pct / 100000`. The
+    /// container is `anchor_*_relative_from` (page / margin / etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pct_pos_h: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pct_pos_v: Option<f64>,
+    /// `<wp:positionH/V relativeFrom="…">` — overrides the looser
+    /// `anchor_x_from_margin`/`anchor_y_from_para` booleans for the
+    /// pct-pos and align paths. Common values: "page", "margin",
+    /// "leftMargin"/"rightMargin", "insideMargin"/"outsideMargin",
+    /// "topMargin"/"bottomMargin", "paragraph", "line".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_x_relative_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_y_relative_from: Option<String>,
     /// If true, draw the shape behind text (wp:anchor behindDoc="1"). Renderer
     /// should draw background shapes BEFORE body text.
     #[serde(skip_serializing_if = "std::ops::Not::not")]

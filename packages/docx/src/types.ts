@@ -168,6 +168,18 @@ export interface ShapeRun {
   anchorXAlign?: string | null;
   /** Vertical equivalent of anchorXAlign: "top" | "center" | "bottom". */
   anchorYAlign?: string | null;
+  /** ECMA-376 §20.4.2.7 wp14:pctPosHOffset / pctPosVOffset normalised to a
+   *  fraction in `[0, 1]`. When set the renderer multiplies it by the
+   *  relativeFrom container's width / height and uses that as the
+   *  shape's offset within the container, ignoring anchorXPt / anchorYPt. */
+  pctPosH?: number | null;
+  pctPosV?: number | null;
+  /** Raw `relativeFrom` value from `<wp:positionH>` / `<wp:positionV>` —
+   *  e.g. "page", "margin", "topMargin", "rightMargin",
+   *  "insideMargin", "paragraph", "line". Drives container selection
+   *  for both pctPos* and anchor*Align positioning. */
+  anchorXRelativeFrom?: string | null;
+  anchorYRelativeFrom?: string | null;
   /** Draw behind text when true (wp:anchor behindDoc="1"). */
   behindDoc?: boolean;
   /** Document-order index within a group; lower values render first. */
