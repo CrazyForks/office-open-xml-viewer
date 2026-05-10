@@ -196,6 +196,20 @@ export interface ChartElement {
   valAxisFontSizeHpt: number | null;
   /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
   dataLabelFontSizeHpt: number | null;
+  /** `<c:legend><c:legendPos val>` — "r" (default) | "l" | "t" | "b" | "tr". */
+  legendPos?: 'r' | 'l' | 't' | 'b' | 'tr' | null;
+  /** `<c:barChart><c:gapWidth val>` — % of bar width between category groups (default 150). */
+  barGapWidth?: number | null;
+  /** `<c:barChart><c:overlap val>` — signed % of bar width for cluster overlap. */
+  barOverlap?: number | null;
+  /** `<c:dLbls><c:dLblPos val>` — data label placement ("ctr" | "inEnd" | "outEnd" | …). */
+  dataLabelPosition?: string | null;
+  /** `<c:dLbls><c:txPr>…<a:solidFill>` resolved to hex (no '#'). null = renderer default. */
+  dataLabelFontColor?: string | null;
+  /** `<c:dLbls><c:numFmt formatCode>` — data label number format. */
+  dataLabelFormatCode?: string | null;
+  /** `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format. */
+  valAxisFormatCode?: string | null;
 }
 
 export interface PictureElement {
@@ -218,6 +232,14 @@ export interface PictureElement {
   srcRect?: { l?: number; t?: number; r?: number; b?: number };
   /** a:blip > a:alphaModFix@amt as 0..1. Undefined = fully opaque. */
   alpha?: number;
+  /**
+   * `<p:spPr><a:custGeom>` clipping path. Same `PathCmd` model as
+   * `ShapeElement.custGeom` (one entry per `<a:path>`; coords normalized
+   * into [0,1] of the picture's bounding box). The renderer builds a
+   * Path2D and `ctx.clip()` before drawing the bitmap so the image is
+   * trimmed to the laptop / device silhouette declared in the file.
+   */
+  custGeom?: PathCmd[][] | null;
 }
 
 // ===== Worker message protocol =====

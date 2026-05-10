@@ -143,6 +143,31 @@ struct ChartElement {
     val_axis_font_size_hpt: Option<i32>,
     /// <c:dLbls><c:txPr>…defRPr@sz — data-label font size (hpt).
     data_label_font_size_hpt: Option<i32>,
+    /// `<c:legend><c:legendPos val>` — "r" (default) | "l" | "t" | "b" | "tr".
+    /// None when `<c:legend>` is absent (then `show_legend` is also false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legend_pos: Option<String>,
+    /// `<c:barChart><c:gapWidth val>` — percent of bar width between category
+    /// groups (ECMA-376 §21.2.2.13). Default 150 if absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bar_gap_width: Option<i32>,
+    /// `<c:barChart><c:overlap val>` — signed percent of bar width for cluster
+    /// overlap (ECMA-376 §21.2.2.25). Negative = gap; +100 = full overlap (stacked).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bar_overlap: Option<i32>,
+    /// `<c:dLbls><c:dLblPos val>` — data label position relative to bar/marker
+    /// ("ctr" | "inEnd" | "outEnd" | "inBase" | …). None falls back to renderer default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_label_position: Option<String>,
+    /// `<c:dLbls><c:txPr>…<a:solidFill>` resolved to hex (no #) — data label text color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_label_font_color: Option<String>,
+    /// `<c:dLbls><c:numFmt formatCode>` — data label number format (e.g. "0.0%").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_label_format_code: Option<String>,
+    /// `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_format_code: Option<String>,
 }
 
 // ===== Table data model =====
@@ -266,6 +291,12 @@ struct PictureElement {
     /// a:blip > a:alphaModFix@amt (0.0–1.0). None = fully opaque.
     #[serde(skip_serializing_if = "Option::is_none")]
     alpha: Option<f64>,
+    /// `<p:spPr><a:custGeom>` — custom geometry path used as a clip on the
+    /// blitted image. Same shape model as `ShapeElement.cust_geom` (one or more
+    /// `<a:path>` whose coordinates are normalized into [0,1] of the bbox).
+    /// None when the picture is a plain rectangle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cust_geom: Option<Vec<Vec<PathCmd>>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -1465,6 +1496,13 @@ struct LayoutPlaceholders {
     by_type_color: HashMap<String, String>,
     /// Default text color from master (txStyles + spTree lstStyle) — fallback when layout has none
     by_type_master_color: HashMap<String, String>,
+    /// `<p:spPr><a:solidFill | a:noFill | a:gradFill | a:pattFill>` per placeholder idx.
+    /// Used to inherit a layout-level shape fill (e.g. a tinted body placeholder)
+    /// onto slide-level shapes whose `<p:spPr>` is empty.
+    by_idx_fill: HashMap<u32, Fill>,
+    /// Same as `by_idx_fill` but keyed by placeholder type (fallback when idx
+    /// doesn't match a layout shape).
+    by_type_fill: HashMap<String, Fill>,
 }
 
 #[derive(Debug, Clone)]
@@ -1560,6 +1598,17 @@ impl LayoutPlaceholders {
             .or_else(|| if ph_type == "body" { self.by_type_color.get("").cloned() } else { None })
             .or_else(|| self.by_type_master_color.get(ph_type).cloned())
             .or_else(|| if ph_type == "body" { self.by_type_master_color.get("").cloned() } else { None })
+    }
+
+    /// Look up the inherited shape fill from the layout placeholder's `<p:spPr>`.
+    /// Used when the slide-level shape leaves `<p:spPr>` empty (or with no fill
+    /// elements) and is bound to a placeholder — the layout fill is the
+    /// authoritative default per ECMA-376 §19.3.1.36.
+    fn lookup_fill(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<Fill> {
+        ph_idx
+            .and_then(|i| self.by_idx_fill.get(&i).cloned())
+            .or_else(|| self.by_type_fill.get(ph_type).cloned())
+            .or_else(|| if ph_type == "body" { self.by_type_fill.get("").cloned() } else { None })
     }
 
     /// Look up inherited line spacing (spcPct val, e.g. 90000 = 90%) for this placeholder.
@@ -1917,6 +1966,13 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_stroke: Option<Stroke> = child(sp_pr, "ln")
             .and_then(|n| parse_stroke(n, theme));
 
+        // Layout spPr fill (solidFill / noFill / gradFill / pattFill). The
+        // slide-level placeholder shape inherits this when its own `<p:spPr>` is
+        // empty — that's how a "tinted body placeholder" carries through to the
+        // slide. We deliberately exclude grpFill here (group inheritance is
+        // resolved at slide parse time, not from the layout).
+        let layout_fill: Option<Fill> = parse_fill(sp_pr, theme);
+
         // Layout spPr > blipFill → image that bleeds through when the slide's
         // matching placeholder has no own blipFill (picture placeholder inheritance).
         let layout_blip_fill: Option<InheritedBlipFill> = child(sp_pr, "blipFill")
@@ -1960,6 +2016,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 if let Some(ref c) = layout_color {
                     lph.by_idx_color.entry(idx).or_insert(c.clone());
                 }
+                if let Some(ref f) = layout_fill {
+                    lph.by_idx_fill.entry(idx).or_insert(f.clone());
+                }
             }
             let effective_fs = layout_font_size
                 .or_else(|| master_font_sizes.get(&ph_type).copied());
@@ -1998,6 +2057,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             }
             if let Some(c) = layout_color {
                 lph.by_type_color.entry(ph_type.clone()).or_insert(c);
+            }
+            if let Some(f) = layout_fill {
+                lph.by_type_fill.entry(ph_type.clone()).or_insert(f);
             }
             if let Some(t) = t_opt {
                 lph.by_type.entry(ph_type).or_insert(t);
@@ -2607,8 +2669,16 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
         .and_then(|fill| parse_color_node(fill, theme));
 
-    let show_legend = root.descendants()
-        .any(|n| n.is_element() && n.tag_name().name() == "legend");
+    // <c:legend> determines whether the legend is shown; <c:legendPos val>
+    // (ECMA-376 §21.2.2.10) picks the side ("r" default | "l" | "t" | "b" | "tr").
+    let legend_node = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "legend");
+    let show_legend = legend_node.is_some();
+    let legend_pos = legend_node.and_then(|ln| {
+        ln.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "legendPos")
+            .and_then(|p| attr(&p, "val"))
+    });
 
     // ECMA-376 §21.2.2.35: `<c:crossBetween>` lives on the VALUE axis (not cat),
     // and describes whether value gridlines land between or on category ticks.
@@ -2662,6 +2732,60 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
                 }))
         });
 
+    // ECMA-376 §21.2.2.13 / §21.2.2.25 — `<c:gapWidth val>` and `<c:overlap val>`
+    // are siblings of `<c:ser>` inside the bar/area chart-type wrapper. Default
+    // gapWidth=150 (per spec). overlap default 0; +100 = stacked.
+    let bar_gap_width = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "gapWidth")
+        .and_then(|n| attr(&n, "val"))
+        .and_then(|v| v.parse::<i32>().ok());
+    let bar_overlap = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "overlap")
+        .and_then(|n| attr(&n, "val"))
+        .and_then(|v| v.parse::<i32>().ok());
+
+    // Walk every `<c:dLbls>` (chart-level + per-series) and pick the first
+    // dLblPos / numFmt / fill that we find. ECMA-376 §21.2.2.49: dLblPos values
+    // include "ctr" | "inEnd" | "outEnd" | "inBase" | "l" | "r" | "t" | "b".
+    let mut data_label_position: Option<String> = None;
+    let mut data_label_format_code: Option<String> = None;
+    let mut data_label_font_color: Option<String> = None;
+    for dlbls in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "dLbls") {
+        for child in dlbls.children().filter(|n| n.is_element()) {
+            match child.tag_name().name() {
+                "dLblPos" => {
+                    if data_label_position.is_none() {
+                        data_label_position = attr(&child, "val");
+                    }
+                }
+                "numFmt" => {
+                    if data_label_format_code.is_none() {
+                        data_label_format_code = attr(&child, "formatCode")
+                            .filter(|s| !s.is_empty() && s != "General");
+                    }
+                }
+                "txPr" => {
+                    if data_label_font_color.is_none() {
+                        for desc in child.descendants().filter(|n| n.is_element()) {
+                            if desc.tag_name().name() != "solidFill" { continue; }
+                            if let Some(c) = parse_color_node(desc, theme) {
+                                data_label_font_color = Some(c);
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
+    let val_axis_format_code = val_ax
+        .and_then(|ax| ax.children().find(|n| n.is_element() && n.tag_name().name() == "numFmt"))
+        .and_then(|n| attr(&n, "formatCode"))
+        .filter(|s| !s.is_empty() && s != "General");
+
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,
         chart_type,
@@ -2684,6 +2808,13 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         cat_axis_font_size_hpt,
         val_axis_font_size_hpt,
         data_label_font_size_hpt,
+        legend_pos,
+        bar_gap_width,
+        bar_overlap,
+        data_label_position,
+        data_label_font_color,
+        data_label_format_code,
+        val_axis_format_code,
     })
 }
 
@@ -2759,6 +2890,20 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         data_point_colors: None,
     }];
 
+    // ChartEx axis visibility — `<cx:axis hidden="1">`. Each axis carries either
+    // `<cx:catScaling>` or `<cx:valScaling>` so we can disambiguate even when
+    // the spec doesn't declare `id` semantics. Default visible.
+    let mut cat_axis_hidden = false;
+    let mut val_axis_hidden = false;
+    for ax in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "axis") {
+        let hidden = attr(&ax, "hidden").as_deref() == Some("1");
+        if !hidden { continue; }
+        let is_val = ax.children().any(|c| c.is_element() && c.tag_name().name() == "valScaling");
+        let is_cat = ax.children().any(|c| c.is_element() && c.tag_name().name() == "catScaling");
+        if is_val { val_axis_hidden = true; }
+        if is_cat { cat_axis_hidden = true; }
+    }
+
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,
         chart_type,
@@ -2769,8 +2914,8 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         val_min: None,
         subtotal_indices,
         show_data_labels: false,
-        cat_axis_hidden: false,
-        val_axis_hidden: false,
+        cat_axis_hidden,
+        val_axis_hidden,
         plot_area_bg: None,
         chart_bg: None,
         show_legend: false,
@@ -2781,6 +2926,13 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         cat_axis_font_size_hpt: None,
         val_axis_font_size_hpt: None,
         data_label_font_size_hpt: None,
+        legend_pos: None,
+        bar_gap_width: None,
+        bar_overlap: None,
+        data_label_position: None,
+        data_label_font_color: None,
+        data_label_format_code: None,
+        val_axis_format_code: None,
     })
 }
 
@@ -3013,13 +3165,25 @@ fn parse_shape(
             }
         });
 
-    // spPr fill: grpFill means inherit from parent group; explicit fill overrides style.
-    // Note: Some(Fill::None) (noFill in spPr) must NOT be overridden by style.
+    // spPr fill resolution order (ECMA-376 §19.3.1.36 / §20.1.4.2):
+    //   1. spPr `<a:grpFill>` → inherit from parent group
+    //   2. spPr explicit fill (`<a:solidFill>`, `<a:noFill>`, gradient, pattern, blip)
+    //   3. layout placeholder fill (only when the slide-level shape has no fill
+    //      element of its own and is bound to a placeholder)
+    //   4. `<p:style><a:fillRef>` falls through last
+    // Some(Fill::None) (noFill in spPr) is treated as an explicit choice and
+    // must NOT be overridden by step 3 or 4.
     let sp_pr_has_grp_fill = sp_pr.and_then(|p| child(p, "grpFill")).is_some();
     let fill = if sp_pr_has_grp_fill {
         group_fill.cloned()
     } else {
-        sp_pr.and_then(|p| parse_fill(p, theme)).or(style_fill)
+        let own = sp_pr.and_then(|p| parse_fill(p, theme));
+        let inherited = if own.is_none() && ph_node.is_some() {
+            lph.lookup_fill(&ph_type, ph_idx)
+        } else {
+            None
+        };
+        own.or(inherited).or(style_fill)
     };
 
     // spPr stroke: if ln element is present, respect it (even if noFill → None);
@@ -3098,12 +3262,19 @@ fn parse_picture(
     let mime = mime_from_ext(&image_path);
     let data_url = format!("data:{mime};base64,{}", B64.encode(&image_bytes));
 
+    // ECMA-376 §20.1.9.8 — `<p:pic>` may carry `<a:custGeom>` inside `<p:spPr>`,
+    // in which case the bitmap is clipped to that custom path (e.g. a laptop
+    // silhouette). Re-use the same parser as for shapes so the renderer can
+    // build a Path2D and `ctx.clip()` before drawing the image.
+    let cust_geom = child(sp_pr, "custGeom").map(parse_cust_geom);
+
     Some(PictureElement {
         x: t.x, y: t.y, width: t.cx, height: t.cy,
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
         data_url, clip_adjust: None,
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
+        cust_geom,
     })
 }
 
@@ -3698,12 +3869,16 @@ fn parse_sp_tree_node(
                                     .and_then(|avlst| avlst.children().find(|n| n.is_element()))
                                     .and_then(|gd| attr(&gd, "fmla"))
                                     .and_then(|fmla| fmla.strip_prefix("val ").and_then(|v| v.parse::<i64>().ok()));
+                                let cust_geom = sp_pr_node
+                                    .and_then(|p| child(p, "custGeom"))
+                                    .map(parse_cust_geom);
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x, y: t.y, width: t.cx, height: t.cy,
                                     rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
                                     data_url, clip_adjust,
                                     src_rect: blip_fill_node.and_then(parse_src_rect),
                                     alpha: blip_fill_node.and_then(parse_blip_alpha),
+                                    cust_geom,
                                 }));
                                 return;
                             }
@@ -3730,6 +3905,7 @@ fn parse_sp_tree_node(
                                     data_url: bf.data_url, clip_adjust: None,
                                     src_rect: bf.src_rect,
                                     alpha: bf.alpha,
+                                    cust_geom: None,
                                 }));
                                 return;
                             }
@@ -3770,6 +3946,7 @@ fn parse_sp_tree_node(
                                         data_url, clip_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
                                         alpha: blip_fill.and_then(parse_blip_alpha),
+                                        cust_geom: None,
                                     }));
                                 }
                             }

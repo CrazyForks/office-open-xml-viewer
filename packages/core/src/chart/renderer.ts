@@ -1841,7 +1841,9 @@ function dashPatternForPreset(preset: string | undefined): number[] {
 
 function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
   const { x, y, w, h } = r;
-  const padL = w * 0.11;
+  // No need to reserve room for value-axis tick labels when the value axis
+  // is hidden — give the bars the full width instead.
+  const padL = chart.valAxisHidden ? w * 0.04 : w * 0.11;
   const padR = w * 0.04;
   const padT = h * 0.08;
   const padB = h * 0.18;
@@ -1887,23 +1889,36 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   ctx.save();
   const fontSize = Math.round(h * 0.042);
   ctx.font = `${fontSize}px sans-serif`;
-  ctx.strokeStyle = '#e8e8e8';
-  ctx.lineWidth = 0.7;
-  ctx.fillStyle = '#666';
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  for (let v = Math.ceil(dataMin / step) * step; v <= dataMax; v += step) {
-    const gy = py0 + ph * (1 - (v - dataMin) / padded);
-    ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
-    ctx.fillText(v.toLocaleString(), px0 - 4, gy);
+
+  // ECMA-376 / chartEx §axis@hidden: when the value axis is hidden, skip the
+  // value-axis gridlines, tick labels and the left segment of the L-frame.
+  // This is the canonical PowerPoint look for waterfall analyses where the
+  // value scale is implicit in the data labels on each bar.
+  if (!chart.valAxisHidden) {
+    ctx.strokeStyle = '#e8e8e8';
+    ctx.lineWidth = 0.7;
+    ctx.fillStyle = '#666';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let v = Math.ceil(dataMin / step) * step; v <= dataMax; v += step) {
+      const gy = py0 + ph * (1 - (v - dataMin) / padded);
+      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      ctx.fillText(v.toLocaleString(), px0 - 4, gy);
+    }
   }
 
   ctx.strokeStyle = '#bbb';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(px0, py0);
-  ctx.lineTo(px0, py0 + ph);
-  ctx.lineTo(px0 + pw, py0 + ph);
+  if (!chart.valAxisHidden) {
+    ctx.moveTo(px0, py0);
+    ctx.lineTo(px0, py0 + ph);
+    ctx.lineTo(px0 + pw, py0 + ph);
+  } else if (!chart.catAxisHidden) {
+    // Just the baseline under the categories.
+    ctx.moveTo(px0, py0 + ph);
+    ctx.lineTo(px0 + pw, py0 + ph);
+  }
   ctx.stroke();
 
   const colorSub = '#196ECA';

@@ -407,40 +407,38 @@ export function buildShapePath(
     }
 
     // ── Callouts ──────────────────────────────────────────────────────────────
+    // Only the callout1 family (2-point: attach + tip) is handled here.
+    // callout2 / callout3 require adj5..adj8 which exceed this function's
+    // 4-adjustment signature, so they go through the generic preset engine
+    // (`renderPresetShape`) that reads the full presets.json definition.
     case 'callout1':
-    case 'callout2':
-    case 'callout3':
     case 'bordercallout1':
-    case 'bordercallout2':
-    case 'bordercallout3':
     case 'accentcallout1':
-    case 'accentcallout2':
-    case 'accentcallout3':
-    case 'accentbordercallout1':
-    case 'accentbordercallout2':
-    case 'accentbordercallout3': {
-      // Line callout: rectangle text area + a single line (tail) to the tip.
-      // Accent variants add a vertical bar on the left edge of the rectangle.
-      // In OOXML, the bounding box covers the text area; the tail tip (adj3/adj4) may
-      // extend outside the box. adj1/adj2 define the attachment on the box edge.
-      const attFx = (adj  !== null ? adj  : 44150) / 100000;
-      const attFy = (adj2 !== null ? adj2 : 98050) / 100000;
-      const tipFx = (adj3 !== null ? adj3 : 50000) / 100000;
-      const tipFy = (adj4 !== null ? adj4 : 115000) / 100000;
-      const attX = x + Math.max(0, Math.min(1, attFx)) * w;
-      const attY = y + Math.max(0, Math.min(1, attFy)) * h;
-      const tipX = x + tipFx * w;
-      const tipY = y + tipFy * h;
+    case 'accentbordercallout1': {
+      // ECMA-376 callout1 gd block (presets.json):
+      //   y1 = h * adj1 / 100000   (attach Y)
+      //   x1 = w * adj2 / 100000   (attach X)
+      //   y2 = h * adj3 / 100000   (tip Y)
+      //   x2 = w * adj4 / 100000   (tip X)
+      // Note the (Y, X) pairing: odd-indexed adj are Y fractions. The previous
+      // implementation had X/Y swapped, which made the line point to the
+      // wrong side of the shape.
+      const attXf = (adj2 !== null ? adj2 : -8333)  / 100000;
+      const attYf = (adj  !== null ? adj  : 18750)  / 100000;
+      const tipXf = (adj4 !== null ? adj4 : -38333) / 100000;
+      const tipYf = (adj3 !== null ? adj3 : 112500) / 100000;
+
+      // Text rectangle (the bounding box itself).
       ctx.rect(x, y, w, h);
-      // Accent bar: vertical line on left edge (offset by ~8% of width)
       if (geom.startsWith('accent')) {
+        // Accent variants add a vertical bar on the left edge (~8% inset).
         const barX = x + w * 0.08;
         ctx.moveTo(barX, y);
         ctx.lineTo(barX, y + h);
       }
-      // Callout line from attachment point to tip
-      ctx.moveTo(attX, attY);
-      ctx.lineTo(tipX, tipY);
+      // Callout line: attach → tip. Either point may sit outside the bbox.
+      ctx.moveTo(x + attXf * w, y + attYf * h);
+      ctx.lineTo(x + tipXf * w, y + tipYf * h);
       break;
     }
     case 'wedgerectcallout': {
