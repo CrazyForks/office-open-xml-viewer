@@ -435,6 +435,17 @@ struct ChartSeriesData {
     /// △ values in red (accent1) while positive values stay in tx1.
     #[serde(skip_serializing_if = "Option::is_none")]
     data_label_colors: Option<Vec<Option<String>>>,
+    /// Per-series X values for scatter/bubble charts (ECMA-376 §21.2.2.43 `<c:xVal>`).
+    /// Emitted as strings so the core ChartSeries.categories field can stay
+    /// string-typed across both category-axis and value-axis charts. None for
+    /// non-scatter charts (they use the chart-level `categories`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    categories: Option<Vec<String>>,
+    /// Per-point bubble sizes from `<c:bubbleSize>` (ECMA-376 §21.2.2.4) —
+    /// drives marker radius (sqrt-scaled) on bubble charts. None for
+    /// non-bubble series.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bubble_sizes: Option<Vec<Option<f64>>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -510,6 +521,12 @@ struct ChartElement {
     /// (sample-2 slide-16's horizontal bar chart).
     #[serde(skip_serializing_if = "Option::is_none")]
     plot_area_manual_layout: Option<ChartManualLayout>,
+    /// `<c:scatterChart><c:scatterStyle val>` (ECMA-376 §21.2.2.42). Values:
+    /// "marker" | "line" | "lineMarker" | "lineNoMarker" | "smooth" |
+    /// "smoothMarker" | "smoothNoMarker". None for non-scatter charts;
+    /// renderer falls back to "marker" when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scatter_style: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1010,6 +1027,12 @@ struct Paragraph {
     def_font_family: Option<String>,
     /// Tab stops from pPr > tabLst
     tab_stops: Vec<TabStop>,
+    /// ECMA-376 §21.1.2.2.7 `<a:pPr rtl="1">` — right-to-left paragraph.
+    /// When true and no explicit `algn`, the default alignment flips from
+    /// "l" to "r". Carried through so the renderer can also flow runs RTL
+    /// when bidi shaping is added.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    rtl: bool,
     runs: Vec<TextRun>,
 }
 
@@ -1069,6 +1092,29 @@ struct TextRunData {
     /// None for runs without a:hlinkClick.
     #[serde(skip_serializing_if = "Option::is_none")]
     hyperlink: Option<String>,
+    /// ECMA-376 §20.1.8.45 (CT_OuterShadowEffect) — drop shadow on this run's
+    /// glyphs from `<a:rPr><a:effectLst><a:outerShdw>`. Distinct from the
+    /// shape-level shadow on `spPr`. None = no shadow on the run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shadow: Option<Shadow>,
+    /// ECMA-376 §20.1.2.2.24 (CT_TextOutlineEffect) — text glyph outline from
+    /// `<a:rPr><a:ln w="EMU"><a:solidFill>...`. None = no outline; renderer
+    /// just fillText. When set the renderer also strokeText with the given
+    /// width (EMU) and colour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outline: Option<TextOutline>,
+}
+
+/// Run-level text outline (`<a:rPr><a:ln>`). The width is the OOXML EMU
+/// value (`w` attribute, 12700 EMU = 1 pt); the renderer converts to px.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TextOutline {
+    /// Outline width in EMU.
+    width: i64,
+    /// Resolved hex colour (no `#`). None = inherit from text fill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
 }
 
 // ===========================
@@ -2717,11 +2763,19 @@ fn parse_paragraph(
 ) -> Paragraph {
     let p_pr = child(p_node, "pPr");
 
-    // Paragraph's own algn → body/layout/master default → "l"
+    // ECMA-376 §21.1.2.2.7 `<a:pPr rtl>` — right-to-left text flow. When set
+    // and the paragraph has no explicit `algn`, the implicit default flips
+    // from "l" to "r" (matches PowerPoint's behaviour for Arabic / Hebrew
+    // slides where users typically don't author an explicit alignment).
+    let rtl = p_pr.and_then(|n| attr(&n, "rtl"))
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+
+    // Paragraph's own algn → body/layout/master default → "r" if rtl, else "l"
     let alignment = p_pr.and_then(|n| attr(&n, "algn"))
         .map(|a| a.to_string())
         .or_else(|| body_default_alignment.map(|a| a.to_string()))
-        .unwrap_or_else(|| "l".into());
+        .unwrap_or_else(|| if rtl { "r".into() } else { "l".into() });
     let lvl: u32   = p_pr.and_then(|n| attr(&n, "lvl")).and_then(|v| v.parse().ok()).unwrap_or(0);
 
     // Detect whether the paragraph has an explicit bullet character (buChar/buAutoNum).
@@ -2828,6 +2882,8 @@ fn parse_paragraph(
                     letter_spacing: None,
                     field_type: if fld_type == "slidenum" { Some("slidenum".to_string()) } else { None },
                     hyperlink: None,
+                    shadow: None,
+                    outline: None,
                 }));
             }
             _ => {}
@@ -2851,7 +2907,7 @@ fn parse_paragraph(
         space_before, space_after, space_line,
         lvl, bullet,
         def_font_size, def_color, def_bold, def_italic, def_font_family,
-        tab_stops, runs,
+        tab_stops, rtl, runs,
     }
 }
 
@@ -2981,12 +3037,30 @@ fn parse_run(
         .and_then(|rid| rels.get(&rid).cloned())
         .filter(|s| !s.is_empty());
 
+    // ECMA-376 §20.1.8.45 — `<a:rPr><a:effectLst><a:outerShdw>` glyph drop
+    // shadow. Reuse the shape-level outerShdw reader so parse semantics
+    // stay identical (blurRad, dist, dir, color + alphaModFix).
+    let shadow = r_pr.and_then(|n| child(n, "effectLst"))
+        .and_then(|el| parse_shadow(el, theme));
+
+    // ECMA-376 §20.1.2.2.24 (CT_TextOutlineEffect) — `<a:rPr><a:ln w="..">`
+    // strokes each glyph outline. `<a:noFill>` inside the ln means "no
+    // visible outline" — skip in that case so the renderer doesn't draw a
+    // black box around every glyph. Pull color from solidFill if present.
+    let outline = r_pr.and_then(|n| child(n, "ln"))
+        .filter(|ln| child(*ln, "noFill").is_none())
+        .map(|ln| TextOutline {
+            width: attr_i64(&ln, "w").unwrap_or(0),
+            color: child(ln, "solidFill").and_then(|n| parse_color_node(n, theme)),
+        });
+
     Some(TextRunData {
         text, bold, italic, underline, underline_style, underline_color,
         strikethrough, strike_double,
         font_size, color, font_family, font_family_ea, baseline,
         caps, letter_spacing,
         field_type: None, hyperlink,
+        shadow, outline,
     })
 }
 
@@ -3130,6 +3204,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
 
     let pt_count = categories.len().max(1);
 
+    let is_scatter_like = chart_type == "scatter" || chart_type == "bubble";
+
     let series: Vec<ChartSeriesData> = ser_nodes.iter().map(|ser| {
         // Series name from <c:tx>  (can be strRef/strCache, strLit, or a bare <c:v>)
         let name = ser.children()
@@ -3151,13 +3227,39 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             })
             .unwrap_or_default();
 
-        // Values: use <c:val> or <c:yVal> (scatter); accept numCache (ref) or numLit (inline)
-        let val_cache = ser.descendants()
-            .find(|n| n.is_element() && (n.tag_name().name() == "val" || n.tag_name().name() == "yVal"))
-            .and_then(|v| v.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")))
-            .or_else(|| ser.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")));
+        // Per-series X values for scatter/bubble: ECMA-376 §21.2.2.43 puts numeric
+        // X data in `<c:xVal>` (with its own numCache / numLit) instead of the
+        // shared `<c:cat>`. Read it as strings so the core ChartSeries.categories
+        // field can stay string-typed (renderScatterChart parses each entry back
+        // to a float).
+        let x_cache = if is_scatter_like {
+            ser.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xVal")
+                .and_then(|x| x.descendants().find(|n| n.is_element() && is_pt_container(n.tag_name().name())))
+        } else { None };
+        let series_categories: Option<Vec<String>> = x_cache.map(|cache| collect_pt_strings(cache));
 
-        let mut values: Vec<Option<f64>> = vec![None; pt_count];
+        // Y values: scatter/bubble use `<c:yVal>`, everything else uses `<c:val>`.
+        // Restrict the descendant walk to the matching tag so a sibling `<c:xVal>`
+        // (also a numCache) can't be picked up as the Y series.
+        let val_cache = if is_scatter_like {
+            ser.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "yVal")
+                .and_then(|y| y.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")))
+        } else {
+            ser.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "val")
+                .and_then(|v| v.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")))
+        };
+
+        // For scatter/bubble the point count comes from this series' xVal (each
+        // series can have a different point count). For other charts it's the
+        // shared category count.
+        let series_pt_count = if is_scatter_like {
+            series_categories.as_ref().map(|c| c.len()).unwrap_or(0).max(1)
+        } else { pt_count };
+
+        let mut values: Vec<Option<f64>> = vec![None; series_pt_count];
         if let Some(cache) = val_cache {
             for pt in cache.children().filter(|n| n.is_element() && n.tag_name().name() == "pt") {
                 let idx: usize = attr(&pt, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -3171,6 +3273,26 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             }
         }
 
+        // Bubble per-point sizes (ECMA-376 §21.2.2.4 `<c:bubbleSize>`).
+        // Only meaningful for bubble charts; scatter / others ignore.
+        let bubble_sizes: Option<Vec<Option<f64>>> = if chart_type == "bubble" {
+            let bub_cache = ser.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "bubbleSize")
+                .and_then(|b| b.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")));
+            bub_cache.map(|cache| {
+                let mut sizes: Vec<Option<f64>> = vec![None; series_pt_count];
+                for pt in cache.children().filter(|n| n.is_element() && n.tag_name().name() == "pt") {
+                    let idx: usize = attr(&pt, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let val: Option<f64> = pt.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "v")
+                        .and_then(|v| v.text())
+                        .and_then(|t| t.parse().ok());
+                    if idx < sizes.len() { sizes[idx] = val; }
+                }
+                sizes
+            })
+        } else { None };
+
         // Series color from spPr > solidFill (bar/area/pie) or spPr > ln > solidFill (line)
         let color = ser.children()
             .find(|n| n.is_element() && n.tag_name().name() == "spPr")
@@ -3183,7 +3305,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             .and_then(|fill| parse_color_node(fill, theme));
 
         // Per-data-point colors from <c:dPt> (important for pie charts)
-        let data_point_colors: Vec<Option<String>> = (0..pt_count).map(|i| {
+        let data_point_colors: Vec<Option<String>> = (0..series_pt_count).map(|i| {
             ser.children()
                 .filter(|n| n.is_element() && n.tag_name().name() == "dPt")
                 .find(|dpt| attr(dpt, "idx").and_then(|v| v.parse::<usize>().ok()) == Some(i))
@@ -3199,6 +3321,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             // `<c:dLbls><c:dLbl idx>` — not yet wired here; chartEx is the only
             // path that needs it for sample-2's waterfall.
             data_label_colors: None,
+            categories: series_categories,
+            bubble_sizes,
         }
     }).collect();
 
@@ -3293,6 +3417,14 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             ChartManualLayout { x_mode, y_mode, layout_target, x, y, w, h }
         });
 
+    // `<c:scatterChart><c:scatterStyle val>` — ECMA-376 §21.2.2.42. Lives
+    // directly under scatterChart, so a plot_area descendant walk is enough.
+    let scatter_style = if chart_type == "scatter" {
+        plot_area.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "scatterStyle")
+            .and_then(|n| attr(&n, "val"))
+    } else { None };
+
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,
         chart_type,
@@ -3323,6 +3455,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         data_label_format_code,
         val_axis_format_code,
         plot_area_manual_layout,
+        scatter_style,
     })
 }
 
@@ -3424,6 +3557,8 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         color,
         data_point_colors: None,
         data_label_colors: if has_per_label_color { Some(data_label_colors_vec) } else { None },
+        categories: None,
+        bubble_sizes: None,
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
@@ -3473,6 +3608,7 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         data_label_format_code: None,
         val_axis_format_code: None,
         plot_area_manual_layout: None,
+        scatter_style: None,
     })
 }
 

@@ -451,7 +451,9 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Connectors (`cxnSp`) | ✅ |
 | | Tables (`tbl` in `graphicFrame`) | ✅ |
 | | Charts (bar, line, area, radar, waterfall) | ✅ |
-| | Charts (pie, scatter, bubble) | ❌ |
+| | Charts (pie, doughnut) | ✅ |
+| | Charts (scatter — `scatterStyle` marker / line / smooth variants) | ✅ |
+| | Charts (bubble — `bubbleSize` per-point area scaling) | ✅ |
 | | SmartArt | ❌ |
 | | OLE objects | ❌ |
 | | Video / audio (poster + interactive playback) | ✅ |
@@ -484,7 +486,8 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Letter spacing (`spc`) | ✅ |
 | | Superscript / subscript | ✅ |
 | | Hyperlinks (`hlinkClick` — theme `hlink` colour + auto underline) | ✅ |
-| | Text shadow / outline effects | ❌ |
+| | Text shadow (`rPr > effectLst > outerShdw`) | ✅ |
+| | Text outline (`rPr > a:ln`) | ✅ |
 | **Text — paragraphs** | Horizontal alignment (left / center / right / justify) | ✅ |
 | | Vertical anchor (top / center / bottom) | ✅ |
 | | Line spacing (`spcPct`, `spcPts`) | ✅ |
@@ -492,7 +495,8 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Bullet points (character and auto-numbered) | ✅ |
 | | Tab stops | ✅ |
 | | Indent / margin | ✅ |
-| | Vertical / RTL text | ❌ |
+| | Vertical text (`bodyPr@vert` — vert / vert270 / eaVert) | ✅ |
+| | Right-to-left paragraph (`pPr@rtl` — Arabic / Hebrew default alignment + browser bidi) | ✅ |
 | **Text — body** | Text padding (insets) | ✅ |
 | | normAutoFit (shrink to fit) | ✅ |
 | | spAutoFit (expand box; suppresses wrap when text fits in one line) | ✅ |

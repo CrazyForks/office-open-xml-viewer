@@ -214,6 +214,10 @@ type LayoutSegment = {
   /** Extra inter-character spacing in px (already scaled). */
   letterSpacingPx?: number;
   baseline?: number;
+  /** Run-level glyph drop shadow (rPr > effectLst > outerShdw). */
+  shadow?: import('@silurus/ooxml-core').Shadow;
+  /** Run-level glyph outline (rPr > a:ln). Width in EMU; renderer scales. */
+  outline?: import('@silurus/ooxml-core').TextOutline;
 };
 
 interface LayoutLine {
@@ -400,7 +404,14 @@ function layoutParagraph(
     underline: boolean,
     strikethrough: boolean,
     baseline?: number,
-    extras?: { strikeDouble?: boolean; letterSpacingPx?: number; underlineStyle?: string; underlineColor?: string },
+    extras?: {
+      strikeDouble?: boolean;
+      letterSpacingPx?: number;
+      underlineStyle?: string;
+      underlineColor?: string;
+      shadow?: import('@silurus/ooxml-core').Shadow;
+      outline?: import('@silurus/ooxml-core').TextOutline;
+    },
   ) => {
     if (!text) return;
     ctx.font = font;
@@ -414,6 +425,11 @@ function layoutParagraph(
     const strikeDouble = extras?.strikeDouble;
     const underlineStyle = extras?.underlineStyle;
     const underlineColor = extras?.underlineColor;
+    const shadow = extras?.shadow;
+    const outline = extras?.outline;
+    // Shadow / outline use object identity for merging — adjacent runs share
+    // the same object since the run is parsed once. Different objects (or
+    // one set / one missing) force a new segment.
     const sameMeta = (a: LayoutSegment) =>
       a.font === font &&
       a.color === color &&
@@ -423,14 +439,16 @@ function layoutParagraph(
       a.strikethrough === strikethrough &&
       (a.strikeDouble ?? false) === (strikeDouble ?? false) &&
       (a.letterSpacingPx ?? 0) === lsPx &&
-      a.baseline === baseline;
+      a.baseline === baseline &&
+      a.shadow === shadow &&
+      a.outline === outline;
     if (tabActive && currentLine.tabStop) {
       const segs = currentLine.tabStop.segments;
       const last = segs.at(-1);
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        segs.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
+        segs.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline });
       }
     } else {
       lineW += w;
@@ -438,7 +456,7 @@ function layoutParagraph(
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        currentLine.segments.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline });
+        currentLine.segments.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline });
       }
     }
   };
@@ -502,6 +520,8 @@ function layoutParagraph(
       letterSpacingPx: lsPx,
       underlineStyle: run.underlineStyle,
       underlineColor: run.underlineColor ? hexToRgba(run.underlineColor) : undefined,
+      shadow: run.shadow,
+      outline: run.outline,
     };
 
     // Split on whitespace boundaries, keeping the whitespace tokens
@@ -1318,6 +1338,23 @@ function renderTextBody(
       const baselineShift = seg.baseline ? -(seg.baseline / 100000) * seg.sizePx : 0;
       const segBaseline = baseline + baselineShift;
       const ls = seg.letterSpacingPx ?? 0;
+
+      // Run-level text shadow (rPr > effectLst > outerShdw). Set on the
+      // context so the fillText below picks it up, then cleared after so
+      // the outline / underline / strikethrough don't get shadowed too.
+      // ECMA-376 §20.1.8.45 dir is degrees clockwise from east; the same
+      // formula used by the shape-level shadow renderer above.
+      const segShadow = seg.shadow;
+      if (segShadow) {
+        const dirRad = (segShadow.dir * Math.PI) / 180;
+        const dist = emuToPx(segShadow.dist, scale);
+        ctx.save();
+        ctx.shadowColor = hexToRgba(segShadow.color, segShadow.alpha);
+        ctx.shadowBlur = emuToPx(segShadow.blur, scale);
+        ctx.shadowOffsetX = Math.cos(dirRad) * dist;
+        ctx.shadowOffsetY = Math.sin(dirRad) * dist;
+      }
+
       if (ls > 0 && seg.text.length > 1) {
         // Draw glyph-by-glyph so each character advance is `measure + ls`.
         // Matches OOXML rPr @spc semantics — extra space added to each
@@ -1329,6 +1366,32 @@ function renderTextBody(
         }
       } else {
         ctx.fillText(seg.text, penX, segBaseline);
+      }
+
+      if (segShadow) ctx.restore();
+
+      // Run-level text outline (rPr > a:ln). Strokes each glyph in addition
+      // to the fill so the text reads as a thin lined character. ECMA-376
+      // §20.1.2.2.24: `w` is EMU; convert to px via the same scale used for
+      // fonts. Min 0.5 px so a 1-pt outline at small zoom levels stays
+      // visible. Skip when width <= 0 (parser may emit width=0 for
+      // explicitly empty <a:ln/>).
+      const segOutline = seg.outline;
+      if (segOutline && segOutline.width > 0) {
+        ctx.save();
+        ctx.lineWidth = Math.max(0.5, emuToPx(segOutline.width, scale));
+        ctx.strokeStyle = segOutline.color ? `#${segOutline.color}` : seg.color;
+        ctx.lineJoin = 'round';
+        if (ls > 0 && seg.text.length > 1) {
+          let cx = penX;
+          for (const ch of seg.text) {
+            ctx.strokeText(ch, cx, segBaseline);
+            cx += ctx.measureText(ch).width + ls;
+          }
+        } else {
+          ctx.strokeText(seg.text, penX, segBaseline);
+        }
+        ctx.restore();
       }
 
       ctx.font = seg.font;
@@ -1899,6 +1962,7 @@ export async function renderSlide(
           dataLabelFormatCode: el.dataLabelFormatCode ?? null,
           valAxisFormatCode: el.valAxisFormatCode ?? null,
           plotAreaManualLayout: el.plotAreaManualLayout ?? null,
+          scatterStyle: el.scatterStyle ?? null,
         },
         {
           x: emuToPx(el.x, scale),

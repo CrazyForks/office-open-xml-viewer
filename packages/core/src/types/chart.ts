@@ -88,6 +88,14 @@ export interface ChartSeries {
    * regardless of `errValType`.
    */
   errBars?: ChartErrBars[] | null;
+  /**
+   * `<c:bubbleSize>` per-point sizes for bubble charts (ECMA-376 §21.2.2.4).
+   * Drives marker radius — renderer treats the values as areas (radius
+   * scales by sqrt) so visual area is proportional to value, matching
+   * Excel. null / empty array = uniform marker size. Ignored for non-bubble
+   * series.
+   */
+  bubbleSizes?: (number | null)[] | null;
 }
 
 export interface ChartDataPointOverride {
@@ -288,6 +296,16 @@ export interface ChartModel {
    * included).
    */
   plotAreaManualLayout?: ChartManualLayout | null;
+  /**
+   * `<c:scatterChart><c:scatterStyle val>` (ECMA-376 §21.2.2.42). Drives
+   * whether scatter charts connect points with lines and whether those
+   * lines are smoothed. Values: "marker" (markers only — Excel default
+   * "Scatter"), "line" / "lineMarker" (straight segments), "smooth" /
+   * "smoothMarker" (cubic Bézier through points), "lineNoMarker",
+   * "smoothNoMarker". null = renderer default ("marker"). Only consulted
+   * for `chartType === "scatter"`; bubble ignores it.
+   */
+  scatterStyle?: string | null;
 }
 
 /**
