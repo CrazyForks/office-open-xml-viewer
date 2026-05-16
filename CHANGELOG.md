@@ -4,6 +4,15 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## Unreleased
+
+### Features
+
+- **diff**: new `@silurus/ooxml/diff` entrypoint exporting `diffPptx` / `diffDocx` / `diffXlsx`, which produce a structural `Change[]` between two parsed documents — slide / page / paragraph / cell level, with locations (slide index + EMU bbox for PPTX, paragraph index for DOCX, A1-style cell ref for XLSX). PPTX element matching uses parser-emitted `id` / `name` as the primary key with greedy nearest-neighbour by type + position as fallback (CHANGELOG 0.32.0 introduced these fields). DOCX paragraph alignment uses LCS over text signatures so single-paragraph edits stay tagged as `modify` instead of remove + add.
+- **pptx / docx / xlsx**: new `PptxDiffViewer` / `DocxDiffViewer` / `XlsxDiffViewer` classes that render two documents side-by-side and overlay per-change bbox highlights (PPTX only at the moment — DOCX / XLSX expose the diff result via `onDiff` for caller-driven rendering). Inject the diff implementation via `setDiffFn(diffPptx)` so the format packages stay free of a runtime dependency on `@silurus/ooxml-diff`.
+- **pptx / xlsx**: added public `PptxPresentation.presentation` and `XlsxWorkbook.parsed` getters so consumers can inspect the parsed model without reaching for private fields. Used by the new diff viewers; also useful for ad-hoc tooling.
+- **storybook**: new `PptxViewer/Diff`, `DocxViewer/Diff`, `XlsxViewer/Diff` story groups demonstrating side-by-side diff with file upload.
+
 ## 0.34.0 — 2026-05-16
 
 Single xlsx-focused change. pptx / docx renderers are byte-identical to 0.33.2, and the xlsx grid render with no active selection is unchanged — header colors only diverge once the viewer holds a selection. No README screenshot updates because of this.

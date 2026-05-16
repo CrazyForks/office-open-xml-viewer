@@ -521,6 +521,42 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 
 ---
 
+## Document diff
+
+In addition to viewing, `@silurus/ooxml` exposes a structural diff for any of
+the three formats — useful for review workflows, CI checks, or change
+visualisation.
+
+```typescript
+import { diffPptx } from '@silurus/ooxml/diff';
+import { PptxPresentation } from '@silurus/ooxml/pptx';
+
+const before = await PptxPresentation.load('/v1.pptx');
+const after  = await PptxPresentation.load('/v2.pptx');
+
+const result = diffPptx(before.presentation!, after.presentation!);
+// result.changes: [{ op: 'modify', kind: 'text', location: { kind: 'slide', slideIndex: 2, bbox: { x, y, width, height } }, before, after }, ...]
+```
+
+There's also a turnkey side-by-side viewer that overlays the diff:
+
+```typescript
+import { PptxDiffViewer } from '@silurus/ooxml/pptx';
+import { diffPptx } from '@silurus/ooxml/diff';
+
+const left  = document.getElementById('before-canvas') as HTMLCanvasElement;
+const right = document.getElementById('after-canvas')  as HTMLCanvasElement;
+const viewer = new PptxDiffViewer(left, right, { width: 480 });
+viewer.setDiffFn(diffPptx);
+await viewer.load('/v1.pptx', '/v2.pptx');
+```
+
+The DOCX (`DocxDiffViewer`) and XLSX (`XlsxDiffViewer`) counterparts have the
+same shape. See the `Diff` stories under each viewer in the
+[Storybook demo](https://ooxml.silurus.dev) for live examples.
+
+---
+
 ## Companion packages
 
 - **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` so AI coding agents in the same window (Copilot Agent mode, Claude, …) can read those files via dedicated tools.
