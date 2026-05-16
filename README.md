@@ -386,7 +386,8 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | Text boxes / drawing shapes | ✅ |
 | **Advanced** | Footnote / endnote reference markers | ✅ |
-| | Track changes / comments | ❌ |
+| | Track changes (`w:ins` / `w:del` — author-coloured underline / strikethrough) | ✅ |
+| | Comments / footnote bodies (parsed, not yet rendered inline) | ⚠️ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
 
