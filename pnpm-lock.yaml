@@ -11,9 +11,6 @@ importers:
       '@chromatic-com/storybook':
         specifier: ^5.1.2
         version: 5.1.2(storybook@10.3.5(@testing-library/dom@10.4.1)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))
-      '@silurus/ooxml-diff':
-        specifier: workspace:*
-        version: link:packages/diff
       '@storybook/addon-a11y':
         specifier: ^10.3.5
         version: 10.3.5(storybook@10.3.5(@testing-library/dom@10.4.1)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))
@@ -45,22 +42,6 @@ importers:
         specifier: ^6.0.2
         version: 6.0.3
 
-  packages/diff:
-    dependencies:
-      '@silurus/ooxml-docx':
-        specifier: workspace:*
-        version: link:../docx
-      '@silurus/ooxml-pptx':
-        specifier: workspace:*
-        version: link:../pptx
-      '@silurus/ooxml-xlsx':
-        specifier: workspace:*
-        version: link:../xlsx
-    devDependencies:
-      typescript:
-        specifier: ^6.0.2
-        version: 6.0.3
-
   packages/docx:
     dependencies:
       '@silurus/ooxml-core':
@@ -70,9 +51,6 @@ importers:
       '@playwright/test':
         specifier: ^1.59.1
         version: 1.59.1
-      '@silurus/ooxml-diff':
-        specifier: workspace:*
-        version: link:../diff
       '@types/pngjs':
         specifier: ^6.0.5
         version: 6.0.5
@@ -141,9 +119,6 @@ importers:
       '@playwright/test':
         specifier: ^1.59.1
         version: 1.59.1
-      '@silurus/ooxml-diff':
-        specifier: workspace:*
-        version: link:../diff
       '@types/pngjs':
         specifier: ^6.0.5
         version: 6.0.5
@@ -206,9 +181,6 @@ importers:
       '@playwright/test':
         specifier: ^1.59.1
         version: 1.59.1
-      '@silurus/ooxml-diff':
-        specifier: workspace:*
-        version: link:../diff
       '@types/pngjs':
         specifier: ^6.0.5
         version: 6.0.5

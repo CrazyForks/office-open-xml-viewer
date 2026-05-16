@@ -1,7 +1,6 @@
 export { XlsxWorkbook } from './workbook.js';
 export { XlsxViewer } from './viewer.js';
 export type { XlsxViewerOptions, CellAddress, CellRange, SelectionMode } from './viewer.js';
-export { XlsxDiffViewer, type XlsxDiffViewerOptions } from './diff-viewer.js';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export type {
   Workbook,

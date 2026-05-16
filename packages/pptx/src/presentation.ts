@@ -169,11 +169,6 @@ export class PptxPresentation {
   /** Slide height in EMU. */
   get slideHeight(): number { return this._presentation?.slideHeight ?? 0; }
 
-  /** The parsed presentation model. `null` until `load()` resolves. Read-only
-   *  view intended for consumers that need to inspect or diff the structure
-   *  (`@silurus/ooxml-diff`). */
-  get presentation(): Presentation | null { return this._presentation; }
-
   /** Render a slide onto the given canvas. */
   async renderSlide(
     canvas: HTMLCanvasElement,
