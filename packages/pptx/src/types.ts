@@ -214,6 +214,9 @@ export interface ChartElement {
    * plot-area placement so bars don't extend past the chart-frame's intended
    * inner region (sample-2 slide-16 horizontal bar chart). */
   plotAreaManualLayout?: import('@silurus/ooxml-core').ChartManualLayout | null;
+  /** `<c:scatterChart><c:scatterStyle val>` (ECMA-376 §21.2.2.42) — drives
+   * whether scatter charts connect points with straight or smooth lines. */
+  scatterStyle?: string | null;
 }
 
 export interface PictureElement {

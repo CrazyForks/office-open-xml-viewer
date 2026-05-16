@@ -187,6 +187,12 @@ export interface Paragraph {
   defFontFamily: string | null;
   /** Tab stops from pPr > tabLst */
   tabStops: TabStop[];
+  /**
+   * `<a:pPr rtl="1">` — right-to-left paragraph (ECMA-376 §21.1.2.2.7).
+   * When true and no explicit `algn`, the parser-side default flips from
+   * "l" to "r"; renderers can also use this flag to flow runs RTL.
+   */
+  rtl?: boolean;
   runs: TextRun[];
 }
 
@@ -252,6 +258,26 @@ export interface TextRunData {
    * Undefined for runs without a hyperlink. ECMA-376 §21.1.2.3.5 (CT_Hyperlink).
    */
   hyperlink?: string;
+  /**
+   * Run-level drop shadow on glyphs (`<a:rPr><a:effectLst><a:outerShdw>`),
+   * ECMA-376 §20.1.8.45. Independent of the shape-level shadow on `spPr`.
+   * Absent means no run-level shadow.
+   */
+  shadow?: Shadow;
+  /**
+   * Run-level glyph outline (`<a:rPr><a:ln w="..">`), ECMA-376 §20.1.2.2.24
+   * (CT_TextOutlineEffect). Renderer strokes each glyph with the given
+   * width / colour in addition to the normal fill. Absent means glyphs are
+   * fill-only.
+   */
+  outline?: TextOutline;
+}
+
+/** Run-level glyph outline. Width is in OOXML EMU (12700 EMU = 1 pt). */
+export interface TextOutline {
+  width: number;
+  /** Hex without '#'. Absent = inherit from text fill colour. */
+  color?: string;
 }
 
 export interface LineBreak {

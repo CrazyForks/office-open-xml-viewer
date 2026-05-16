@@ -1551,9 +1551,19 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
   }
 
-  // Render each series. Order: error bars (behind), markers, then data
-  // labels (in front). dPt overrides apply per point for color and marker
-  // shape; dLbl overrides apply per point for label text and position.
+  // ECMA-376 §21.2.2.42 `<c:scatterStyle>`. Drives whether scatter points
+  // are connected (line / smooth) and whether markers are also drawn.
+  // For bubble charts the value is ignored (always markers, sized by data).
+  const isBubble = chart.chartType === 'bubble';
+  const style = isBubble ? 'marker' : (chart.scatterStyle ?? 'marker');
+  const drawLines     = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
+  const drawSmooth    = style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
+  const hideMarkersByStyle = style === 'lineNoMarker' || style === 'smoothNoMarker';
+
+  // Render each series. Order: error bars (behind), connecting lines,
+  // markers, then data labels (in front). dPt overrides apply per point
+  // for color and marker shape; dLbl overrides apply per point for label
+  // text and position.
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
     const fallbackColor = chartColor(si, s);
@@ -1564,17 +1574,78 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       drawSeriesErrorBars(ctx, s, eb, cats, useIndexX, toX, toY, fallbackColor);
     }
 
-    // Markers (skip when symbol="none" or series-level showMarker is false).
-    const hideMarkers = s.showMarker === false
+    // Connecting lines (scatterStyle = line / smooth / lineMarker / smoothMarker).
+    if (drawLines || drawSmooth) {
+      const pts: Array<{ x: number; y: number }> = [];
+      for (let ci = 0; ci < s.values.length; ci++) {
+        const yv = s.values[ci]; if (yv == null) continue;
+        const xv = useIndexX ? ci : parseFloat(cats[ci] ?? '0');
+        if (isNaN(xv)) continue;
+        pts.push({ x: toX(xv), y: toY(yv) });
+      }
+      if (pts.length >= 2) {
+        ctx.save();
+        ctx.strokeStyle = s.color ? `#${s.color}` : fallbackColor;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        if (drawSmooth && pts.length >= 3) {
+          // Catmull-Rom-ish: cubic Bézier between consecutive points with
+          // tangents derived from neighbours. Good enough for the typical
+          // ECMA-376 smoothing intent without shipping a full spline lib.
+          for (let i = 0; i < pts.length - 1; i++) {
+            const p0 = pts[i - 1] ?? pts[i];
+            const p1 = pts[i];
+            const p2 = pts[i + 1];
+            const p3 = pts[i + 2] ?? p2;
+            const cp1x = p1.x + (p2.x - p0.x) / 6;
+            const cp1y = p1.y + (p2.y - p0.y) / 6;
+            const cp2x = p2.x - (p3.x - p1.x) / 6;
+            const cp2y = p2.y - (p3.y - p1.y) / 6;
+            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+          }
+        } else {
+          for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Markers (skip when symbol="none", series-level showMarker false, or
+    // the scatter style explicitly disables markers).
+    const hideMarkers = hideMarkersByStyle
+      || s.showMarker === false
       || (typeof s.markerSymbol === 'string' && s.markerSymbol === 'none');
     if (!hideMarkers) {
+      // Bubble size scaling. ECMA-376 §21.2.2.4 treats `<c:bubbleSize>` as an
+      // area-proportional value, so radius scales by sqrt. We pick a max
+      // radius proportional to the plot width / point count so bubbles
+      // don't overlap in typical Excel-style data.
+      let bubbleScale = 0;
+      if (isBubble && s.bubbleSizes && s.bubbleSizes.length > 0) {
+        const maxSz = Math.max(0, ...s.bubbleSizes.filter((v): v is number => v != null));
+        if (maxSz > 0) {
+          const maxRadiusPx = Math.min(pw, ph) / Math.max(8, s.values.length * 1.6);
+          bubbleScale = maxRadiusPx / Math.sqrt(maxSz);
+        }
+      }
+
       for (let ci = 0; ci < s.values.length; ci++) {
         const yv = s.values[ci]; if (yv == null) continue;
         const xv = useIndexX ? ci : parseFloat(cats[ci] ?? '0');
         if (isNaN(xv)) continue;
         const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
         const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle') as string;
-        const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
+        let sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
+        if (isBubble && bubbleScale > 0) {
+          const bsz = s.bubbleSizes?.[ci];
+          if (bsz != null && bsz > 0) {
+            // Convert resulting radius (px) back to pt so drawMarker's
+            // ptToPx multiplication gives the same px size.
+            sizePt = (Math.sqrt(bsz) * bubbleScale * 2) / ptToPx;
+          }
+        }
         const fill = dpt?.markerFill
           ?? dpt?.color
           ?? s.markerFill
@@ -1595,8 +1666,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
 /** Draw a single ECMA-376 §21.2.2.32 marker shape centered at `(cx, cy)`.
  *  `sizePt` is the spec's marker side length in points (Excel's default
- *  is 5). `fill` and `line` are hex strings without `#`; `line` may be
- *  null in which case no outline is drawn. `picture` falls back to a
+ *  is 5). `fill` and `line` are hex strings; a leading `#` is tolerated so
+ *  callers that route through `chartColor` (which returns `#RRGGBB`)
+ *  don't end up double-prefixing into an invalid `##RRGGBB`. `line` may
+ *  be null in which case no outline is drawn. `picture` falls back to a
  *  square because we don't ship the embedded image yet. */
 function drawMarker(
   ctx: CanvasRenderingContext2D,
@@ -1609,10 +1682,12 @@ function drawMarker(
 ): void {
   const sizePx = Math.max(2, sizePt * ptToPx);
   const half = sizePx / 2;
+  const fillCss = fill.startsWith('#') ? fill : `#${fill}`;
+  const lineCss = line ? (line.startsWith('#') ? line : `#${line}`) : null;
   ctx.save();
-  ctx.fillStyle = `#${fill}`;
-  if (line) {
-    ctx.strokeStyle = `#${line}`;
+  ctx.fillStyle = fillCss;
+  if (lineCss) {
+    ctx.strokeStyle = lineCss;
     ctx.lineWidth = 1;
   }
   switch (symbol) {
@@ -1643,7 +1718,7 @@ function drawMarker(
       break;
     }
     case 'x': {
-      ctx.strokeStyle = `#${fill}`;
+      ctx.strokeStyle = fillCss;
       ctx.lineWidth = Math.max(1, sizePx * 0.18);
       ctx.beginPath();
       ctx.moveTo(cx - half, cy - half); ctx.lineTo(cx + half, cy + half);
@@ -1652,7 +1727,7 @@ function drawMarker(
       break;
     }
     case 'plus': {
-      ctx.strokeStyle = `#${fill}`;
+      ctx.strokeStyle = fillCss;
       ctx.lineWidth = Math.max(1, sizePx * 0.18);
       ctx.beginPath();
       ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy);
