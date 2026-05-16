@@ -81,5 +81,8 @@
     "vite-plugin-dts": "^4.5.4",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1"
   }
 }
