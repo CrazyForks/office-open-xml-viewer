@@ -41,14 +41,45 @@ const FREEZE_LINE_COLOR = '#7a7a7a';
  *  invoked many times per render so we memoize. */
 const mdwCache = new Map<string, number>();
 
+/** Excel's empirical MDW overrides for fonts that the host might not have
+ *  installed (e.g. Meiryo UI on macOS, where Canvas2D falls back to a
+ *  narrower sans-serif and undermeasures the digits — verified against
+ *  private/sample-10's column widths in Excel: 21.125 chars = 169 px,
+ *  which requires MDW=8). Without these the rendered column widths drift
+ *  smaller than Excel's, which then offsets every drawing anchor inside
+ *  the sheet (sample-10's H7 sun ended up one cell to the right of where
+ *  Excel renders it).
+ *
+ *  Only listed when the Canvas2D fallback measurement diverges from
+ *  Excel's actual MDW; other fonts (e.g. Yu Gothic 12 pt where Canvas
+ *  happens to land on 8) continue to use the measurement. */
+const MDW_TABLE: Record<string, Record<number, number>> = {
+  'meiryo ui':       { 10: 8, 11: 8 },
+  'meiryo':          { 10: 8, 11: 8 },
+};
+
 /** Measure the Max Digit Width (ECMA-376 §18.3.1.13) for an arbitrary font
  *  using Canvas2D. The maximum of `measureText('0'..'9').width` is taken,
  *  rounded to the nearest pixel to match Excel's storage of integer pixel
- *  widths in `<col>` width values. */
+ *  widths in `<col>` width values.
+ *
+ *  When the requested font isn't installed on the host (e.g. Meiryo UI on
+ *  macOS), Canvas2D silently falls back to a narrower sans-serif face and
+ *  the digit width comes back ~1 px too small. That offset cascades into
+ *  the column widths, shifting every drawing anchor inside the sheet
+ *  relative to where Excel placed it (private/sample-10 H7 sun ended up
+ *  one cell to the right of where Excel renders it). So we consult a small
+ *  lookup table of Excel's documented MDW values first and only fall back
+ *  to measurement for unknown faces. */
 export function computeMdw(family: string, sizePt: number): number {
   const key = `${family}:${sizePt}`;
   const cached = mdwCache.get(key);
   if (cached !== undefined) return cached;
+  const tableHit = MDW_TABLE[family.toLowerCase()]?.[Math.round(sizePt)];
+  if (tableHit !== undefined) {
+    mdwCache.set(key, tableHit);
+    return tableHit;
+  }
   const sizePx = sizePt * PT_TO_PX;
   // Off-DOM canvas: avoids touching the document tree from background calls.
   const canvas = (typeof OffscreenCanvas !== 'undefined')
@@ -83,17 +114,13 @@ export function colWidthToPx(w: number, mdw: number = MDW_FALLBACK): number {
 
 /** Convert a row height value from the parser into CSS pixels.
  *
- * ECMA-376 §18.3.1.73 (`row.ht`) and §18.3.1.81 (`sheetFormatPr.defaultRowHeight`)
- * both nominally specify "point size", but in practice every Excel-saved file
- * we have access to stores row heights as their *display pixel* equivalent —
- * e.g. a row that Excel shows at 21 px is written as `ht="21"`, not the
- * 15.75 pt that 21 px would correspond to under 4/3 conversion. Applying the
- * pt→px conversion here therefore made all rows visibly taller than Excel
- * (sample-27 row 4 rendered 28 px instead of 21 px). The parser already
- * normalizes the "intrinsic default" to 20 (CSS px) so callers can treat
- * every value here as already-resolved display pixels. */
+ * ECMA-376 §18.3.1.73 (`<row ht>`) and §18.3.1.81 (`sheetFormatPr@defaultRowHeight`)
+ * both specify the value in points. Convert pt → CSS px at 96 DPI (×4/3)
+ * to match what Excel actually displays. The parser keeps both per-row
+ * heights and the intrinsic default in points so this single conversion
+ * applies to either source. */
 export function rowHeightToPx(h: number): number {
-  return Math.round(h);
+  return Math.round(h * PT_TO_PX);
 }
 
 function hexToRgba(hex: string, alpha = 1): string {
@@ -3755,17 +3782,33 @@ function renderImages(
     // xdr col/row are 0-indexed; our widths map is 1-indexed.
     const fromCol1 = anchor.fromCol + 1;
     const fromRow1 = anchor.fromRow + 1;
-    const toCol1   = anchor.toCol   + 1;
-    const toRow1   = anchor.toRow   + 1;
 
-    // Image sheet-space rect (in scaled px)
+    // Image sheet-space top-left (always derived from the `from` anchor)
     const imgSheetX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
     const imgSheetY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
-    const imgSheetX2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
-    const imgSheetY2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
 
-    const imgW = imgSheetX2 - imgSheetX1;
-    const imgH = imgSheetY2 - imgSheetY1;
+    // ECMA-376 §20.5.2.33 + "Move but don't size with cells": when the
+    // anchor was saved with editAs="oneCell" Excel preserves the picture's
+    // saved EMU size (<xdr:spPr><a:xfrm><a:ext>) regardless of cell
+    // resizing, and the to anchor is only updated to track that fixed size.
+    // Use the native ext directly so the rendered image matches Excel even
+    // when our column-width / row-height computation diverges slightly from
+    // Excel's (e.g. row ht is stored as px in this viewer but Excel applies
+    // pt→px for some files). Falls back to the from/to-derived rect for
+    // editAs="twoCell" (default, image resizes with cells) and absolute
+    // anchors, or when the parser couldn't capture the native ext.
+    let imgW: number, imgH: number;
+    if (anchor.editAs === 'oneCell' && anchor.nativeExtCx > 0 && anchor.nativeExtCy > 0) {
+      imgW = (anchor.nativeExtCx * cs) / EMU_PER_PX;
+      imgH = (anchor.nativeExtCy * cs) / EMU_PER_PX;
+    } else {
+      const toCol1 = anchor.toCol + 1;
+      const toRow1 = anchor.toRow + 1;
+      const imgSheetX2 = sheetXForCol(ws, toCol1, cs) + (anchor.toColOff * cs) / EMU_PER_PX;
+      const imgSheetY2 = sheetYForRow(ws, toRow1, cs) + (anchor.toRowOff * cs) / EMU_PER_PX;
+      imgW = imgSheetX2 - imgSheetX1;
+      imgH = imgSheetY2 - imgSheetY1;
+    }
     if (imgW <= 0 || imgH <= 0) continue;
 
     // Translate to canvas coordinates of the scrollable viewport
@@ -3811,15 +3854,25 @@ function renderShapeGroups(
   for (const anchor of anchors) {
     const fromCol1 = anchor.fromCol + 1;
     const fromRow1 = anchor.fromRow + 1;
-    const toCol1   = anchor.toCol   + 1;
-    const toRow1   = anchor.toRow   + 1;
 
     const x1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
     const y1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
-    const x2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
-    const y2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
-    const w = x2 - x1;
-    const h = y2 - y1;
+
+    // editAs="oneCell" preserves the group's saved grpSpPr/xfrm/ext EMU
+    // size regardless of cell resizing (ECMA-376 §20.5.2.33). See
+    // renderImages for the same handling on stand-alone <xdr:pic>.
+    let w: number, h: number;
+    if (anchor.editAs === 'oneCell' && anchor.nativeExtCx > 0 && anchor.nativeExtCy > 0) {
+      w = (anchor.nativeExtCx * cs) / EMU_PER_PX;
+      h = (anchor.nativeExtCy * cs) / EMU_PER_PX;
+    } else {
+      const toCol1 = anchor.toCol + 1;
+      const toRow1 = anchor.toRow + 1;
+      const x2 = sheetXForCol(ws, toCol1, cs) + (anchor.toColOff * cs) / EMU_PER_PX;
+      const y2 = sheetYForRow(ws, toRow1, cs) + (anchor.toRowOff * cs) / EMU_PER_PX;
+      w = x2 - x1;
+      h = y2 - y1;
+    }
     if (w <= 0 || h <= 0) continue;
 
     const canvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;

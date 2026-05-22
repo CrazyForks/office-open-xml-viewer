@@ -731,6 +731,16 @@ pub struct ShapeAnchor {
     pub to_col_off: i64,
     pub to_row: u32,
     pub to_row_off: i64,
+    /// `twoCellAnchor@editAs` (ECMA-376 §20.5.2.33). With `"oneCell"` the
+    /// renderer uses `native_ext_cx/cy` for the on-sheet size instead of the
+    /// from/to-derived rect (Excel's "Move but don't size with cells").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_as: Option<String>,
+    /// Group's `<xdr:grpSpPr><a:xfrm><a:ext cx cy>` (or `<xdr:spPr><a:xfrm>`
+    /// for stand-alone sp/pic) in EMU. The saved on-sheet size, used as the
+    /// authoritative extent when `editAs == "oneCell"`. 0 = unavailable.
+    pub native_ext_cx: i64,
+    pub native_ext_cy: i64,
     pub shapes: Vec<ShapeInfo>,
 }
 
@@ -887,6 +897,17 @@ pub struct ImageAnchor {
     pub to_col_off: i64,
     pub to_row: u32,
     pub to_row_off: i64,
+    /// `twoCellAnchor@editAs` (ECMA-376 §20.5.2.33). Possible values: `"twoCell"`
+    /// (default), `"oneCell"`, `"absolute"`. With `"oneCell"`, Excel preserves
+    /// the picture's native EMU size (below) when cells are resized; with
+    /// `"twoCell"`, the from/to anchor rect IS the rendered size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_as: Option<String>,
+    /// `<xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>` in EMU. The picture's saved
+    /// size at insert/edit time. Used as the authoritative size when
+    /// `editAs == "oneCell"`. 0 = absent / use from/to rect.
+    pub native_ext_cx: i64,
+    pub native_ext_cy: i64,
     /// Data URL: "data:image/png;base64,..."
     pub data_url: String,
 }
@@ -1565,8 +1586,8 @@ fn parse_si_node(
                             let mut f = RunFont::default();
                             for rp in rc.children() {
                                 match rp.tag_name().name() {
-                                    "b" => f.bold = true,
-                                    "i" => f.italic = true,
+                                    "b" => f.bold = parse_st_on_off(&rp),
+                                    "i" => f.italic = parse_st_on_off(&rp),
                                     "u" => {
                                         // ECMA-376 §18.4.13 ST_UnderlineValues:
                                         // single (default) | double | singleAccounting |
@@ -1579,7 +1600,7 @@ fn parse_si_node(
                                             }
                                         }
                                     }
-                                    "strike" => f.strike = true,
+                                    "strike" => f.strike = parse_st_on_off(&rp),
                                     "vertAlign" => {
                                         // ECMA-376 §18.4.6 ST_VerticalAlignRun.
                                         if let Some(v) = rp.attribute("val") {
@@ -1687,8 +1708,8 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                         let mut f = Font { size: 11.0, ..Default::default() };
                         for fc in child.children() {
                             match fc.tag_name().name() {
-                                "b" => f.bold = true,
-                                "i" => f.italic = true,
+                                "b" => f.bold = parse_st_on_off(&fc),
+                                "i" => f.italic = parse_st_on_off(&fc),
                                 "u" => {
                                     let v = fc.attribute("val").unwrap_or("single");
                                     if v != "none" {
@@ -1698,7 +1719,7 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                                         }
                                     }
                                 }
-                                "strike" => f.strike = true,
+                                "strike" => f.strike = parse_st_on_off(&fc),
                                 "vertAlign" => {
                                     if let Some(v) = fc.attribute("val") {
                                         if v != "baseline" {
@@ -1795,6 +1816,18 @@ fn parse_num_fmts(doc: &roxmltree::Document, ns: &str) -> Vec<NumFmt> {
     fmts
 }
 
+/// ECMA-376 §22.9.2 ST_OnOff. Toggle elements like `<b/>`, `<i/>`, `<strike/>`
+/// accept an optional `val` attribute whose value is "1" / "true" (on) or
+/// "0" / "false" (off). When omitted, the presence of the element itself
+/// implies "on". A dxf with `<i val="0"/>` therefore means "differential
+/// format that *clears* italic", not "set italic to true".
+fn parse_st_on_off(node: &roxmltree::Node) -> bool {
+    match node.attribute("val") {
+        None => true,
+        Some(v) => !matches!(v, "0" | "false" | "False" | "FALSE" | "off" | "Off"),
+    }
+}
+
 fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Font> {
     let mut fonts = Vec::new();
     for fonts_node in doc.descendants() {
@@ -1804,8 +1837,8 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                 let mut f = Font { size: 11.0, ..Default::default() };
                 for child in font_node.children() {
                     match child.tag_name().name() {
-                        "b" => f.bold = true,
-                        "i" => f.italic = true,
+                        "b" => f.bold = parse_st_on_off(&child),
+                        "i" => f.italic = parse_st_on_off(&child),
                         "u" => {
                             let v = child.attribute("val").unwrap_or("single");
                             if v != "none" {
@@ -1815,7 +1848,7 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                                 }
                             }
                         }
-                        "strike" => f.strike = true,
+                        "strike" => f.strike = parse_st_on_off(&child),
                         "vertAlign" => {
                             if let Some(v) = child.attribute("val") {
                                 if v != "baseline" {
@@ -1989,14 +2022,12 @@ fn parse_worksheet(
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
     let mut default_col_width = 8.43;
-    // Intrinsic default row height in *display pixels* — Excel's baseline
-    // for the Calibri 11 normal style. ECMA-376 §18.3.1.81 nominally
-    // measures `defaultRowHeight` in points, but Excel actually writes the
-    // pixel-equivalent value (sample-27 stores `defaultRowHeight="20"` and
-    // Excel displays 20 px on screen — see the renderer-side `rowHeightToPx`
-    // comment). Storing 20 here and skipping the pt→px multiplication keeps
-    // both code paths consistent.
-    let mut default_row_height = 20.0;
+    // Intrinsic default row height in *points* — ECMA-376 §18.3.1.81.
+    // 15 pt = 20 CSS px at 96 DPI, Excel's baseline for the Calibri 11
+    // Normal style. The renderer multiplies by 4/3 at display time, so
+    // both this default and per-row `<row ht="…">` values share the
+    // same units across the parser/renderer boundary.
+    let mut default_row_height = 15.0;
     let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
     let mut show_zeros = true;
     let mut show_gridlines = true;
@@ -2186,10 +2217,22 @@ fn parse_worksheet(
             "row" if node.tag_name().namespace() == Some(ns) => {
                 let row_idx: u32 = node.attribute("r").and_then(|s| s.parse().ok()).unwrap_or(0);
                 let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+                // ECMA-376 §18.3.1.73 `<row>@ht` is only authoritative when
+                // `@customHeight="1"`. When customHeight is absent / 0 the
+                // ht attribute is informational and Excel falls back to the
+                // workbook default (sample-27 stores ht="21" on rows 4-10
+                // without customHeight; Excel still displays them at the
+                // 20-px default rather than 21 pt × 4/3).
+                let custom_height = node
+                    .attribute("customHeight")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
                 let height: Option<f64> = if hidden {
                     Some(0.0)
-                } else {
+                } else if custom_height {
                     node.attribute("ht").and_then(|s| s.parse().ok())
+                } else {
+                    None
                 };
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);
@@ -2765,6 +2808,13 @@ fn parse_drawing_anchors(
         let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
         let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
         let mut pic_rid: Option<String> = None;
+        let mut native_ext_cx: i64 = 0;
+        let mut native_ext_cy: i64 = 0;
+        // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs`. Possible values:
+        // "twoCell" (default), "oneCell", "absolute". With "oneCell" Excel
+        // preserves the picture's saved size from <xdr:spPr><a:xfrm><a:ext>
+        // regardless of cell resizing.
+        let edit_as = anchor.attribute("editAs").map(|s| s.to_string());
 
         for child in anchor.children() {
             if !child.is_element() { continue; }
@@ -2804,6 +2854,20 @@ fn parse_drawing_anchors(
                                 .map(|a| a.value().to_string());
                         }
                     }
+                    // <xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>: the picture's
+                    // own saved EMU extent. Authoritative when editAs="oneCell".
+                    if let Some(sp_pr) = child.children()
+                        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(xdr_ns))
+                    {
+                        if let Some(xfrm_n) = sp_pr.children()
+                            .find(|n| n.tag_name().name() == "xfrm" && n.tag_name().namespace() == Some(a_ns))
+                        {
+                            if let Some(xfrm) = parse_xfrm(&xfrm_n) {
+                                native_ext_cx = xfrm.ext_x as i64;
+                                native_ext_cy = xfrm.ext_y as i64;
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2819,6 +2883,9 @@ fn parse_drawing_anchors(
         anchors.push(ImageAnchor {
             from_col, from_col_off, from_row, from_row_off,
             to_col, to_col_off, to_row, to_row_off,
+            edit_as,
+            native_ext_cx,
+            native_ext_cy,
             data_url,
         });
     }
@@ -3294,6 +3361,12 @@ fn parse_shape_anchors(
         // Parse from/to anchor rect (shared between grpSp and stand-alone sp paths)
         let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
         let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+        // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs` — see ImageAnchor parsing
+        // path for semantics. `"oneCell"` instructs the renderer to preserve
+        // the group's saved EMU size instead of resizing with the cell rect.
+        let edit_as = anchor.attribute("editAs").map(|s| s.to_string());
+        let native_ext_cx: i64;
+        let native_ext_cy: i64;
         for c in anchor.children() {
             if !c.is_element() { continue; }
             if c.tag_name().name() == "from" || c.tag_name().name() == "to" {
@@ -3333,6 +3406,11 @@ fn parse_shape_anchors(
             let Some(root) = xfrm else { continue; };
             if !root.has_ch || root.ch_ext_x == 0.0 || root.ch_ext_y == 0.0 { continue; }
 
+            // Top-level grpSp ext is the group's saved on-sheet EMU size —
+            // authoritative when editAs="oneCell".
+            native_ext_cx = root.ext_x as i64;
+            native_ext_cy = root.ext_y as i64;
+
             // Map child coords → root coords with the grpSp's own chOff/chExt.
             let csx = root.ext_x / root.ch_ext_x;
             let csy = root.ext_y / root.ch_ext_y;
@@ -3354,6 +3432,8 @@ fn parse_shape_anchors(
             let Some(xfrm_n) = xfrm_node else { continue; };
             let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
             if xfrm.ext_x == 0.0 || xfrm.ext_y == 0.0 { continue; }
+            native_ext_cx = xfrm.ext_x as i64;
+            native_ext_cy = xfrm.ext_y as i64;
             collect_shapes(&anchor, xfrm.off_x, xfrm.off_y, xfrm.ext_x, xfrm.ext_y,
                            1.0, 1.0, 0.0, 0.0, theme_colors, rid_urls, &mut shapes);
         } else {
@@ -3365,6 +3445,9 @@ fn parse_shape_anchors(
         anchors.push(ShapeAnchor {
             from_col, from_col_off, from_row, from_row_off,
             to_col, to_col_off, to_row, to_row_off,
+            edit_as,
+            native_ext_cx,
+            native_ext_cy,
             shapes,
         });
     }
