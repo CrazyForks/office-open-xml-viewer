@@ -349,13 +349,58 @@ function drawAxisTitle(
   ctx.restore();
 }
 
+/** Line-shaped legend swatch styles match Excel's actual chart-type
+ *  conventions: bar/column/area/pie use a filled rectangle ("swatch");
+ *  line/radar/scatter use a horizontal line segment (the same stroke
+ *  weight the series uses). Without this, line-chart legends rendered as
+ *  filled squares, which read as a different chart-type marker.
+ */
+type LegendSwatchStyle = 'fill' | 'line';
+
+function legendSwatchStyle(chartType: string | undefined): LegendSwatchStyle {
+  if (!chartType) return 'fill';
+  if (
+    chartType === 'line' || chartType === 'stackedLine' || chartType === 'stackedLinePct' ||
+    chartType === 'radar' || chartType === 'scatter'
+  ) {
+    return 'line';
+  }
+  return 'fill';
+}
+
+function drawLegendSwatch(
+  ctx: CanvasRenderingContext2D,
+  style: LegendSwatchStyle,
+  color: string,
+  x: number, y: number, w: number, h: number,
+): void {
+  ctx.fillStyle = color;
+  if (style === 'line') {
+    // Horizontal stroke centered vertically inside the swatch slot. 2 px
+    // weight matches Excel's default 2.25 pt line at typical legend sizes.
+    ctx.strokeStyle = color;
+    const prevW = ctx.lineWidth;
+    ctx.lineWidth = Math.max(1.5, h * 0.15);
+    ctx.beginPath();
+    const ly = y + h / 2;
+    ctx.moveTo(x, ly);
+    ctx.lineTo(x + w, ly);
+    ctx.stroke();
+    ctx.lineWidth = prevW;
+  } else {
+    ctx.fillRect(x, y, w, h);
+  }
+}
+
 function drawLegend(
   ctx: CanvasRenderingContext2D,
   series: ChartSeries[],
   lx: number, ly: number, lw: number, lh: number,
   orient: 'vertical' | 'horizontal' = 'vertical',
+  chartType?: string,
 ): void {
   const sw = 10; const gap = 4;
+  const swatchStyle = legendSwatchStyle(chartType);
   if (orient === 'horizontal') {
     // Excel lays a bottom/top legend as a single horizontal row, centered.
     const fontSize = Math.max(9, Math.min(12, lh * 0.7));
@@ -368,8 +413,7 @@ function drawLegend(
     let rx = lx + (lw - total) / 2;
     const ry = ly + lh / 2;
     for (let i = 0; i < series.length; i++) {
-      ctx.fillStyle = chartColor(i, series[i]);
-      ctx.fillRect(rx, ry - fontSize / 2, sw, fontSize);
+      drawLegendSwatch(ctx, swatchStyle, chartColor(i, series[i]), rx, ry - fontSize / 2, sw, fontSize);
       ctx.fillStyle = '#333'; ctx.textAlign = 'left';
       ctx.fillText(labels[i].slice(0, 30), rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
@@ -382,8 +426,7 @@ function drawLegend(
   const rowH = fontSize + 4;
   let ry = ly + (lh - rowH * series.length) / 2;
   for (let i = 0; i < series.length; i++) {
-    ctx.fillStyle = chartColor(i, series[i]);
-    ctx.fillRect(lx, ry, sw, fontSize);
+    drawLegendSwatch(ctx, swatchStyle, chartColor(i, series[i]), lx, ry, sw, fontSize);
     ctx.fillStyle = '#333'; ctx.textAlign = 'left';
     const label = series[i].name || `Series ${i + 1}`;
     ctx.fillText(label.slice(0, 20), lx + sw + gap, ry + fontSize / 2);
@@ -438,21 +481,21 @@ function drawLegendForLayout(
     // when on left/right. A manual box wider than tall implies horizontal —
     // matches Excel's one-row legend rendering for top/bottom manual layouts.
     const orient = lw >= lh ? 'horizontal' : 'vertical';
-    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient);
+    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient, chart.chartType);
     return;
   }
   switch (leg.side) {
     case 'r':
-      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph);
+      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType);
       break;
     case 'l':
-      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph);
+      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph, 'vertical', chart.chartType);
       break;
     case 't':
-      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal');
+      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal', chart.chartType);
       break;
     case 'b':
-      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal');
+      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal', chart.chartType);
       break;
   }
 }
@@ -725,10 +768,17 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   }
 
   ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+  // `<c:spPr><a:ln><a:noFill>` on the corresponding axis suppresses just
+  // the rule (labels stay). For a vertical bar chart the bottom rule is
+  // the category axis; for a horizontal bar chart it's the value axis.
   if (!isH) {
-    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+      ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    }
   } else {
-    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
+      ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    }
   }
 
   // Bar cluster geometry — ECMA-376 §21.2.2.13 (gapWidth = % of bar width
@@ -989,10 +1039,14 @@ function renderLineChart(
   }
 
   // Axis lines: bottom (category) + left (value). Both default to visible
-  // unless hidden explicitly.
+  // unless hidden explicitly. `<c:spPr><a:ln><a:noFill>` (line-only hide)
+  // suppresses the rule while keeping labels and tick marks — sample-1
+  // "Carbon & Growth" uses this on the value axis.
   ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
-  if (!chart.valAxisHidden) {
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  }
+  if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
     ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
   }
 

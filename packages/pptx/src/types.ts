@@ -173,6 +173,10 @@ export interface ChartElement {
   showDataLabels: boolean;
   catAxisHidden: boolean;
   valAxisHidden: boolean;
+  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — line-only hide; labels stay. */
+  catAxisLineHidden?: boolean;
+  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — line-only hide; labels stay. */
+  valAxisLineHidden?: boolean;
   plotAreaBg: string | null;
   /** Outer chartSpace background (hex without '#'). null when noFill/absent. */
   chartBg: string | null;

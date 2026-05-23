@@ -181,6 +181,13 @@ export interface ChartModel {
   catAxisHidden: boolean;
   /** `<c:valAx><c:delete val="1"/>`. */
   valAxisHidden: boolean;
+  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — hide just the axis LINE; labels
+   *  and tick marks still render. Distinct from `catAxisHidden` (which
+   *  removes everything via `<c:delete val="1"/>`). */
+  catAxisLineHidden: boolean;
+  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — hide just the axis LINE; labels
+   *  and tick marks still render. */
+  valAxisLineHidden: boolean;
   /** Hex without '#'. From `<c:plotArea><c:spPr><a:solidFill>`. */
   plotAreaBg: string | null;
   /** Outer chartSpace background (hex without '#'). null when noFill/absent. */
