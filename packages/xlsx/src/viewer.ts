@@ -48,6 +48,9 @@ export class XlsxViewer {
   private scrollHost: HTMLDivElement;
   private spacer: HTMLDivElement;
   private tabBar: HTMLDivElement;
+  private tabStrip: HTMLDivElement;
+  private navPrev: HTMLButtonElement;
+  private navNext: HTMLButtonElement;
   private tabs: HTMLButtonElement[] = [];
   private currentSheet = 0;
   private currentWorksheet: Worksheet | null = null;
@@ -100,12 +103,31 @@ export class XlsxViewer {
     this.tabBar = document.createElement('div');
     this.tabBar.style.cssText =
       `display:flex;align-items:flex-end;height:${TAB_BAR_H}px;flex-shrink:0;` +
-      `background:#f0f0f0;border-top:1px solid #c8ccd0;` +
-      `overflow-x:auto;overflow-y:hidden;padding:0 4px;gap:1px;scrollbar-width:none;`;
+      `background:#f0f0f0;border-top:1px solid #c8ccd0;padding:0 4px;gap:2px;`;
+
+    // Excel-style scroll buttons. They scroll the tab strip; they do NOT change
+    // the active sheet. Disabled (greyed) at the ends / when there is no overflow.
+    this.navPrev = this.makeNavButton('◀', 'Scroll tabs left', () => this.scrollTabs(-1));
+    this.navNext = this.makeNavButton('▶', 'Scroll tabs right', () => this.scrollTabs(1));
+    this.navPrev.dataset.xlsxTabNav = 'prev';
+    this.navNext.dataset.xlsxTabNav = 'next';
+    this.navNext.style.marginRight = '4px';
+
+    // The scrollable strip that actually holds the sheet tabs. position:relative
+    // so each tab's offsetLeft is measured against the strip's scroll content.
+    this.tabStrip = document.createElement('div');
+    this.tabStrip.style.cssText =
+      `position:relative;display:flex;align-items:flex-end;flex:1;min-width:0;height:100%;` +
+      `overflow-x:auto;overflow-y:hidden;gap:1px;scrollbar-width:none;`;
+    this.tabStrip.classList.add('xlsx-tab-strip');
     const style = document.createElement('style');
-    style.textContent = `.xlsx-tab-bar::-webkit-scrollbar{display:none}`;
+    style.textContent = `.xlsx-tab-strip::-webkit-scrollbar{display:none}`;
     document.head.appendChild(style);
-    this.tabBar.classList.add('xlsx-tab-bar');
+    this.tabStrip.addEventListener('scroll', () => this.updateNavButtons());
+
+    this.tabBar.appendChild(this.navPrev);
+    this.tabBar.appendChild(this.navNext);
+    this.tabBar.appendChild(this.tabStrip);
 
     wrapper.appendChild(this.canvasArea);
     wrapper.appendChild(this.tabBar);
@@ -120,6 +142,7 @@ export class XlsxViewer {
     this.resizeObserver = new ResizeObserver(() => {
       this.renderCurrentSheet();
       this.updateSelectionOverlay();
+      this.updateNavButtons();
     });
     this.resizeObserver.observe(this.canvasArea);
 
@@ -680,7 +703,7 @@ export class XlsxViewer {
   }
 
   private buildTabs(): void {
-    this.tabBar.innerHTML = '';
+    this.tabStrip.innerHTML = '';
     this.tabs = [];
     this.wb.sheetNames.forEach((name, i) => {
       const btn = document.createElement('button');
@@ -688,9 +711,75 @@ export class XlsxViewer {
       btn.title = name;
       btn.style.cssText = this.tabStyle(false);
       btn.addEventListener('click', () => this.showSheet(i));
-      this.tabBar.appendChild(btn);
+      this.tabStrip.appendChild(btn);
       this.tabs.push(btn);
     });
+    this.updateNavButtons();
+  }
+
+  private makeNavButton(glyph: string, label: string, onClick: () => void): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.textContent = glyph;
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+    btn.style.cssText = this.navButtonStyle(false);
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  private navButtonStyle(disabled: boolean): string {
+    // Sit a touch lower than the active tab (matches inactive tab height) and
+    // share the tab palette so the buttons read as part of the tab strip.
+    const base =
+      `flex-shrink:0;width:22px;height:${TAB_BAR_H - 5}px;` +
+      `display:flex;align-items:center;justify-content:center;` +
+      `border:1px solid #c8ccd0;border-bottom:none;border-radius:3px 3px 0 0;` +
+      `background:#e0e0e0;color:#555;font-size:9px;line-height:1;` +
+      `box-sizing:border-box;outline:none;`;
+    return disabled
+      ? base + `opacity:0.35;cursor:default;pointer-events:none;`
+      : base + `cursor:pointer;`;
+  }
+
+  private scrollTabs(dir: -1 | 1): void {
+    const strip = this.tabStrip;
+    const viewLeft = strip.scrollLeft;
+    const viewRight = viewLeft + strip.clientWidth;
+    let target: number | null = null;
+    if (dir === 1) {
+      // First tab clipped on the right; align its right edge to the viewport.
+      for (const tab of this.tabs) {
+        const right = tab.offsetLeft + tab.offsetWidth;
+        if (right > viewRight + 1) {
+          target = right - strip.clientWidth;
+          break;
+        }
+      }
+    } else {
+      // Last tab clipped on the left; align its left edge to the viewport.
+      for (let i = this.tabs.length - 1; i >= 0; i--) {
+        const left = this.tabs[i].offsetLeft;
+        if (left < viewLeft - 1) {
+          target = left;
+          break;
+        }
+      }
+    }
+    if (target !== null) {
+      // Instant (not smooth) so the disabled state is consistent the moment the
+      // click resolves — keeps the interaction deterministic to drive/test.
+      strip.scrollLeft = Math.max(0, target);
+    }
+    this.updateNavButtons();
+  }
+
+  private updateNavButtons(): void {
+    const strip = this.tabStrip;
+    const atStart = strip.scrollLeft <= 0;
+    const atEnd = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1;
+    // No overflow => scrollWidth ≈ clientWidth => both ends true => both disabled.
+    this.navPrev.style.cssText = this.navButtonStyle(atStart);
+    this.navNext.style.cssText = this.navButtonStyle(atEnd);
   }
 
   private updateTabActive(index: number): void {
@@ -707,7 +796,7 @@ export class XlsxViewer {
     const activeH = TAB_BAR_H - 2;
     const inactiveH = TAB_BAR_H - 5;
     const base =
-      `display:inline-block;padding:0 14px;` +
+      `display:inline-block;flex:none;padding:0 14px;` +
       `border:1px solid #c8ccd0;border-bottom:none;border-radius:3px 3px 0 0;` +
       `cursor:pointer;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;` +
       `outline:none;box-sizing:border-box;`;
