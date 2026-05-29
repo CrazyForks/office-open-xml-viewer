@@ -3,6 +3,10 @@ import type { ViewportRange, Worksheet } from './types.js';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet } from './renderer.js';
 
 const TAB_BAR_H = 30;
+// Gap between adjacent sheet tabs. The first tab also gets this much leading
+// space so it is offset from the row-header boundary by the same margin that
+// separates tabs from each other.
+const TAB_GAP = 1;
 
 export interface XlsxViewerOptions {
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
@@ -125,9 +129,12 @@ export class XlsxViewer {
     // The scrollable strip that actually holds the sheet tabs. position:relative
     // so each tab's offsetLeft is measured against the strip's scroll content.
     this.tabStrip = document.createElement('div');
+    // margin-left (not padding) keeps the leading gap OUTSIDE the scroll content
+    // so each tab's offsetLeft / scrollLeft math is unaffected and scrolling
+    // still returns to exactly 0.
     this.tabStrip.style.cssText =
       `position:relative;display:flex;align-items:flex-end;flex:1;min-width:0;height:100%;` +
-      `overflow-x:auto;overflow-y:hidden;gap:1px;scrollbar-width:none;`;
+      `margin-left:${TAB_GAP}px;overflow-x:auto;overflow-y:hidden;gap:${TAB_GAP}px;scrollbar-width:none;`;
     this.tabStrip.classList.add('xlsx-tab-strip');
     const style = document.createElement('style');
     style.textContent =
