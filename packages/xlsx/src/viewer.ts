@@ -121,7 +121,10 @@ export class XlsxViewer {
       `overflow-x:auto;overflow-y:hidden;gap:1px;scrollbar-width:none;`;
     this.tabStrip.classList.add('xlsx-tab-strip');
     const style = document.createElement('style');
-    style.textContent = `.xlsx-tab-strip::-webkit-scrollbar{display:none}`;
+    style.textContent =
+      `.xlsx-tab-strip::-webkit-scrollbar{display:none}` +
+      `.xlsx-tab-nav{background:transparent;transition:background 0.1s;}` +
+      `.xlsx-tab-nav:hover{background:rgba(0,0,0,0.08);}`;
     document.head.appendChild(style);
     this.tabStrip.addEventListener('scroll', () => this.updateNavButtons());
 
@@ -722,22 +725,23 @@ export class XlsxViewer {
     btn.textContent = glyph;
     btn.setAttribute('aria-label', label);
     btn.title = label;
+    btn.classList.add('xlsx-tab-nav');
     btn.style.cssText = this.navButtonStyle(false);
     btn.addEventListener('click', onClick);
     return btn;
   }
 
   private navButtonStyle(disabled: boolean): string {
-    // Sit a touch lower than the active tab (matches inactive tab height) and
-    // share the tab palette so the buttons read as part of the tab strip.
+    // Plain triangle icons — no border / tab chrome. The background (incl. the
+    // hover tint) lives in the injected `.xlsx-tab-nav` stylesheet so the inline
+    // style does not shadow the `:hover` rule.
     const base =
-      `flex-shrink:0;width:22px;height:${TAB_BAR_H - 5}px;` +
+      `flex-shrink:0;align-self:center;width:18px;height:18px;padding:0;` +
       `display:flex;align-items:center;justify-content:center;` +
-      `border:1px solid #c8ccd0;border-bottom:none;border-radius:3px 3px 0 0;` +
-      `background:#e0e0e0;color:#555;font-size:9px;line-height:1;` +
+      `border:none;border-radius:3px;color:#666;font-size:8px;line-height:1;` +
       `box-sizing:border-box;outline:none;`;
     return disabled
-      ? base + `opacity:0.35;cursor:default;pointer-events:none;`
+      ? base + `opacity:0.3;cursor:default;pointer-events:none;`
       : base + `cursor:pointer;`;
   }
 
