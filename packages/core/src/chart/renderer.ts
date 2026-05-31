@@ -2059,25 +2059,32 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   const { x, y, w, h } = r;
   // PowerPoint's chartEx waterfall uses very thin side margins when the
   // value axis is hidden — there's no axis label area to reserve.
-  const padL = chart.valAxisHidden ? w * 0.01 : w * 0.11;
-  const padR = w * 0.01;
-  // Top / bottom padding sets where bar bottoms (value 0) and tops (value
-  // padded) land in absolute slide coordinates. Sibling shapes — e.g. the
-  // sample-2 slide-8 callouts whose `<a:prstGeom prst="callout1">` adj3/adj4
-  // tips are placed in absolute slide EMU — assume a specific y for the
-  // bar's lower-left corner (the running-total line). Working that
-  // backwards from id=14's tip at ((5015880 + 1468672*0.95815),
-  // (3748214 + 516167*(-0.67286))) = (6423117, 3400921) EMU and solving
-  // for the padT that puts 人件費変化's bar.start (value 388, the
-  // running-total line for that bar) at that y gives padT ≈ 12% with
-  // padB ≈ 14%. Smaller padT shifts bar bottoms upward and the callout
-  // tips render below the bars (the regression PR #248 introduced).
-  const padT = h * 0.12;
-  const padB = h * 0.14;
-  const px0 = x + padL;
-  const py0 = y + padT;
-  const pw  = w - padL - padR;
-  const ph  = h - padT - padB;
+  // An explicit plot-area layout wins, exactly as the other chart renderers
+  // do (ECMA-376 §21.2.2.32 `<c:plotArea><c:layout><c:manualLayout>`).
+  const pml = chart.plotAreaManualLayout;
+  let px0: number, py0: number, pw: number, ph: number;
+  if (pml && pml.w != null && pml.h != null) {
+    px0 = x + pml.x * w;
+    py0 = y + pml.y * h;
+    pw  = pml.w * w;
+    ph  = pml.h * h;
+  } else {
+    // Fallback plot insets when the chart gives no explicit layout. The side
+    // margins are principled (thin when the value axis is hidden, otherwise a
+    // value-label gutter). The top/bottom values are HEURISTIC: 0.12 / 0.14
+    // were tuned against sample-2 slide-8 (its callout tips assume a specific
+    // running-total line y) and are NOT a documented chartEx default. Replace
+    // once chartEx `<cx:plotArea><cx:layout>` is parsed or PowerPoint's default
+    // waterfall insets are confirmed. Tracked — do not extend this tuning.
+    const padL = chart.valAxisHidden ? w * 0.01 : w * 0.11;
+    const padR = w * 0.01;
+    const padT = h * 0.12;
+    const padB = h * 0.14;
+    px0 = x + padL;
+    py0 = y + padT;
+    pw  = w - padL - padR;
+    ph  = h - padT - padB;
+  }
 
   const vals = chart.series[0]?.values ?? [];
   const cats = chart.categories;
