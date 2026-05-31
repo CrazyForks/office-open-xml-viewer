@@ -52,6 +52,11 @@ jobs:
       - name: Build WASM (all packages)
         run: pnpm build:wasm
 
+      # Gate the release on a clean typecheck so a tag never publishes
+      # type-broken code (defence in depth alongside the PR CI workflow).
+      - name: Typecheck
+        run: pnpm typecheck
+
       - name: Build library
         run: pnpm build
 
