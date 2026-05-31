@@ -45,6 +45,79 @@ export interface CellRange {
   mode: SelectionMode;
 }
 
+/**
+ * Cumulative-offset axis (columns or rows) with O(log n) lookup instead of the
+ * O(n) linear scan that previously walked from the first cell to the scroll
+ * position on every frame / click (up to ~1M rows). Sizes are sparse
+ * (`Record<index, size>`); most cells use the default, so the prefix sum is
+ * built only over the custom entries and a binary search resolves both
+ * directions. All offsets are in *logical* pixels.
+ */
+class AxisMetrics {
+  private readonly idxs: number[];      // sorted custom (1-based) indices
+  private readonly cumDelta: number[];  // prefix sum of (customPx - defaultPx)
+  constructor(
+    customs: Record<number, number>,
+    private readonly defaultPx: number,
+    toPx: (raw: number) => number,
+    private readonly maxIndex: number,
+  ) {
+    this.idxs = Object.keys(customs)
+      .map(Number)
+      .filter((n) => n >= 1 && n <= maxIndex)
+      .sort((a, b) => a - b);
+    this.cumDelta = new Array(this.idxs.length);
+    let acc = 0;
+    for (let k = 0; k < this.idxs.length; k++) {
+      acc += toPx(customs[this.idxs[k]]) - defaultPx;
+      this.cumDelta[k] = acc;
+    }
+  }
+
+  /** Σ (customPx − defaultPx) for custom indices strictly below `index`. */
+  private deltaBefore(index: number): number {
+    let lo = 0, hi = this.idxs.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (this.idxs[m] < index) lo = m + 1; else hi = m;
+    }
+    return lo === 0 ? 0 : this.cumDelta[lo - 1];
+  }
+
+  /** Logical-px offset to the START of `index` (1-based). */
+  offsetOf(index: number): number {
+    return (index - 1) * this.defaultPx + this.deltaBefore(index);
+  }
+
+  /** Index whose span contains absolute logical-px `offset`, plus the partial
+   *  scroll into it. Mirrors the old linear search exactly. */
+  indexAt(offset: number): { index: number; partial: number } {
+    if (offset <= 0) return { index: 1, partial: 0 };
+    let lo = 1, hi = this.maxIndex;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (this.offsetOf(mid) <= offset) lo = mid; else hi = mid - 1;
+    }
+    return { index: lo, partial: offset - this.offsetOf(lo) };
+  }
+}
+
+interface SheetAxes { col: AxisMetrics; row: AxisMetrics; }
+const sheetAxisCache = new WeakMap<Worksheet, SheetAxes>();
+
+/** Per-Worksheet column/row axis metrics (memoized; the workbook keeps one
+ *  Worksheet object per sheet so this hits across frames). */
+function getSheetAxes(ws: Worksheet, mdw: number): SheetAxes {
+  const cached = sheetAxisCache.get(ws);
+  if (cached) return cached;
+  const axes: SheetAxes = {
+    col: new AxisMetrics(ws.colWidths, colWidthToPx(ws.defaultColWidth, mdw), (raw) => colWidthToPx(raw, mdw), 16384),
+    row: new AxisMetrics(ws.rowHeights, rowHeightToPx(ws.defaultRowHeight), (raw) => rowHeightToPx(raw), 1048576),
+  };
+  sheetAxisCache.set(ws, axes);
+  return axes;
+}
+
 export class XlsxViewer {
   private wb: XlsxWorkbook;
   private canvas: HTMLCanvasElement;
@@ -307,17 +380,11 @@ export class XlsxViewer {
       for (let c = 1; c <= freezeCols; c++) frozenW += colW(c);
       const scrollAreaX = sp(HEADER_W) + frozenW;
 
-      // Mirror renderCurrentSheet's startCol / offsetX search.
+      // Mirror renderCurrentSheet's startCol / offsetX search (binary search).
       const logicalScrollX = this.scrollHost.scrollLeft / cs;
-      let startCol = freezeCols + 1;
-      let xAcc = 0;
-      let offsetX = 0;
-      while (startCol <= 16384) {
-        const cw = colWidthToPx(ws.colWidths[startCol] ?? ws.defaultColWidth, mdw);
-        if (xAcc + cw > logicalScrollX) { offsetX = logicalScrollX - xAcc; break; }
-        xAcc += cw;
-        startCol++;
-      }
+      const colAxis = getSheetAxes(ws, mdw).col;
+      const { index: startCol, partial: offsetX } =
+        colAxis.indexAt(logicalScrollX + colAxis.offsetOf(freezeCols + 1));
 
       let acc = scrollAreaX - offsetX * cs;
       if (col >= startCol) {
@@ -341,15 +408,9 @@ export class XlsxViewer {
       const scrollAreaY = sp(HEADER_H) + frozenH;
 
       const logicalScrollY = this.scrollHost.scrollTop / cs;
-      let startRow = freezeRows + 1;
-      let yAcc = 0;
-      let offsetY = 0;
-      while (startRow <= 1048576) {
-        const rh = rowHeightToPx(ws.rowHeights[startRow] ?? ws.defaultRowHeight);
-        if (yAcc + rh > logicalScrollY) { offsetY = logicalScrollY - yAcc; break; }
-        yAcc += rh;
-        startRow++;
-      }
+      const rowAxis = getSheetAxes(ws, mdw).row;
+      const { index: startRow, partial: offsetY } =
+        rowAxis.indexAt(logicalScrollY + rowAxis.offsetOf(freezeRows + 1));
 
       let acc = scrollAreaY - offsetY * cs;
       if (row >= startRow) {
@@ -892,29 +953,13 @@ export class XlsxViewer {
     const logicalScrollX = this.scrollHost.scrollLeft / cs;
     const logicalScrollY = this.scrollHost.scrollTop / cs;
 
-    // Find startCol in logical pixel space
-    let startCol = freezeCols + 1;
-    let xAcc = 0;
-    let offsetX = 0;
-    while (true) {
-      const cw = colWidthToPx(ws.colWidths[startCol] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
-      if (xAcc + cw > logicalScrollX) { offsetX = logicalScrollX - xAcc; break; }
-      xAcc += cw;
-      startCol++;
-      if (startCol > 16384) break;
-    }
-
-    // Find startRow in logical pixel space
-    let startRow = freezeRows + 1;
-    let yAcc = 0;
-    let offsetY = 0;
-    while (true) {
-      const rh = rowHeightToPx(ws.rowHeights[startRow] ?? ws.defaultRowHeight);
-      if (yAcc + rh > logicalScrollY) { offsetY = logicalScrollY - yAcc; break; }
-      yAcc += rh;
-      startRow++;
-      if (startRow > 1048576) break;
-    }
+    // Find startCol / startRow in logical pixel space (binary search over the
+    // per-sheet cumulative-offset axes instead of an O(n) walk from cell 1).
+    const axes = getSheetAxes(ws, getMdwForWorksheet(ws));
+    const { index: startCol, partial: offsetX } =
+      axes.col.indexAt(logicalScrollX + axes.col.offsetOf(freezeCols + 1));
+    const { index: startRow, partial: offsetY } =
+      axes.row.indexAt(logicalScrollY + axes.row.offsetOf(freezeRows + 1));
 
     // Effective scrollable area in logical pixels (canvas / cs - headers - frozen)
     const cellW = w / cs - HEADER_W - frozenW;
