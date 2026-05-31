@@ -1097,7 +1097,9 @@ function renderQuadrant(
     const isNumeric = cell.value.type === 'number';
     const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
     const alignV = xf.alignV ?? 'bottom';
-    const indentPx = xf.indent ? Math.round(xf.indent * font.size * PT_TO_PX * 0.5) : 0;
+    // Indent: ECMA-376 §18.8.1 alignment@indent — one level indents by 3
+    // character widths (MDW) of the workbook's normal-style font.
+    const indentPx = xf.indent ? Math.round(xf.indent * 3 * rc.mdw) : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
 
     ctx.save();
@@ -1405,8 +1407,9 @@ function renderQuadrant(
       const isNumeric = cell.value.type === 'number';
       const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
       const alignV = xf.alignV ?? 'bottom';
-      // Indent: each level ≈ one character width (ECMA-376 §18.8.44)
-      const indentPx = xf.indent ? Math.round(xf.indent * font.size * PT_TO_PX * 0.5) : 0;
+      // Indent: ECMA-376 §18.8.1 alignment@indent — one level indents by 3
+      // character widths (MDW) of the workbook's normal-style font.
+      const indentPx = xf.indent ? Math.round(xf.indent * 3 * rc.mdw) : 0;
       // IconSet: reserve space on the left for the icon
       const iconSz = cf.iconSet ? Math.max(8, Math.round(Math.min(cellW, cellH) * 0.55)) : 0;
       const iconPad = iconSz > 0 ? iconSz + 4 : 0;
