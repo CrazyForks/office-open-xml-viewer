@@ -1997,6 +1997,9 @@ struct LayoutPlaceholders {
     by_type_bold: HashMap<String, bool>,
     /// Default italic per placeholder type, from layout lstStyle defRPr i attribute
     by_type_italic: HashMap<String, bool>,
+    /// Default caps ("all"/"small") per placeholder type, from layout/master
+    /// lstStyle defRPr cap attribute (ECMA-376 §21.1.2.3.13)
+    by_type_caps: HashMap<String, String>,
     /// Vertical anchor ("t"/"ctr"/"b") per placeholder type, from layout/master bodyPr
     by_type_anchor: HashMap<String, String>,
     /// Default paragraph alignment per placeholder type, from layout/master lstStyle
@@ -2078,6 +2081,12 @@ impl LayoutPlaceholders {
     fn lookup_italic(&self, ph_type: &str) -> Option<bool> {
         self.by_type_italic.get(ph_type).copied()
             .or_else(|| if ph_type == "body" { self.by_type_italic.get("").copied() } else { None })
+    }
+
+    /// Look up inherited caps ("all"/"small") for this placeholder type.
+    fn lookup_caps(&self, ph_type: &str) -> Option<String> {
+        self.by_type_caps.get(ph_type).cloned()
+            .or_else(|| if ph_type == "body" { self.by_type_caps.get("").cloned() } else { None })
     }
 
     /// Look up inherited vertical anchor for this placeholder type.
@@ -2299,15 +2308,18 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
 /// Parse default bold/italic from master txStyles (titleStyle / bodyStyle / otherStyle)
 /// > lvl1pPr > defRPr @b and @i. Keyed by ph_type.
 /// Only populated when the attribute is explicitly present on the master.
-fn parse_master_txstyle_bold_italic(master_xml: &str) -> (HashMap<String, bool>, HashMap<String, bool>) {
+fn parse_master_txstyle_bold_italic(master_xml: &str) -> (HashMap<String, bool>, HashMap<String, bool>, HashMap<String, String>) {
     let mut bold_map: HashMap<String, bool> = HashMap::new();
     let mut italic_map: HashMap<String, bool> = HashMap::new();
+    // ECMA-376 §21.1.2.3.13 cap="all"/"small" on the master txStyles defRPr —
+    // e.g. a template titleStyle with cap="all" upper-cases every title.
+    let mut caps_map: HashMap<String, String> = HashMap::new();
     let doc = match roxmltree::Document::parse(master_xml) {
         Ok(d) => d,
-        Err(_) => return (bold_map, italic_map),
+        Err(_) => return (bold_map, italic_map, caps_map),
     };
     let root = doc.root_element();
-    let Some(tx_styles) = child(root, "txStyles") else { return (bold_map, italic_map); };
+    let Some(tx_styles) = child(root, "txStyles") else { return (bold_map, italic_map, caps_map); };
     let style_ph_map: &[(&str, &[&str])] = &[
         ("titleStyle",  &["title", "ctrTitle"]),
         ("bodyStyle",   &["body", "subTitle", "obj", ""]),
@@ -2319,14 +2331,18 @@ fn parse_master_txstyle_bold_italic(master_xml: &str) -> (HashMap<String, bool>,
             .and_then(|lp| child(lp, "defRPr"));
         let b = def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
         let i = def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
+        let c = def_rpr.and_then(|rp| attr(&rp, "cap")).filter(|v| v == "all" || v == "small");
         if let Some(bv) = b {
             for t in *ph_types { bold_map.entry(t.to_string()).or_insert(bv); }
         }
         if let Some(iv) = i {
             for t in *ph_types { italic_map.entry(t.to_string()).or_insert(iv); }
         }
+        if let Some(cv) = c {
+            for t in *ph_types { caps_map.entry(t.to_string()).or_insert(cv.clone()); }
+        }
     }
-    (bold_map, italic_map)
+    (bold_map, italic_map, caps_map)
 }
 
 /// Parse default text color from master txStyles (titleStyle/bodyStyle/otherStyle)
@@ -2497,6 +2513,7 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_font_size = layout_def_rpr.and_then(|rp| attr_f64(&rp, "sz")).map(|v| v / 100.0);
         let layout_bold   = layout_def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
         let layout_italic = layout_def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
+        let layout_caps   = layout_def_rpr.and_then(|rp| attr(&rp, "cap")).filter(|v| v == "all" || v == "small");
         let layout_color: Option<String> = layout_def_rpr
             .and_then(|rp| child(rp, "solidFill"))
             .and_then(|sf| parse_color_node(sf, theme));
@@ -2592,6 +2609,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             if let Some(i) = layout_italic {
                 lph.by_type_italic.entry(ph_type.clone()).or_insert(i);
             }
+            if let Some(c) = layout_caps.clone() {
+                lph.by_type_caps.entry(ph_type.clone()).or_insert(c);
+            }
             if let Some(a) = layout_alignment {
                 lph.by_type_alignment.entry(ph_type.clone()).or_insert(a);
             }
@@ -2656,6 +2676,7 @@ fn parse_text_body(
     inherited_font_size: Option<f64>,
     inherited_bold: Option<bool>,
     inherited_italic: Option<bool>,
+    inherited_caps: Option<String>,
     inherited_anchor: Option<String>,
     inherited_alignment: Option<String>,
     inherited_space_before: Option<i64>,
@@ -2788,10 +2809,29 @@ fn parse_text_body(
         .and_then(|s| attr_f64(&s, "val"));
     let body_default_line_spacing = own_lvl1_line_spacing.or(inherited_line_spacing);
 
-    let paragraphs = children_vec(tx_body, "p")
+    let mut paragraphs: Vec<Paragraph> = children_vec(tx_body, "p")
         .into_iter()
         .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing))
         .collect();
+
+    // ECMA-376 §21.1.2.3.13 cap: a run inherits cap="all"/"small" from the
+    // shape's own lstStyle defRPr, else from the layout/master placeholder
+    // style (e.g. a template's titleStyle cap="all" upper-cases the title even
+    // though the run's text is stored mixed-case). Run-level rPr/paragraph
+    // defRPr already won via parse_run; fill the remainder here.
+    let body_caps = own_def_rpr
+        .and_then(|rp| attr(&rp, "cap"))
+        .filter(|v| v == "all" || v == "small")
+        .or(inherited_caps);
+    if let Some(bc) = body_caps {
+        for para in &mut paragraphs {
+            for run in &mut para.runs {
+                if let TextRun::Text(t) = run {
+                    if t.caps.is_none() { t.caps = Some(bc.clone()); }
+                }
+            }
+        }
+    }
 
     TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit, font_scale, ln_spc_reduction, num_col, spc_col }
 }
@@ -3941,12 +3981,13 @@ fn parse_shape(
     };
 
     // Inherited defaults from layout/master for this placeholder type/idx
-    let (inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment,
+    let (inherited_font_size, inherited_bold, inherited_italic, inherited_caps, inherited_anchor, inherited_alignment,
          inherited_space_before, inherited_space_after, inherited_line_spacing) = if ph_node.is_some() {
         (
             lph.lookup_font_size(&ph_type, ph_idx),
             lph.lookup_bold(&ph_type),
             lph.lookup_italic(&ph_type),
+            lph.lookup_caps(&ph_type),
             lph.lookup_anchor(&ph_type),
             lph.lookup_alignment(&ph_type),
             lph.lookup_space_before(&ph_type),
@@ -3954,7 +3995,7 @@ fn parse_shape(
             lph.lookup_line_spacing(&ph_type, ph_idx),
         )
     } else {
-        (None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None)
     };
 
     // ECMA-376 §19.3.1.21 / §20.1.4.2: a slide-level `<p:cNvSpPr txBox="1"/>`
@@ -3967,7 +4008,7 @@ fn parse_shape(
         .unwrap_or(false);
     let shape_kind = if is_text_box { ShapeKind::Tx } else { ShapeKind::Sp };
     let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing, shape_kind));
+        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_bold, inherited_italic, inherited_caps.clone(), inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing, shape_kind));
 
     // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
     // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
@@ -4466,7 +4507,7 @@ fn parse_table_cell(
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
     let anchor = tc_pr.and_then(|n| attr(&n, "anchor")).map(|a| a.to_string());
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, None, None, anchor, None, None, None, None, ShapeKind::Sp));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, None, None, None, anchor, None, None, None, None, ShapeKind::Sp));
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
@@ -4511,6 +4552,7 @@ fn parse_slide(
     master_line_spacing: &HashMap<String, f64>,
     master_bold: &HashMap<String, bool>,
     master_italic: &HashMap<String, bool>,
+    master_caps: &HashMap<String, String>,
     master_color: &HashMap<String, String>,
     index: usize,
     rels: &HashMap<String, String>,
@@ -4530,6 +4572,9 @@ fn parse_slide(
     }
     for (t, i) in master_italic.iter() {
         lph.by_type_italic.entry(t.clone()).or_insert(*i);
+    }
+    for (t, c) in master_caps.iter() {
+        lph.by_type_caps.entry(t.clone()).or_insert(c.clone());
     }
     for (t, c) in master_color.iter() {
         lph.by_type_master_color.entry(t.clone()).or_insert(c.clone());
@@ -5302,7 +5347,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_txstyle_spacing(xml))
         .unwrap_or_default();
 
-    let (master_bold, master_italic): (HashMap<String, bool>, HashMap<String, bool>) = master_xml_opt
+    let (master_bold, master_italic, master_caps): (HashMap<String, bool>, HashMap<String, bool>, HashMap<String, String>) = master_xml_opt
         .as_deref()
         .map(|xml| parse_master_txstyle_bold_italic(xml))
         .unwrap_or_default();
@@ -5384,6 +5429,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &master_line_spacing,
             &master_bold,
             &master_italic,
+            &master_caps,
             &master_color,
             raw.index,
             &raw.slide_rels,
