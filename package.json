@@ -63,9 +63,12 @@
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm",
-    "vrt": "pnpm -r vrt"
+    "vrt": "pnpm -r vrt",
+    "lint": "ast-grep scan",
+    "lint:test": "ast-grep test --skip-snapshot-tests"
   },
   "devDependencies": {
+    "@ast-grep/cli": "^0.43.0",
     "@chromatic-com/storybook": "^5.1.2",
     "@storybook/addon-a11y": "^10.3.5",
     "@storybook/addon-docs": "^10.3.5",

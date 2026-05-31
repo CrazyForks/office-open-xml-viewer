@@ -1,0 +1,8 @@
+id: no-non-null-assertion-in-examples
+valid:
+  - "const c = document.getElementById('x') as HTMLCanvasElement;"
+  - "const v = map.get(k) as Foo;"
+  - "const negated = !flag;"
+invalid:
+  - "const s = map.get(k)!;"
+  - "const c = document.getElementById('x')!;"
