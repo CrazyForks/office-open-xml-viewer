@@ -458,10 +458,17 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         }
     }
 
-    // Color
+    // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) is NOT
+    // the same as an absent color: it means "the automatic text color" (black on
+    // a light background) and must OVERRIDE any inherited style color — e.g. a
+    // run that carries `rStyle="PlaceholderText"` (gray #808080) plus a direct
+    // `w:color="auto"` renders black, not gray. Mapping auto to None (inherit)
+    // would wrongly keep the gray. An absent `<w:color>` element stays None.
     if let Some(col) = child_w(rpr, "color") {
         let val = attr_w(col, "val").unwrap_or_default();
-        if val != "auto" && !val.is_empty() {
+        if val == "auto" {
+            fmt.color = Some("000000".to_string());
+        } else if !val.is_empty() {
             fmt.color = Some(val.to_lowercase());
         }
     }
@@ -518,4 +525,42 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     }
 
     fmt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roxmltree::Document as XmlDoc;
+
+    fn run_fmt_from(rpr_xml: &str) -> RunFmt {
+        let xml = format!(
+            r#"<w:rPr xmlns:w="{ns}">{body}</w:rPr>"#,
+            ns = W_NS,
+            body = rpr_xml
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        parse_run_fmt(doc.root_element())
+    }
+
+    #[test]
+    fn explicit_color_auto_resolves_to_black_overriding_inheritance() {
+        // ECMA-376 §17.3.2.6: an explicit w:color="auto" is the automatic text
+        // color (black on a light background), NOT "inherit". It must override a
+        // style color (e.g. PlaceholderText gray), so it is parsed as a concrete
+        // value rather than None.
+        let fmt = run_fmt_from(r#"<w:color w:val="auto"/>"#);
+        assert_eq!(fmt.color.as_deref(), Some("000000"));
+    }
+
+    #[test]
+    fn explicit_hex_color_is_lowercased() {
+        let fmt = run_fmt_from(r#"<w:color w:val="FF0000"/>"#);
+        assert_eq!(fmt.color.as_deref(), Some("ff0000"));
+    }
+
+    #[test]
+    fn absent_color_element_stays_none_to_inherit() {
+        let fmt = run_fmt_from(r#"<w:b/>"#);
+        assert_eq!(fmt.color, None);
+    }
 }
