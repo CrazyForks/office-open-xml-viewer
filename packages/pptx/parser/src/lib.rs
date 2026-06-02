@@ -2005,6 +2005,13 @@ struct LayoutPlaceholders {
     by_idx_font_size:  HashMap<u32, f64>,
     /// Default font size (pt) per placeholder type, from layout/master lstStyle
     by_type_font_size: HashMap<String, f64>,
+    /// Per-list-level default font sizes (pt) per placeholder idx — index 0..=8
+    /// maps to lvl1pPr..lvl9pPr (ECMA-376 §21.1.2.4). Lets nested bullets shrink
+    /// per level (e.g. body 28pt → lvl2 24pt → lvl3 20pt) instead of all using
+    /// the level-1 size. None per level where the style chain doesn't specify it.
+    by_idx_level_sizes:  HashMap<u32, LevelFontSizes>,
+    /// Per-list-level default font sizes (pt) per placeholder type.
+    by_type_level_sizes: HashMap<String, LevelFontSizes>,
     /// Default bold per placeholder type, from layout lstStyle defRPr b attribute
     by_type_bold: HashMap<String, bool>,
     /// Default italic per placeholder type, from layout lstStyle defRPr i attribute
@@ -2081,6 +2088,18 @@ impl LayoutPlaceholders {
         }
         self.by_type_font_size.get(ph_type).copied()
             .or_else(|| if ph_type == "body" { self.by_type_font_size.get("").copied() } else { None })
+    }
+
+    /// Per-list-level inherited default font sizes (lvl1..lvl9). Same idx-strict
+    /// resolution as `lookup_font_size`. All-None when the placeholder has no
+    /// per-level styling.
+    fn lookup_level_font_sizes(&self, ph_type: &str, ph_idx: Option<u32>) -> LevelFontSizes {
+        if let Some(i) = ph_idx {
+            return self.by_idx_level_sizes.get(&i).copied().unwrap_or([None; 9]);
+        }
+        self.by_type_level_sizes.get(ph_type).copied()
+            .or_else(|| if ph_type == "body" { self.by_type_level_sizes.get("").copied() } else { None })
+            .unwrap_or([None; 9])
     }
 
     /// Look up inherited bold for this placeholder type.
@@ -2213,6 +2232,41 @@ fn extract_lvl1_font_size(tx_body: roxmltree::Node<'_, '_>) -> Option<f64> {
         .map(|v| v / 100.0)
 }
 
+/// Per-list-level default font sizes (pt). Index 0..=8 → lvl1pPr..lvl9pPr
+/// (ECMA-376 §21.1.2.4). `None` where the level isn't specified.
+type LevelFontSizes = [Option<f64>; 9];
+
+/// Read `<a:lvlNpPr><a:defRPr@sz>` for levels 1..9 from a node that holds
+/// `<a:lvlNpPr>` children — a txBody's `<a:lstStyle>` or a master `<p:txStyles>`
+/// style node (`<p:bodyStyle>` etc.). Sizes are in pt.
+fn read_level_font_sizes(list_style: roxmltree::Node<'_, '_>) -> LevelFontSizes {
+    let mut out: LevelFontSizes = [None; 9];
+    for (lvl, slot) in out.iter_mut().enumerate() {
+        let tag = format!("lvl{}pPr", lvl + 1);
+        *slot = list_style.children()
+            .find(|n| n.is_element() && n.tag_name().name() == tag)
+            .and_then(|lp| child(lp, "defRPr"))
+            .and_then(|rp| attr_f64(&rp, "sz"))
+            .map(|v| v / 100.0);
+    }
+    out
+}
+
+/// Per-level default font sizes from a txBody's own `<a:lstStyle>`.
+fn extract_level_font_sizes(tx_body: roxmltree::Node<'_, '_>) -> LevelFontSizes {
+    child(tx_body, "lstStyle").map(read_level_font_sizes).unwrap_or([None; 9])
+}
+
+/// True when any level carries a size (avoids storing all-None arrays).
+fn has_any_level_size(s: &LevelFontSizes) -> bool { s.iter().any(|v| v.is_some()) }
+
+/// Per-edge merge: `primary[lvl]` wins, else `fallback[lvl]`.
+fn merge_level_sizes(primary: &LevelFontSizes, fallback: &LevelFontSizes) -> LevelFontSizes {
+    let mut out: LevelFontSizes = [None; 9];
+    for lvl in 0..9 { out[lvl] = primary[lvl].or(fallback[lvl]); }
+    out
+}
+
 /// Parse bodyPr anchor ("t"/"ctr"/"b") from master placeholder shapes.
 fn parse_master_anchors(master_xml: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -2309,6 +2363,53 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
             if let Some(fs) = sz {
                 for ph_type in *ph_types {
                     map.entry(ph_type.to_string()).or_insert(fs);
+                }
+            }
+        }
+    }
+
+    map
+}
+
+/// Per-list-level default font sizes from the master, keyed by ph_type. Mirrors
+/// `parse_master_font_sizes` but captures every list level (lvl1pPr..lvl9pPr) so
+/// nested bullets inherit the correct shrinking sizes (ECMA-376 §21.1.2.4),
+/// not just the level-1 size. Per-shape lstStyle wins over the generic txStyles.
+fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontSizes> {
+    let mut map: HashMap<String, LevelFontSizes> = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
+
+    // Per-shape lstStyle first (more specific).
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
+            if let Some(ph) = sp.descendants().find(|n| n.is_element() && n.tag_name().name() == "ph") {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(tx_body) = child(sp, "txBody") {
+                    let sizes = extract_level_font_sizes(tx_body);
+                    if has_any_level_size(&sizes) { map.entry(ph_type).or_insert(sizes); }
+                }
+            }
+        }
+    }
+
+    // txStyles fallback.
+    if let Some(tx_styles) = child(root, "txStyles") {
+        let style_ph_map: &[(&str, &[&str])] = &[
+            ("titleStyle",  &["title", "ctrTitle"]),
+            ("bodyStyle",   &["body", "subTitle", "obj", ""]),
+            ("otherStyle",  &["dt", "ftr", "sldNum"]),
+        ];
+        for (style_name, ph_types) in style_ph_map {
+            if let Some(style_node) = child(tx_styles, style_name) {
+                let sizes = read_level_font_sizes(style_node);
+                if has_any_level_size(&sizes) {
+                    for ph_type in *ph_types {
+                        map.entry(ph_type.to_string()).or_insert(sizes);
+                    }
                 }
             }
         }
@@ -2481,7 +2582,7 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     map
 }
 
-fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, master_space_before: &HashMap<String, i64>, master_space_after: &HashMap<String, i64>, master_line_spacing: &HashMap<String, f64>, theme: &HashMap<String, String>, layout_dir: &str, layout_rels: &HashMap<String, String>, zip: &mut PptxZip<'_>) -> LayoutPlaceholders {
+fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_level_font_sizes: &HashMap<String, LevelFontSizes>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, master_space_before: &HashMap<String, i64>, master_space_after: &HashMap<String, i64>, master_line_spacing: &HashMap<String, f64>, theme: &HashMap<String, String>, layout_dir: &str, layout_rels: &HashMap<String, String>, zip: &mut PptxZip<'_>) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders::default();
     lph.master_by_type = master_transforms.clone();
     lph.by_type_master_alignment = master_alignments.clone();
@@ -2523,6 +2624,11 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_def_rpr: Option<roxmltree::Node<'_, '_>> = layout_lvl1_ppr
             .and_then(|lp| child(lp, "defRPr"));
         let layout_font_size = layout_def_rpr.and_then(|rp| attr_f64(&rp, "sz")).map(|v| v / 100.0);
+        // Per-level sizes from the layout placeholder's own lstStyle (all
+        // lvlNpPr), used to give nested bullets their shrinking sizes.
+        let layout_level_sizes: LevelFontSizes = child(sp, "txBody")
+            .map(extract_level_font_sizes)
+            .unwrap_or([None; 9]);
         let layout_bold   = layout_def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
         let layout_italic = layout_def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
         let layout_caps   = layout_def_rpr.and_then(|rp| attr(&rp, "cap")).filter(|v| v == "all" || v == "small");
@@ -2594,6 +2700,14 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 if let Some(fs) = fs {
                     lph.by_idx_font_size.entry(idx).or_insert(fs);
                 }
+                // Per-level: layout lstStyle wins per level, else master.
+                let level_sizes = merge_level_sizes(
+                    &layout_level_sizes,
+                    master_level_font_sizes.get(&ph_type).unwrap_or(&[None; 9]),
+                );
+                if has_any_level_size(&level_sizes) {
+                    lph.by_idx_level_sizes.entry(idx).or_insert(level_sizes);
+                }
                 if let Some(ref s) = layout_stroke {
                     lph.by_idx_stroke.entry(idx).or_insert(s.clone());
                 }
@@ -2614,6 +2728,13 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 .or_else(|| master_font_sizes.get(&ph_type).copied());
             if let Some(fs) = effective_fs {
                 lph.by_type_font_size.entry(ph_type.clone()).or_insert(fs);
+            }
+            let type_level_sizes = merge_level_sizes(
+                &layout_level_sizes,
+                master_level_font_sizes.get(&ph_type).unwrap_or(&[None; 9]),
+            );
+            if has_any_level_size(&type_level_sizes) {
+                lph.by_type_level_sizes.entry(ph_type.clone()).or_insert(type_level_sizes);
             }
             if let Some(b) = layout_bold {
                 lph.by_type_bold.entry(ph_type.clone()).or_insert(b);
@@ -2686,6 +2807,7 @@ fn parse_text_body(
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
     inherited_font_size: Option<f64>,
+    inherited_level_font_sizes: LevelFontSizes,
     inherited_bold: Option<bool>,
     inherited_italic: Option<bool>,
     inherited_caps: Option<String>,
@@ -2790,6 +2912,11 @@ fn parse_text_body(
     let default_font_size = own_def_rpr.and_then(|rp| attr_f64(&rp, "sz"))
         .map(|v| v / 100.0)
         .or(inherited_font_size);
+    // Effective per-list-level default sizes: this shape's own lstStyle wins per
+    // level, else the layout/master inherited per-level sizes. Paragraphs pick
+    // their size by `lvl` so nested bullets shrink (ECMA-376 §21.1.2.4).
+    let own_level_sizes = extract_level_font_sizes(tx_body);
+    let effective_level_sizes = merge_level_sizes(&own_level_sizes, &inherited_level_font_sizes);
     let default_bold = own_def_rpr
         .and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true")
         .or(inherited_bold);
@@ -2823,7 +2950,7 @@ fn parse_text_body(
 
     let mut paragraphs: Vec<Paragraph> = children_vec(tx_body, "p")
         .into_iter()
-        .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing))
+        .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing, &effective_level_sizes))
         .collect();
 
     // ECMA-376 §21.1.2.3.13 cap: a run inherits cap="all"/"small" from the
@@ -2856,6 +2983,7 @@ fn parse_paragraph(
     body_default_space_before: Option<i64>,
     body_default_space_after: Option<i64>,
     body_default_line_spacing: Option<f64>,
+    level_font_sizes: &LevelFontSizes,
 ) -> Paragraph {
     let p_pr = child(p_node, "pPr");
 
@@ -2990,13 +3118,19 @@ fn parse_paragraph(
     // This ensures empty spacer paragraphs have the correct height (e.g. between sections).
     let end_rpr = child(p_node, "endParaRPr");
     let has_text = runs.iter().any(|r| matches!(r, TextRun::Text(_)));
-    let def_font_size = def_font_size.or_else(|| {
-        if !has_text {
-            end_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0)
-        } else {
-            None
-        }
-    });
+    let def_font_size = def_font_size
+        .or_else(|| {
+            if !has_text {
+                end_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0)
+            } else {
+                None
+            }
+        })
+        // Inherited per-list-level default size, indexed by this paragraph's
+        // level (ECMA-376 §21.1.2.4): a 2nd-level bullet uses lvl3pPr's smaller
+        // defRPr sz, not the level-1 size. The renderer applies `def_font_size`
+        // to runs that carry no explicit `sz`.
+        .or_else(|| level_font_sizes.get(lvl as usize).copied().flatten());
 
     Paragraph {
         alignment, mar_l, mar_r, indent,
@@ -4033,6 +4167,11 @@ fn parse_shape(
     } else {
         (None, None, None, None, None, None, None, None, None)
     };
+    let inherited_level_font_sizes: LevelFontSizes = if ph_node.is_some() {
+        lph.lookup_level_font_sizes(&ph_type, ph_idx)
+    } else {
+        [None; 9]
+    };
 
     // ECMA-376 §19.3.1.21 / §20.1.4.2: a slide-level `<p:cNvSpPr txBox="1"/>`
     // marks the shape as a true text box, which means the theme's
@@ -4044,7 +4183,7 @@ fn parse_shape(
         .unwrap_or(false);
     let shape_kind = if is_text_box { ShapeKind::Tx } else { ShapeKind::Sp };
     let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_bold, inherited_italic, inherited_caps.clone(), inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing, shape_kind));
+        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_level_font_sizes, inherited_bold, inherited_italic, inherited_caps.clone(), inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing, shape_kind));
 
     // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
     // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
@@ -4543,7 +4682,7 @@ fn parse_table_cell(
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
     let anchor = tc_pr.and_then(|n| attr(&n, "anchor")).map(|a| a.to_string());
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, None, None, None, anchor, None, None, None, None, ShapeKind::Sp));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, [None; 9], None, None, None, anchor, None, None, None, None, ShapeKind::Sp));
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
@@ -4580,6 +4719,7 @@ fn parse_slide(
     layout_dir: &str,
     master_bg: Option<Fill>,
     master_font_sizes: &HashMap<String, f64>,
+    master_level_font_sizes: &HashMap<String, LevelFontSizes>,
     master_anchors: &HashMap<String, String>,
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
@@ -4597,7 +4737,7 @@ fn parse_slide(
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     let mut lph = match layout_xml {
-        Some(x) => parse_layout_placeholders(x, master_font_sizes, master_anchors, master_transforms, master_alignments, master_space_before, master_space_after, master_line_spacing, theme, layout_dir, layout_rels, zip),
+        Some(x) => parse_layout_placeholders(x, master_font_sizes, master_level_font_sizes, master_anchors, master_transforms, master_alignments, master_space_before, master_space_after, master_line_spacing, theme, layout_dir, layout_rels, zip),
         None => LayoutPlaceholders::default(),
     };
     // Fall back to master txStyles defRPr @b/@i when the layout did not specify
@@ -5363,6 +5503,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_font_sizes(xml))
         .unwrap_or_default();
 
+    let master_level_font_sizes: HashMap<String, LevelFontSizes> = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_level_font_sizes(xml))
+        .unwrap_or_default();
+
     let master_anchors: HashMap<String, String> = master_xml_opt
         .as_deref()
         .map(|xml| parse_master_anchors(xml))
@@ -5457,6 +5602,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &raw.layout_dir,
             master_bg.clone(),
             &master_font_sizes,
+            &master_level_font_sizes,
             &master_anchors,
             &master_transforms,
             &master_alignments,
@@ -5880,5 +6026,46 @@ mod tests {
         let doc = roxmltree::Document::parse(sng).unwrap();
         let s = parse_stroke(doc.root_element(), &theme).expect("stroke should parse");
         assert!(s.cmpd.is_none());
+    }
+
+    #[test]
+    fn master_body_style_per_level_font_sizes() {
+        // ECMA-376 §21.1.2.4: each list level has its own defRPr sz. A 2nd-level
+        // bullet must inherit lvl3pPr's smaller size, not lvl1pPr's.
+        let master = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+          <p:txStyles>
+            <p:bodyStyle>
+              <a:lvl1pPr><a:defRPr sz="2800"/></a:lvl1pPr>
+              <a:lvl2pPr><a:defRPr sz="2400"/></a:lvl2pPr>
+              <a:lvl3pPr><a:defRPr sz="2000"/></a:lvl3pPr>
+            </p:bodyStyle>
+            <p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
+          </p:txStyles>
+        </p:sldMaster>"#;
+        let m = parse_master_level_font_sizes(master);
+        let body = m.get("body").expect("body level sizes");
+        assert_eq!(body[0], Some(28.0)); // lvl1 → level 0
+        assert_eq!(body[1], Some(24.0)); // lvl2 → level 1
+        assert_eq!(body[2], Some(20.0)); // lvl3 → level 2
+        assert_eq!(body[3], None);       // unspecified
+        // body style also keys the empty placeholder type and "obj".
+        assert_eq!(m.get("").unwrap()[2], Some(20.0));
+        // title style is captured separately.
+        assert_eq!(m.get("title").unwrap()[0], Some(44.0));
+    }
+
+    #[test]
+    fn merge_level_sizes_prefers_primary_per_edge() {
+        let primary: LevelFontSizes = {
+            let mut a = [None; 9]; a[1] = Some(28.0); a
+        };
+        let fallback: LevelFontSizes = {
+            let mut a = [None; 9]; a[0] = Some(32.0); a[1] = Some(24.0); a[2] = Some(20.0); a
+        };
+        let merged = merge_level_sizes(&primary, &fallback);
+        assert_eq!(merged[0], Some(32.0)); // only fallback
+        assert_eq!(merged[1], Some(28.0)); // primary wins
+        assert_eq!(merged[2], Some(20.0)); // only fallback
     }
 }
