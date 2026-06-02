@@ -12,14 +12,21 @@ export function niceStep(range: number, targetSteps = 5): number {
   return nice * mag;
 }
 
-/** Excel's automatic value-axis maximum: the smallest major-unit multiple that
- *  is >= dataMax — no extra headroom step. A series filling 97% of the axis
- *  stays at 97%, exactly as Excel renders it. (Overlap with sibling shapes is
- *  handled by honoring <c:plotArea><c:manualLayout> — ECMA-376 §21.2.2.32 —
- *  not by inflating the axis.) */
-export function niceAxisMax(dataMax: number, step: number): number {
+/** Excel / PowerPoint automatic value-axis maximum. Microsoft's documented
+ *  algorithm (per Peltier Tech) is "the first major unit above
+ *  `Ymax + (Ymax − Ymin)/20`": ~5% of the data range is added as headroom so the
+ *  tallest series sits just below the top gridline rather than flush against it,
+ *  then the result is rounded up to the next major unit. `dataMin` is the axis
+ *  minimum (0 for bar/column charts; the data minimum otherwise).
+ *
+ *  The major unit itself is Excel-proprietary (it varies with plot size, tick
+ *  font, etc. and is not documented), so we approximate it with `niceStep`; the
+ *  computed max can therefore differ from PowerPoint by one major unit on some
+ *  charts. */
+export function niceAxisMax(dataMax: number, step: number, dataMin = 0): number {
   if (dataMax <= 0) return step;
-  return Math.ceil(dataMax / step) * step;
+  const withHeadroom = dataMax + (dataMax - dataMin) / 20;
+  return Math.ceil(withHeadroom / step) * step;
 }
 
 /** Axis minimum for data that dips below zero: the largest major-unit multiple
