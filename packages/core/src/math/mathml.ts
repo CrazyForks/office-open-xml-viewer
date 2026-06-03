@@ -102,18 +102,44 @@ function nodeToMathML(node: MathNode): string {
       return node.pos === 'top' ? `<mover>${b}${mo}</mover>` : `<munder>${b}${mo}</munder>`;
     }
     case 'bar': {
-      // A tight stretchy bar hugging the base (overline / underline), not a padded box.
+      // Tight stretchy overline/underline (like \overline). NOTE: accent="true" adds a
+      // gap above the base in MathJax, so we omit it — the stretchy bar hugs the base.
       const b = row(node.base);
       const barOp = '<mo stretchy="true">&#x00AF;</mo>';
-      return node.pos === 'bot'
-        ? `<munder accent="true">${b}${barOp}</munder>`
-        : `<mover accent="true">${b}${barOp}</mover>`;
+      return node.pos === 'bot' ? `<munder>${b}${barOp}</munder>` : `<mover>${b}${barOp}</mover>`;
     }
     case 'accent':
-      return `<mover accent="true">${row(node.base)}<mo stretchy="false">${esc(node.char)}</mo></mover>`;
+      return accentToMathML(node);
     case 'func':
       return `<mrow>${row(node.name)}<mo>&#x2061;</mo>${row(node.arg)}</mrow>`;
   }
+}
+
+// Map an OMML accent character to a MathJax-friendly accent. Combining marks (zero
+// advance) float when used as <mo> content, so we translate to spacing equivalents.
+const ACCENT_MAP: Record<string, string> = {
+  '̀': '`', // grave
+  '́': '´', // acute
+  '̂': '^', // circumflex / hat
+  '̃': '~', // tilde
+  '̆': '˘', // breve
+  '̇': '˙', // dot above
+  '̈': '¨', // diaeresis
+  '̌': 'ˇ', // caron
+  '⃗': '→', // vector arrow
+  '⃖': '←', // left arrow
+};
+// Overline / macron family → rendered as a tight stretchy bar (\overline), no accent gap.
+const OVERLINE_CHARS = new Set(['̅', '̄', '¯', '‾', '̲', '̳']);
+
+function accentToMathML(node: Extract<MathNode, { kind: 'accent' }>): string {
+  const b = row(node.base);
+  if (OVERLINE_CHARS.has(node.char)) {
+    return `<mover>${b}<mo stretchy="true">&#x00AF;</mo></mover>`;
+  }
+  const ch = ACCENT_MAP[node.char] ?? node.char;
+  const stretchy = ch === '→' || ch === '←' ? 'true' : 'false';
+  return `<mover accent="true">${b}<mo stretchy="${stretchy}">${esc(ch)}</mo></mover>`;
 }
 
 function limitToMathML(node: Extract<MathNode, { kind: 'limit' }>): string {
