@@ -1903,7 +1903,9 @@ function drawTabLeader(
     // Dots sit on a loose grid; other leaders are drawn solid.
     const step = leader === 'dot' || leader === 'middleDot' ? chW * 1.5 : chW;
     const margin = chW * 0.5;
-    const end = x + width - margin;
+    // Leave a clear gap (about one dot-step) before the page number so the
+    // leader doesn't run right up against it.
+    const end = x + width - step - margin;
     for (let cx = x + margin; cx <= end; cx += step) {
       ctx.fillText(ch, cx, baseline);
     }
