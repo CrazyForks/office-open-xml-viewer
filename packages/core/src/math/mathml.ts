@@ -169,15 +169,33 @@ function arrayToMathML(node: Extract<MathNode, { kind: 'array' }>): string {
   return `<mtable columnalign="${colalign}" rowspacing="0.2em" columnspacing="0.3em">${rows}</mtable>`;
 }
 
+// Integrals place limits beside the operator; sums/products/etc. place them above/below.
+const INTEGRAL_OPS = new Set([...'∫∬∭∮∯∰∱∲∳⨌⨍⨎⨏⨐⨑⨒⨓⨔⨕⨖⨗']);
+
 function naryToMathML(node: Extract<MathNode, { kind: 'nary' }>): string {
-  const op = `<mo largeop="true" movablelimits="true">${esc(node.op)}</mo>`;
+  const side =
+    node.limLoc === 'subSup'
+      ? true
+      : node.limLoc === 'undOvr'
+        ? false
+        : INTEGRAL_OPS.has(node.op);
+  const op = `<mo largeop="true">${esc(node.op)}</mo>`;
   const sub = node.sub ?? [];
   const sup = node.sup ?? [];
   let operator: string;
-  if (sub.length && sup.length) operator = `<munderover>${op}${row(sub)}${row(sup)}</munderover>`;
-  else if (sub.length) operator = `<munder>${op}${row(sub)}</munder>`;
-  else if (sup.length) operator = `<mover>${op}${row(sup)}</mover>`;
-  else operator = op;
+  if (side) {
+    // limits to the right of the operator (integral style)
+    if (sub.length && sup.length) operator = `<msubsup>${op}${row(sub)}${row(sup)}</msubsup>`;
+    else if (sub.length) operator = `<msub>${op}${row(sub)}</msub>`;
+    else if (sup.length) operator = `<msup>${op}${row(sup)}</msup>`;
+    else operator = op;
+  } else {
+    // limits above/below (sum/product style)
+    if (sub.length && sup.length) operator = `<munderover>${op}${row(sub)}${row(sup)}</munderover>`;
+    else if (sub.length) operator = `<munder>${op}${row(sub)}</munder>`;
+    else if (sup.length) operator = `<mover>${op}${row(sup)}</mover>`;
+    else operator = op;
+  }
   return `<mrow>${operator}${seq(node.body)}</mrow>`;
 }
 

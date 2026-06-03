@@ -7,7 +7,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 
 use crate::xml_util::*;
 use crate::types::*;
-use crate::styles::{StyleMap, parse_para_fmt, parse_run_fmt, ParaFmt, RunFmt};
+use crate::styles::{StyleMap, parse_para_fmt, parse_run_fmt, ParaFmt, RunFmt, CondFmt, RawTblBorders, EdgeBorder};
 use crate::numbering::NumberingMap;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
@@ -708,7 +708,8 @@ fn parse_paragraph(
         }
     }
 
-    let alignment = base_para.alignment.as_deref().map(normalize_align).unwrap_or("left").to_string();
+    let mut alignment = base_para.alignment.as_deref().map(normalize_align).unwrap_or("left").to_string();
+    let alignment_explicit = base_para.alignment.is_some();
     let indent_right = base_para.indent_right.unwrap_or(0.0);
     let space_before = base_para.space_before.unwrap_or(0.0);
     let space_after = base_para.space_after.unwrap_or(0.0);
@@ -742,6 +743,15 @@ fn parse_paragraph(
     // Parse runs
     let mut runs = vec![];
     parse_para_content(node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None);
+
+    // OMML display equations (m:oMathPara) are center-justified by default (§22.1.2.88
+    // m:jc). When the paragraph has no explicit alignment, centering the block math
+    // matches Word.
+    if !alignment_explicit
+        && runs.iter().any(|r| matches!(r, DocRun::Math { display: true, .. }))
+    {
+        alignment = "center".to_string();
+    }
 
     let tab_stops = base_para.tab_stops.clone().unwrap_or_default().into_iter()
         .map(|(pos, alignment, leader)| TabStop { pos, alignment, leader })
@@ -2129,10 +2139,24 @@ fn parse_table(
             .collect()
     }).unwrap_or_default();
 
-    // Table borders
-    let borders = tbl_pr.and_then(|p| child_w(p, "tblBorders"))
+    // Resolve the table style's cell/border formatting (shading, banding, borders,
+    // vAlign) — these live in styles.xml, not inline (§17.7.6). tblLook selects which
+    // conditional formats are active.
+    let tstyle = table_style_id
+        .as_deref()
+        .map(|id| style_map.resolve_table_style(id))
+        .unwrap_or_default();
+    let look = tbl_pr.and_then(|p| child_w(p, "tblLook"));
+    let look_flag = |name: &str| look.and_then(|l| attr_w(l, name)).as_deref() == Some("1");
+    let first_row = look_flag("firstRow");
+    let h_band = look.and_then(|l| attr_w(l, "noHBand")).as_deref() != Some("1");
+
+    // Table borders: inline tblBorders win; otherwise the table style's borders
+    // (so styles like "Table Grid" show their gridlines).
+    let mut borders = tbl_pr.and_then(|p| child_w(p, "tblBorders"))
         .map(|b| parse_table_borders(b))
         .unwrap_or_default();
+    apply_style_borders(&mut borders, &tstyle.borders);
 
     // Cell margins
     let (cm_top, cm_bot, cm_left, cm_right) = tbl_pr
@@ -2146,10 +2170,60 @@ fn parse_table(
         .unwrap_or((0.0, 0.0, 3.6, 3.6));
 
     let mut rows = vec![];
+    let mut row_cnf: Vec<Option<String>> = vec![];
     for tr_node in children_w_flat(node, "tr") {
+        // §17.4.7 conditional-format bitmask on the row (firstRow/band1Horz/…).
+        row_cnf.push(
+            child_w(tr_node, "trPr")
+                .and_then(|p| child_w(p, "cnfStyle"))
+                .and_then(|c| attr_w(c, "val")),
+        );
         let row = parse_table_row(tr_node, style_map, num_map, media_map, rel_map, theme, table_style_id.as_deref());
         rows.push(row);
     }
+
+    // Apply table-style cell shading + vAlign where the cell didn't set them inline.
+    // Only treat row 0 as a non-banded "first row" when firstRow is enabled AND the
+    // style's firstRow conditional actually carries formatting; an empty firstRow
+    // (like EHC) must NOT shift the banding (Word bands from row 0 → 1st row = band1).
+    let first_row_styled = first_row
+        && tstyle
+            .cond
+            .get("firstRow")
+            .map(|c| c.shd.is_some())
+            .unwrap_or(false);
+    for (r, row) in rows.iter_mut().enumerate() {
+        // Pick the conditional format: the row's explicit cnfStyle wins (§17.4.7);
+        // otherwise fall back to tblLook firstRow + horizontal banding by row parity.
+        let cond_name: Option<String> = if let Some(cnf) = &row_cnf[r] {
+            cnf_to_cond(cnf)
+        } else if r == 0 && first_row_styled {
+            Some("firstRow".to_string())
+        } else if h_band {
+            let bi = if first_row_styled { r as i64 - 1 } else { r as i64 };
+            Some(if bi % 2 == 0 { "band1Horz" } else { "band2Horz" }.to_string())
+        } else {
+            None
+        };
+        let cond: Option<&CondFmt> = cond_name.as_deref().and_then(|n| tstyle.cond.get(n));
+        let row_shd = cond.and_then(|c| c.shd.clone()).or_else(|| tstyle.cell_shd.clone());
+        for cell in row.cells.iter_mut() {
+            if cell.background.is_none() {
+                cell.background = row_shd.clone();
+            }
+            if cell.v_align.is_empty() {
+                cell.v_align = tstyle
+                    .cell_valign
+                    .clone()
+                    .unwrap_or_else(|| "top".to_string());
+            }
+        }
+    }
+
+    let jc = tbl_pr
+        .and_then(|p| child_w(p, "jc"))
+        .and_then(|j| attr_w(j, "val"))
+        .unwrap_or_else(|| "left".to_string());
 
     DocTable {
         col_widths,
@@ -2159,6 +2233,7 @@ fn parse_table(
         cell_margin_bottom: cm_bot,
         cell_margin_left: cm_left,
         cell_margin_right: cm_right,
+        jc,
     }
 }
 
@@ -2224,9 +2299,10 @@ fn parse_table_cell(
         .filter(|f| f != "auto" && f.len() == 6)
         .map(|f| f.to_lowercase());
 
+    // Empty = not set inline; parse_table fills it from the table style (else "top").
     let v_align = tc_pr.and_then(|p| child_w(p, "vAlign"))
         .and_then(|v| attr_w(v, "val"))
-        .unwrap_or_else(|| "top".to_string());
+        .unwrap_or_default();
 
     // ECMA-376 §17.18.87 ST_TblWidth:
     //   dxa  — twentieths of a point (1/20pt)
@@ -2295,6 +2371,40 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
         left: child_w(node, "left").map(parse_border_spec),
         right: child_w(node, "right").map(parse_border_spec),
     }
+}
+
+/// Decode a `w:cnfStyle` bitmask (12 chars) to the conditional-format key it selects.
+/// Bit order (§17.4.7): firstRow,lastRow,firstCol,lastCol,band1Vert,band2Vert,
+/// band1Horz,band2Horz,neCell,nwCell,seCell,swCell.
+fn cnf_to_cond(cnf: &str) -> Option<String> {
+    let bit = |i: usize| cnf.as_bytes().get(i).copied() == Some(b'1');
+    if bit(0) {
+        Some("firstRow".to_string())
+    } else if bit(1) {
+        Some("lastRow".to_string())
+    } else if bit(6) {
+        Some("band1Horz".to_string())
+    } else if bit(7) {
+        Some("band2Horz".to_string())
+    } else {
+        None
+    }
+}
+
+/// Fill table-border edges from a table style where the inline table didn't set them.
+fn apply_style_borders(dst: &mut TableBorders, src: &RawTblBorders) {
+    let usable = |e: &EdgeBorder| e.style != "none" && e.style != "nil";
+    let conv = |e: &EdgeBorder| BorderSpec {
+        width: e.width,
+        color: e.color.clone(),
+        style: e.style.clone(),
+    };
+    if dst.top.is_none() { if let Some(e) = &src.top { if usable(e) { dst.top = Some(conv(e)); } } }
+    if dst.bottom.is_none() { if let Some(e) = &src.bottom { if usable(e) { dst.bottom = Some(conv(e)); } } }
+    if dst.left.is_none() { if let Some(e) = &src.left { if usable(e) { dst.left = Some(conv(e)); } } }
+    if dst.right.is_none() { if let Some(e) = &src.right { if usable(e) { dst.right = Some(conv(e)); } } }
+    if dst.inside_h.is_none() { if let Some(e) = &src.inside_h { if usable(e) { dst.inside_h = Some(conv(e)); } } }
+    if dst.inside_v.is_none() { if let Some(e) = &src.inside_v { if usable(e) { dst.inside_v = Some(conv(e)); } } }
 }
 
 fn parse_border_spec(node: roxmltree::Node) -> BorderSpec {

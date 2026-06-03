@@ -33,8 +33,11 @@ pub enum MathNode {
         sub: Vec<MathNode>,
         sup: Vec<MathNode>,
     },
+    #[serde(rename_all = "camelCase")]
     Nary {
         op: String,
+        #[serde(skip_serializing_if = "String::is_empty")]
+        lim_loc: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         sub: Vec<MathNode>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -147,8 +150,10 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                 let op = pr
                     .and_then(|p| mval(p, "chr"))
                     .unwrap_or_else(|| "\u{222B}".to_string()); // default ∫
+                let lim_loc = pr.and_then(|p| mval(p, "limLoc")).unwrap_or_default();
                 out.push(MathNode::Nary {
                     op,
+                    lim_loc,
                     sub: nodes_in(child, "sub"),
                     sup: nodes_in(child, "sup"),
                     body: nodes_in(child, "e"),
@@ -252,7 +257,7 @@ pub fn nodes_to_text(nodes: &[MathNode]) -> String {
                 s.push('^');
                 s.push_str(&nodes_to_text(sup));
             }
-            MathNode::Nary { op, sub, sup, body } => {
+            MathNode::Nary { op, sub, sup, body, .. } => {
                 s.push_str(op);
                 s.push_str(&nodes_to_text(sub));
                 s.push_str(&nodes_to_text(sup));
