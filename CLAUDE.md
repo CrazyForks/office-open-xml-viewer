@@ -121,6 +121,7 @@ pnpm --filter @silurus/ooxml-pptx vrt   # 単一パッケージ
 2. **README の対応表更新**（メインタスク）
    - 前リリース以降にマージされた PR を `git log --oneline` で拾い、機能追加があれば `## Feature Support` の該当行を ❌ → ✅ に反転、または新しい行を追加する。
    - bug fix / 精度向上だけなら対応表は動かさず、根拠は CHANGELOG に書く。
+   - **紹介サイトの API リファレンス同期**（メインタスク）: 公開 API（各 `*Viewer` のオプション／メソッド、`*Presentation`・`*Document` の headless API）が前リリースから変わっていたら `site/src/lib/api-reference.ts` を実装に合わせて更新する。型は手動抽出なので放置すると陳腐化する。併せて新フォーマット機能があれば `site/src/components/Capabilities.astro` の該当列にも追記する。サイト自体のデプロイは `v*` タグで `deploy-pages.yml` が自動実行する（site を `/`、Storybook を `/storybook/` に統合配信）。
 3. **CHANGELOG 追記**: `CHANGELOG.md` の先頭に `## 0.x.0 — YYYY-MM-DD` セクションを追加し、docx/pptx/xlsx/charts ごとに 1〜3 行の bullet で要点を書く。ECMA-376 節番号や PR 番号を適宜併記。
 4. **バージョン bump**: ルート `package.json` と `packages/{core,pptx,xlsx,docx,markdown,node,vscode-extension}/package.json` の計 8 ファイルを同じバージョンへ揃える。markdown / node は private パッケージだが、バージョンは全パッケージで統一する（リリース番号は単一系列で進める）。VS Code 拡張も npm ライブラリと同じ番号で進めるため、機能変更がない月でも minor を上げる。
 5. **PR 作成**: ブランチ名は `release/0.x.0`。PR タイトルは `chore(release): 0.x.0`。マージは必ず `--merge` か `--rebase`（squash 禁止）。
