@@ -94,6 +94,10 @@ const base = import.meta.env.BASE_URL;
         Rust/WASM parse, Canvas paint. Switch formats, step through pages, scroll the sheet.
       </p>
       <LiveShowcase />
+      <p class="showcase-more">
+        Go deeper — live demos and the code behind them, per format:
+        <a href="/pptx">PowerPoint</a> · <a href="/docx">Word</a> · <a href="/xlsx">Excel</a>
+      </p>
     </div>
   </section>
 
@@ -108,7 +112,7 @@ const base = import.meta.env.BASE_URL;
         <code>XlsxWorkbook</code>) render into any canvas you supply for the rest.
       </p>
       <div class="code-wrap">
-        <CodeTabs tabs={recipeTabs} filename="example.ts" />
+        <CodeTabs tabs={recipeTabs} />
       </div>
 
       <div class="fw-block">
@@ -119,7 +123,7 @@ const base = import.meta.env.BASE_URL;
           Excel and PowerPoint.
         </p>
         <div class="code-wrap">
-          <CodeTabs tabs={frameworkTabs} filename="Deck.tsx" />
+          <CodeTabs tabs={frameworkTabs} />
         </div>
       </div>
     </div>
@@ -243,39 +247,9 @@ const base = import.meta.env.BASE_URL;
   }
   .fw-lead code { color: var(--text); font-family: var(--mono); font-size: 0.9em; }
 
-  /* nav */
-  .nav {
-    position: sticky;
-    top: 0;
-    z-index: 50;
-    backdrop-filter: blur(12px);
-    background: rgba(7, 9, 14, 0.72);
-    border-bottom: 1px solid var(--border);
-  }
-  .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 58px; }
-  .nav-brand { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-weight: 600; font-size: 14px; }
-  .nav-mark { display: inline-flex; gap: 3px; }
-  .nav-mark i { width: 7px; height: 14px; border-radius: 2px; }
-  .nav-mark i:nth-child(1) { background: var(--docx); }
-  .nav-mark i:nth-child(2) { background: var(--xlsx); }
-  .nav-mark i:nth-child(3) { background: var(--pptx); }
-  .nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; color: var(--text-dim); }
-  .nav-links a:hover { color: var(--text); }
-  .nav-gh { color: var(--text) !important; font-weight: 600; }
-  @media (max-width: 720px) {
-    .nav-links a:not(.nav-gh) { display: none; }
-  }
-
   .pitch-section { padding: 64px 0; }
   .inline-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
-
-  /* footer */
-  .footer { border-top: 1px solid var(--border); padding: 44px 0 56px; margin-top: 40px; }
-  .footer-inner { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
-  .footer-brand { display: flex; align-items: center; gap: 12px; }
-  .footer-brand strong { display: block; font-size: 15px; }
-  .footer-brand span { font-size: 13px; color: var(--text-faint); }
-  .footer-links { display: flex; gap: 22px; font-size: 14px; color: var(--text-dim); }
-  .footer-links a:hover { color: var(--accent); }
-  .footer-fine { margin-top: 24px; font-size: 12.5px; color: var(--text-faint); }
+  .showcase-more { margin-top: 20px; font-size: 15px; color: var(--text-dim); }
+  .showcase-more a { color: var(--accent); font-weight: 600; }
+  .showcase-more a:hover { text-decoration: underline; }
 </style>

@@ -1,0 +1,89 @@
+---
+import { Code } from 'astro:components';
+interface Props {
+  format: 'pptx' | 'docx' | 'xlsx';
+  kind: 'demo' | 'scroll' | 'thumbnails' | 'masterdetail' | 'sheet';
+  badge: string;
+  title: string;
+  description: string;
+  code: string;
+}
+const { format, kind, badge, title, description, code } = Astro.props;
+const file = { pptx: 'sample-1.pptx', docx: 'sample-1.docx', xlsx: 'sample-1.xlsx' }[format];
+---
+<section class="demo-block" data-reveal>
+  <div class="demo-head">
+    <p class="demo-badge">{badge}</p>
+    <h3 class="demo-title">{title}</h3>
+    <p class="demo-desc">{description}</p>
+  </div>
+
+  <div class="demo-grid-2">
+    <div class="demo-panel">
+      <div class="demo-chrome">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span class="demo-file">{file}</span>
+        <span class="demo-tag">live · WASM</span>
+      </div>
+      <div class="demo-live" data-demo={kind} data-format={format}></div>
+    </div>
+
+    <div class="demo-code">
+      <Code code={code} lang="ts" theme="github-dark-default" />
+    </div>
+  </div>
+</section>
+
+<style>
+  .demo-block { padding: 40px 0; border-top: 1px solid var(--border); }
+  .demo-badge {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+  .demo-title { font-size: 24px; font-weight: 700; margin: 8px 0 8px; }
+  .demo-desc { color: var(--text-dim); font-size: 16px; max-width: 70ch; margin: 0 0 22px; }
+
+  .demo-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 18px;
+    align-items: start;
+  }
+
+  .demo-panel {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--panel);
+    overflow: hidden;
+    box-shadow: var(--glow);
+  }
+  .demo-chrome {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .dots { display: inline-flex; gap: 6px; }
+  .dots i { width: 11px; height: 11px; border-radius: 50%; background: var(--border-bright); }
+  .dots i:nth-child(1) { background: #ff5f57; }
+  .dots i:nth-child(2) { background: #febc2e; }
+  .dots i:nth-child(3) { background: #28c840; }
+  .demo-file { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
+  .demo-tag {
+    margin-left: auto; font-family: var(--mono); font-size: 11px;
+    color: var(--accent); border: 1px solid var(--border-bright);
+    border-radius: 999px; padding: 3px 10px;
+  }
+
+  .demo-code { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #0d1117; }
+  .demo-code :global(pre) {
+    margin: 0; padding: 18px 18px; background: #0d1117 !important;
+    font-size: 13px; line-height: 1.6; overflow-x: auto;
+    max-height: 520px;
+  }
+  .demo-code :global(code) { font-family: var(--mono); }
+</style>

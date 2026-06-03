@@ -1,0 +1,32 @@
+---
+import FormatPage from '../layouts/FormatPage.astro';
+import DemoBlock from '../components/DemoBlock.astro';
+import { pptxSnippets } from '../lib/demo-snippets';
+---
+<FormatPage format="pptx" name="PowerPoint" ext=".pptx" color="var(--pptx)"
+  tagline="Render .pptx decks to Canvas, your way.">
+  <DemoBlock
+    format="pptx" kind="demo" badge="Story · Demo"
+    title="Single viewer with navigation"
+    description="Hand PptxViewer a canvas and it manages parsing, rendering and the current slide. Step through with the built-in nextSlide() / prevSlide()."
+    code={pptxSnippets.demo}
+  />
+  <DemoBlock
+    format="pptx" kind="scroll" badge="Story · ScrollView"
+    title="Scroll through every slide"
+    description="Drive the headless PptxPresentation engine to render each slide into its own canvas, stacked in a scroll container — no built-in viewer required."
+    code={pptxSnippets.scroll}
+  />
+  <DemoBlock
+    format="pptx" kind="thumbnails" badge="Story · ThumbnailGrid"
+    title="Thumbnail overview"
+    description="The same engine renders slides at any size. Drop them into a grid at thumbnail width and wire up click handlers for navigation."
+    code={pptxSnippets.thumbnails}
+  />
+  <DemoBlock
+    format="pptx" kind="masterdetail" badge="Story · MasterDetail"
+    title="Thumbnail rail + large preview"
+    description="Combine both: a PptxPresentation for the thumbnail rail and a PptxViewer for the detail pane. Click a thumbnail to jump the preview with goToSlide()."
+    code={pptxSnippets.masterdetail}
+  />
+</FormatPage>

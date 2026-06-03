@@ -48,6 +48,7 @@ const cols = [
       <ul>
         {col.items.map((it) => <li set:html={it} />)}
       </ul>
+      <a class="caps-link" href={col.ext.replace('.', '/')}>{col.name} demos &amp; code →</a>
     </div>
   ))}
 </div>
@@ -73,5 +74,14 @@ const cols = [
   }
   .caps-col li:first-child { border-top: none; }
   .caps-col li::before { content: '✓'; position: absolute; left: 0; top: 7px; color: var(--c); font-weight: 700; }
+  .caps-link {
+    display: inline-block;
+    margin: 14px 0 16px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--c);
+    transition: opacity 0.15s;
+  }
+  .caps-link:hover { opacity: 0.75; }
   @media (max-width: 860px) { .caps-grid { grid-template-columns: 1fr; } }
 </style>

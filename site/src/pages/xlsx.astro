@@ -1,0 +1,14 @@
+---
+import FormatPage from '../layouts/FormatPage.astro';
+import DemoBlock from '../components/DemoBlock.astro';
+import { xlsxSheetSnippet } from '../lib/demo-snippets';
+---
+<FormatPage format="xlsx" name="Excel" ext=".xlsx" color="var(--xlsx)"
+  tagline="Render .xlsx workbooks to Canvas, your way.">
+  <DemoBlock
+    format="xlsx" kind="sheet" badge="Story · Demo"
+    title="The full workbook viewer"
+    description="Unlike slides and pages, a spreadsheet is one continuous grid — so XlsxViewer owns its own canvas, sheet-tab bar and zoom slider. Switch sheets along the bottom, click-drag to select a range, press Ctrl/Cmd+C to copy it as TSV, and drag the zoom slider (10–400%)."
+    code={xlsxSheetSnippet}
+  />
+</FormatPage>

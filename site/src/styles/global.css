@@ -168,3 +168,83 @@ h1, h2, h3 { line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
   overflow: hidden;
   background: #fff;
 }
+
+/* ── Nav (shared across pages) ───────────────────────────────────── */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  backdrop-filter: blur(12px);
+  background: rgba(7, 9, 14, 0.72);
+  border-bottom: 1px solid var(--border);
+}
+.nav-inner { display: flex; align-items: center; justify-content: space-between; height: 58px; }
+.nav-brand { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-weight: 600; font-size: 14px; }
+.nav-mark { display: inline-flex; gap: 3px; }
+.nav-mark i { width: 7px; height: 14px; border-radius: 2px; }
+.nav-mark i:nth-child(1) { background: var(--docx); }
+.nav-mark i:nth-child(2) { background: var(--xlsx); }
+.nav-mark i:nth-child(3) { background: var(--pptx); }
+.nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; color: var(--text-dim); }
+.nav-links a:hover { color: var(--text); }
+.nav-gh { color: var(--text) !important; font-weight: 600; }
+@media (max-width: 720px) {
+  .nav-links a:not(.nav-gh) { display: none; }
+}
+
+/* ── Footer (shared across pages) ────────────────────────────────── */
+.footer { border-top: 1px solid var(--border); padding: 44px 0 56px; margin-top: 40px; }
+.footer-inner { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.footer-brand { display: flex; align-items: center; gap: 12px; }
+.footer-brand strong { display: block; font-size: 15px; }
+.footer-brand span { font-size: 13px; color: var(--text-faint); }
+.footer-links { display: flex; gap: 22px; font-size: 14px; color: var(--text-dim); }
+.footer-links a:hover { color: var(--accent); }
+.footer-fine { margin-top: 24px; font-size: 12.5px; color: var(--text-faint); }
+
+/* ── Per-format detail-page demos ────────────────────────────────── */
+.demo-stage, .demo-scroll, .demo-grid, .demo-md {
+  background: radial-gradient(120% 80% at 50% 0%, #20242e, #161922 70%);
+}
+.demo-page { background: #fff; border-radius: 4px; box-shadow: 0 1px 1px rgba(0,0,0,0.5), 0 14px 40px -12px rgba(0,0,0,0.65); }
+
+.demo-bar { display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: var(--bg-elev); border-bottom: 1px solid var(--border); }
+.demo-btn {
+  width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border-bright);
+  background: var(--bg-elev-2); color: var(--text); font-size: 17px; line-height: 1; cursor: pointer;
+  transition: border-color 0.15s, opacity 0.15s;
+}
+.demo-btn:hover:not(:disabled) { border-color: var(--accent); }
+.demo-btn:disabled { opacity: 0.35; cursor: default; }
+.demo-info { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
+.demo-status { font-family: var(--mono); font-size: 13px; color: var(--text-dim); padding: 36px; text-align: center; }
+
+/* single-viewer demo */
+.demo-stage { padding: 22px; display: flex; justify-content: center; max-height: 560px; overflow: auto; }
+.demo-stage .demo-page { width: 100%; max-width: 760px; height: auto; }
+
+/* scroll demo */
+.demo-scroll {
+  max-height: 560px; overflow-y: auto; padding: 22px clamp(14px, 4%, 32px);
+  display: flex; flex-direction: column; align-items: center; gap: 22px;
+}
+.demo-scroll .demo-page { width: 100%; max-width: 720px; height: auto; }
+
+/* thumbnail grid demo */
+.demo-grid { padding: 22px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 18px; max-height: 560px; overflow-y: auto; }
+.demo-cell { display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
+.demo-cell .demo-page { width: 100%; height: auto; transition: transform 0.15s; }
+.demo-cell:hover .demo-page { transform: translateY(-2px); }
+.demo-cap { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+
+/* master-detail demo */
+.demo-md { display: flex; gap: 0; height: 560px; }
+.demo-rail { flex: 0 0 168px; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; border-right: 1px solid rgba(255,255,255,0.06); }
+.demo-rail-cell { cursor: pointer; border-radius: 5px; outline: 2px solid transparent; transition: outline-color 0.15s; }
+.demo-rail-cell .demo-page { width: 100%; height: auto; }
+.demo-rail-cell.active { outline-color: var(--accent); }
+.demo-detail { flex: 1 1 auto; overflow: auto; padding: 22px; display: flex; justify-content: center; align-items: flex-start; }
+.demo-detail .demo-page { width: 100%; max-width: 640px; height: auto; }
+
+/* xlsx full viewer */
+.demo-xlsx { width: 100%; height: 560px; background: #fff; }

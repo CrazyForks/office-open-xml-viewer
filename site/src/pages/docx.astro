@@ -1,0 +1,32 @@
+---
+import FormatPage from '../layouts/FormatPage.astro';
+import DemoBlock from '../components/DemoBlock.astro';
+import { docxSnippets } from '../lib/demo-snippets';
+---
+<FormatPage format="docx" name="Word" ext=".docx" color="var(--docx)"
+  tagline="Render .docx documents to Canvas, your way.">
+  <DemoBlock
+    format="docx" kind="demo" badge="Story · Demo"
+    title="Single viewer with navigation"
+    description="Hand DocxViewer a canvas and it manages parsing, page layout and the current page. Step through with the built-in nextPage() / prevPage()."
+    code={docxSnippets.demo}
+  />
+  <DemoBlock
+    format="docx" kind="scroll" badge="Story · ScrollView"
+    title="Scroll through every page"
+    description="Drive the headless DocxDocument engine to render each page into its own canvas, stacked in a scroll container — the natural way to read a long document."
+    code={docxSnippets.scroll}
+  />
+  <DemoBlock
+    format="docx" kind="thumbnails" badge="Story · ThumbnailGrid"
+    title="Page thumbnails"
+    description="The same engine renders pages at any size. Lay them out in a grid at thumbnail width for a quick overview, with click-to-navigate."
+    code={docxSnippets.thumbnails}
+  />
+  <DemoBlock
+    format="docx" kind="masterdetail" badge="Story · MasterDetail"
+    title="Thumbnail rail + large preview"
+    description="Combine both: a DocxDocument for the thumbnail rail and a DocxViewer for the detail pane. Click a thumbnail to jump the preview with goToPage()."
+    code={docxSnippets.masterdetail}
+  />
+</FormatPage>
