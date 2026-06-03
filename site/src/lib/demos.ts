@@ -34,14 +34,19 @@ type ViewerCtl = {
 };
 
 function makeViewer(format: Format, canvas: HTMLCanvasElement, width: number): ViewerCtl {
+  // NB: no enableTextSelection here. The demo canvases are downscaled with CSS
+  // (.demo-page width:100%/height:auto) to fit the card, but the viewer's text
+  // overlay is sized to the un-scaled page — leaving it on would inflate the
+  // scroll area and add a big empty gap below the page. Text selection is shown
+  // in the API reference instead.
   if (format === 'pptx') {
-    const v = new PptxViewer(canvas, { width, useGoogleFonts: true, enableTextSelection: true });
+    const v = new PptxViewer(canvas, { width, useGoogleFonts: true });
     return {
       load: (u) => v.load(u), go: (i) => v.goToSlide(i), next: () => v.nextSlide(),
       prev: () => v.prevSlide(), index: () => v.slideIndex, count: () => v.slideCount,
     };
   }
-  const v = new DocxViewer(canvas, { width, dpr: DPR(), useGoogleFonts: true, enableTextSelection: true });
+  const v = new DocxViewer(canvas, { width, dpr: DPR(), useGoogleFonts: true });
   return {
     load: (u) => v.load(u), go: (i) => v.goToPage(i), next: () => v.nextPage(),
     prev: () => v.prevPage(), index: () => v.currentPage, count: () => v.pageCount,
