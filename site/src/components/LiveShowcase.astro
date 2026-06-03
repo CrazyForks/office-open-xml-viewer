@@ -1,0 +1,147 @@
+---
+// Live Showcase — three real viewers behind format tabs.
+const formats = [
+  { id: 'pptx', label: 'PowerPoint', ext: '.pptx', color: 'var(--pptx)' },
+  { id: 'docx', label: 'Word', ext: '.docx', color: 'var(--docx)' },
+  { id: 'xlsx', label: 'Excel', ext: '.xlsx', color: 'var(--xlsx)' },
+];
+---
+<div class="showcase" data-showcase>
+  <div class="tabs" role="tablist" aria-label="Document format">
+    {formats.map((f, i) => (
+      <button
+        class="tab"
+        role="tab"
+        data-tab={f.id}
+        aria-selected={i === 0 ? 'true' : 'false'}
+        style={`--fmt:${f.color}`}
+      >
+        <span class="tab-dot"></span>
+        <span class="tab-label">{f.label}</span>
+        <span class="tab-ext">{f.ext}</span>
+      </button>
+    ))}
+  </div>
+  <div class="panel">
+    <div class="panel-head">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span class="panel-file" data-file>sample-1.pptx</span>
+      <span class="panel-badge">live · WASM</span>
+    </div>
+    <div class="panel-body" data-mount></div>
+  </div>
+</div>
+
+<script>
+  import { mountPptx, mountDocx, mountXlsx, type LiveController } from '../lib/live';
+
+  const base = import.meta.env.BASE_URL;
+  const sample = (f: string) => `${base}samples/${f}`.replace(/([^:])\/\/+/g, '$1/');
+
+  document.querySelectorAll<HTMLElement>('[data-showcase]').forEach((root) => {
+    const mount = root.querySelector<HTMLElement>('[data-mount]')!;
+    const fileLabel = root.querySelector<HTMLElement>('[data-file]')!;
+    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-tab]'));
+    let current: LiveController | null = null;
+    let loaded: string | null = null;
+
+    function show(id: string): void {
+      if (loaded === id) return;
+      loaded = id;
+      current?.destroy();
+      if (id === 'pptx') { fileLabel.textContent = 'sample-1.pptx'; current = mountPptx(mount, sample('sample-1.pptx')); }
+      else if (id === 'docx') { fileLabel.textContent = 'sample-1.docx'; current = mountDocx(mount, sample('sample-1.docx')); }
+      else { fileLabel.textContent = 'sample-1.xlsx'; current = mountXlsx(mount, sample('sample-1.xlsx')); }
+    }
+
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        tabs.forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
+        show(tab.dataset.tab!);
+      });
+    });
+
+    // Lazy-mount the first tab when the showcase is near the viewport. Mount
+    // immediately if it's already close; otherwise wait for it to scroll in.
+    const nearViewport = () => root.getBoundingClientRect().top < window.innerHeight + 600;
+    if (nearViewport()) {
+      show('pptx');
+    } else {
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) { show('pptx'); io.disconnect(); }
+        }
+      }, { rootMargin: '600px' });
+      io.observe(root);
+    }
+  });
+</script>
+
+<style>
+  .showcase { margin-top: 32px; }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: -1px;
+  }
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 18px;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 12px 12px 0 0;
+    background: var(--bg-elev);
+    color: var(--text-dim);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color 0.2s, background 0.2s;
+  }
+  .tab[aria-selected='true'] {
+    color: var(--text);
+    background: var(--panel);
+    box-shadow: inset 0 2px 0 var(--fmt);
+  }
+  .tab-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--fmt);
+    box-shadow: 0 0 10px -1px var(--fmt);
+  }
+  .tab-ext { font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
+
+  .panel {
+    border: 1px solid var(--border);
+    border-radius: 0 14px 14px 14px;
+    background: var(--panel);
+    overflow: hidden;
+    box-shadow: var(--glow);
+  }
+  .panel-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .dots { display: inline-flex; gap: 6px; }
+  .dots i { width: 11px; height: 11px; border-radius: 50%; background: var(--border-bright); }
+  .dots i:nth-child(1) { background: #ff5f57; }
+  .dots i:nth-child(2) { background: #febc2e; }
+  .dots i:nth-child(3) { background: #28c840; }
+  .panel-file { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
+  .panel-badge {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+    border: 1px solid var(--border-bright);
+    border-radius: 999px;
+    padding: 3px 10px;
+  }
+  .panel-body { padding: 18px; }
+</style>
