@@ -12,6 +12,7 @@ import {
   loadMathJax,
   mathMLToSvg,
   recolorSvg,
+  PT_TO_PX,
 } from '@silurus/ooxml-core';
 import type { MathNode } from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
@@ -23,9 +24,6 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
   darkYellow: '#808000', darkGray: '#808080', lightGray: '#C0C0C0',
   black: '#000000', white: '#FFFFFF',
 };
-
-// 1pt = 96/72 CSS px at screen
-const PT_TO_PX = 96 / 72;
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
 // Each equation is converted OMML AST -> MathML -> MathJax SVG, then rasterized to

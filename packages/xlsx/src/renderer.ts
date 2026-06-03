@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, type ChartModel, type SparklineModel } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, PT_TO_PX, EMU_PER_PX, type ChartModel, type SparklineModel } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -28,10 +28,6 @@ const DEFAULT_FONT_SIZE = 11;
 // so the spec-correct value depends on which font and point size that style
 // resolves to (e.g. Meiryo UI 10 pt yields MDW ≈ 6 px).
 const MDW_FALLBACK = 8;
-/** Standard pt → CSS px conversion at 96 DPI. ECMA-376 §18.4.11 (font sz),
- * §18.8.5 (border width margins, etc.) all express their dimensions in
- * points. Multiply by this constant to obtain the display pixel value. */
-const PT_TO_PX = 4 / 3;
 
 export const HEADER_W = 50;
 export const HEADER_H = 22;
@@ -2296,7 +2292,6 @@ function renderHeaders(
 // ────────────────────────────────────────────────────────────────
 // Image anchors  (ECMA-376 §20.5, <xdr:twoCellAnchor>)
 // ────────────────────────────────────────────────────────────────
-const EMU_PER_PX = 9525;
 
 /** Sum scaled column widths for cols 1..n-1 (sheet-space X of col n in scaled px). */
 function sheetXForCol(
@@ -3124,7 +3119,7 @@ function renderCharts(
 
     // XLSX natural rendering is device-px at 96 DPI where 1pt = 4/3 px. Scale
     // that by `cs` so OOXML-specified font sizes (title/axes) scale with zoom.
-    const ptToPx = (4 / 3) * cs;
+    const ptToPx = PT_TO_PX * cs;
     renderChart(ctx, adaptChartData(anchor.chart), { x: cx, y: cy, w: cw, h: ch }, ptToPx);
     ctx.restore();
   }

@@ -3,6 +3,8 @@
 // or title. Theme colors are expected to be flattened to `#RRGGBB` strings
 // at parse time so this module has zero theme awareness.
 
+import { PT_TO_PX } from '../units.js';
+
 export type SparklineKind = 'line' | 'column' | 'stem';
 
 /** Render-ready sparkline. The xlsx renderer flattens its parser output into
@@ -122,9 +124,8 @@ export function renderSparkline(
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   // ECMA-376 lineWeight is in points; the canvas is already scaled, so
-  // 1 pt ≈ 1.333 px at 96 DPI. We multiply by ptToPx to keep visual weight
+  // 1 pt ≈ 1.333 px at 96 DPI. We multiply by PT_TO_PX to keep visual weight
   // consistent with PowerPoint / Excel.
-  const PT_TO_PX = 1.333;
   ctx.lineWidth = (model.lineWeight ?? 0.75) * PT_TO_PX;
   ctx.beginPath();
   let penDown = false;

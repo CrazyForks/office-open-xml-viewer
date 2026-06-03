@@ -1,8 +1,8 @@
 import type { MediaElement, Slide } from './types';
 import { drawPlayBadge } from './media-chrome';
 import { tabularDigitWidth, tabularTextWidth, drawTabularText } from './tabular-text';
+import { EMU_PER_PX } from '@silurus/ooxml-core';
 
-const EMU_PER_PX = 9525;
 const emuToPx = (v: number, scale: number) => (v / EMU_PER_PX) * scale;
 
 interface MediaState {

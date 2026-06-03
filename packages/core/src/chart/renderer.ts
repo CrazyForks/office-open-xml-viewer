@@ -6,6 +6,7 @@
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
 import { niceStep, niceAxisMax, niceAxisMin } from './axis-scale.js';
 import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
+import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 
 // ─── Palette + helpers ──────────────────────────────────────────────────────
 
@@ -488,8 +489,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // default (gridlines stand in), so only draw it when the file specifies one.
   const catLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#aaa';
   const valLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#aaa';
-  const catLineW = chart.catAxisLineWidthEmu ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700) : 1;
-  const valLineW = chart.valAxisLineWidthEmu ? Math.max(0.5, chart.valAxisLineWidthEmu / 12700) : 1;
+  const catLineW = chart.catAxisLineWidthEmu ? Math.max(0.5, chart.catAxisLineWidthEmu / EMU_PER_PT) : 1;
+  const valLineW = chart.valAxisLineWidthEmu ? Math.max(0.5, chart.valAxisLineWidthEmu / EMU_PER_PT) : 1;
   const strokeAxis = (x1: number, y1: number, x2: number, y2: number, color: string, lw: number): void => {
     ctx.strokeStyle = color; ctx.lineWidth = lw;
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
@@ -1307,7 +1308,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
       const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
       const yAxisLineWidth = chart.valAxisLineWidthEmu
-        ? Math.max(0.5, chart.valAxisLineWidthEmu / 12700) : undefined;
+        ? Math.max(0.5, chart.valAxisLineWidthEmu / EMU_PER_PT) : undefined;
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, yAxisLineColor, yAxisLineWidth);
     }
   }
@@ -1343,7 +1344,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     ctx.save();
     ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
     ctx.lineWidth = chart.catAxisLineWidthEmu
-      ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700)
+      ? Math.max(0.5, chart.catAxisLineWidthEmu / EMU_PER_PT)
       : 1;
     ctx.lineCap = 'butt';
     ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
@@ -1353,7 +1354,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     ctx.save();
     ctx.strokeStyle = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#888';
     ctx.lineWidth = chart.valAxisLineWidthEmu
-      ? Math.max(0.5, chart.valAxisLineWidthEmu / 12700)
+      ? Math.max(0.5, chart.valAxisLineWidthEmu / EMU_PER_PT)
       : 1;
     ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
     ctx.restore();
@@ -1378,7 +1379,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode), gx, xAxisY + 4);
       const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
       const xAxisLineWidth = chart.catAxisLineWidthEmu
-        ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700) : undefined;
+        ? Math.max(0.5, chart.catAxisLineWidthEmu / EMU_PER_PT) : undefined;
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, xAxisLineWidth);
     }
   }
@@ -1620,7 +1621,7 @@ function drawSeriesErrorBars(
 ): void {
   ctx.save();
   ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
-  ctx.lineWidth = eb.lineWidthEmu ? Math.max(0.5, eb.lineWidthEmu / 12700) : 1;
+  ctx.lineWidth = eb.lineWidthEmu ? Math.max(0.5, eb.lineWidthEmu / EMU_PER_PT) : 1;
   ctx.setLineDash(dashPatternForPreset(eb.dash));
   const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
   const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
@@ -1998,7 +1999,7 @@ export function renderChart(
    * device-px where 1pt≈1.333. Used to size title/axis labels whose
    * XML-specified sizes are in OOXML hundredths of a point.
    */
-  ptToPx: number = 1.333,
+  ptToPx: number = PT_TO_PX,
 ): void {
   const { x, y, w, h } = rect;
   // Only fill the outer chartSpace when chartBg is set; a null means noFill
