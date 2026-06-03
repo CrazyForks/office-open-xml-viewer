@@ -8,16 +8,12 @@ import {
   buildShapePath,
   hexToRgba,
   resolveFill,
-  parseMathFont,
-  parseMathConstants,
-  layoutMath,
-  renderMathBox,
-  defaultMathFontUrl,
-  DEFAULT_MATH_FONT_FAMILY,
-  type MathFont,
-  type MathConstants,
-  type MeasureGlyph,
+  mathToMathML,
+  loadMathJax,
+  mathMLToSvg,
+  recolorSvg,
 } from '@silurus/ooxml-core';
+import type { MathNode } from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -31,87 +27,80 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
 // 1pt = 96/72 CSS px at screen
 const PT_TO_PX = 96 / 72;
 
-// ── Math (OMML) resources ──────────────────────────────────────────────────
-// The math font is parsed once and shared. Layout reads it synchronously, so it
-// must be loaded (via loadMathResources) before computePages / renderPage run.
-// Loading is skipped entirely for documents without equations.
-interface MathResources {
-  font: MathFont;
-  consts: MathConstants;
+// ── Math (OMML) rendering via MathJax ───────────────────────────────────────
+// Each equation is converted OMML AST -> MathML -> MathJax SVG, then rasterized to
+// an <img> once (async, before pagination). Layout reads cached em-extents
+// synchronously; drawing blits the image. Skipped entirely for math-free documents.
+interface MathRender {
+  img: CanvasImageSource;
+  /** baseline-relative extents in em (1em = the equation's font size). */
+  widthEm: number;
+  ascentEm: number;
+  descentEm: number;
 }
-let mathResources: MathResources | null = null;
-let mathResourcesPromise: Promise<MathResources> | null = null;
-
-/** Real per-glyph ink metrics from a canvas context, for the math layout engine. */
-function mathMeasureGlyph(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-): MeasureGlyph {
-  return (text, sizePx, style) => {
-    const bold = style === 'bold' || style === 'boldItalic';
-    const italic = style === 'italic' || style === 'boldItalic';
-    ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${sizePx}px "${DEFAULT_MATH_FONT_FAMILY}"`;
-    const m = ctx.measureText(text);
-    const ascent = m.actualBoundingBoxAscent;
-    const descent = m.actualBoundingBoxDescent;
-    return {
-      width: m.width,
-      ascent: Number.isFinite(ascent) ? ascent : sizePx * 0.7,
-      descent: Number.isFinite(descent) ? descent : 0,
-    };
-  };
-}
+// Keyed by the run's MathNode[] reference, which is stable from parse through render.
+const mathRenders = new WeakMap<MathNode[], MathRender>();
 
 /** True if any run in the body (incl. tables) is an OMML equation. */
 export function documentHasMath(body: BodyElement[]): boolean {
-  const runsHaveMath = (runs: DocRun[]) => runs.some((r) => r.type === 'math');
-  const walk = (el: BodyElement): boolean => {
-    if ('runs' in el && runsHaveMath((el as DocParagraph).runs)) return true;
+  return collectMathRuns(body).length > 0;
+}
+
+function collectMathRuns(body: BodyElement[]): { nodes: MathNode[]; display: boolean }[] {
+  const found: { nodes: MathNode[]; display: boolean }[] = [];
+  const fromRuns = (runs: DocRun[]) => {
+    for (const r of runs) {
+      if (r.type === 'math') found.push({ nodes: r.nodes, display: r.display });
+    }
+  };
+  const walk = (el: BodyElement) => {
+    if ('runs' in el) fromRuns((el as DocParagraph).runs);
     if ('rows' in el) {
       for (const row of (el as DocTable).rows) {
         for (const cell of row.cells) {
-          for (const child of cell.content) {
-            if (walk(child as BodyElement)) return true;
-          }
+          for (const child of cell.content) walk(child as BodyElement);
         }
       }
     }
-    return false;
   };
-  return body.some(walk);
+  body.forEach(walk);
+  return found;
+}
+
+/** Rasterize an SVG string to an <img> (browser). Resolves once decoded. */
+function svgToImage(svg: string): Promise<HTMLImageElement> {
+  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  const img = new Image();
+  return new Promise((resolve, reject) => {
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
 }
 
 /**
- * Fetch + parse the default math font and register it for `fillText`. Idempotent
- * and safe to call repeatedly. Call once after parsing when the document has math.
+ * Convert + rasterize every equation in the document. Must complete before
+ * pagination/render (which read extents synchronously). Idempotent per equation.
  */
-export async function loadMathResources(url: string = defaultMathFontUrl): Promise<MathResources> {
-  if (mathResources) return mathResources;
-  if (!mathResourcesPromise) {
-    mathResourcesPromise = (async () => {
-      const buf = await (await fetch(url)).arrayBuffer();
-      // FontFaceSet lives on `document.fonts` (window) or `self.fonts` (worker) —
-      // NOT on `globalThis.fonts`. Resolve the right one so fillText actually uses
-      // the math font instead of silently falling back to a system serif.
-      const fonts: FontFaceSet | undefined =
-        typeof document !== 'undefined' && document.fonts
-          ? document.fonts
-          : (self as unknown as { fonts?: FontFaceSet }).fonts;
-      if (typeof FontFace !== 'undefined' && fonts) {
-        try {
-          const face = new FontFace(DEFAULT_MATH_FONT_FAMILY, buf);
-          await face.load();
-          fonts.add(face);
-        } catch {
-          // Registration failure (e.g. no FontFaceSet): glyphs fall back to a
-          // system font; layout (which uses parsed metrics) is unaffected.
-        }
-      }
-      const font = parseMathFont(buf);
-      mathResources = { font, consts: parseMathConstants(font) };
-      return mathResources;
-    })();
+export async function prepareMathRuns(body: BodyElement[]): Promise<void> {
+  const runs = collectMathRuns(body);
+  if (runs.length === 0) return;
+  await loadMathJax();
+  for (const r of runs) {
+    if (mathRenders.has(r.nodes)) continue;
+    try {
+      const out = await mathMLToSvg(mathToMathML(r.nodes, r.display));
+      const img = await svgToImage(recolorSvg(out.svg, '#000000'));
+      mathRenders.set(r.nodes, {
+        img,
+        widthEm: out.widthEm,
+        ascentEm: out.ascentEm,
+        descentEm: out.descentEm,
+      });
+    } catch {
+      // Conversion failure: leave the equation unrendered (zero-size) rather than throw.
+    }
   }
-  return mathResourcesPromise;
 }
 
 /** Anchor image float that affects text wrap on the current page. */
@@ -1117,22 +1106,13 @@ function renderParagraph(
         continue;
       }
       if ('mathNodes' in seg) {
-        if (!dryRun && mathResources) {
-          const box = layoutMath(seg.mathNodes, {
-            font: mathResources.font,
-            consts: mathResources.consts,
-            fontSizePx: seg.fontSize * scale,
-            level: seg.display ? 'display' : 'text',
-            measureGlyph: mathMeasureGlyph(ctx),
-          });
-          renderMathBox(
-            ctx,
-            box,
-            x,
-            baseline,
-            seg.color ? `#${seg.color}` : defaultColor,
-            DEFAULT_MATH_FONT_FAMILY,
-          );
+        const render = mathRenders.get(seg.mathNodes);
+        if (!dryRun && render) {
+          const emPx = seg.fontSize * scale;
+          const w = render.widthEm * emPx;
+          const h = (render.ascentEm + render.descentEm) * emPx;
+          const top = baseline - render.ascentEm * emPx;
+          ctx.drawImage(render.img, x, top, w, h);
         }
         x += seg.measuredWidth;
         continue;
@@ -1732,20 +1712,17 @@ function layoutLines(
 
     // ── Math segment ─────────────────────────────────────
     if ('mathNodes' in seg) {
-      if (!mathResources) { seg.measuredWidth = 0; continue; }
-      const box = layoutMath(seg.mathNodes, {
-        font: mathResources.font,
-        consts: mathResources.consts,
-        fontSizePx: seg.fontSize * scale,
-        level: seg.display ? 'display' : 'text',
-        measureGlyph: mathMeasureGlyph(ctx),
-      });
-      seg.measuredWidth = box.width;
-      seg.mathAscent = box.ascent;
-      seg.mathDescent = box.descent;
-      if (currentLine.length > 0 && currentWidth + box.width > availW()) flush();
-      // line-height tracks the un-scaled pt size; ascent/descent come from the box.
-      addToLine(seg, box.width, seg.fontSize, box.ascent, box.descent);
+      const render = mathRenders.get(seg.mathNodes);
+      if (!render) { seg.measuredWidth = 0; continue; }
+      const emPx = seg.fontSize * scale;
+      const w = render.widthEm * emPx;
+      const asc = render.ascentEm * emPx;
+      const desc = render.descentEm * emPx;
+      seg.measuredWidth = w;
+      seg.mathAscent = asc;
+      seg.mathDescent = desc;
+      if (currentLine.length > 0 && currentWidth + w > availW()) flush();
+      addToLine(seg, w, seg.fontSize, asc, desc);
       continue;
     }
 
