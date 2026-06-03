@@ -24,6 +24,9 @@ export interface MathNary {
   kind: 'nary';
   /** operator char, e.g. '∑', '∫', '∏'. */
   op: string;
+  /** limit location (`m:limLoc`): 'subSup' = beside the op, 'undOvr' = above/below.
+   *  Empty/omitted = default by operator class (integrals → subSup, others → undOvr). */
+  limLoc?: string;
   sub?: MathNode[];
   sup?: MathNode[];
   body: MathNode[];
