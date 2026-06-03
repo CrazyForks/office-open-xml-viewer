@@ -1,0 +1,127 @@
+---
+import { Code } from 'astro:components';
+
+interface Tab {
+  id: string;
+  label: string;
+  lang: string;
+  code: string;
+}
+interface Props {
+  tabs: Tab[];
+  filename?: string;
+}
+const { tabs, filename } = Astro.props;
+---
+<div class="codetabs" data-codetabs>
+  <div class="ct-head">
+    <div class="ct-tabs" role="tablist">
+      {tabs.map((t, i) => (
+        <button class="ct-tab" role="tab" data-ct-tab={t.id} aria-selected={i === 0 ? 'true' : 'false'}>
+          {t.label}
+        </button>
+      ))}
+    </div>
+    {filename && <span class="ct-file">{filename}</span>}
+    <button class="ct-copy" data-ct-copy aria-label="Copy code">
+      <span class="ct-copy-default">Copy</span>
+      <span class="ct-copy-done">Copied ✓</span>
+    </button>
+  </div>
+  {tabs.map((t, i) => (
+    <div class="ct-panel" data-ct-panel={t.id} hidden={i !== 0} data-code={t.code}>
+      <Code code={t.code} lang={t.lang as any} theme="github-dark-default" />
+    </div>
+  ))}
+</div>
+
+<script>
+  document.querySelectorAll<HTMLElement>('[data-codetabs]').forEach((root) => {
+    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-ct-tab]'));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>('[data-ct-panel]'));
+    const copy = root.querySelector<HTMLButtonElement>('[data-ct-copy]');
+
+    function select(id: string): void {
+      tabs.forEach((t) => t.setAttribute('aria-selected', String(t.dataset.ctTab === id)));
+      panels.forEach((p) => { p.hidden = p.dataset.ctPanel !== id; });
+    }
+    tabs.forEach((t) => t.addEventListener('click', () => select(t.dataset.ctTab!)));
+
+    copy?.addEventListener('click', async () => {
+      const active = panels.find((p) => !p.hidden);
+      if (!active) return;
+      try {
+        await navigator.clipboard.writeText(active.dataset.code ?? '');
+        copy.classList.add('done');
+        setTimeout(() => copy.classList.remove('done'), 1400);
+      } catch { /* clipboard unavailable */ }
+    });
+  });
+</script>
+
+<style>
+  .codetabs {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+    background: #0d1117;
+  }
+  .ct-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px 6px 10px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+  }
+  .ct-tabs { display: flex; gap: 2px; flex-wrap: wrap; }
+  .ct-tab {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 13px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+  }
+  .ct-tab:hover { color: var(--text-dim); }
+  .ct-tab[aria-selected='true'] { color: var(--text); background: var(--bg-elev-2); }
+  .ct-file {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-left: 6px;
+  }
+  .ct-copy {
+    margin-left: auto;
+    appearance: none;
+    border: 1px solid var(--border-bright);
+    background: var(--bg-elev-2);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    position: relative;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .ct-copy:hover { color: var(--text); border-color: var(--accent); }
+  .ct-copy-done { display: none; color: var(--accent); }
+  .ct-copy.done .ct-copy-default { display: none; }
+  .ct-copy.done .ct-copy-done { display: inline; }
+
+  .ct-panel :global(pre) {
+    margin: 0;
+    padding: 18px 20px;
+    background: #0d1117 !important;
+    font-size: 13.5px;
+    line-height: 1.65;
+    overflow-x: auto;
+  }
+  .ct-panel :global(code) { font-family: var(--mono); }
+</style>

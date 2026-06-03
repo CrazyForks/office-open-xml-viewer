@@ -1,0 +1,24 @@
+---
+import CodeTabs from '../../components/CodeTabs.astro';
+import { vanillaSnippet, reactSnippet, vueSnippet, svelteSnippet, headlessSnippet } from '../../lib/snippets';
+import '../../styles/global.css';
+const frameworkTabs = [
+  { id: 'react', label: 'React', lang: 'tsx', code: reactSnippet },
+  { id: 'vue', label: 'Vue', lang: 'vue', code: vueSnippet },
+  { id: 'svelte', label: 'Svelte', lang: 'svelte', code: svelteSnippet },
+  { id: 'vanilla', label: 'Vanilla', lang: 'ts', code: vanillaSnippet },
+];
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" /><title>preview: code</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  </head>
+  <body style="padding:24px;">
+    <div style="max-width:900px;margin:0 auto;display:grid;gap:28px;">
+      <CodeTabs tabs={frameworkTabs} filename="Deck.tsx" />
+      <CodeTabs tabs={[{ id: 'headless', label: 'thumbnails.ts', lang: 'ts', code: headlessSnippet }]} />
+    </div>
+  </body>
+</html>

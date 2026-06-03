@@ -1,6 +1,21 @@
 ---
 import Base from '../layouts/Base.astro';
 import LiveShowcase from '../components/LiveShowcase.astro';
+import CodeTabs from '../components/CodeTabs.astro';
+import {
+  vanillaSnippet,
+  reactSnippet,
+  vueSnippet,
+  svelteSnippet,
+  headlessSnippet,
+} from '../lib/snippets';
+
+const frameworkTabs = [
+  { id: 'react', label: 'React', lang: 'tsx', code: reactSnippet },
+  { id: 'vue', label: 'Vue', lang: 'vue', code: vueSnippet },
+  { id: 'svelte', label: 'Svelte', lang: 'svelte', code: svelteSnippet },
+  { id: 'vanilla', label: 'Vanilla', lang: 'ts', code: vanillaSnippet },
+];
 ---
 <Base>
   <!-- ── Hero ──────────────────────────────────────────────────── -->
@@ -48,6 +63,37 @@ import LiveShowcase from '../components/LiveShowcase.astro';
         Rust/WASM parse, Canvas paint. Switch formats, step through pages, scroll the sheet.
       </p>
       <LiveShowcase />
+    </div>
+  </section>
+
+  <!-- ── Code / framework integration ──────────────────────────── -->
+  <section class="section section-alt" id="code">
+    <div class="wrap" data-reveal>
+      <p class="eyebrow">Framework-agnostic</p>
+      <h2 class="section-title">Drop it into your stack.</h2>
+      <p class="section-lead">
+        The viewers are plain TypeScript classes — no framework runtime, no peer deps. Hand one a
+        <code>&lt;canvas&gt;</code> (or a container, for Excel) and call <code>load()</code>. Here's the
+        same PowerPoint viewer in four flavours; Word and Excel follow the identical shape.
+      </p>
+      <div class="code-wrap">
+        <CodeTabs tabs={frameworkTabs} filename="Deck.tsx" />
+      </div>
+
+      <div class="headless">
+        <div class="headless-copy">
+          <h3 class="headless-title">Or compose your own UI.</h3>
+          <p class="headless-lead">
+            Each format also ships a <strong>headless engine</strong>
+            (<code>PptxPresentation</code> / <code>DocxDocument</code> / <code>XlsxWorkbook</code>)
+            that renders into any canvas you supply. Build thumbnail grids, scroll views, or
+            master–detail panes — you own the chrome, the library owns the pixels.
+          </p>
+        </div>
+        <div class="code-wrap">
+          <CodeTabs tabs={[{ id: 'headless', label: 'thumbnails.ts', lang: 'ts', code: headlessSnippet }]} />
+        </div>
+      </div>
     </div>
   </section>
 </Base>
@@ -113,4 +159,34 @@ import LiveShowcase from '../components/LiveShowcase.astro';
   .hero-lead code, .hero-lead strong { color: var(--text); }
   .hero-lead code { font-family: var(--mono); font-size: 0.92em; }
   .hero-cta { display: flex; gap: 14px; margin-top: 32px; flex-wrap: wrap; }
+
+  .section-alt { background: linear-gradient(180deg, transparent, rgba(12, 15, 23, 0.6)); }
+  .section-lead code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    color: var(--text);
+    background: var(--bg-elev-2);
+    padding: 1px 6px;
+    border-radius: 5px;
+  }
+  .code-wrap { margin-top: 28px; }
+
+  .headless {
+    margin-top: 56px;
+    display: grid;
+    grid-template-columns: 0.85fr 1.15fr;
+    gap: 28px;
+    align-items: center;
+  }
+  .headless-title { font-size: 24px; font-weight: 700; }
+  .headless-lead {
+    margin-top: 12px;
+    color: var(--text-dim);
+    font-size: 16px;
+  }
+  .headless-lead code, .headless-lead strong { color: var(--text); }
+  .headless-lead code { font-family: var(--mono); font-size: 0.9em; }
+  @media (max-width: 860px) {
+    .headless { grid-template-columns: 1fr; }
+  }
 </style>
