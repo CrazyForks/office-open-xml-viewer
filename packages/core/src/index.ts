@@ -1,5 +1,40 @@
-export * from './types/common';
-export * from './types/chart';
+export type {
+  ArrowEnd,
+  Bullet,
+  Fill,
+  Glow,
+  GradientFill,
+  GradientStop,
+  LineBreak,
+  NoFill,
+  Paragraph,
+  PathCmd,
+  PatternFill,
+  Reflection,
+  RenderOptions,
+  Shadow,
+  SoftEdge,
+  SolidFill,
+  SpaceLine,
+  Stroke,
+  TabStop,
+  TextBody,
+  TextOutline,
+  TextRun,
+  TextRunData,
+} from './types/common';
+export type {
+  ChartDataLabelOverride,
+  ChartDataPointOverride,
+  ChartErrBars,
+  ChartManualLayout,
+  ChartModel,
+  ChartRect,
+  ChartSeries,
+  ChartSeriesDataLabels,
+  ChartType,
+  LegendManualLayout,
+} from './types/chart';
 export type { LoadOptions } from './types/load-options';
 export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
 export { renderChart } from './chart/renderer';
@@ -13,7 +48,15 @@ export {
   type SparklineModel,
   type SparklineRect,
 } from './sparkline/renderer';
-export * from './math';
+export {
+  mathToMathML,
+  loadMathJax,
+  mathMLToSvg,
+  svgExtents,
+  recolorSvg,
+  setMathJaxUrl,
+  type MathSvg,
+} from './math';
 export type { MathNode, MathFormula, MathStyle } from './types/math';
 export { EMU_PER_INCH, EMU_PER_PT, EMU_PER_PX, PT_TO_PX } from './units';
 export {

@@ -1347,8 +1347,9 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     // Ruby annotation rides with the WHOLE base text (typically 1-2 chars).
     // Splitting on word boundaries would lose the association, so attach
     // the annotation only to the first emitted segment.
-    const ruby = (base as DocxTextRun).ruby
-      ? { text: (base as DocxTextRun).ruby!.text, fontSizePt: (base as DocxTextRun).ruby!.fontSizePt }
+    const baseRuby = (base as DocxTextRun).ruby;
+    const ruby = baseRuby
+      ? { text: baseRuby.text, fontSizePt: baseRuby.fontSizePt }
       : undefined;
     const revision = (base as DocxTextRun).revision;
     let firstSeg = true;

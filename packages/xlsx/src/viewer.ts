@@ -311,6 +311,34 @@ export class XlsxViewer {
     this.opts.onSheetChange?.(index, this.workbook.sheetNames[index] ?? '');
   }
 
+  /** 0-based index of the currently displayed sheet. */
+  get sheetIndex(): number {
+    return this.currentSheet;
+  }
+
+  /** Total number of sheets in the loaded workbook. */
+  get sheetCount(): number {
+    return this.wb?.sheetCount ?? 0;
+  }
+
+  /**
+   * Navigate to a sheet by index, clamped to range. Canonical navigation verb
+   * matching {@link PptxViewer.goToSlide} / {@link DocxViewer.goToPage};
+   * {@link showSheet} is the lower-level form that assumes a valid index.
+   */
+  async goToSheet(index: number): Promise<void> {
+    if (this.sheetCount === 0) return;
+    await this.showSheet(Math.max(0, Math.min(index, this.sheetCount - 1)));
+  }
+
+  async nextSheet(): Promise<void> {
+    await this.goToSheet(this.currentSheet + 1);
+  }
+
+  async prevSheet(): Promise<void> {
+    await this.goToSheet(this.currentSheet - 1);
+  }
+
   /** Returns the cell at canvas-client coordinates, or null if outside the cell grid. */
   getCellAt(clientX: number, clientY: number): CellAddress | null {
     const ws = this.currentWorksheet;

@@ -101,11 +101,9 @@ export class PptxPresentation {
       buffer = source;
     }
     await pres._parse(buffer, opts.maxZipEntryBytes);
-    if (opts.useGoogleFonts) {
-      await preloadGoogleFonts(
-        [pres._presentation!.majorFont, pres._presentation!.minorFont],
-        PPTX_GOOGLE_FONTS,
-      );
+    const parsed = pres._presentation;
+    if (opts.useGoogleFonts && parsed) {
+      await preloadGoogleFonts([parsed.majorFont, parsed.minorFont], PPTX_GOOGLE_FONTS);
     }
     return pres;
   }

@@ -157,12 +157,11 @@ export class PptxViewer {
     }
 
     if (this.textLayer) {
-      this._buildTextLayer(runs, targetWidth, cssHeight);
+      this._buildTextLayer(this.textLayer, runs, targetWidth, cssHeight);
     }
   }
 
-  private _buildTextLayer(runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
-    const layer = this.textLayer!;
+  private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
     layer.innerHTML = '';
     layer.style.width = `${cssWidth}px`;
     layer.style.height = `${cssHeight}px`;

@@ -1,19 +1,16 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "skipLibCheck": true,
-    "isolatedModules": true,
-    "declaration": true,
-    "composite": true,
     "declarationDir": "./dist/types",
     "emitDeclarationOnly": true,
     "rootDir": "./src",
-    "outDir": "./dist"
+    "outDir": "./dist",
+    "paths": {
+      "@silurus/ooxml-core": ["../core/src/index.ts"],
+      "@silurus/ooxml-core/*": ["../core/src/*"]
+    }
   },
   "include": ["src"],
-  "exclude": ["src/**/*.stories.ts", "src/**/*.stories.tsx"]
+  "exclude": ["src/**/*.stories.ts", "src/**/*.stories.tsx"],
+  "references": [{ "path": "../core" }]
 }
