@@ -1,6 +1,11 @@
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
-import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
+import {
+  preloadGoogleFonts,
+  WorkerBridge,
+  type FontPreloadEntry,
+  type LoadOptions as CoreLoadOptions,
+} from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
 import { renderViewport } from './renderer.js';
 
@@ -22,20 +27,13 @@ const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   },
 };
 
-/** Options for {@link XlsxWorkbook.load}. Extends the shared
- *  `LoadOptions` shape from `@silurus/ooxml-core`. */
-export interface LoadOptions extends CoreLoadOptions {
-  /**
-   * Override the per-entry ZIP decompression cap (bytes) used by the
-   * zip-bomb guard in the Rust parser. Defaults to 512 MiB. Applies to both
-   * the initial workbook parse and per-sheet parse. Zero / negative values
-   * fall back to the default.
-   */
-  maxZipEntryBytes?: number;
-}
+/** Options for {@link XlsxWorkbook.load}. The shared load-options type from
+ *  `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
+export type LoadOptions = CoreLoadOptions;
 
 export class XlsxWorkbook {
   private worker: Worker;
+  private bridge: WorkerBridge<WorkerResponse>;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
   /** Cache of loaded images keyed by their data URL. Shared across sheets. */
@@ -43,24 +41,41 @@ export class XlsxWorkbook {
   private rawData: ArrayBuffer | null = null;
   private maxZipEntryBytes: number | undefined;
 
-  constructor() {
+  private constructor() {
     this.worker = new InlineWorker();
+    this.bridge = new WorkerBridge<WorkerResponse>(this.worker, {
+      correlate: (res) => res.id,
+      toError: (res) => (res.type === 'error' ? res.message : undefined),
+    });
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
-    this.worker.postMessage({ type: 'init', wasmUrl });
+    this.bridge.post({ type: 'init', wasmUrl });
   }
 
-  async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
-    const data =
-      typeof source === 'string'
-        ? await fetch(source).then((r) => r.arrayBuffer())
-        : source;
+  /** Parse an XLSX from a URL or ArrayBuffer. */
+  static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<XlsxWorkbook> {
+    const wb = new XlsxWorkbook();
+    await wb._load(source, opts);
+    return wb;
+  }
+
+  private async _load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
+    let data: ArrayBuffer;
+    if (typeof source === 'string') {
+      const res = await fetch(source);
+      if (!res.ok) throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
+      data = await res.arrayBuffer();
+    } else {
+      data = source;
+    }
     this.rawData = data;
     this.maxZipEntryBytes = opts.maxZipEntryBytes;
-    this.parsedWorkbook = await this.sendMessage({
+    const parsed = await this.bridge.request((id) => ({
       type: 'parse',
+      id,
       data: data.slice(0),
       maxZipEntryBytes: this.maxZipEntryBytes,
-    }) as ParsedWorkbook;
+    }));
+    this.parsedWorkbook = (parsed as Extract<WorkerResponse, { type: 'parsed' }>).workbook;
     if (opts.useGoogleFonts) {
       // Walk every styled font in the workbook and queue Google Fonts
       // substitutes for any Office faces (Calibri → Carlito, Cambria →
@@ -89,22 +104,24 @@ export class XlsxWorkbook {
   }
 
   async getWorksheet(sheetIndex: number): Promise<Worksheet> {
-    if (this.sheetCache.has(sheetIndex)) {
-      return this.sheetCache.get(sheetIndex)!;
-    }
+    const cached = this.sheetCache.get(sheetIndex);
+    if (cached) return cached;
     if (!this.parsedWorkbook || !this.rawData) {
       throw new Error('Workbook not loaded');
     }
+    const rawData = this.rawData;
     const sheetMeta = this.parsedWorkbook.workbook.sheets[sheetIndex];
     if (!sheetMeta) throw new Error(`Sheet index ${sheetIndex} out of range`);
 
-    const ws = await this.sendMessage({
+    const res = await this.bridge.request((id) => ({
       type: 'parseSheet',
-      data: this.rawData.slice(0),
+      id,
+      data: rawData.slice(0),
       sheetIndex,
       sheetName: sheetMeta.name,
       maxZipEntryBytes: this.maxZipEntryBytes,
-    }) as Worksheet;
+    }));
+    const ws = (res as Extract<WorkerResponse, { type: 'parsedSheet' }>).worksheet;
     this.sheetCache.set(sheetIndex, ws);
     return ws;
   }
@@ -188,23 +205,6 @@ export class XlsxWorkbook {
   }
 
   destroy(): void {
-    this.worker.terminate();
-  }
-
-  private sendMessage(req: object): Promise<ParsedWorkbook | Worksheet> {
-    return new Promise((resolve, reject) => {
-      const handler = (e: MessageEvent<WorkerResponse>) => {
-        this.worker.removeEventListener('message', handler);
-        if (e.data.type === 'error') {
-          reject(new Error(e.data.message));
-        } else if (e.data.type === 'parsed') {
-          resolve(e.data.workbook);
-        } else if (e.data.type === 'parsedSheet') {
-          resolve(e.data.worksheet);
-        }
-      };
-      this.worker.addEventListener('message', handler);
-      this.worker.postMessage(req);
-    });
+    this.bridge.terminate();
   }
 }

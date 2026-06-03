@@ -1,17 +1,8 @@
 import init, { parse_docx } from './wasm/docx_parser.js';
+import { decodeDataUrl } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types';
 
 let initPromise: Promise<unknown> | null = null;
-
-function decodeDataUrl(url: string): ArrayBuffer | null {
-  if (!url.startsWith('data:')) return null;
-  const comma = url.indexOf(',');
-  if (comma === -1) return null;
-  const binary = atob(url.slice(comma + 1));
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
@@ -21,6 +12,9 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
     return;
   }
 
+  // Echo the correlation id so the client routes the response to the right
+  // pending promise (id correlation, not response-type matching).
+  const id = req.id;
   try {
     await initPromise;
     if (req.type === 'parse') {
@@ -31,11 +25,11 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       const json = parse_docx(new Uint8Array(req.data), maxBytes);
       const document = JSON.parse(json);
       if (document.error) throw new Error(`Parse error: ${document.error}`);
-      const res: WorkerResponse = { type: 'parsed', document };
+      const res: WorkerResponse = { type: 'parsed', id, document };
       self.postMessage(res);
     }
   } catch (err) {
-    const res: WorkerResponse = { type: 'error', message: String(err) };
+    const res: WorkerResponse = { type: 'error', id, message: String(err) };
     self.postMessage(res);
   }
 };

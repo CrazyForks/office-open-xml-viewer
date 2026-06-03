@@ -1,6 +1,6 @@
 import type {
-  Document, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
+  DocRun, DocxTextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
 import {
@@ -12,6 +12,7 @@ import {
   loadMathJax,
   mathMLToSvg,
   recolorSvg,
+  PT_TO_PX,
 } from '@silurus/ooxml-core';
 import type { MathNode } from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
@@ -23,9 +24,6 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
   darkYellow: '#808000', darkGray: '#808080', lightGray: '#C0C0C0',
   black: '#000000', white: '#FFFFFF',
 };
-
-// 1pt = 96/72 CSS px at screen
-const PT_TO_PX = 96 / 72;
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
 // Each equation is converted OMML AST -> MathML -> MathJax SVG, then rasterized to
@@ -234,7 +232,7 @@ function authorColor(author?: string): string {
   return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
 }
 
-function collectImagePairs(doc: Document): ImagePair[] {
+function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
   const seen = new Map<string, ImagePair>();
   const walk = (runs: DocRun[]) => {
     for (const run of runs) {
@@ -295,7 +293,7 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
   return createImageBitmap(offscreen);
 }
 
-async function preloadImages(doc: Document): Promise<Map<string, ImageBitmap>> {
+async function preloadImages(doc: DocxDocumentModel): Promise<Map<string, ImageBitmap>> {
   const pairs = collectImagePairs(doc);
   const entries = await Promise.all(
     pairs.map(async (pair): Promise<[string, ImageBitmap] | null> => {
@@ -318,7 +316,7 @@ async function preloadImages(doc: Document): Promise<Map<string, ImageBitmap>> {
 // ===== Main entry =====
 
 export async function renderDocumentToCanvas(
-  doc: Document,
+  doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
   opts: RenderDocumentOptions = {},
@@ -641,7 +639,7 @@ function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: numb
  *  ruby-bearing and ruby-free lines line up on the same baseline grid. */
 function paragraphHasRuby(para: DocParagraph): boolean {
   for (const run of para.runs) {
-    if (run.type === 'text' && (run as unknown as TextRun).ruby) return true;
+    if (run.type === 'text' && (run as unknown as DocxTextRun).ruby) return true;
   }
   return false;
 }
@@ -820,7 +818,7 @@ function findMergeEndRow(table: DocTable, startRi: number, startCi: number): num
 }
 
 function pickHeaderFooter(
-  set: Document['headers'],
+  set: DocxDocumentModel['headers'],
   pageIndex: number,
   _totalPages: number,
   titlePage: boolean,
@@ -1342,17 +1340,18 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
   const pushTextPiece = (
     text: string,
-    base: TextRun | FieldRun,
+    base: DocxTextRun | FieldRun,
     vertAlign: 'super' | 'sub' | null,
   ) => {
     const displayText = (base.allCaps || base.smallCaps) ? text.toUpperCase() : text;
     // Ruby annotation rides with the WHOLE base text (typically 1-2 chars).
     // Splitting on word boundaries would lose the association, so attach
     // the annotation only to the first emitted segment.
-    const ruby = (base as TextRun).ruby
-      ? { text: (base as TextRun).ruby!.text, fontSizePt: (base as TextRun).ruby!.fontSizePt }
+    const baseRuby = (base as DocxTextRun).ruby;
+    const ruby = baseRuby
+      ? { text: baseRuby.text, fontSizePt: baseRuby.fontSizePt }
       : undefined;
-    const revision = (base as TextRun).revision;
+    const revision = (base as DocxTextRun).revision;
     let firstSeg = true;
     for (const word of splitTextForLayout(displayText)) {
       segs.push({
@@ -1378,7 +1377,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
 
   for (const run of runs) {
     if (run.type === 'text') {
-      const t = run as unknown as TextRun & { type: 'text' };
+      const t = run as unknown as DocxTextRun & { type: 'text' };
       // Split on tab chars so tab alignment can be resolved during layout.
       const parts = t.text.split('\t');
       for (let i = 0; i < parts.length; i++) {
@@ -1434,12 +1433,12 @@ function findNearbyFontSize(runs: DocRun[], idx: number): number {
   // Look backwards then forwards for a text or field run to get font size
   for (let i = idx - 1; i >= 0; i--) {
     const r = runs[i];
-    if (r.type === 'text') return (r as unknown as TextRun).fontSize;
+    if (r.type === 'text') return (r as unknown as DocxTextRun).fontSize;
     if (r.type === 'field') return (r as unknown as FieldRun).fontSize;
   }
   for (let i = idx + 1; i < runs.length; i++) {
     const r = runs[i];
-    if (r.type === 'text') return (r as unknown as TextRun).fontSize;
+    if (r.type === 'text') return (r as unknown as DocxTextRun).fontSize;
     if (r.type === 'field') return (r as unknown as FieldRun).fontSize;
   }
   return 10; // pt fallback
@@ -2807,7 +2806,7 @@ function normalizeFontFamily(
 function getDefaultFontSize(para: DocParagraph): number {
   for (const run of para.runs) {
     if (run.type === 'text') {
-      return (run as unknown as TextRun).fontSize;
+      return (run as unknown as DocxTextRun).fontSize;
     }
     if (run.type === 'field') {
       return (run as unknown as FieldRun).fontSize;
@@ -2824,7 +2823,7 @@ function getDefaultFontSize(para: DocParagraph): number {
  *  Meiryo's tall line box rather than the generic fallback's. */
 function getDefaultFontFamily(para: DocParagraph): string | null {
   for (const run of para.runs) {
-    if (run.type === 'text') return (run as unknown as TextRun).fontFamily;
+    if (run.type === 'text') return (run as unknown as DocxTextRun).fontFamily;
     if (run.type === 'field') return (run as unknown as FieldRun).fontFamily;
   }
   return para.defaultFontFamily ?? null;

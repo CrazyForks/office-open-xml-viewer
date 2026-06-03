@@ -127,7 +127,7 @@ function getSheetAxes(ws: Worksheet, mdw: number): SheetAxes {
 }
 
 export class XlsxViewer {
-  private wb: XlsxWorkbook;
+  private wb: XlsxWorkbook | null = null;
   private canvas: HTMLCanvasElement;
   private canvasArea: HTMLDivElement;
   private scrollHost: HTMLDivElement;
@@ -160,7 +160,6 @@ export class XlsxViewer {
 
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     this.opts = opts;
-    this.wb = new XlsxWorkbook();
 
     const wrapper = document.createElement('div');
     wrapper.style.cssText =
@@ -265,9 +264,16 @@ export class XlsxViewer {
     this.setupSelectionEvents();
   }
 
+  /**
+   * Load an XLSX from URL or ArrayBuffer and render the first sheet.
+   *
+   * Error contract (shared by all three viewers): on failure, if an `onError`
+   * callback was provided it is invoked and `load` resolves normally; if not,
+   * the error is rethrown so it is never silently swallowed.
+   */
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
-      await this.wb.load(source, {
+      this.wb = await XlsxWorkbook.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
       });
@@ -275,8 +281,19 @@ export class XlsxViewer {
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(0);
     } catch (err) {
-      this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      const e = err instanceof Error ? err : new Error(String(err));
+      if (this.opts.onError) {
+        this.opts.onError(e);
+        return;
+      }
+      throw e;
     }
+  }
+
+  /** The loaded workbook, or throws if {@link load} has not completed. */
+  private get workbook(): XlsxWorkbook {
+    if (!this.wb) throw new Error('Workbook not loaded');
+    return this.wb;
   }
 
   async showSheet(index: number): Promise<void> {
@@ -288,10 +305,38 @@ export class XlsxViewer {
     this.selectionMode = 'cells';
     this.updateSelectionOverlay();
     this.updateTabActive(index);
-    this.currentWorksheet = await this.wb.getWorksheet(index);
+    this.currentWorksheet = await this.workbook.getWorksheet(index);
     this.updateSpacerSize(this.currentWorksheet);
     await this.renderCurrentSheet();
-    this.opts.onSheetChange?.(index, this.wb.sheetNames[index] ?? '');
+    this.opts.onSheetChange?.(index, this.workbook.sheetNames[index] ?? '');
+  }
+
+  /** 0-based index of the currently displayed sheet. */
+  get sheetIndex(): number {
+    return this.currentSheet;
+  }
+
+  /** Total number of sheets in the loaded workbook. */
+  get sheetCount(): number {
+    return this.wb?.sheetCount ?? 0;
+  }
+
+  /**
+   * Navigate to a sheet by index, clamped to range. Canonical navigation verb
+   * matching {@link PptxViewer.goToSlide} / {@link DocxViewer.goToPage};
+   * {@link showSheet} is the lower-level form that assumes a valid index.
+   */
+  async goToSheet(index: number): Promise<void> {
+    if (this.sheetCount === 0) return;
+    await this.showSheet(Math.max(0, Math.min(index, this.sheetCount - 1)));
+  }
+
+  async nextSheet(): Promise<void> {
+    await this.goToSheet(this.currentSheet + 1);
+  }
+
+  async prevSheet(): Promise<void> {
+    await this.goToSheet(this.currentSheet - 1);
   }
 
   /** Returns the cell at canvas-client coordinates, or null if outside the cell grid. */
@@ -809,8 +854,8 @@ export class XlsxViewer {
   private buildTabs(): void {
     this.tabStrip.innerHTML = '';
     this.tabs = [];
-    this.tabColors = this.wb.tabColors;
-    this.wb.sheetNames.forEach((name, i) => {
+    this.tabColors = this.workbook.tabColors;
+    this.workbook.sheetNames.forEach((name, i) => {
       const btn = document.createElement('button');
       btn.textContent = name;
       btn.title = name;
@@ -1119,7 +1164,7 @@ export class XlsxViewer {
 
     const { selectedRowRange, selectedColRange } = this.computeHeaderHighlight();
 
-    await this.wb.renderViewport(this.canvas, this.currentSheet, viewport, {
+    await this.workbook.renderViewport(this.canvas, this.currentSheet, viewport, {
       width: w,
       height: h,
       dpr,
@@ -1170,7 +1215,12 @@ export class XlsxViewer {
   }
 
   get sheetNames(): string[] {
-    return this.wb.sheetNames;
+    return this.wb?.sheetNames ?? [];
+  }
+
+  /** The underlying <canvas> element the grid is drawn on. */
+  get canvasElement(): HTMLCanvasElement {
+    return this.canvas;
   }
 
   destroy(): void {
@@ -1178,6 +1228,6 @@ export class XlsxViewer {
     if (this.keydownHandler) {
       document.removeEventListener('keydown', this.keydownHandler);
     }
-    this.wb.destroy();
+    this.wb?.destroy();
   }
 }

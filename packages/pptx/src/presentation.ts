@@ -1,7 +1,12 @@
 import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
-import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
+import {
+  preloadGoogleFonts,
+  WorkerBridge,
+  type FontPreloadEntry,
+  type LoadOptions as CoreLoadOptions,
+} from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
@@ -20,18 +25,9 @@ const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
 };
 
-/** Options for {@link PptxPresentation.load}. Extends the shared
- *  `LoadOptions` shape from `@silurus/ooxml-core`. */
-export interface LoadOptions extends CoreLoadOptions {
-  /**
-   * Override the per-entry ZIP decompression cap (bytes). Defaults to
-   * 512 MiB — matches `MAX_ZIP_ENTRY_BYTES` in the Rust parser. Raising
-   * this past 4 GiB requires a 64-bit WASM build; lowering it makes the
-   * loader reject otherwise-legitimate large media decks. Zero or
-   * negative values fall back to the default.
-   */
-  maxZipEntryBytes?: number;
-}
+/** Options for {@link PptxPresentation.load}. The shared load-options type
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
+export type LoadOptions = CoreLoadOptions;
 
 /** Options for rendering a single slide onto a canvas. */
 export interface RenderSlideOptions {
@@ -66,68 +62,28 @@ export interface RenderSlideOptions {
  */
 export class PptxPresentation {
   private readonly _worker: Worker;
+  private readonly _bridge: WorkerBridge<WorkerResponse>;
   private _presentation: Presentation | null = null;
-  private _pendingParseCallbacks = new Map<
-    number,
-    { resolve: (p: Presentation) => void; reject: (e: Error) => void }
-  >();
-  private _pendingMediaCallbacks = new Map<
-    number,
-    { resolve: (b: ArrayBuffer) => void; reject: (e: Error) => void }
-  >();
   private _mediaCache = new Map<string, Promise<Blob>>();
-  private _nextId = 1;
   private _workerReady = false;
   private _workerReadyCallbacks: Array<() => void> = [];
 
   private constructor() {
     this._worker = new InlineWorker();
+    this._bridge = new WorkerBridge<WorkerResponse>(this._worker, {
+      // The init `ready` handshake carries no id; everything else does.
+      correlate: (msg) => ('id' in msg ? msg.id : undefined),
+      toError: (msg) => (msg.kind === 'error' ? msg.message : undefined),
+      onUnsolicited: (msg) => {
+        if (msg.kind === 'ready') {
+          this._workerReady = true;
+          for (const cb of this._workerReadyCallbacks) cb();
+          this._workerReadyCallbacks = [];
+        }
+      },
+    });
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
-    this._worker.postMessage({ kind: 'init', wasmUrl } satisfies WorkerRequest);
-
-    this._worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
-      const msg = e.data;
-
-      if (msg.kind === 'ready') {
-        this._workerReady = true;
-        for (const cb of this._workerReadyCallbacks) cb();
-        this._workerReadyCallbacks = [];
-        return;
-      }
-
-      if (msg.kind === 'parsed') {
-        const cb = this._pendingParseCallbacks.get(msg.id);
-        if (cb) {
-          this._pendingParseCallbacks.delete(msg.id);
-          cb.resolve(msg.presentation);
-        }
-        return;
-      }
-
-      if (msg.kind === 'mediaExtracted') {
-        const cb = this._pendingMediaCallbacks.get(msg.id);
-        if (cb) {
-          this._pendingMediaCallbacks.delete(msg.id);
-          cb.resolve(msg.bytes);
-        }
-        return;
-      }
-
-      if (msg.kind === 'error') {
-        const err = new Error(msg.message);
-        const parseCb = this._pendingParseCallbacks.get(msg.id);
-        if (parseCb) {
-          this._pendingParseCallbacks.delete(msg.id);
-          parseCb.reject(err);
-          return;
-        }
-        const mediaCb = this._pendingMediaCallbacks.get(msg.id);
-        if (mediaCb) {
-          this._pendingMediaCallbacks.delete(msg.id);
-          mediaCb.reject(err);
-        }
-      }
-    };
+    this._bridge.post({ kind: 'init', wasmUrl } satisfies WorkerRequest);
   }
 
   /** Parse a PPTX from URL or ArrayBuffer. */
@@ -145,11 +101,9 @@ export class PptxPresentation {
       buffer = source;
     }
     await pres._parse(buffer, opts.maxZipEntryBytes);
-    if (opts.useGoogleFonts) {
-      await preloadGoogleFonts(
-        [pres._presentation!.majorFont, pres._presentation!.minorFont],
-        PPTX_GOOGLE_FONTS,
-      );
+    const parsed = pres._presentation;
+    if (opts.useGoogleFonts && parsed) {
+      await preloadGoogleFonts([parsed.majorFont, parsed.minorFont], PPTX_GOOGLE_FONTS);
     }
     return pres;
   }
@@ -161,12 +115,11 @@ export class PptxPresentation {
 
   private async _parse(buffer: ArrayBuffer, maxZipEntryBytes?: number): Promise<void> {
     await this._waitForWorker();
-    const id = this._nextId++;
-    const presentation = await new Promise<Presentation>((resolve, reject) => {
-      this._pendingParseCallbacks.set(id, { resolve, reject });
-      this._worker.postMessage({ kind: 'parse', id, buffer, maxZipEntryBytes } satisfies WorkerRequest, [buffer]);
-    });
-    this._presentation = presentation;
+    const res = await this._bridge.request(
+      (id) => ({ kind: 'parse', id, buffer, maxZipEntryBytes }) satisfies WorkerRequest,
+      [buffer],
+    );
+    this._presentation = (res as Extract<WorkerResponse, { kind: 'parsed' }>).presentation;
   }
 
   /** Total number of slides in the loaded presentation. */
@@ -218,11 +171,10 @@ export class PptxPresentation {
     const mimeType = this._findMimeTypeForPath(mediaPath);
     const p = (async () => {
       await this._waitForWorker();
-      const id = this._nextId++;
-      const bytes = await new Promise<ArrayBuffer>((resolve, reject) => {
-        this._pendingMediaCallbacks.set(id, { resolve, reject });
-        this._worker.postMessage({ kind: 'extractMedia', id, path: mediaPath } satisfies WorkerRequest);
-      });
+      const res = await this._bridge.request(
+        (id) => ({ kind: 'extractMedia', id, path: mediaPath }) satisfies WorkerRequest,
+      );
+      const bytes = (res as Extract<WorkerResponse, { kind: 'mediaExtracted' }>).bytes;
       return new Blob([bytes], { type: mimeType });
     })();
     this._mediaCache.set(mediaPath, p);
@@ -274,7 +226,7 @@ export class PptxPresentation {
 
   /** Terminate the worker and release all resources. */
   destroy(): void {
-    this._worker.terminate();
+    this._bridge.terminate();
     this._presentation = null;
     this._mediaCache.clear();
   }

@@ -1,4 +1,4 @@
-import type { RenderOptions, TextRunInfo } from './renderer';
+import type { RenderOptions, PptxTextRunInfo } from './renderer';
 import { PptxPresentation } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 
@@ -80,7 +80,13 @@ export class PptxViewer {
     }
   }
 
-  /** Load a PPTX from URL or ArrayBuffer and render the first slide. */
+  /**
+   * Load a PPTX from URL or ArrayBuffer and render the first slide.
+   *
+   * Error contract (shared by all three viewers): on failure, if an `onError`
+   * callback was provided it is invoked and `load` resolves normally; if not,
+   * the error is rethrown so it is never silently swallowed.
+   */
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
       this.engine = await PptxPresentation.load(source, {
@@ -91,7 +97,10 @@ export class PptxViewer {
       await this.renderCurrentSlide();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
-      this.opts.onError?.(e);
+      if (this.opts.onError) {
+        this.opts.onError(e);
+        return;
+      }
       throw e;
     }
   }
@@ -130,8 +139,8 @@ export class PptxViewer {
     this.handle?.dispose();
     this.handle = null;
 
-    const runs: TextRunInfo[] = [];
-    const onTextRun = this.textLayer ? (r: TextRunInfo) => runs.push(r) : undefined;
+    const runs: PptxTextRunInfo[] = [];
+    const onTextRun = this.textLayer ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
     try {
       if (this.opts.enableMediaPlayback) {
@@ -148,12 +157,11 @@ export class PptxViewer {
     }
 
     if (this.textLayer) {
-      this._buildTextLayer(runs, targetWidth, cssHeight);
+      this._buildTextLayer(this.textLayer, runs, targetWidth, cssHeight);
     }
   }
 
-  private _buildTextLayer(runs: TextRunInfo[], cssWidth: number, cssHeight: number): void {
-    const layer = this.textLayer!;
+  private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
     layer.innerHTML = '';
     layer.style.width = `${cssWidth}px`;
     layer.style.height = `${cssHeight}px`;

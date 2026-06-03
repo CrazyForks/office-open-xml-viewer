@@ -2,7 +2,7 @@
 
 import type { MathNode } from '@silurus/ooxml-core';
 
-export interface Document {
+export interface DocxDocumentModel {
   section: SectionProps;
   body: BodyElement[];
   headers: HeadersFooters;
@@ -22,7 +22,7 @@ export interface Document {
   fontFamilyClasses?: Record<string, string>;
   /** ECMA-376 §17.13.5 — flat list of `<w:ins>` / `<w:del>` events in the
    *  body. Each entry carries author / date / text. The renderer marks
-   *  runs inline via {@link TextRun.revision}; this array is primarily for
+   *  runs inline via {@link DocxTextRun.revision}; this array is primarily for
    *  tooling (MCP, agents, change-summary panels). */
   revisions?: DocRevision[];
   /** ECMA-376 §17.13.4 — `word/comments.xml`. Each comment carries id,
@@ -190,7 +190,7 @@ export interface NumberingInfo {
 }
 
 export type DocRun =
-  | { type: 'text' } & TextRun
+  | { type: 'text' } & DocxTextRun
   | { type: 'image' } & ImageRun
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
   | { type: 'field' } & FieldRun
@@ -312,7 +312,7 @@ export interface FieldRun {
   highlight?: string | null;
 }
 
-export interface TextRun {
+export interface DocxTextRun {
   text: string;
   bold: boolean;
   italic: boolean;
@@ -470,11 +470,11 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; data: ArrayBuffer; maxZipEntryBytes?: number };
+  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number };
 
 export type WorkerResponse =
-  | { type: 'parsed'; document: Document }
-  | { type: 'error'; message: string };
+  | { type: 'parsed'; id: number; document: DocxDocumentModel }
+  | { type: 'error'; id: number; message: string };
 
 // ===== Public API types =====
 

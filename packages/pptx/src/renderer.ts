@@ -26,12 +26,10 @@ import {
   drawStar,
   drawPolygon,
   ooxmlArcTo,
+  EMU_PER_PT as PT_TO_EMU,
 } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
 import { renderPresetShape, hasPreset, getConnectorAnchors } from './preset-shape';
-
-/** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
-const PT_TO_EMU = 12700;
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -42,7 +40,7 @@ export interface RenderContext {
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
-export interface TextRunInfo {
+export interface PptxTextRunInfo {
   text: string;
   /** X position in CSS px, relative to the shape's top-left corner. */
   inShapeX: number;
@@ -73,7 +71,7 @@ export interface TextRunInfo {
   textBodyRotation?: number;
 }
 
-export type TextRunCallback = (run: TextRunInfo) => void;
+export type TextRunCallback = (run: PptxTextRunInfo) => void;
 
 /**
  * Convert EMU to canvas pixels.
@@ -2031,8 +2029,8 @@ export async function renderSlide(
       await renderMedia(ctx, el, scale, opts.fetchMedia, opts.skipMediaControls);
     } else if (el.type === 'chart') {
       // OOXML: 1pt = 12700 EMU. The slide renderer's `scale` is px-per-EMU,
-      // so 12700 * scale gives pixels-per-point at the current display size.
-      const chartPtToPx = 12700 * scale;
+      // so PT_TO_EMU * scale gives pixels-per-point at the current display size.
+      const chartPtToPx = PT_TO_EMU * scale;
       renderChart(
         ctx,
         {
