@@ -1,6 +1,6 @@
 {
   "name": "@silurus/ooxml",
-  "version": "0.46.0",
+  "version": "0.47.0",
   "description": "Browser-based OOXML viewer (docx/xlsx/pptx) — Rust/WASM parser + Canvas renderer",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -36,22 +36,18 @@
   "exports": {
     ".": {
       "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs",
       "types": "./dist/types/index.d.ts"
     },
     "./docx": {
       "import": "./dist/docx.mjs",
-      "require": "./dist/docx.cjs",
       "types": "./dist/types/docx.d.ts"
     },
     "./xlsx": {
       "import": "./dist/xlsx.mjs",
-      "require": "./dist/xlsx.cjs",
       "types": "./dist/types/xlsx.d.ts"
     },
     "./pptx": {
       "import": "./dist/pptx.mjs",
-      "require": "./dist/pptx.cjs",
       "types": "./dist/types/pptx.d.ts"
     }
   },
