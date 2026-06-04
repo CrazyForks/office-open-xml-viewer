@@ -4,6 +4,21 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.45.1 — 2026-06-04
+
+Patch fixes for docx math (OMML) rendering.
+
+### docx
+
+- **Cases / piecewise**: a delimiter with an explicit empty closing char
+  (`m:d` `begChr="{"`, `endChr=""`) no longer renders a spurious right
+  parenthesis — an empty delimiter char now produces an invisible fence rather
+  than falling back to `)`.
+- **Group-char arrows**: `m:groupChr` arrows (`\to\above` / `\to\below`) render
+  at a fixed accent size instead of being stretched to a narrow base (which
+  looked cramped / clipped). Only brace-like group chars (overbrace / underbrace)
+  stretch.
+
 ## 0.45.0 — 2026-06-04
 
 A consistency pass over the public API ahead of a future 1.0, plus a
