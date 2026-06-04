@@ -4,6 +4,19 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.47.0 — 2026-06-04
+
+Packaging: **ESM-only distribution.**
+
+- The published `@silurus/ooxml` bundle inlines a large math-typesetting engine;
+  emitting a duplicate CommonJS copy of every chunk roughly doubled the package.
+  We now ship **`.mjs` only** (no `.cjs`), halving the package: unpacked
+  22.3 MB → 11.3 MB, tarball 8.4 MB → 4.3 MB.
+- **Breaking** for `require('@silurus/ooxml/…')` (CommonJS) consumers — use an
+  `import` instead. Every modern bundler (Vite / webpack / Rollup / esbuild /
+  Next) and Node ≥ 20 consume ESM, and the documented examples already use
+  `import`.
+
 ## 0.46.0 — 2026-06-04
 
 PowerPoint equation rendering, and a new shared math font.

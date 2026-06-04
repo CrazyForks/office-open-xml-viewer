@@ -31,8 +31,12 @@ export default defineConfig({
         xlsx:  resolve(__dirname, 'src/xlsx.ts'),
         docx:  resolve(__dirname, 'src/docx.ts'),
       },
-      formats: ['es', 'cjs'],
-      fileName: (format, name) => `${name}.${format === 'es' ? 'mjs' : 'cjs'}`,
+      // ESM-only: the published bundle inlines a large math engine; emitting a
+      // duplicate CJS copy of every chunk roughly doubled the package size.
+      // Every modern bundler (Vite / webpack / Rollup / esbuild / Next) and
+      // Node ≥ 20 consume ESM, so we ship `.mjs` only.
+      formats: ['es'],
+      fileName: (_format, name) => `${name}.mjs`,
     },
     rollupOptions: {
       output: { assetFileNames: '[name][extname]' },
