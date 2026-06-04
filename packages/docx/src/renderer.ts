@@ -1859,10 +1859,20 @@ function layoutLines(
       const asc = render.ascentEm * emPx;
       const desc = render.descentEm * emPx;
       seg.measuredWidth = w;
+      // Ink extents (from the MathJax SVG viewBox) position the rasterized
+      // glyph relative to the baseline when drawing.
       seg.mathAscent = asc;
       seg.mathDescent = desc;
+      // …but the LINE BOX must reserve at least a normal single line for the
+      // run's font size. A short equation — e.g. a lone "−" — has near-zero ink
+      // height; using that as the line height would collapse the line (and the
+      // table row) and pin the glyph to the very top of the cell. Floor to the
+      // font's natural ascent/descent so math occupies a full line like text
+      // does (tall math — fractions, big operators — keeps its larger ink box).
+      const lineAsc = Math.max(asc, emPx * 0.8);
+      const lineDesc = Math.max(desc, emPx * 0.2);
       if (currentLine.length > 0 && currentWidth + w > availW()) flush();
-      addToLine(seg, w, seg.fontSize, asc, desc);
+      addToLine(seg, w, seg.fontSize, lineAsc, lineDesc);
       continue;
     }
 
