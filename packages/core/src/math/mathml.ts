@@ -19,6 +19,10 @@ function variant(style: MathStyle): string | null {
   }
 }
 
+// Group characters that stretch to span their base (braces, over/under brackets).
+// Other group chars (arrows, etc.) are drawn at a fixed accent size.
+const GROUP_BRACES = new Set([...'⏞⏟⎴⎵︷︸⏜⏝{}[]()¯_‾']);
+
 const BIN = '+−±∓×÷·∗⋅∘∙*/';
 const REL = '=≠<>≤≥≈≡∼≅≃→←↔⇒∈∉⊂⊆⊃⊇∝≪≫⊥≔';
 const OPEN = '([{⟨⌈⌊';
@@ -98,8 +102,14 @@ function nodeToMathML(node: MathNode): string {
       return arrayToMathML(node);
     case 'groupChr': {
       const b = row(node.base);
-      const mo = `<mo stretchy="true">${esc(node.char)}</mo>`;
-      return node.pos === 'top' ? `<mover>${b}${mo}</mover>` : `<munder>${b}${mo}</munder>`;
+      // Brace-like group chars stretch to span the base (overbrace / underbrace).
+      // Arrows and other marks render at a fixed size as an accent — Word does not
+      // shrink them to a narrow base (a stretchy arrow over a single letter looks
+      // cramped / clipped).
+      const stretchy = GROUP_BRACES.has(node.char);
+      const tag = node.pos === 'top' ? 'mover' : 'munder';
+      const mo = `<mo stretchy="${stretchy}">${esc(node.char)}</mo>`;
+      return stretchy ? `<${tag}>${b}${mo}</${tag}>` : `<${tag} accent="true">${b}${mo}</${tag}>`;
     }
     case 'bar': {
       // Tight stretchy overline/underline (like \overline). NOTE: accent="true" adds a
