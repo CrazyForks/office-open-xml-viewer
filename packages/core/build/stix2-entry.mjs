@@ -1,0 +1,65 @@
+// Entry for the pre-bundled MathJax v4 + STIX Two Math converter.
+//
+// esbuild bundles this (and only this) into `assets/mathjax-stix2.js`, an
+// opaque, tree-shaken, minified IIFE (~1.7 MB). The renderer loads that asset
+// lazily, so it never bloats non-math viewers and is never re-bundled by the
+// consuming app's bundler. The STIX2 font is baked in statically (all glyph
+// ranges imported up-front, then `dynamicFiles` emptied) → DOM-free, zero
+// network, zero cross-origin.
+import { mathjax } from '@mathjax/src/mjs/mathjax.js';
+import { MathML } from '@mathjax/src/mjs/input/mathml.js';
+import { SVG } from '@mathjax/src/mjs/output/svg.js';
+import { liteAdaptor } from '@mathjax/src/mjs/adaptors/liteAdaptor.js';
+import { RegisterHTMLHandler } from '@mathjax/src/mjs/handlers/html.js';
+import { SvgFontData } from '@mathjax/src/mjs/output/svg/FontData.js';
+import { MathJaxStix2Font } from '@mathjax/mathjax-stix2-font/mjs/svg.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/accents-other.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/accents.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/arrows.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/calligraphic.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/cyrillic.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/dingbats.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/double-struck.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/enclosed.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/fraktur.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/greek.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-b.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-bi.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin-i.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/latin.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/math.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/monospace.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/phonetics.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/sans-serif.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/script.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/shapes.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/stretchy.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/symbols-other.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/symbols.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/upright.js';
+import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/variants.js';
+
+// Every range is now resident in the font class; disable on-demand loading so
+// the renderer never attempts a (cross-origin) fetch for a glyph range.
+MathJaxStix2Font.dynamicFiles = SvgFontData.defineDynamicFiles([]);
+
+const adaptor = liteAdaptor();
+RegisterHTMLHandler(adaptor);
+const svgJax = new SVG({ fontData: MathJaxStix2Font, fontCache: 'none' });
+const doc = mathjax.document('', { InputJax: new MathML(), OutputJax: svgJax });
+
+// Exposed on globalThis so the lazily-injected script hands the API back to the
+// renderer. Returns a standalone `<svg>…</svg>` string (currentColor fill, a
+// `0 -minY w h` viewBox in 1000-units/em).
+globalThis.__ooxmlStix2 = {
+  mathml2svg(mathml) {
+    const node = doc.convert(mathml, { display: true });
+    const html = adaptor.outerHTML(node);
+    // Use the FIRST <svg and the LAST </svg>: stretchy glyphs (overlines, norm
+    // bars, big operators) emit a NESTED <svg>, so matching the first </svg>
+    // would truncate the markup into a broken (img-unloadable) fragment.
+    const s = html.indexOf('<svg');
+    const e = html.lastIndexOf('</svg>');
+    return s >= 0 && e >= 0 ? html.slice(s, e + 6) : html;
+  },
+};
