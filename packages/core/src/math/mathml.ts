@@ -200,10 +200,13 @@ function naryToMathML(node: Extract<MathNode, { kind: 'nary' }>): string {
 }
 
 function delimiterToMathML(node: Extract<MathNode, { kind: 'delimiter' }>): string {
-  const beg = `<mo fence="true" stretchy="true">${esc(node.begChar || '(')}</mo>`;
-  const end = `<mo fence="true" stretchy="true">${esc(node.endChar || ')')}</mo>`;
+  // An EMPTY begChr/endChr ("") means "no delimiter on that side" (e.g. cases use
+  // '{' on the left and nothing on the right). The parser already defaults an
+  // *absent* dPr to '(' / ')', so an empty string here is intentional → emit an
+  // invisible stretchy fence rather than falling back to a paren.
+  const fence = (ch: string) => `<mo fence="true" stretchy="true">${esc(ch)}</mo>`;
   const inner = node.items.map((g) => row(g)).join('<mo separator="true">,</mo>');
-  return `<mrow>${beg}${inner}${end}</mrow>`;
+  return `<mrow>${fence(node.begChar)}${inner}${fence(node.endChar)}</mrow>`;
 }
 
 /** Full MathML document string for a formula. `display` selects block vs inline. */
