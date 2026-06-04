@@ -12,6 +12,13 @@ const math = { loadMathJax, mathMLToSvg };
 
 const DPR = () => Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2);
 
+// Render slides at the width they actually display at (`.lv-page` max-width),
+// not larger. Rendering bigger than the display only shrinks the interactive
+// media controls (drawn at fixed px in canvas space) when the canvas is
+// CSS-downscaled to fit — making them look tiny next to the slide. dpr keeps
+// the backing store crisp on HiDPI.
+const SLIDE_W = 880;
+
 type SlideHandle = Awaited<ReturnType<PptxPresentation['presentSlide']>>;
 
 // Disposes the previous render's live resources (interactive slide handles +
@@ -58,7 +65,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       c.className = 'lv-page';
       c.dataset.slide = String(i);
       sc.appendChild(c);
-      await deck.renderSlide(c, i, { width: 1280, dpr: DPR(), math });
+      await deck.renderSlide(c, i, { width: SLIDE_W, dpr: DPR(), math });
       canvases.push(c);
     }
 
@@ -79,7 +86,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
             if (handles.has(idx) || pending.has(idx)) continue;
             pending.add(idx);
             deck
-              .presentSlide(c, idx, { width: 1280, dpr: DPR(), math })
+              .presentSlide(c, idx, { width: SLIDE_W, dpr: DPR(), math })
               .then((h) => {
                 pending.delete(idx);
                 if (visible.has(idx)) handles.set(idx, h);

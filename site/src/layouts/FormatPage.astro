@@ -10,6 +10,7 @@ interface Props {
 }
 const { format, name, ext, tagline, color } = Astro.props;
 const title = `${name} (${ext}) — @silurus/ooxml`;
+const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPoint deck' }[format];
 ---
 <Base title={title}>
   <Nav active={format} />
@@ -20,8 +21,8 @@ const title = `${name} (${ext}) — @silurus/ooxml`;
       <p class="eyebrow"><span class="fp-dot"></span> {name}</p>
       <h1 class="fp-title">{tagline}</h1>
       <p class="fp-lead">
-        Every demo below is the real library rendering <code>{`sample-1${ext}`}</code> live in your
-        browser — and the exact code that produces it. The same patterns power the Storybook stories.
+        Every demo below is the real library rendering a sample {fileNoun} (<code>{ext}</code>) live in
+        your browser — and the exact code that produces it. The same patterns power the Storybook stories.
       </p>
     </div>
   </header>
