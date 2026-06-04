@@ -3048,12 +3048,27 @@ fn parse_text_body(
 /// Walk `node` for OMML math and push a `TextRun::Math` for each equation,
 /// descending PowerPoint's `mc:AlternateContent` / `mc:Choice` / `a14:m`
 /// wrappers (ECMA-376 §22.1; the a14 markup is from the 2010 drawing ext).
+/// Find the font size (pt) of an equation from the first run property within it
+/// that carries `sz`. PowerPoint puts the size on the math run's `a:rPr` (or
+/// `m:rPr`) rather than the paragraph defRPr, so inline math matches the
+/// surrounding text size. `sz` is in hundredths of a point (ECMA-376 §21.1.2.3.9).
+fn math_run_size(om: roxmltree::Node<'_, '_>) -> Option<f64> {
+    om.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "rPr")
+        .find_map(|rpr| attr_f64(&rpr, "sz"))
+        .map(|v| v / 100.0)
+}
+
 fn push_math_runs(node: roxmltree::Node<'_, '_>, font_size: Option<f64>, runs: &mut Vec<TextRun>) {
     match node.tag_name().name() {
         "oMath" => {
             let nodes = parse_omath_nodes(node);
             if !nodes.is_empty() {
-                runs.push(TextRun::Math { nodes, display: false, font_size });
+                runs.push(TextRun::Math {
+                    nodes,
+                    display: false,
+                    font_size: math_run_size(node).or(font_size),
+                });
             }
         }
         "oMathPara" => {
@@ -3063,7 +3078,11 @@ fn push_math_runs(node: roxmltree::Node<'_, '_>, font_size: Option<f64>, runs: &
             {
                 let nodes = parse_omath_nodes(om);
                 if !nodes.is_empty() {
-                    runs.push(TextRun::Math { nodes, display: true, font_size });
+                    runs.push(TextRun::Math {
+                        nodes,
+                        display: true,
+                        font_size: math_run_size(om).or(font_size),
+                    });
                 }
             }
         }
@@ -3193,8 +3212,10 @@ fn parse_paragraph(
             "br" => runs.push(TextRun::Break),
             // OMML equations (ECMA-376 §22.1). `def_font_size` here is the
             // paragraph's defRPr size (pre-level-fallback); the renderer applies
-            // its own inheritance when this is None.
-            "oMath" | "oMathPara" | "AlternateContent" => {
+            // its own inheritance when this is None. PowerPoint stores inline
+            // math as a bare `a14:m` (local name "m") directly under `a:p`, and
+            // also inside `mc:AlternateContent`; both reach push_math_runs.
+            "oMath" | "oMathPara" | "AlternateContent" | "m" => {
                 push_math_runs(node, def_font_size, &mut runs);
             }
             // Field elements (e.g. slide number, date): parse like a run but tag the field type
@@ -6275,6 +6296,35 @@ mod tests {
                 assert!(*display, "oMathPara → display math");
                 assert_eq!(*font_size, Some(18.0));
                 assert_eq!(nodes_to_text(nodes), "x");
+            }
+            other => panic!("expected math run, got {other:?}"),
+        }
+    }
+
+    /// PowerPoint also stores INLINE math as a bare `a14:m` (local name "m")
+    /// directly under `a:p` — not wrapped in AlternateContent — holding an
+    /// `m:oMath` (not oMathPara). It must extract as inline (display:false) and
+    /// pick up its run size from the math run's rPr `sz` (hundredths of a pt).
+    #[test]
+    fn extracts_inline_bare_a14m_with_run_size() {
+        let xml = r#"<m
+            xmlns="http://schemas.microsoft.com/office/drawing/2010/main"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+          <m:oMath><m:r>
+            <a:rPr sz="2800" i="1"/>
+            <m:t>n</m:t>
+          </m:r></m:oMath>
+        </m>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut runs = Vec::new();
+        push_math_runs(doc.root_element(), None, &mut runs);
+        assert_eq!(runs.len(), 1);
+        match &runs[0] {
+            TextRun::Math { display, font_size, nodes } => {
+                assert!(!*display, "bare a14:m with m:oMath → inline");
+                assert_eq!(*font_size, Some(28.0), "size read from math run rPr sz");
+                assert_eq!(nodes_to_text(nodes), "n");
             }
             other => panic!("expected math run, got {other:?}"),
         }
