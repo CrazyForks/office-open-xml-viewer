@@ -4,6 +4,11 @@
 import { PptxPresentation } from '@silurus/ooxml-pptx';
 import { DocxDocument } from '@silurus/ooxml-docx';
 import { XlsxViewer } from '@silurus/ooxml-xlsx';
+import { loadMathJax, mathMLToSvg } from '../../../packages/core/src/math/engine';
+
+// Opt-in OMML equation engine — enabled here so user-supplied docx/pptx with
+// equations render. (In the published library this is `@silurus/ooxml/math`.)
+const math = { loadMathJax, mathMLToSvg };
 
 const DPR = () => Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2);
 
@@ -40,12 +45,12 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       const c = document.createElement('canvas');
       c.className = 'lv-page';
       sc.appendChild(c);
-      await deck.renderSlide(c, i, { width: 1280, dpr: DPR() });
+      await deck.renderSlide(c, i, { width: 1280, dpr: DPR(), math });
     }
     return { format: 'pptx', units: deck.slideCount, unitLabel: 'slide' };
   }
 
-  const doc = await DocxDocument.load(buffer, { useGoogleFonts: true });
+  const doc = await DocxDocument.load(buffer, { useGoogleFonts: true, math });
   for (let i = 0; i < doc.pageCount; i++) {
     const c = document.createElement('canvas');
     c.className = 'lv-page';
