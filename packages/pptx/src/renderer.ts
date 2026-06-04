@@ -251,6 +251,24 @@ function svgToImage(svg: string): Promise<HTMLImageElement> {
   });
 }
 
+// Rasterization resolution for equation SVGs, in px per em. A MathJax SVG
+// carries its size in `ex` units, so an `<img>` rasterizes it at a small
+// intrinsic size and `drawImage` then upscales it — blurry on HiDPI canvases.
+// Forcing an explicit px width/height makes the browser rasterize at this
+// resolution instead; 256 px/em stays crisp for equations well past 40pt even
+// at devicePixelRatio 3 (40pt → ~53px/em × 3 ≈ 160 px/em needed).
+const MATH_RASTER_PX_PER_EM = 256;
+
+/** Pin the SVG root to an explicit high-resolution px size before rasterizing. */
+function sizeSvgForRaster(svg: string, widthEm: number, heightEm: number): string {
+  const w = Math.max(1, Math.round(widthEm * MATH_RASTER_PX_PER_EM));
+  const h = Math.max(1, Math.round(heightEm * MATH_RASTER_PX_PER_EM));
+  return svg.replace(/<svg([^>]*?)>/, (_m, attrs: string) => {
+    const cleaned = attrs.replace(/\s(?:width|height)="[^"]*"/g, '');
+    return `<svg${cleaned} width="${w}" height="${h}">`;
+  });
+}
+
 /** Gather every math run reachable from a slide's shapes and table cells. */
 function collectSlideMathRuns(slide: Slide): { nodes: MathNode[]; display: boolean }[] {
   const found: { nodes: MathNode[]; display: boolean }[] = [];
@@ -284,7 +302,8 @@ export async function prepareSlideMath(slide: Slide): Promise<void> {
     if (mathRenders.has(r.nodes)) continue;
     try {
       const out = await mathMLToSvg(mathToMathML(r.nodes, r.display));
-      const img = await svgToImage(recolorSvg(out.svg, '#000000'));
+      const sized = sizeSvgForRaster(recolorSvg(out.svg, '#000000'), out.widthEm, out.ascentEm + out.descentEm);
+      const img = await svgToImage(sized);
       mathRenders.set(r.nodes, {
         img,
         widthEm: out.widthEm,
