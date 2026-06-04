@@ -99,9 +99,10 @@ describe('splitTableAcrossPages', () => {
     const flat = pages.flatMap((p) => rowsOf(p[0]));
     expect(flat.length).toBe(5);
     // For each page boundary, the first row of a continuation slice must not be
-    // a vMerge continuation row.
+    // a vMerge continuation row (a row carrying any vMerge=false cell).
     for (let i = 1; i < pages.length; i++) {
-      expect(rowsOf(pages[i][0])[0].vMerge).not.toBe(false);
+      const firstRow = rowsOf(pages[i][0])[0];
+      expect(firstRow.cells.some((c) => c.vMerge === false)).toBe(false);
     }
   });
 });
