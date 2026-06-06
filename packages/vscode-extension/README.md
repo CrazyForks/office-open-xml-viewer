@@ -19,7 +19,7 @@ A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a 
 - **DOCX** — Continuous **scroll view** of every page with a transparent text layer (PDF.js-style) — drag to select, copy as plain text.
 - **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
 - **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly.
-- **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, and more rendered straight from the OOXML spec.
+- **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, math equations (OMML, via MathJax + STIX Two Math), and more rendered straight from the OOXML spec.
 - **MCP server (opt-in)** — Lets AI coding agents (Copilot, Claude, etc.) read `.xlsx` / `.docx` / `.pptx` files in your workspace through dedicated tools instead of unzipping XML by hand. See [MCP server for AI agents](#mcp-server-for-ai-agents) below.
 
 All three formats share the same Rust parser (`wasm-pack`) for accuracy and speed.

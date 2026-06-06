@@ -57,3 +57,5 @@ package-lock.json
 # (docs/images/ stays tracked — it holds the README / extension screenshots.)
 docs/superpowers/
 docs/dev-notes/
+# Internal task list (Japanese dev notes); keep local, not for the public repo.
+TODO.md
