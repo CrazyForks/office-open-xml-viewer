@@ -14,6 +14,12 @@ import {
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
+import {
+  segmentsHaveRtl,
+  computeLineVisualOrder,
+  resolveAlignEdge,
+  type LineVisualOrder,
+} from './bidi-line.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -1096,6 +1102,15 @@ function renderParagraph(
     return c;
   };
 
+  // Bidirectional text. The paragraph's base direction comes from w:bidi
+  // (ECMA-376 §17.3.1.6). We engage the (exact) bidi pass only when the base is
+  // RTL or the line actually contains strong-RTL characters, so pure-LTR
+  // paragraphs keep their byte-identical fast path. `alignEdge` resolves
+  // logical start/end against the base direction.
+  const baseRtl = para.bidi === true;
+  const paraNeedsBidi = baseRtl || segmentsHaveRtl(segments);
+  const alignEdge = resolveAlignEdge(para.alignment, baseRtl);
+
   // Slice bounds — when the paginator split this paragraph across pages,
   // only render lines in [sliceStart, sliceEnd). The first line we paint
   // resets state.y baseline so the slice begins at the page's content top.
@@ -1131,16 +1146,31 @@ function renderParagraph(
       const numFontSize = getDefaultFontSize(para) * scale;
       ctx.font = `${numFontSize}px sans-serif`;
       ctx.fillStyle = defaultColor;
-      ctx.fillText(para.numbering!.text, x - numTab, baseline);
+      if (baseRtl) {
+        // RTL list: the marker hangs in the right gutter; its right edge mirrors
+        // the LTR position (firstLineX - numTab) about the line's right edge.
+        const prevAlign = ctx.textAlign;
+        const prevDir = ctx.direction;
+        ctx.textAlign = 'left';
+        ctx.direction = 'rtl';
+        const markerW = ctx.measureText(para.numbering!.text).width;
+        ctx.fillText(para.numbering!.text, lineLeft + lineAvailW + numTab - markerW, baseline);
+        ctx.textAlign = prevAlign;
+        ctx.direction = prevDir;
+      } else {
+        ctx.fillText(para.numbering!.text, x - numTab, baseline);
+      }
     }
 
     const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
+    const lineSlack = lineAvailW - (x - lineLeft) - lineWidth;
     let alignOffset = 0;
-    if (para.alignment === 'right' || para.alignment === 'end') {
-      alignOffset = lineAvailW - (x - lineLeft) - lineWidth;
-    } else if (para.alignment === 'center') {
-      alignOffset = (lineAvailW - (x - lineLeft) - lineWidth) / 2;
+    if (alignEdge === 'right') {
+      alignOffset = lineSlack;
+    } else if (alignEdge === 'center') {
+      alignOffset = lineSlack / 2;
     }
+    // 'left' and 'justify' keep alignOffset 0 (justify expands inter-word space).
     x += alignOffset;
 
     // Inter-word adjustment per whitespace char on this line. Positive slack
@@ -1169,9 +1199,20 @@ function renderParagraph(
       }
     }
 
-    for (let si = 0; si < line.segments.length; si++) {
+    // Visual draw order. Under bidi we reorder the line's segments per UAX#9
+    // (rule L2) and draw each with ctx.direction matching its resolved
+    // direction; ctx.textAlign stays physical 'left' so x is always the
+    // segment's left edge. The LTR fast path is untouched (visual === null).
+    const visual: LineVisualOrder | null = paraNeedsBidi
+      ? computeLineVisualOrder(line.segments, baseRtl)
+      : null;
+    if (paraNeedsBidi) ctx.textAlign = 'left';
+    const segCount = line.segments.length;
+    for (let vi = 0; vi < segCount; vi++) {
+      const si = visual ? visual.order[vi] : vi;
       const seg = line.segments[si];
-      const isLastSeg = si === line.segments.length - 1;
+      const isLastSeg = vi === segCount - 1;
+      if (visual) ctx.direction = visual.rtl[si] ? 'rtl' : 'ltr';
       if ('isTab' in seg) {
         // Tabs render as blank space, optionally filled with a leader (TOC dots etc.).
         if (!dryRun && seg.leader && seg.leader !== 'none' && seg.measuredWidth > 1) {
@@ -1292,6 +1333,7 @@ function renderParagraph(
         if (trailing > 0) x += trailing * extraPerSpace;
       }
     }
+    if (paraNeedsBidi) ctx.direction = 'ltr'; // reset for subsequent draws
 
     state.y += lineH;
   }
