@@ -368,6 +368,11 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null): 
   // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
   if (builtinFmt) return formatExcelDateCode(num, builtinFmt);
+  // ECMA-376 §18.8.30: "General" is the reserved General number format regardless
+  // of numFmtId. LibreOffice writes a custom numFmt (id ≥ 164) with
+  // formatCode="General"; tokenizing it as a literal pattern would render the
+  // word "General" instead of the value (issue #358).
+  if (formatCode && formatCode.trim().toLowerCase() === 'general') return String(num);
   if (formatCode) {
     if (isDateFormatCode(formatCode)) return formatExcelDateCode(num, formatCode);
     return applyFormatCode(num, formatCode);

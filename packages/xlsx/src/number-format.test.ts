@@ -62,6 +62,22 @@ describe('number formats — literals', () => {
   });
 });
 
+describe('General format code (§18.8.30 / LibreOffice custom numFmt)', () => {
+  // LibreOffice Calc writes a custom numFmt (id ≥ 164) with formatCode="General"
+  // for every saved workbook. "General" is the reserved General-format keyword,
+  // so a cell must render its value — not the literal text "General" (issue #358).
+  it('renders the number for a custom numFmt whose code is "General"', () => {
+    expect(fmt(10, 'General')).toBe('10');
+    expect(fmt(42, 'General')).toBe('42');
+    expect(fmt(3.14, 'General')).toBe('3.14');
+  });
+  it('is case-insensitive and tolerates surrounding whitespace', () => {
+    expect(fmt(10, 'general')).toBe('10');
+    expect(fmt(10, 'GENERAL')).toBe('10');
+    expect(fmt(10, ' General ')).toBe('10');
+  });
+});
+
 describe('non-numeric cells', () => {
   it('passes text through when no 4th section', () => {
     const cell: Cell = { row: 1, col: 1, colRef: 'A1', value: { type: 'text', text: 'hello' }, styleIndex: 0 };
