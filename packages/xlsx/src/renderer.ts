@@ -8,6 +8,7 @@ import { renderChart, renderSparkline, PT_TO_PX, EMU_PER_PX, mathToMathML, recol
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
+import { computeLineVisualOrder, cellBaseRtl } from './bidi-line.js';
 
 // Default font stack. Calibri is the workbook default font in Excel; on
 // systems without Office (macOS / Linux) the browser would otherwise fall
@@ -1639,6 +1640,9 @@ function renderQuadrant(
         else yy = cy + cellH - totalH - paddingY;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
+        // Bidi base direction for the cell (xf @readingOrder / first-strong).
+        const wrapBaseRtl = cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
+        const dctxW = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
         for (const line of rLines) {
           const lineH = Math.round(line.maxFontSize * PT_TO_PX * 1.2);
           const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
@@ -1646,7 +1650,12 @@ function renderQuadrant(
           if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
           else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
           else xx = cx + leftPad;
-          for (const seg of line.segments) {
+          // Draw the line's segments in visual order (rule L2).
+          const wvis = computeLineVisualOrder(line.segments, wrapBaseRtl);
+          for (let vi = 0; vi < line.segments.length; vi++) {
+            const li2 = wvis.order[vi];
+            const seg = line.segments[li2];
+            try { dctxW.direction = wvis.rtl[li2] ? 'rtl' : 'ltr'; } catch { /* ignore */ }
             ctx.font = buildFont(seg.font, cs);
             const segColor = cf.fontColor ?? seg.font.color;
             ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
@@ -1669,6 +1678,7 @@ function renderQuadrant(
           }
           yy += lineH;
         }
+        try { dctxW.direction = 'ltr'; } catch { /* ignore */ } // reset for next cell
       } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
         const lineH = Math.round(font.size * PT_TO_PX * 1.2);
@@ -1709,8 +1719,17 @@ function renderQuadrant(
         if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
         else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
         else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
+        // Bidi: draw the runs in visual order (UAX#9 rule L2) under the cell's
+        // base direction (xf @readingOrder, or first-strong for Context), each
+        // with ctx.direction set so Canvas shapes/orders it internally. The
+        // x-budget (totalWidth/startX) is order-independent.
+        const richBaseRtl = cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
+        const richVis = computeLineVisualOrder(runs, richBaseRtl);
+        const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
         let runX = startX;
-        for (let i = 0; i < runs.length; i++) {
+        for (let vi = 0; vi < runs.length; vi++) {
+          const i = richVis.order[vi];
+          try { dctx.direction = richVis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ }
           const rf = drawRunFonts[i];
           const baseRf = baseRunFonts[i];
           ctx.font = buildFont(rf, cs);
@@ -1750,6 +1769,7 @@ function renderQuadrant(
           }
           runX += runWidths[i];
         }
+        try { dctx.direction = 'ltr'; } catch { /* ignore */ } // reset for next cell
       } else {
         // ECMA-376 §18.4.6 — cell-level super/subscript: render the glyphs at
         // ~65% size, shifted off the baseline so the cell still reads at the
