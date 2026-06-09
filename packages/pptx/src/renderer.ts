@@ -33,6 +33,11 @@ import {
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
 import { renderPresetShape, hasPreset, getConnectorAnchors } from './preset-shape';
+import {
+  segmentsHaveRtl,
+  computeLineVisualOrder,
+  type LineVisualOrder,
+} from './bidi-line';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -1561,6 +1566,12 @@ function renderTextBody(
     const bulletX = entry.bulletX + xShift;
     const textMaxW = entry.textMaxW;
 
+    // Bidi: base direction from a:pPr@rtl (the parser already flips the default
+    // alignment l→r for rtl paragraphs). Engage only when the base is RTL or a
+    // line carries strong-RTL characters, so LTR slides keep their exact path.
+    const baseRtl = entry.para.rtl === true;
+    const paraNeedsBidi = baseRtl || segmentsHaveRtl(line.segments);
+
     // Measure line for alignment AND baseline ascent in one pass.
     // actualBoundingBoxAscent gives the real font ascent for the rendered glyphs,
     // replacing the 0.8×lineHeight heuristic that over-estimates for CJK and
@@ -1583,11 +1594,21 @@ function renderTextBody(
     }
     const baseline = cursorY + maxAscent;
 
-    // Draw bullet
+    // Draw bullet. Under RTL the bullet hangs in the right gutter: mirror its
+    // LTR offset (textX − bulletX, i.e. the bullet→text gap) about the text
+    // column's right edge.
     if (bulletLabel) {
       ctx.font = bulletFont;
       ctx.fillStyle = bulletColor;
-      ctx.fillText(bulletLabel, bulletX, baseline);
+      if (paraNeedsBidi && baseRtl) {
+        const prevDir = ctx.direction;
+        ctx.direction = 'rtl';
+        const bw = ctx.measureText(bulletLabel).width;
+        ctx.fillText(bulletLabel, textX + textMaxW + (textX - bulletX) - bw, baseline);
+        ctx.direction = prevDir;
+      } else {
+        ctx.fillText(bulletLabel, bulletX, baseline);
+      }
     }
 
     const effectiveTextX = textX + textXOffset;
@@ -1600,7 +1621,18 @@ function renderTextBody(
       penX = effectiveTextX;
     }
 
-    for (const seg of line.segments) {
+    // Visual draw order: under bidi, reorder segments per UAX#9 (rule L2) and
+    // draw each with ctx.direction matching its resolved direction. textAlign
+    // is already 'left', so penX stays the segment's left edge.
+    const visual: LineVisualOrder | null = paraNeedsBidi
+      ? computeLineVisualOrder(line.segments, baseRtl)
+      : null;
+    const segCount = line.segments.length;
+    for (let vi = 0; vi < segCount; vi++) {
+      const li = visual ? visual.order[vi] : vi;
+      const seg = line.segments[li];
+      const segRtl = visual ? visual.rtl[li] : false;
+      if (paraNeedsBidi) ctx.direction = segRtl ? 'rtl' : 'ltr';
       // ── Equation segment: draw the cached image instead of text ──────────
       if (seg.math) {
         const render = mathRenders.get(seg.math.nodes);
@@ -1637,10 +1669,12 @@ function renderTextBody(
         ctx.shadowOffsetY = Math.sin(dirRad) * dist;
       }
 
-      if (ls > 0 && seg.text.length > 1) {
+      if (ls > 0 && seg.text.length > 1 && !segRtl) {
         // Draw glyph-by-glyph so each character advance is `measure + ls`.
         // Matches OOXML rPr @spc semantics — extra space added to each
-        // character's advance, including after the last one.
+        // character's advance, including after the last one. Skipped for RTL
+        // segments: per-glyph advance would break Arabic cursive joining, so we
+        // draw the whole shaped segment in one fillText instead.
         let cx = penX;
         for (const ch of seg.text) {
           ctx.fillText(ch, cx, segBaseline);
@@ -1664,7 +1698,7 @@ function renderTextBody(
         ctx.lineWidth = Math.max(0.5, emuToPx(segOutline.width, scale));
         ctx.strokeStyle = segOutline.color ? `#${segOutline.color}` : seg.color;
         ctx.lineJoin = 'round';
-        if (ls > 0 && seg.text.length > 1) {
+        if (ls > 0 && seg.text.length > 1 && !segRtl) {
           let cx = penX;
           for (const ch of seg.text) {
             ctx.strokeText(ch, cx, segBaseline);
@@ -1728,6 +1762,7 @@ function renderTextBody(
 
       penX += segW;
     }
+    if (paraNeedsBidi) ctx.direction = 'ltr'; // reset before tab-stop / next line
 
     // ── Tab-stop segments (right-aligned or centred at tab stop position) ──
     if (line.tabStop && line.tabStop.segments.length > 0) {
