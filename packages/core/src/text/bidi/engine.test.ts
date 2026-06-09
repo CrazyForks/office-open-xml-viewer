@@ -34,4 +34,18 @@ describe('BidiEngine seam', () => {
     expect(getDefaultBidiEngine()).not.toBe(fake);
     expect(typeof getDefaultBidiEngine().getMirror).toBe('function');
   });
+
+  it('the default engine mirrors brackets (L4) and computes levels', () => {
+    const engine = getDefaultBidiEngine();
+    expect(engine.getMirror(0x28)).toBe(0x29); // ( -> )
+    expect(engine.getMirror(0x3c)).toBe(0x3e); // < -> >
+    expect(engine.getMirror(0x41)).toBeNull();
+
+    // "אב" (two Hebrew letters) under auto base resolves to RTL level 1.
+    const { levels, paragraphLevel } = engine.computeLevels('אב', 'auto');
+    expect(paragraphLevel).toBe(1);
+    expect([...levels]).toEqual([1, 1]);
+    // Pure RTL line reverses under L2.
+    expect(engine.reorderVisual(levels, 0, 2)).toEqual([1, 0]);
+  });
 });
