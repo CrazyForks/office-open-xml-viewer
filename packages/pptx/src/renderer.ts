@@ -2016,8 +2016,12 @@ function drawArrowHead(
 ): void {
   if (arrowEnd.type === 'none') return;
   const lw = Math.max(0.5, emuToPx(stroke.width, scale));
-  const wMul = arrowEnd.w   === 'sm' ? 2 : arrowEnd.w   === 'lg' ? 4 : 3;
-  const lMul = arrowEnd.len === 'sm' ? 2 : arrowEnd.len === 'lg' ? 4 : 3;
+  // Arrowhead size is implementation-defined: ECMA-376 §20.1.10.32/.33 only name
+  // the w/len steps (sm/med/lg) as "relative", not exact ratios. These multiples
+  // of line width are calibrated to PowerPoint's rendering (verified against the
+  // sample-9 SmartArt timeline PDF, a lg/lg triangle on a 1pt line ≈ 8× wide).
+  const wMul = arrowEnd.w   === 'sm' ? 4 : arrowEnd.w   === 'lg' ? 8 : 6;
+  const lMul = arrowEnd.len === 'sm' ? 4 : arrowEnd.len === 'lg' ? 8 : 6;
   const halfW = lw * wMul / 2;
   const len   = lw * lMul;
   const color = hexToRgba(stroke.color);
