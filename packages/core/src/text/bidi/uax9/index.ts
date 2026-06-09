@@ -1,32 +1,55 @@
 // From-scratch UAX#9 engine — the swappable implementation behind BidiEngine.
-//
-// NOTE: Task 1 scaffold ships a trivial LTR/RTL-uniform placeholder so the seam
-// is wired and importable. The full P2-P3 / X / W / N / I / L rule set is
-// implemented in Task 3 (`./rules.ts`), conformance-tested against Unicode's
-// BidiCharacterTest.txt / BidiTest.txt. Nothing consumes the engine until the
-// renderers (PR2+), so this placeholder is never user-visible.
+// The rule set lives in ./rules.ts (conformance-tested against Unicode's
+// BidiCharacterTest.txt / BidiTest.txt). This file adapts the code-point-space
+// core to the string / code-unit surface renderers use.
 
 import type { BidiEngine } from '../engine.js';
 import type { BaseDirection, BidiLevels } from '../types.js';
+import { mirror as mirrorGlyph } from '../char-data.js';
+import { resolveLevels, reorderByLevels, REMOVED } from './rules.js';
+
+/** Code-unit sentinel for code units removed by rule X9 (REMOVED maps here). */
+const REMOVED_UNIT = 255;
+
+/** Decode a UTF-16 string into code points + how many code units each occupies. */
+function decode(text: string): { cps: number[]; units: number[] } {
+  const cps: number[] = [];
+  const units: number[] = [];
+  for (let i = 0; i < text.length; ) {
+    const cp = text.codePointAt(i)!;
+    const len = cp > 0xffff ? 2 : 1;
+    cps.push(cp);
+    units.push(len);
+    i += len;
+  }
+  return { cps, units };
+}
 
 class Uax9Engine implements BidiEngine {
   computeLevels(
     text: string,
     base: BaseDirection,
   ): { levels: BidiLevels; paragraphLevel: number } {
-    const paragraphLevel = base === 'rtl' ? 1 : 0;
-    const levels = new Uint8Array(text.length).fill(paragraphLevel);
-    return { levels, paragraphLevel };
+    const { cps, units } = decode(text);
+    const { levels: cpLevels, paragraphLevel } = resolveLevels(cps, base);
+
+    // Expand per-code-point levels back to per-code-unit (both surrogate halves
+    // share the level), mapping the REMOVED sentinel to 255.
+    const out = new Uint8Array(text.length);
+    let u = 0;
+    for (let i = 0; i < cpLevels.length; i++) {
+      const v = cpLevels[i] === REMOVED ? REMOVED_UNIT : cpLevels[i];
+      for (let k = 0; k < units[i]; k++) out[u++] = v;
+    }
+    return { levels: out, paragraphLevel };
   }
 
-  reorderVisual(_levels: BidiLevels, start: number, end: number): number[] {
-    const order: number[] = [];
-    for (let i = start; i < end; i++) order.push(i);
-    return order;
+  reorderVisual(levels: BidiLevels, start: number, end: number): number[] {
+    return reorderByLevels(levels, start, end);
   }
 
-  getMirror(_codePoint: number): number | null {
-    return null;
+  getMirror(codePoint: number): number | null {
+    return mirrorGlyph(codePoint);
   }
 }
 
