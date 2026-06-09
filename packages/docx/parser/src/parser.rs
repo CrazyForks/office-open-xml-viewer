@@ -795,6 +795,9 @@ fn parse_paragraph(
         default_font_family: theme.resolve_font_ref(base_run.font_family_ascii.clone())
             .or_else(|| theme.resolve_font_ref(base_run.font_family_east_asia.clone())),
         outline_level: base_para.outline_level,
+        // ECMA-376 §17.3.1.6 — RTL paragraph flag resolved through the style
+        // chain + direct pPr. Recorded only in Phase 0.
+        bidi: base_para.bidi,
     }
 }
 
@@ -1096,6 +1099,13 @@ fn parse_run_inner(
     let small_caps = fmt.small_caps.unwrap_or(false);
     let double_strikethrough = fmt.dstrike.unwrap_or(false);
     let highlight = fmt.highlight.clone();
+    // RTL / complex-script properties (ECMA-376 §17.3.2.30 / §17.3.2.26 /
+    // §17.3.2.18). Phase 0: recorded on the run, not yet used for layout. The
+    // cs font goes through the same theme-ref resolution as the ascii/eastAsia
+    // axes so consumers receive a literal family.
+    let rtl = fmt.rtl;
+    let font_family_cs = theme.resolve_font_ref(fmt.font_family_cs.clone());
+    let font_size_cs = fmt.font_size_cs;
 
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -1124,6 +1134,9 @@ fn parse_run_inner(
                         highlight: highlight.clone(),
                         ruby: None,
                         revision: revision.cloned(),
+                        rtl,
+                        font_family_cs: font_family_cs.clone(),
+                        font_size_cs,
                     }));
                 }
             }
@@ -1148,6 +1161,9 @@ fn parse_run_inner(
                     highlight: highlight.clone(),
                     ruby: None,
                     revision: revision.cloned(),
+                    rtl,
+                    font_family_cs: font_family_cs.clone(),
+                    font_size_cs,
                 }));
             }
             "br" => {
@@ -1241,6 +1257,9 @@ fn parse_run_inner(
                     highlight: highlight.clone(),
                     ruby: None,
                     revision: revision.cloned(),
+                    rtl,
+                    font_family_cs: font_family_cs.clone(),
+                    font_size_cs,
                 }));
             }
             "AlternateContent" => {
@@ -2246,6 +2265,10 @@ fn parse_table(
         .and_then(|j| attr_w(j, "val"))
         .unwrap_or_else(|| "left".to_string());
 
+    // ECMA-376 §17.4.1 w:bidiVisual — RTL (visual) column order. On-off toggle.
+    // Phase 0: recorded only; column-order resolution is deferred.
+    let bidi_visual = tbl_pr.and_then(|p| bool_prop(p, "bidiVisual"));
+
     DocTable {
         col_widths,
         rows,
@@ -2255,6 +2278,7 @@ fn parse_table(
         cell_margin_left: cm_left,
         cell_margin_right: cm_right,
         jc,
+        bidi_visual,
     }
 }
 
@@ -2468,6 +2492,7 @@ fn apply_direct_para(base: &mut ParaFmt, direct: &ParaFmt) {
     if direct.num_id.is_some() { base.num_id = direct.num_id; }
     if direct.num_level.is_some() { base.num_level = direct.num_level; }
     if direct.tab_stops.is_some() { base.tab_stops = direct.tab_stops.clone(); }
+    if direct.bidi.is_some() { base.bidi = direct.bidi; }
 }
 
 fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
@@ -2481,6 +2506,9 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.font_family_east_asia.is_some() { base.font_family_east_asia = direct.font_family_east_asia.clone(); }
     if direct.background.is_some() { base.background = direct.background.clone(); }
     if direct.vert_align.is_some() { base.vert_align = direct.vert_align.clone(); }
+    if direct.rtl.is_some() { base.rtl = direct.rtl; }
+    if direct.font_family_cs.is_some() { base.font_family_cs = direct.font_family_cs.clone(); }
+    if direct.font_size_cs.is_some() { base.font_size_cs = direct.font_size_cs; }
 }
 
 fn parse_rels(xml: &str) -> HashMap<String, String> {
@@ -2515,4 +2543,100 @@ fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
     let mut buf = vec![];
     entry.by_ref().take(max).read_to_end(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod rtl_tests {
+    use super::*;
+
+    /// Parse a minimal `<w:body>` document through the real body-parse path
+    /// (the layer below the wasm/zip-gated `parse` entry). Mirrors how the
+    /// crate builds `BodyElement`s from `word/document.xml`.
+    fn body_from(body_inner: &str) -> Vec<BodyElement> {
+        let xml = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
+            ns = W_NS,
+            inner = body_inner,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body_node = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media_map: HashMap<String, String> = HashMap::new();
+        let rel_map: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_body_elements(body_node, &style_map, &mut num_map, &media_map, &rel_map, &theme)
+    }
+
+    /// ECMA-376 §17.3.1.6 w:bidi, §17.3.2.30 w:rtl, §17.3.2.26 w:rFonts@cs,
+    /// §17.3.2.18 w:szCs, §17.4.1 w:bidiVisual — all surfaced on the model.
+    #[test]
+    fn rtl_direction_attributes_are_extracted() {
+        let body = body_from(
+            r#"
+            <w:p>
+              <w:pPr><w:bidi/></w:pPr>
+              <w:r>
+                <w:rPr>
+                  <w:rtl/>
+                  <w:rFonts w:cs="Arial"/>
+                  <w:szCs w:val="28"/>
+                </w:rPr>
+                <w:t>שלום</w:t>
+              </w:r>
+            </w:p>
+            <w:tbl>
+              <w:tblPr><w:bidiVisual/></w:tblPr>
+              <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+              <w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>
+            </w:tbl>
+            "#,
+        );
+
+        // Paragraph w:bidi
+        let para = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        }).expect("paragraph present");
+        assert_eq!(para.bidi, Some(true), "w:bidi should set paragraph.bidi");
+
+        // Run w:rtl + w:cs + w:szCs
+        let run = para.runs.iter().find_map(|r| match r {
+            DocRun::Text(t) => Some(t),
+            _ => None,
+        }).expect("text run present");
+        assert_eq!(run.rtl, Some(true), "w:rtl should set run.rtl");
+        assert_eq!(run.font_family_cs.as_deref(), Some("Arial"), "w:rFonts@cs → run.fontFamilyCs");
+        assert_eq!(run.font_size_cs, Some(14.0), "w:szCs val=28 half-pts → 14pt run.fontSizeCs");
+
+        // Table w:bidiVisual
+        let tbl = body.iter().find_map(|e| match e {
+            BodyElement::Table(t) => Some(t),
+            _ => None,
+        }).expect("table present");
+        assert_eq!(tbl.bidi_visual, Some(true), "w:bidiVisual should set table.bidiVisual");
+    }
+
+    /// On-off toggles honor an explicit `w:val="0"` (off), per §17.3.2.22, so
+    /// the new flags can carry `Some(false)` distinctly from `None` (inherit).
+    #[test]
+    fn rtl_toggles_honor_explicit_off() {
+        let body = body_from(
+            r#"<w:p><w:pPr><w:bidi w:val="0"/></w:pPr><w:r><w:rPr><w:rtl w:val="false"/></w:rPr><w:t>a</w:t></w:r></w:p>"#,
+        );
+        let para = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        }).unwrap();
+        assert_eq!(para.bidi, Some(false));
+        let run = para.runs.iter().find_map(|r| match r {
+            DocRun::Text(t) => Some(t),
+            _ => None,
+        }).unwrap();
+        assert_eq!(run.rtl, Some(false));
+    }
 }

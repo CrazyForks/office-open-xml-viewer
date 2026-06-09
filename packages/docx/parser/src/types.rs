@@ -207,6 +207,12 @@ pub struct DocParagraph {
     /// on the styleId string ("Heading1", "見出し1", etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outline_level: Option<u32>,
+    /// ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `Some(true)` =
+    /// RTL, `Some(false)` = explicitly LTR, `None` = unspecified (inherit).
+    /// Phase 0 of RTL support: recorded only; alignment/column-order resolution
+    /// is deferred to a later PR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bidi: Option<bool>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -530,6 +536,19 @@ pub struct TextRun {
     /// can see tracked edits inline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<RunRevision>,
+    /// ECMA-376 §17.3.2.30 `<w:rtl>` — complex-script / right-to-left run.
+    /// `Some(true)` = RTL, `Some(false)` = explicitly LTR, `None` = unspecified.
+    /// Phase 0: recorded only; glyph-order resolution is deferred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
+    /// ECMA-376 §17.3.2.26 `<w:rFonts w:cs>` — complex-script typeface (theme
+    /// references resolved to a literal family). `None` when unspecified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    /// ECMA-376 §17.3.2.18 `<w:szCs>` — complex-script font size in pt (same
+    /// units as `font_size`). `None` when unspecified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_cs: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -656,6 +675,12 @@ pub struct DocTable {
     pub cell_margin_right: f64,
     /// table horizontal alignment on the page: "left" | "center" | "right" (w:tblPr/w:jc).
     pub jc: String,
+    /// ECMA-376 §17.4.1 `<w:bidiVisual>` — render columns in right-to-left
+    /// (visual) order. `Some(true)` = RTL columns, `Some(false)` = explicitly
+    /// LTR, `None` = unspecified. Phase 0: recorded only; column-order
+    /// resolution is deferred to a later PR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bidi_visual: Option<bool>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

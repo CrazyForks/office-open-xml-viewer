@@ -144,6 +144,12 @@ export interface DocParagraph {
   /** Default font family resolved from the style chain. Used to size empty
    *  paragraphs (no runs) with the intended font's line metrics. */
   defaultFontFamily?: string | null;
+  /**
+   * ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `true` = RTL,
+   * `false` = explicitly LTR, absent = unspecified (inherit). Phase 0 of RTL
+   * support: recorded only; alignment/column-order resolution is deferred.
+   */
+  bidi?: boolean;
 }
 
 export interface ParagraphBorders {
@@ -338,6 +344,16 @@ export interface DocxTextRun {
    *  underline and deletions with an author-coloured strikethrough so
    *  tracked changes appear inline. */
   revision?: RunRevision;
+  /** ECMA-376 §17.3.2.30 `<w:rtl>` — complex-script / right-to-left run.
+   *  `true` = RTL, `false` = explicitly LTR, absent = unspecified.
+   *  Phase 0: recorded only; glyph-order resolution is deferred. */
+  rtl?: boolean;
+  /** ECMA-376 §17.3.2.26 `<w:rFonts w:cs>` — complex-script typeface
+   *  (theme references resolved to a literal family). */
+  fontFamilyCs?: string;
+  /** ECMA-376 §17.3.2.18 `<w:szCs>` — complex-script font size in pt
+   *  (same units as `fontSize`). */
+  fontSizeCs?: number;
 }
 
 export interface RunRevision {
@@ -411,6 +427,13 @@ export interface DocTable {
   cellMarginRight: number;
   /** table horizontal alignment on the page: 'left' | 'center' | 'right'. */
   jc: string;
+  /**
+   * ECMA-376 §17.4.1 `<w:bidiVisual>` — render columns in right-to-left
+   * (visual) order. `true` = RTL columns, `false` = explicitly LTR, absent =
+   * unspecified. Phase 0 of RTL support: recorded only; column-order
+   * resolution is deferred.
+   */
+  bidiVisual?: boolean;
 }
 
 export interface TableBorders {
