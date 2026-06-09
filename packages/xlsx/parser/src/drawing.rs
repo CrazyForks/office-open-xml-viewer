@@ -178,12 +178,33 @@ pub(crate) fn parse_xfrm(xfrm_node: &roxmltree::Node) -> Option<Xfrm> {
     })
 }
 
+/// Apply the DrawingML color-transform children (`lumMod`, `lumOff`, `shade`,
+/// `tint`, `satMod`, …) declared inside a `<a:srgbClr>` / `<a:schemeClr>` to a
+/// resolved base hex, via the shared transform. Without this, an accent with
+/// e.g. `lumMod 20% + lumOff 80%` (a light tint) renders at full strength — so
+/// "light fill + dark border" pairs collapse to one solid mid-tone.
+fn apply_clr_mods(base_with_hash: &str, clr_node: &roxmltree::Node) -> String {
+    let base = base_with_hash.trim_start_matches('#');
+    let out = ooxml_common::color::apply_color_transforms(
+        base,
+        *clr_node,
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    format!("#{}", out.to_uppercase())
+}
+
 pub(crate) fn parse_solid_fill(fill_node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
     for c in fill_node.children() {
         match c.tag_name().name() {
             "srgbClr" => {
                 let v = c.attribute("val")?;
-                return Some(format!("#{}", v.to_uppercase()));
+                return Some(apply_clr_mods(&format!("#{}", v.to_uppercase()), &c));
+            }
+            "sysClr" => {
+                // System colour (e.g. windowText / window). `lastClr` is the
+                // concrete value the authoring app last resolved it to.
+                let last = c.attribute("lastClr")?;
+                return Some(apply_clr_mods(&format!("#{}", last.to_uppercase()), &c));
             }
             "schemeClr" => {
                 let v = c.attribute("val")?;
@@ -207,7 +228,9 @@ pub(crate) fn parse_solid_fill(fill_node: &roxmltree::Node, theme_colors: &[Stri
                     "folHlink"       => Some(11),
                     _ => None,
                 };
-                return idx.and_then(|i| theme_colors.get(i).cloned());
+                return idx
+                    .and_then(|i| theme_colors.get(i).cloned())
+                    .map(|base| apply_clr_mods(&base, &c));
             }
             _ => {}
         }
@@ -270,25 +293,35 @@ pub(crate) fn parse_custom_path(path_node: &roxmltree::Node) -> PathInfo {
 /// `<a:latin@typeface>` selects the Latin font face (we don't yet
 /// distinguish East-Asian / complex-script fonts — `<a:ea>` and `<a:cs>`
 /// are ignored for typeface).
-/// Point size for an equation: the first `rPr@sz` within the equation
-/// (Excel/PowerPoint put the size on the math run's `a:rPr`), in pt.
+/// Point size for an equation: the first `a:rPr@sz` on an actual math RUN
+/// (`m:r`), in pt. Scoped to `m:r` so the size on `<m:ctrlPr>` (control
+/// properties — structural delimiters, not visible glyphs) is ignored.
 fn math_run_size_shape(om: roxmltree::Node) -> Option<f64> {
     om.descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "rPr")
-        .find_map(|rpr| rpr.attribute("sz").and_then(|s| s.parse::<f64>().ok()))
+        .filter(|n| n.is_element() && n.tag_name().name() == "r")
+        .find_map(|r| {
+            r.descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "rPr")
+                .find_map(|rpr| rpr.attribute("sz").and_then(|s| s.parse::<f64>().ok()))
+        })
         .map(|v| v / 100.0)
 }
 
-/// Equation colour: the first run-property `solidFill` within the equation, so
-/// inline math follows the surrounding text colour (mirrors pptx). Resolved
-/// through the same `parse_solid_fill` used for shape text runs.
+/// Equation colour: the first `a:rPr/solidFill` on an actual math RUN (`m:r`).
+/// Scoped to `m:r` so a colour on `<m:ctrlPr>` (structural control properties,
+/// which Excel does NOT use as the visible glyph colour) is ignored — equations
+/// with no explicit run colour then fall back to the shape font colour (black).
 fn math_run_color_shape(om: roxmltree::Node, theme_colors: &[String]) -> Option<String> {
     om.descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "rPr")
-        .find_map(|rpr| {
-            rpr.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
-                .and_then(|sf| parse_solid_fill(&sf, theme_colors))
+        .filter(|n| n.is_element() && n.tag_name().name() == "r")
+        .find_map(|r| {
+            r.descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "rPr")
+                .find_map(|rpr| {
+                    rpr.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                        .and_then(|sf| parse_solid_fill(&sf, theme_colors))
+                })
         })
 }
 
@@ -545,7 +578,8 @@ pub(crate) fn collect_shapes(
             let mut stroke_color: Option<String> = None;
             let mut stroke_width: i64 = 0;
             if let Some(ln) = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "ln") {
-                stroke_width = ln.attribute("w").and_then(|s| s.parse().ok()).unwrap_or(0);
+                let w_attr = ln.attribute("w");
+                stroke_width = w_attr.and_then(|s| s.parse().ok()).unwrap_or(0);
                 for c in ln.children().filter(|n| n.is_element()) {
                     if c.tag_name().name() == "solidFill" {
                         stroke_color = parse_solid_fill(&c, theme_colors);
@@ -553,6 +587,13 @@ pub(crate) fn collect_shapes(
                         stroke_color = None;
                         stroke_width = 0;
                     }
+                }
+                // An `<a:ln>` with a fill but no explicit `w` still draws an
+                // outline — Excel uses a thin default (~0.75pt = 9525 EMU).
+                // Without this the border (e.g. a dark-green outline on a
+                // light-green box) silently disappears.
+                if w_attr.is_none() && stroke_color.is_some() && stroke_width == 0 {
+                    stroke_width = 9525;
                 }
             }
 
