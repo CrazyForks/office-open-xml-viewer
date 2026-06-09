@@ -11,6 +11,7 @@ import {
   mathToMathML,
   recolorSvg,
   PT_TO_PX,
+  resolveBaseDirection,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
@@ -2378,11 +2379,19 @@ function renderShapeText(
     const fontPx = block.fontSizePt * scale;
     ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null, fontFamilyClasses);
     ctx.fillStyle = block.color ? `#${block.color}` : '#000000';
+    // The whole block is drawn in one fillText, so Canvas applies UAX#9 over
+    // the full string; we only set the base direction (for neutral resolution)
+    // and resolve alignment. No explicit shape-paragraph rtl flag exists, so
+    // derive the base direction from the content (first-strong).
+    const baseRtl = resolveBaseDirection(undefined, block.text) === 'rtl';
+    const edge = resolveAlignEdge(block.alignment, baseRtl);
+    ctx.textAlign = 'left';
+    ctx.direction = baseRtl ? 'rtl' : 'ltr';
     const m = ctx.measureText(block.text);
     let tx = innerX;
-    if (block.alignment === 'center' || block.alignment === 'distribute') {
+    if (edge === 'center') {
       tx = innerX + Math.max(0, (innerW - m.width) / 2);
-    } else if (block.alignment === 'right' || block.alignment === 'end') {
+    } else if (edge === 'right') {
       tx = innerX + Math.max(0, innerW - m.width);
     }
     // Baseline = cursorY + ascent (approx 0.85 of font size for default fonts).
@@ -2390,6 +2399,7 @@ function renderShapeText(
     ctx.fillText(block.text, tx, baseline);
     cursorY += lineHeights[i];
   }
+  ctx.direction = 'ltr'; // reset for subsequent draws
 }
 
 function isWrapFloat(mode?: string): boolean {
