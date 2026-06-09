@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.52.0 — 2026-06-09
+
+pptx:
+
+- **Placeholder body text now inherits the master `txStyles` colour even when
+  bound by `idx`.** A slide body placeholder bound by `idx` (e.g.
+  `<p:ph idx="35"/>`) whose matching layout shape declared size-but-not-colour
+  rendered black instead of the master `bodyStyle` colour. Colour resolution was
+  idx-strict and returned early on a missing layout-idx colour, never falling
+  through to the master default. The idx-strict rule (ECMA-376 §19.7.16) only
+  applies to the layout tier — it stops a sibling layout placeholder from leaking
+  its colour. The master `txStyles` tier (titleStyle/bodyStyle/otherStyle) is a
+  document-wide default keyed by placeholder *type* (§21.1.2.4 / §19.3.1) and is
+  inherited regardless of `idx`. Fixes white-on-dark body text (master
+  `schemeClr bg1`) rendering black on themed decks.
+
 ## 0.51.0 — 2026-06-09
 
 xlsx:
