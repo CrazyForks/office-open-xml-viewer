@@ -398,11 +398,15 @@ pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) 
             }
             "p" => {
                 let mut align = String::from("l");
+                let mut rtl = false;
                 let mut runs: Vec<ShapeTextRun> = Vec::new();
                 for pc in c.children().filter(|n| n.is_element()) {
                     match pc.tag_name().name() {
                         "pPr" => {
                             if let Some(a) = pc.attribute("algn") { align = a.to_string(); }
+                            // ECMA-376 §21.1.2.2.45 `<a:pPr@rtl>` — right-to-left
+                            // paragraph. Default false (left-to-right).
+                            rtl = pc.attribute("rtl").map(|v| v == "1" || v == "true").unwrap_or(false);
                         }
                         "r" => {
                             // Run text + run-level formatting.
@@ -457,7 +461,7 @@ pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) 
                     }
                 }
                 if !runs.is_empty() {
-                    paragraphs.push(ShapeParagraph { align, runs });
+                    paragraphs.push(ShapeParagraph { align, rtl, runs });
                 }
             }
             _ => {}
@@ -1043,6 +1047,41 @@ mod math_tests {
         assert!(matches!(runs[1], ShapeTextRun::Math { display: false, .. }));
         assert!(matches!(runs[2], ShapeTextRun::Break));
         assert!(matches!(runs[3], ShapeTextRun::Text { .. }));
+    }
+
+    /// `<a:pPr rtl="1">` (ECMA-376 §21.1.2.2.45) marks the paragraph as
+    /// right-to-left.
+    #[test]
+    fn parses_paragraph_rtl_attribute() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:pPr rtl="1"/>
+                <a:r><a:t>שלום</a:t></a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        assert_eq!(text.paragraphs.len(), 1);
+        assert!(text.paragraphs[0].rtl, "pPr rtl=\"1\" → rtl true");
+    }
+
+    /// Absent `@rtl` defaults to false (left-to-right).
+    #[test]
+    fn paragraph_rtl_defaults_false_when_absent() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:pPr algn="ctr"/>
+                <a:r><a:t>hello</a:t></a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        assert_eq!(text.paragraphs.len(), 1);
+        assert!(!text.paragraphs[0].rtl, "absent @rtl → rtl false");
     }
 }
 
