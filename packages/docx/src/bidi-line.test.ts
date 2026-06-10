@@ -19,8 +19,12 @@ describe('resolveAlignEdge', () => {
     expect(resolveAlignEdge('end', false)).toBe('right');
     expect(resolveAlignEdge('center', true)).toBe('center');
     expect(resolveAlignEdge('both', true)).toBe('justify');
-    expect(resolveAlignEdge('left', true)).toBe('left'); // physical stays physical
-    expect(resolveAlignEdge('right', true)).toBe('right');
+    // Transitional left/right are "semantically equivalent to start/end"
+    // (ECMA-376 Part 4 §14.11.2) — logical, so they flip under an RTL base.
+    expect(resolveAlignEdge('left', true)).toBe('right');
+    expect(resolveAlignEdge('right', true)).toBe('left');
+    expect(resolveAlignEdge('left', false)).toBe('left');
+    expect(resolveAlignEdge('right', false)).toBe('right');
   });
 });
 

@@ -1,7 +1,9 @@
 // Per-line bidi ordering for the docx renderer.
 //
-// `buildSegments` splits runs into space-delimited word pieces, so Arabic
-// joining never crosses a segment boundary. That lets us reorder at SEGMENT
+// `buildSegments` splits each run's text into space-delimited word pieces, so
+// WITHIN a run Arabic joining never crosses a segment boundary (a mid-word
+// run split — e.g. one letter bolded — still seams at the run boundary; that
+// pre-existing limitation is tracked for Phase 4). That lets us reorder at SEGMENT
 // granularity (1:1 with the laid-out segments — every per-segment property is
 // preserved) using the shared UAX#9 engine, and let Canvas shape/mirror each
 // segment internally when it is drawn with `ctx.direction` set to the segment's
@@ -13,7 +15,11 @@ import { getDefaultBidiEngine } from '@silurus/ooxml-core';
 /** Strong-RTL scripts (Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, …) +
  *  Arabic presentation forms. Used only as a cheap gate to decide whether a
  *  line needs the (exact) bidi pass at all — never for ordering itself. */
-const RTL_GATE = /[֐-ࣿיִ-﷿ﹰ-﻿]|[\u{10800}-\u{10FFF}]/u;
+const RTL_GATE =
+  // strong-RTL blocks incl. presentation forms, Plane-1 RTL blocks
+  // (Phoenician..Old Hungarian U+10800-10FFF; Mende Kikakui/Adlam/Arabic
+  // Math U+1E800-1EFFF), and RTL-implicating controls (RLM/RLE/RLO/RLI).
+  /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u200F\u202B\u202E\u2067]|[\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
 
 /** A laid-out segment as seen here: only its optional text matters for bidi.
  *  Typed as `unknown` element so the renderer's LayoutSeg union (whose image /
@@ -85,8 +91,11 @@ export type AlignEdge = 'left' | 'right' | 'center' | 'justify';
 
 /**
  * Resolve a paragraph's `w:jc` value (and base direction) to a physical edge.
- * `start`/`end` are logical (flip under RTL); `left`/`right` are physical;
- * an unset alignment defaults to the leading (logical-start) edge.
+ * ALL edge values are logical in WordprocessingML: `start`/`end` by definition
+ * (§17.18.44), and the transitional `left`/`right` are defined as
+ * "semantically equivalent to start/end" (ECMA-376 Part 4 §14.11.2) — so every
+ * edge flips under an RTL base. An unset alignment defaults to the leading
+ * (logical-start) edge.
  */
 export function resolveAlignEdge(alignment: string | undefined, baseRtl: boolean): AlignEdge {
   switch (alignment) {
@@ -96,13 +105,11 @@ export function resolveAlignEdge(alignment: string | undefined, baseRtl: boolean
     case 'justify':
     case 'distribute':
       return 'justify';
-    case 'left':
-      return 'left';
-    case 'right':
-      return 'right';
     case 'end':
+    case 'right':
       return baseRtl ? 'left' : 'right';
     case 'start':
+    case 'left':
     case undefined:
     default:
       return baseRtl ? 'right' : 'left';

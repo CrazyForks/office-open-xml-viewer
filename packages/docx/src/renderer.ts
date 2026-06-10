@@ -1163,15 +1163,37 @@ function renderParagraph(
       }
     }
 
+    // Visual draw order. Under bidi we reorder the line's segments per UAX#9
+    // (rule L2) and draw each with ctx.direction matching its resolved
+    // direction; ctx.textAlign stays physical 'left' so x is always the
+    // segment's left edge. The LTR fast path is untouched (visual === null).
+    // Computed before justification so the stretch bookkeeping below can use
+    // the same (visual) domain as the draw loop.
+    const visual: LineVisualOrder | null = paraNeedsBidi
+      ? computeLineVisualOrder(line.segments, baseRtl)
+      : null;
+    if (paraNeedsBidi) ctx.textAlign = 'left';
+    const segCount = line.segments.length;
+    // The segment whose trailing spaces sit at the line's PHYSICAL end (no
+    // stretch there): the visually-last segment. Equals the logical last in
+    // the LTR fast path.
+    const lastDrawnSi = visual ? visual.order[segCount - 1] : segCount - 1;
+
     const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
     const lineSlack = lineAvailW - (x - lineLeft) - lineWidth;
+    const applyJustify = isJustified && (!isLastLine || stretchLastLine);
     let alignOffset = 0;
     if (alignEdge === 'right') {
       alignOffset = lineSlack;
     } else if (alignEdge === 'center') {
       alignOffset = lineSlack / 2;
+    } else if (alignEdge === 'justify' && baseRtl && !applyJustify) {
+      // The unstretched (last) line of a justified RTL paragraph aligns to the
+      // leading edge — the RIGHT margin (§17.18.44 `both`: last line is
+      // start-aligned). LTR keeps alignOffset 0 as before.
+      alignOffset = lineSlack;
     }
-    // 'left' and 'justify' keep alignOffset 0 (justify expands inter-word space).
+    // 'left' and stretched 'justify' keep alignOffset 0.
     x += alignOffset;
 
     // Inter-word adjustment per whitespace char on this line. Positive slack
@@ -1182,12 +1204,13 @@ function renderParagraph(
     // space, and is only applied when the line is a candidate for justification
     // (jc=both/distribute, not the last line unless distribute).
     let extraPerSpace = 0;
-    const applyJustify = isJustified && (!isLastLine || stretchLastLine);
     if (applyJustify) {
       let totalTrailingSpaces = 0;
-      for (let si = 0; si < line.segments.length; si++) {
+      for (let si = 0; si < segCount; si++) {
         const seg = line.segments[si];
-        if (si === line.segments.length - 1) break; // trailing spaces on final seg don't stretch
+        // Trailing spaces on the visually-final segment don't stretch (they sit
+        // at the physical line end) — same domain as the draw-loop skip below.
+        if (si === lastDrawnSi) continue;
         if ('text' in seg) totalTrailingSpaces += countTrailingSpaces((seg as LayoutTextSeg).text);
       }
       const slack = lineAvailW - (x - lineLeft) - lineWidth;
@@ -1200,15 +1223,6 @@ function renderParagraph(
       }
     }
 
-    // Visual draw order. Under bidi we reorder the line's segments per UAX#9
-    // (rule L2) and draw each with ctx.direction matching its resolved
-    // direction; ctx.textAlign stays physical 'left' so x is always the
-    // segment's left edge. The LTR fast path is untouched (visual === null).
-    const visual: LineVisualOrder | null = paraNeedsBidi
-      ? computeLineVisualOrder(line.segments, baseRtl)
-      : null;
-    if (paraNeedsBidi) ctx.textAlign = 'left';
-    const segCount = line.segments.length;
     for (let vi = 0; vi < segCount; vi++) {
       const si = visual ? visual.order[vi] : vi;
       const seg = line.segments[si];
@@ -2384,7 +2398,12 @@ function renderShapeText(
     // and resolve alignment. No explicit shape-paragraph rtl flag exists, so
     // derive the base direction from the content (first-strong).
     const baseRtl = resolveBaseDirection(undefined, block.text) === 'rtl';
-    const edge = resolveAlignEdge(block.alignment, baseRtl);
+    // Shape text draws one line per block with no inter-word stretching, so
+    // 'distribute' keeps its pre-bidi approximation (centered) rather than the
+    // justify edge resolveAlignEdge reports for paragraphs.
+    const edge = block.alignment === 'distribute'
+      ? 'center'
+      : resolveAlignEdge(block.alignment, baseRtl);
     ctx.textAlign = 'left';
     ctx.direction = baseRtl ? 'rtl' : 'ltr';
     const m = ctx.measureText(block.text);
