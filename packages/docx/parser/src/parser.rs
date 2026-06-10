@@ -1274,6 +1274,16 @@ fn parse_run_inner(
                     }
                 }
             }
+            "pict" => {
+                // Legacy VML drawing (ECMA-376 Part 4 §14.1): <w:pict> wraps a
+                // <v:shape>/<v:rect>/<v:roundrect> with optional <v:textbox>.
+                // Word still emits these for simple text boxes. We surface the
+                // shape's fill/stroke/size and its txbxContent as a ShapeRun so
+                // the existing shape renderer draws the panel + RTL body text.
+                if let Some(shp) = parse_vml_pict(child, theme) {
+                    runs.push(DocRun::Shape(shp));
+                }
+            }
             _ => {}
         }
     }
@@ -1954,6 +1964,118 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
         bold,
         italic,
         alignment: normalize_align(&alignment).to_string(),
+    })
+}
+
+/// Parse a legacy VML `<w:pict>` text box (ECMA-376 Part 4 §14.1) into a
+/// ShapeRun. Handles the common Word-emitted form:
+///   <w:pict><v:shape type="#_x0000_t202"
+///       style="…width:300pt;height:60pt…" fillcolor="#fdf2d0"
+///       strokecolor="#c0a000">
+///     <v:textbox><w:txbxContent>…</w:txbxContent></v:textbox>
+///   </v:shape></w:pict>
+/// Size comes from the CSS-like `style` attribute (width/height in pt), fill
+/// and stroke from `fillcolor`/`strokecolor`. The shape is anchored to the
+/// paragraph's leading (top-left) corner — VML `position:relative` text boxes
+/// flow with their anchor paragraph, which Word places at the left margin just
+/// below the preceding content.
+fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun> {
+    // v:shape / v:rect / v:roundrect — any VML shape element with geometry.
+    let shape = pict.descendants().find(|n| {
+        n.is_element()
+            && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+    })?;
+
+    // CSS-like `style`: "position:relative;width:300pt;height:60pt;…"
+    let style = shape.attribute("style").unwrap_or("");
+    let css_pt = |prop: &str| -> Option<f64> {
+        for decl in style.split(';') {
+            let mut kv = decl.splitn(2, ':');
+            let k = kv.next()?.trim();
+            let v = kv.next()?.trim();
+            if k.eq_ignore_ascii_case(prop) {
+                // strip a trailing "pt" unit; VML lengths default to pt here.
+                let num = v.trim_end_matches("pt").trim();
+                return num.parse::<f64>().ok();
+            }
+        }
+        None
+    };
+    let width_pt = css_pt("width").unwrap_or(0.0);
+    let height_pt = css_pt("height").unwrap_or(0.0);
+    if width_pt <= 0.0 || height_pt <= 0.0 {
+        return None;
+    }
+
+    // VML colors: `fillcolor` / `strokecolor` are "#rrggbb" (or named); we keep
+    // the 6-hex form the renderer expects (no leading '#').
+    let hex6 = |c: &str| -> Option<String> {
+        let s = c.trim().trim_start_matches('#');
+        if s.len() == 6 && s.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            Some(s.to_ascii_lowercase())
+        } else {
+            None
+        }
+    };
+    let fill = shape
+        .attribute("fillcolor")
+        .and_then(hex6)
+        .map(|color| ShapeFill::Solid { color });
+    let stroke = shape.attribute("strokecolor").and_then(hex6);
+    // VML default stroke weight is 0.75pt when a stroke color is present and no
+    // explicit weight is given (Part 4 §14.1.2.21 strokeweight default).
+    let stroke_width = if stroke.is_some() {
+        shape
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "stroke")
+            .and_then(|n| n.attribute("weight"))
+            .and_then(|w| w.trim_end_matches("pt").trim().parse::<f64>().ok())
+            .or_else(|| {
+                shape
+                    .attribute("strokeweight")
+                    .and_then(|w| w.trim_end_matches("pt").trim().parse::<f64>().ok())
+            })
+            .unwrap_or(0.75)
+    } else {
+        0.0
+    };
+
+    // Body text from <v:textbox><w:txbxContent>.
+    let text_blocks: Vec<ShapeText> = shape
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+        .map(|content| {
+            children_w_flat(content, "p")
+                .into_iter()
+                .filter_map(|p| extract_simple_paragraph_text(p, theme))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(ShapeRun {
+        width_pt,
+        height_pt,
+        anchor_x_pt: 0.0,
+        anchor_y_pt: 0.0,
+        anchor_x_from_margin: true,
+        anchor_y_from_para: true,
+        behind_doc: false,
+        z_order: 0,
+        subpaths: Vec::new(),
+        preset_geometry: Some("rect".to_string()),
+        adj_values: Vec::new(),
+        fill,
+        stroke,
+        stroke_width,
+        rotation: 0.0,
+        // VML t202 text-box default insets are the OOXML defaults (§21.1.2.1.1).
+        text_blocks,
+        text_anchor: None,
+        text_inset_l: 91440.0 / 12700.0,
+        text_inset_t: 45720.0 / 12700.0,
+        text_inset_r: 91440.0 / 12700.0,
+        text_inset_b: 45720.0 / 12700.0,
+        ..Default::default()
     })
 }
 
@@ -2638,5 +2760,47 @@ mod rtl_tests {
             _ => None,
         }).unwrap();
         assert_eq!(run.rtl, Some(false));
+    }
+
+    /// Legacy VML text box (ECMA-376 Part 4 §14.1): `<w:pict>` with a
+    /// `<v:shape type="#_x0000_t202">` surfaces as a ShapeRun carrying the
+    /// fill/stroke from the VML attributes, the size from the CSS `style`, and
+    /// the `<w:txbxContent>` body text — so the renderer draws the yellow box.
+    #[test]
+    fn vml_pict_textbox_becomes_a_shape_run() {
+        let body = body_from(
+            r##"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">
+              <v:shape id="tb1" type="#_x0000_t202"
+                  style="position:relative;width:300pt;height:60pt"
+                  fillcolor="#fdf2d0" strokecolor="#c0a000">
+                <v:textbox><w:txbxContent>
+                  <w:p><w:pPr><w:bidi/><w:jc w:val="right"/></w:pPr>
+                    <w:r><w:rPr><w:rtl/></w:rPr><w:t>مربع نص 2025</w:t></w:r>
+                  </w:p>
+                </w:txbxContent></v:textbox>
+              </v:shape>
+            </w:pict></w:r></w:p>"##,
+        );
+        let para = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        }).expect("paragraph present");
+        let shape = para.runs.iter().find_map(|r| match r {
+            DocRun::Shape(s) => Some(s),
+            _ => None,
+        }).expect("VML pict should produce a ShapeRun");
+
+        assert_eq!(shape.width_pt, 300.0, "width from CSS style");
+        assert_eq!(shape.height_pt, 60.0, "height from CSS style");
+        assert_eq!(shape.preset_geometry.as_deref(), Some("rect"));
+        match &shape.fill {
+            Some(ShapeFill::Solid { color }) => assert_eq!(color, "fdf2d0"),
+            other => panic!("expected solid fdf2d0 fill, got {other:?}"),
+        }
+        assert_eq!(shape.stroke.as_deref(), Some("c0a000"));
+        assert!(shape.stroke_width > 0.0, "stroke present ⇒ visible weight");
+        assert_eq!(shape.text_blocks.len(), 1, "one body paragraph");
+        assert_eq!(shape.text_blocks[0].text, "مربع نص 2025");
+        assert_eq!(shape.text_blocks[0].alignment, "right");
     }
 }
