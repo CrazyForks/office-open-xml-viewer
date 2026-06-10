@@ -63,3 +63,17 @@ export {
   type WorkerBridgeOptions,
   decodeDataUrl,
 } from './worker';
+export {
+  toVisualSegments,
+  resolveBaseDirection,
+  getDefaultBidiEngine,
+  setBidiEngine,
+  resetBidiEngine,
+  type BidiEngine,
+  type BaseDirection,
+  type BidiClass,
+  type BidiLevels,
+  type StyledRun,
+  type VisualSegment,
+  type SegmentPart,
+} from './text/bidi';

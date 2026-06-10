@@ -7,7 +7,6 @@ export type {
   SoftEdge,
   Reflection,
   Stroke,
-  TextBody,
   SpaceLine,
   Bullet,
   TabStop,
@@ -21,7 +20,21 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Fill, Stroke, TextBody, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+import type { Fill, Stroke, TextBody as CoreTextBody, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+
+/**
+ * PPTX text body. Extends the shared core `TextBody` with PPTX-only bodyPr
+ * fields that the pptx parser surfaces but the shared core model does not yet
+ * carry.
+ */
+export interface TextBody extends CoreTextBody {
+  /**
+   * `<a:bodyPr rtlCol>` (ECMA-376 §21.1.2.1.1) — when true the columns of a
+   * multi-column text body are laid out right-to-left. Defaults to false;
+   * omitted from JSON when false. Only meaningful when `numCol > 1`.
+   */
+  rtlCol?: boolean;
+}
 
 export interface Presentation {
   slideWidth: number;

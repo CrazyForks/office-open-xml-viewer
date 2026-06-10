@@ -26,6 +26,17 @@ pub struct RunFmt {
     pub vanish: Option<bool>,
     /// Highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
     pub highlight: Option<String>,
+    /// ECMA-376 §17.3.2.30 w:rtl — this run contains complex-script (RTL)
+    /// content. Phase 0 of RTL support only records the flag; alignment /
+    /// glyph-order resolution is deferred to a later PR.
+    pub rtl: Option<bool>,
+    /// ECMA-376 §17.3.2.26 w:rFonts/@w:cs — complex-script typeface. Parallel
+    /// to `font_family_ascii` / `font_family_east_asia`; carries the same
+    /// "@theme:<ref>" marker convention for @cstheme references.
+    pub font_family_cs: Option<String>,
+    /// ECMA-376 §17.3.2.39 w:szCs/@w:val — complex-script font size in pt
+    /// (converted from half-points, same units as `font_size`).
+    pub font_size_cs: Option<f64>,
 }
 
 /// Resolved paragraph formatting.
@@ -72,6 +83,10 @@ pub struct ParaFmt {
     /// `w:keepNext` even when not spelled out in styles.xml; downstream
     /// code uses this to infer that behavior.
     pub outline_level: Option<u32>,
+    /// ECMA-376 §17.3.1.6 w:bidi — right-to-left paragraph (text and column
+    /// order flow RTL). Phase 0 only records the flag; alignment start/end
+    /// resolution is deferred to a later PR.
+    pub bidi: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -328,6 +343,7 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.keep_lines.is_some() { dst.keep_lines = src.keep_lines; }
     if src.widow_control.is_some() { dst.widow_control = src.widow_control; }
     if src.para_borders.is_some() { dst.para_borders = src.para_borders.clone(); }
+    if src.bidi.is_some() { dst.bidi = src.bidi; }
 }
 
 fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
@@ -346,6 +362,9 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.dstrike.is_some() { dst.dstrike = src.dstrike; }
     if src.vanish.is_some() { dst.vanish = src.vanish; }
     if src.highlight.is_some() { dst.highlight = src.highlight.clone(); }
+    if src.rtl.is_some() { dst.rtl = src.rtl; }
+    if src.font_family_cs.is_some() { dst.font_family_cs = src.font_family_cs.clone(); }
+    if src.font_size_cs.is_some() { dst.font_size_cs = src.font_size_cs; }
 }
 
 pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
@@ -460,6 +479,11 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // (ECMA-376 default: true; explicit value=0 disables).
     fmt.widow_control = bool_prop(ppr, "widowControl");
 
+    // bidi — right-to-left paragraph (ECMA-376 §17.3.1.6). On-off toggle:
+    // present (or w:val="1"/"true") = RTL, w:val="0"/"false" = LTR. Phase 0
+    // records the flag only; alignment direction resolution is deferred.
+    fmt.bidi = bool_prop(ppr, "bidi");
+
     // outlineLvl — 0..8 marks this paragraph (or its style) as a heading.
     // ECMA-376 §17.3.1.20 lists only 0–8 and "no level" (absent). Word
     // attaches an implicit keepNext to heading paragraphs (Heading 1–9
@@ -528,6 +552,15 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         }
     }
 
+    // Complex-script font size (ECMA-376 §17.3.2.39 w:szCs, half-points).
+    // Recorded independently of the sz/szCs fallback above so RTL runs can use
+    // the complex-script metric without disturbing the existing Latin/CJK size.
+    if let Some(sz_cs) = child_w(rpr, "szCs") {
+        if let Some(v) = attr_w(sz_cs, "val") {
+            fmt.font_size_cs = Some(half_pt_to_pt(&v));
+        }
+    }
+
     // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) is NOT
     // the same as an absent color: it means "the automatic text color" (black on
     // a light background) and must OVERRIDE any inherited style color — e.g. a
@@ -557,6 +590,12 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         let direct_ea = attr_w(rf, "eastAsia");
         let theme_ea  = attr_w(rf, "eastAsiaTheme");
         fmt.font_family_east_asia = direct_ea.or_else(|| theme_ea.map(|t| format!("@theme:{t}")));
+
+        // Complex-script typeface (§17.3.2.26 @cs / @cstheme). Same direct-wins
+        // rule and "@theme:<ref>" marker convention as the other axes.
+        let direct_cs = attr_w(rf, "cs");
+        let theme_cs  = attr_w(rf, "cstheme");
+        fmt.font_family_cs = direct_cs.or_else(|| theme_cs.map(|t| format!("@theme:{t}")));
     }
 
     // Background highlight
@@ -593,6 +632,9 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     if let Some(hl) = child_w(rpr, "highlight") {
         fmt.highlight = attr_w(hl, "val").filter(|v| v != "none");
     }
+
+    // Complex-script / RTL run (ECMA-376 §17.3.2.30 w:rtl). On-off toggle.
+    fmt.rtl = bool_prop(rpr, "rtl");
 
     fmt
 }

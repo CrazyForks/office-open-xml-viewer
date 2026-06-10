@@ -551,6 +551,7 @@ fn parse_worksheet(
     let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
     let mut show_zeros = true;
     let mut show_gridlines = true;
+    let mut right_to_left = false;
     let mut tab_color: Option<String> = None;
     let mut auto_filter: Option<CellRange> = None;
     let mut hyperlink_rids: Vec<(u32, u32, String)> = Vec::new();
@@ -669,6 +670,9 @@ fn parse_worksheet(
             "sheetView" if node.tag_name().namespace() == Some(ns) => {
                 show_zeros = node.attribute("showZeros").map(|v| v != "0").unwrap_or(true);
                 show_gridlines = node.attribute("showGridLines").map(|v| v != "0").unwrap_or(true);
+                // ECMA-376 §18.3.1.87 `rightToLeft` — mirrors the whole grid so
+                // column A is on the right. Default false (left-to-right).
+                right_to_left = node.attribute("rightToLeft").map(|v| v == "1" || v == "true").unwrap_or(false);
             }
             "tabColor" if node.tag_name().namespace() == Some(ns) => {
                 tab_color = parse_color(&node, theme_colors);
@@ -927,6 +931,7 @@ fn parse_worksheet(
         shape_groups: Vec::new(),
         show_zeros,
         show_gridlines,
+        right_to_left,
         tab_color,
         auto_filter,
         hyperlinks: Vec::new(),
@@ -1574,5 +1579,33 @@ mod tab_color_tests {
         // A stray "tabColor" token inside the body must not be misread.
         let head = r#"<worksheet><sheetPr/><sheetData><c><is><t>tabColor rgb="00FF00"</t></is></c>"#;
         assert_eq!(extract_tab_color_from_head(head, &theme()), None);
+    }
+}
+
+#[cfg(test)]
+mod sheet_view_tests {
+    use super::parse_worksheet;
+
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    /// ECMA-376 §18.3.1.87 `<sheetView rightToLeft="1">` mirrors the entire
+    /// grid (column A on the right).
+    #[test]
+    fn sheet_view_right_to_left() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetViews><sheetView rightToLeft="1" workbookViewId="0"/></sheetViews><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert!(ws.right_to_left, "rightToLeft=\"1\" → right_to_left true");
+    }
+
+    /// Absent `@rightToLeft` defaults to false (left-to-right).
+    #[test]
+    fn sheet_view_right_to_left_defaults_false() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert!(!ws.right_to_left, "absent @rightToLeft → right_to_left false");
     }
 }

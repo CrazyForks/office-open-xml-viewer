@@ -55,6 +55,10 @@ pub struct Worksheet {
     /// Gridlines" checkbox in Excel; parsed from `<sheetView showGridLines>`
     /// (ECMA-376 §18.3.1.83). Defaults to true.
     pub show_gridlines: bool,
+    /// Whether the sheet grid is laid out right-to-left, mirroring the entire
+    /// grid so column A sits on the right. Parsed from `<sheetView rightToLeft>`
+    /// (ECMA-376 §18.3.1.87). Defaults to false (left-to-right).
+    pub right_to_left: bool,
     /// Tab color for the sheet tab (ECMA-376 §18.3.1.79)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tab_color: Option<String>,
@@ -815,6 +819,11 @@ pub struct ShapeText {
 pub struct ShapeParagraph {
     /// `<a:pPr@algn>` — `l` (default), `ctr`, `r`, `just`, `dist`.
     pub align: String,
+    /// `<a:pPr@rtl>` — whether the paragraph reads right-to-left (ECMA-376
+    /// §21.1.2.2.7). Omitted from JSON when false so existing output stays
+    /// byte-identical (additive, like the other Phase 0 direction flags).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rtl: bool,
     pub runs: Vec<ShapeTextRun>,
 }
 

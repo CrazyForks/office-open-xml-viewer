@@ -1056,11 +1056,18 @@ struct TextBody {
     #[serde(skip_serializing_if = "is_zero_i64")]
     #[serde(default)]
     spc_col: i64,
+    /// `<a:bodyPr rtlCol>` (ECMA-376 §21.1.2.1.1) — when true the columns of a
+    /// multi-column text body are laid out right-to-left. Default false. Only
+    /// meaningful when `num_col > 1`.
+    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default)]
+    rtl_col: bool,
 }
 
 fn one_u32() -> u32 { 1 }
 fn is_one(n: &u32) -> bool { *n == 1 }
 fn is_zero_i64(n: &i64) -> bool { *n == 0 }
+fn is_false(b: &bool) -> bool { !*b }
 
 /// Line spacing specification
 #[derive(Serialize, Deserialize, Debug)]
@@ -3146,6 +3153,14 @@ fn parse_text_body(
         .and_then(|n| attr_i64(&n, "spcCol"))
         .or_else(|| theme_default_i64("spcCol"))
         .unwrap_or(0);
+    // ECMA-376 §21.1.2.1.1: rtlCol on <a:bodyPr> lays out the text body's
+    // columns right-to-left. xsd:boolean, so accept "1"/"true". Shape
+    // attribute → theme objectDefaults → spec default (false).
+    let rtl_col = body_pr
+        .and_then(|n| attr(&n, "rtlCol"))
+        .or_else(|| theme_default_str("rtlCol"))
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
 
     // Own lstStyle > lvl1pPr, then fall back to layout/master inherited values
     let own_lvl1_ppr = child(tx_body, "lstStyle")
@@ -3219,7 +3234,7 @@ fn parse_text_body(
         }
     }
 
-    TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit, font_scale, ln_spc_reduction, num_col, spc_col }
+    TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit, font_scale, ln_spc_reduction, num_col, spc_col, rtl_col }
 }
 
 /// Walk `node` for OMML math and push a `TextRun::Math` for each equation,
@@ -6767,5 +6782,47 @@ mod tests {
         // firstRow `<a:tcTxStyle b="on">` → bold header.
         assert_eq!(def.first_row_bold, Some(true),
             "firstRow header should be bold from tcTxStyle b=on");
+    }
+
+    /// ECMA-376 §21.1.2.1.1 — `<a:bodyPr rtlCol="1">` lays out a multi-column
+    /// text body's columns right-to-left. parse_text_body should surface it as
+    /// rtl_col=true; an absent attribute yields false (and is omitted from JSON
+    /// via skip_serializing_if).
+    #[test]
+    fn test_parse_text_body_rtl_col() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let parse = |body_pr: &str| -> TextBody {
+            let xml = format!(
+                r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">{body_pr}<p><r><t>x</t></r></p></txBody>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            parse_text_body(
+                doc.root_element(), &theme, &rels,
+                None, [None; 9], &empty_level_bullets(),
+                None, None, None, None, None, None, None, None,
+                ShapeKind::Sp,
+            )
+        };
+
+        // rtlCol="1" → true.
+        let tb = parse(r#"<bodyPr numCol="2" rtlCol="1"/>"#);
+        assert!(tb.rtl_col, "rtlCol=\"1\" should yield rtl_col=true");
+
+        // rtlCol="true" is also accepted (xsd:boolean lexical form).
+        let tb_true = parse(r#"<bodyPr numCol="2" rtlCol="true"/>"#);
+        assert!(tb_true.rtl_col, "rtlCol=\"true\" should yield rtl_col=true");
+
+        // Absent attribute → false (spec default).
+        let tb_absent = parse(r#"<bodyPr numCol="2"/>"#);
+        assert!(!tb_absent.rtl_col, "absent rtlCol should yield rtl_col=false");
+
+        // false is omitted from the serialized JSON.
+        let json = serde_json::to_string(&tb_absent).unwrap();
+        assert!(!json.contains("rtlCol"), "rtl_col=false must be omitted from JSON; got {json}");
+
+        // rtlCol="1" appears under the camelCase key "rtlCol".
+        let json_true = serde_json::to_string(&tb).unwrap();
+        assert!(json_true.contains("\"rtlCol\":true"), "expected rtlCol:true in JSON; got {json_true}");
     }
 }

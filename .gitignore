@@ -59,3 +59,6 @@ docs/superpowers/
 docs/dev-notes/
 # Internal task list (Japanese dev notes); keep local, not for the public repo.
 TODO.md
+
+# Unicode bidi conformance fixtures (downloaded by the conformance test)
+packages/core/src/text/bidi/__fixtures__/
