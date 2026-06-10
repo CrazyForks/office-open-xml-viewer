@@ -33,6 +33,11 @@ import {
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
 import { renderPresetShape, hasPreset, getConnectorAnchors } from './preset-shape';
+import {
+  segmentsHaveRtl,
+  computeLineVisualOrder,
+  type LineVisualOrder,
+} from './bidi-line';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -426,7 +431,22 @@ const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'calibri light': 'Carlito',
   'cambria': 'Caladea',
   'cambria math': 'Caladea',
+  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
+  // substitutes so RTL slides (e.g. sample-10, which requests Sakkal Majalla /
+  // Univers Next Arabic) render with a real web font instead of an oversized
+  // OS fallback. "Naskh" covers traditional serif-like Arabic faces; "Sans"
+  // covers the modern geometric ones.
+  'sakkal majalla': 'Noto Naskh Arabic',
+  'traditional arabic': 'Noto Naskh Arabic',
+  'simplified arabic': 'Noto Naskh Arabic',
+  'arabic typesetting': 'Noto Naskh Arabic',
+  'univers next arabic': 'Noto Sans Arabic',
 };
+
+/** Generic Arabic fallbacks appended to every named-font canvas stack (before
+ *  the CSS generic) so Arabic-script glyphs in an unmapped family still resolve
+ *  to a real Arabic web font when `useGoogleFonts` is on. */
+const ARABIC_FALLBACKS = '"Noto Naskh Arabic", "Noto Sans Arabic"';
 
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
@@ -435,12 +455,12 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
-  // Named font + (metric-compatible substitute, if an Office face) + inferred
-  // generic fallback, so browsers degrade consistently when the exact typeface
-  // is not installed.
+  // Named font + (metric-compatible substitute, if an Office face) + generic
+  // Arabic web fonts + inferred generic fallback, so browsers degrade
+  // consistently when the exact typeface is not installed.
   const sub = OFFICE_FONT_SUBSTITUTE[normalized.toLowerCase()];
   const subPart = sub ? `"${sub}", ` : '';
-  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${genericFallback(normalized)}`;
+  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${ARABIC_FALLBACKS}, ${genericFallback(normalized)}`;
 }
 
 /**
@@ -1156,7 +1176,8 @@ function renderTextBody(
   slideNumber?: number,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null },
   onTextRun?: TextRunCallback,
-) {
+  measureOnly = false,
+): number | void {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
   // "vert270" rotates 270° (= 90° counterclockwise).
@@ -1195,6 +1216,11 @@ function renderTextBody(
         })
       : undefined;
 
+    if (measureOnly) {
+      // The rotated sub-frame's content height runs along the original width
+      // axis; for a table row the vertical extent is the original box width.
+      return bw;
+    }
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
@@ -1469,6 +1495,13 @@ function renderTextBody(
     }
   }
 
+  // ── measure-only: return the content height the text body needs ─────────
+  // Used by renderTable to grow rows to fit their tallest cell (ECMA-376
+  // §21.1.3.18: a:tr@h is a minimum). Returns padding + laid-out text height.
+  if (measureOnly) {
+    return tPad + totalHeight + bPad;
+  }
+
   // ── anchor="b" with bh=0: auto-height growing upward from by ────────────
   // When cy=0 and anchor="b", off_y is the bottom anchor; shape grows upward.
   const anchor = body.verticalAnchor ?? 't';
@@ -1556,10 +1589,19 @@ function renderTextBody(
     }
     cursorY += topGapPx;
     entriesInCol++;
-    const xShift = colIdx * colWidthShift;
+    // §21.1.2.1.1 bodyPr@rtlCol: columns fill right-to-left — mirror the
+    // visual column index. LTR bodies (rtlCol false/absent) are unchanged.
+    const visCol = body.rtlCol ? numCol - 1 - colIdx : colIdx;
+    const xShift = visCol * colWidthShift;
     const textX = entry.textX + xShift;
     const bulletX = entry.bulletX + xShift;
     const textMaxW = entry.textMaxW;
+
+    // Bidi: base direction from a:pPr@rtl (the parser already flips the default
+    // alignment l→r for rtl paragraphs). Engage only when the base is RTL or a
+    // line carries strong-RTL characters, so LTR slides keep their exact path.
+    const baseRtl = entry.para.rtl === true;
+    const paraNeedsBidi = baseRtl || segmentsHaveRtl(line.segments);
 
     // Measure line for alignment AND baseline ascent in one pass.
     // actualBoundingBoxAscent gives the real font ascent for the rendered glyphs,
@@ -1583,11 +1625,21 @@ function renderTextBody(
     }
     const baseline = cursorY + maxAscent;
 
-    // Draw bullet
+    // Draw bullet. Under RTL the bullet hangs in the right gutter: mirror its
+    // LTR offset (textX − bulletX, i.e. the bullet→text gap) about the text
+    // column's right edge.
     if (bulletLabel) {
       ctx.font = bulletFont;
       ctx.fillStyle = bulletColor;
-      ctx.fillText(bulletLabel, bulletX, baseline);
+      if (paraNeedsBidi && baseRtl) {
+        const prevDir = ctx.direction;
+        ctx.direction = 'rtl';
+        const bulletW = ctx.measureText(bulletLabel).width;
+        ctx.fillText(bulletLabel, textX + textMaxW + (textX - bulletX) - bulletW, baseline);
+        ctx.direction = prevDir;
+      } else {
+        ctx.fillText(bulletLabel, bulletX, baseline);
+      }
     }
 
     const effectiveTextX = textX + textXOffset;
@@ -1600,7 +1652,18 @@ function renderTextBody(
       penX = effectiveTextX;
     }
 
-    for (const seg of line.segments) {
+    // Visual draw order: under bidi, reorder segments per UAX#9 (rule L2) and
+    // draw each with ctx.direction matching its resolved direction. textAlign
+    // is already 'left', so penX stays the segment's left edge.
+    const visual: LineVisualOrder | null = paraNeedsBidi
+      ? computeLineVisualOrder(line.segments, baseRtl)
+      : null;
+    const segCount = line.segments.length;
+    for (let vi = 0; vi < segCount; vi++) {
+      const li = visual ? visual.order[vi] : vi;
+      const seg = line.segments[li];
+      const segRtl = visual ? visual.rtl[li] : false;
+      if (paraNeedsBidi) ctx.direction = segRtl ? 'rtl' : 'ltr';
       // ── Equation segment: draw the cached image instead of text ──────────
       if (seg.math) {
         const render = mathRenders.get(seg.math.nodes);
@@ -1637,7 +1700,7 @@ function renderTextBody(
         ctx.shadowOffsetY = Math.sin(dirRad) * dist;
       }
 
-      if (ls > 0 && seg.text.length > 1) {
+      if (ls > 0 && seg.text.length > 1 && !segRtl) {
         // Draw glyph-by-glyph so each character advance is `measure + ls`.
         // Matches OOXML rPr @spc semantics — extra space added to each
         // character's advance, including after the last one.
@@ -1646,6 +1709,15 @@ function renderTextBody(
           ctx.fillText(ch, cx, segBaseline);
           cx += ctx.measureText(ch).width + ls;
         }
+      } else if (ls > 0 && seg.text.length > 1) {
+        // RTL segment with rPr @spc: per-glyph advance would break Arabic
+        // cursive joining, so distribute the spacing via canvas letterSpacing
+        // and draw the whole shaped segment in one fillText. The painted width
+        // then matches the segW advance below (baseW + ls per character).
+        const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+        try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
+        ctx.fillText(seg.text, penX, segBaseline);
+        try { lctx.letterSpacing = '0px'; } catch { /* ignore */ }
       } else {
         ctx.fillText(seg.text, penX, segBaseline);
       }
@@ -1664,12 +1736,17 @@ function renderTextBody(
         ctx.lineWidth = Math.max(0.5, emuToPx(segOutline.width, scale));
         ctx.strokeStyle = segOutline.color ? `#${segOutline.color}` : seg.color;
         ctx.lineJoin = 'round';
-        if (ls > 0 && seg.text.length > 1) {
+        if (ls > 0 && seg.text.length > 1 && !segRtl) {
           let cx = penX;
           for (const ch of seg.text) {
             ctx.strokeText(ch, cx, segBaseline);
             cx += ctx.measureText(ch).width + ls;
           }
+        } else if (ls > 0 && seg.text.length > 1) {
+          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
+          ctx.strokeText(seg.text, penX, segBaseline);
+          try { lctx.letterSpacing = '0px'; } catch { /* ignore */ }
         } else {
           ctx.strokeText(seg.text, penX, segBaseline);
         }
@@ -1728,6 +1805,7 @@ function renderTextBody(
 
       penX += segW;
     }
+    if (paraNeedsBidi) ctx.direction = 'ltr'; // reset before tab-stop / next line
 
     // ── Tab-stop segments (right-aligned or centred at tab stop position) ──
     if (line.tabStop && line.tabStop.segments.length > 0) {
@@ -2082,34 +2160,119 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
-  // Convert col widths and row heights to pixels
+  // Convert col widths to pixels.
   const colWidths = el.cols.map(c => emuToPx(c, scale));
+  const numCols = colWidths.length;
+
+  // Spanned width starting at column `ci` for `span` columns.
+  const spannedWidth = (ci: number, span: number): number => {
+    let w = 0;
+    for (let s = 0; s < span; s++) w += colWidths[ci + s] ?? 0;
+    return w;
+  };
+
+  // ── Row heights: ECMA-376 §21.1.3.18 (a:tr@h) is a MINIMUM ────────────────
+  // PowerPoint grows a row to fit its tallest cell's laid-out text (like
+  // Word's "at least" line rule). A literal h=0 therefore becomes
+  // content-driven. We measure each cell's text body at its spanned width
+  // (reusing the same renderTextBody machinery via measureOnly) and take
+  // max(tr@h, tallest single-row cell content). A rowSpan cell distributes
+  // its content height across the rows it covers so it doesn't inflate the
+  // first row.
   const rowHeights = el.rows.map(r => emuToPx(r.height, scale));
 
-  let rowY = y0;
+  // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
-    const rowH = rowHeights[ri];
-    let colX = x0;
+    for (let ci = 0; ci < row.cells.length; ci++) {
+      const cell = row.cells[ci];
+      if (cell.hMerge || cell.vMerge) continue;
+      if ((cell.rowSpan || 1) > 1) continue;
+      if (!cell.textBody) continue;
+      const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      const needed = (renderTextBody(
+        ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
+        '#000000', slideNumber, rc, undefined, true,
+      ) as number) || 0;
+      if (needed > rowHeights[ri]) rowHeights[ri] = needed;
+    }
+  }
+
+  // Second pass: rowSpan cells. If the content needs more than the sum of the
+  // rows it spans, distribute the deficit across those rows so the merged area
+  // grows without inflating any single row beyond what its own content needs.
+  for (let ri = 0; ri < el.rows.length; ri++) {
+    const row = el.rows[ri];
+    for (let ci = 0; ci < row.cells.length; ci++) {
+      const cell = row.cells[ci];
+      if (cell.hMerge || cell.vMerge) continue;
+      const span = cell.rowSpan || 1;
+      if (span <= 1 || !cell.textBody) continue;
+      const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      const needed = (renderTextBody(
+        ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
+        '#000000', slideNumber, rc, undefined, true,
+      ) as number) || 0;
+      let have = 0;
+      for (let s = 0; s < span && ri + s < rowHeights.length; s++) have += rowHeights[ri + s];
+      if (needed > have) {
+        const extra = (needed - have) / span;
+        for (let s = 0; s < span && ri + s < rowHeights.length; s++) rowHeights[ri + s] += extra;
+      }
+    }
+  }
+
+  // ── Column x-positions ────────────────────────────────────────────────────
+  // ECMA-376 §21.1.3.13 (a:tblPr@rtl): a right-to-left table places column 0
+  // at the right edge, columns advancing leftward. We precompute the left
+  // pixel edge of each column so RTL is a coordinate flip (no ctx.scale(-1,1)
+  // which would mirror text and borders).
+  const tableW = colWidths.reduce((a, b) => a + b, 0);
+  const colLeft: number[] = new Array(numCols);
+  if (el.rtl) {
+    let right = x0 + tableW;
+    for (let ci = 0; ci < numCols; ci++) {
+      right -= colWidths[ci];
+      colLeft[ci] = right;
+    }
+  } else {
+    let left = x0;
+    for (let ci = 0; ci < numCols; ci++) {
+      colLeft[ci] = left;
+      left += colWidths[ci];
+    }
+  }
+
+  // Left pixel edge of a cell spanning columns [ci, ci+span). Under RTL the
+  // span grows leftward, so the merged cell's left edge is the leftmost column.
+  const spannedLeft = (ci: number, span: number): number =>
+    el.rtl ? colLeft[ci + span - 1] : colLeft[ci];
+
+  const rowTop: number[] = new Array(el.rows.length);
+  {
+    let y = y0;
+    for (let ri = 0; ri < el.rows.length; ri++) { rowTop[ri] = y; y += rowHeights[ri]; }
+  }
+
+  for (let ri = 0; ri < el.rows.length; ri++) {
+    const row = el.rows[ri];
+    const rowY = rowTop[ri];
 
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
 
       // Merged cells that are continuations: skip drawing
       if (cell.hMerge || cell.vMerge) {
-        colX += colWidths[ci] ?? 0;
         continue;
       }
 
       // Cell size: span multiple columns/rows
-      let cellW = 0;
-      for (let span = 0; span < (cell.gridSpan || 1); span++) {
-        cellW += colWidths[ci + span] ?? 0;
-      }
+      const cellW = spannedWidth(ci, cell.gridSpan || 1);
       let cellH = 0;
       for (let span = 0; span < (cell.rowSpan || 1); span++) {
         cellH += rowHeights[ri + span] ?? 0;
       }
+      const colX = spannedLeft(ci, cell.gridSpan || 1);
 
       // Fill
       const fillColor = resolveFill(cell.fill);
@@ -2171,10 +2334,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
         ctx.stroke();
       }
       ctx.restore();
-
-      colX += colWidths[ci] ?? 0;
     }
-    rowY += rowH;
   }
 }
 
