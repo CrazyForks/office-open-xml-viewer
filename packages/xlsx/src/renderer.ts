@@ -8,7 +8,7 @@ import { renderChart, renderSparkline, PT_TO_PX, EMU_PER_PX, mathToMathML, recol
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
-import { computeLineVisualOrder, cellBaseRtl } from './bidi-line.js';
+import { computeLineVisualOrder, cellBaseRtl, segmentsHaveRtl } from './bidi-line.js';
 
 // Default font stack. Calibri is the workbook default font in Excel; on
 // systems without Office (macOS / Linux) the browser would otherwise fall
@@ -1618,11 +1618,14 @@ function renderQuadrant(
       if (letterSpacingPx > 0) {
         try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${letterSpacingPx}px`; } catch { /* ignore */ }
       }
-      if (xf.readingOrder === 2) {
-        try { (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction = 'rtl'; } catch { /* ignore */ }
-      } else if (xf.readingOrder === 1) {
-        try { (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction = 'ltr'; } catch { /* ignore */ }
-      }
+      // §18.8.1 readingOrder: 1 = LTR, 2 = RTL, 0/absent = Context (first
+      // strong character decides). Always set the direction explicitly — the
+      // previous explicit-only ladder leaked the prior cell's direction into
+      // Context cells.
+      try {
+        (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction =
+          cellBaseRtl(xf.readingOrder, text) ? 'rtl' : 'ltr';
+      } catch { /* ignore */ }
 
       // Rich text: draw each run with its own font. Only supported for the
       // non-wrap path (wrap with mixed fonts is significantly more complex).
@@ -1641,7 +1644,9 @@ function renderQuadrant(
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         // Bidi base direction for the cell (xf @readingOrder / first-strong).
-        const wrapBaseRtl = cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
+        // Gated so pure-LTR cells keep the exact pre-bidi path.
+        const wrapNeedsBidi = xf.readingOrder === 2 || segmentsHaveRtl(runs);
+        const wrapBaseRtl = wrapNeedsBidi && cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
         const dctxW = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
         for (const line of rLines) {
           const lineH = Math.round(line.maxFontSize * PT_TO_PX * 1.2);
@@ -1651,11 +1656,11 @@ function renderQuadrant(
           else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
           else xx = cx + leftPad;
           // Draw the line's segments in visual order (rule L2).
-          const wvis = computeLineVisualOrder(line.segments, wrapBaseRtl);
+          const wvis = wrapNeedsBidi ? computeLineVisualOrder(line.segments, wrapBaseRtl) : null;
           for (let vi = 0; vi < line.segments.length; vi++) {
-            const li2 = wvis.order[vi];
+            const li2 = wvis ? wvis.order[vi] : vi;
             const seg = line.segments[li2];
-            try { dctxW.direction = wvis.rtl[li2] ? 'rtl' : 'ltr'; } catch { /* ignore */ }
+            if (wvis) { try { dctxW.direction = wvis.rtl[li2] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
             ctx.font = buildFont(seg.font, cs);
             const segColor = cf.fontColor ?? seg.font.color;
             ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
@@ -1678,7 +1683,8 @@ function renderQuadrant(
           }
           yy += lineH;
         }
-        try { dctxW.direction = 'ltr'; } catch { /* ignore */ } // reset for next cell
+        // Defensive reset (the per-cell ctx.restore() also restores direction).
+        if (wrapNeedsBidi) { try { dctxW.direction = 'ltr'; } catch { /* ignore */ } }
       } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
         const lineH = Math.round(font.size * PT_TO_PX * 1.2);
@@ -1722,14 +1728,17 @@ function renderQuadrant(
         // Bidi: draw the runs in visual order (UAX#9 rule L2) under the cell's
         // base direction (xf @readingOrder, or first-strong for Context), each
         // with ctx.direction set so Canvas shapes/orders it internally. The
-        // x-budget (totalWidth/startX) is order-independent.
-        const richBaseRtl = cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join(''));
-        const richVis = computeLineVisualOrder(runs, richBaseRtl);
+        // x-budget (totalWidth/startX) is order-independent. Gated so pure-LTR
+        // cells keep the exact pre-bidi path (no per-repaint UAX#9 cost).
+        const richNeedsBidi = xf.readingOrder === 2 || segmentsHaveRtl(runs);
+        const richVis = richNeedsBidi
+          ? computeLineVisualOrder(runs, cellBaseRtl(xf.readingOrder, runs.map(r => r.text).join('')))
+          : null;
         const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
         let runX = startX;
         for (let vi = 0; vi < runs.length; vi++) {
-          const i = richVis.order[vi];
-          try { dctx.direction = richVis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ }
+          const i = richVis ? richVis.order[vi] : vi;
+          if (richVis) { try { dctx.direction = richVis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
           const rf = drawRunFonts[i];
           const baseRf = baseRunFonts[i];
           ctx.font = buildFont(rf, cs);
@@ -1769,7 +1778,8 @@ function renderQuadrant(
           }
           runX += runWidths[i];
         }
-        try { dctx.direction = 'ltr'; } catch { /* ignore */ } // reset for next cell
+        // Defensive reset (the per-cell ctx.restore() also restores direction).
+        if (richVis) { try { dctx.direction = 'ltr'; } catch { /* ignore */ } }
       } else {
         // ECMA-376 §18.4.6 — cell-level super/subscript: render the glyphs at
         // ~65% size, shifted off the baseline so the cell still reads at the
