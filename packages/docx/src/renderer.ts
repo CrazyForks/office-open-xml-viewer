@@ -2906,7 +2906,7 @@ function normalizeFontFamily(
   family: string | null,
   fontFamilyClasses: Record<string, string> = {},
 ): string {
-  if (!family) return '"Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif';
+  if (!family) return '"Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif';
 
   const escape = (s: string) => s.replace(/"/g, '\\"');
   const head = `"${escape(family)}"`;
@@ -2917,9 +2917,9 @@ function normalizeFontFamily(
   if (tableClass && tableClass !== 'auto') {
     switch (tableClass) {
       case 'roman':
-        return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", serif`;
+        return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", "Noto Naskh Arabic", "Noto Sans Arabic", serif`;
       case 'swiss':
-        return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif`;
+        return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
       case 'modern':
         return `${head}, "Courier New", monospace`;
       default:
@@ -2951,22 +2951,22 @@ function normalizeFontFamily(
     family.includes('Noto Serif');
 
   if (isSerif) {
-    return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", serif`;
+    return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", "Noto Naskh Arabic", "Noto Sans Arabic", serif`;
   }
 
   if (lower.includes('meiryo') || family.includes('メイリオ')) {
-    return `${head}, "Meiryo UI", "Meiryo", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+    return `${head}, "Meiryo UI", "Meiryo", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
   }
   if (family.includes('游ゴシック') || /\byu\s*gothic\b/i.test(family) || lower.includes('yugothic')) {
-    return `${head}, "Yu Gothic", "YuGothic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+    return `${head}, "Yu Gothic", "YuGothic", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
   }
   if (lower.includes('ipa')) {
-    return `${head}, "IPAexGothic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
+    return `${head}, "IPAexGothic", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
   }
   if (lower.includes('segoe')) {
-    return `${head}, "Segoe UI", sans-serif`;
+    return `${head}, "Segoe UI", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
   }
-  return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif`;
+  return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
 }
 
 function getDefaultFontSize(para: DocParagraph): number {
