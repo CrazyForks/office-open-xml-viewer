@@ -11,8 +11,6 @@ const dirname =
 
 export default defineConfig({
   plugins: [wasm()],
-  // Don't copy public/ (sample .pptx fixtures) into the published dist/.
-  publicDir: false,
   server: {
     fs: {
       // Include monorepo root so node_modules/.pnpm/ fontsource files can be served
@@ -21,6 +19,9 @@ export default defineConfig({
     },
   },
   build: {
+    // Serve public/ (sample fixtures) from the dev server for VRT, but don't
+    // copy it into the published dist/.
+    copyPublicDir: false,
     lib: {
       entry: resolve(dirname, 'src/index.ts'),
       name: 'OoxmlViewer',

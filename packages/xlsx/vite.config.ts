@@ -12,10 +12,11 @@ const dirname =
 export default defineConfig({
   plugins: [wasm()],
   root: dirname,
-  // Don't copy public/ (sample .xlsx fixtures) into the published dist/.
-  publicDir: false,
   server: { port: 5175, strictPort: true },
   build: {
+    // Serve public/ (sample fixtures) from the dev server for VRT, but don't
+    // copy it into the published dist/.
+    copyPublicDir: false,
     lib: {
       entry: resolve(dirname, 'src/index.ts'),
       name: 'XlsxViewer',

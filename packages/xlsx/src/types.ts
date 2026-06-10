@@ -44,6 +44,10 @@ export interface Worksheet {
    *  `<sheetView showGridLines>`). Mirrors the Excel "View → Gridlines"
    *  checkbox. Defaults to true. */
   showGridlines?: boolean;
+  /** Whether the sheet grid is laid out right-to-left, mirroring the entire
+   *  grid so column A sits on the right (ECMA-376 §18.3.1.87
+   *  `<sheetView rightToLeft>`). Defaults to false. */
+  rightToLeft?: boolean;
   /** Sheet tab color (ECMA-376 §18.3.1.79). */
   tabColor?: string | null;
   /** AutoFilter header range (ECMA-376 §18.3.1.2). */
@@ -460,6 +464,9 @@ export interface ShapeText {
 export interface ShapeParagraph {
   /** `<a:pPr@algn>` — `l` (default) | `ctr` | `r` | `just` | `dist`. */
   align: string;
+  /** `<a:pPr@rtl>` — whether the paragraph reads right-to-left
+   *  (ECMA-376 §21.1.2.2.7). Omitted (undefined) when false. */
+  rtl?: boolean;
   runs: ShapeTextRun[];
 }
 

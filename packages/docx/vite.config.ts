@@ -9,9 +9,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   root: __dirname,
   plugins: [wasm(), topLevelAwait()],
-  // Don't copy public/ (sample .docx fixtures) into the published dist/.
-  publicDir: false,
   build: {
+    // Serve public/ (sample fixtures) from the dev server for VRT, but don't
+    // copy it into the published dist/.
+    copyPublicDir: false,
     lib: {
       entry: resolve(__dirname, 'src/index.ts'),
       formats: ['es', 'cjs'],
