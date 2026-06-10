@@ -1,7 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet } from './types.js';
 import type { MathRenderer } from '@silurus/ooxml-core';
-import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet } from './renderer.js';
+import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 
 const TAB_BAR_H = 30;
 // Gap between adjacent sheet tabs. The first tab also gets this much leading
@@ -356,6 +356,20 @@ export class XlsxViewer {
     return this.isRtl ? this.maxScrollLeft - raw : raw;
   }
 
+  /**
+   * Map between the logical-LTR x used by all the cell-geometry math and the
+   * on-screen (canvasArea CSS-pixel) x, applying the RTL mirror (ECMA-376
+   * §18.3.1.87) via the same {@link rtlMirrorX} the renderer uses. For LTR this
+   * is the identity. The mirror is an involution, so this one method serves
+   * both cell→px (overlay draw, `w` = cell width) and px→cell (pointer
+   * hit-testing, `w` = 0 for a point) — guaranteeing the overlay sits exactly
+   * where the cell is drawn and a click resolves to that same cell at every
+   * scroll offset. `canvasArea.clientWidth` equals the renderer's `canvasW`.
+   */
+  private screenX(logicalX: number, w: number): number {
+    return this.isRtl ? rtlMirrorX(logicalX, w, this.canvasArea.clientWidth) : logicalX;
+  }
+
   /** Park the scrollbar at the sheet's natural start: scrollLeft=0 for LTR,
    *  the right end for RTL (so col A shows first). */
   private resetHorizontalScroll(): void {
@@ -397,7 +411,11 @@ export class XlsxViewer {
     const cs = this.opts.cellScale ?? 1;
 
     const rect = this.canvasArea.getBoundingClientRect();
-    const lx = (clientX - rect.left) / cs;
+    // Un-mirror the screen x into the logical-LTR layout the geometry below
+    // assumes (header on the left). screenX is an involution, so applying it to
+    // a screen point recovers the logical point; w = 0 for a point. Done in
+    // scaled CSS px (canvasArea space) before converting to logical px.
+    const lx = this.screenX(clientX - rect.left, 0) / cs;
     const ly = (clientY - rect.top) / cs;
 
     if (lx < HEADER_W || ly < HEADER_H) return null;
@@ -563,7 +581,9 @@ export class XlsxViewer {
     if (!ws) return null;
     const cs = this.opts.cellScale ?? 1;
     const rect = this.canvasArea.getBoundingClientRect();
-    const lx = (clientX - rect.left) / cs;
+    // Same RTL un-mirror as getCellAt: map the screen x back to the logical-LTR
+    // layout (row header on the left) before the header math below.
+    const lx = this.screenX(clientX - rect.left, 0) / cs;
     const ly = (clientY - rect.top) / cs;
 
     const inRowHeader = lx < HEADER_W;
@@ -756,10 +776,20 @@ export class XlsxViewer {
     if (selR1 > freezeRows && y < frozenBoundY) { h -= frozenBoundY - y; y = frozenBoundY; }
 
     if (w <= 0 || h <= 0) return;
+
+    // The rect above is in the logical-LTR layout (header on the left), the
+    // same space getCellRect / the all|rows|cols branches use. For an RTL sheet
+    // the renderer mirrors every cell about canvasW (ECMA-376 §18.3.1.87), so
+    // mirror the final [x, x+w] band once with the same transform the renderer
+    // uses. Doing it here — after the LTR clamps — keeps the header/frozen
+    // clamping correct and guarantees the overlay lands exactly on the drawn
+    // cell at every scroll offset (cell→px uses the same map as px→cell above).
+    const screenLeft = this.screenX(x, w);
+
     const box = document.createElement('div');
     box.style.cssText =
       `position:absolute;` +
-      `left:${x}px;top:${y}px;width:${w}px;height:${h}px;` +
+      `left:${screenLeft}px;top:${y}px;width:${w}px;height:${h}px;` +
       `box-sizing:border-box;border:2px solid #1a73e8;` +
       `background:rgba(26,115,232,0.08);pointer-events:none;`;
     this.selectionOverlay.appendChild(box);

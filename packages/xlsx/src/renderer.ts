@@ -40,6 +40,32 @@ const MDW_FALLBACK = 8;
 export const HEADER_W = 50;
 export const HEADER_H = 22;
 
+/**
+ * Sheet-level right-to-left horizontal mirror (ECMA-376 §18.3.1.87
+ * `<sheetView rightToLeft>`). The grid is always laid out left-to-right
+ * internally; an RTL sheet is produced by mirroring every horizontal extent
+ * about the canvas width. A left-anchored rect `[x, x + w]` maps to
+ * `[canvasW - x - w, canvasW - x]`.
+ *
+ * Because the LTR layout puts the row-header strip at `[0, HEADER_W]` and the
+ * cell area at `[HEADER_W, canvasW]`, mirroring moves the header strip to the
+ * right edge and the cell area to `[0, canvasW - HEADER_W]`, matching Excel.
+ *
+ * This is the SINGLE source of truth for the RTL x transform. The Canvas
+ * renderer, the selection overlay, and pointer hit-testing must all use it so
+ * that a cell drawn at screen-x is the same cell a click at screen-x resolves
+ * to, at every scroll offset. `canvasW` is the CSS-pixel width of the drawing
+ * surface (`canvasArea.clientWidth`), identical to `ctx.canvas.width / dpr`.
+ *
+ * The transform is an involution: applying it to a screen point recovers the
+ * logical-LTR point (`rtlMirrorX(rtlMirrorX(x, w, W), w, W) === x`), so the
+ * same function serves both cell→px (draw) and px→cell (hit-test, with w = 0
+ * for a point).
+ */
+export function rtlMirrorX(x: number, w: number, canvasW: number): number {
+  return canvasW - x - w;
+}
+
 // Thin line drawn between frozen and scrollable areas
 const FREEZE_LINE_COLOR = '#7a7a7a';
 
@@ -1017,7 +1043,7 @@ function renderQuadrant(
   // to every column x (so fills, borders, gridlines, text positions, merge
   // spans and the clip rect all mirror) while leaving glyphs un-flipped and
   // cell-level left/right alignment physical.
-  const mirrorX = (x: number, w: number): number => rc.rtl ? rc.canvasW - x - w : x;
+  const mirrorX = (x: number, w: number): number => rc.rtl ? rtlMirrorX(x, w, rc.canvasW) : x;
 
   // Canvas x for each column
   const colXs: number[] = [];
@@ -2277,7 +2303,7 @@ function renderHeaders(
   // canvasW: a left-anchored col-header rect [x, x+w] maps to its mirror.
   // The corner box and the row-number strip move from the left edge
   // ([0, hw]) to the right edge ([canvasW - hw, canvasW]).
-  const mirrorX = (x: number, w: number): number => rtl ? canvasW - x - w : x;
+  const mirrorX = (x: number, w: number): number => rtl ? rtlMirrorX(x, w, canvasW) : x;
   const cornerX = rtl ? canvasW - hw : 0;  // x-origin of the corner / row-header strip
 
   // Corner – draw all 4 edges (standalone box)
