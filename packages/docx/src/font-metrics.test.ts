@@ -54,11 +54,15 @@ describe('correctLineMetrics', () => {
     // the substitute's 26 px), which is what fixes the over-measured cell box.
     expect(r.ascent + r.descent).toBeCloseTo((2860 / 2048) * 12, 5);
   });
-  it('sizes Meiryo to its OS/2 win sum (1.5962 em) with the win asc/desc split', () => {
+  it('keeps the substitute metrics when its box is SMALLER than the document win box (Meiryo)', () => {
+    // Two-regime rule: a substitute that UNDERSTATES the document font (here
+    // 18px natural vs Meiryo's 1.5962em ≈ 28.7px) passes through unchanged —
+    // the intendedSingleLinePx floor raises the LINE BOX and the renderer
+    // centers the natural line, keeping ink where Word's sits (sample-3 VRT).
     const r = correctLineMetrics('Meiryo UI', 18, 14, 4);
-    expect(r.ascent + r.descent).toBeCloseTo((3269 / 2048) * 18, 5);
-    expect(r.ascent).toBeCloseTo((2210 / 2048) * 18, 5);
-    expect(r.descent).toBeCloseTo((1059 / 2048) * 18, 5);
+    expect(r).toEqual({ ascent: 14, descent: 4 });
+    // ...while the floor still claims the document font's win height.
+    expect(intendedSingleLinePx('Meiryo UI', 18)).toBeCloseTo((3269 / 2048) * 18, 5);
   });
   it('passes through measured metrics unchanged for untabled fonts', () => {
     const r = correctLineMetrics('Arial', 12, 11, 3);

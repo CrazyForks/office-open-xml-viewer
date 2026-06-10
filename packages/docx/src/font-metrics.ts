@@ -136,22 +136,26 @@ export function intendedSingleLinePx(family: string | null | undefined, emPx: nu
 
 /**
  * Correct a substitute font's measured Canvas `fontBoundingBox` ascent/descent
- * to the DOCUMENT font's design line box, so both the rendered line height AND
- * the baseline position within it match Word regardless of which fallback drew
- * the glyphs.
+ * against the DOCUMENT font's design line box.
  *
- * When `family` is in the win-metric table the returned ascent/descent are the
- * document font's `usWinAscent / unitsPerEm × emPx` and
- * `usWinDescent / unitsPerEm × emPx` — i.e. the intended line box with the
- * intended baseline split, not the substitute's. This both RAISES boxes for
- * substitutes that understate the document font (Meiryo via Hiragino) and
- * SHRINKS boxes for substitutes that overstate it (Sakkal Majalla via Noto
- * Naskh Arabic, §17.4.81 / §17.4.84 cell centering). Using the document font's
- * own ascent:descent split keeps vertically-centered text on center even when
- * the substitute's split differs. When `family` is not in the table, the
- * measured metrics are returned unchanged. The `ascentPx`/`descentPx` arguments
- * are unused for tabled fonts but kept so callers can pass the substitute
- * metrics uniformly.
+ * Two regimes, decided by comparing the substitute's natural box with the
+ * document font's win box (`usWinAscent+usWinDescent / unitsPerEm`):
+ *
+ * - Substitute box ≤ document box (e.g. Meiryo drawn via Hiragino): return the
+ *   substitute's measured metrics UNCHANGED. The {@link intendedSingleLinePx}
+ *   floor (applied by layoutLines) raises the LINE BOX to the document font's
+ *   win height, and the renderer centers the natural line inside it — keeping
+ *   the substitute's glyph ink centered where Word's ink sits. Replacing the
+ *   split here instead shifted every line's ink upward and regressed the
+ *   Word-reference VRT (private/sample-3).
+ *
+ * - Substitute box > document box (Sakkal Majalla drawn via Noto Naskh Arabic,
+ *   win 2.2 em vs 1.3965 em): return the document font's win ascent/descent.
+ *   Without the shrink, exact-height rows (§17.4.81) and vAlign-centered cells
+ *   (§17.4.84) overflow — the sample-7 page-2 header case.
+ *
+ * When `family` is not in the win-metric table, the measured metrics are
+ * returned unchanged.
  */
 export function correctLineMetrics(
   family: string | null | undefined,
@@ -161,5 +165,9 @@ export function correctLineMetrics(
 ): { ascent: number; descent: number } {
   const m = lookupWinMetric(family);
   if (m === null) return { ascent: ascentPx, descent: descentPx };
+  const targetTotal = (m.asc + m.desc) * emPx;
+  if (ascentPx + descentPx <= targetTotal) {
+    return { ascent: ascentPx, descent: descentPx };
+  }
   return { ascent: m.asc * emPx, descent: m.desc * emPx };
 }
