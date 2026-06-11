@@ -1,6 +1,7 @@
 import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
+import { selectNotes } from './notes';
 import {
   preloadGoogleFonts,
   WorkerBridge,
@@ -170,6 +171,29 @@ export class PptxPresentation {
 
   /** Slide height in EMU. */
   get slideHeight(): number { return this._presentation?.slideHeight ?? 0; }
+
+  /**
+   * Speaker-notes text for a slide (`ppt/notesSlides/notesSlideN.xml`,
+   * ECMA-376 §13.3.5 — Notes Slide). Returns the notes-body text as a single
+   * string (paragraphs joined with `\n`), or `null` when the slide has no
+   * notes part. The notes are parsed at {@link load} time, so this is a
+   * synchronous lookup.
+   *
+   * `slideIndex` is 0-based. Unlike navigation methods it is *not* clamped:
+   * an out-of-range or non-integer index returns `null` rather than the notes
+   * of the nearest slide (so a tool iterating by index gets an honest "no
+   * notes" instead of a duplicated neighbour).
+   *
+   * @example
+   * const pres = await PptxPresentation.load(buffer);
+   * for (let i = 0; i < pres.slideCount; i++) {
+   *   const notes = pres.getNotes(i);
+   *   if (notes) console.log(`Slide ${i + 1} notes:`, notes);
+   * }
+   */
+  getNotes(slideIndex: number): string | null {
+    return selectNotes(this._presentation?.slides ?? [], slideIndex);
+  }
 
   /** Render a slide onto the given canvas. */
   async renderSlide(

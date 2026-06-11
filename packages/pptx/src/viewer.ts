@@ -112,6 +112,16 @@ export class PptxViewer {
   get slideIndex(): number { return this.currentSlide; }
   get slideCount(): number { return this.engine?.slideCount ?? 0; }
 
+  /**
+   * Speaker-notes text for a slide (`ppt/notesSlides/notesSlideN.xml`,
+   * ECMA-376 §13.3.5). Passthrough to {@link PptxPresentation.getNotes}:
+   * 0-based index, returns `null` when the slide has no notes part, the index
+   * is out of range, or nothing is loaded yet.
+   */
+  getNotes(slideIndex: number): string | null {
+    return this.engine?.getNotes(slideIndex) ?? null;
+  }
+
   /** The underlying <canvas> element. */
   get canvasElement(): HTMLCanvasElement { return this.canvas; }
 
