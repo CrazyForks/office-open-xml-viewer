@@ -4,6 +4,56 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.56.0 — 2026-06-11
+
+The right-to-left release: full RTL (Arabic / Hebrew) rendering across all
+three formats (issue #366), plus Japanese kinsoku line breaking and Word
+table auto-layout.
+
+core:
+
+- From-scratch UAX#9 bidirectional engine behind a swappable `BidiEngine`
+  seam — passes the full Unicode conformance suites (BidiCharacterTest
+  91,707 + BidiTest 490,852 lines), with a §4.3 HL1 class-override hook
+  (#367, #375).
+- Google-font preload now awaits every substitute `FontFace` before first
+  paint — deterministic rendering across reloads (#375).
+
+docx:
+
+- Right-to-left text: per-line UAX#9 reorder, `w:bidi` / run `w:rtl`
+  (ambiguous punctuation → RTL, §17.3.2.30), complex-script formatting axis
+  (`w:szCs` / `w:bCs` / `rFonts@cs`, §17.3.2.26/.38/.39 with direct-value
+  mirroring per §17.3.2.18), Word-compatible AN digit ordering for dates,
+  RTL lists / logical indents (Part 4 §14.11.2), `w:bidiVisual` column
+  order (§17.4.1), `w:tcBorders` start/end edges (§17.4.66–67), and theme
+  cs-font fallback via `w:themeFontLang` (§17.15.1.88) (#368, #374–#378,
+  #380).
+- Word table auto-layout: columns sized by preferred widths with a minimum
+  content-width floor (`w:tblLayout` autofit, §17.4.52/.63) (#372, #374).
+- Japanese kinsoku line breaking (`w:kinsoku` default-on, custom
+  `noLineBreaksBefore/After` sets, §17.15.1.58–.60) (#383).
+- Line-metric fidelity: substituted fonts use the document font's OS/2 win
+  metrics (two-regime floor/shrink), `hRule="exact"` rows clip (§17.4.81),
+  zero exact line spacing (#371), and a trailing `<w:br/>` keeps its empty
+  line (§17.3.3.1) (#379, #382).
+
+pptx:
+
+- Right-to-left text: intra-line bidi, RTL bullets, `bodyPr@rtlCol` column
+  order, `tblPr@rtl` tables, content-driven table row heights (`a:tr@h` as
+  minimum, §21.1.3.18) (#369, #375).
+- Arabic fallback web fonts are now gated to Arabic-script faces — Latin
+  text in substituted fonts resolves sans-serif again (#381).
+
+xlsx:
+
+- Right-to-left sheets (`sheetView rightToLeft`, §18.3.1.87): mirrored
+  grid, headers and frozen panes, rich-text cell bidi with `readingOrder`
+  (#370, #375).
+- Selection overlay and pointer hit-testing share the grid's RTL mirror —
+  the selection frame now follows horizontal scrolling (#376).
+
 ## 0.55.0 — 2026-06-09
 
 API (all formats) — **breaking, opt-in math only:**

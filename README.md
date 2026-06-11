@@ -411,7 +411,11 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Table style borders / shading / banding (`tblStylePr`, `cnfStyle`, §17.4.7) | ✅ |
 | | Table of contents (TOC field) — dot leaders, right-aligned page numbers | ✅ |
 | | keepNext / keepLines / widowControl | ✅ |
+| | Right-to-left text — UAX#9 bidi, `w:bidi` / `w:rtl`, complex-script formatting (`w:szCs` / `w:bCs` / `rFonts@cs`, §17.3.2.26), RTL lists and indents | ✅ |
+| | Japanese kinsoku line breaking (`w:kinsoku`, §17.15.1.58 — 行頭/行末禁則) | ✅ |
 | **Elements** | Tables (with borders, fills, merges, banding, alignment) | ✅ |
+| | Table auto-layout by preferred widths (`w:tblLayout` autofit, §17.4.52; min content width) | ✅ |
+| | Right-to-left table column order (`w:bidiVisual`, §17.4.1) | ✅ |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | Text boxes / drawing shapes | ✅ |
@@ -445,6 +449,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Text wrapping | ✅ |
 | | Number formats (`0.00`, `%`, `#,##0`, custom date/time) | ✅ |
 | **Structure** | Merged cells | ✅ |
+| | Right-to-left sheets (`sheetView rightToLeft`, §18.3.1.87 — mirrored grid, headers, selection, scroll) | ✅ |
 | | Frozen panes | ✅ |
 | | Row / column sizing (custom widths and heights) | ✅ |
 | | Hidden rows / columns | ✅ |
@@ -533,7 +538,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Tab stops | ✅ |
 | | Indent / margin | ✅ |
 | | Vertical text (`bodyPr@vert` — vert / vert270 / eaVert) | ✅ |
-| | Right-to-left paragraph (`pPr@rtl` — Arabic / Hebrew default alignment + browser bidi) | ✅ |
+| | Right-to-left text — UAX#9 bidi engine, `pPr@rtl`, RTL bullets, `bodyPr@rtlCol` column order, `tblPr@rtl` tables | ✅ |
 | **Text — body** | Text padding (insets) | ✅ |
 | | normAutoFit (shrink to fit) | ✅ |
 | | spAutoFit (expand box; suppresses wrap when text fits in one line) | ✅ |
