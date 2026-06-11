@@ -515,7 +515,15 @@ export type ShapeTextRun =
     };
 
 export type ShapeGeom =
-  | { type: 'preset'; name: string }
+  | {
+      type: 'preset';
+      name: string;
+      /** Adjust handles from `<a:avLst><a:gd>` in `adj1..adj8` order
+       *  (ECMA-376 §19.5.31.3 / §20.1.9.5). `null` entries mean "use the
+       *  preset's declared default". Omitted entirely when the shape has no
+       *  `<a:avLst>`. Consumed by the shared `renderPresetShape` engine. */
+      adj?: (number | null)[];
+    }
   | { type: 'custom'; paths: PathInfo[] }
   /** Bitmap picture leaf inside a `<xdr:grpSp>`. `dataUrl` is a pre-encoded
    *  `data:<mime>;base64,…` produced by the Rust parser from the drawing's

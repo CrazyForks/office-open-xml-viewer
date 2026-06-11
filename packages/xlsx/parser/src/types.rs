@@ -891,7 +891,15 @@ pub enum ShapeTextRun {
 pub enum ShapeGeom {
     /// Preset geometry (rect, ellipse, roundRect, triangle, etc.).
     /// ECMA-376 §20.1.9.18 `a:prstGeom/@prst`.
-    Preset { name: String },
+    ///
+    /// `adj` carries the shape's adjust handles from `<a:avLst><a:gd>` in
+    /// declaration order (index 0 = adj/adj1, 1 = adj2, …); `None` entries mean
+    /// "use the preset's declared default". ECMA-376 §19.5.31.3 / §20.1.9.5.
+    Preset {
+        name: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        adj: Vec<Option<f64>>,
+    },
     /// Freeform path geometry (ECMA-376 §20.1.9.2 `a:custGeom`).
     Custom { paths: Vec<PathInfo> },
     /// Bitmap image leaf inside a `<xdr:grpSp>` tree (ECMA-376 §20.5.2.17).
