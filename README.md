@@ -465,7 +465,8 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | **Advanced** | Conditional formatting (`cellIs`, `colorScale`, `dataBar`, `iconSet`, `top10`, `aboveAverage`) | ✅ |
 | | Slicers (static, Office 2010 extension) | ✅ |
 | | Pivot tables | ❌ Not planned |
-| | Data validation / comments | ❌ Not planned |
+| | Cell comments / notes (classic `xl/commentsN.xml` + Office-365 threaded comments — red triangle indicator + author / text via the worksheet model) | ✅ |
+| | Data validation (rules via the worksheet model; `list`-type dropdown arrow on the selected cell — display only) | ✅ |
 | **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
 | | Excel-style row / column header highlight on selection | ✅ |
 | | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
