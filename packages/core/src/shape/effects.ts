@@ -145,10 +145,14 @@ export function applyInnerShadow(
  * so the perimeter fades to transparent over the feather radius.
  *
  * This helper paints the shape onto an auxiliary canvas, then intersects it with
- * a blurred version of its own silhouette, then blits the feathered result back.
- * Because the mask is the blurred silhouette, the interior (where blur leaves
- * alpha = 1) is untouched and only the edge band fades — matching the spec's
- * "fill is not affected".
+ * a blurred version of its FILLED SILHOUETTE (not the styled body), then blits
+ * the feathered result back. The mask must be the filled silhouette — masking
+ * with a stroked body would `destination-in` only the thin outline ring and
+ * erase the interior. Because the silhouette interior stays alpha = 1 under
+ * blur, only the edge band fades, matching the spec's "fill is not affected".
+ *
+ * `paintMask` paints a flat opaque silhouette (filled path, no stroke). When
+ * omitted, `paintShape` is reused (correct only for unstroked shapes).
  */
 export function applySoftEdge(
   liveCtx: AuxContext,
@@ -158,6 +162,7 @@ export function applySoftEdge(
   scale: number,
   deviceW: number,
   deviceH: number,
+  paintMask?: PaintShape,
 ): void {
   const radius = emuToPx(softEdge.radius, scale);
   if (radius <= 0) {
@@ -177,17 +182,18 @@ export function applySoftEdge(
     return;
   }
 
+  const mask = paintMask ?? paintShape;
+
   // 1. Paint the full shape (fill + stroke) onto the aux canvas.
   paintShape(c);
 
-  // 2. Intersect with a blurred silhouette mask to feather the perimeter.
-  //    A box blur of `radius` px feathers the edge over ~radius px each side;
+  // 2. Intersect with a blurred FILLED silhouette to feather the perimeter.
   //    ECMA gives `rad` as the blur radius directly.
   c.save();
   c.globalCompositeOperation = 'destination-in';
   c.filter = `blur(${radius}px)`;
   c.fillStyle = '#000';
-  paintShape(c);
+  mask(c);
   c.restore();
 
   // 3. Blit the feathered shape back to the live context.

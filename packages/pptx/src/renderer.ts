@@ -1092,6 +1092,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     applySoftEdge(
       ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D); },
       effBBox, el.softEdge, effScale, deviceW, deviceH,
+      // Mask is the flat filled silhouette (no stroke) — see applySoftEdge.
+      (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D, '#000'); },
     );
     ctx.restore();
   } else {
