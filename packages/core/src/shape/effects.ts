@@ -92,7 +92,7 @@ function get2d(canvas: AuxCanvas): AuxContext | null {
 export function applyInnerShadow(
   liveCtx: AuxContext,
   paintShape: PaintShape,
-  bbox: EffectBBox,
+  _bbox: EffectBBox,
   shadow: Shadow,
   scale: number,
   deviceW: number,
