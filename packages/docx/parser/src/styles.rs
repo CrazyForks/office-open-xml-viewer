@@ -82,7 +82,6 @@ pub struct ParaFmt {
     pub tab_stops: Option<Vec<(f64, String, String)>>,
     /// merged run defaults from pPr/rPr
     pub run: RunFmt,
-    pub based_on: Option<String>,
     /// Paragraph background hex color (w:shd fill on paragraph)
     pub shading: Option<String>,
     /// Force page break before paragraph (w:pageBreakBefore)
@@ -715,11 +714,12 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 }
 
 pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
-    let mut fmt = RunFmt::default();
-
-    fmt.bold = bool_prop(rpr, "b");
-    fmt.italic = bool_prop(rpr, "i");
-    fmt.strikethrough = bool_prop(rpr, "strike");
+    let mut fmt = RunFmt {
+        bold: bool_prop(rpr, "b"),
+        italic: bool_prop(rpr, "i"),
+        strikethrough: bool_prop(rpr, "strike"),
+        ..Default::default()
+    };
 
     // Underline
     if let Some(u) = child_w(rpr, "u") {

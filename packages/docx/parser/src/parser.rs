@@ -107,8 +107,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
 
     let sect_pr = body_node
         .children()
-        .filter(|n| n.is_element())
-        .last()
+        .rfind(|n| n.is_element())
         .filter(|n| n.tag_name().name() == "sectPr");
 
     let (section, refs) = parse_section(sect_pr, &rel_map);
@@ -710,6 +709,10 @@ fn parse_body_elements(
     body
 }
 
+// Short-lived intermediate consumed immediately by the caller into BodyElement;
+// boxing the Para variant would add a heap allocation per paragraph on the hot
+// parse path with no real memory benefit for a transient `Vec<ParaPiece>`.
+#[allow(clippy::large_enum_variant)]
 enum ParaPiece {
     Para(DocParagraph),
     PageBreak,
@@ -1215,6 +1218,10 @@ struct FieldState {
     substitute: bool,
 }
 
+// Threads the immutable parse context (style/media/rel maps, theme) plus the
+// running output buffer and revision state through the paragraph walk; grouping
+// these into a context struct would only relocate the same fields.
+#[allow(clippy::too_many_arguments)]
 fn parse_para_content(
     node: roxmltree::Node,
     base_run: &RunFmt,
@@ -1334,6 +1341,9 @@ fn parse_para_content(
     }
 }
 
+// Same parse-context threading as parse_para_content, with the additional
+// hyperlink/field state carried per run.
+#[allow(clippy::too_many_arguments)]
 fn handle_run_in_para(
     r_node: roxmltree::Node,
     base_run: &RunFmt,
@@ -1474,7 +1484,6 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
 
 fn classify_field(instr: &str) -> String {
     let token = instr
-        .trim()
         .split_whitespace()
         .next()
         .unwrap_or("")
@@ -1486,6 +1495,8 @@ fn classify_field(instr: &str) -> String {
     }
 }
 
+// Same parse-context threading as handle_run_in_para.
+#[allow(clippy::too_many_arguments)]
 fn parse_run_inner(
     node: roxmltree::Node,
     base_run: &RunFmt,
@@ -2395,6 +2406,10 @@ fn parse_wgp_shapes(
 /// from group child coord space to page EMU; `group_off_pt_*` are the group origin
 /// on the page (in pt) so the shape's off.x/off.y (in child coord space) can be
 /// translated to page-relative pt. For a standalone wsp (no wgp), pass sx=sy=1, group_off=0.
+// Carries the accumulated anchor/group coordinate transform (offsets, scale,
+// relative-from flags, z-order) needed to place a wsp shape in page space;
+// these are interdependent transform parameters, not an arbitrary bag.
+#[allow(clippy::too_many_arguments)]
 fn parse_wsp_shape(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
@@ -4333,7 +4348,7 @@ mod rtl_tests {
             })
             .unwrap();
         // `w:b` sets the non-CS bold…
-        assert_eq!(run.bold, true, "w:b sets non-CS bold");
+        assert!(run.bold, "w:b sets non-CS bold");
         // …and `w:bCs` is absent, so the parser leaves the CS bold axis None.
         // The renderer mirrors it from `bold` (boldCs ?? bold) per the PDF-
         // verified sample-7 page-1 behaviour; that fallback lives in renderer.ts.
