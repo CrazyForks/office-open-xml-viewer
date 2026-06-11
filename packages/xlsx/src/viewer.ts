@@ -2,6 +2,7 @@ import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet } from './types.js';
 import type { MathRenderer } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
+import { findListValidationAt } from './data-validation.js';
 
 const TAB_BAR_H = 30;
 // Gap between adjacent sheet tabs. The first tab also gets this much leading
@@ -836,6 +837,61 @@ export class XlsxViewer {
       `box-sizing:border-box;border:2px solid #1a73e8;` +
       `background:rgba(26,115,232,0.08);pointer-events:none;`;
     this.selectionOverlay.appendChild(box);
+
+    // List data-validation dropdown arrow (ECMA-376 §18.3.1.33). Excel shows an
+    // in-cell dropdown button only while the cell is *selected* and only for
+    // `list`-type rules — so it is drawn here (selection overlay) rather than in
+    // the canvas renderer. Display only: clicking it does nothing, since opening
+    // the list / picking a value is out of scope for a read-only viewer (TODO:
+    // surface the choices on click once an interaction model is defined).
+    this.maybeDrawValidationDropdown();
+  }
+
+  /** Draw the Excel list-validation dropdown button just outside the
+   *  bottom-right corner of the *active* cell when that cell is covered by a
+   *  `list` data-validation rule. Anchored to the single active cell (not the
+   *  whole range) to mirror Excel, which attaches the button to the active
+   *  cell of the selection. */
+  private maybeDrawValidationDropdown(): void {
+    if (this.selectionMode !== 'cells') return;
+    const ws = this.currentWorksheet;
+    const active = this.activeCell;
+    if (!ws || !active) return;
+    const dv = findListValidationAt(ws.dataValidations, active.row, active.col);
+    if (!dv) return;
+
+    const rect = this.getCellRect(active.row, active.col);
+    if (!rect) return;
+
+    // Excel's dropdown button is a fixed square sized to the cell height,
+    // clamped to a sensible range so it stays usable at small zoom and doesn't
+    // dominate tall rows. The arrow glyph is centered inside.
+    const cs = this.opts.cellScale ?? 1;
+    const headerW = Math.round(HEADER_W * cs);
+    const headerH = Math.round(HEADER_H * cs);
+    const side = Math.max(14, Math.min(rect.h, 22 * cs));
+    // Button sits flush to the right of the cell, top-aligned with it.
+    const btnLogicalX = rect.x + rect.w;
+    const btnY = rect.y;
+    // Cull when the active cell (hence its button) is scrolled behind the
+    // fixed headers.
+    if (btnLogicalX + side <= headerW || btnY + side <= headerH) return;
+
+    const screenLeft = this.screenX(btnLogicalX, side);
+
+    const btn = document.createElement('div');
+    btn.setAttribute('data-xlsx-validation-dropdown', '');
+    btn.style.cssText =
+      `position:absolute;` +
+      `left:${screenLeft}px;top:${btnY}px;width:${side}px;height:${side}px;` +
+      `box-sizing:border-box;display:flex;align-items:center;justify-content:center;` +
+      // Match Excel's grey button chrome; non-interactive (display only).
+      `background:#f0f0f0;border:1px solid #7f7f7f;pointer-events:none;`;
+    const arrow = Math.max(4, Math.round(side * 0.42));
+    btn.innerHTML =
+      `<svg width="${arrow}" height="${arrow}" viewBox="0 0 10 6" aria-hidden="true">` +
+      `<path d="M0 0 L10 0 L5 6 Z" fill="#333"/></svg>`;
+    this.selectionOverlay.appendChild(btn);
   }
 
   private applyPointerSelection(clientX: number, clientY: number, shiftKey: boolean, pointerId: number, allowDrag: boolean): void {
