@@ -2321,7 +2321,10 @@ mod data_validation_tests {
         let dv = &dvs[0];
         assert_eq!(dv.sqref, "B2:B5");
         assert_eq!(dv.validation_type.as_deref(), Some("list"));
-        assert_eq!(dv.formula1.as_deref(), Some("\"Pending,Shipped,Delivered\""));
+        assert_eq!(
+            dv.formula1.as_deref(),
+            Some("\"Pending,Shipped,Delivered\"")
+        );
         assert!(dv.allow_blank, "allowBlank=\"1\" → true");
     }
 
@@ -2457,7 +2460,11 @@ mod threaded_comment_tests {
         let cs = parse_threaded_comments_xml(&xml, &persons());
         assert_eq!(cs.len(), 1, "one comment per cell");
         assert_eq!(cs[0].cell_ref, "A1");
-        assert_eq!(cs[0].author.as_deref(), Some("Reviewer"), "first author kept");
+        assert_eq!(
+            cs[0].author.as_deref(),
+            Some("Reviewer"),
+            "first author kept"
+        );
         assert_eq!(cs[0].text, "Question?\nAnswer.");
     }
 
