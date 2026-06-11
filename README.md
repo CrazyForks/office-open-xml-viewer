@@ -517,7 +517,8 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Inner shadow (`innerShdw`) | ✅ |
 | | Soft edge (`softEdge`) | ✅ |
 | | Reflection (`reflection`) | ✅ |
-| | Bevel / 3D extrusion | ❌ |
+| | 3D camera / perspective projection (`scene3d` camera + `rot`) on pictures | ✅ |
+| | Bevel / 3D extrusion (`sp3d`) | ⚠️ parsed; rendering planned |
 | **Text — characters** | Bold, italic, strikethrough (incl. `dblStrike`) | ✅ |
 | | Underline styles (`sng` / `dbl` / `dotted` / `dash` / `dashLong` / `dotDash` / `dotDotDash` / `wavy` / `wavyDbl` and `*Heavy` variants) | ✅ |
 | | Per-run underline colour (`uFill` / `uFillTx`) | ✅ |
