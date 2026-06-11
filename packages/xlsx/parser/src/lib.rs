@@ -207,6 +207,38 @@ pub(crate) fn read_zip_entry(
     Ok(buf)
 }
 
+/// Theme `fmtScheme > lnStyleLst` line widths (EMU), in declaration order.
+/// A drawing shape's `<a:style><a:lnRef idx="N">` resolves its outline width
+/// from entry N (1-based) of this list (ECMA-376 §20.1.4.2.19); an entry
+/// without an explicit `w` uses the CT_LineProperties default 9525 EMU =
+/// 0.75 pt (§20.1.2.2.24).
+pub(crate) fn parse_theme_ln_widths(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<i64> {
+    let Ok(xml) = read_zip_entry(archive, "xl/theme/theme1.xml") else {
+        return Vec::new();
+    };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        return Vec::new();
+    };
+    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    let mut widths: Vec<i64> = Vec::new();
+    for node in doc.descendants() {
+        if node.tag_name().name() == "lnStyleLst" && node.tag_name().namespace() == Some(a_ns) {
+            for ln in node
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "ln")
+            {
+                widths.push(
+                    ln.attribute("w")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(9525),
+                );
+            }
+            break;
+        }
+    }
+    widths
+}
+
 fn parse_theme_colors(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
     let Ok(xml) = read_zip_entry(archive, "xl/theme/theme1.xml") else {
         return Vec::new();

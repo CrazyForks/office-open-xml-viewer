@@ -700,6 +700,7 @@ pub(crate) fn collect_shapes(
     trans_x: f64,
     trans_y: f64,
     theme_colors: &[String],
+    theme_ln_widths: &[i64],
     rid_urls: &HashMap<String, String>,
     out: &mut Vec<ShapeInfo>,
 ) {
@@ -752,6 +753,7 @@ pub(crate) fn collect_shapes(
                 tx,
                 ty,
                 theme_colors,
+                theme_ln_widths,
                 rid_urls,
                 out,
             );
@@ -817,6 +819,9 @@ pub(crate) fn collect_shapes(
             // Stroke (line)
             let mut stroke_color: Option<String> = None;
             let mut stroke_width: i64 = 0;
+            // An explicit `<a:ln><a:noFill/>` is a hard "no outline" and must
+            // suppress the theme lnRef fallback below.
+            let mut ln_no_stroke = false;
             if let Some(ln) = sp_pr
                 .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "ln")
@@ -826,9 +831,11 @@ pub(crate) fn collect_shapes(
                 for c in ln.children().filter(|n| n.is_element()) {
                     if c.tag_name().name() == "solidFill" {
                         stroke_color = parse_solid_fill(&c, theme_colors);
+                        ln_no_stroke = false;
                     } else if c.tag_name().name() == "noFill" {
                         stroke_color = None;
                         stroke_width = 0;
+                        ln_no_stroke = true;
                     }
                 }
                 // An `<a:ln>` with a fill but no explicit `w` still draws an
@@ -866,6 +873,38 @@ pub(crate) fn collect_shapes(
                 .and_then(|n| parse_solid_fill(&n, theme_colors));
             if fill_color.is_none() && !has_no_fill {
                 fill_color = style_fill;
+            }
+
+            // <a:lnRef> — ECMA-376 §20.1.4.2.19: when `<xdr:spPr>` carries no
+            // explicit `<a:ln>`, the shape's outline comes from the theme's
+            // style matrix: `idx="N"` selects entry N (1-based) of
+            // `fmtScheme > lnStyleLst` for the line WIDTH, and the lnRef's
+            // child color (e.g. `<a:schemeClr val="accent1"/>`) substitutes
+            // the entry's `phClr` placeholder for the line COLOR. This is how
+            // Excel-inserted shapes get their default border, so without it
+            // every default shape renders outline-less. An explicit
+            // `<a:ln>` (including `<a:noFill/>`) always wins.
+            if stroke_color.is_none() && !ln_no_stroke {
+                if let Some(ln_ref) = style_node.as_ref().and_then(|s| {
+                    s.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "lnRef")
+                }) {
+                    if let Some(c) = parse_solid_fill(&ln_ref, theme_colors) {
+                        stroke_color = Some(c);
+                        let idx: usize = ln_ref
+                            .attribute("idx")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        // Missing/out-of-range entries fall back to the
+                        // CT_LineProperties default width (§20.1.2.2.24,
+                        // 9525 EMU = 0.75 pt).
+                        stroke_width = if idx >= 1 {
+                            theme_ln_widths.get(idx - 1).copied().unwrap_or(9525)
+                        } else {
+                            9525
+                        };
+                    }
+                }
             }
 
             // Text body (txBox shapes carry visible text inside
@@ -980,6 +1019,7 @@ pub(crate) fn collect_shapes(
 pub(crate) fn parse_shape_anchors(
     drawing_xml: &str,
     theme_colors: &[String],
+    theme_ln_widths: &[i64],
     rid_urls: &HashMap<String, String>,
 ) -> Vec<ShapeAnchor> {
     let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
@@ -1118,6 +1158,7 @@ pub(crate) fn parse_shape_anchors(
                 tx,
                 ty,
                 theme_colors,
+                theme_ln_widths,
                 rid_urls,
                 &mut shapes,
             );
@@ -1161,6 +1202,7 @@ pub(crate) fn parse_shape_anchors(
                 0.0,
                 0.0,
                 theme_colors,
+                theme_ln_widths,
                 rid_urls,
                 &mut shapes,
             );
@@ -1195,6 +1237,8 @@ pub(crate) fn load_sheet_shape_groups(
     sheet_path: &str,
     theme_colors: &[String],
 ) -> Vec<ShapeAnchor> {
+    // Theme line-style widths for <a:lnRef> resolution (§20.1.4.2.19).
+    let theme_ln_widths = crate::parse_theme_ln_widths(archive);
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
     };
@@ -1224,7 +1268,12 @@ pub(crate) fn load_sheet_shape_groups(
             continue;
         };
         let rid_urls = build_drawing_rid_urls(archive, &drawing_path);
-        all.extend(parse_shape_anchors(&drawing_xml, theme_colors, &rid_urls));
+        all.extend(parse_shape_anchors(
+            &drawing_xml,
+            theme_colors,
+            &theme_ln_widths,
+            &rid_urls,
+        ));
     }
     all
 }
@@ -1469,6 +1518,94 @@ mod math_tests {
         let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
         assert_eq!(text.paragraphs.len(), 1);
         assert!(!text.paragraphs[0].rtl, "absent @rtl → rtl false");
+    }
+}
+
+#[cfg(test)]
+mod style_lnref_tests {
+    use super::*;
+
+    const NS: &str = r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#;
+
+    /// dk1, lt1, dk2, lt2, accent1 — enough slots for schemeClr accent1 (idx 4).
+    fn theme() -> Vec<String> {
+        ["#000000", "#FFFFFF", "#222222", "#EEEEEE", "#4472C4"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn shape_of(sp_pr_inner: &str, style: &str) -> (Option<String>, i64) {
+        let xml = format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:sp>
+                <xdr:nvSpPr><xdr:cNvPr id="2" name="P"/><xdr:cNvSpPr/></xdr:nvSpPr>
+                <xdr:spPr>
+                  <a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                  <a:prstGeom prst="parallelogram"><a:avLst/></a:prstGeom>
+                  {sp_pr_inner}
+                </xdr:spPr>
+                {style}
+              </xdr:sp>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#
+        );
+        let anchors =
+            parse_shape_anchors(&xml, &theme(), &[6_350, 12_700, 19_050], &HashMap::new());
+        assert_eq!(anchors.len(), 1, "one anchor expected");
+        let s = &anchors[0].shapes[0];
+        (s.stroke_color.clone(), s.stroke_width)
+    }
+
+    /// §20.1.4.2.19 — with no explicit `<a:ln>`, the outline comes from the
+    /// theme style matrix: lnRef idx picks the lnStyleLst width, the lnRef's
+    /// child scheme colour substitutes phClr.
+    #[test]
+    fn lnref_supplies_stroke_when_sppr_has_no_ln() {
+        let (color, width) = shape_of(
+            "",
+            r#"<xdr:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef></xdr:style>"#,
+        );
+        assert_eq!(color.as_deref(), Some("#4472C4"));
+        assert_eq!(width, 12_700);
+    }
+
+    /// An explicit `<a:ln><a:noFill/>` is a hard "no outline" and must beat
+    /// the theme lnRef fallback.
+    #[test]
+    fn explicit_nofill_ln_beats_lnref() {
+        let (color, width) = shape_of(
+            r#"<a:ln><a:noFill/></a:ln>"#,
+            r#"<xdr:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef></xdr:style>"#,
+        );
+        assert!(color.is_none());
+        assert_eq!(width, 0);
+    }
+
+    /// An explicit `<a:ln>` with its own fill/width wins over lnRef.
+    #[test]
+    fn explicit_ln_beats_lnref() {
+        let (color, width) = shape_of(
+            r#"<a:ln w="28575"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln>"#,
+            r#"<xdr:style><a:lnRef idx="3"><a:schemeClr val="accent1"/></a:lnRef></xdr:style>"#,
+        );
+        assert_eq!(color.as_deref(), Some("#00FF00"));
+        assert_eq!(width, 28_575);
+    }
+
+    /// lnRef idx out of range (or theme without lnStyleLst) still draws with
+    /// the CT_LineProperties default width (§20.1.2.2.24).
+    #[test]
+    fn lnref_out_of_range_uses_default_width() {
+        let (color, width) = shape_of(
+            "",
+            r#"<xdr:style><a:lnRef idx="9"><a:schemeClr val="accent1"/></a:lnRef></xdr:style>"#,
+        );
+        assert_eq!(color.as_deref(), Some("#4472C4"));
+        assert_eq!(width, 9_525);
     }
 }
 
