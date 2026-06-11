@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, renderPresetShape, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -2794,18 +2794,40 @@ function drawShape(
       fillAndStroke(ctx, shape);
     }
   } else if (shape.geom.type === 'preset') {
-    ctx.beginPath();
-    switch (shape.geom.name) {
-      case 'ellipse':
-      case 'roundRect': {
-        const rx = sw / 2, ry = sh / 2;
-        ctx.ellipse(rx, ry, rx, ry, 0, 0, Math.PI * 2);
-        break;
-      }
-      default:
-        ctx.rect(0, 0, sw, sh);
+    // Drive the shape off the ECMA-376 §20.1.9 spec-driven preset engine
+    // (presets.json from presetShapeDefinitions.xml). It honours each path's
+    // own fill/stroke attributes, so a parallelogram / rtTriangle / callout
+    // renders with its true outline instead of the old rect fallback. The
+    // engine returns false for presets it doesn't carry; only then do we fall
+    // back to a plain rectangle.
+    const baseFill = shape.fillColor ?? null;
+    const applyAndStroke =
+      shape.strokeColor && shape.strokeWidth > 0
+        ? () => {
+            ctx.strokeStyle = shape.strokeColor as string;
+            ctx.lineWidth = Math.max(0.5, shape.strokeWidth / EMU_PER_PX);
+            ctx.stroke();
+          }
+        : null;
+    const drawn = renderPresetShape(
+      ctx,
+      shape.geom.name,
+      0,
+      0,
+      sw,
+      sh,
+      shape.geom.adj ?? [],
+      baseFill,
+      applyAndStroke,
+      // xlsx shapes carry no drop shadow on the body, so there's nothing to
+      // clear between the engine's fill and stroke passes.
+      () => {},
+    );
+    if (!drawn) {
+      ctx.beginPath();
+      ctx.rect(0, 0, sw, sh);
+      fillAndStroke(ctx, shape);
     }
-    fillAndStroke(ctx, shape);
   } else if (shape.geom.type === 'image') {
     // Image leaf inside a group (e.g. a sun-emoji clip-art nested in the
     // calendar header). The caller pre-decodes every data URL seen in
