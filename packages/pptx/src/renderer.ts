@@ -2117,12 +2117,16 @@ async function renderPicture(
       };
     }
 
-    // Apply the picture clip (roundRect / custGeom) at an arbitrary local rect.
-    // ECMA-376 §20.1.9.8: a `<p:pic>` may carry `<a:custGeom>` defining a
-    // non-rectangular silhouette the bitmap is trimmed to (e.g. a laptop frame).
-    // The rect is parameterised so the same clip applies to the live draw
-    // (x,y,w,h) and to the scene3d offscreen (0,0,w,h).
-    const applyClipAt = (
+    // Trace the picture's clip silhouette (roundRect / custGeom / plain rect).
+    // Shared by the clip and the border / contour strokes so the outline always
+    // hugs the exact silhouette the bitmap is trimmed to. ECMA-376 §20.1.9.8:
+    // a `<p:pic>` may carry `<a:custGeom>` (e.g. a laptop frame) or a roundRect
+    // preset clip.
+    //
+    // `...Subpath` appends the silhouette as a fresh subpath of the CURRENT path
+    // (no `beginPath`). Used when combining the silhouette with an enclosing
+    // rect for an even-odd "outside" clip region.
+    const tracePictureSilhouetteSubpath = (
       target: CanvasRenderingContext2D,
       cx: number,
       cy: number,
@@ -2132,12 +2136,99 @@ async function renderPicture(
       if (el.clipAdjust != null) {
         const minDim = Math.min(cw, ch);
         const r = (el.clipAdjust / 100000) * minDim;
-        target.beginPath();
         target.roundRect(cx, cy, cw, ch, r);
-        target.clip();
       } else if (el.custGeom && el.custGeom.length > 0) {
         buildCustomPath(target, el.custGeom, cx, cy, cw, ch);
+      } else {
+        target.rect(cx, cy, cw, ch);
+      }
+    };
+
+    const tracePictureSilhouette = (
+      target: CanvasRenderingContext2D,
+      cx: number,
+      cy: number,
+      cw: number,
+      ch: number,
+    ): void => {
+      target.beginPath();
+      tracePictureSilhouetteSubpath(target, cx, cy, cw, ch);
+    };
+
+    // Apply the picture clip (roundRect / custGeom) at an arbitrary local rect.
+    // The rect is parameterised so the same clip applies to the live draw
+    // (x,y,w,h) and to the scene3d offscreen (0,0,w,h). A plain rectangle needs
+    // no clip (the bitmap already fills the rect), so we only clip when there
+    // is an actual non-rectangular / rounded silhouette.
+    const applyClipAt = (
+      target: CanvasRenderingContext2D,
+      cx: number,
+      cy: number,
+      cw: number,
+      ch: number,
+    ): void => {
+      if (el.clipAdjust != null || (el.custGeom && el.custGeom.length > 0)) {
+        tracePictureSilhouette(target, cx, cy, cw, ch);
         target.clip();
+      }
+    };
+
+    // Stroke the picture's silhouette with the `<a:ln>` border and/or the
+    // `<a:sp3d>` contour edge. Drawn *after* the bitmap inside `paintImageAt`,
+    // so when scene3d is active the strokes are warped through the same camera
+    // homography and effectLst (reflection / soft edge) re-paints them too —
+    // matching PowerPoint, which applies the 3D transform and effects to the
+    // framed picture as a whole.
+    const strokePictureEdges = (
+      target: CanvasRenderingContext2D,
+      ox: number,
+      oy: number,
+      ow: number,
+      oh: number,
+    ): void => {
+      // 1) a:ln picture border (ECMA-376 §20.1.2.2.24). Centre-aligned stroke,
+      //    the Canvas default — PowerPoint draws the picture frame straddling
+      //    the silhouette edge.
+      if (el.stroke) {
+        target.save();
+        applyStroke(target, el.stroke, scale);
+        tracePictureSilhouette(target, ox, oy, ow, oh);
+        target.stroke();
+        target.restore();
+      }
+      // 2) sp3d contour edge (ECMA-376 §20.1.5.12 `contourW` / `<a:contourClr>`).
+      //    The spec's contour is the extruded 3D edge surface lit by the scene's
+      //    light rig. Phase A draws a FLAT approximation: a uniform-width outline
+      //    in the contour colour, with no bevel shading or light-rig response
+      //    (bevelT/bevelB shading remains Phase B — see the Sp3d type doc).
+      //    Position assumption: the contour grows OUTWARD from the front face
+      //    in 3D, so Phase A draws it as an OUTSIDE-aligned stroke (the framed
+      //    edge sits just beyond the picture, not over the image). Canvas has no
+      //    outside-stroke mode, so we (a) clip to the region OUTSIDE the
+      //    silhouette — traced silhouette + an enclosing rect with the even-odd
+      //    rule — then (b) stroke the silhouette at 2× width centred on the
+      //    edge; only the outer half survives the clip. When Phase B implements
+      //    the true 3D extruded edge (with bevel/light-rig shading) it replaces
+      //    this flat band.
+      const sp3d = el.sp3d;
+      if (sp3d && (sp3d.contourW ?? 0) > 0 && sp3d.contourClr) {
+        const wPx = Math.max(0.5, (sp3d.contourW as number) * scale);
+        target.save();
+        // Clip to everything OUTSIDE the silhouette: trace the silhouette plus a
+        // generously enlarged enclosing rect, filled even-odd, so the silhouette
+        // interior is excluded from the clip region.
+        target.beginPath();
+        const pad = wPx * 2 + Math.max(ow, oh);
+        target.rect(ox - pad, oy - pad, ow + 2 * pad, oh + 2 * pad);
+        tracePictureSilhouetteSubpath(target, ox, oy, ow, oh);
+        target.clip('evenodd');
+        target.beginPath();
+        tracePictureSilhouette(target, ox, oy, ow, oh);
+        target.strokeStyle = hexToRgba(sp3d.contourClr);
+        target.lineWidth = wPx * 2;
+        target.setLineDash([]);
+        target.stroke();
+        target.restore();
       }
     };
 
@@ -2165,6 +2256,11 @@ async function renderPicture(
         target.drawImage(bitmap, ox, oy, ow, oh);
       }
       target.restore();
+      // Border (a:ln) and 3D contour edge (sp3d) are stroked AFTER the bitmap so
+      // they sit on top of / around the image, and — because this runs inside
+      // paintImageAt — they ride through the scene3d projection and effectLst
+      // re-paints (reflection / soft edge) along with the picture body.
+      strokePictureEdges(target, ox, oy, ow, oh);
     };
 
     // Draw the (clipped, optionally cropped) bitmap into a target context. This
