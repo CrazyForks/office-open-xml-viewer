@@ -30,7 +30,7 @@ pnpm add @silurus/ooxml
 
 > **Bundler note**: this package embeds `.wasm` files. With Vite add [`vite-plugin-wasm`](https://github.com/Menci/vite-plugin-wasm); with webpack use [`experiments.asyncWebAssembly`](https://webpack.js.org/configuration/experiments/).
 
-> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums all four entry bundles, including the **opt-in** math engine (MathJax + STIX Two Math, ~3 MB). What actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`). The math engine is a **separate entry** (`@silurus/ooxml/math`): it is bundled **only if you import it and pass it to a viewer** (see [Rendering equations](#rendering-equations)). Viewers that never receive a `math` engine tree-shake the ~3 MB away entirely.
+> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums all four entry bundles, including the **opt-in** math engine (MathJax + STIX Two Math, ~4 MB). What actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`). The math engine is a **separate entry** (`@silurus/ooxml/math`): it is bundled **only if you import it and pass it to a viewer** (see [Rendering equations](#rendering-equations)). Viewers that never receive a `math` engine tree-shake the ~4 MB away entirely.
 
 ---
 
@@ -63,9 +63,9 @@ pptx.nextSlide();
 
 OMML equations (`m:oMath` / `m:oMathPara`) in `.docx`, `.pptx` and `.xlsx` are rendered with
 [MathJax](https://www.mathjax.org/) + [STIX Two Math](https://github.com/stipub/stixfonts).
-That engine is ~3 MB, so it is **opt-in**: import the `math` engine from the separate
+That engine is ~4 MB, so it is **opt-in**: import the `math` engine from the separate
 `@silurus/ooxml/math` entry and pass it to the viewer. Pass it and equations render;
-omit it and the engine is referenced nowhere, so a bundler **tree-shakes the ~3 MB
+omit it and the engine is referenced nowhere, so a bundler **tree-shakes the ~4 MB
 away entirely** (equations are simply skipped). It is fully self-contained: no
 network, no cross-origin requests.
 
