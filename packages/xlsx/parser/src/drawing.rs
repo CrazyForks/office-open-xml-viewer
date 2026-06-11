@@ -626,6 +626,11 @@ pub(crate) fn parse_sp_geom(sp_pr: &roxmltree::Node) -> Option<ShapeGeom> {
 /// Recursively walk an `xdr:grpSp` / `xdr:sp` tree, chaining coordinate
 /// transforms, and push leaf shapes (normalized to [0,1] of `root_ext`) into
 /// `out`.
+// The arguments are the running coordinate-transform state threaded through the
+// recursion (root offset/extent, accumulated scale/translation, theme + rels);
+// bundling them into a struct would only move the same fields elsewhere without
+// improving clarity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_shapes(
     node: &roxmltree::Node,
     root_off_x: f64,

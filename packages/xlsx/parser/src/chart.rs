@@ -1362,9 +1362,9 @@ pub(crate) fn resolve_scheme_color(name: &str, theme_colors: &[String]) -> Optio
 /// this widens it to combine multiple transforms.
 pub(crate) fn apply_color_transforms(base_hex: &str, color_el: &roxmltree::Node) -> String {
     let cleaned = base_hex.trim_start_matches('#');
-    let r = u8::from_str_radix(&cleaned.get(0..2).unwrap_or("00"), 16).unwrap_or(0);
-    let g = u8::from_str_radix(&cleaned.get(2..4).unwrap_or("00"), 16).unwrap_or(0);
-    let b = u8::from_str_radix(&cleaned.get(4..6).unwrap_or("00"), 16).unwrap_or(0);
+    let r = u8::from_str_radix(cleaned.get(0..2).unwrap_or("00"), 16).unwrap_or(0);
+    let g = u8::from_str_radix(cleaned.get(2..4).unwrap_or("00"), 16).unwrap_or(0);
+    let b = u8::from_str_radix(cleaned.get(4..6).unwrap_or("00"), 16).unwrap_or(0);
     let mut rf = r as f64 / 255.0;
     let mut gf = g as f64 / 255.0;
     let mut bf = b as f64 / 255.0;
@@ -1401,7 +1401,7 @@ pub(crate) fn apply_color_transforms(base_hex: &str, color_el: &roxmltree::Node)
             _ => {}
         }
     }
-    let clamp = |v: f64| -> u8 { (v.max(0.0).min(1.0) * 255.0).round() as u8 };
+    let clamp = |v: f64| -> u8 { (v.clamp(0.0, 1.0) * 255.0).round() as u8 };
     format!("{:02X}{:02X}{:02X}", clamp(rf), clamp(gf), clamp(bf))
 }
 
@@ -1761,9 +1761,7 @@ pub(crate) fn parse_error_bars(
                     let vals = extract_num_block(&side, c_ns, n_points);
                     if !vals.is_empty() {
                         let len = vals.len().min(target.len());
-                        for i in 0..len {
-                            target[i] = vals[i];
-                        }
+                        target[..len].copy_from_slice(&vals[..len]);
                     }
                 }
             }

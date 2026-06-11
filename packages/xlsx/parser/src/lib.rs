@@ -461,20 +461,21 @@ fn parse_defined_names_for_sheet(doc: &roxmltree::Document, sheet_index: u32) ->
 fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
     let ns = "http://schemas.openxmlformats.org/package/2006/relationships";
     for node in doc.descendants() {
-        if node.tag_name().name() == "Relationship" && node.tag_name().namespace() == Some(ns) {
-            if node.attribute("Id") == Some(r_id) {
-                let target = node.attribute("Target")?;
-                // ECMA-376 / Open Packaging Conventions: Target may be a
-                // package-absolute path (`/xl/worksheets/sheet1.xml`, used
-                // by openpyxl and some online tools) or a path relative to
-                // the .rels file's parent (`worksheets/sheet1.xml`, the
-                // common Office-saved form). Callers prepend `xl/` to the
-                // returned value, so strip a leading `/xl/` to convert
-                // absolute paths into the relative form they expect.
-                let t = target.strip_prefix('/').unwrap_or(target);
-                let t = t.strip_prefix("xl/").unwrap_or(t);
-                return Some(t.to_string());
-            }
+        if node.tag_name().name() == "Relationship"
+            && node.tag_name().namespace() == Some(ns)
+            && node.attribute("Id") == Some(r_id)
+        {
+            let target = node.attribute("Target")?;
+            // ECMA-376 / Open Packaging Conventions: Target may be a
+            // package-absolute path (`/xl/worksheets/sheet1.xml`, used
+            // by openpyxl and some online tools) or a path relative to
+            // the .rels file's parent (`worksheets/sheet1.xml`, the
+            // common Office-saved form). Callers prepend `xl/` to the
+            // returned value, so strip a leading `/xl/` to convert
+            // absolute paths into the relative form they expect.
+            let t = target.strip_prefix('/').unwrap_or(target);
+            let t = t.strip_prefix("xl/").unwrap_or(t);
+            return Some(t.to_string());
         }
     }
     None
@@ -586,12 +587,15 @@ fn parse_si_node(node: &roxmltree::Node, ns: &str, theme_colors: &[String]) -> S
         runs: if has_runs { Some(runs) } else { None },
     }
 }
+/// `(row, col, relationship id)` triples for cell hyperlinks pending rels resolution.
+type HyperlinkRids = Vec<(u32, u32, String)>;
+
 fn parse_worksheet(
     xml: &str,
     shared_strings: &[SharedString],
     theme_colors: &[String],
     name: &str,
-) -> Result<(Worksheet, Vec<(u32, u32, String)>), String> {
+) -> Result<(Worksheet, HyperlinkRids), String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -615,7 +619,7 @@ fn parse_worksheet(
     let mut right_to_left = false;
     let mut tab_color: Option<String> = None;
     let mut auto_filter: Option<CellRange> = None;
-    let mut hyperlink_rids: Vec<(u32, u32, String)> = Vec::new();
+    let mut hyperlink_rids: HyperlinkRids = Vec::new();
 
     // Pre-scan worksheet-level extLst for x14:dataBar extension attributes.
     // Excel 2010+ stores the `gradient` flag on `<x14:dataBar>` inside
@@ -896,10 +900,7 @@ fn parse_worksheet(
                 });
             }
             "conditionalFormatting" if node.tag_name().namespace() == Some(ns) => {
-                let sqref = node
-                    .attribute("sqref")
-                    .map(|s| parse_sqref(s))
-                    .unwrap_or_default();
+                let sqref = node.attribute("sqref").map(parse_sqref).unwrap_or_default();
                 let mut rules: Vec<CfRule> = Vec::new();
                 for cf in node.children() {
                     if cf.tag_name().name() != "cfRule" {
@@ -1380,7 +1381,7 @@ fn parse_data_validations(ws_root: roxmltree::Node<'_, '_>) -> Vec<DataValidatio
 fn load_hyperlinks(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     sheet_path: &str,
-    hyperlink_rids: Vec<(u32, u32, String)>,
+    hyperlink_rids: HyperlinkRids,
 ) -> Vec<Hyperlink> {
     if hyperlink_rids.is_empty() {
         return Vec::new();
@@ -1859,7 +1860,6 @@ pub(crate) fn parse_cell_ref(r: &str) -> (u32, u32) {
 
 /// Returns workbook overview (sheet names and metadata) as JSON.
 /// Native equivalent of `parse_xlsx` for use from the MCP server.
-
 pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
     parse_xlsx_inner(data)
         .and_then(|wb| serde_json::to_string(&wb.workbook).map_err(|e| e.to_string()))
@@ -1879,7 +1879,6 @@ pub fn xlsx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result
 /// cached `<v>` so formula formulas show their results, not the formula text.
 /// Designed for AI agents that need to read the spreadsheet content
 /// efficiently — drops styling, formatting, charts, sparklines, drawings.
-
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     to_markdown_impl(data)
 }
@@ -1906,7 +1905,6 @@ fn to_markdown_impl(data: &[u8]) -> Result<String, String> {
 
 /// Parses a single worksheet by 0-based index and returns it as JSON.
 /// Native equivalent of `parse_sheet` for use from the MCP server.
-
 pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<String, String> {
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
