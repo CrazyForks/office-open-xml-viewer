@@ -797,6 +797,23 @@ struct PictureElement {
     /// None when the picture is a plain rectangle.
     #[serde(skip_serializing_if = "Option::is_none")]
     cust_geom: Option<Vec<Vec<PathCmd>>>,
+    /// Drop shadow from spPr > effectLst > outerShdw. ECMA-376 §20.1.8.45.
+    /// `p:spPr` is CT_ShapeProperties for pictures too (§19.3.1.37), so the
+    /// same effects a shape carries apply to images.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shadow: Option<Shadow>,
+    /// Inner (inset) shadow from spPr > effectLst > innerShdw. §20.1.8.40.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inner_shadow: Option<Shadow>,
+    /// Coloured glow halo from spPr > effectLst > glow. §20.1.8.32.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    glow: Option<Glow>,
+    /// Soft (feathered) edge from spPr > effectLst > softEdge. §20.1.8.53.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    soft_edge: Option<SoftEdge>,
+    /// Mirrored reflection from spPr > effectLst > reflection. §20.1.8.50.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reflection: Option<Reflection>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -1964,6 +1981,33 @@ fn parse_reflection(effect_lst: roxmltree::Node<'_, '_>) -> Option<Reflection> {
         sx: pct("sx", 1.0),
         sy: pct("sy", -1.0),
     })
+}
+
+/// Effects pulled from `spPr > effectLst`. The five members are independent
+/// siblings inside `CT_EffectList` — ECMA-376 §20.1.8.16. Used by both shapes
+/// (`p:sp`) and pictures (`p:pic`): `p:spPr` is `CT_ShapeProperties` in both
+/// cases (§19.3.1.37), so `effectLst` applies equally to images.
+struct EffectLst {
+    shadow: Option<Shadow>,
+    inner_shadow: Option<Shadow>,
+    glow: Option<Glow>,
+    soft_edge: Option<SoftEdge>,
+    reflection: Option<Reflection>,
+}
+
+/// Read every `effectLst` child shapes and pictures share. `effect_lst` is the
+/// optional `<a:effectLst>` node; missing nodes yield an all-`None` result.
+fn parse_effect_lst(
+    effect_lst: Option<roxmltree::Node<'_, '_>>,
+    theme: &HashMap<String, String>,
+) -> EffectLst {
+    EffectLst {
+        shadow: effect_lst.and_then(|n| parse_shadow(n, theme)),
+        inner_shadow: effect_lst.and_then(|n| parse_inner_shadow(n, theme)),
+        glow: effect_lst.and_then(|n| parse_glow(n, theme)),
+        soft_edge: effect_lst.and_then(parse_soft_edge),
+        reflection: effect_lst.and_then(parse_reflection),
+    }
 }
 
 // ===========================
@@ -5478,12 +5522,13 @@ fn parse_shape(
 
     // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
     // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
-    let effect_lst = sp_pr.and_then(|p| child(p, "effectLst"));
-    let shadow = effect_lst.and_then(|n| parse_shadow(n, theme));
-    let inner_shadow = effect_lst.and_then(|n| parse_inner_shadow(n, theme));
-    let glow = effect_lst.and_then(|n| parse_glow(n, theme));
-    let soft_edge = effect_lst.and_then(parse_soft_edge);
-    let reflection = effect_lst.and_then(parse_reflection);
+    let EffectLst {
+        shadow,
+        inner_shadow,
+        glow,
+        soft_edge,
+        reflection,
+    } = parse_effect_lst(sp_pr.and_then(|p| child(p, "effectLst")), theme);
 
     Some(ShapeElement {
         x: t.x,
@@ -5528,6 +5573,7 @@ fn parse_picture(
     pic_node: roxmltree::Node<'_, '_>,
     slide_dir: &str,
     rels: &HashMap<String, String>,
+    theme: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
 ) -> Option<PictureElement> {
     let sp_pr = child(pic_node, "spPr")?;
@@ -5554,6 +5600,16 @@ fn parse_picture(
     // build a Path2D and `ctx.clip()` before drawing the image.
     let cust_geom = child(sp_pr, "custGeom").map(parse_cust_geom);
 
+    // §19.3.1.37: p:pic's spPr is CT_ShapeProperties, so effectLst (§20.1.8.16)
+    // applies to images exactly as it does to shapes.
+    let EffectLst {
+        shadow,
+        inner_shadow,
+        glow,
+        soft_edge,
+        reflection,
+    } = parse_effect_lst(child(sp_pr, "effectLst"), theme);
+
     Some(PictureElement {
         x: t.x,
         y: t.y,
@@ -5567,6 +5623,11 @@ fn parse_picture(
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
         cust_geom,
+        shadow,
+        inner_shadow,
+        glow,
+        soft_edge,
+        reflection,
     })
 }
 
@@ -6565,6 +6626,18 @@ fn parse_sp_tree_node(
                                 let cust_geom = sp_pr_node
                                     .and_then(|p| child(p, "custGeom"))
                                     .map(parse_cust_geom);
+                                // §20.1.8.16 effectLst applies to a sp painted as
+                                // a picture (blipFill) just like a regular p:pic.
+                                let EffectLst {
+                                    shadow,
+                                    inner_shadow,
+                                    glow,
+                                    soft_edge,
+                                    reflection,
+                                } = parse_effect_lst(
+                                    sp_pr_node.and_then(|p| child(p, "effectLst")),
+                                    theme,
+                                );
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -6578,6 +6651,11 @@ fn parse_sp_tree_node(
                                     src_rect: blip_fill_node.and_then(parse_src_rect),
                                     alpha: blip_fill_node.and_then(parse_blip_alpha),
                                     cust_geom,
+                                    shadow,
+                                    inner_shadow,
+                                    glow,
+                                    soft_edge,
+                                    reflection,
                                 }));
                                 return;
                             }
@@ -6613,6 +6691,11 @@ fn parse_sp_tree_node(
                                     src_rect: bf.src_rect,
                                     alpha: bf.alpha,
                                     cust_geom: None,
+                                    shadow: None,
+                                    inner_shadow: None,
+                                    glow: None,
+                                    soft_edge: None,
+                                    reflection: None,
                                 }));
                                 return;
                             }
@@ -6627,7 +6710,7 @@ fn parse_sp_tree_node(
         "pic" => {
             if let Some(media) = parse_media(node, slide_dir, rels) {
                 out.push(SlideElement::Media(media));
-            } else if let Some(pic) = parse_picture(node, slide_dir, rels, zip) {
+            } else if let Some(pic) = parse_picture(node, slide_dir, rels, theme, zip) {
                 out.push(SlideElement::Picture(pic));
             } else {
                 // Placeholder pic: no xfrm in spPr — position comes from layout by_idx
@@ -6662,6 +6745,11 @@ fn parse_sp_tree_node(
                                         src_rect: blip_fill.and_then(parse_src_rect),
                                         alpha: blip_fill.and_then(parse_blip_alpha),
                                         cust_geom: None,
+                                        shadow: None,
+                                        inner_shadow: None,
+                                        glow: None,
+                                        soft_edge: None,
+                                        reflection: None,
                                     }));
                                 }
                             }
@@ -7859,6 +7947,64 @@ mod tests {
         assert!((r.sy + 1.0).abs() < 0.01);
         // sx defaults to 1.0 when not specified
         assert!((r.sx - 1.0).abs() < 0.01);
+    }
+
+    /// §19.3.1.37 — a p:pic's spPr is CT_ShapeProperties, so every effectLst
+    /// child (§20.1.8.16) applies to images. parse_effect_lst is the shared
+    /// reader both p:sp and p:pic use; exercise it with the reflection-bearing
+    /// effectLst lifted from sample-11's `図 3` picture.
+    #[test]
+    fn test_pic_effect_lst_resolves_all_effects() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <effectLst>
+                <outerShdw blurRad="50800" dist="38100" dir="2700000"><srgbClr val="000000"><alpha val="40000"/></srgbClr></outerShdw>
+                <innerShdw blurRad="63500" dist="50800" dir="5400000"><srgbClr val="111111"/></innerShdw>
+                <glow rad="63500"><srgbClr val="FFCC00"/></glow>
+                <softEdge rad="25400"/>
+                <reflection blurRad="12700" stA="38000" endPos="28000" dist="5000" dir="5400000" sy="-100000" algn="bl" rotWithShape="0"/>
+            </effectLst>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let sp_pr = doc.root_element();
+        let eff = parse_effect_lst(child(sp_pr, "effectLst"), &theme);
+
+        let shadow = eff.shadow.expect("outerShdw should resolve");
+        assert_eq!(shadow.blur, 50_800);
+        assert_eq!(shadow.dist, 38_100);
+        assert!((shadow.alpha - 0.4).abs() < 0.01);
+
+        let inner = eff.inner_shadow.expect("innerShdw should resolve");
+        assert_eq!(inner.blur, 63_500);
+
+        let glow = eff.glow.expect("glow should resolve");
+        assert_eq!(glow.radius, 63_500);
+        assert_eq!(glow.color, "FFCC00");
+
+        let soft = eff.soft_edge.expect("softEdge should resolve");
+        assert_eq!(soft.radius, 25_400);
+
+        let r = eff.reflection.expect("reflection should resolve");
+        assert_eq!(r.blur, 12_700);
+        assert_eq!(r.dist, 5_000);
+        assert!((r.dir - 90.0).abs() < 0.001);
+        assert!((r.st_a - 0.38).abs() < 0.01);
+        assert!((r.end_pos - 0.28).abs() < 0.01);
+        assert!((r.sy + 1.0).abs() < 0.01);
+    }
+
+    /// A spPr with no effectLst yields an all-None EffectLst (the common case).
+    #[test]
+    fn test_pic_effect_lst_empty_when_absent() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"/>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let eff = parse_effect_lst(child(doc.root_element(), "effectLst"), &theme);
+        assert!(eff.shadow.is_none());
+        assert!(eff.inner_shadow.is_none());
+        assert!(eff.glow.is_none());
+        assert!(eff.soft_edge.is_none());
+        assert!(eff.reflection.is_none());
     }
 
     /// ECMA-376 §20.1.8.42 — `<a:ln cmpd="dbl"/>` should round-trip.
