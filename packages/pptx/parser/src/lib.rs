@@ -41,7 +41,6 @@ pub fn pptx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result
 }
 
 /// Native equivalent of `parse_pptx` for use from the MCP server.
-
 pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
     let presentation = parse_presentation(data).map_err(|e| e.to_string())?;
     serde_json::to_string(&presentation).map_err(|e| e.to_string())
@@ -53,7 +52,6 @@ pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
 /// strokes, effects, theme inheritance details). Designed for AI agents that
 /// need to read content efficiently — typical 10-30× token reduction vs. the
 /// raw JSON of `parse_pptx_native`.
-
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     let pres = parse_presentation(data).map_err(|e| e.to_string())?;
     let mut out = String::new();
@@ -274,7 +272,6 @@ fn render_runs_md(runs: &[TextRun]) -> String {
 /// body text contains so much punctuation that aggressive escaping makes the
 /// output noisier than the structure it's trying to expose. Pipe is handled
 /// separately in `render_table_cell_md` since it only matters inside tables.
-
 fn escape_inline_md(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('*', "\\*")
@@ -438,6 +435,11 @@ struct PptxComment {
     text: String,
 }
 
+// serde-facing parser output enum; the variant sizes follow the OOXML element
+// model. Boxing the large Shape variant would change the JSON serialization
+// shape only cosmetically while complicating 30+ construction/match sites, for
+// no real benefit on this parse-once-then-serialize type.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum SlideElement {
@@ -1193,6 +1195,10 @@ struct Paragraph {
     runs: Vec<TextRun>,
 }
 
+// serde-facing parser output enum; same rationale as SlideElement — the Text
+// variant is the common case and boxing it would add an allocation per run with
+// no meaningful gain on this parse-once-then-serialize type.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum TextRun {
@@ -1729,18 +1735,6 @@ fn parse_color_node_tint(
         }
     }
     None
-}
-
-/// PowerPoint's interpretation of OOXML color modifiers. Wraps the shared
-/// `ooxml_common::color::apply_color_transforms` with TintMode::PowerPointLinear
-/// — `tint` is applied as a `lerp(input, white, val)` in linear sRGB.
-/// Verified against PDF exports of SmartArt accent recolors.
-fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
-    ooxml_common::color::apply_color_transforms(
-        hex,
-        node,
-        ooxml_common::color::TintMode::PowerPointLinear,
-    )
 }
 
 fn preset_color(name: &str) -> Option<String> {
@@ -3036,7 +3030,7 @@ fn parse_master_level_bullets(
 
 /// Parse default bold/italic from master txStyles (titleStyle / bodyStyle / otherStyle)
 /// > lvl1pPr > defRPr @b and @i. Keyed by ph_type.
-/// Only populated when the attribute is explicitly present on the master.
+/// > Only populated when the attribute is explicitly present on the master.
 fn parse_master_txstyle_bold_italic(
     master_xml: &str,
 ) -> (
@@ -3096,8 +3090,8 @@ fn parse_master_txstyle_bold_italic(
 
 /// Parse default text color from master txStyles (titleStyle/bodyStyle/otherStyle)
 /// > lvl1pPr > defRPr > solidFill, and from per-placeholder shapes in the master spTree's
-/// txBody > lstStyle > lvl1pPr > defRPr > solidFill. Keyed by ph_type.
-/// Shape-level lstStyle takes priority over txStyles generic defaults.
+/// > txBody > lstStyle > lvl1pPr > defRPr > solidFill. Keyed by ph_type.
+/// > Shape-level lstStyle takes priority over txStyles generic defaults.
 fn parse_master_txstyle_color(
     master_xml: &str,
     theme: &HashMap<String, String>,
@@ -3235,6 +3229,10 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     map
 }
 
+// Seeds layout placeholders from the master's per-type defaults (transforms,
+// alignment, spacing) before overlaying the layout's own placeholder props; the
+// many maps are the master inheritance sources, threaded through as-is.
+#[allow(clippy::too_many_arguments)]
 fn parse_layout_placeholders(
     layout_xml: &str,
     master_font_sizes: &HashMap<String, f64>,
@@ -3251,12 +3249,14 @@ fn parse_layout_placeholders(
     layout_rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
 ) -> LayoutPlaceholders {
-    let mut lph = LayoutPlaceholders::default();
-    lph.master_by_type = master_transforms.clone();
-    lph.by_type_master_alignment = master_alignments.clone();
-    lph.by_type_master_space_before = master_space_before.clone();
-    lph.by_type_master_space_after = master_space_after.clone();
-    lph.by_type_master_line_spacing = master_line_spacing.clone();
+    let mut lph = LayoutPlaceholders {
+        master_by_type: master_transforms.clone(),
+        by_type_master_alignment: master_alignments.clone(),
+        by_type_master_space_before: master_space_before.clone(),
+        by_type_master_space_after: master_space_after.clone(),
+        by_type_master_line_spacing: master_line_spacing.clone(),
+        ..Default::default()
+    };
     let doc = match roxmltree::Document::parse(layout_xml) {
         Ok(d) => d,
         Err(_) => return lph,
@@ -3503,6 +3503,10 @@ enum ShapeKind {
     Sp,
 }
 
+// Carries the resolved master/layout/placeholder inheritance context (theme,
+// rels, inherited font size, default alignment/spacing, level styles) that text
+// runs need; these are inheritance inputs, not an arbitrary parameter bag.
+#[allow(clippy::too_many_arguments)]
 fn parse_text_body(
     tx_body: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -3810,6 +3814,8 @@ fn push_math_runs(
     }
 }
 
+// Same inherited paragraph/run context as parse_text_body, scoped to one <a:p>.
+#[allow(clippy::too_many_arguments)]
 fn parse_paragraph(
     p_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -3871,7 +3877,7 @@ fn parse_paragraph(
     let mar_r = p_pr.and_then(|n| attr_i64(&n, "marR")).unwrap_or(0);
     let indent = p_pr
         .and_then(|n| attr_i64(&n, "indent"))
-        .unwrap_or_else(|| if has_bullet { -342900 } else { 0 });
+        .unwrap_or(if has_bullet { -342900 } else { 0 });
 
     let space_before = p_pr
         .and_then(|n| {
@@ -4409,7 +4415,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             cat.descendants()
                 .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
         })
-        .map(|cache| collect_pt_strings(cache))
+        .map(&collect_pt_strings)
         .unwrap_or_default();
 
     let pt_count = categories.len().max(1);
@@ -4461,8 +4467,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             } else {
                 None
             };
-            let series_categories: Option<Vec<String>> =
-                x_cache.map(|cache| collect_pt_strings(cache));
+            let series_categories: Option<Vec<String>> = x_cache.map(&collect_pt_strings);
 
             // Y values: scatter/bubble use `<c:yVal>`, everything else uses `<c:val>`.
             // Restrict the descendant walk to the matching tag so a sibling `<c:xVal>`
@@ -4647,8 +4652,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let show_data_labels = root
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
-        .any(|dLbls| {
-            dLbls.children().any(|c| {
+        .any(|d_lbls| {
+            d_lbls.children().any(|c| {
                 c.is_element()
                     && c.tag_name().name() == "showVal"
                     && attr(&c, "val").as_deref() == Some("1")
@@ -5777,14 +5782,17 @@ fn parse_table_styles_xml(
         let style_id = style_id.to_string();
         let mut def = TableStyleDef::default();
 
-        let parse_tc_style = |role: roxmltree::Node<'_, '_>| -> (
+        // (fill, inside-horizontal, inside-vertical, diagonal/unused, outer-horizontal,
+        // outer-vertical) borders for one table-style role (ECMA-376 §20.1.4.2.27).
+        type TcStyle = (
             Option<Fill>,
             Option<Stroke>,
             Option<Stroke>,
             Option<Stroke>,
             Option<Stroke>,
             Option<Stroke>,
-        ) {
+        );
+        let parse_tc_style = |role: roxmltree::Node<'_, '_>| -> TcStyle {
             let tc_style = match child(role, "tcStyle") {
                 Some(n) => n,
                 None => return (None, None, None, None, None, None),
@@ -6262,6 +6270,11 @@ fn parse_table_cell(
 //  Slide parser
 // ===========================
 
+// Threads the full master+layout inheritance context (per-type font sizes,
+// bullets, anchors, transforms, alignments, spacing, bold/italic/caps/color
+// maps) plus zip/theme into one slide parse; this is the inheritance chain
+// ECMA-376 requires, not an arbitrary parameter bag.
+#[allow(clippy::too_many_arguments)]
 fn parse_slide(
     xml: &str,
     layout_xml: Option<&str>,
@@ -6503,6 +6516,9 @@ fn load_pptx_comments(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> 
     out
 }
 
+// Recurses the shape tree carrying placeholder/layout context, theme, rels,
+// smartart drawings, the zip, the output buffer and inherited group fill.
+#[allow(clippy::too_many_arguments)]
 fn parse_sp_tree_node(
     node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
@@ -7249,12 +7265,12 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
 
     let master_font_sizes: HashMap<String, f64> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_font_sizes(xml))
+        .map(parse_master_font_sizes)
         .unwrap_or_default();
 
     let master_level_font_sizes: HashMap<String, LevelFontSizes> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_level_font_sizes(xml))
+        .map(parse_master_level_font_sizes)
         .unwrap_or_default();
 
     let master_level_bullets: HashMap<String, LevelBullets> = master_xml_opt
@@ -7264,17 +7280,17 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
 
     let master_anchors: HashMap<String, String> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_anchors(xml))
+        .map(parse_master_anchors)
         .unwrap_or_default();
 
     let master_transforms: HashMap<String, Transform> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_transforms(xml))
+        .map(parse_master_transforms)
         .unwrap_or_default();
 
     let master_alignments: HashMap<String, String> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_alignments(xml))
+        .map(parse_master_alignments)
         .unwrap_or_default();
 
     let (master_space_before, master_space_after, master_line_spacing): (
@@ -7283,7 +7299,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         HashMap<String, f64>,
     ) = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_txstyle_spacing(xml))
+        .map(parse_master_txstyle_spacing)
         .unwrap_or_default();
 
     let (master_bold, master_italic, master_caps): (
@@ -7292,7 +7308,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         HashMap<String, String>,
     ) = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_txstyle_bold_italic(xml))
+        .map(parse_master_txstyle_bold_italic)
         .unwrap_or_default();
 
     let master_color: HashMap<String, String> = master_xml_opt
@@ -7321,7 +7337,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let slide_path = format!("ppt/{rel_target}");
         let slide_file = rel_target
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or("slide.xml")
             .to_owned();
         let rels_path = format!("ppt/slides/_rels/{slide_file}.rels");
@@ -7343,7 +7359,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let layout_rels = layout_path
             .as_deref()
             .and_then(|path| {
-                let file = path.split('/').last().unwrap_or("layout.xml");
+                let file = path.split('/').next_back().unwrap_or("layout.xml");
                 let rels_p = format!("ppt/slideLayouts/_rels/{file}.rels");
                 read_zip_str(&mut zip, &rels_p).ok()
             })
