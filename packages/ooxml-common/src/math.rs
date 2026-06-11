@@ -521,7 +521,7 @@ mod tests {
         }
         // no stray '&' leaks into text
         let json = serde_json::to_string(&nodes).unwrap();
-        assert!(!json.contains('&') || json.contains("\\u0026") == false);
+        assert!(!json.contains('&') || !json.contains("\\u0026"));
     }
 
     #[test]
