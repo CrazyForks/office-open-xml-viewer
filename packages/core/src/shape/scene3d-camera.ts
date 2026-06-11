@@ -102,20 +102,49 @@ interface PresetDef {
   fovDeg: number;
 }
 
-// Default perspective FOV. PowerPoint's perspective presets cluster around a
-// ~45° vertical field of view; the "relaxed" variants soften it. These match
-// the values LibreOffice oox uses for the corresponding presets.
-const DEFAULT_PERSP_FOV = 45;
+// Default perspective FOV for the relaxed presets, in degrees.
+//
+// SPEC GAP (see the file header): ECMA-376 gives no per-preset FOV. This value
+// is CALIBRATED against the PowerPoint-rendered ground truth (sample-11.pdf
+// page 3, `perspectiveRelaxed` + an explicit <a:rot lat="-30" lon="20"
+// rev="-13">). Procedure: rasterise the PDF page at 200 DPI, detect the card's
+// four corners as the pixels extremal along x±y (robust for a convex quad),
+// normalise (centroid-subtract + mean-radius-divide), and minimise the summed
+// per-corner residual over (fov, rotation-sign, depth-sign). The composition
+// Rz(-rev)·Rx(-lat)·Ry(-lon) with depth = d − rz (see `buildRotation`) wins by
+// 5–9× over every other order/sign/depth variant, and its residual bottoms out
+// near **fov ≈ 26°** (top/bottom edge ratio 0.809 vs the PDF's 0.824, left/right
+// 0.927 vs 0.944). 26° is a *narrow* perspective — the earlier 45° vastly
+// over-foreshortened the card. The "relaxed" presets are gentle by design, so a
+// shallow FOV is expected.
+//
+// We have ground truth for `perspectiveRelaxed` only. The remaining perspective
+// presets share the same family/lens scale in PowerPoint's camera rig, so we
+// apply the same 26° default and flag it as a derived assumption; if a future
+// sample supplies a ground truth for another preset, recalibrate that entry.
+const DEFAULT_PERSP_FOV = 26;
 
 /**
  * Preset camera table. Only the presets we can render in Phase A (planar
  * homography) are enumerated with their orientation; everything else falls back
  * to `orthographicFront` (identity) so an unknown/legacy preset never throws.
  *
- * Orientation sign convention (object axes): +X right, +Y down, +Z toward the
- * viewer. `lat` tilts the top toward (-) / away (+) from the viewer, `lon`
- * turns the right edge toward (+) / away (-) from the viewer, `rev` spins in
- * the screen plane clockwise (+).
+ * Orientation sign convention. Object axes: +X right, +Y down, +Z toward the
+ * viewer (depth = d − z, so a corner with larger +z projects larger). The
+ * DrawingML `rot` latitude/longitude/revolution rotate in the OPPOSITE sense to
+ * a textbook right-handed rotation about those axes — `buildRotation` therefore
+ * spins by the NEGATED file angle. In the resulting (file-angle) terms:
+ *   - `lat` > 0 tips the TOP edge TOWARD the viewer (top edge widens / nears);
+ *     `lat` < 0 tips the top AWAY (top edge recedes). sample-11 slide 3 uses
+ *     lat = −30° → top recedes, matching the PDF (top/bottom width ≈ 0.82).
+ *   - `lon` > 0 turns the RIGHT edge TOWARD the viewer (right edge nears / grows
+ *     taller); `lon` < 0 turns the right edge away. sample-11 slide 3 uses
+ *     lon = +20° → right edge nearer, matching the PDF (left/right ≈ 0.94).
+ *   - `rev` > 0 spins the shape COUNTER-CLOCKWISE on screen; `rev` < 0 clockwise.
+ * These directions are calibrated against sample-11.pdf p3 (see DEFAULT_PERSP_FOV)
+ * and verified by the per-axis geometric unit tests. Preset base orientations
+ * below are written as the same file-angle lat/lon/rev so they compose with the
+ * file <a:rot> through one code path.
  */
 const PRESETS: Record<string, PresetDef> = {
   // ---- Orthographic / front-facing ----
@@ -130,10 +159,14 @@ const PRESETS: Record<string, PresetDef> = {
   // angles (see SPEC GAP). The file-level <a:rot> overrides them when present.
   perspectiveRelaxed: { kind: 'perspective', baseLat: 0, baseLon: 0, baseRev: 0, fovDeg: DEFAULT_PERSP_FOV },
   perspectiveRelaxedModerately: { kind: 'perspective', baseLat: 0, baseLon: 0, baseRev: 0, fovDeg: DEFAULT_PERSP_FOV },
-  // perspectiveAbove / perspectiveBelow: camera looks down / up at the shape.
-  perspectiveAbove: { kind: 'perspective', baseLat: 20, baseLon: 0, baseRev: 0, fovDeg: DEFAULT_PERSP_FOV },
-  perspectiveBelow: { kind: 'perspective', baseLat: -20, baseLon: 0, baseRev: 0, fovDeg: DEFAULT_PERSP_FOV },
+  // perspectiveAbove / perspectiveBelow: camera looks down at / up at the shape.
+  // "Above" → the top edge recedes, so lat < 0 in the file-angle convention
+  // documented above (lat < 0 tips the top away); "Below" → top nears, lat > 0.
+  perspectiveAbove: { kind: 'perspective', baseLat: -20, baseLon: 0, baseRev: 0, fovDeg: DEFAULT_PERSP_FOV },
+  perspectiveBelow: { kind: 'perspective', baseLat: 20, baseLon: 0, baseRev: 0, fovDeg: DEFAULT_PERSP_FOV },
   // Left / right facing perspective variants: shape turned about the Y axis.
+  // "Right" shows the right edge nearer (lon > 0); "Left" the left edge nearer
+  // (lon < 0). No ground truth for these — derived from the documented lon sign.
   perspectiveLeft: { kind: 'perspective', baseLat: 0, baseLon: -20, baseRev: 0, fovDeg: DEFAULT_PERSP_FOV },
   perspectiveRight: { kind: 'perspective', baseLat: 0, baseLon: 20, baseRev: 0, fovDeg: DEFAULT_PERSP_FOV },
 };
@@ -201,7 +234,12 @@ function applyMat3(m: Mat3, x: number, y: number, z: number): [number, number, n
  * `rot` override. Per §20.1.5.11 the revolution is applied "about the axis as
  * the latitude and longitude coordinates", i.e. rev is the last (outermost)
  * rotation about the resulting view axis. We therefore compose
- *   R = Rz(rev) · Rx(lat) · Ry(lon).
+ *   R = Rz(−rev) · Rx(−lat) · Ry(−lon).
+ * The angles are NEGATED: DrawingML's sphere-coordinate rotations spin in the
+ * opposite sense to the textbook right-handed rotX/rotY/rotZ used here (the
+ * y-down screen axis flips the apparent handedness). This negated composition
+ * is the variant that fits the PowerPoint ground truth (sample-11.pdf p3) by
+ * 5–9× over every alternative order/sign — see DEFAULT_PERSP_FOV for the fit.
  * When an explicit `<a:rot>` is present it supplies lat/lon/rev directly
  * (replacing the preset base, per the override semantics in §20.1.5.5); when
  * absent we use the preset's base angles.
@@ -210,7 +248,7 @@ function buildRotation(preset: PresetDef, rot: RotInput | undefined): Mat3 {
   const lat = rot ? rot.lat : preset.baseLat;
   const lon = rot ? rot.lon : preset.baseLon;
   const rev = rot ? rot.rev : preset.baseRev;
-  return mul3(rotZ(rev), mul3(rotX(lat), rotY(lon)));
+  return mul3(rotZ(-rev), mul3(rotX(-lat), rotY(-lon)));
 }
 
 /** Look up a preset def, falling back to orthographicFront for unknown names. */

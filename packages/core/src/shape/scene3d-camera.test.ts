@@ -39,11 +39,13 @@ describe('computeScene3dQuad', () => {
     expect(q.isIdentity).toBe(true);
   });
 
-  it('lon-only rotation is symmetric about the horizontal centre line', () => {
-    // A pure longitude (Y-axis) turn turns the right edge toward / the left edge
-    // away from the viewer. The left and right edges stay vertical (equal x for
-    // the two corners on each side) and the quad mirrors top↔bottom about the
-    // horizontal centre line; left and right edge HEIGHTS differ (foreshorten).
+  it('lon>0 turns the right edge TOWARD the viewer (right edge nearer/taller)', () => {
+    // A pure longitude (Y-axis) turn. With lon > 0 the right edge comes toward
+    // the viewer and the left edge recedes (file-angle convention — see the
+    // module header). The left and right edges stay vertical (equal x for the
+    // two corners on each side) and the quad mirrors top↔bottom about the
+    // horizontal centre line; the near (right) edge is TALLER than the far (left)
+    // edge by perspective foreshortening.
     const cam: CameraInput = { prst: 'perspectiveFront', rot: { lat: 0, lon: 25, rev: 0 } };
     const q = computeScene3dQuad(cam, W, H);
     expect(q.isAffine).toBe(false);
@@ -54,17 +56,18 @@ describe('computeScene3dQuad', () => {
     // Mirror about the horizontal centre line: TL.y↔BL.y, TR.y↔BR.y.
     expect(tl.y).toBeCloseTo(H - bl.y, 2);
     expect(tr.y).toBeCloseTo(H - br.y, 2);
-    // Near edge taller than far edge (perspective foreshortening).
+    // Right (near) edge taller than left (far) edge.
     const leftH = bl.y - tl.y;
     const rightH = br.y - tr.y;
-    expect(Math.abs(leftH - rightH)).toBeGreaterThan(1);
+    expect(rightH).toBeGreaterThan(leftH + 1);
   });
 
-  it('lat-only rotation is symmetric about the vertical centre line', () => {
-    // A pure latitude (X-axis) tilt tips the top edge away / bottom edge toward
-    // the viewer. The top and bottom edges stay horizontal (equal y for the two
-    // corners on each edge) and the quad mirrors left↔right about the vertical
-    // centre line; top and bottom edge WIDTHS differ (foreshorten).
+  it('lat>0 tips the TOP edge TOWARD the viewer (top edge nearer/wider)', () => {
+    // A pure latitude (X-axis) tilt. With lat > 0 the top edge tips toward the
+    // viewer and the bottom recedes (file-angle convention — see the module
+    // header; sample-11's lat = −30° does the opposite, top recedes). The top and
+    // bottom edges stay horizontal and the quad mirrors left↔right about the
+    // vertical centre line; the near (top) edge is WIDER than the far (bottom).
     const cam: CameraInput = { prst: 'perspectiveFront', rot: { lat: 25, lon: 0, rev: 0 } };
     const q = computeScene3dQuad(cam, W, H);
     expect(q.isAffine).toBe(false);
@@ -75,7 +78,20 @@ describe('computeScene3dQuad', () => {
     // Mirror about the vertical centre line: TL.x↔TR.x, BL.x↔BR.x.
     expect(tl.x).toBeCloseTo(W - tr.x, 2);
     expect(bl.x).toBeCloseTo(W - br.x, 2);
-    // Top edge narrower than bottom edge (top recedes from the viewer).
+    // Top edge WIDER than bottom edge (top nears the viewer).
+    const topW = tr.x - tl.x;
+    const botW = br.x - bl.x;
+    expect(topW).toBeGreaterThan(botW);
+  });
+
+  it('lat<0 (sample-11 slide-3 tilt) makes the TOP edge recede (narrower)', () => {
+    // sample-11 slide 3 supplies lat = 330° (= −30°). The corrected convention
+    // must make the top edge RECEDE here, matching the PDF ground truth
+    // (top/bottom width ratio ≈ 0.82). This is the inverse of the lat>0 case and
+    // is the regression guard for the axis-convention fix.
+    const cam: CameraInput = { prst: 'perspectiveRelaxed', rot: { lat: 330, lon: 0, rev: 0 } };
+    const q = computeScene3dQuad(cam, W, H);
+    const [tl, tr, br, bl] = q.corners;
     const topW = tr.x - tl.x;
     const botW = br.x - bl.x;
     expect(topW).toBeLessThan(botW);
@@ -83,8 +99,8 @@ describe('computeScene3dQuad', () => {
 
   it('rev-only rotation is a pure in-plane rotation (affine, rigid)', () => {
     // rev spins the shape in the screen plane: the quad stays a rectangle
-    // (affine), corner-to-corner distances are preserved up to the refit scale,
-    // and it is rotated by -rev (clockwise screen, see sign convention).
+    // (affine), corner-to-corner distances are preserved up to the refit scale.
+    // rev > 0 rotates COUNTER-CLOCKWISE on screen (file-angle convention).
     const cam: CameraInput = { prst: 'orthographicFront', rot: { lat: 0, lon: 0, rev: 30 } };
     const q = computeScene3dQuad(cam, W, H);
     expect(q.isAffine).toBe(true);
@@ -104,6 +120,9 @@ describe('computeScene3dQuad', () => {
     const cy = (tl.y + tr.y + br.y + bl.y) / 4;
     expect(cx).toBeCloseTo(W / 2, 3);
     expect(cy).toBeCloseTo(H / 2, 3);
+    // Direction: rev > 0 is counter-clockwise on screen, so the top-right corner
+    // rises above the top-left corner (TR.y < TL.y in y-down coords).
+    expect(tr.y).toBeLessThan(tl.y);
   });
 
   it('fov override widens the perspective foreshortening', () => {
@@ -145,12 +164,18 @@ describe('computeScene3dQuad', () => {
   });
 
   it('snapshot — sample-11 slide-3 camera (perspectiveRelaxed lat330 lon20 rev347)', () => {
-    // The exact camera from sample-11 slide 3, "図 3". lat=330° (=-30° tilt),
-    // lon=20°, rev=347° (=-13° in-plane). Fixed numeric snapshot so future
-    // changes to the camera math are caught.
+    // The exact camera from sample-11 slide 3, "図 3". lat=330° (=−30° tilt → top
+    // recedes), lon=20° (right edge nears), rev=347° (=−13° → clockwise in-plane),
+    // fov=26° (calibrated, see scene3d-camera.ts). Fixed numeric snapshot so
+    // future changes to the camera math are caught; the corner positions encode
+    // the corrected axis convention validated against sample-11.pdf page 3.
     const cam: CameraInput = { prst: 'perspectiveRelaxed', rot: { lat: 330, lon: 20, rev: 347 } };
     const q = computeScene3dQuad(cam, W, H);
     expect(q.isAffine).toBe(false);
+    // Top edge narrower than bottom edge (top recedes — the PDF keystone).
+    const topW = q.corners[1].x - q.corners[0].x;
+    const botW = q.corners[2].x - q.corners[3].x;
+    expect(topW).toBeLessThan(botW);
     expect(q.corners.map((c) => r(c, 2))).toMatchSnapshot();
   });
 });
