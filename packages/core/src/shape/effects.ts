@@ -244,18 +244,23 @@ export function applyReflection(
   c.restore();
 
   // 2. Fade with a vertical alpha gradient over the shape's bbox band.
-  //    Map stPos/endPos (0..1 along the ramp) to the bbox top..bottom.
+  //    ECMA-376 §20.1.8.50: stA/stPos is the alpha at the START of the
+  //    reflection (the edge touching the shape) and endA/endPos the END (the
+  //    far edge). The reflection is mirrored about the bottom edge (step 3), so
+  //    its START maps to the shape's BOTTOM row in this un-mirrored aux and its
+  //    END maps upward toward the top. Build the ramp from the bottom up so the
+  //    opaque stA band sits at `bottom` (→ reflection top after the flip) and
+  //    fades to endA toward `top` — otherwise the visible band lands far below
+  //    the shape (off-canvas for tall pictures) and the reflection disappears.
   c.save();
   c.globalCompositeOperation = 'destination-in';
   const top = bbox.y;
   const bottom = bbox.y + bbox.h;
-  const grad = c.createLinearGradient(0, top, 0, bottom);
+  const grad = c.createLinearGradient(0, bottom, 0, top);
   const stPos = clamp01(reflection.stPos);
   const endPos = clamp01(reflection.endPos);
-  // Guard equal stops (createLinearGradient requires strictly increasing offsets
-  // only loosely, but identical offsets collapse the ramp). stA applies before
-  // stPos, endA after endPos — pad the ends so the band outside [stPos,endPos]
-  // holds the terminal alpha.
+  // Offsets run 0→1 from `bottom` to `top` (the createLinearGradient axis).
+  // stA holds from the bottom edge up to stPos; endA holds from endPos onward.
   grad.addColorStop(0, `rgba(0,0,0,${reflection.stA})`);
   if (stPos > 0) grad.addColorStop(stPos, `rgba(0,0,0,${reflection.stA})`);
   if (endPos < 1 && endPos > stPos) grad.addColorStop(endPos, `rgba(0,0,0,${reflection.endA})`);
