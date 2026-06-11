@@ -1047,6 +1047,32 @@ fn parse_src_rect(blip_fill: roxmltree::Node<'_, '_>) -> Option<SrcRect> {
     }
 }
 
+/// Parse `<a:stretch><a:fillRect l t r b>` (ECMA-376 §20.1.8.58 / §20.1.8.30).
+/// Edge attributes are ST_Percentage (1000ths of a percent → /100000 gives a
+/// fraction). Negative values are valid (overscan). Returns None when there is
+/// no fillRect or all four edges are zero (= the source fills the whole box).
+fn parse_fill_rect(stretch: roxmltree::Node<'_, '_>) -> Option<FillRect> {
+    let fr = child(stretch, "fillRect")?;
+    let read = |name: &str| -> f64 {
+        attr(&fr, name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v / 100_000.0)
+            .unwrap_or(0.0)
+    };
+    let rect = FillRect {
+        l: read("l"),
+        t: read("t"),
+        r: read("r"),
+        b: read("b"),
+    };
+    if is_zero_f64(&rect.l) && is_zero_f64(&rect.t) && is_zero_f64(&rect.r) && is_zero_f64(&rect.b)
+    {
+        None
+    } else {
+        Some(rect)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct GradStop {
@@ -1147,6 +1173,40 @@ enum Fill {
         /// Preset value: pct5/pct10/.../horz/vert/cross/diagCross/lgGrid/smGrid etc.
         preset: String,
     },
+    /// Image fill — ECMA-376 §20.1.8.14 `a:blipFill`. The referenced blip is
+    /// resolved to a base64 data URL at parse time. Only the `stretch`
+    /// fill-mode (§20.1.8.58) is modelled; the `tile` mode (§20.1.8.32) is not
+    /// implemented (see `parse_blip_fill`).
+    #[serde(rename_all = "camelCase")]
+    Image {
+        /// `data:<mime>;base64,…` of the embedded blip.
+        data_url: String,
+        /// `<a:stretch><a:fillRect>` (§20.1.8.30 CT_RelativeRect). Edge insets
+        /// as fractions of the fill region; negative values overscan past the
+        /// bounding box. `None` when stretch has no fillRect (= full box).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_rect: Option<FillRect>,
+        /// `a:blip > a:alphaModFix@amt` as a fraction (0.0–1.0). None = opaque.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpha: Option<f64>,
+    },
+}
+
+/// ECMA-376 §20.1.8.30 `a:fillRect` (CT_RelativeRect) — the destination
+/// rectangle a stretched blip is mapped into, expressed as edge insets relative
+/// to the fill region. Values are fractions (ST_Percentage / 100000); negative
+/// values push the edge outward so the image bleeds past the box (overscan).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct FillRect {
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    l: f64,
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    t: f64,
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    r: f64,
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    b: f64,
 }
 
 /// Arrow end descriptor for headEnd / tailEnd on a line.
@@ -1987,6 +2047,35 @@ fn parse_fill(node: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) ->
         }
     }
     None
+}
+
+/// ECMA-376 §20.1.8.14 `a:blipFill` → `Fill::Image`. The `resolve_blip`
+/// closure maps the `<a:blip r:embed>` rId to a base64 data URL using the
+/// caller's rels + zip (each inheritance level resolves against its own part).
+///
+/// Only the `stretch` fill-mode (§20.1.8.58) is honoured: its `fillRect`
+/// (§20.1.8.30) is captured so the renderer can place the (possibly
+/// overscanned) image. The `tile` fill-mode (§20.1.8.32) is **not implemented**
+/// — a tile-only blipFill returns None so callers keep their existing
+/// solid/bgRef fallback rather than mis-rendering a tiled image as stretched.
+fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
+    blip_fill: roxmltree::Node<'_, '_>,
+    resolve_blip: &mut F,
+) -> Option<Fill> {
+    let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
+    let data_url = resolve_blip(&r_id)?;
+    // tile mode is unsupported; only proceed for stretch (or no explicit mode,
+    // which defaults to stretch-like full-box placement).
+    if child(blip_fill, "tile").is_some() {
+        return None;
+    }
+    let fill_rect = child(blip_fill, "stretch").and_then(parse_fill_rect);
+    let alpha = parse_blip_alpha(blip_fill);
+    Some(Fill::Image {
+        data_url,
+        fill_rect,
+        alpha,
+    })
 }
 
 fn parse_arrow_end(node: roxmltree::Node<'_, '_>) -> ArrowEnd {
@@ -6045,13 +6134,26 @@ fn parse_media(
 //  Slide background
 // ===========================
 
-fn parse_background(
+/// ECMA-376 §19.3.1.1 `p:bg`. `resolve_blip` maps a `<a:blip r:embed>` rId to a
+/// base64 data URL using the rels + zip of the part this `c_sld` belongs to
+/// (slide / layout / master), so an image background (§20.1.8.14) is resolved
+/// against the correct relationship base.
+fn parse_background<F: FnMut(&str) -> Option<String>>(
     c_sld: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
+    resolve_blip: &mut F,
 ) -> Option<Fill> {
     let bg = child(c_sld, "bg")?;
     // bgPr contains an explicit fill specification
     if let Some(bg_pr) = child(bg, "bgPr") {
+        // §20.1.8.14 — an image background lives in `bgPr > blipFill`. Try it
+        // first so the embedded blip is resolved; fall back to the generic
+        // solid/gradient/pattern parser for non-image bgPr fills.
+        if let Some(blip_fill) = child(bg_pr, "blipFill") {
+            if let Some(fill) = parse_blip_fill(blip_fill, resolve_blip) {
+                return Some(fill);
+            }
+        }
         return parse_fill(bg_pr, theme);
     }
     // bgRef references a theme background style; its child is a color element
@@ -6668,16 +6770,49 @@ fn parse_slide(
     let root = doc.root_element(); // <p:sld>
     let c_sld = child(root, "cSld");
 
-    // Background chain: slide → layout → master
-    let background = c_sld
-        .and_then(|n| parse_background(n, theme))
-        .or_else(|| {
-            layout_xml.and_then(|lx| {
-                let doc2 = roxmltree::Document::parse(lx).ok()?;
-                child(doc2.root_element(), "cSld").and_then(|n| parse_background(n, theme))
-            })
-        })
-        .or(master_bg);
+    // Background chain: slide → layout → master. Each level resolves a blip
+    // background (§20.1.8.14) against its own rels + part directory, so the
+    // closures are run sequentially (one mutable borrow of `zip` at a time).
+    let mut background: Option<Fill> = None;
+
+    // Slide-level bg (rels = slide rels, part dir = ppt/slides).
+    if let Some(n) = c_sld {
+        let mut resolve = |rid: &str| -> Option<String> {
+            let target = rels.get(rid)?;
+            let path = resolve_path("ppt/slides", target);
+            let bytes = read_zip_bytes(zip, &path)?;
+            Some(format!(
+                "data:{};base64,{}",
+                mime_from_ext(&path),
+                B64.encode(&bytes)
+            ))
+        };
+        background = parse_background(n, theme, &mut resolve);
+    }
+
+    // Layout-level bg (rels = layout rels, part dir = layout_dir).
+    if background.is_none() {
+        if let Some(lx) = layout_xml {
+            if let Ok(doc2) = roxmltree::Document::parse(lx) {
+                if let Some(n) = child(doc2.root_element(), "cSld") {
+                    let mut resolve = |rid: &str| -> Option<String> {
+                        let target = layout_rels.get(rid)?;
+                        let path = resolve_path(layout_dir, target);
+                        let bytes = read_zip_bytes(zip, &path)?;
+                        Some(format!(
+                            "data:{};base64,{}",
+                            mime_from_ext(&path),
+                            B64.encode(&bytes)
+                        ))
+                    };
+                    background = parse_background(n, theme, &mut resolve);
+                }
+            }
+        }
+    }
+
+    // Master-level bg (resolved by the caller before parse_slide; already a Fill).
+    let background = background.or(master_bg);
 
     let sp_tree = c_sld
         .and_then(|n| child(n, "spTree"))
@@ -7635,13 +7770,42 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
     let theme = parse_theme_colors(&theme_xml);
 
     // --- First slide master: background + font size defaults ---
-    let master_xml_opt: Option<String> = find_rel_target_by_type(&pres_rels_xml, "/slideMaster")
-        .map(|t| resolve_path("ppt", &t))
-        .and_then(|path| read_zip_str(&mut zip, &path).ok());
+    let master_path: Option<String> =
+        find_rel_target_by_type(&pres_rels_xml, "/slideMaster").map(|t| resolve_path("ppt", &t));
+    let master_xml_opt: Option<String> = master_path
+        .as_deref()
+        .and_then(|path| read_zip_str(&mut zip, path).ok());
+
+    // Master part directory + rels, for resolving an image background
+    // (§20.1.8.14) referenced from the master's bgPr blipFill.
+    let master_dir: String = master_path
+        .as_deref()
+        .and_then(|p| p.rsplit_once('/').map(|(dir, _)| dir.to_owned()))
+        .unwrap_or_else(|| "ppt/slideMasters".to_owned());
+    let master_rels: HashMap<String, String> = master_path
+        .as_deref()
+        .and_then(|p| {
+            let file = p.split('/').next_back().unwrap_or("slideMaster1.xml");
+            let rels_p = format!("ppt/slideMasters/_rels/{file}.rels");
+            read_zip_str(&mut zip, &rels_p).ok()
+        })
+        .map(|xml| parse_rels(&xml))
+        .unwrap_or_default();
 
     let master_bg: Option<Fill> = master_xml_opt.as_deref().and_then(|master_xml| {
         let doc = roxmltree::Document::parse(master_xml).ok()?;
-        child(doc.root_element(), "cSld").and_then(|n| parse_background(n, &theme))
+        let c_sld = child(doc.root_element(), "cSld")?;
+        let mut resolve = |rid: &str| -> Option<String> {
+            let target = master_rels.get(rid)?;
+            let path = resolve_path(&master_dir, target);
+            let bytes = read_zip_bytes(&mut zip, &path)?;
+            Some(format!(
+                "data:{};base64,{}",
+                mime_from_ext(&path),
+                B64.encode(&bytes)
+            ))
+        };
+        parse_background(c_sld, &theme, &mut resolve)
     });
 
     let master_font_sizes: HashMap<String, f64> = master_xml_opt
@@ -8111,6 +8275,67 @@ mod tests {
         assert!((s.dir - 45.0).abs() < 0.001);
         assert!((s.alpha - 0.5).abs() < 0.01);
         assert_eq!(s.color.to_lowercase(), "000000");
+    }
+
+    /// ECMA-376 §20.1.8.14 + §20.1.8.58 + §20.1.8.30 — a `bgPr > blipFill`
+    /// with a `stretch > fillRect` (incl. negative overscan edges) parses into
+    /// `Fill::Image` carrying the resolved data URL, the fractional fillRect,
+    /// and the alphaModFix alpha. Mirrors sample-12 slide1's background.
+    #[test]
+    fn test_parse_background_blip_fill_stretch() {
+        let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <p:bg><p:bgPr>
+                <a:blipFill>
+                    <a:blip r:embed="rId2"><a:alphaModFix amt="80000"/></a:blip>
+                    <a:stretch><a:fillRect t="-9000" b="-9000"/></a:stretch>
+                </a:blipFill>
+                <a:effectLst/>
+            </p:bgPr></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let mut resolve = |rid: &str| -> Option<String> {
+            assert_eq!(rid, "rId2");
+            Some("data:image/jpeg;base64,QUJD".to_owned())
+        };
+        let fill = parse_background(doc.root_element(), &theme, &mut resolve)
+            .expect("blip background should resolve to Fill::Image");
+        match fill {
+            Fill::Image {
+                data_url,
+                fill_rect,
+                alpha,
+            } => {
+                assert_eq!(data_url, "data:image/jpeg;base64,QUJD");
+                let fr = fill_rect.expect("fillRect should be present");
+                assert!((fr.t - (-0.09)).abs() < 1e-9, "t={}", fr.t);
+                assert!((fr.b - (-0.09)).abs() < 1e-9, "b={}", fr.b);
+                assert!(is_zero_f64(&fr.l) && is_zero_f64(&fr.r));
+                assert!((alpha.expect("alpha") - 0.8).abs() < 1e-6);
+            }
+            other => panic!("expected Fill::Image, got {other:?}"),
+        }
+    }
+
+    /// A `bgPr > blipFill` whose fill-mode is `tile` is unsupported: it must NOT
+    /// produce a `Fill::Image` (so callers keep their solid/bgRef fallback).
+    #[test]
+    fn test_parse_background_blip_fill_tile_unsupported() {
+        let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <p:bg><p:bgPr>
+                <a:blipFill><a:blip r:embed="rId2"/><a:tile/></a:blipFill>
+            </p:bgPr></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::new();
+        let mut resolve =
+            |_: &str| -> Option<String> { Some("data:image/png;base64,QQ==".to_owned()) };
+        // No solidFill fallback inside bgPr → overall None (caller falls through).
+        assert!(parse_background(doc.root_element(), &theme, &mut resolve).is_none());
     }
 
     /// ECMA-376 §21.1.2.3.16 — underline_style carries non-default underline
