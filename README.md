@@ -485,7 +485,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Slide size (custom dimensions) | ✅ |
 | | Slide background (solid, gradient, image) | ✅ |
 | | Slide numbers | ✅ |
-| | Notes pages | ❌ |
+| | Speaker notes (plain text via `getNotes()`) | ✅ |
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`) | ✅ |
@@ -496,14 +496,13 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Charts (pie, doughnut) | ✅ |
 | | Charts (scatter — `scatterStyle` marker / line / smooth variants) | ✅ |
 | | Charts (bubble — `bubbleSize` per-point area scaling) | ✅ |
-| | SmartArt | ❌ |
-| | OLE objects | ❌ |
+| | SmartArt (renders the PowerPoint-saved drawing layout `dsp:drawing`; no native diagram layout engine) | ✅ |
+| | OLE embedded objects (`p:oleObj` — preview/icon rendering) | ❌ Not planned |
 | | Video / audio (poster + interactive playback) | ✅ |
 | | Ink / handwriting (`p:contentPart`, raster fallback) | ✅ |
-| **Shape geometry** | 130+ preset shapes (`prstGeom`) | ✅ |
+| **Shape geometry** | 186 preset shapes (`prstGeom` — incl. 3D presets cube / can / bevel / frame) | ✅ |
 | | Custom geometry (`custGeom`) on shapes and pictures (clipping) | ✅ |
 | | Rotation and flip (flipH / flipV) | ✅ |
-| | 3D preset shapes | ❌ |
 | **Fills** | Solid fill (`solidFill`) | ✅ |
 | | Linear / radial gradient (`gradFill`) | ✅ |
 | | No fill (`noFill`) | ✅ |

@@ -58,6 +58,31 @@ export interface Slide {
   slideNumber: number;
   background: Fill | null;
   elements: SlideElement[];
+  /**
+   * Speaker-notes pane text from `ppt/notesSlides/notesSlideN.xml`
+   * (ECMA-376 §13.3.5 — Notes Slide). The full notes-body text as a single
+   * string, paragraphs joined with `\n`. Absent (`undefined`) when the slide
+   * has no notes part. The renderer ignores this — it is surfaced for tools;
+   * read it via {@link PptxPresentation.getNotes}.
+   */
+  notes?: string;
+  /**
+   * Legacy slide comments (`ppt/comments/commentN.xml`, ECMA-376 §13.3.4).
+   * Modern Office 365 threaded comments are not parsed. Omitted from the JSON
+   * when the slide has no comments.
+   */
+  comments?: PptxComment[];
+}
+
+/** A single legacy slide comment (`<p:cm>` in `ppt/comments/commentN.xml`). */
+export interface PptxComment {
+  /** Resolved author name from `ppt/commentAuthors.xml`. Absent when the
+   *  authors file is missing or the `authorId` is out of range. */
+  author?: string;
+  /** `<p:cm @dt>` — ISO-8601 timestamp the comment was authored. */
+  date?: string;
+  /** Plain-text comment body (`<p:text>`). */
+  text: string;
 }
 
 export type SlideElement = ShapeElement | PictureElement | TableElement | ChartElement | MediaElement;

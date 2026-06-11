@@ -6,6 +6,9 @@ export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export type {
   Presentation,
   Slide,
+  // Reachable via Slide.comments — exported so consumers reading legacy slide
+  // comments have a name for the element type.
+  PptxComment,
   SlideElement,
   ShapeElement,
   PictureElement,
