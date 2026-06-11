@@ -124,7 +124,10 @@ fn col_to_letter(mut col: u32) -> String {
 
 /// Resolves which sheets to operate on. When `identifier` is `Some`, returns a
 /// single-element vec; when `None`, returns every sheet in workbook order.
-fn target_sheets(workbook_json: &str, identifier: Option<&str>) -> Result<Vec<(u32, String)>, String> {
+fn target_sheets(
+    workbook_json: &str,
+    identifier: Option<&str>,
+) -> Result<Vec<(u32, String)>, String> {
     if let Some(id) = identifier {
         return resolve_sheet(workbook_json, id).map(|r| vec![r]);
     }
@@ -183,7 +186,13 @@ fn cell_display(cell: &Value) -> String {
         // serde from the variant's inner field name).
         "bool" => val["bool"]
             .as_bool()
-            .map(|b| if b { "TRUE".to_string() } else { "FALSE".to_string() })
+            .map(|b| {
+                if b {
+                    "TRUE".to_string()
+                } else {
+                    "FALSE".to_string()
+                }
+            })
             .unwrap_or_default(),
         "error" => val["error"].as_str().unwrap_or("#ERR").to_string(),
         _ => String::new(),
@@ -195,7 +204,9 @@ fn cell_display(cell: &Value) -> String {
 pub struct XlsxTools;
 
 impl XlsxTools {
-    #[tool(description = "Convert an XLSX file to GitHub-flavoured markdown — one `## SheetName` per sheet, followed by a pipe table of the cells' cached display values. Merged-cell continuation cells render empty. Formula cells show the cached result, not the formula text (use `xlsx_get_formulas` if you need the formulas). Designed for agents that need to *read* spreadsheet content efficiently. Lossy by design: drops styling, conditional formatting, charts, sparklines, drawings. For precise structure use the structured tools (`xlsx_get_cell_range`, `xlsx_get_sheet_layout`, etc.)")]
+    #[tool(
+        description = "Convert an XLSX file to GitHub-flavoured markdown — one `## SheetName` per sheet, followed by a pipe table of the cells' cached display values. Merged-cell continuation cells render empty. Formula cells show the cached result, not the formula text (use `xlsx_get_formulas` if you need the formulas). Designed for agents that need to *read* spreadsheet content efficiently. Lossy by design: drops styling, conditional formatting, charts, sparklines, drawings. For precise structure use the structured tools (`xlsx_get_cell_range`, `xlsx_get_sheet_layout`, etc.)"
+    )]
     pub fn xlsx_to_markdown(Parameters(p): Parameters<XlsxPathParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -207,7 +218,9 @@ impl XlsxTools {
         }
     }
 
-    #[tool(description = "Parse an XLSX file and return workbook overview including sheet names and IDs")]
+    #[tool(
+        description = "Parse an XLSX file and return workbook overview including sheet names and IDs"
+    )]
     pub fn xlsx_parse(Parameters(p): Parameters<XlsxPathParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -235,12 +248,7 @@ impl XlsxTools {
         };
         let names: Vec<&str> = wb["sheets"]
             .as_array()
-            .map(|sheets| {
-                sheets
-                    .iter()
-                    .filter_map(|s| s["name"].as_str())
-                    .collect()
-            })
+            .map(|sheets| sheets.iter().filter_map(|s| s["name"].as_str()).collect())
             .unwrap_or_default();
         serde_json::to_string(&names).unwrap_or_else(|e| format!("Error: {}", e))
     }
@@ -296,7 +304,9 @@ impl XlsxTools {
         .to_string()
     }
 
-    #[tool(description = "Return cell values and formulas for a given range (e.g. \"A1:C10\") in a worksheet")]
+    #[tool(
+        description = "Return cell values and formulas for a given range (e.g. \"A1:C10\") in a worksheet"
+    )]
     pub fn xlsx_get_cell_range(Parameters(p): Parameters<XlsxCellRangeParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -424,7 +434,9 @@ impl XlsxTools {
         .to_string()
     }
 
-    #[tool(description = "Search for a substring in cell values and formulas across one or all sheets of an XLSX file")]
+    #[tool(
+        description = "Search for a substring in cell values and formulas across one or all sheets of an XLSX file"
+    )]
     pub fn xlsx_search_cells(Parameters(p): Parameters<XlsxSearchParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -505,7 +517,9 @@ impl XlsxTools {
         .to_string()
     }
 
-    #[tool(description = "List charts on a worksheet (or all sheets if `sheet` is omitted). Returns a summary per chart: anchor cell range, chart type, title, axes, legend, and a series outline (without numeric values)")]
+    #[tool(
+        description = "List charts on a worksheet (or all sheets if `sheet` is omitted). Returns a summary per chart: anchor cell range, chart type, title, axes, legend, and a series outline (without numeric values)"
+    )]
     pub fn xlsx_get_charts(Parameters(p): Parameters<XlsxOptSheetParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -530,7 +544,9 @@ impl XlsxTools {
                 Ok(v) => v,
                 Err(e) => return format!("Error: {}", e),
             };
-            let Some(charts) = ws["charts"].as_array() else { continue };
+            let Some(charts) = ws["charts"].as_array() else {
+                continue;
+            };
             for (chart_idx, anchor) in charts.iter().enumerate() {
                 let chart = &anchor["chart"];
                 let series_outline: Vec<Value> = chart["series"]
@@ -538,7 +554,8 @@ impl XlsxTools {
                     .map(|arr| {
                         arr.iter()
                             .map(|s| {
-                                let value_count = s["values"].as_array().map(|a| a.len()).unwrap_or(0);
+                                let value_count =
+                                    s["values"].as_array().map(|a| a.len()).unwrap_or(0);
                                 serde_json::json!({
                                     "name": s["name"],
                                     "type": s["seriesType"],
@@ -587,7 +604,9 @@ impl XlsxTools {
         serde_json::json!({ "charts": all_charts }).to_string()
     }
 
-    #[tool(description = "Return one chart's full series data (categories and per-point values) for drill-down. `chartIndex` matches the index from `xlsx_get_charts` for the same sheet")]
+    #[tool(
+        description = "Return one chart's full series data (categories and per-point values) for drill-down. `chartIndex` matches the index from `xlsx_get_charts` for the same sheet"
+    )]
     pub fn xlsx_get_chart_series(Parameters(p): Parameters<XlsxChartIndexParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -653,7 +672,9 @@ impl XlsxTools {
         .to_string()
     }
 
-    #[tool(description = "Return all defined names (named ranges) visible in the workbook. Includes workbook-global names plus each sheet's local names; duplicates across sheets are merged")]
+    #[tool(
+        description = "Return all defined names (named ranges) visible in the workbook. Includes workbook-global names plus each sheet's local names; duplicates across sheets are merged"
+    )]
     pub fn xlsx_get_named_ranges(Parameters(p): Parameters<XlsxPathParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -679,7 +700,9 @@ impl XlsxTools {
                 Ok(v) => v,
                 Err(e) => return format!("Error: {}", e),
             };
-            let Some(names) = ws["definedNames"].as_array() else { continue };
+            let Some(names) = ws["definedNames"].as_array() else {
+                continue;
+            };
             for dn in names {
                 let n = dn["name"].as_str().unwrap_or("").to_string();
                 let f = dn["formula"].as_str().unwrap_or("").to_string();
@@ -701,7 +724,9 @@ impl XlsxTools {
         serde_json::json!({ "definedNames": defined_names }).to_string()
     }
 
-    #[tool(description = "List Excel Tables (Ctrl+T tables, ECMA-376 §18.5) on a sheet or across all sheets. Returns each table's range, style, header/totals row counts")]
+    #[tool(
+        description = "List Excel Tables (Ctrl+T tables, ECMA-376 §18.5) on a sheet or across all sheets. Returns each table's range, style, header/totals row counts"
+    )]
     pub fn xlsx_get_tables(Parameters(p): Parameters<XlsxOptSheetParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -726,7 +751,9 @@ impl XlsxTools {
                 Ok(v) => v,
                 Err(e) => return format!("Error: {}", e),
             };
-            let Some(arr) = ws["tables"].as_array() else { continue };
+            let Some(arr) = ws["tables"].as_array() else {
+                continue;
+            };
             for t in arr {
                 tables.push(serde_json::json!({
                     "sheet": name,
@@ -742,7 +769,9 @@ impl XlsxTools {
         serde_json::json!({ "tables": tables }).to_string()
     }
 
-    #[tool(description = "Return all merged cell ranges on a worksheet as A1 strings (e.g. \"A1:B2\")")]
+    #[tool(
+        description = "Return all merged cell ranges on a worksheet as A1 strings (e.g. \"A1:B2\")"
+    )]
     pub fn xlsx_get_merged_cells(Parameters(p): Parameters<XlsxSheetParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -771,7 +800,9 @@ impl XlsxTools {
         serde_json::json!({ "sheet": name, "merges": merges }).to_string()
     }
 
-    #[tool(description = "Return conditional formatting rules on a worksheet. Each entry has the affected ranges (sqref) and the rule body (CellIs, Expression, ColorScale, DataBar, Top10, AboveAverage, IconSet, Other)")]
+    #[tool(
+        description = "Return conditional formatting rules on a worksheet. Each entry has the affected ranges (sqref) and the rule body (CellIs, Expression, ColorScale, DataBar, Top10, AboveAverage, IconSet, Other)"
+    )]
     pub fn xlsx_get_conditional_formats(Parameters(p): Parameters<XlsxSheetParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -815,7 +846,9 @@ impl XlsxTools {
         serde_json::json!({ "sheet": name, "formats": formats }).to_string()
     }
 
-    #[tool(description = "Return all `<dataValidation>` rules on a worksheet: affected ranges, type, operator, formulas, and the optional prompt / error messages")]
+    #[tool(
+        description = "Return all `<dataValidation>` rules on a worksheet: affected ranges, type, operator, formulas, and the optional prompt / error messages"
+    )]
     pub fn xlsx_get_data_validations(Parameters(p): Parameters<XlsxSheetParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -844,7 +877,9 @@ impl XlsxTools {
         .to_string()
     }
 
-    #[tool(description = "Return all comments on a worksheet (or all sheets if `sheet` is omitted) with full text and resolved author. Each entry: { sheet, cellRef, author?, text }")]
+    #[tool(
+        description = "Return all comments on a worksheet (or all sheets if `sheet` is omitted) with full text and resolved author. Each entry: { sheet, cellRef, author?, text }"
+    )]
     pub fn xlsx_get_comments(Parameters(p): Parameters<XlsxOptSheetParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -869,7 +904,9 @@ impl XlsxTools {
                 Ok(v) => v,
                 Err(e) => return format!("Error: {}", e),
             };
-            let Some(comments) = ws["comments"].as_array() else { continue };
+            let Some(comments) = ws["comments"].as_array() else {
+                continue;
+            };
             for c in comments {
                 all_comments.push(serde_json::json!({
                     "sheet": name,
@@ -882,7 +919,9 @@ impl XlsxTools {
         serde_json::json!({ "comments": all_comments }).to_string()
     }
 
-    #[tool(description = "Return per-sheet layout: explicit column widths, row heights, freeze panes, gridline visibility, default sizes, and tab color")]
+    #[tool(
+        description = "Return per-sheet layout: explicit column widths, row heights, freeze panes, gridline visibility, default sizes, and tab color"
+    )]
     pub fn xlsx_get_sheet_layout(Parameters(p): Parameters<XlsxSheetParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -915,7 +954,9 @@ impl XlsxTools {
                 .collect();
             entries.sort_by_key(|(k, _)| *k);
             for (col, width) in entries {
-                cols.push(serde_json::json!({ "col": col, "width": width, "letter": col_to_letter(col) }));
+                cols.push(
+                    serde_json::json!({ "col": col, "width": width, "letter": col_to_letter(col) }),
+                );
             }
         }
         let mut rows: Vec<Value> = Vec::new();
@@ -968,7 +1009,11 @@ mod sample_tests {
         }
         let out = XlsxTools::xlsx_to_markdown(pp(&path));
         assert!(!out.starts_with("Error:"), "errored: {out}");
-        assert!(out.contains("## "), "missing sheet heading: {}", &out[..200.min(out.len())]);
+        assert!(
+            out.contains("## "),
+            "missing sheet heading: {}",
+            &out[..200.min(out.len())]
+        );
         assert!(out.contains("|"), "no pipe table emitted");
     }
 
@@ -980,7 +1025,10 @@ mod sample_tests {
         }
         let out = XlsxTools::xlsx_parse(pp(&path));
         let v: Value = serde_json::from_str(&out).expect("xlsx_parse must return JSON");
-        assert!(v["sheets"].as_array().is_some(), "missing 'sheets' array: {out}");
+        assert!(
+            v["sheets"].as_array().is_some(),
+            "missing 'sheets' array: {out}"
+        );
     }
 
     #[test]
@@ -992,7 +1040,10 @@ mod sample_tests {
         let out = XlsxTools::xlsx_get_sheet_names(pp(&path));
         let v: Value = serde_json::from_str(&out).expect("must return JSON array");
         let arr = v.as_array().expect("must be JSON array");
-        assert!(!arr.is_empty(), "sample-1.xlsx should have at least one sheet");
+        assert!(
+            !arr.is_empty(),
+            "sample-1.xlsx should have at least one sheet"
+        );
     }
 
     #[test]
@@ -1006,7 +1057,10 @@ mod sample_tests {
             sheet: None,
         }));
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
-        assert!(v["charts"].as_array().is_some(), "missing 'charts' array: {out}");
+        assert!(
+            v["charts"].as_array().is_some(),
+            "missing 'charts' array: {out}"
+        );
     }
 
     #[test]
@@ -1017,7 +1071,10 @@ mod sample_tests {
         }
         let out = XlsxTools::xlsx_get_named_ranges(pp(&path));
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
-        assert!(v["definedNames"].as_array().is_some(), "missing 'definedNames'");
+        assert!(
+            v["definedNames"].as_array().is_some(),
+            "missing 'definedNames'"
+        );
     }
 
     #[test]
@@ -1061,7 +1118,10 @@ mod sample_tests {
             sheet: "0".into(),
         }));
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
-        assert!(v["validations"].as_array().is_some(), "missing 'validations'");
+        assert!(
+            v["validations"].as_array().is_some(),
+            "missing 'validations'"
+        );
     }
 
     #[test]
@@ -1070,10 +1130,7 @@ mod sample_tests {
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let out = XlsxTools::xlsx_get_comments(Parameters(XlsxOptSheetParam {
-            path,
-            sheet: None,
-        }));
+        let out = XlsxTools::xlsx_get_comments(Parameters(XlsxOptSheetParam { path, sheet: None }));
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
         assert!(v["comments"].as_array().is_some(), "missing 'comments'");
     }

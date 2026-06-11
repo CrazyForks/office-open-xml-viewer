@@ -1,5 +1,5 @@
 use crate::types::*;
-use crate::{read_zip_entry, read_zip_bytes, resolve_zip_path, parse_rels_map, mime_from_ext};
+use crate::{mime_from_ext, parse_rels_map, read_zip_bytes, read_zip_entry, resolve_zip_path};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -27,8 +27,9 @@ pub(crate) fn parse_drawing_anchors(
         {
             continue;
         }
-        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
-        let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) =
+            (0u32, 0i64, 0u32, 0i64);
+        let (mut to_col, mut to_col_off, mut to_row, mut to_row_off) = (0u32, 0i64, 0u32, 0i64);
         let mut pic_rid: Option<String> = None;
         let mut native_ext_cx: i64 = 0;
         let mut native_ext_cy: i64 = 0;
@@ -39,7 +40,9 @@ pub(crate) fn parse_drawing_anchors(
         let edit_as = anchor.attribute("editAs").map(|s| s.to_string());
 
         for child in anchor.children() {
-            if !child.is_element() { continue; }
+            if !child.is_element() {
+                continue;
+            }
             match child.tag_name().name() {
                 "from" | "to" => {
                     let is_from = child.tag_name().name() == "from";
@@ -49,41 +52,51 @@ pub(crate) fn parse_drawing_anchors(
                     let mut row_off: i64 = 0;
                     for c in child.children() {
                         match (c.tag_name().name(), c.text()) {
-                            ("col",    Some(t)) => col     = t.trim().parse().unwrap_or(0),
+                            ("col", Some(t)) => col = t.trim().parse().unwrap_or(0),
                             ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
-                            ("row",    Some(t)) => row     = t.trim().parse().unwrap_or(0),
+                            ("row", Some(t)) => row = t.trim().parse().unwrap_or(0),
                             ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
                             _ => {}
                         }
                     }
                     if is_from {
-                        from_col = col; from_col_off = col_off; from_row = row; from_row_off = row_off;
+                        from_col = col;
+                        from_col_off = col_off;
+                        from_row = row;
+                        from_row_off = row_off;
                     } else {
-                        to_col = col; to_col_off = col_off; to_row = row; to_row_off = row_off;
+                        to_col = col;
+                        to_col_off = col_off;
+                        to_row = row;
+                        to_row_off = row_off;
                     }
                 }
                 "pic" => {
                     // <xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic>
-                    let blip_fill = child.children()
-                        .find(|n| n.tag_name().name() == "blipFill" && n.tag_name().namespace() == Some(xdr_ns));
+                    let blip_fill = child.children().find(|n| {
+                        n.tag_name().name() == "blipFill"
+                            && n.tag_name().namespace() == Some(xdr_ns)
+                    });
                     if let Some(bf) = blip_fill {
-                        let blip = bf.children()
-                            .find(|n| n.tag_name().name() == "blip" && n.tag_name().namespace() == Some(a_ns));
+                        let blip = bf.children().find(|n| {
+                            n.tag_name().name() == "blip" && n.tag_name().namespace() == Some(a_ns)
+                        });
                         if let Some(b) = blip {
                             // r:embed attribute
-                            pic_rid = b.attributes()
+                            pic_rid = b
+                                .attributes()
                                 .find(|a| a.name() == "embed" && a.namespace() == Some(r_ns))
                                 .map(|a| a.value().to_string());
                         }
                     }
                     // <xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>: the picture's
                     // own saved EMU extent. Authoritative when editAs="oneCell".
-                    if let Some(sp_pr) = child.children()
-                        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(xdr_ns))
-                    {
-                        if let Some(xfrm_n) = sp_pr.children()
-                            .find(|n| n.tag_name().name() == "xfrm" && n.tag_name().namespace() == Some(a_ns))
-                        {
+                    if let Some(sp_pr) = child.children().find(|n| {
+                        n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(xdr_ns)
+                    }) {
+                        if let Some(xfrm_n) = sp_pr.children().find(|n| {
+                            n.tag_name().name() == "xfrm" && n.tag_name().namespace() == Some(a_ns)
+                        }) {
                             if let Some(xfrm) = parse_xfrm(&xfrm_n) {
                                 native_ext_cx = xfrm.ext_x as i64;
                                 native_ext_cy = xfrm.ext_y as i64;
@@ -95,16 +108,28 @@ pub(crate) fn parse_drawing_anchors(
             }
         }
 
-        let Some(rid) = pic_rid else { continue; };
-        let Some(target) = drawing_rels.get(&rid) else { continue; };
+        let Some(rid) = pic_rid else {
+            continue;
+        };
+        let Some(target) = drawing_rels.get(&rid) else {
+            continue;
+        };
         let media_path = resolve_zip_path(drawing_dir, target);
-        let Some(bytes) = read_zip_bytes(archive, &media_path) else { continue; };
+        let Some(bytes) = read_zip_bytes(archive, &media_path) else {
+            continue;
+        };
         let mime = mime_from_ext(&media_path);
         let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
 
         anchors.push(ImageAnchor {
-            from_col, from_col_off, from_row, from_row_off,
-            to_col, to_col_off, to_row, to_row_off,
+            from_col,
+            from_col_off,
+            from_row,
+            from_row_off,
+            to_col,
+            to_col_off,
+            to_row,
+            to_row_off,
             edit_as,
             native_ext_cx,
             native_ext_cy,
@@ -129,10 +154,14 @@ pub(crate) fn parse_drawing_anchors(
 
 #[derive(Clone, Copy)]
 pub(crate) struct Xfrm {
-    off_x: f64, off_y: f64,
-    ext_x: f64, ext_y: f64,
-    ch_off_x: f64, ch_off_y: f64,
-    ch_ext_x: f64, ch_ext_y: f64,
+    off_x: f64,
+    off_y: f64,
+    ext_x: f64,
+    ext_y: f64,
+    ch_off_x: f64,
+    ch_off_y: f64,
+    ch_ext_x: f64,
+    ch_ext_y: f64,
     has_ch: bool,
 }
 
@@ -150,8 +179,14 @@ pub(crate) fn parse_xfrm(xfrm_node: &roxmltree::Node) -> Option<Xfrm> {
                 off.1 = c.attribute("y").and_then(|s| s.parse().ok()).unwrap_or(0.0);
             }
             "ext" => {
-                ext.0 = c.attribute("cx").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                ext.1 = c.attribute("cy").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                ext.0 = c
+                    .attribute("cx")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                ext.1 = c
+                    .attribute("cy")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
                 has_ext = true;
             }
             "chOff" => {
@@ -160,18 +195,29 @@ pub(crate) fn parse_xfrm(xfrm_node: &roxmltree::Node) -> Option<Xfrm> {
                 has_ch = true;
             }
             "chExt" => {
-                ch_ext.0 = c.attribute("cx").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                ch_ext.1 = c.attribute("cy").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                ch_ext.0 = c
+                    .attribute("cx")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                ch_ext.1 = c
+                    .attribute("cy")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
                 has_ch = true;
             }
             _ => {}
         }
     }
-    if !has_ext { return None; }
+    if !has_ext {
+        return None;
+    }
     Some(Xfrm {
-        off_x: off.0, off_y: off.1,
-        ext_x: ext.0, ext_y: ext.1,
-        ch_off_x: ch_off.0, ch_off_y: ch_off.1,
+        off_x: off.0,
+        off_y: off.1,
+        ext_x: ext.0,
+        ext_y: ext.1,
+        ch_off_x: ch_off.0,
+        ch_off_y: ch_off.1,
         ch_ext_x: if ch_ext.0 == 0.0 { ext.0 } else { ch_ext.0 },
         ch_ext_y: if ch_ext.1 == 0.0 { ext.1 } else { ch_ext.1 },
         has_ch,
@@ -193,7 +239,10 @@ fn apply_clr_mods(base_with_hash: &str, clr_node: &roxmltree::Node) -> String {
     format!("#{}", out.to_uppercase())
 }
 
-pub(crate) fn parse_solid_fill(fill_node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
+pub(crate) fn parse_solid_fill(
+    fill_node: &roxmltree::Node,
+    theme_colors: &[String],
+) -> Option<String> {
     for c in fill_node.children() {
         match c.tag_name().name() {
             "srgbClr" => {
@@ -214,18 +263,18 @@ pub(crate) fn parse_solid_fill(fill_node: &roxmltree::Node, theme_colors: &[Stri
                 // here had dk1/lt1 and dk2/lt2 swapped which darkened
                 // shapes that painted "lt1" (the sheet paper colour).
                 let idx = match v {
-                    "dk1" | "tx1"    => Some(0),
-                    "lt1" | "bg1"    => Some(1),
-                    "dk2" | "tx2"    => Some(2),
-                    "lt2" | "bg2"    => Some(3),
-                    "accent1"        => Some(4),
-                    "accent2"        => Some(5),
-                    "accent3"        => Some(6),
-                    "accent4"        => Some(7),
-                    "accent5"        => Some(8),
-                    "accent6"        => Some(9),
-                    "hlink"          => Some(10),
-                    "folHlink"       => Some(11),
+                    "dk1" | "tx1" => Some(0),
+                    "lt1" | "bg1" => Some(1),
+                    "dk2" | "tx2" => Some(2),
+                    "lt2" | "bg2" => Some(3),
+                    "accent1" => Some(4),
+                    "accent2" => Some(5),
+                    "accent3" => Some(6),
+                    "accent4" => Some(7),
+                    "accent5" => Some(8),
+                    "accent6" => Some(9),
+                    "hlink" => Some(10),
+                    "folHlink" => Some(11),
                     _ => None,
                 };
                 return idx
@@ -241,44 +290,87 @@ pub(crate) fn parse_solid_fill(fill_node: &roxmltree::Node, theme_colors: &[Stri
 /// Parse a single custGeom path element. Each path has its own coordinate
 /// system (`a:path/@w`, `@h`) that the renderer scales to the shape's rect.
 pub(crate) fn parse_custom_path(path_node: &roxmltree::Node) -> PathInfo {
-    let w: f64 = path_node.attribute("w").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let h: f64 = path_node.attribute("h").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let w: f64 = path_node
+        .attribute("w")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let h: f64 = path_node
+        .attribute("h")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
     let mut commands: Vec<PathCmd> = Vec::new();
     for cmd in path_node.children().filter(|n| n.is_element()) {
         let name = cmd.tag_name().name();
         // Collect `<a:pt x=.. y=..>` points in order.
-        let pts: Vec<(f64, f64)> = cmd.children()
+        let pts: Vec<(f64, f64)> = cmd
+            .children()
             .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-            .map(|n| (
-                n.attribute("x").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                n.attribute("y").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-            ))
+            .map(|n| {
+                (
+                    n.attribute("x").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    n.attribute("y").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                )
+            })
             .collect();
         match name {
-            "moveTo"       => if let Some(p) = pts.first() { commands.push(PathCmd::MoveTo { x: p.0, y: p.1 }); },
-            "lnTo"         => if let Some(p) = pts.first() { commands.push(PathCmd::LineTo { x: p.0, y: p.1 }); },
-            "cubicBezTo"   => if pts.len() >= 3 {
-                commands.push(PathCmd::CubicBezTo {
-                    x1: pts[0].0, y1: pts[0].1,
-                    x2: pts[1].0, y2: pts[1].1,
-                    x3: pts[2].0, y3: pts[2].1,
-                });
-            },
-            "quadBezTo"    => if pts.len() >= 2 {
-                commands.push(PathCmd::QuadBezTo {
-                    x1: pts[0].0, y1: pts[0].1,
-                    x2: pts[1].0, y2: pts[1].1,
-                });
-            },
-            "close"        => commands.push(PathCmd::Close),
+            "moveTo" => {
+                if let Some(p) = pts.first() {
+                    commands.push(PathCmd::MoveTo { x: p.0, y: p.1 });
+                }
+            }
+            "lnTo" => {
+                if let Some(p) = pts.first() {
+                    commands.push(PathCmd::LineTo { x: p.0, y: p.1 });
+                }
+            }
+            "cubicBezTo" => {
+                if pts.len() >= 3 {
+                    commands.push(PathCmd::CubicBezTo {
+                        x1: pts[0].0,
+                        y1: pts[0].1,
+                        x2: pts[1].0,
+                        y2: pts[1].1,
+                        x3: pts[2].0,
+                        y3: pts[2].1,
+                    });
+                }
+            }
+            "quadBezTo" => {
+                if pts.len() >= 2 {
+                    commands.push(PathCmd::QuadBezTo {
+                        x1: pts[0].0,
+                        y1: pts[0].1,
+                        x2: pts[1].0,
+                        y2: pts[1].1,
+                    });
+                }
+            }
+            "close" => commands.push(PathCmd::Close),
             "arcTo" => {
                 // ECMA-376 §20.1.9.3: `wR`/`hR` in path-coord units;
                 // `stAng`/`swAng` in 60000ths of a degree.
-                let wr:     f64 = cmd.attribute("wR").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let hr:     f64 = cmd.attribute("hR").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let st_ang: f64 = cmd.attribute("stAng").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let sw_ang: f64 = cmd.attribute("swAng").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                commands.push(PathCmd::ArcTo { wr, hr, st_ang, sw_ang });
+                let wr: f64 = cmd
+                    .attribute("wR")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                let hr: f64 = cmd
+                    .attribute("hR")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                let st_ang: f64 = cmd
+                    .attribute("stAng")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                let sw_ang: f64 = cmd
+                    .attribute("swAng")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                commands.push(PathCmd::ArcTo {
+                    wr,
+                    hr,
+                    st_ang,
+                    sw_ang,
+                });
             }
             _ => {}
         }
@@ -386,15 +478,22 @@ fn push_math_runs_shape(
     }
 }
 
-pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) -> Option<ShapeText> {
+pub(crate) fn parse_tx_body(
+    tx_body: &roxmltree::Node,
+    theme_colors: &[String],
+) -> Option<ShapeText> {
     let mut anchor = String::from("t");
     let mut wrap = String::from("square");
     let mut paragraphs: Vec<ShapeParagraph> = Vec::new();
     for c in tx_body.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "bodyPr" => {
-                if let Some(a) = c.attribute("anchor") { anchor = a.to_string(); }
-                if let Some(w) = c.attribute("wrap") { wrap = w.to_string(); }
+                if let Some(a) = c.attribute("anchor") {
+                    anchor = a.to_string();
+                }
+                if let Some(w) = c.attribute("wrap") {
+                    wrap = w.to_string();
+                }
             }
             "p" => {
                 let mut align = String::from("l");
@@ -403,10 +502,15 @@ pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) 
                 for pc in c.children().filter(|n| n.is_element()) {
                     match pc.tag_name().name() {
                         "pPr" => {
-                            if let Some(a) = pc.attribute("algn") { align = a.to_string(); }
+                            if let Some(a) = pc.attribute("algn") {
+                                align = a.to_string();
+                            }
                             // ECMA-376 §21.1.2.2.7 `<a:pPr@rtl>` — right-to-left
                             // paragraph. Default false (left-to-right).
-                            rtl = pc.attribute("rtl").map(|v| v == "1" || v == "true").unwrap_or(false);
+                            rtl = pc
+                                .attribute("rtl")
+                                .map(|v| v == "1" || v == "true")
+                                .unwrap_or(false);
                         }
                         "r" => {
                             // Run text + run-level formatting.
@@ -420,8 +524,10 @@ pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) 
                                 match rc.tag_name().name() {
                                     "rPr" => {
                                         bold = rc.attribute("b").map(|v| v == "1").unwrap_or(false);
-                                        italic = rc.attribute("i").map(|v| v == "1").unwrap_or(false);
-                                        size = rc.attribute("sz")
+                                        italic =
+                                            rc.attribute("i").map(|v| v == "1").unwrap_or(false);
+                                        size = rc
+                                            .attribute("sz")
                                             .and_then(|s| s.parse::<f64>().ok())
                                             .map(|v| v / 100.0)
                                             .unwrap_or(0.0);
@@ -431,20 +537,30 @@ pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) 
                                                     color = parse_solid_fill(&rpc, theme_colors);
                                                 }
                                                 "latin" => {
-                                                    font_face = rpc.attribute("typeface").map(String::from);
+                                                    font_face =
+                                                        rpc.attribute("typeface").map(String::from);
                                                 }
                                                 _ => {}
                                             }
                                         }
                                     }
                                     "t" => {
-                                        if let Some(t) = rc.text() { text.push_str(t); }
+                                        if let Some(t) = rc.text() {
+                                            text.push_str(t);
+                                        }
                                     }
                                     _ => {}
                                 }
                             }
                             if !text.is_empty() {
-                                runs.push(ShapeTextRun::Text { text, bold, italic, size, color, font_face });
+                                runs.push(ShapeTextRun::Text {
+                                    text,
+                                    bold,
+                                    italic,
+                                    size,
+                                    color,
+                                    font_face,
+                                });
                             }
                         }
                         "br" => {
@@ -467,8 +583,14 @@ pub(crate) fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) 
             _ => {}
         }
     }
-    if paragraphs.is_empty() { None } else {
-        Some(ShapeText { anchor, wrap, paragraphs })
+    if paragraphs.is_empty() {
+        None
+    } else {
+        Some(ShapeText {
+            anchor,
+            wrap,
+            paragraphs,
+        })
     }
 }
 
@@ -482,8 +604,14 @@ pub(crate) fn parse_sp_geom(sp_pr: &roxmltree::Node) -> Option<ShapeGeom> {
             }
             "custGeom" => {
                 let mut paths: Vec<PathInfo> = Vec::new();
-                for pl in c.children().filter(|n| n.is_element() && n.tag_name().name() == "pathLst") {
-                    for p in pl.children().filter(|n| n.is_element() && n.tag_name().name() == "path") {
+                for pl in c
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "pathLst")
+                {
+                    for p in pl
+                        .children()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "path")
+                    {
                         paths.push(parse_custom_path(&p));
                     }
                 }
@@ -498,13 +626,22 @@ pub(crate) fn parse_sp_geom(sp_pr: &roxmltree::Node) -> Option<ShapeGeom> {
 /// Recursively walk an `xdr:grpSp` / `xdr:sp` tree, chaining coordinate
 /// transforms, and push leaf shapes (normalized to [0,1] of `root_ext`) into
 /// `out`.
+// The arguments are the running coordinate-transform state threaded through the
+// recursion (root offset/extent, accumulated scale/translation, theme + rels);
+// bundling them into a struct would only move the same fields elsewhere without
+// improving clarity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_shapes(
     node: &roxmltree::Node,
-    root_off_x: f64, root_off_y: f64,
-    root_ext_x: f64, root_ext_y: f64,
+    root_off_x: f64,
+    root_off_y: f64,
+    root_ext_x: f64,
+    root_ext_y: f64,
     // transform from current local coords into root (top-level grpSp) coords
-    scale_x: f64, scale_y: f64,
-    trans_x: f64, trans_y: f64,
+    scale_x: f64,
+    scale_y: f64,
+    trans_x: f64,
+    trans_y: f64,
     theme_colors: &[String],
     rid_urls: &HashMap<String, String>,
     out: &mut Vec<ShapeInfo>,
@@ -513,9 +650,14 @@ pub(crate) fn collect_shapes(
         let tag = child.tag_name().name();
         if tag == "grpSp" {
             // Nested grpSp: compose the transform by the group's own xfrm.
-            let grp_sp_pr = child.children().find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
+            let grp_sp_pr = child
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
             let xfrm = grp_sp_pr
-                .and_then(|n| n.children().find(|c| c.is_element() && c.tag_name().name() == "xfrm"))
+                .and_then(|n| {
+                    n.children()
+                        .find(|c| c.is_element() && c.tag_name().name() == "xfrm")
+                })
                 .as_ref()
                 .and_then(parse_xfrm);
             let (sx, sy, tx, ty) = if let Some(x) = xfrm {
@@ -532,23 +674,50 @@ pub(crate) fn collect_shapes(
                     )
                 } else {
                     // No child coord system: treat as identity mapping inside the group.
-                    (scale_x, scale_y,
-                     trans_x + scale_x * x.off_x,
-                     trans_y + scale_y * x.off_y)
+                    (
+                        scale_x,
+                        scale_y,
+                        trans_x + scale_x * x.off_x,
+                        trans_y + scale_y * x.off_y,
+                    )
                 }
             } else {
                 (scale_x, scale_y, trans_x, trans_y)
             };
-            collect_shapes(&child, root_off_x, root_off_y, root_ext_x, root_ext_y,
-                           sx, sy, tx, ty, theme_colors, rid_urls, out);
+            collect_shapes(
+                &child,
+                root_off_x,
+                root_off_y,
+                root_ext_x,
+                root_ext_y,
+                sx,
+                sy,
+                tx,
+                ty,
+                theme_colors,
+                rid_urls,
+                out,
+            );
         } else if tag == "sp" {
-            let sp_pr = child.children().find(|n| n.is_element() && n.tag_name().name() == "spPr");
-            let Some(sp_pr) = sp_pr else { continue; };
-            let xfrm_node = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm");
-            let Some(xfrm_n) = xfrm_node else { continue; };
-            let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
-            let rot_raw: f64 = xfrm_n.attribute("rot")
-                .and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let sp_pr = child
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "spPr");
+            let Some(sp_pr) = sp_pr else {
+                continue;
+            };
+            let xfrm_node = sp_pr
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xfrm");
+            let Some(xfrm_n) = xfrm_node else {
+                continue;
+            };
+            let Some(xfrm) = parse_xfrm(&xfrm_n) else {
+                continue;
+            };
+            let rot_raw: f64 = xfrm_n
+                .attribute("rot")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
 
             // Shape rect in root coords
             let root_x = trans_x + scale_x * xfrm.off_x;
@@ -557,31 +726,44 @@ pub(crate) fn collect_shapes(
             let root_h = scale_y * xfrm.ext_y;
 
             // Normalize to [0,1] of root ext
-            if root_ext_x == 0.0 || root_ext_y == 0.0 { continue; }
+            if root_ext_x == 0.0 || root_ext_y == 0.0 {
+                continue;
+            }
             let nx = (root_x - root_off_x) / root_ext_x;
             let ny = (root_y - root_off_y) / root_ext_y;
             let nw = root_w / root_ext_x;
             let nh = root_h / root_ext_y;
 
             let geom = parse_sp_geom(&sp_pr);
-            let Some(geom) = geom else { continue; };
+            let Some(geom) = geom else {
+                continue;
+            };
 
             // Fill
             let mut fill_color: Option<String> = None;
             let mut has_no_fill = false;
             for c in sp_pr.children().filter(|n| n.is_element()) {
                 match c.tag_name().name() {
-                    "solidFill" => { fill_color = parse_solid_fill(&c, theme_colors); }
-                    "noFill"    => { has_no_fill = true; }
+                    "solidFill" => {
+                        fill_color = parse_solid_fill(&c, theme_colors);
+                    }
+                    "noFill" => {
+                        has_no_fill = true;
+                    }
                     _ => {}
                 }
             }
-            if has_no_fill { fill_color = None; }
+            if has_no_fill {
+                fill_color = None;
+            }
 
             // Stroke (line)
             let mut stroke_color: Option<String> = None;
             let mut stroke_width: i64 = 0;
-            if let Some(ln) = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "ln") {
+            if let Some(ln) = sp_pr
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "ln")
+            {
                 let w_attr = ln.attribute("w");
                 stroke_width = w_attr.and_then(|s| s.parse().ok()).unwrap_or(0);
                 for c in ln.children().filter(|n| n.is_element()) {
@@ -608,13 +790,22 @@ pub(crate) fn collect_shapes(
             // and rely on the style's fillRef + fontRef pair (e.g. accent1
             // background + lt1 white text). We resolve scheme colors here
             // against the workbook theme and apply them as fallbacks.
-            let style_node = child.children()
+            let style_node = child
+                .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "style");
-            let style_fill = style_node.as_ref()
-                .and_then(|s| s.children().find(|n| n.is_element() && n.tag_name().name() == "fillRef"))
+            let style_fill = style_node
+                .as_ref()
+                .and_then(|s| {
+                    s.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "fillRef")
+                })
                 .and_then(|n| parse_solid_fill(&n, theme_colors));
-            let style_text_color = style_node.as_ref()
-                .and_then(|s| s.children().find(|n| n.is_element() && n.tag_name().name() == "fontRef"))
+            let style_text_color = style_node
+                .as_ref()
+                .and_then(|s| {
+                    s.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "fontRef")
+                })
                 .and_then(|n| parse_solid_fill(&n, theme_colors));
             if fill_color.is_none() && !has_no_fill {
                 fill_color = style_fill;
@@ -642,7 +833,10 @@ pub(crate) fn collect_shapes(
             }
 
             out.push(ShapeInfo {
-                x: nx, y: ny, w: nw, h: nh,
+                x: nx,
+                y: ny,
+                w: nw,
+                h: nh,
                 rot: rot_raw / 60000.0,
                 fill_color,
                 stroke_color,
@@ -654,45 +848,71 @@ pub(crate) fn collect_shapes(
             // `<xdr:pic>` leaf inside a group (ECMA-376 §20.5.2.17). The image
             // binary is resolved via the drawing's .rels file; `rid_urls` maps
             // each r:id to its pre-encoded `data:<mime>;base64,…` URL.
-            let sp_pr = child.children().find(|n| n.is_element() && n.tag_name().name() == "spPr");
-            let Some(sp_pr) = sp_pr else { continue; };
-            let xfrm_node = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm");
-            let Some(xfrm_n) = xfrm_node else { continue; };
-            let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
-            let rot_raw: f64 = xfrm_n.attribute("rot")
-                .and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let sp_pr = child
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "spPr");
+            let Some(sp_pr) = sp_pr else {
+                continue;
+            };
+            let xfrm_node = sp_pr
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xfrm");
+            let Some(xfrm_n) = xfrm_node else {
+                continue;
+            };
+            let Some(xfrm) = parse_xfrm(&xfrm_n) else {
+                continue;
+            };
+            let rot_raw: f64 = xfrm_n
+                .attribute("rot")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
 
             // Resolve <a:blip r:embed="rIdN"/>. The r:embed attribute lives in
             // the relationships namespace, not the drawingml namespace.
             let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-            let pic_rid = child.descendants()
+            let pic_rid = child
+                .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "blip")
                 .and_then(|b| {
                     b.attributes()
                         .find(|a| a.name() == "embed" && a.namespace() == Some(r_ns))
                         .map(|a| a.value().to_string())
                 });
-            let Some(rid) = pic_rid else { continue; };
-            let Some(data_url) = rid_urls.get(&rid) else { continue; };
+            let Some(rid) = pic_rid else {
+                continue;
+            };
+            let Some(data_url) = rid_urls.get(&rid) else {
+                continue;
+            };
 
             let root_x = trans_x + scale_x * xfrm.off_x;
             let root_y = trans_y + scale_y * xfrm.off_y;
             let root_w = scale_x * xfrm.ext_x;
             let root_h = scale_y * xfrm.ext_y;
-            if root_ext_x == 0.0 || root_ext_y == 0.0 { continue; }
+            if root_ext_x == 0.0 || root_ext_y == 0.0 {
+                continue;
+            }
             let nx = (root_x - root_off_x) / root_ext_x;
             let ny = (root_y - root_off_y) / root_ext_y;
             let nw = root_w / root_ext_x;
             let nh = root_h / root_ext_y;
-            if nw <= 0.0 || nh <= 0.0 { continue; }
+            if nw <= 0.0 || nh <= 0.0 {
+                continue;
+            }
 
             out.push(ShapeInfo {
-                x: nx, y: ny, w: nw, h: nh,
+                x: nx,
+                y: ny,
+                w: nw,
+                h: nh,
                 rot: rot_raw / 60000.0,
                 fill_color: None,
                 stroke_color: None,
                 stroke_width: 0,
-                geom: ShapeGeom::Image { data_url: data_url.clone() },
+                geom: ShapeGeom::Image {
+                    data_url: data_url.clone(),
+                },
                 text: None,
             });
         }
@@ -705,7 +925,9 @@ pub(crate) fn parse_shape_anchors(
     theme_colors: &[String],
     rid_urls: &HashMap<String, String>,
 ) -> Vec<ShapeAnchor> {
-    let Ok(doc) = roxmltree::Document::parse(drawing_xml) else { return Vec::new(); };
+    let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
+        return Vec::new();
+    };
     let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
     let mut anchors: Vec<ShapeAnchor> = Vec::new();
 
@@ -716,11 +938,15 @@ pub(crate) fn parse_shape_anchors(
         // size). Excel authors equation text boxes as oneCellAnchor, so we must
         // accept both or those shapes (and their math) are silently dropped.
         if (anchor_tag != "twoCellAnchor" && anchor_tag != "oneCellAnchor")
-            || anchor.tag_name().namespace() != Some(xdr_ns) { continue; }
+            || anchor.tag_name().namespace() != Some(xdr_ns)
+        {
+            continue;
+        }
 
         // Parse from/to anchor rect (shared between grpSp and stand-alone sp paths)
-        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
-        let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) =
+            (0u32, 0i64, 0u32, 0i64);
+        let (mut to_col, mut to_col_off, mut to_row, mut to_row_off) = (0u32, 0i64, 0u32, 0i64);
         // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs` — see ImageAnchor parsing
         // path for semantics. `"oneCell"` instructs the renderer to preserve
         // the group's saved EMU size instead of resizing with the cell rect.
@@ -737,24 +963,34 @@ pub(crate) fn parse_shape_anchors(
         let native_ext_cx: i64;
         let native_ext_cy: i64;
         for c in anchor.children() {
-            if !c.is_element() { continue; }
+            if !c.is_element() {
+                continue;
+            }
             if c.tag_name().name() == "from" || c.tag_name().name() == "to" {
                 let is_from = c.tag_name().name() == "from";
-                let mut col: u32 = 0; let mut col_off: i64 = 0;
-                let mut row: u32 = 0; let mut row_off: i64 = 0;
+                let mut col: u32 = 0;
+                let mut col_off: i64 = 0;
+                let mut row: u32 = 0;
+                let mut row_off: i64 = 0;
                 for cc in c.children() {
                     match (cc.tag_name().name(), cc.text()) {
-                        ("col",    Some(t)) => col     = t.trim().parse().unwrap_or(0),
+                        ("col", Some(t)) => col = t.trim().parse().unwrap_or(0),
                         ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
-                        ("row",    Some(t)) => row     = t.trim().parse().unwrap_or(0),
+                        ("row", Some(t)) => row = t.trim().parse().unwrap_or(0),
                         ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
                         _ => {}
                     }
                 }
                 if is_from {
-                    from_col = col; from_col_off = col_off; from_row = row; from_row_off = row_off;
+                    from_col = col;
+                    from_col_off = col_off;
+                    from_row = row;
+                    from_row_off = row_off;
                 } else {
-                    to_col = col; to_col_off = col_off; to_row = row; to_row_off = row_off;
+                    to_col = col;
+                    to_col_off = col_off;
+                    to_row = row;
+                    to_row_off = row_off;
                 }
             }
         }
@@ -782,14 +1018,26 @@ pub(crate) fn parse_shape_anchors(
         //       to define the anchor's drawing-coord system; the stand-alone
         //       path treats the shape as filling 100 % of the anchor rect.
         let mut shapes: Vec<ShapeInfo> = Vec::new();
-        if let Some(grp) = content.children().find(|n| n.is_element() && n.tag_name().name() == "grpSp") {
-            let grp_sp_pr = grp.children().find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
+        if let Some(grp) = content
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "grpSp")
+        {
+            let grp_sp_pr = grp
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
             let xfrm = grp_sp_pr
-                .and_then(|n| n.children().find(|c| c.is_element() && c.tag_name().name() == "xfrm"))
+                .and_then(|n| {
+                    n.children()
+                        .find(|c| c.is_element() && c.tag_name().name() == "xfrm")
+                })
                 .as_ref()
                 .and_then(parse_xfrm);
-            let Some(root) = xfrm else { continue; };
-            if !root.has_ch || root.ch_ext_x == 0.0 || root.ch_ext_y == 0.0 { continue; }
+            let Some(root) = xfrm else {
+                continue;
+            };
+            if !root.has_ch || root.ch_ext_x == 0.0 || root.ch_ext_y == 0.0 {
+                continue;
+            }
 
             // Top-level grpSp ext is the group's saved on-sheet EMU size —
             // authoritative when editAs="oneCell".
@@ -802,34 +1050,80 @@ pub(crate) fn parse_shape_anchors(
             let tx = root.off_x - root.ch_off_x * csx;
             let ty = root.off_y - root.ch_off_y * csy;
 
-            collect_shapes(&grp, root.off_x, root.off_y, root.ext_x, root.ext_y,
-                           csx, csy, tx, ty, theme_colors, rid_urls, &mut shapes);
-        } else if let Some(sp) = content.children().find(|n| n.is_element() && (n.tag_name().name() == "sp" || n.tag_name().name() == "pic")) {
+            collect_shapes(
+                &grp,
+                root.off_x,
+                root.off_y,
+                root.ext_x,
+                root.ext_y,
+                csx,
+                csy,
+                tx,
+                ty,
+                theme_colors,
+                rid_urls,
+                &mut shapes,
+            );
+        } else if let Some(sp) = content.children().find(|n| {
+            n.is_element() && (n.tag_name().name() == "sp" || n.tag_name().name() == "pic")
+        }) {
             // Stand-alone sp/pic: the shape's own xfrm gives its absolute EMU
             // rect, but for our rendering pipeline the anchor's from/to
             // already defines the on-sheet rect, and the leaf occupies it
             // 100 %. Build a synthetic root coord-system whose origin matches
             // the shape's xfrm so collect_shapes normalizes the leaf to (0,0)
             // (1,1).
-            let sp_pr = sp.children().find(|n| n.is_element() && n.tag_name().name() == "spPr");
-            let Some(sp_pr_node) = sp_pr else { continue; };
-            let xfrm_node = sp_pr_node.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm");
-            let Some(xfrm_n) = xfrm_node else { continue; };
-            let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
-            if xfrm.ext_x == 0.0 || xfrm.ext_y == 0.0 { continue; }
+            let sp_pr = sp
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "spPr");
+            let Some(sp_pr_node) = sp_pr else {
+                continue;
+            };
+            let xfrm_node = sp_pr_node
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xfrm");
+            let Some(xfrm_n) = xfrm_node else {
+                continue;
+            };
+            let Some(xfrm) = parse_xfrm(&xfrm_n) else {
+                continue;
+            };
+            if xfrm.ext_x == 0.0 || xfrm.ext_y == 0.0 {
+                continue;
+            }
             native_ext_cx = xfrm.ext_x as i64;
             native_ext_cy = xfrm.ext_y as i64;
-            collect_shapes(&content, xfrm.off_x, xfrm.off_y, xfrm.ext_x, xfrm.ext_y,
-                           1.0, 1.0, 0.0, 0.0, theme_colors, rid_urls, &mut shapes);
+            collect_shapes(
+                &content,
+                xfrm.off_x,
+                xfrm.off_y,
+                xfrm.ext_x,
+                xfrm.ext_y,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                theme_colors,
+                rid_urls,
+                &mut shapes,
+            );
         } else {
             continue;
         }
 
-        if shapes.is_empty() { continue; }
+        if shapes.is_empty() {
+            continue;
+        }
 
         anchors.push(ShapeAnchor {
-            from_col, from_col_off, from_row, from_row_off,
-            to_col, to_col_off, to_row, to_row_off,
+            from_col,
+            from_col_off,
+            from_row,
+            from_row_off,
+            to_col,
+            to_col_off,
+            to_row,
+            to_row_off,
             edit_as,
             native_ext_cx,
             native_ext_cy,
@@ -844,20 +1138,34 @@ pub(crate) fn load_sheet_shape_groups(
     sheet_path: &str,
     theme_colors: &[String],
 ) -> Vec<ShapeAnchor> {
-    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
+        return Vec::new();
+    };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
-    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else { return Vec::new(); };
+    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+        return Vec::new();
+    };
+    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+        return Vec::new();
+    };
     let mut drawing_targets: Vec<String> = Vec::new();
-    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+    for rel in rels_doc
+        .root_element()
+        .children()
+        .filter(|n| n.is_element())
+    {
         if rel.attribute("Type").unwrap_or("").ends_with("/drawing") {
-            if let Some(t) = rel.attribute("Target") { drawing_targets.push(t.to_string()); }
+            if let Some(t) = rel.attribute("Target") {
+                drawing_targets.push(t.to_string());
+            }
         }
     }
     let mut all: Vec<ShapeAnchor> = Vec::new();
     for target in drawing_targets {
         let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else { continue; };
+        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else {
+            continue;
+        };
         let rid_urls = build_drawing_rid_urls(archive, &drawing_path);
         all.extend(parse_shape_anchors(&drawing_xml, theme_colors, &rid_urls));
     }
@@ -885,9 +1193,12 @@ pub(crate) fn build_drawing_rid_urls(
     let mut result: HashMap<String, String> = HashMap::new();
     for (rid, target) in rels {
         let lower = target.to_lowercase();
-        if !(lower.ends_with(".png") || lower.ends_with(".jpg")
-            || lower.ends_with(".jpeg") || lower.ends_with(".gif")
-            || lower.ends_with(".bmp")  || lower.ends_with(".webp"))
+        if !(lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg")
+            || lower.ends_with(".gif")
+            || lower.ends_with(".bmp")
+            || lower.ends_with(".webp"))
         {
             continue;
         }
@@ -920,7 +1231,11 @@ pub(crate) fn load_sheet_images(
         return Vec::new();
     };
     let mut drawing_targets: Vec<String> = Vec::new();
-    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+    for rel in rels_doc
+        .root_element()
+        .children()
+        .filter(|n| n.is_element())
+    {
         let rel_type = rel.attribute("Type").unwrap_or("");
         if rel_type.ends_with("/drawing") {
             if let Some(t) = rel.attribute("Target") {
@@ -928,16 +1243,22 @@ pub(crate) fn load_sheet_images(
             }
         }
     }
-    if drawing_targets.is_empty() { return Vec::new(); }
+    if drawing_targets.is_empty() {
+        return Vec::new();
+    }
 
     let mut all_anchors: Vec<ImageAnchor> = Vec::new();
     for target in drawing_targets {
         // sheet_dir is "worksheets", target typically "../drawings/drawing1.xml"
         // base dir for the drawing = "xl/worksheets" + "../drawings" → "xl/drawings"
         let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else { continue; };
+        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else {
+            continue;
+        };
         // Drawing rels:  xl/drawings/_rels/drawing1.xml.rels
-        let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else { continue; };
+        let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else {
+            continue;
+        };
         let drawing_rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
         let drawing_rels = read_zip_entry(archive, &drawing_rels_path)
             .ok()
@@ -1015,10 +1336,19 @@ mod math_tests {
         let runs = &text.paragraphs[0].runs;
         assert_eq!(runs.len(), 1);
         match &runs[0] {
-            ShapeTextRun::Math { display, font_size, color, nodes } => {
+            ShapeTextRun::Math {
+                display,
+                font_size,
+                color,
+                nodes,
+            } => {
                 assert!(!*display, "bare a14:m + m:oMath → inline");
                 assert_eq!(*font_size, Some(28.0), "size from math run rPr sz/100");
-                assert_eq!(color.as_deref(), Some("#7030A0"), "colour from math run rPr solidFill (xlsx #-prefixed convention)");
+                assert_eq!(
+                    color.as_deref(),
+                    Some("#7030A0"),
+                    "colour from math run rPr solidFill (xlsx #-prefixed convention)"
+                );
                 assert_eq!(nodes_to_text(nodes), "n");
             }
             other => panic!("expected Math run, got {other:?}"),
@@ -1084,4 +1414,3 @@ mod math_tests {
         assert!(!text.paragraphs[0].rtl, "absent @rtl → rtl false");
     }
 }
-

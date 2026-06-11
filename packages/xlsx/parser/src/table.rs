@@ -1,5 +1,5 @@
 use crate::types::*;
-use crate::{read_zip_entry, resolve_zip_path, parse_cell_ref};
+use crate::{parse_cell_ref, read_zip_entry, resolve_zip_path};
 use std::io::Cursor;
 
 /// Parse `xl/tables/tableN.xml` files referenced from the sheet rels and
@@ -29,23 +29,39 @@ pub(crate) struct TableStyleElements {
 
 /// Parse `<tableStyles><tableStyle name="…"><tableStyleElement type="…" dxfId="…"/>`
 /// into a lookup keyed by table-style name.
-pub(crate) fn parse_table_styles_map(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> std::collections::HashMap<String, TableStyleElements> {
+pub(crate) fn parse_table_styles_map(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+) -> std::collections::HashMap<String, TableStyleElements> {
     use std::collections::HashMap;
     let mut map: HashMap<String, TableStyleElements> = HashMap::new();
-    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else { return map; };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else { return map; };
+    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else {
+        return map;
+    };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        return map;
+    };
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     for n in doc.descendants() {
-        if n.tag_name().name() != "tableStyles" || n.tag_name().namespace() != Some(ns) { continue; }
-        for ts in n.children().filter(|c| c.is_element() && c.tag_name().name() == "tableStyle") {
-            let Some(name) = ts.attribute("name") else { continue; };
+        if n.tag_name().name() != "tableStyles" || n.tag_name().namespace() != Some(ns) {
+            continue;
+        }
+        for ts in n
+            .children()
+            .filter(|c| c.is_element() && c.tag_name().name() == "tableStyle")
+        {
+            let Some(name) = ts.attribute("name") else {
+                continue;
+            };
             let mut elems = TableStyleElements::default();
-            for el in ts.children().filter(|c| c.is_element() && c.tag_name().name() == "tableStyleElement") {
+            for el in ts
+                .children()
+                .filter(|c| c.is_element() && c.tag_name().name() == "tableStyleElement")
+            {
                 let t = el.attribute("type").unwrap_or("");
                 let dxf: Option<u32> = el.attribute("dxfId").and_then(|s| s.parse().ok());
                 match t {
                     "wholeTable" => elems.whole_table = dxf,
-                    "headerRow"  => elems.header_row = dxf,
+                    "headerRow" => elems.header_row = dxf,
                     _ => {}
                 }
             }
@@ -57,13 +73,23 @@ pub(crate) fn parse_table_styles_map(archive: &mut zip::ZipArchive<Cursor<&[u8]>
 
 pub(crate) fn resolve_table_style_accent(style_name: &str, theme_colors: &[String]) -> String {
     let fallback = "#808080".to_string();
-    let Some(rest) = style_name.strip_prefix("TableStyle") else { return fallback; };
+    let Some(rest) = style_name.strip_prefix("TableStyle") else {
+        return fallback;
+    };
     let digits_start = rest.find(|c: char| c.is_ascii_digit());
-    let Some(start) = digits_start else { return fallback; };
-    let Ok(n) = rest[start..].parse::<u32>() else { return fallback; };
-    if n == 0 { return fallback; }
+    let Some(start) = digits_start else {
+        return fallback;
+    };
+    let Ok(n) = rest[start..].parse::<u32>() else {
+        return fallback;
+    };
+    if n == 0 {
+        return fallback;
+    }
     let slot = ((n - 1) % 7) as usize;
-    if slot == 0 { return fallback; }
+    if slot == 0 {
+        return fallback;
+    }
     theme_colors.get(3 + slot).cloned().unwrap_or(fallback)
 }
 
@@ -73,13 +99,23 @@ pub(crate) fn load_sheet_tables(
     theme_colors: &[String],
 ) -> Vec<TableInfo> {
     let custom_styles = parse_table_styles_map(archive);
-    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
+        return Vec::new();
+    };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
-    let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else { return Vec::new(); };
+    let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+        return Vec::new();
+    };
+    let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else {
+        return Vec::new();
+    };
 
     let mut table_targets: Vec<String> = Vec::new();
-    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+    for rel in rels_doc
+        .root_element()
+        .children()
+        .filter(|n| n.is_element())
+    {
         if rel.attribute("Type").unwrap_or("").ends_with("/table") {
             if let Some(t) = rel.attribute("Target") {
                 table_targets.push(t.to_string());
@@ -90,26 +126,46 @@ pub(crate) fn load_sheet_tables(
     let mut tables: Vec<TableInfo> = Vec::new();
     for target in table_targets {
         let table_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(xml) = read_zip_entry(archive, &table_path) else { continue; };
-        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue; };
+        let Ok(xml) = read_zip_entry(archive, &table_path) else {
+            continue;
+        };
+        let Ok(doc) = roxmltree::Document::parse(&xml) else {
+            continue;
+        };
         let root = doc.root_element();
-        let Some(ref_attr) = root.attribute("ref") else { continue };
+        let Some(ref_attr) = root.attribute("ref") else {
+            continue;
+        };
         let parts: Vec<&str> = ref_attr.split(':').collect();
         let range = if parts.len() == 2 {
             let (left, top) = parse_cell_ref(parts[0]);
             let (right, bottom) = parse_cell_ref(parts[1]);
-            CellRange { top, left, bottom, right }
+            CellRange {
+                top,
+                left,
+                bottom,
+                right,
+            }
         } else {
             let (col, row) = parse_cell_ref(parts[0]);
-            CellRange { top: row, left: col, bottom: row, right: col }
+            CellRange {
+                top: row,
+                left: col,
+                bottom: row,
+                right: col,
+            }
         };
-        let header_row_count: u32 = root.attribute("headerRowCount")
+        let header_row_count: u32 = root
+            .attribute("headerRowCount")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
-        let totals_row_count: u32 = root.attribute("totalsRowCount")
+        let totals_row_count: u32 = root
+            .attribute("totalsRowCount")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let style_info = root.children().find(|n| n.tag_name().name() == "tableStyleInfo");
+        let style_info = root
+            .children()
+            .find(|n| n.tag_name().name() == "tableStyleInfo");
         // ECMA-376 §18.5.1.4: when `name` is absent the table has "None" style —
         // no visual table formatting. Default to "" rather than a named style so
         // the renderer can skip table-style overlay for these cells.
@@ -117,16 +173,21 @@ pub(crate) fn load_sheet_tables(
             .and_then(|n| n.attribute("name"))
             .unwrap_or("")
             .to_string();
-        let bool_attr = |n: &roxmltree::Node, key: &str| n.attribute(key).map(|v| v == "1" || v == "true").unwrap_or(false);
-        let (show_row_stripes, show_column_stripes, show_first_column, show_last_column) = match style_info {
-            Some(n) => (
-                bool_attr(&n, "showRowStripes"),
-                bool_attr(&n, "showColumnStripes"),
-                bool_attr(&n, "showFirstColumn"),
-                bool_attr(&n, "showLastColumn"),
-            ),
-            None => (false, false, false, false),
+        let bool_attr = |n: &roxmltree::Node, key: &str| {
+            n.attribute(key)
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false)
         };
+        let (show_row_stripes, show_column_stripes, show_first_column, show_last_column) =
+            match style_info {
+                Some(n) => (
+                    bool_attr(&n, "showRowStripes"),
+                    bool_attr(&n, "showColumnStripes"),
+                    bool_attr(&n, "showFirstColumn"),
+                    bool_attr(&n, "showLastColumn"),
+                ),
+                None => (false, false, false, false),
+            };
         let accent_color = resolve_table_style_accent(&style_name, theme_colors);
         let (whole_table_dxf, header_row_dxf) = match custom_styles.get(&style_name) {
             Some(e) => (e.whole_table, e.header_row),
@@ -140,7 +201,7 @@ pub(crate) fn load_sheet_tables(
             .descendants()
             .filter(|n| n.is_element() && n.tag_name().name() == "tableColumn")
             .map(|tc| TableColumnInfo {
-                data_dxf_id:       tc.attribute("dataDxfId").and_then(|s| s.parse().ok()),
+                data_dxf_id: tc.attribute("dataDxfId").and_then(|s| s.parse().ok()),
                 header_row_dxf_id: tc.attribute("headerRowDxfId").and_then(|s| s.parse().ok()),
                 totals_row_dxf_id: tc.attribute("totalsRowDxfId").and_then(|s| s.parse().ok()),
             })

@@ -61,43 +61,61 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
                 let val = attr_pct(&t, "val", 100_000.0);
                 let (h, l, s) = rgb_to_hls(rf, gf, bf);
                 let (nr, ng, nb) = hls_to_rgb(h, (l * val).min(1.0), s);
-                rf = nr; gf = ng; bf = nb;
+                rf = nr;
+                gf = ng;
+                bf = nb;
             }
             "lumOff" => {
                 let val = attr_pct(&t, "val", 0.0);
                 let (h, l, s) = rgb_to_hls(rf, gf, bf);
                 let (nr, ng, nb) = hls_to_rgb(h, (l + val).clamp(0.0, 1.0), s);
-                rf = nr; gf = ng; bf = nb;
+                rf = nr;
+                gf = ng;
+                bf = nb;
             }
             "satMod" => {
                 let val = attr_pct(&t, "val", 100_000.0);
                 let (h, l, s) = rgb_to_hls(rf, gf, bf);
                 let (nr, ng, nb) = hls_to_rgb(h, l, (s * val).clamp(0.0, 1.0));
-                rf = nr; gf = ng; bf = nb;
+                rf = nr;
+                gf = ng;
+                bf = nb;
             }
             "satOff" => {
                 let val = attr_pct(&t, "val", 0.0);
                 let (h, l, s) = rgb_to_hls(rf, gf, bf);
                 let (nr, ng, nb) = hls_to_rgb(h, l, (s + val).clamp(0.0, 1.0));
-                rf = nr; gf = ng; bf = nb;
+                rf = nr;
+                gf = ng;
+                bf = nb;
             }
             "hueMod" => {
                 let val = attr_pct(&t, "val", 100_000.0);
                 let (h, l, s) = rgb_to_hls(rf, gf, bf);
                 let (nr, ng, nb) = hls_to_rgb((h * val).rem_euclid(1.0), l, s);
-                rf = nr; gf = ng; bf = nb;
+                rf = nr;
+                gf = ng;
+                bf = nb;
             }
             "hueOff" => {
                 // hueOff is in 60000ths of a degree per ECMA-376 §20.1.2.3.16.
-                let val_deg = t.attribute("val").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 60_000.0;
+                let val_deg = t
+                    .attribute("val")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.0)
+                    / 60_000.0;
                 let (h, l, s) = rgb_to_hls(rf, gf, bf);
                 let (nr, ng, nb) = hls_to_rgb((h + val_deg / 360.0).rem_euclid(1.0), l, s);
-                rf = nr; gf = ng; bf = nb;
+                rf = nr;
+                gf = ng;
+                bf = nb;
             }
             "shade" => {
                 // ECMA-376 §20.1.2.3.31: result = val·input + (1-val)·black.
                 let val = attr_pct(&t, "val", 100_000.0);
-                rf *= val; gf *= val; bf *= val;
+                rf *= val;
+                gf *= val;
+                bf *= val;
             }
             "tint" => {
                 let val = attr_pct(&t, "val", 0.0);
@@ -154,12 +172,20 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
 
 /// sRGB → linear light. IEC 61966-2-1 transfer function.
 pub fn srgb_to_linear(c: f64) -> f64 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Linear light → sRGB.
 pub fn linear_to_srgb(c: f64) -> f64 {
-    if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+    if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 /// RGB → HLS conversion (lightness in the middle, matches Python's colorsys).
@@ -172,7 +198,11 @@ pub fn rgb_to_hls(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
     if d < 1e-10 {
         return (0.0, l, 0.0);
     }
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
     let h = if (max - r).abs() < 1e-10 {
         (g - b) / d + if g < b { 6.0 } else { 0.0 }
     } else if (max - g).abs() < 1e-10 {
@@ -190,14 +220,28 @@ pub fn hls_to_rgb(h: f64, l: f64, s: f64) -> (f64, f64, f64) {
         return (l, l, l);
     }
     fn hue2rgb(p: f64, q: f64, mut t: f64) -> f64 {
-        if t < 0.0 { t += 1.0; }
-        if t > 1.0 { t -= 1.0; }
-        if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
-        if t < 0.5        { return q; }
-        if t < 2.0 / 3.0  { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            return p + (q - p) * 6.0 * t;
+        }
+        if t < 0.5 {
+            return q;
+        }
+        if t < 2.0 / 3.0 {
+            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+        }
         p
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     (
         hue2rgb(p, q, h + 1.0 / 3.0),

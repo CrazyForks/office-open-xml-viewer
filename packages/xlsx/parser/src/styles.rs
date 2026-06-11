@@ -2,28 +2,43 @@ use crate::types::*;
 use crate::{parse_color, read_zip_entry};
 use std::io::Cursor;
 
-
 /// Resolve the workbook's Normal-style font (family name + point size) by
 /// following `<cellStyleXfs>[0].fontId` → `<fonts>[fontId]`. Returns `(None,
 /// None)` if `xl/styles.xml` is missing or malformed. The renderer uses this
 /// to compute the Max Digit Width for column-width pixel conversion
 /// (ECMA-376 §18.3.1.13).
-pub(crate) fn parse_default_font(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> (Option<String>, Option<f64>) {
-    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else { return (None, None); };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else { return (None, None); };
+pub(crate) fn parse_default_font(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+) -> (Option<String>, Option<f64>) {
+    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else {
+        return (None, None);
+    };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        return (None, None);
+    };
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     let mut font_id: usize = 0;
     for n in doc.descendants() {
         if n.tag_name().name() == "cellStyleXfs" && n.tag_name().namespace() == Some(ns) {
-            if let Some(xf) = n.children().find(|c| c.is_element() && c.tag_name().name() == "xf") {
-                font_id = xf.attribute("fontId").and_then(|s| s.parse().ok()).unwrap_or(0);
+            if let Some(xf) = n
+                .children()
+                .find(|c| c.is_element() && c.tag_name().name() == "xf")
+            {
+                font_id = xf
+                    .attribute("fontId")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
             }
             break;
         }
     }
     for fonts_node in doc.descendants() {
-        if fonts_node.tag_name().name() != "fonts" || fonts_node.tag_name().namespace() != Some(ns) { continue; }
-        if let Some(font_node) = fonts_node.children()
+        if fonts_node.tag_name().name() != "fonts" || fonts_node.tag_name().namespace() != Some(ns)
+        {
+            continue;
+        }
+        if let Some(font_node) = fonts_node
+            .children()
             .filter(|c| c.is_element() && c.tag_name().name() == "font")
             .nth(font_id)
         {
@@ -32,7 +47,7 @@ pub(crate) fn parse_default_font(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -
             for child in font_node.children() {
                 match child.tag_name().name() {
                     "name" => name = child.attribute("val").map(|s| s.to_string()),
-                    "sz"   => sz = child.attribute("val").and_then(|s| s.parse().ok()),
+                    "sz" => sz = child.attribute("val").and_then(|s| s.parse().ok()),
                     _ => {}
                 }
             }
@@ -43,7 +58,10 @@ pub(crate) fn parse_default_font(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -
     (None, None)
 }
 
-pub(crate) fn parse_styles(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, theme_colors: &[String]) -> Result<Styles, String> {
+pub(crate) fn parse_styles(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    theme_colors: &[String],
+) -> Result<Styles, String> {
     let xml = read_zip_entry(archive, "xl/styles.xml")?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -55,7 +73,14 @@ pub(crate) fn parse_styles(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, theme_c
     let cell_xfs = parse_cell_xfs(&doc, ns);
     let dxfs = parse_dxfs(&doc, ns, theme_colors);
 
-    Ok(Styles { fonts, fills, borders, cell_xfs, num_fmts, dxfs })
+    Ok(Styles {
+        fonts,
+        fills,
+        borders,
+        cell_xfs,
+        num_fmts,
+        dxfs,
+    })
 }
 
 pub(crate) fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Dxf> {
@@ -65,12 +90,17 @@ pub(crate) fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[St
             continue;
         }
         for dxf_node in dxfs_node.children() {
-            if dxf_node.tag_name().name() != "dxf" { continue; }
+            if dxf_node.tag_name().name() != "dxf" {
+                continue;
+            }
             let mut d = Dxf::default();
             for child in dxf_node.children() {
                 match child.tag_name().name() {
                     "font" => {
-                        let mut f = Font { size: 11.0, ..Default::default() };
+                        let mut f = Font {
+                            size: 11.0,
+                            ..Default::default()
+                        };
                         for fc in child.children() {
                             match fc.tag_name().name() {
                                 "b" => f.bold = parse_st_on_off(&fc),
@@ -93,7 +123,9 @@ pub(crate) fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[St
                                     }
                                 }
                                 "sz" => {
-                                    if let Some(v) = fc.attribute("val").and_then(|s| s.parse().ok()) {
+                                    if let Some(v) =
+                                        fc.attribute("val").and_then(|s| s.parse().ok())
+                                    {
                                         f.size = v;
                                     }
                                 }
@@ -112,11 +144,16 @@ pub(crate) fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[St
                         let mut f = Fill::default();
                         for pf in child.children() {
                             if pf.tag_name().name() == "patternFill" {
-                                f.pattern_type = pf.attribute("patternType").unwrap_or("solid").to_string();
+                                f.pattern_type =
+                                    pf.attribute("patternType").unwrap_or("solid").to_string();
                                 for color_node in pf.children() {
                                     match color_node.tag_name().name() {
-                                        "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
-                                        "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
+                                        "fgColor" => {
+                                            f.fg_color = parse_color(&color_node, theme_colors)
+                                        }
+                                        "bgColor" => {
+                                            f.bg_color = parse_color(&color_node, theme_colors)
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -132,8 +169,12 @@ pub(crate) fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[St
                         let mut b = Border::default();
                         for edge_node in child.children() {
                             let style = edge_node.attribute("style").unwrap_or("").to_string();
-                            if style.is_empty() { continue; }
-                            let color = edge_node.children().find(|c| c.is_element())
+                            if style.is_empty() {
+                                continue;
+                            }
+                            let color = edge_node
+                                .children()
+                                .find(|c| c.is_element())
                                 .and_then(|c| parse_color(&c, theme_colors));
                             let edge = Some(BorderEdge { style, color });
                             match edge_node.tag_name().name() {
@@ -142,18 +183,22 @@ pub(crate) fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[St
                                 "top" => b.top = edge,
                                 "bottom" => b.bottom = edge,
                                 "horizontal" => b.horizontal = edge,
-                                "vertical"   => b.vertical   = edge,
+                                "vertical" => b.vertical = edge,
                                 _ => {}
                             }
                         }
                         d.border = Some(b);
                     }
                     "numFmt" => {
-                        let num_fmt_id = child.attribute("numFmtId")
-                            .and_then(|v| v.parse().ok()).unwrap_or(0);
-                        let format_code = child.attribute("formatCode")
-                            .unwrap_or("").to_string();
-                        d.num_fmt = Some(NumFmt { num_fmt_id, format_code });
+                        let num_fmt_id = child
+                            .attribute("numFmtId")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        let format_code = child.attribute("formatCode").unwrap_or("").to_string();
+                        d.num_fmt = Some(NumFmt {
+                            num_fmt_id,
+                            format_code,
+                        });
                     }
                     _ => {}
                 }
@@ -170,10 +215,18 @@ pub(crate) fn parse_num_fmts(doc: &roxmltree::Document, ns: &str) -> Vec<NumFmt>
     for node in doc.descendants() {
         if node.tag_name().name() == "numFmts" && node.tag_name().namespace() == Some(ns) {
             for child in node.children() {
-                if child.tag_name().name() != "numFmt" { continue; }
-                let num_fmt_id = child.attribute("numFmtId").and_then(|v| v.parse().ok()).unwrap_or(0);
+                if child.tag_name().name() != "numFmt" {
+                    continue;
+                }
+                let num_fmt_id = child
+                    .attribute("numFmtId")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
                 let format_code = child.attribute("formatCode").unwrap_or("").to_string();
-                fmts.push(NumFmt { num_fmt_id, format_code });
+                fmts.push(NumFmt {
+                    num_fmt_id,
+                    format_code,
+                });
             }
             break;
         }
@@ -193,13 +246,23 @@ pub(crate) fn parse_st_on_off(node: &roxmltree::Node) -> bool {
     }
 }
 
-pub(crate) fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Font> {
+pub(crate) fn parse_fonts(
+    doc: &roxmltree::Document,
+    ns: &str,
+    theme_colors: &[String],
+) -> Vec<Font> {
     let mut fonts = Vec::new();
     for fonts_node in doc.descendants() {
-        if fonts_node.tag_name().name() == "fonts" && fonts_node.tag_name().namespace() == Some(ns) {
+        if fonts_node.tag_name().name() == "fonts" && fonts_node.tag_name().namespace() == Some(ns)
+        {
             for font_node in fonts_node.children() {
-                if font_node.tag_name().name() != "font" { continue; }
-                let mut f = Font { size: 11.0, ..Default::default() };
+                if font_node.tag_name().name() != "font" {
+                    continue;
+                }
+                let mut f = Font {
+                    size: 11.0,
+                    ..Default::default()
+                };
                 for child in font_node.children() {
                     match child.tag_name().name() {
                         "b" => f.bold = parse_st_on_off(&child),
@@ -243,21 +306,33 @@ pub(crate) fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[S
     fonts
 }
 
-pub(crate) fn parse_fills(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Fill> {
+pub(crate) fn parse_fills(
+    doc: &roxmltree::Document,
+    ns: &str,
+    theme_colors: &[String],
+) -> Vec<Fill> {
     let mut fills = Vec::new();
     for fills_node in doc.descendants() {
-        if fills_node.tag_name().name() == "fills" && fills_node.tag_name().namespace() == Some(ns) {
+        if fills_node.tag_name().name() == "fills" && fills_node.tag_name().namespace() == Some(ns)
+        {
             for fill_node in fills_node.children() {
-                if fill_node.tag_name().name() != "fill" { continue; }
+                if fill_node.tag_name().name() != "fill" {
+                    continue;
+                }
                 let mut f = Fill::default();
                 for pf in fill_node.children() {
                     match pf.tag_name().name() {
                         "patternFill" => {
-                            f.pattern_type = pf.attribute("patternType").unwrap_or("none").to_string();
+                            f.pattern_type =
+                                pf.attribute("patternType").unwrap_or("none").to_string();
                             for color_node in pf.children() {
                                 match color_node.tag_name().name() {
-                                    "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
-                                    "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
+                                    "fgColor" => {
+                                        f.fg_color = parse_color(&color_node, theme_colors)
+                                    }
+                                    "bgColor" => {
+                                        f.bg_color = parse_color(&color_node, theme_colors)
+                                    }
                                     _ => {}
                                 }
                             }
@@ -267,26 +342,53 @@ pub(crate) fn parse_fills(doc: &roxmltree::Document, ns: &str, theme_colors: &[S
                             // `degree`, path uses top/bottom/left/right as a relative
                             // bounding box; children <stop position="n"><color/></stop>.
                             let gtype = pf.attribute("type").unwrap_or("linear").to_string();
-                            let degree = pf.attribute("degree").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            let left   = pf.attribute("left").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            let right  = pf.attribute("right").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            let top    = pf.attribute("top").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            let bottom = pf.attribute("bottom").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            let mut stops: Vec<GradientStopSpec> = pf.children()
+                            let degree = pf
+                                .attribute("degree")
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let left = pf
+                                .attribute("left")
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let right = pf
+                                .attribute("right")
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let top = pf
+                                .attribute("top")
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let bottom = pf
+                                .attribute("bottom")
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let mut stops: Vec<GradientStopSpec> = pf
+                                .children()
                                 .filter(|n| n.is_element() && n.tag_name().name() == "stop")
                                 .filter_map(|stop| {
-                                    let position = stop.attribute("position").and_then(|s| s.parse::<f64>().ok())?;
-                                    let color_node = stop.children().find(|c| c.is_element() && c.tag_name().name() == "color")?;
+                                    let position = stop
+                                        .attribute("position")
+                                        .and_then(|s| s.parse::<f64>().ok())?;
+                                    let color_node = stop.children().find(|c| {
+                                        c.is_element() && c.tag_name().name() == "color"
+                                    })?;
                                     let color = parse_color(&color_node, theme_colors)?;
                                     Some(GradientStopSpec { position, color })
                                 })
                                 .collect();
-                            stops.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap_or(std::cmp::Ordering::Equal));
+                            stops.sort_by(|a, b| {
+                                a.position
+                                    .partial_cmp(&b.position)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
                             if !stops.is_empty() {
                                 f.gradient = Some(GradientFillSpec {
                                     gradient_type: gtype,
                                     degree,
-                                    left, right, top, bottom,
+                                    left,
+                                    right,
+                                    top,
+                                    bottom,
                                     stops,
                                 });
                             }
@@ -302,30 +404,55 @@ pub(crate) fn parse_fills(doc: &roxmltree::Document, ns: &str, theme_colors: &[S
     fills
 }
 
-pub(crate) fn parse_borders(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Border> {
+pub(crate) fn parse_borders(
+    doc: &roxmltree::Document,
+    ns: &str,
+    theme_colors: &[String],
+) -> Vec<Border> {
     let mut borders = Vec::new();
     for borders_node in doc.descendants() {
-        if borders_node.tag_name().name() == "borders" && borders_node.tag_name().namespace() == Some(ns) {
+        if borders_node.tag_name().name() == "borders"
+            && borders_node.tag_name().namespace() == Some(ns)
+        {
             for border_node in borders_node.children() {
-                if border_node.tag_name().name() != "border" { continue; }
-                let has_diag_up = border_node.attribute("diagonalUp").map(|v| v == "1" || v == "true").unwrap_or(false);
-                let has_diag_down = border_node.attribute("diagonalDown").map(|v| v == "1" || v == "true").unwrap_or(false);
+                if border_node.tag_name().name() != "border" {
+                    continue;
+                }
+                let has_diag_up = border_node
+                    .attribute("diagonalUp")
+                    .map(|v| v == "1" || v == "true")
+                    .unwrap_or(false);
+                let has_diag_down = border_node
+                    .attribute("diagonalDown")
+                    .map(|v| v == "1" || v == "true")
+                    .unwrap_or(false);
                 let mut b = Border::default();
                 let mut diag_edge: Option<BorderEdge> = None;
                 for edge_node in border_node.children() {
                     let style = edge_node.attribute("style").unwrap_or("").to_string();
-                    let color = edge_node.children().find(|c| c.is_element()).and_then(|c| parse_color(&c, theme_colors));
+                    let color = edge_node
+                        .children()
+                        .find(|c| c.is_element())
+                        .and_then(|c| parse_color(&c, theme_colors));
                     match edge_node.tag_name().name() {
                         "left" if !style.is_empty() => b.left = Some(BorderEdge { style, color }),
                         "right" if !style.is_empty() => b.right = Some(BorderEdge { style, color }),
                         "top" if !style.is_empty() => b.top = Some(BorderEdge { style, color }),
-                        "bottom" if !style.is_empty() => b.bottom = Some(BorderEdge { style, color }),
-                        "diagonal" if !style.is_empty() => diag_edge = Some(BorderEdge { style, color }),
+                        "bottom" if !style.is_empty() => {
+                            b.bottom = Some(BorderEdge { style, color })
+                        }
+                        "diagonal" if !style.is_empty() => {
+                            diag_edge = Some(BorderEdge { style, color })
+                        }
                         _ => {}
                     }
                 }
-                if has_diag_up { b.diagonal_up = diag_edge.clone(); }
-                if has_diag_down { b.diagonal_down = diag_edge; }
+                if has_diag_up {
+                    b.diagonal_up = diag_edge.clone();
+                }
+                if has_diag_down {
+                    b.diagonal_down = diag_edge;
+                }
                 borders.push(b);
             }
             break;
@@ -339,11 +466,25 @@ pub(crate) fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf>
     for xfs_node in doc.descendants() {
         if xfs_node.tag_name().name() == "cellXfs" && xfs_node.tag_name().namespace() == Some(ns) {
             for xf_node in xfs_node.children() {
-                if xf_node.tag_name().name() != "xf" { continue; }
-                let font_id = xf_node.attribute("fontId").and_then(|v| v.parse().ok()).unwrap_or(0);
-                let fill_id = xf_node.attribute("fillId").and_then(|v| v.parse().ok()).unwrap_or(0);
-                let border_id = xf_node.attribute("borderId").and_then(|v| v.parse().ok()).unwrap_or(0);
-                let num_fmt_id = xf_node.attribute("numFmtId").and_then(|v| v.parse().ok()).unwrap_or(0);
+                if xf_node.tag_name().name() != "xf" {
+                    continue;
+                }
+                let font_id = xf_node
+                    .attribute("fontId")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let fill_id = xf_node
+                    .attribute("fillId")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let border_id = xf_node
+                    .attribute("borderId")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let num_fmt_id = xf_node
+                    .attribute("numFmtId")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
                 let mut align_h = None;
                 let mut align_v = None;
                 let mut wrap_text = false;
@@ -355,18 +496,44 @@ pub(crate) fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf>
                     if child.tag_name().name() == "alignment" {
                         align_h = child.attribute("horizontal").map(|s| s.to_string());
                         align_v = child.attribute("vertical").map(|s| s.to_string());
-                        wrap_text = child.attribute("wrapText").map(|v| v == "1" || v == "true").unwrap_or(false);
-                        indent = child.attribute("indent").and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
-                        text_rotation = child.attribute("textRotation").and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
-                        shrink_to_fit = child.attribute("shrinkToFit").map(|v| v == "1" || v == "true").unwrap_or(false);
-                        reading_order = child.attribute("readingOrder").and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
+                        wrap_text = child
+                            .attribute("wrapText")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false);
+                        indent = child
+                            .attribute("indent")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .filter(|&v| v > 0);
+                        text_rotation = child
+                            .attribute("textRotation")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .filter(|&v| v > 0);
+                        shrink_to_fit = child
+                            .attribute("shrinkToFit")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false);
+                        reading_order = child
+                            .attribute("readingOrder")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .filter(|&v| v > 0);
                     }
                 }
-                xfs.push(CellXf { font_id, fill_id, border_id, num_fmt_id, align_h, align_v, wrap_text, indent, text_rotation, shrink_to_fit, reading_order });
+                xfs.push(CellXf {
+                    font_id,
+                    fill_id,
+                    border_id,
+                    num_fmt_id,
+                    align_h,
+                    align_v,
+                    wrap_text,
+                    indent,
+                    text_rotation,
+                    shrink_to_fit,
+                    reading_order,
+                });
             }
             break;
         }
     }
     xfs
 }
-

@@ -209,23 +209,37 @@ pub fn parse_omath_nodes(el: Node) -> Vec<MathNode> {
                     .and_then(|p| mval(p, "pos"))
                     .unwrap_or_else(|| "bot".to_string());
                 let chr = pr.and_then(|p| mval(p, "chr")).unwrap_or_else(|| {
-                    if pos == "top" { "\u{23DE}".to_string() } else { "\u{23DF}".to_string() }
+                    if pos == "top" {
+                        "\u{23DE}".to_string()
+                    } else {
+                        "\u{23DF}".to_string()
+                    }
                 });
-                out.push(MathNode::GroupChr { chr, pos, base: nodes_in(child, "e") });
+                out.push(MathNode::GroupChr {
+                    chr,
+                    pos,
+                    base: nodes_in(child, "e"),
+                });
             }
             "bar" => {
                 let pr = mchild(child, "barPr");
                 let pos = pr
                     .and_then(|p| mval(p, "pos"))
                     .unwrap_or_else(|| "top".to_string());
-                out.push(MathNode::Bar { pos, base: nodes_in(child, "e") });
+                out.push(MathNode::Bar {
+                    pos,
+                    base: nodes_in(child, "e"),
+                });
             }
             "acc" => {
                 let pr = mchild(child, "accPr");
                 let chr = pr
                     .and_then(|p| mval(p, "chr"))
                     .unwrap_or_else(|| "\u{0302}".to_string());
-                out.push(MathNode::Accent { chr, base: nodes_in(child, "e") });
+                out.push(MathNode::Accent {
+                    chr,
+                    base: nodes_in(child, "e"),
+                });
             }
             "func" => out.push(MathNode::Func {
                 name: nodes_in(child, "fName"),
@@ -266,13 +280,19 @@ pub fn nodes_to_text(nodes: &[MathNode]) -> String {
                 s.push('^');
                 s.push_str(&nodes_to_text(sup));
             }
-            MathNode::Nary { op, sub, sup, body, .. } => {
+            MathNode::Nary {
+                op, sub, sup, body, ..
+            } => {
                 s.push_str(op);
                 s.push_str(&nodes_to_text(sub));
                 s.push_str(&nodes_to_text(sup));
                 s.push_str(&nodes_to_text(body));
             }
-            MathNode::Delimiter { beg_char, end_char, items } => {
+            MathNode::Delimiter {
+                beg_char,
+                end_char,
+                items,
+            } => {
                 s.push_str(beg_char);
                 for (i, it) in items.iter().enumerate() {
                     if i > 0 {
@@ -345,7 +365,10 @@ fn parse_matrix(el: Node) -> MathNode {
             .collect();
         rows.push(cells);
     }
-    MathNode::Array { rows, align: "center".to_string() }
+    MathNode::Array {
+        rows,
+        align: "center".to_string(),
+    }
 }
 
 /// `m:eqArr` -> array where each `m:e` is a row, split into cells at `&` alignment marks.
@@ -357,7 +380,10 @@ fn parse_eqarr(el: Node) -> MathNode {
     {
         rows.push(split_align_cells(parse_omath_nodes(e)));
     }
-    MathNode::Array { rows, align: "eq".to_string() }
+    MathNode::Array {
+        rows,
+        align: "eq".to_string(),
+    }
 }
 
 /// Split a row's nodes into alignment cells at run-text `&` markers.
@@ -396,7 +422,10 @@ fn nodes_in(parent: Node, name: &str) -> Vec<MathNode> {
 /// Concatenate all `m:t` text under a math run.
 fn run_text(r: Node) -> String {
     let mut s = String::new();
-    for t in r.children().filter(|n| n.is_element() && n.tag_name().name() == "t") {
+    for t in r
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "t")
+    {
         for tn in t.children() {
             if let Some(txt) = tn.text() {
                 s.push_str(txt);
@@ -465,7 +494,10 @@ mod tests {
         let nodes = parse(&xml);
         let json = serde_json::to_string(&nodes).unwrap();
         assert!(json.contains(r#""kind":"nary""#), "json: {json}");
-        assert!(json.contains(r#""op":"∑""#) || json.contains("∑"), "json: {json}");
+        assert!(
+            json.contains(r#""op":"∑""#) || json.contains("∑"),
+            "json: {json}"
+        );
     }
 
     #[test]
@@ -489,7 +521,7 @@ mod tests {
         }
         // no stray '&' leaks into text
         let json = serde_json::to_string(&nodes).unwrap();
-        assert!(!json.contains('&') || json.contains("\\u0026") == false);
+        assert!(!json.contains('&') || !json.contains("\\u0026"));
     }
 
     #[test]

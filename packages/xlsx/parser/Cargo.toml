@@ -15,7 +15,3 @@ roxmltree = { workspace = true }
 base64 = { workspace = true }
 console_error_panic_hook = { workspace = true }
 ooxml-common = { workspace = true }
-
-[profile.release]
-opt-level = "s"
-lto = true

@@ -41,7 +41,6 @@ pub fn pptx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result
 }
 
 /// Native equivalent of `parse_pptx` for use from the MCP server.
-
 pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
     let presentation = parse_presentation(data).map_err(|e| e.to_string())?;
     serde_json::to_string(&presentation).map_err(|e| e.to_string())
@@ -53,7 +52,6 @@ pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
 /// strokes, effects, theme inheritance details). Designed for AI agents that
 /// need to read content efficiently — typical 10-30× token reduction vs. the
 /// raw JSON of `parse_pptx_native`.
-
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     let pres = parse_presentation(data).map_err(|e| e.to_string())?;
     let mut out = String::new();
@@ -70,7 +68,6 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 //  Markdown projection (text-focused) — separate code path from the rich JSON
 //  serialization used by the viewer. Lossy by design.
 // ───────────────────────────────────────────────────────────────────────────
-
 
 fn render_slide_md(slide: &Slide, out: &mut String) {
     use std::fmt::Write as _;
@@ -99,7 +96,6 @@ fn render_slide_md(slide: &Slide, out: &mut String) {
     }
 }
 
-
 fn slide_title_md(slide: &Slide) -> Option<String> {
     for el in &slide.elements {
         if let SlideElement::Shape(s) = el {
@@ -117,7 +113,6 @@ fn slide_title_md(slide: &Slide) -> Option<String> {
     None
 }
 
-
 fn shape_text_plain(s: &ShapeElement) -> Option<String> {
     let tb = s.text_body.as_ref()?;
     let mut buf = String::new();
@@ -130,9 +125,12 @@ fn shape_text_plain(s: &ShapeElement) -> Option<String> {
         buf.push(' ');
     }
     let trimmed = buf.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
-
 
 fn render_element_md(el: &SlideElement, out: &mut String) {
     match el {
@@ -160,7 +158,6 @@ fn render_element_md(el: &SlideElement, out: &mut String) {
     }
 }
 
-
 fn render_shape_md(s: &ShapeElement, out: &mut String) {
     let Some(tb) = &s.text_body else { return };
     if tb.paragraphs.is_empty() {
@@ -171,21 +168,18 @@ fn render_shape_md(s: &ShapeElement, out: &mut String) {
     // as bulleted, mirroring what PowerPoint draws. Free text boxes default to
     // plain paragraphs.
     let ph = s.placeholder_type.as_deref().unwrap_or("");
-    let inherit_means_bullet =
-        matches!(ph, "body" | "subTitle" | "obj" | "tx" | "ftr" | "hdr");
+    let inherit_means_bullet = matches!(ph, "body" | "subTitle" | "obj" | "tx" | "ftr" | "hdr");
     for para in &tb.paragraphs {
         render_paragraph_md(para, inherit_means_bullet, out);
     }
     out.push('\n');
 }
 
-
 enum ParaKind {
     Plain,
     Bullet,
     Number,
 }
-
 
 fn paragraph_kind(b: &Bullet, inherit_means_bullet: bool) -> ParaKind {
     match b {
@@ -201,7 +195,6 @@ fn paragraph_kind(b: &Bullet, inherit_means_bullet: bool) -> ParaKind {
         }
     }
 }
-
 
 fn render_paragraph_md(para: &Paragraph, inherit_means_bullet: bool, out: &mut String) {
     use std::fmt::Write as _;
@@ -227,7 +220,6 @@ fn render_paragraph_md(para: &Paragraph, inherit_means_bullet: bool, out: &mut S
         }
     }
 }
-
 
 fn render_runs_md(runs: &[TextRun]) -> String {
     let mut out = String::new();
@@ -280,14 +272,12 @@ fn render_runs_md(runs: &[TextRun]) -> String {
 /// body text contains so much punctuation that aggressive escaping makes the
 /// output noisier than the structure it's trying to expose. Pipe is handled
 /// separately in `render_table_cell_md` since it only matters inside tables.
-
 fn escape_inline_md(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('*', "\\*")
         .replace('_', "\\_")
         .replace('`', "\\`")
 }
-
 
 fn render_table_md(t: &TableElement, out: &mut String) {
     use std::fmt::Write as _;
@@ -308,7 +298,6 @@ fn render_table_md(t: &TableElement, out: &mut String) {
     }
     out.push('\n');
 }
-
 
 fn render_table_cell_md(cell: &TableCell) -> String {
     // Continuation cells of a merge carry no content — leave empty so the row
@@ -332,7 +321,6 @@ fn render_table_cell_md(cell: &TableCell) -> String {
     }
     buf.trim().replace('|', "\\|")
 }
-
 
 fn render_chart_md(c: &ChartElement, out: &mut String) {
     use std::fmt::Write as _;
@@ -359,7 +347,11 @@ fn render_chart_md(c: &ChartElement, out: &mut String) {
 /// pptx zip archive. Used by the main thread to materialize media blobs for
 /// interactive playback without re-parsing the whole file.
 #[wasm_bindgen]
-pub fn extract_media(data: &[u8], path: &str, max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
+pub fn extract_media(
+    data: &[u8],
+    path: &str,
+    max_zip_entry_bytes: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     let max = ooxml_common::zip::current_max();
     let cursor = Cursor::new(data);
@@ -443,6 +435,11 @@ struct PptxComment {
     text: String,
 }
 
+// serde-facing parser output enum; the variant sizes follow the OOXML element
+// model. Boxing the large Shape variant would change the JSON serialization
+// shape only cosmetically while complicating 30+ construction/match sites, for
+// no real benefit on this parse-once-then-serialize type.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum SlideElement {
@@ -495,7 +492,10 @@ struct ChartSeriesData {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ChartElement {
-    x: i64, y: i64, width: i64, height: i64,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
     chart_type: String,
     title: Option<String>,
     categories: Vec<String>,
@@ -624,7 +624,10 @@ struct ChartManualLayout {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct TableElement {
-    x: i64, y: i64, width: i64, height: i64,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
     /// Column widths in EMU
     cols: Vec<i64>,
     rows: Vec<TableRow>,
@@ -814,7 +817,9 @@ struct SrcRect {
     b: f64,
 }
 
-fn is_zero_f64(v: &f64) -> bool { v.abs() < 1e-9 }
+fn is_zero_f64(v: &f64) -> bool {
+    v.abs() < 1e-9
+}
 
 /// ECMA-376 §19.3.1.17/18 a:audioFile / a:videoFile and the
 /// p14:media extension (embed attribute).
@@ -850,7 +855,11 @@ fn parse_blip_alpha(blip_fill: roxmltree::Node<'_, '_>) -> Option<f64> {
     let amf = child(blip, "alphaModFix")?;
     let amt: f64 = attr(&amf, "amt")?.parse().ok()?;
     let frac = amt / 100_000.0;
-    if frac >= 0.9999 { None } else { Some(frac.max(0.0)) }
+    if frac >= 0.9999 {
+        None
+    } else {
+        Some(frac.max(0.0))
+    }
 }
 
 /// Parse `<a:srcRect l t r b>` from a `<p:blipFill>` (or `<a:blipFill>`) node.
@@ -863,8 +872,14 @@ fn parse_src_rect(blip_fill: roxmltree::Node<'_, '_>) -> Option<SrcRect> {
             .map(|v| v / 100_000.0)
             .unwrap_or(0.0)
     };
-    let rect = SrcRect { l: read("l"), t: read("t"), r: read("r"), b: read("b") };
-    if is_zero_f64(&rect.l) && is_zero_f64(&rect.t) && is_zero_f64(&rect.r) && is_zero_f64(&rect.b) {
+    let rect = SrcRect {
+        l: read("l"),
+        t: read("t"),
+        r: read("r"),
+        b: read("b"),
+    };
+    if is_zero_f64(&rect.l) && is_zero_f64(&rect.t) && is_zero_f64(&rect.r) && is_zero_f64(&rect.b)
+    {
         None
     } else {
         Some(rect)
@@ -949,7 +964,9 @@ struct Reflection {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 enum Fill {
-    Solid { color: String },
+    Solid {
+        color: String,
+    },
     None,
     #[serde(rename_all = "camelCase")]
     Gradient {
@@ -1010,12 +1027,30 @@ struct Stroke {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "cmd", rename_all = "camelCase")]
 enum PathCmd {
-    MoveTo { x: f64, y: f64 },
-    LineTo { x: f64, y: f64 },
+    MoveTo {
+        x: f64,
+        y: f64,
+    },
+    LineTo {
+        x: f64,
+        y: f64,
+    },
     /// Cubic Bézier: two control points + endpoint
-    CubicBezTo { x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64 },
+    CubicBezTo {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        x: f64,
+        y: f64,
+    },
     /// Elliptical arc (all angles in degrees)
-    ArcTo { wr: f64, hr: f64, st_ang: f64, sw_ang: f64 },
+    ArcTo {
+        wr: f64,
+        hr: f64,
+        st_ang: f64,
+        sw_ang: f64,
+    },
     Close,
 }
 
@@ -1068,10 +1103,18 @@ struct TextBody {
     rtl_col: bool,
 }
 
-fn one_u32() -> u32 { 1 }
-fn is_one(n: &u32) -> bool { *n == 1 }
-fn is_zero_i64(n: &i64) -> bool { *n == 0 }
-fn is_false(b: &bool) -> bool { !*b }
+fn one_u32() -> u32 {
+    1
+}
+fn is_one(n: &u32) -> bool {
+    *n == 1
+}
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
+}
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 
 /// Line spacing specification
 #[derive(Serialize, Deserialize, Debug)]
@@ -1152,6 +1195,10 @@ struct Paragraph {
     runs: Vec<TextRun>,
 }
 
+// serde-facing parser output enum; same rationale as SlideElement — the Text
+// variant is the common case and boxing it would add an allocation per run with
+// no meaningful gain on this parse-once-then-serialize type.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum TextRun {
@@ -1285,43 +1332,40 @@ fn read_zip_bytes(zip: &mut PptxZip<'_>, path: &str) -> Option<Vec<u8>> {
 /// Resolved fills and borders extracted from a single <a:tblStyle> definition.
 #[derive(Debug, Clone, Default)]
 struct TableStyleDef {
-    whole_fill:        Option<Fill>,
-    whole_inside_h:    Option<Stroke>,
-    whole_inside_v:    Option<Stroke>,
+    whole_fill: Option<Fill>,
+    whole_inside_h: Option<Stroke>,
+    whole_inside_v: Option<Stroke>,
     /// Outer top/bottom edge border (from wholeTbl tcBdr top/bottom)
-    whole_outer_h:     Option<Stroke>,
+    whole_outer_h: Option<Stroke>,
     /// Outer left/right edge border (from wholeTbl tcBdr left/right)
-    whole_outer_v:     Option<Stroke>,
-    band1h_fill:       Option<Fill>,
-    band2h_fill:       Option<Fill>,
-    first_row_fill:    Option<Fill>,
+    whole_outer_v: Option<Stroke>,
+    band1h_fill: Option<Fill>,
+    band2h_fill: Option<Fill>,
+    first_row_fill: Option<Fill>,
     first_row_border_b: Option<Stroke>,
-    last_row_fill:     Option<Fill>,
-    first_col_fill:    Option<Fill>,
-    last_col_fill:     Option<Fill>,
+    last_row_fill: Option<Fill>,
+    first_col_fill: Option<Fill>,
+    last_col_fill: Option<Fill>,
     /// Default text colour per role, from `<a:tcTxStyle>` (schemeClr/srgbClr).
     /// e.g. wholeTbl → dk1, firstRow header → lt1 (white). Hex, no `#`.
-    whole_text_color:     Option<String>,
+    whole_text_color: Option<String>,
     first_row_text_color: Option<String>,
-    last_row_text_color:  Option<String>,
+    last_row_text_color: Option<String>,
     first_col_text_color: Option<String>,
-    last_col_text_color:  Option<String>,
+    last_col_text_color: Option<String>,
     /// Default bold per role, from `<a:tcTxStyle b="on">` (ECMA-376 §20.1.4.2.28).
     /// e.g. a firstRow header is commonly bold.
-    first_row_bold:       Option<bool>,
-    last_row_bold:        Option<bool>,
-    first_col_bold:       Option<bool>,
-    last_col_bold:        Option<bool>,
+    first_row_bold: Option<bool>,
+    last_row_bold: Option<bool>,
+    first_col_bold: Option<bool>,
+    last_col_bold: Option<bool>,
 }
 
 // ===========================
 //  XML helpers (roxmltree)
 // ===========================
 
-fn child<'a, 'i>(
-    node: roxmltree::Node<'a, 'i>,
-    local: &str,
-) -> Option<roxmltree::Node<'a, 'i>> {
+fn child<'a, 'i>(node: roxmltree::Node<'a, 'i>, local: &str) -> Option<roxmltree::Node<'a, 'i>> {
     node.children()
         .find(|n| n.is_element() && n.tag_name().name() == local)
 }
@@ -1335,8 +1379,7 @@ fn children_vec<'a, 'i>(
         .collect()
 }
 
-const R_NS: &str =
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 fn attr(node: &roxmltree::Node<'_, '_>, local: &str) -> Option<String> {
     node.attributes()
@@ -1381,10 +1424,7 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
 /// Pair diagramData rels with diagramDrawing rels in a slide's rels XML by filename
 /// number (data1.xml ↔ drawing1.xml, data2.xml ↔ drawing2.xml, ...), then load each
 /// drawing XML from the zip. Returns dm_rid → drawing_xml_content.
-fn build_smartart_drawings(
-    rels_xml: &str,
-    zip: &mut PptxZip<'_>,
-) -> HashMap<String, String> {
+fn build_smartart_drawings(rels_xml: &str, zip: &mut PptxZip<'_>) -> HashMap<String, String> {
     let mut result: HashMap<String, String> = HashMap::new();
     let doc = match roxmltree::Document::parse(rels_xml) {
         Ok(d) => d,
@@ -1406,12 +1446,20 @@ fn build_smartart_drawings(
     fn trailing_num(target: &str) -> Option<u32> {
         let file = target.rsplit('/').next().unwrap_or("");
         let stem = file.split('.').next().unwrap_or("");
-        let digits: String = stem.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = stem
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         digits.chars().rev().collect::<String>().parse().ok()
     }
     for (rid, data_target) in data_rels {
-        let Some(num) = trailing_num(&data_target) else { continue };
-        let drawing_target = drawing_targets.iter().find(|t| trailing_num(t) == Some(num));
+        let Some(num) = trailing_num(&data_target) else {
+            continue;
+        };
+        let drawing_target = drawing_targets
+            .iter()
+            .find(|t| trailing_num(t) == Some(num));
         if let Some(dt) = drawing_target {
             let drawing_path = resolve_path("ppt/slides", dt);
             if let Ok(xml) = read_zip_str(zip, &drawing_path) {
@@ -1440,7 +1488,9 @@ fn resolve_path(base_dir: &str, target: &str) -> String {
     let mut parts: Vec<&str> = base_dir.split('/').collect();
     for seg in target.split('/') {
         match seg {
-            ".." => { parts.pop(); }
+            ".." => {
+                parts.pop();
+            }
             "." | "" => {}
             s => parts.push(s),
         }
@@ -1476,9 +1526,9 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
         for c in slot.children().filter(|n| n.is_element()) {
             let hex = match c.tag_name().name() {
                 "srgbClr" => attr(&c, "val"),
-                "sysClr"  => attr(&c, "lastClr"),
+                "sysClr" => attr(&c, "lastClr"),
                 "prstClr" => preset_color(attr(&c, "val").unwrap_or_default().as_str()),
-                _         => None,
+                _ => None,
             };
             if let Some(h) = hex {
                 map.insert(name, h);
@@ -1490,11 +1540,16 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
     // Parse fmtScheme > lnStyleLst so lnRef idx="N" can resolve to the theme's
     // canonical stroke width (9525 is wrong; theme defines 12700 / 19050 / 25400).
     // Stored under "+lnRef-1", "+lnRef-2", "+lnRef-3".
-    if let Some(fmt_scheme) = root.descendants()
+    if let Some(fmt_scheme) = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "fmtScheme")
     {
         if let Some(ln_style_lst) = child(fmt_scheme, "lnStyleLst") {
-            for (i, ln) in ln_style_lst.children().filter(|n| n.is_element() && n.tag_name().name() == "ln").enumerate() {
+            for (i, ln) in ln_style_lst
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "ln")
+                .enumerate()
+            {
                 if let Some(w) = attr(&ln, "w") {
                     map.insert(format!("+lnRef-{}", i + 1), w);
                 }
@@ -1504,7 +1559,8 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
 
     // Parse font scheme: majorFont (+mj-lt, +mj-ea, +mj-cs) and minorFont (+mn-lt, +mn-ea, +mn-cs)
     // Store as special keys in the theme map so the renderer can resolve +mj-lt → actual typeface.
-    if let Some(font_scheme) = root.descendants()
+    if let Some(font_scheme) = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "fontScheme")
     {
         let pairs: &[(&str, &[&str])] = &[
@@ -1515,8 +1571,8 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
         for (element_name, keys) in pairs {
             if let Some(font_node) = child(font_scheme, element_name) {
                 for (script, key) in scripts.iter().zip(keys.iter()) {
-                    if let Some(typeface) = child(font_node, script)
-                        .and_then(|n| attr(&n, "typeface"))
+                    if let Some(typeface) =
+                        child(font_node, script).and_then(|n| attr(&n, "typeface"))
                     {
                         if !typeface.is_empty() {
                             map.insert(key.to_string(), typeface.to_string());
@@ -1539,28 +1595,52 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
     // the bodyPr attributes (and the autoFit child element) into namespaced
     // theme keys so `parse_text_body` can fall back through them without
     // changing function signatures.
-    if let Some(obj_defaults) = root.descendants()
+    if let Some(obj_defaults) = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "objectDefaults")
     {
         let read_def = |def_name: &str, key_prefix: &str, map: &mut HashMap<String, String>| {
-            let Some(def) = child(obj_defaults, def_name) else { return; };
-            let Some(body_pr) = child(def, "bodyPr") else { return; };
+            let Some(def) = child(obj_defaults, def_name) else {
+                return;
+            };
+            let Some(body_pr) = child(def, "bodyPr") else {
+                return;
+            };
             // Plain attributes — copy verbatim; consumers parse the strings.
-            for attr_name in ["wrap", "anchor", "anchorCtr", "vert", "rtlCol",
-                              "lIns", "rIns", "tIns", "bIns",
-                              "numCol", "spcCol",
-                              "vertOverflow", "horzOverflow", "spcFirstLastPara",
-                              "rot", "upright", "fromWordArt", "forceAA",
-                              "compatLnSpc"] {
+            for attr_name in [
+                "wrap",
+                "anchor",
+                "anchorCtr",
+                "vert",
+                "rtlCol",
+                "lIns",
+                "rIns",
+                "tIns",
+                "bIns",
+                "numCol",
+                "spcCol",
+                "vertOverflow",
+                "horzOverflow",
+                "spcFirstLastPara",
+                "rot",
+                "upright",
+                "fromWordArt",
+                "forceAA",
+                "compatLnSpc",
+            ] {
                 if let Some(v) = attr(&body_pr, attr_name) {
                     map.insert(format!("{key_prefix}-bodyPr-{attr_name}"), v);
                 }
             }
             // Auto-fit is a child element, not an attribute. Encode as
             // `{prefix}-autoFit` → "sp" | "norm" | "none".
-            let auto_fit = if child(body_pr, "spAutoFit").is_some() { "sp" }
-                else if child(body_pr, "normAutofit").is_some() { "norm" }
-                else { "none" };
+            let auto_fit = if child(body_pr, "spAutoFit").is_some() {
+                "sp"
+            } else if child(body_pr, "normAutofit").is_some() {
+                "norm"
+            } else {
+                "none"
+            };
             // Only record when explicit; "none" is the spec default and
             // recording it would make every consumer see `Some("none")` even
             // for themes that didn't say anything.
@@ -1621,15 +1701,16 @@ fn parse_color_node_tint(
     theme: &HashMap<String, String>,
     tint_mode: ooxml_common::color::TintMode,
 ) -> Option<String> {
-    let xform = |hex: &str, c: roxmltree::Node<'_, '_>|
-        ooxml_common::color::apply_color_transforms(hex, c, tint_mode);
+    let xform = |hex: &str, c: roxmltree::Node<'_, '_>| {
+        ooxml_common::color::apply_color_transforms(hex, c, tint_mode)
+    };
     for c in node.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "srgbClr" => {
                 let hex = attr(&c, "val")?;
                 return Some(xform(&hex, c));
             }
-            "sysClr"  => {
+            "sysClr" => {
                 let hex = attr(&c, "lastClr")?;
                 return Some(xform(&hex, c));
             }
@@ -1638,14 +1719,14 @@ fn parse_color_node_tint(
                 let scheme_name = attr(&c, "val")?;
                 // OOXML semantic aliases → canonical theme slot names
                 let canonical: &str = match scheme_name.as_str() {
-                    "tx1" | "dk1"   => "dk1",
-                    "tx2" | "dk2"   => "dk2",
-                    "bg1" | "lt1"   => "lt1",
-                    "bg2" | "lt2"   => "lt2",
+                    "tx1" | "dk1" => "dk1",
+                    "tx2" | "dk2" => "dk2",
+                    "bg1" | "lt1" => "lt1",
+                    "bg2" | "lt2" => "lt2",
                     // phClr = "placeholder color" (inherits from layout).
                     // Approximate as the primary dark text color.
-                    "phClr"         => "dk1",
-                    other           => other,
+                    "phClr" => "dk1",
+                    other => other,
                 };
                 let base_hex = theme.get(canonical)?.clone();
                 return Some(xform(&base_hex, c));
@@ -1656,31 +1737,19 @@ fn parse_color_node_tint(
     None
 }
 
-/// PowerPoint's interpretation of OOXML color modifiers. Wraps the shared
-/// `ooxml_common::color::apply_color_transforms` with TintMode::PowerPointLinear
-/// — `tint` is applied as a `lerp(input, white, val)` in linear sRGB.
-/// Verified against PDF exports of SmartArt accent recolors.
-fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
-    ooxml_common::color::apply_color_transforms(
-        hex,
-        node,
-        ooxml_common::color::TintMode::PowerPointLinear,
-    )
-}
-
 fn preset_color(name: &str) -> Option<String> {
     let hex = match name {
-        "black"                  => "000000",
-        "white"                  => "FFFFFF",
-        "red"                    => "FF0000",
-        "green"                  => "008000",
-        "blue"                   => "0000FF",
-        "yellow"                 => "FFFF00",
-        "cyan"                   => "00FFFF",
-        "magenta"                => "FF00FF",
-        "orange"                 => "FFA500",
-        "gray"   | "grey"        => "808080",
-        "darkGray"  | "darkGrey"  => "404040",
+        "black" => "000000",
+        "white" => "FFFFFF",
+        "red" => "FF0000",
+        "green" => "008000",
+        "blue" => "0000FF",
+        "yellow" => "FFFF00",
+        "cyan" => "00FFFF",
+        "magenta" => "FF00FF",
+        "orange" => "FFA500",
+        "gray" | "grey" => "808080",
+        "darkGray" | "darkGrey" => "404040",
         "lightGray" | "lightGrey" => "D3D3D3",
         _ => return None,
     };
@@ -1691,10 +1760,7 @@ fn preset_color(name: &str) -> Option<String> {
 //  Fill / Stroke parsing
 // ===========================
 
-fn parse_fill(
-    node: roxmltree::Node<'_, '_>,
-    theme: &HashMap<String, String>,
-) -> Option<Fill> {
+fn parse_fill(node: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) -> Option<Fill> {
     for c in node.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "solidFill" => {
@@ -1736,7 +1802,9 @@ fn parse_fill(
                     // No valid stops — continue scanning other fill elements
                 } else {
                     stops.sort_by(|a, b| {
-                        a.position.partial_cmp(&b.position).unwrap_or(std::cmp::Ordering::Equal)
+                        a.position
+                            .partial_cmp(&b.position)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     });
                     let (grad_type, angle) = if let Some(lin) = child(c, "lin") {
                         // OOXML ang: 60000ths of degree, 0 = left→right, 5400000 = top→bottom
@@ -1747,7 +1815,11 @@ fn parse_fill(
                     } else {
                         ("linear".to_owned(), 0.0)
                     };
-                    return Some(Fill::Gradient { stops, angle, grad_type });
+                    return Some(Fill::Gradient {
+                        stops,
+                        angle,
+                        grad_type,
+                    });
                 }
             }
             _ => {}
@@ -1758,8 +1830,8 @@ fn parse_fill(
 
 fn parse_arrow_end(node: roxmltree::Node<'_, '_>) -> ArrowEnd {
     let kind = attr(&node, "type").unwrap_or_else(|| "none".to_owned());
-    let w    = attr(&node, "w").unwrap_or_else(|| "med".to_owned());
-    let len  = attr(&node, "len").unwrap_or_else(|| "med".to_owned());
+    let w = attr(&node, "w").unwrap_or_else(|| "med".to_owned());
+    let len = attr(&node, "len").unwrap_or_else(|| "med".to_owned());
     ArrowEnd { kind, w, len }
 }
 
@@ -1771,8 +1843,7 @@ fn parse_stroke(
         return None;
     }
     let width = attr_i64(&ln_node, "w").unwrap_or(9525);
-    let color = child(ln_node, "solidFill")
-        .and_then(|n| parse_color_node(n, theme))?;
+    let color = child(ln_node, "solidFill").and_then(|n| parse_color_node(n, theme))?;
     let dash_style = child(ln_node, "prstDash")
         .and_then(|n| attr(&n, "val"))
         .filter(|v| v != "solid");
@@ -1786,7 +1857,14 @@ fn parse_stroke(
     // ECMA-376 §20.1.8.42 ST_CompoundLine. Default "sng" stays absent so the
     // renderer keeps its single-stroke fast path.
     let cmpd = attr(&ln_node, "cmpd").filter(|v| v != "sng");
-    Some(Stroke { color, width, dash_style, head_end, tail_end, cmpd })
+    Some(Stroke {
+        color,
+        width,
+        dash_style,
+        head_end,
+        tail_end,
+        cmpd,
+    })
 }
 
 // ===========================
@@ -1829,7 +1907,13 @@ fn parse_shadow_node(
         (color_str, 1.0)
     };
 
-    Some(Shadow { color, alpha, blur, dist, dir })
+    Some(Shadow {
+        color,
+        alpha,
+        blur,
+        dist,
+        dir,
+    })
 }
 
 /// Parse spPr > effectLst > glow into a Glow effect — ECMA-376 §20.1.8.17
@@ -1847,7 +1931,11 @@ fn parse_glow(
     } else {
         (color_str, 1.0)
     };
-    Some(Glow { color, alpha, radius })
+    Some(Glow {
+        color,
+        alpha,
+        radius,
+    })
 }
 
 /// Parse spPr > effectLst > softEdge into a SoftEdge — ECMA-376 §20.1.8.31.
@@ -1869,11 +1957,11 @@ fn parse_reflection(effect_lst: roxmltree::Node<'_, '_>) -> Option<Reflection> {
         blur: attr_i64(&r, "blurRad").unwrap_or(0),
         dist: attr_i64(&r, "dist").unwrap_or(0),
         dir: attr_f64(&r, "dir").unwrap_or(0.0) / 60_000.0,
-        st_a:   pct("stA",   1.0),
+        st_a: pct("stA", 1.0),
         st_pos: pct("stPos", 0.0),
-        end_a:  pct("endA",  0.0),
+        end_a: pct("endA", 0.0),
         end_pos: pct("endPos", 1.0),
-        sx: pct("sx",  1.0),
+        sx: pct("sx", 1.0),
         sy: pct("sy", -1.0),
     })
 }
@@ -1883,11 +1971,7 @@ fn parse_reflection(effect_lst: roxmltree::Node<'_, '_>) -> Option<Reflection> {
 // ===========================
 
 /// Parse a single path command node; coordinates are normalised to [0,1].
-fn parse_path_cmd(
-    cmd_node: roxmltree::Node<'_, '_>,
-    path_w: f64,
-    path_h: f64,
-) -> Option<PathCmd> {
+fn parse_path_cmd(cmd_node: roxmltree::Node<'_, '_>, path_w: f64, path_h: f64) -> Option<PathCmd> {
     match cmd_node.tag_name().name() {
         "moveTo" => {
             let pt = child(cmd_node, "pt")?;
@@ -1903,22 +1987,36 @@ fn parse_path_cmd(
         }
         "cubicBezTo" => {
             let pts: Vec<_> = children_vec(cmd_node, "pt");
-            if pts.len() < 3 { return None; }
+            if pts.len() < 3 {
+                return None;
+            }
             let x1 = attr_f64(&pts[0], "x")? / path_w;
             let y1 = attr_f64(&pts[0], "y")? / path_h;
             let x2 = attr_f64(&pts[1], "x")? / path_w;
             let y2 = attr_f64(&pts[1], "y")? / path_h;
-            let x  = attr_f64(&pts[2], "x")? / path_w;
-            let y  = attr_f64(&pts[2], "y")? / path_h;
-            Some(PathCmd::CubicBezTo { x1, y1, x2, y2, x, y })
+            let x = attr_f64(&pts[2], "x")? / path_w;
+            let y = attr_f64(&pts[2], "y")? / path_h;
+            Some(PathCmd::CubicBezTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            })
         }
         "arcTo" => {
             // wR/hR are radii in path-local units; stAng/swAng in 60000ths of a degree
-            let wr     = attr_f64(&cmd_node, "wR").unwrap_or(0.0) / path_w;
-            let hr     = attr_f64(&cmd_node, "hR").unwrap_or(0.0) / path_h;
+            let wr = attr_f64(&cmd_node, "wR").unwrap_or(0.0) / path_w;
+            let hr = attr_f64(&cmd_node, "hR").unwrap_or(0.0) / path_h;
             let st_ang = attr_f64(&cmd_node, "stAng").unwrap_or(0.0) / 60000.0;
             let sw_ang = attr_f64(&cmd_node, "swAng").unwrap_or(0.0) / 60000.0;
-            Some(PathCmd::ArcTo { wr, hr, st_ang, sw_ang })
+            Some(PathCmd::ArcTo {
+                wr,
+                hr,
+                st_ang,
+                sw_ang,
+            })
         }
         "close" => Some(PathCmd::Close),
         _ => None,
@@ -1964,17 +2062,23 @@ struct Transform {
 }
 
 fn parse_xfrm(xfrm: roxmltree::Node<'_, '_>) -> Transform {
-    let rot    = attr_f64(&xfrm, "rot").unwrap_or(0.0) / 60000.0;
-    let flip_h = attr(&xfrm, "flipH").map(|v| v == "1" || v == "true").unwrap_or(false);
-    let flip_v = attr(&xfrm, "flipV").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let rot = attr_f64(&xfrm, "rot").unwrap_or(0.0) / 60000.0;
+    let flip_h = attr(&xfrm, "flipH")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    let flip_v = attr(&xfrm, "flipV")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
     let off = child(xfrm, "off");
     let ext = child(xfrm, "ext");
     Transform {
-        x:  off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
-        y:  off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
+        x: off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
+        y: off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
         cx: ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
         cy: ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
-        rot, flip_h, flip_v,
+        rot,
+        flip_h,
+        flip_v,
     }
 }
 
@@ -1984,10 +2088,14 @@ fn parse_xfrm(xfrm: roxmltree::Node<'_, '_>) -> Transform {
 
 #[derive(Clone, Debug, Default)]
 struct GroupTransform {
-    x: i64, y: i64,
-    cx: i64, cy: i64,
-    ch_x: i64, ch_y: i64,
-    ch_cx: i64, ch_cy: i64,
+    x: i64,
+    y: i64,
+    cx: i64,
+    cy: i64,
+    ch_x: i64,
+    ch_y: i64,
+    ch_cx: i64,
+    ch_cy: i64,
     flip_h: bool,
     flip_v: bool,
     /// Group rotation in degrees, clockwise
@@ -1996,8 +2104,16 @@ struct GroupTransform {
 
 impl GroupTransform {
     fn apply_to_transform(&self, t: Transform) -> Transform {
-        let sx = if self.ch_cx != 0 { self.cx as f64 / self.ch_cx as f64 } else { 1.0 };
-        let sy = if self.ch_cy != 0 { self.cy as f64 / self.ch_cy as f64 } else { 1.0 };
+        let sx = if self.ch_cx != 0 {
+            self.cx as f64 / self.ch_cx as f64
+        } else {
+            1.0
+        };
+        let sy = if self.ch_cy != 0 {
+            self.cy as f64 / self.ch_cy as f64
+        } else {
+            1.0
+        };
         // If the group is flipped, mirror child positions in child coordinate space
         // before applying the normal scale+translate.
         // Mirror formula: new_left = (ch_x + ch_cx) - (t.x - ch_x) - t.cx
@@ -2033,7 +2149,10 @@ impl GroupTransform {
             // Clockwise rotation in screen coords (y-axis down): x' = x*cos - y*sin, y' = x*sin + y*cos
             let dx_new = dx * cos_r - dy * sin_r;
             let dy_new = dx * sin_r + dy * cos_r;
-            (group_cx + dx_new - new_cx as f64 / 2.0, group_cy + dy_new - new_cy as f64 / 2.0)
+            (
+                group_cx + dx_new - new_cx as f64 / 2.0,
+                group_cy + dy_new - new_cy as f64 / 2.0,
+            )
         } else {
             (new_x, new_y)
         };
@@ -2043,8 +2162,8 @@ impl GroupTransform {
         // GF (group net flip) = flip_h XOR flip_v.
         let gf = self.flip_h ^ self.flip_v;
         Transform {
-            x:  final_x.round() as i64,
-            y:  final_y.round() as i64,
+            x: final_x.round() as i64,
+            y: final_y.round() as i64,
             cx: new_cx,
             cy: new_cy,
             rot: self.rot + if gf { -t.rot } else { t.rot },
@@ -2058,24 +2177,61 @@ impl GroupTransform {
 fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) {
     match el {
         SlideElement::Shape(s) => {
-            let t = Transform { x: s.x, y: s.y, cx: s.width, cy: s.height, rot: s.rotation, flip_h: s.flip_h, flip_v: s.flip_v };
+            let t = Transform {
+                x: s.x,
+                y: s.y,
+                cx: s.width,
+                cy: s.height,
+                rot: s.rotation,
+                flip_h: s.flip_h,
+                flip_v: s.flip_v,
+            };
             let nt = gt.apply_to_transform(t);
-            s.x = nt.x; s.y = nt.y; s.width = nt.cx; s.height = nt.cy;
-            s.rotation = nt.rot; s.flip_h = nt.flip_h; s.flip_v = nt.flip_v;
+            s.x = nt.x;
+            s.y = nt.y;
+            s.width = nt.cx;
+            s.height = nt.cy;
+            s.rotation = nt.rot;
+            s.flip_h = nt.flip_h;
+            s.flip_v = nt.flip_v;
             // Transform the explicit text frame in lock-step. It is axis-aligned
             // in local coords; pass rot=0/flip=false so it only translates+scales
             // (SmartArt drawings that carry txXfrm are not nested in rotated groups).
             if let Some(tr) = &mut s.text_rect {
-                let tt = Transform { x: tr.x, y: tr.y, cx: tr.width, cy: tr.height, rot: 0.0, flip_h: false, flip_v: false };
+                let tt = Transform {
+                    x: tr.x,
+                    y: tr.y,
+                    cx: tr.width,
+                    cy: tr.height,
+                    rot: 0.0,
+                    flip_h: false,
+                    flip_v: false,
+                };
                 let ntt = gt.apply_to_transform(tt);
-                tr.x = ntt.x; tr.y = ntt.y; tr.width = ntt.cx; tr.height = ntt.cy;
+                tr.x = ntt.x;
+                tr.y = ntt.y;
+                tr.width = ntt.cx;
+                tr.height = ntt.cy;
             }
         }
         SlideElement::Picture(p) => {
-            let t = Transform { x: p.x, y: p.y, cx: p.width, cy: p.height, rot: p.rotation, flip_h: p.flip_h, flip_v: p.flip_v };
+            let t = Transform {
+                x: p.x,
+                y: p.y,
+                cx: p.width,
+                cy: p.height,
+                rot: p.rotation,
+                flip_h: p.flip_h,
+                flip_v: p.flip_v,
+            };
             let nt = gt.apply_to_transform(t);
-            p.x = nt.x; p.y = nt.y; p.width = nt.cx; p.height = nt.cy;
-            p.rotation = nt.rot; p.flip_h = nt.flip_h; p.flip_v = nt.flip_v;
+            p.x = nt.x;
+            p.y = nt.y;
+            p.width = nt.cx;
+            p.height = nt.cy;
+            p.rotation = nt.rot;
+            p.flip_h = nt.flip_h;
+            p.flip_v = nt.flip_v;
         }
         SlideElement::Table(tbl) => {
             // If the table has no xfrm (zero dimensions), it fills the group's child space.
@@ -2084,9 +2240,20 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
             } else {
                 (tbl.x, tbl.y, tbl.width, tbl.height)
             };
-            let t = Transform { x: ex, y: ey, cx: ecx, cy: ecy, rot: 0.0, flip_h: false, flip_v: false };
+            let t = Transform {
+                x: ex,
+                y: ey,
+                cx: ecx,
+                cy: ecy,
+                rot: 0.0,
+                flip_h: false,
+                flip_v: false,
+            };
             let nt = gt.apply_to_transform(t);
-            tbl.x = nt.x; tbl.y = nt.y; tbl.width = nt.cx; tbl.height = nt.cy;
+            tbl.x = nt.x;
+            tbl.y = nt.y;
+            tbl.width = nt.cx;
+            tbl.height = nt.cy;
         }
         SlideElement::Chart(chart) => {
             // If the chart graphicFrame has no xfrm (zero dimensions), it fills the group's child space.
@@ -2095,14 +2262,36 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
             } else {
                 (chart.x, chart.y, chart.width, chart.height)
             };
-            let t = Transform { x: ex, y: ey, cx: ecx, cy: ecy, rot: 0.0, flip_h: false, flip_v: false };
+            let t = Transform {
+                x: ex,
+                y: ey,
+                cx: ecx,
+                cy: ecy,
+                rot: 0.0,
+                flip_h: false,
+                flip_v: false,
+            };
             let nt = gt.apply_to_transform(t);
-            chart.x = nt.x; chart.y = nt.y; chart.width = nt.cx; chart.height = nt.cy;
+            chart.x = nt.x;
+            chart.y = nt.y;
+            chart.width = nt.cx;
+            chart.height = nt.cy;
         }
         SlideElement::Media(m) => {
-            let t = Transform { x: m.x, y: m.y, cx: m.width, cy: m.height, rot: 0.0, flip_h: false, flip_v: false };
+            let t = Transform {
+                x: m.x,
+                y: m.y,
+                cx: m.width,
+                cy: m.height,
+                rot: 0.0,
+                flip_h: false,
+                flip_v: false,
+            };
             let nt = gt.apply_to_transform(t);
-            m.x = nt.x; m.y = nt.y; m.width = nt.cx; m.height = nt.cy;
+            m.x = nt.x;
+            m.y = nt.y;
+            m.width = nt.cx;
+            m.height = nt.cy;
         }
     }
 }
@@ -2114,24 +2303,24 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
 /// Keyed first by idx (integer), then by type string.
 #[derive(Default)]
 struct LayoutPlaceholders {
-    by_idx:  HashMap<u32, Transform>,
+    by_idx: HashMap<u32, Transform>,
     by_type: HashMap<String, Transform>,
     /// Fallback transforms from slide master (by ph_type), used when layout has no xfrm
     master_by_type: HashMap<String, Transform>,
     /// Default font size (pt) per placeholder idx, from layout/master lstStyle
-    by_idx_font_size:  HashMap<u32, f64>,
+    by_idx_font_size: HashMap<u32, f64>,
     /// Default font size (pt) per placeholder type, from layout/master lstStyle
     by_type_font_size: HashMap<String, f64>,
     /// Per-list-level default font sizes (pt) per placeholder idx — index 0..=8
     /// maps to lvl1pPr..lvl9pPr (ECMA-376 §21.1.2.4). Lets nested bullets shrink
     /// per level (e.g. body 28pt → lvl2 24pt → lvl3 20pt) instead of all using
     /// the level-1 size. None per level where the style chain doesn't specify it.
-    by_idx_level_sizes:  HashMap<u32, LevelFontSizes>,
+    by_idx_level_sizes: HashMap<u32, LevelFontSizes>,
     /// Per-list-level default font sizes (pt) per placeholder type.
     by_type_level_sizes: HashMap<String, LevelFontSizes>,
     /// Per-list-level inherited bullet (buChar/buAutoNum/buNone) per placeholder
     /// idx — what a paragraph with no explicit bullet inherits (ECMA-376 §19.7.10).
-    by_idx_level_bullets:  HashMap<u32, LevelBullets>,
+    by_idx_level_bullets: HashMap<u32, LevelBullets>,
     /// Per-list-level inherited bullet per placeholder type.
     by_type_level_bullets: HashMap<String, LevelBullets>,
     /// Default bold per placeholder type, from layout lstStyle defRPr b attribute
@@ -2197,7 +2386,11 @@ impl LayoutPlaceholders {
             .and_then(|i| self.by_idx.get(&i))
             .or_else(|| self.by_type.get(ph_type))
             .or_else(|| {
-                if ph_type == "body" { self.by_type.get("") } else { None }
+                if ph_type == "body" {
+                    self.by_type.get("")
+                } else {
+                    None
+                }
             })
             .or_else(|| self.master_by_type.get(ph_type))
     }
@@ -2208,8 +2401,13 @@ impl LayoutPlaceholders {
         if let Some(i) = ph_idx {
             return self.by_idx_font_size.get(&i).copied();
         }
-        self.by_type_font_size.get(ph_type).copied()
-            .or_else(|| if ph_type == "body" { self.by_type_font_size.get("").copied() } else { None })
+        self.by_type_font_size.get(ph_type).copied().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_font_size.get("").copied()
+            } else {
+                None
+            }
+        })
     }
 
     /// Per-list-level inherited default font sizes (lvl1..lvl9). Same idx-strict
@@ -2217,10 +2415,22 @@ impl LayoutPlaceholders {
     /// per-level styling.
     fn lookup_level_font_sizes(&self, ph_type: &str, ph_idx: Option<u32>) -> LevelFontSizes {
         if let Some(i) = ph_idx {
-            return self.by_idx_level_sizes.get(&i).copied().unwrap_or([None; 9]);
+            return self
+                .by_idx_level_sizes
+                .get(&i)
+                .copied()
+                .unwrap_or([None; 9]);
         }
-        self.by_type_level_sizes.get(ph_type).copied()
-            .or_else(|| if ph_type == "body" { self.by_type_level_sizes.get("").copied() } else { None })
+        self.by_type_level_sizes
+            .get(ph_type)
+            .copied()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_level_sizes.get("").copied()
+                } else {
+                    None
+                }
+            })
             .unwrap_or([None; 9])
     }
 
@@ -2228,57 +2438,131 @@ impl LayoutPlaceholders {
     /// `lookup_level_font_sizes`. All-None when the placeholder inherits no bullet.
     fn lookup_level_bullets(&self, ph_type: &str, ph_idx: Option<u32>) -> LevelBullets {
         if let Some(i) = ph_idx {
-            return self.by_idx_level_bullets.get(&i).cloned().unwrap_or_else(empty_level_bullets);
+            return self
+                .by_idx_level_bullets
+                .get(&i)
+                .cloned()
+                .unwrap_or_else(empty_level_bullets);
         }
-        self.by_type_level_bullets.get(ph_type).cloned()
-            .or_else(|| if ph_type == "body" { self.by_type_level_bullets.get("").cloned() } else { None })
+        self.by_type_level_bullets
+            .get(ph_type)
+            .cloned()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_level_bullets.get("").cloned()
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(empty_level_bullets)
     }
 
     /// Look up inherited bold for this placeholder type.
     fn lookup_bold(&self, ph_type: &str) -> Option<bool> {
-        self.by_type_bold.get(ph_type).copied()
-            .or_else(|| if ph_type == "body" { self.by_type_bold.get("").copied() } else { None })
+        self.by_type_bold.get(ph_type).copied().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_bold.get("").copied()
+            } else {
+                None
+            }
+        })
     }
 
     /// Look up inherited italic for this placeholder type.
     fn lookup_italic(&self, ph_type: &str) -> Option<bool> {
-        self.by_type_italic.get(ph_type).copied()
-            .or_else(|| if ph_type == "body" { self.by_type_italic.get("").copied() } else { None })
+        self.by_type_italic.get(ph_type).copied().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_italic.get("").copied()
+            } else {
+                None
+            }
+        })
     }
 
     /// Look up inherited caps ("all"/"small") for this placeholder type.
     fn lookup_caps(&self, ph_type: &str) -> Option<String> {
-        self.by_type_caps.get(ph_type).cloned()
-            .or_else(|| if ph_type == "body" { self.by_type_caps.get("").cloned() } else { None })
+        self.by_type_caps.get(ph_type).cloned().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_caps.get("").cloned()
+            } else {
+                None
+            }
+        })
     }
 
     /// Look up inherited vertical anchor for this placeholder type.
     fn lookup_anchor(&self, ph_type: &str) -> Option<String> {
-        self.by_type_anchor.get(ph_type).cloned()
-            .or_else(|| if ph_type == "body" { self.by_type_anchor.get("").cloned() } else { None })
+        self.by_type_anchor.get(ph_type).cloned().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_anchor.get("").cloned()
+            } else {
+                None
+            }
+        })
     }
 
     /// Look up inherited paragraph alignment for this placeholder type.
     fn lookup_alignment(&self, ph_type: &str) -> Option<String> {
-        self.by_type_alignment.get(ph_type).cloned()
-            .or_else(|| if ph_type == "body" { self.by_type_alignment.get("").cloned() } else { None })
+        self.by_type_alignment
+            .get(ph_type)
+            .cloned()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_alignment.get("").cloned()
+                } else {
+                    None
+                }
+            })
             .or_else(|| self.by_type_master_alignment.get(ph_type).cloned())
-            .or_else(|| if ph_type == "body" { self.by_type_master_alignment.get("").cloned() } else { None })
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_master_alignment.get("").cloned()
+                } else {
+                    None
+                }
+            })
     }
 
     fn lookup_space_before(&self, ph_type: &str) -> Option<i64> {
-        self.by_type_space_before.get(ph_type).copied()
-            .or_else(|| if ph_type == "body" { self.by_type_space_before.get("").copied() } else { None })
+        self.by_type_space_before
+            .get(ph_type)
+            .copied()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_space_before.get("").copied()
+                } else {
+                    None
+                }
+            })
             .or_else(|| self.by_type_master_space_before.get(ph_type).copied())
-            .or_else(|| if ph_type == "body" { self.by_type_master_space_before.get("").copied() } else { None })
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_master_space_before.get("").copied()
+                } else {
+                    None
+                }
+            })
     }
 
     fn lookup_space_after(&self, ph_type: &str) -> Option<i64> {
-        self.by_type_space_after.get(ph_type).copied()
-            .or_else(|| if ph_type == "body" { self.by_type_space_after.get("").copied() } else { None })
+        self.by_type_space_after
+            .get(ph_type)
+            .copied()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_space_after.get("").copied()
+                } else {
+                    None
+                }
+            })
             .or_else(|| self.by_type_master_space_after.get(ph_type).copied())
-            .or_else(|| if ph_type == "body" { self.by_type_master_space_after.get("").copied() } else { None })
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_master_space_after.get("").copied()
+                } else {
+                    None
+                }
+            })
     }
 
     /// Look up inherited blipFill from the layout placeholder spPr. Used when a slide
@@ -2298,8 +2582,13 @@ impl LayoutPlaceholders {
         if let Some(i) = ph_idx {
             return self.by_idx_stroke.get(&i).cloned();
         }
-        self.by_type_stroke.get(ph_type).cloned()
-            .or_else(|| if ph_type == "body" { self.by_type_stroke.get("").cloned() } else { None })
+        self.by_type_stroke.get(ph_type).cloned().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_stroke.get("").cloned()
+            } else {
+                None
+            }
+        })
     }
 
     /// Look up inherited default text color for this placeholder (layout then master fallback).
@@ -2322,13 +2611,32 @@ impl LayoutPlaceholders {
                 return Some(c.clone());
             }
             // Layout idx had no colour → fall through to the master type-keyed default.
-            return self.by_type_master_color.get(ph_type).cloned()
-                .or_else(|| if ph_type == "body" { self.by_type_master_color.get("").cloned() } else { None });
+            return self.by_type_master_color.get(ph_type).cloned().or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_master_color.get("").cloned()
+                } else {
+                    None
+                }
+            });
         }
-        self.by_type_color.get(ph_type).cloned()
-            .or_else(|| if ph_type == "body" { self.by_type_color.get("").cloned() } else { None })
+        self.by_type_color
+            .get(ph_type)
+            .cloned()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_color.get("").cloned()
+                } else {
+                    None
+                }
+            })
             .or_else(|| self.by_type_master_color.get(ph_type).cloned())
-            .or_else(|| if ph_type == "body" { self.by_type_master_color.get("").cloned() } else { None })
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_master_color.get("").cloned()
+                } else {
+                    None
+                }
+            })
     }
 
     /// Look up the inherited shape fill from the layout placeholder's `<p:spPr>`.
@@ -2353,8 +2661,13 @@ impl LayoutPlaceholders {
         if let Some(i) = ph_idx {
             return self.by_idx_fill.get(&i).cloned();
         }
-        self.by_type_fill.get(ph_type).cloned()
-            .or_else(|| if ph_type == "body" { self.by_type_fill.get("").cloned() } else { None })
+        self.by_type_fill.get(ph_type).cloned().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_fill.get("").cloned()
+            } else {
+                None
+            }
+        })
     }
 
     /// Look up inherited line spacing (spcPct val, e.g. 90000 = 90%) for this placeholder.
@@ -2363,10 +2676,24 @@ impl LayoutPlaceholders {
         if let Some(i) = ph_idx {
             return self.by_idx_line_spacing.get(&i).copied();
         }
-        self.by_type_line_spacing.get(ph_type).copied()
-            .or_else(|| if ph_type == "body" { self.by_type_line_spacing.get("").copied() } else { None })
+        self.by_type_line_spacing
+            .get(ph_type)
+            .copied()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_line_spacing.get("").copied()
+                } else {
+                    None
+                }
+            })
             .or_else(|| self.by_type_master_line_spacing.get(ph_type).copied())
-            .or_else(|| if ph_type == "body" { self.by_type_master_line_spacing.get("").copied() } else { None })
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_master_line_spacing.get("").copied()
+                } else {
+                    None
+                }
+            })
     }
 }
 
@@ -2390,7 +2717,8 @@ fn read_level_font_sizes(list_style: roxmltree::Node<'_, '_>) -> LevelFontSizes 
     let mut out: LevelFontSizes = [None; 9];
     for (lvl, slot) in out.iter_mut().enumerate() {
         let tag = format!("lvl{}pPr", lvl + 1);
-        *slot = list_style.children()
+        *slot = list_style
+            .children()
             .find(|n| n.is_element() && n.tag_name().name() == tag)
             .and_then(|lp| child(lp, "defRPr"))
             .and_then(|rp| attr_f64(&rp, "sz"))
@@ -2401,16 +2729,22 @@ fn read_level_font_sizes(list_style: roxmltree::Node<'_, '_>) -> LevelFontSizes 
 
 /// Per-level default font sizes from a txBody's own `<a:lstStyle>`.
 fn extract_level_font_sizes(tx_body: roxmltree::Node<'_, '_>) -> LevelFontSizes {
-    child(tx_body, "lstStyle").map(read_level_font_sizes).unwrap_or([None; 9])
+    child(tx_body, "lstStyle")
+        .map(read_level_font_sizes)
+        .unwrap_or([None; 9])
 }
 
 /// True when any level carries a size (avoids storing all-None arrays).
-fn has_any_level_size(s: &LevelFontSizes) -> bool { s.iter().any(|v| v.is_some()) }
+fn has_any_level_size(s: &LevelFontSizes) -> bool {
+    s.iter().any(|v| v.is_some())
+}
 
 /// Per-edge merge: `primary[lvl]` wins, else `fallback[lvl]`.
 fn merge_level_sizes(primary: &LevelFontSizes, fallback: &LevelFontSizes) -> LevelFontSizes {
     let mut out: LevelFontSizes = [None; 9];
-    for lvl in 0..9 { out[lvl] = primary[lvl].or(fallback[lvl]); }
+    for lvl in 0..9 {
+        out[lvl] = primary[lvl].or(fallback[lvl]);
+    }
     out
 }
 
@@ -2419,19 +2753,27 @@ fn merge_level_sizes(primary: &LevelFontSizes, fallback: &LevelFontSizes) -> Lev
 /// (so the value is still inherited from a lower-priority style tier).
 type LevelBullets = [Option<Bullet>; 9];
 
-fn empty_level_bullets() -> LevelBullets { std::array::from_fn(|_| None) }
+fn empty_level_bullets() -> LevelBullets {
+    std::array::from_fn(|_| None)
+}
 
 /// True when any level carries an explicit bullet (avoids storing all-None arrays).
-fn has_any_level_bullet(s: &LevelBullets) -> bool { s.iter().any(|v| v.is_some()) }
+fn has_any_level_bullet(s: &LevelBullets) -> bool {
+    s.iter().any(|v| v.is_some())
+}
 
 /// Read `<a:lvlNpPr>` bullets for levels 1..9 from a node holding `<a:lvlNpPr>`
 /// children (a txBody `<a:lstStyle>` or a master `<p:txStyles>` style node).
 /// A level resolves to `Some` only when it explicitly sets `buChar`/`buAutoNum`/
 /// `buNone`; an absent bullet element stays `None` so lower tiers can supply it.
-fn read_level_bullets(list_style: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) -> LevelBullets {
+fn read_level_bullets(
+    list_style: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> LevelBullets {
     std::array::from_fn(|lvl| {
         let tag = format!("lvl{}pPr", lvl + 1);
-        list_style.children()
+        list_style
+            .children()
             .find(|n| n.is_element() && n.tag_name().name() == tag)
             .and_then(|lp| match parse_bullet(Some(lp), theme) {
                 Bullet::Inherit => None,
@@ -2441,8 +2783,13 @@ fn read_level_bullets(list_style: roxmltree::Node<'_, '_>, theme: &HashMap<Strin
 }
 
 /// Per-level bullets from a txBody's own `<a:lstStyle>`.
-fn extract_level_bullets(tx_body: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) -> LevelBullets {
-    child(tx_body, "lstStyle").map(|ls| read_level_bullets(ls, theme)).unwrap_or_else(empty_level_bullets)
+fn extract_level_bullets(
+    tx_body: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> LevelBullets {
+    child(tx_body, "lstStyle")
+        .map(|ls| read_level_bullets(ls, theme))
+        .unwrap_or_else(empty_level_bullets)
 }
 
 /// Per-edge merge: `primary[lvl]` wins, else `fallback[lvl]`.
@@ -2459,8 +2806,12 @@ fn parse_master_anchors(master_xml: &str) -> HashMap<String, String> {
     };
     let root = doc.root_element();
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
-        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
-            let ph_node = sp.descendants()
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            let ph_node = sp
+                .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "ph");
             if let Some(ph) = ph_node {
                 let ph_type = attr(&ph, "type").unwrap_or_default();
@@ -2485,8 +2836,12 @@ fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
     };
     let root = doc.root_element();
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
-        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
-            let ph_node = sp.descendants()
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            let ph_node = sp
+                .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "ph");
             if let Some(ph) = ph_node {
                 let ph_type = attr(&ph, "type").unwrap_or_default();
@@ -2516,8 +2871,12 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
 
     // Scan master spTree placeholder shapes first — per-shape lstStyle is more specific
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
-        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
-            let ph_node = sp.descendants()
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            let ph_node = sp
+                .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "ph");
             if let Some(ph) = ph_node {
                 let ph_type = attr(&ph, "type").unwrap_or_default();
@@ -2533,9 +2892,9 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
     // p:txStyles > a:titleStyle / a:bodyStyle / a:otherStyle as fallback
     if let Some(tx_styles) = child(root, "txStyles") {
         let style_ph_map: &[(&str, &[&str])] = &[
-            ("titleStyle",  &["title", "ctrTitle"]),
-            ("bodyStyle",   &["body", "subTitle", "obj", ""]),
-            ("otherStyle",  &["dt", "ftr", "sldNum"]),
+            ("titleStyle", &["title", "ctrTitle"]),
+            ("bodyStyle", &["body", "subTitle", "obj", ""]),
+            ("otherStyle", &["dt", "ftr", "sldNum"]),
         ];
         for (style_name, ph_types) in style_ph_map {
             let sz = child(tx_styles, style_name)
@@ -2568,12 +2927,20 @@ fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontS
 
     // Per-shape lstStyle first (more specific).
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
-        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
-            if let Some(ph) = sp.descendants().find(|n| n.is_element() && n.tag_name().name() == "ph") {
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            if let Some(ph) = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph")
+            {
                 let ph_type = attr(&ph, "type").unwrap_or_default();
                 if let Some(tx_body) = child(sp, "txBody") {
                     let sizes = extract_level_font_sizes(tx_body);
-                    if has_any_level_size(&sizes) { map.entry(ph_type).or_insert(sizes); }
+                    if has_any_level_size(&sizes) {
+                        map.entry(ph_type).or_insert(sizes);
+                    }
                 }
             }
         }
@@ -2582,9 +2949,9 @@ fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontS
     // txStyles fallback.
     if let Some(tx_styles) = child(root, "txStyles") {
         let style_ph_map: &[(&str, &[&str])] = &[
-            ("titleStyle",  &["title", "ctrTitle"]),
-            ("bodyStyle",   &["body", "subTitle", "obj", ""]),
-            ("otherStyle",  &["dt", "ftr", "sldNum"]),
+            ("titleStyle", &["title", "ctrTitle"]),
+            ("bodyStyle", &["body", "subTitle", "obj", ""]),
+            ("otherStyle", &["dt", "ftr", "sldNum"]),
         ];
         for (style_name, ph_types) in style_ph_map {
             if let Some(style_node) = child(tx_styles, style_name) {
@@ -2606,7 +2973,10 @@ fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontS
 /// the `bodyStyle` `<a:lvlNpPr>` bullets) is what a slide body paragraph with no
 /// explicit bullet inherits (ECMA-376 §19.7.10 / §21.1.2.4). Per-shape lstStyle
 /// wins over the generic txStyles.
-fn parse_master_level_bullets(master_xml: &str, theme: &HashMap<String, String>) -> HashMap<String, LevelBullets> {
+fn parse_master_level_bullets(
+    master_xml: &str,
+    theme: &HashMap<String, String>,
+) -> HashMap<String, LevelBullets> {
     let mut map: HashMap<String, LevelBullets> = HashMap::new();
     let doc = match roxmltree::Document::parse(master_xml) {
         Ok(d) => d,
@@ -2616,12 +2986,20 @@ fn parse_master_level_bullets(master_xml: &str, theme: &HashMap<String, String>)
 
     // Per-shape lstStyle first (more specific).
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
-        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
-            if let Some(ph) = sp.descendants().find(|n| n.is_element() && n.tag_name().name() == "ph") {
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            if let Some(ph) = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph")
+            {
                 let ph_type = attr(&ph, "type").unwrap_or_default();
                 if let Some(tx_body) = child(sp, "txBody") {
                     let bullets = extract_level_bullets(tx_body, theme);
-                    if has_any_level_bullet(&bullets) { map.entry(ph_type).or_insert(bullets); }
+                    if has_any_level_bullet(&bullets) {
+                        map.entry(ph_type).or_insert(bullets);
+                    }
                 }
             }
         }
@@ -2630,16 +3008,17 @@ fn parse_master_level_bullets(master_xml: &str, theme: &HashMap<String, String>)
     // txStyles fallback.
     if let Some(tx_styles) = child(root, "txStyles") {
         let style_ph_map: &[(&str, &[&str])] = &[
-            ("titleStyle",  &["title", "ctrTitle"]),
-            ("bodyStyle",   &["body", "subTitle", "obj", ""]),
-            ("otherStyle",  &["dt", "ftr", "sldNum"]),
+            ("titleStyle", &["title", "ctrTitle"]),
+            ("bodyStyle", &["body", "subTitle", "obj", ""]),
+            ("otherStyle", &["dt", "ftr", "sldNum"]),
         ];
         for (style_name, ph_types) in style_ph_map {
             if let Some(style_node) = child(tx_styles, style_name) {
                 let bullets = read_level_bullets(style_node, theme);
                 if has_any_level_bullet(&bullets) {
                     for ph_type in *ph_types {
-                        map.entry(ph_type.to_string()).or_insert_with(|| bullets.clone());
+                        map.entry(ph_type.to_string())
+                            .or_insert_with(|| bullets.clone());
                     }
                 }
             }
@@ -2651,8 +3030,14 @@ fn parse_master_level_bullets(master_xml: &str, theme: &HashMap<String, String>)
 
 /// Parse default bold/italic from master txStyles (titleStyle / bodyStyle / otherStyle)
 /// > lvl1pPr > defRPr @b and @i. Keyed by ph_type.
-/// Only populated when the attribute is explicitly present on the master.
-fn parse_master_txstyle_bold_italic(master_xml: &str) -> (HashMap<String, bool>, HashMap<String, bool>, HashMap<String, String>) {
+/// > Only populated when the attribute is explicitly present on the master.
+fn parse_master_txstyle_bold_italic(
+    master_xml: &str,
+) -> (
+    HashMap<String, bool>,
+    HashMap<String, bool>,
+    HashMap<String, String>,
+) {
     let mut bold_map: HashMap<String, bool> = HashMap::new();
     let mut italic_map: HashMap<String, bool> = HashMap::new();
     // ECMA-376 §21.1.2.3.13 cap="all"/"small" on the master txStyles defRPr —
@@ -2663,27 +3048,41 @@ fn parse_master_txstyle_bold_italic(master_xml: &str) -> (HashMap<String, bool>,
         Err(_) => return (bold_map, italic_map, caps_map),
     };
     let root = doc.root_element();
-    let Some(tx_styles) = child(root, "txStyles") else { return (bold_map, italic_map, caps_map); };
+    let Some(tx_styles) = child(root, "txStyles") else {
+        return (bold_map, italic_map, caps_map);
+    };
     let style_ph_map: &[(&str, &[&str])] = &[
-        ("titleStyle",  &["title", "ctrTitle"]),
-        ("bodyStyle",   &["body", "subTitle", "obj", ""]),
-        ("otherStyle",  &["dt", "ftr", "sldNum"]),
+        ("titleStyle", &["title", "ctrTitle"]),
+        ("bodyStyle", &["body", "subTitle", "obj", ""]),
+        ("otherStyle", &["dt", "ftr", "sldNum"]),
     ];
     for (style_name, ph_types) in style_ph_map {
         let def_rpr = child(tx_styles, style_name)
             .and_then(|sn| child(sn, "lvl1pPr"))
             .and_then(|lp| child(lp, "defRPr"));
-        let b = def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
-        let i = def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
-        let c = def_rpr.and_then(|rp| attr(&rp, "cap")).filter(|v| v == "all" || v == "small");
+        let b = def_rpr
+            .and_then(|rp| attr(&rp, "b"))
+            .map(|v| v == "1" || v == "true");
+        let i = def_rpr
+            .and_then(|rp| attr(&rp, "i"))
+            .map(|v| v == "1" || v == "true");
+        let c = def_rpr
+            .and_then(|rp| attr(&rp, "cap"))
+            .filter(|v| v == "all" || v == "small");
         if let Some(bv) = b {
-            for t in *ph_types { bold_map.entry(t.to_string()).or_insert(bv); }
+            for t in *ph_types {
+                bold_map.entry(t.to_string()).or_insert(bv);
+            }
         }
         if let Some(iv) = i {
-            for t in *ph_types { italic_map.entry(t.to_string()).or_insert(iv); }
+            for t in *ph_types {
+                italic_map.entry(t.to_string()).or_insert(iv);
+            }
         }
         if let Some(cv) = c {
-            for t in *ph_types { caps_map.entry(t.to_string()).or_insert(cv.clone()); }
+            for t in *ph_types {
+                caps_map.entry(t.to_string()).or_insert(cv.clone());
+            }
         }
     }
     (bold_map, italic_map, caps_map)
@@ -2691,8 +3090,8 @@ fn parse_master_txstyle_bold_italic(master_xml: &str) -> (HashMap<String, bool>,
 
 /// Parse default text color from master txStyles (titleStyle/bodyStyle/otherStyle)
 /// > lvl1pPr > defRPr > solidFill, and from per-placeholder shapes in the master spTree's
-/// txBody > lstStyle > lvl1pPr > defRPr > solidFill. Keyed by ph_type.
-/// Shape-level lstStyle takes priority over txStyles generic defaults.
+/// > txBody > lstStyle > lvl1pPr > defRPr > solidFill. Keyed by ph_type.
+/// > Shape-level lstStyle takes priority over txStyles generic defaults.
 fn parse_master_txstyle_color(
     master_xml: &str,
     theme: &HashMap<String, String>,
@@ -2706,8 +3105,13 @@ fn parse_master_txstyle_color(
 
     // Scan master spTree placeholder shapes first — per-shape lstStyle is more specific.
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
-        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
-            let ph_node = sp.descendants().find(|n| n.is_element() && n.tag_name().name() == "ph");
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            let ph_node = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph");
             if let Some(ph) = ph_node {
                 let ph_type = attr(&ph, "type").unwrap_or_default();
                 if let Some(color) = child(sp, "txBody")
@@ -2726,9 +3130,9 @@ fn parse_master_txstyle_color(
     // Fall back to p:txStyles > titleStyle/bodyStyle/otherStyle > lvl1pPr > defRPr > solidFill.
     if let Some(tx_styles) = child(root, "txStyles") {
         let style_ph_map: &[(&str, &[&str])] = &[
-            ("titleStyle",  &["title", "ctrTitle"]),
-            ("bodyStyle",   &["body", "subTitle", "obj", ""]),
-            ("otherStyle",  &["dt", "ftr", "sldNum"]),
+            ("titleStyle", &["title", "ctrTitle"]),
+            ("bodyStyle", &["body", "subTitle", "obj", ""]),
+            ("otherStyle", &["dt", "ftr", "sldNum"]),
         ];
         for (style_name, ph_types) in style_ph_map {
             if let Some(color) = child(tx_styles, style_name)
@@ -2753,10 +3157,16 @@ fn parse_master_txstyle_color(
 /// Note: line_spacing_map is intentionally NOT populated. Inheriting txStyles lnSpc hurts VRT
 /// scores because our font substitutes (sans-serif) have different em-square metrics than the
 /// original Aptos font, so applying the master's 120% line spacing over-expands text layout.
-fn parse_master_txstyle_spacing(master_xml: &str) -> (HashMap<String, i64>, HashMap<String, i64>, HashMap<String, f64>) {
+fn parse_master_txstyle_spacing(
+    master_xml: &str,
+) -> (
+    HashMap<String, i64>,
+    HashMap<String, i64>,
+    HashMap<String, f64>,
+) {
     let mut before_map: HashMap<String, i64> = HashMap::new();
-    let mut after_map:  HashMap<String, i64> = HashMap::new();
-    let line_map:       HashMap<String, f64> = HashMap::new(); // intentionally not populated
+    let mut after_map: HashMap<String, i64> = HashMap::new();
+    let line_map: HashMap<String, f64> = HashMap::new(); // intentionally not populated
     let doc = match roxmltree::Document::parse(master_xml) {
         Ok(d) => d,
         Err(_) => return (before_map, after_map, line_map),
@@ -2767,15 +3177,17 @@ fn parse_master_txstyle_spacing(master_xml: &str) -> (HashMap<String, i64>, Hash
         None => return (before_map, after_map, line_map),
     };
     let style_ph_map: &[(&str, &[&str])] = &[
-        ("titleStyle",  &["title", "ctrTitle"]),
-        ("bodyStyle",   &["body", "subTitle", "obj", ""]),
-        ("otherStyle",  &["dt", "ftr", "sldNum"]),
+        ("titleStyle", &["title", "ctrTitle"]),
+        ("bodyStyle", &["body", "subTitle", "obj", ""]),
+        ("otherStyle", &["dt", "ftr", "sldNum"]),
     ];
     for (style_name, ph_types) in style_ph_map {
         let lvl1 = child(tx_styles, style_name).and_then(|sn| child(sn, "lvl1pPr"));
-        let spc_before = lvl1.and_then(|lp| child(lp, "spcBef"))
+        let spc_before = lvl1
+            .and_then(|lp| child(lp, "spcBef"))
             .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
-        let spc_after = lvl1.and_then(|lp| child(lp, "spcAft"))
+        let spc_after = lvl1
+            .and_then(|lp| child(lp, "spcAft"))
             .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
         if let Some(v) = spc_before {
             for ph_type in *ph_types {
@@ -2799,8 +3211,12 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     };
     let root = doc.root_element();
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
-        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
-            let ph_node = sp.descendants()
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            let ph_node = sp
+                .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "ph");
             if let Some(ph) = ph_node {
                 let ph_type = attr(&ph, "type").unwrap_or_default();
@@ -2813,13 +3229,34 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     map
 }
 
-fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_level_font_sizes: &HashMap<String, LevelFontSizes>, master_level_bullets: &HashMap<String, LevelBullets>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, master_space_before: &HashMap<String, i64>, master_space_after: &HashMap<String, i64>, master_line_spacing: &HashMap<String, f64>, theme: &HashMap<String, String>, layout_dir: &str, layout_rels: &HashMap<String, String>, zip: &mut PptxZip<'_>) -> LayoutPlaceholders {
-    let mut lph = LayoutPlaceholders::default();
-    lph.master_by_type = master_transforms.clone();
-    lph.by_type_master_alignment = master_alignments.clone();
-    lph.by_type_master_space_before = master_space_before.clone();
-    lph.by_type_master_space_after = master_space_after.clone();
-    lph.by_type_master_line_spacing = master_line_spacing.clone();
+// Seeds layout placeholders from the master's per-type defaults (transforms,
+// alignment, spacing) before overlaying the layout's own placeholder props; the
+// many maps are the master inheritance sources, threaded through as-is.
+#[allow(clippy::too_many_arguments)]
+fn parse_layout_placeholders(
+    layout_xml: &str,
+    master_font_sizes: &HashMap<String, f64>,
+    master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_bullets: &HashMap<String, LevelBullets>,
+    master_anchors: &HashMap<String, String>,
+    master_transforms: &HashMap<String, Transform>,
+    master_alignments: &HashMap<String, String>,
+    master_space_before: &HashMap<String, i64>,
+    master_space_after: &HashMap<String, i64>,
+    master_line_spacing: &HashMap<String, f64>,
+    theme: &HashMap<String, String>,
+    layout_dir: &str,
+    layout_rels: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
+) -> LayoutPlaceholders {
+    let mut lph = LayoutPlaceholders {
+        master_by_type: master_transforms.clone(),
+        by_type_master_alignment: master_alignments.clone(),
+        by_type_master_space_before: master_space_before.clone(),
+        by_type_master_space_after: master_space_after.clone(),
+        by_type_master_line_spacing: master_line_spacing.clone(),
+        ..Default::default()
+    };
     let doc = match roxmltree::Document::parse(layout_xml) {
         Ok(d) => d,
         Err(_) => return lph,
@@ -2852,9 +3289,11 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_lvl1_ppr: Option<roxmltree::Node<'_, '_>> = child(sp, "txBody")
             .and_then(|tb| child(tb, "lstStyle"))
             .and_then(|ls| child(ls, "lvl1pPr"));
-        let layout_def_rpr: Option<roxmltree::Node<'_, '_>> = layout_lvl1_ppr
-            .and_then(|lp| child(lp, "defRPr"));
-        let layout_font_size = layout_def_rpr.and_then(|rp| attr_f64(&rp, "sz")).map(|v| v / 100.0);
+        let layout_def_rpr: Option<roxmltree::Node<'_, '_>> =
+            layout_lvl1_ppr.and_then(|lp| child(lp, "defRPr"));
+        let layout_font_size = layout_def_rpr
+            .and_then(|rp| attr_f64(&rp, "sz"))
+            .map(|v| v / 100.0);
         // Per-level sizes from the layout placeholder's own lstStyle (all
         // lvlNpPr), used to give nested bullets their shrinking sizes.
         let layout_level_sizes: LevelFontSizes = child(sp, "txBody")
@@ -2864,9 +3303,15 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_level_bullets: LevelBullets = child(sp, "txBody")
             .map(|tb| extract_level_bullets(tb, theme))
             .unwrap_or_else(empty_level_bullets);
-        let layout_bold   = layout_def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
-        let layout_italic = layout_def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
-        let layout_caps   = layout_def_rpr.and_then(|rp| attr(&rp, "cap")).filter(|v| v == "all" || v == "small");
+        let layout_bold = layout_def_rpr
+            .and_then(|rp| attr(&rp, "b"))
+            .map(|v| v == "1" || v == "true");
+        let layout_italic = layout_def_rpr
+            .and_then(|rp| attr(&rp, "i"))
+            .map(|v| v == "1" || v == "true");
+        let layout_caps = layout_def_rpr
+            .and_then(|rp| attr(&rp, "cap"))
+            .filter(|v| v == "all" || v == "small");
         let layout_color: Option<String> = layout_def_rpr
             .and_then(|rp| child(rp, "solidFill"))
             .and_then(|sf| parse_color_node(sf, theme));
@@ -2894,8 +3339,7 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             .map(|a| a.to_string());
 
         // Layout spPr > ln stroke (real visible border, not edit-mode indicator when solidFill is present)
-        let layout_stroke: Option<Stroke> = child(sp_pr, "ln")
-            .and_then(|n| parse_stroke(n, theme));
+        let layout_stroke: Option<Stroke> = child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme));
 
         // Layout spPr fill (solidFill / noFill / gradFill / pattFill). The
         // slide-level placeholder shape inherits this when its own `<p:spPr>` is
@@ -2906,20 +3350,19 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
 
         // Layout spPr > blipFill → image that bleeds through when the slide's
         // matching placeholder has no own blipFill (picture placeholder inheritance).
-        let layout_blip_fill: Option<InheritedBlipFill> = child(sp_pr, "blipFill")
-            .and_then(|bf| {
-                let rid = child(bf, "blip").and_then(|b| attr_r(&b, "embed"))?;
-                let rel_target = layout_rels.get(&rid)?;
-                let image_path = resolve_path(layout_dir, rel_target);
-                let bytes = read_zip_bytes(zip, &image_path)?;
-                let mime = mime_from_ext(&image_path);
-                let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
-                Some(InheritedBlipFill {
-                    data_url,
-                    src_rect: parse_src_rect(bf),
-                    alpha: parse_blip_alpha(bf),
-                })
-            });
+        let layout_blip_fill: Option<InheritedBlipFill> = child(sp_pr, "blipFill").and_then(|bf| {
+            let rid = child(bf, "blip").and_then(|b| attr_r(&b, "embed"))?;
+            let rel_target = layout_rels.get(&rid)?;
+            let image_path = resolve_path(layout_dir, rel_target);
+            let bytes = read_zip_bytes(zip, &image_path)?;
+            let mime = mime_from_ext(&image_path);
+            let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+            Some(InheritedBlipFill {
+                data_url,
+                src_rect: parse_src_rect(bf),
+                alpha: parse_blip_alpha(bf),
+            })
+        });
 
         if let Some(ph) = ph_node {
             let ph_type = attr(&ph, "type").unwrap_or_default();
@@ -2930,8 +3373,7 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                     lph.by_idx.entry(idx).or_insert_with(|| t.clone());
                 }
                 // Prefer layout font size; fall back to master
-                let fs = layout_font_size
-                    .or_else(|| master_font_sizes.get(&ph_type).copied());
+                let fs = layout_font_size.or_else(|| master_font_sizes.get(&ph_type).copied());
                 if let Some(fs) = fs {
                     lph.by_idx_font_size.entry(idx).or_insert(fs);
                 }
@@ -2968,8 +3410,8 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                     lph.by_idx_fill.entry(idx).or_insert(f.clone());
                 }
             }
-            let effective_fs = layout_font_size
-                .or_else(|| master_font_sizes.get(&ph_type).copied());
+            let effective_fs =
+                layout_font_size.or_else(|| master_font_sizes.get(&ph_type).copied());
             if let Some(fs) = effective_fs {
                 lph.by_type_font_size.entry(ph_type.clone()).or_insert(fs);
             }
@@ -2978,7 +3420,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 master_level_font_sizes.get(&ph_type).unwrap_or(&[None; 9]),
             );
             if has_any_level_size(&type_level_sizes) {
-                lph.by_type_level_sizes.entry(ph_type.clone()).or_insert(type_level_sizes);
+                lph.by_type_level_sizes
+                    .entry(ph_type.clone())
+                    .or_insert(type_level_sizes);
             }
             let empty_bul_t = empty_level_bullets();
             let type_level_bullets = merge_level_bullets(
@@ -2986,7 +3430,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 master_level_bullets.get(&ph_type).unwrap_or(&empty_bul_t),
             );
             if has_any_level_bullet(&type_level_bullets) {
-                lph.by_type_level_bullets.entry(ph_type.clone()).or_insert(type_level_bullets);
+                lph.by_type_level_bullets
+                    .entry(ph_type.clone())
+                    .or_insert(type_level_bullets);
             }
             if let Some(b) = layout_bold {
                 lph.by_type_bold.entry(ph_type.clone()).or_insert(b);
@@ -3007,10 +3453,13 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 lph.by_type_space_after.entry(ph_type.clone()).or_insert(v);
             }
             if let Some(ls) = layout_line_spacing {
-                lph.by_type_line_spacing.entry(ph_type.clone()).or_insert(ls);
+                lph.by_type_line_spacing
+                    .entry(ph_type.clone())
+                    .or_insert(ls);
             }
             // Anchor: layout bodyPr > fall back to master anchor map
-            let effective_anchor = layout_anchor.clone()
+            let effective_anchor = layout_anchor
+                .clone()
                 .or_else(|| master_anchors.get(&ph_type).cloned());
             if let Some(a) = effective_anchor {
                 lph.by_type_anchor.entry(ph_type.clone()).or_insert(a);
@@ -3054,6 +3503,10 @@ enum ShapeKind {
     Sp,
 }
 
+// Carries the resolved master/layout/placeholder inheritance context (theme,
+// rels, inherited font size, default alignment/spacing, level styles) that text
+// runs need; these are inheritance inputs, not an arbitrary parameter bag.
+#[allow(clippy::too_many_arguments)]
 fn parse_text_body(
     tx_body: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -3080,19 +3533,18 @@ fn parse_text_body(
     // instead of what the theme author intended.
     // Shape-kind-aware lookup: text boxes consult txDef, regular shapes spDef.
     // Cross-fall is intentionally NOT done — see ShapeKind doc.
-    let def_prefix = match shape_kind { ShapeKind::Tx => "+txDef", ShapeKind::Sp => "+spDef" };
-    let theme_default_str = |key: &str| -> Option<String> {
-        theme.get(&format!("{def_prefix}-bodyPr-{key}")).cloned()
+    let def_prefix = match shape_kind {
+        ShapeKind::Tx => "+txDef",
+        ShapeKind::Sp => "+spDef",
     };
-    let theme_default_i64 = |key: &str| -> Option<i64> {
-        theme_default_str(key).and_then(|v| v.parse::<i64>().ok())
-    };
-    let theme_default_u32 = |key: &str| -> Option<u32> {
-        theme_default_str(key).and_then(|v| v.parse::<u32>().ok())
-    };
-    let theme_auto_fit = || -> Option<String> {
-        theme.get(&format!("{def_prefix}-autoFit")).cloned()
-    };
+    let theme_default_str =
+        |key: &str| -> Option<String> { theme.get(&format!("{def_prefix}-bodyPr-{key}")).cloned() };
+    let theme_default_i64 =
+        |key: &str| -> Option<i64> { theme_default_str(key).and_then(|v| v.parse::<i64>().ok()) };
+    let theme_default_u32 =
+        |key: &str| -> Option<u32> { theme_default_str(key).and_then(|v| v.parse::<u32>().ok()) };
+    let theme_auto_fit =
+        || -> Option<String> { theme.get(&format!("{def_prefix}-autoFit")).cloned() };
 
     let vertical_anchor = body_pr
         .and_then(|n| attr(&n, "anchor"))
@@ -3102,22 +3554,28 @@ fn parse_text_body(
         .unwrap_or_else(|| "t".into());
     // Text insets (EMU). OOXML defaults: lIns=rIns=91440, tIns=bIns=45720.
     // Shape attribute → theme objectDefaults → spec default.
-    let l_ins = body_pr.and_then(|n| attr_i64(&n, "lIns"))
+    let l_ins = body_pr
+        .and_then(|n| attr_i64(&n, "lIns"))
         .or_else(|| theme_default_i64("lIns"))
         .unwrap_or(91_440);
-    let r_ins = body_pr.and_then(|n| attr_i64(&n, "rIns"))
+    let r_ins = body_pr
+        .and_then(|n| attr_i64(&n, "rIns"))
         .or_else(|| theme_default_i64("rIns"))
         .unwrap_or(91_440);
-    let t_ins = body_pr.and_then(|n| attr_i64(&n, "tIns"))
+    let t_ins = body_pr
+        .and_then(|n| attr_i64(&n, "tIns"))
         .or_else(|| theme_default_i64("tIns"))
         .unwrap_or(45_720);
-    let b_ins = body_pr.and_then(|n| attr_i64(&n, "bIns"))
+    let b_ins = body_pr
+        .and_then(|n| attr_i64(&n, "bIns"))
         .or_else(|| theme_default_i64("bIns"))
         .unwrap_or(45_720);
-    let wrap = body_pr.and_then(|n| attr(&n, "wrap"))
+    let wrap = body_pr
+        .and_then(|n| attr(&n, "wrap"))
         .or_else(|| theme_default_str("wrap"))
         .unwrap_or_else(|| "square".into());
-    let vert = body_pr.and_then(|n| attr(&n, "vert"))
+    let vert = body_pr
+        .and_then(|n| attr(&n, "vert"))
         .or_else(|| theme_default_str("vert"))
         .unwrap_or_else(|| "horz".into());
     // Auto-fit child element (spAutoFit / normAutofit). When the shape's own
@@ -3128,15 +3586,17 @@ fn parse_text_body(
     let mut font_scale: Option<f64> = None;
     let mut ln_spc_reduction: Option<f64> = None;
     let auto_fit = if let Some(n) = body_pr {
-        if child(n, "spAutoFit").is_some() { "sp".to_owned() }
+        if child(n, "spAutoFit").is_some() {
+            "sp".to_owned()
+        }
         // OOXML uses lowercase 'f': normAutofit (not normAutoFit).
         else if let Some(na) = child(n, "normAutofit") {
             font_scale = attr_f64(&na, "fontScale").map(|v| v / 100000.0);
             ln_spc_reduction = attr_f64(&na, "lnSpcReduction").map(|v| v / 100000.0);
             "norm".to_owned()
-        }
-        else if child(n, "noAutofit").is_some() { "none".to_owned() }
-        else {
+        } else if child(n, "noAutofit").is_some() {
+            "none".to_owned()
+        } else {
             // bodyPr present but no autofit child — fall back to theme.
             theme_auto_fit().unwrap_or_else(|| "none".to_owned())
         }
@@ -3167,10 +3627,10 @@ fn parse_text_body(
         .unwrap_or(false);
 
     // Own lstStyle > lvl1pPr, then fall back to layout/master inherited values
-    let own_lvl1_ppr = child(tx_body, "lstStyle")
-        .and_then(|ls| child(ls, "lvl1pPr"));
+    let own_lvl1_ppr = child(tx_body, "lstStyle").and_then(|ls| child(ls, "lvl1pPr"));
     let own_def_rpr = own_lvl1_ppr.and_then(|lp| child(lp, "defRPr"));
-    let default_font_size = own_def_rpr.and_then(|rp| attr_f64(&rp, "sz"))
+    let default_font_size = own_def_rpr
+        .and_then(|rp| attr_f64(&rp, "sz"))
         .map(|v| v / 100.0)
         .or(inherited_font_size);
     // Effective per-list-level default sizes: this shape's own lstStyle wins per
@@ -3184,10 +3644,12 @@ fn parse_text_body(
     let own_level_bullets = extract_level_bullets(tx_body, theme);
     let effective_level_bullets = merge_level_bullets(&own_level_bullets, inherited_level_bullets);
     let default_bold = own_def_rpr
-        .and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true")
+        .and_then(|rp| attr(&rp, "b"))
+        .map(|v| v == "1" || v == "true")
         .or(inherited_bold);
     let default_italic = own_def_rpr
-        .and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true")
+        .and_then(|rp| attr(&rp, "i"))
+        .map(|v| v == "1" || v == "true")
         .or(inherited_italic);
     // Own lstStyle > lvl1pPr > algn overrides inherited alignment
     let body_default_alignment = own_lvl1_ppr
@@ -3205,7 +3667,7 @@ fn parse_text_body(
         .and_then(|s| child(s, "spcPts"))
         .and_then(|s| attr_i64(&s, "val"));
     let body_default_space_before = own_lvl1_spcbef.or(inherited_space_before);
-    let body_default_space_after  = own_lvl1_spcaft.or(inherited_space_after);
+    let body_default_space_after = own_lvl1_spcaft.or(inherited_space_after);
 
     // Own lstStyle > lvl1pPr > lnSpc overrides inherited line spacing
     let own_lvl1_line_spacing: Option<f64> = own_lvl1_ppr
@@ -3216,7 +3678,19 @@ fn parse_text_body(
 
     let mut paragraphs: Vec<Paragraph> = children_vec(tx_body, "p")
         .into_iter()
-        .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing, &effective_level_sizes, &effective_level_bullets))
+        .map(|p| {
+            parse_paragraph(
+                p,
+                theme,
+                rels,
+                body_default_alignment.as_deref(),
+                body_default_space_before,
+                body_default_space_after,
+                body_default_line_spacing,
+                &effective_level_sizes,
+                &effective_level_bullets,
+            )
+        })
         .collect();
 
     // ECMA-376 §21.1.2.3.13 cap: a run inherits cap="all"/"small" from the
@@ -3232,13 +3706,33 @@ fn parse_text_body(
         for para in &mut paragraphs {
             for run in &mut para.runs {
                 if let TextRun::Text(t) = run {
-                    if t.caps.is_none() { t.caps = Some(bc.clone()); }
+                    if t.caps.is_none() {
+                        t.caps = Some(bc.clone());
+                    }
                 }
             }
         }
     }
 
-    TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit, font_scale, ln_spc_reduction, num_col, spc_col, rtl_col }
+    TextBody {
+        vertical_anchor,
+        paragraphs,
+        default_font_size,
+        default_bold,
+        default_italic,
+        l_ins,
+        r_ins,
+        t_ins,
+        b_ins,
+        wrap,
+        vert,
+        auto_fit,
+        font_scale,
+        ln_spc_reduction,
+        num_col,
+        spc_col,
+        rtl_col,
+    }
 }
 
 /// Walk `node` for OMML math and push a `TextRun::Math` for each equation,
@@ -3320,6 +3814,8 @@ fn push_math_runs(
     }
 }
 
+// Same inherited paragraph/run context as parse_text_body, scoped to one <a:p>.
+#[allow(clippy::too_many_arguments)]
 fn parse_paragraph(
     p_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -3337,21 +3833,29 @@ fn parse_paragraph(
     // and the paragraph has no explicit `algn`, the implicit default flips
     // from "l" to "r" (matches PowerPoint's behaviour for Arabic / Hebrew
     // slides where users typically don't author an explicit alignment).
-    let rtl = p_pr.and_then(|n| attr(&n, "rtl"))
+    let rtl = p_pr
+        .and_then(|n| attr(&n, "rtl"))
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
 
     // Paragraph's own algn → body/layout/master default → "r" if rtl, else "l"
-    let alignment = p_pr.and_then(|n| attr(&n, "algn"))
+    let alignment = p_pr
+        .and_then(|n| attr(&n, "algn"))
         .map(|a| a.to_string())
         .or_else(|| body_default_alignment.map(|a| a.to_string()))
         .unwrap_or_else(|| if rtl { "r".into() } else { "l".into() });
-    let lvl: u32   = p_pr.and_then(|n| attr(&n, "lvl")).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let lvl: u32 = p_pr
+        .and_then(|n| attr(&n, "lvl"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     // Effective bullet: the paragraph's own `<a:buChar>`/`<a:buAutoNum>`/`<a:buNone>`,
     // else the inherited per-level bullet for this placeholder (ECMA-376 §19.7.10).
     let bullet = match parse_bullet(p_pr, theme) {
-        Bullet::Inherit => level_bullets.get(lvl as usize).and_then(|o| o.clone()).unwrap_or(Bullet::Inherit),
+        Bullet::Inherit => level_bullets
+            .get(lvl as usize)
+            .and_then(|o| o.clone())
+            .unwrap_or(Bullet::Inherit),
         b => b,
     };
     // A paragraph is a list item (and gets a hanging indent) when its effective
@@ -3370,28 +3874,38 @@ fn parse_paragraph(
             lvl as i64 * 457200
         }
     });
-    let mar_r  = p_pr.and_then(|n| attr_i64(&n, "marR")).unwrap_or(0);
-    let indent = p_pr.and_then(|n| attr_i64(&n, "indent")).unwrap_or_else(|| {
-        if has_bullet { -342900 } else { 0 }
-    });
+    let mar_r = p_pr.and_then(|n| attr_i64(&n, "marR")).unwrap_or(0);
+    let indent = p_pr
+        .and_then(|n| attr_i64(&n, "indent"))
+        .unwrap_or(if has_bullet { -342900 } else { 0 });
 
-    let space_before = p_pr.and_then(|n| {
-        child(n, "spcBef").and_then(|s| child(s, "spcPts")).and_then(|s| attr_i64(&s, "val"))
-    }).or(body_default_space_before);
-    let space_after = p_pr.and_then(|n| {
-        child(n, "spcAft").and_then(|s| child(s, "spcPts")).and_then(|s| attr_i64(&s, "val"))
-    }).or(body_default_space_after);
+    let space_before = p_pr
+        .and_then(|n| {
+            child(n, "spcBef")
+                .and_then(|s| child(s, "spcPts"))
+                .and_then(|s| attr_i64(&s, "val"))
+        })
+        .or(body_default_space_before);
+    let space_after = p_pr
+        .and_then(|n| {
+            child(n, "spcAft")
+                .and_then(|s| child(s, "spcPts"))
+                .and_then(|s| attr_i64(&s, "val"))
+        })
+        .or(body_default_space_after);
 
-    let space_line = p_pr.and_then(|n| {
-        let spc = child(n, "lnSpc")?;
-        if let Some(pct) = child(spc, "spcPct") {
-            attr_f64(&pct, "val").map(|v| SpaceLine::Pct { val: v })
-        } else {
-            child(spc, "spcPts")
-                .and_then(|pts| attr_f64(&pts, "val"))
-                .map(|v| SpaceLine::Pts { val: v / 100.0 }) // hundredths of pt → pt
-        }
-    }).or_else(|| body_default_line_spacing.map(|v| SpaceLine::Pct { val: v }));
+    let space_line = p_pr
+        .and_then(|n| {
+            let spc = child(n, "lnSpc")?;
+            if let Some(pct) = child(spc, "spcPct") {
+                attr_f64(&pct, "val").map(|v| SpaceLine::Pct { val: v })
+            } else {
+                child(spc, "spcPts")
+                    .and_then(|pts| attr_f64(&pts, "val"))
+                    .map(|v| SpaceLine::Pts { val: v / 100.0 }) // hundredths of pt → pt
+            }
+        })
+        .or_else(|| body_default_line_spacing.map(|v| SpaceLine::Pct { val: v }));
 
     // Tab stops from pPr > tabLst
     let tab_stops: Vec<TabStop> = p_pr
@@ -3401,7 +3915,7 @@ fn parse_paragraph(
                 .children()
                 .filter(|n| n.is_element() && n.tag_name().name() == "tab")
                 .filter_map(|tab| {
-                    let pos  = attr_i64(&tab, "pos")?;
+                    let pos = attr_i64(&tab, "pos")?;
                     let algn = attr(&tab, "algn").unwrap_or_else(|| "l".into());
                     Some(TabStop { pos, algn })
                 })
@@ -3410,12 +3924,20 @@ fn parse_paragraph(
         .unwrap_or_default();
 
     // Paragraph-level default run properties (pPr > defRPr)
-    let def_rpr        = p_pr.and_then(|n| child(n, "defRPr"));
-    let def_font_size  = def_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
-    let def_color      = def_rpr.and_then(|n| child(n, "solidFill")).and_then(|n| parse_color_node(n, theme));
-    let def_bold       = def_rpr.and_then(|n| attr(&n, "b")).map(|v| v == "1" || v == "true");
-    let def_italic     = def_rpr.and_then(|n| attr(&n, "i")).map(|v| v == "1" || v == "true");
-    let def_font_family = def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
+    let def_rpr = p_pr.and_then(|n| child(n, "defRPr"));
+    let def_font_size = def_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
+    let def_color = def_rpr
+        .and_then(|n| child(n, "solidFill"))
+        .and_then(|n| parse_color_node(n, theme));
+    let def_bold = def_rpr
+        .and_then(|n| attr(&n, "b"))
+        .map(|v| v == "1" || v == "true");
+    let def_italic = def_rpr
+        .and_then(|n| attr(&n, "i"))
+        .map(|v| v == "1" || v == "true");
+    let def_font_family = def_rpr
+        .and_then(|n| child(n, "latin"))
+        .and_then(|n| attr(&n, "typeface"))
         .map(|tf| resolve_theme_typeface(&tf, theme));
 
     let mut runs = Vec::new();
@@ -3438,13 +3960,24 @@ fn parse_paragraph(
             // Field elements (e.g. slide number, date): parse like a run but tag the field type
             "fld" => {
                 let fld_type = attr(&node, "type").unwrap_or_default().to_string();
-                let text = child(node, "t").and_then(|t| t.text()).unwrap_or("").to_string();
+                let text = child(node, "t")
+                    .and_then(|t| t.text())
+                    .unwrap_or("")
+                    .to_string();
                 let r_pr = child(node, "rPr");
                 let font_size = r_pr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
-                let color = r_pr.and_then(|n| child(n, "solidFill")).and_then(|n| parse_color_node(n, theme));
-                let bold = r_pr.and_then(|n| attr(&n, "b")).map(|v| v == "1" || v == "true");
-                let italic = r_pr.and_then(|n| attr(&n, "i")).map(|v| v == "1" || v == "true");
-                let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
+                let color = r_pr
+                    .and_then(|n| child(n, "solidFill"))
+                    .and_then(|n| parse_color_node(n, theme));
+                let bold = r_pr
+                    .and_then(|n| attr(&n, "b"))
+                    .map(|v| v == "1" || v == "true");
+                let italic = r_pr
+                    .and_then(|n| attr(&n, "i"))
+                    .map(|v| v == "1" || v == "true");
+                let font_family = r_pr
+                    .and_then(|n| child(n, "latin"))
+                    .and_then(|n| attr(&n, "typeface"))
                     .map(|tf| resolve_theme_typeface(&tf, theme));
                 runs.push(TextRun::Text(TextRunData {
                     text,
@@ -3462,7 +3995,11 @@ fn parse_paragraph(
                     baseline: None,
                     caps: None,
                     letter_spacing: None,
-                    field_type: if fld_type == "slidenum" { Some("slidenum".to_string()) } else { None },
+                    field_type: if fld_type == "slidenum" {
+                        Some("slidenum".to_string())
+                    } else {
+                        None
+                    },
                     hyperlink: None,
                     shadow: None,
                     outline: None,
@@ -3491,22 +4028,31 @@ fn parse_paragraph(
         .or_else(|| level_font_sizes.get(lvl as usize).copied().flatten());
 
     Paragraph {
-        alignment, mar_l, mar_r, indent,
-        space_before, space_after, space_line,
-        lvl, bullet,
-        def_font_size, def_color, def_bold, def_italic, def_font_family,
-        tab_stops, rtl, runs,
+        alignment,
+        mar_l,
+        mar_r,
+        indent,
+        space_before,
+        space_after,
+        space_line,
+        lvl,
+        bullet,
+        def_font_size,
+        def_color,
+        def_bold,
+        def_italic,
+        def_font_family,
+        tab_stops,
+        rtl,
+        runs,
     }
 }
 
 /// Parse bullet specification from pPr node.
-fn parse_bullet(
-    p_pr: Option<roxmltree::Node<'_, '_>>,
-    theme: &HashMap<String, String>,
-) -> Bullet {
+fn parse_bullet(p_pr: Option<roxmltree::Node<'_, '_>>, theme: &HashMap<String, String>) -> Bullet {
     let p_pr = match p_pr {
         Some(n) => n,
-        None    => return Bullet::Inherit,
+        None => return Bullet::Inherit,
     };
 
     // Explicit "no bullet"
@@ -3522,9 +4068,15 @@ fn parse_bullet(
         let size_pct = child(p_pr, "buSzPct")
             .and_then(|n| attr_f64(&n, "val"))
             .map(|v| v / 1000.0);
-        let font_family = child(p_pr, "buFont").and_then(|n| attr(&n, "typeface"))
+        let font_family = child(p_pr, "buFont")
+            .and_then(|n| attr(&n, "typeface"))
             .map(|tf| resolve_theme_typeface(&tf, theme));
-        return Bullet::Char { ch, color, size_pct, font_family };
+        return Bullet::Char {
+            ch,
+            color,
+            size_pct,
+            font_family,
+        };
     }
 
     // Auto-numbered bullet
@@ -3544,76 +4096,105 @@ fn parse_run(
     rels: &HashMap<String, String>,
 ) -> Option<TextRunData> {
     let t_node = child(r_node, "t")?;
-    let text  = t_node.text().unwrap_or("").to_owned();
-    let r_pr  = child(r_node, "rPr");
+    let text = t_node.text().unwrap_or("").to_owned();
+    let r_pr = child(r_node, "rPr");
 
     // Attribute with rPr → defRPr fallback; None means "not set" (inherit from body/layout defaults)
-    let bold = r_pr.and_then(|n| attr(&n, "b"))
+    let bold = r_pr
+        .and_then(|n| attr(&n, "b"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "b")))
         .map(|v| v == "1" || v == "true");
-    let italic = r_pr.and_then(|n| attr(&n, "i"))
+    let italic = r_pr
+        .and_then(|n| attr(&n, "i"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "i")))
         .map(|v| v == "1" || v == "true");
     // ECMA-376 §21.1.2.3.16 — underline style enum: none/sng/dbl/heavy/dotted/
     // dash/dashLong/dotDash/dotDotDash/wavy plus *Heavy variants. Carry the
     // exact value through for the renderer to dispatch on; the bool stays
     // true for any non-"none" value so existing code paths keep working.
-    let underline_attr = r_pr.and_then(|n| attr(&n, "u"))
+    let underline_attr = r_pr
+        .and_then(|n| attr(&n, "u"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "u")));
-    let underline = underline_attr.as_deref().map(|v| v != "none").unwrap_or(false);
+    let underline = underline_attr
+        .as_deref()
+        .map(|v| v != "none")
+        .unwrap_or(false);
     let underline_style = underline_attr.filter(|v| v != "none" && v != "sng");
 
     // ECMA-376 §21.1.2.3.20 — uFill specifies a per-underline colour that
     // overrides the text colour. uFillTx (or absence) means "follow text".
-    let underline_color = r_pr.and_then(|n| child(n, "uFill"))
+    let underline_color = r_pr
+        .and_then(|n| child(n, "uFill"))
         .or_else(|| def_rpr.and_then(|n| child(n, "uFill")))
         .and_then(|n| child(n, "solidFill"))
         .and_then(|n| parse_color_node(n, theme));
 
     // strikethrough: "sngStrike" or "dblStrike" → true; double tracked separately
-    let strike_attr = r_pr.and_then(|n| attr(&n, "strike"))
+    let strike_attr = r_pr
+        .and_then(|n| attr(&n, "strike"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "strike")));
-    let strikethrough = strike_attr.as_deref().map(|v| v == "sngStrike" || v == "dblStrike").unwrap_or(false);
+    let strikethrough = strike_attr
+        .as_deref()
+        .map(|v| v == "sngStrike" || v == "dblStrike")
+        .unwrap_or(false);
     let strike_double = strike_attr.as_deref() == Some("dblStrike");
 
     // ECMA-376 §21.1.2.3.13 ST_TextCapsType: "none" | "small" | "all". Treat
     // "none" as not set (no transform) so the field stays absent in JSON.
-    let caps = r_pr.and_then(|n| attr(&n, "cap"))
+    let caps = r_pr
+        .and_then(|n| attr(&n, "cap"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "cap")))
         .filter(|v| v == "small" || v == "all");
 
     // ECMA-376 §21.1.2.3.5 rPr @spc — letter spacing in 100ths of a point.
     // Negative values are valid (tightening). Non-zero only.
-    let letter_spacing = r_pr.and_then(|n| attr_f64(&n, "spc"))
+    let letter_spacing = r_pr
+        .and_then(|n| attr_f64(&n, "spc"))
         .or_else(|| def_rpr.and_then(|n| attr_f64(&n, "spc")))
         .map(|v| v / 100.0)
         .filter(|v| v.abs() > f64::EPSILON);
 
     // sz in hundredths of a point
-    let font_size = r_pr.and_then(|n| attr_f64(&n, "sz"))
+    let font_size = r_pr
+        .and_then(|n| attr_f64(&n, "sz"))
         .or_else(|| def_rpr.and_then(|n| attr_f64(&n, "sz")))
         .map(|v| v / 100.0);
 
-    let color = r_pr.and_then(|n| child(n, "solidFill"))
+    let color = r_pr
+        .and_then(|n| child(n, "solidFill"))
         .and_then(|n| parse_color_node(n, theme))
         .or_else(|| {
-            def_rpr.and_then(|n| child(n, "solidFill"))
-                   .and_then(|n| parse_color_node(n, theme))
+            def_rpr
+                .and_then(|n| child(n, "solidFill"))
+                .and_then(|n| parse_color_node(n, theme))
         });
 
-    let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
-        .or_else(|| def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")))
+    let font_family = r_pr
+        .and_then(|n| child(n, "latin"))
+        .and_then(|n| attr(&n, "typeface"))
+        .or_else(|| {
+            def_rpr
+                .and_then(|n| child(n, "latin"))
+                .and_then(|n| attr(&n, "typeface"))
+        })
         .map(|tf| resolve_theme_typeface(&tf, theme));
     // ECMA-376 §21.1.2.3.7 — <a:ea typeface="..."/> sets a separate font for
     // East Asian glyphs (CJK). Defaults to the theme's +mn-ea slot when the
     // run doesn't specify one explicitly.
-    let font_family_ea = r_pr.and_then(|n| child(n, "ea")).and_then(|n| attr(&n, "typeface"))
-        .or_else(|| def_rpr.and_then(|n| child(n, "ea")).and_then(|n| attr(&n, "typeface")))
+    let font_family_ea = r_pr
+        .and_then(|n| child(n, "ea"))
+        .and_then(|n| attr(&n, "typeface"))
+        .or_else(|| {
+            def_rpr
+                .and_then(|n| child(n, "ea"))
+                .and_then(|n| attr(&n, "typeface"))
+        })
         .map(|tf| resolve_theme_typeface(&tf, theme))
         .filter(|tf| !tf.is_empty());
 
     // baseline in thousandths of a point; 30000=superscript, -25000=subscript (OOXML typical)
-    let baseline = r_pr.and_then(|n| attr(&n, "baseline"))
+    let baseline = r_pr
+        .and_then(|n| attr(&n, "baseline"))
         .and_then(|v| v.parse::<i32>().ok())
         .filter(|&v| v != 0);
 
@@ -3628,14 +4209,16 @@ fn parse_run(
     // ECMA-376 §20.1.8.45 — `<a:rPr><a:effectLst><a:outerShdw>` glyph drop
     // shadow. Reuse the shape-level outerShdw reader so parse semantics
     // stay identical (blurRad, dist, dir, color + alphaModFix).
-    let shadow = r_pr.and_then(|n| child(n, "effectLst"))
+    let shadow = r_pr
+        .and_then(|n| child(n, "effectLst"))
         .and_then(|el| parse_shadow(el, theme));
 
     // ECMA-376 §20.1.2.2.24 (CT_TextOutlineEffect) — `<a:rPr><a:ln w="..">`
     // strokes each glyph outline. `<a:noFill>` inside the ln means "no
     // visible outline" — skip in that case so the renderer doesn't draw a
     // black box around every glyph. Pull color from solidFill if present.
-    let outline = r_pr.and_then(|n| child(n, "ln"))
+    let outline = r_pr
+        .and_then(|n| child(n, "ln"))
         .filter(|ln| child(*ln, "noFill").is_none())
         .map(|ln| TextOutline {
             width: attr_i64(&ln, "w").unwrap_or(0),
@@ -3643,12 +4226,25 @@ fn parse_run(
         });
 
     Some(TextRunData {
-        text, bold, italic, underline, underline_style, underline_color,
-        strikethrough, strike_double,
-        font_size, color, font_family, font_family_ea, baseline,
-        caps, letter_spacing,
-        field_type: None, hyperlink,
-        shadow, outline,
+        text,
+        bold,
+        italic,
+        underline,
+        underline_style,
+        underline_color,
+        strikethrough,
+        strike_double,
+        font_size,
+        color,
+        font_family,
+        font_family_ea,
+        baseline,
+        caps,
+        letter_spacing,
+        field_type: None,
+        hyperlink,
+        shadow,
+        outline,
     })
 }
 
@@ -3662,27 +4258,32 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let root = doc.root_element();
 
     // Determine chart type by finding the first recognized chart element
-    let find_chart = |name: &str| root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == name);
+    let find_chart = |name: &str| {
+        root.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == name)
+    };
 
     let chart_type = if let Some(bc) = find_chart("barChart") {
-        let grouping = bc.children()
+        let grouping = bc
+            .children()
             .find(|c| c.is_element() && c.tag_name().name() == "grouping")
             .and_then(|n| attr(&n, "val"))
             .unwrap_or_else(|| "clustered".into());
-        let bar_dir = bc.children()
+        let bar_dir = bc
+            .children()
             .find(|c| c.is_element() && c.tag_name().name() == "barDir")
             .and_then(|n| attr(&n, "val"))
             .unwrap_or_else(|| "col".into());
         let horizontal = bar_dir == "bar";
         match (grouping.as_str(), horizontal) {
             ("stacked" | "percentStacked", false) => "stackedBar".to_string(),
-            ("stacked" | "percentStacked", true)  => "stackedBarH".to_string(),
+            ("stacked" | "percentStacked", true) => "stackedBarH".to_string(),
             (_, false) => "clusteredBar".to_string(),
-            (_, true)  => "clusteredBarH".to_string(),
+            (_, true) => "clusteredBarH".to_string(),
         }
     } else if let Some(lc) = find_chart("lineChart") {
-        let grouping = lc.children()
+        let grouping = lc
+            .children()
             .find(|c| c.is_element() && c.tag_name().name() == "grouping")
             .and_then(|n| attr(&n, "val"))
             .unwrap_or_else(|| "standard".into());
@@ -3696,7 +4297,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     } else if find_chart("doughnutChart").is_some() {
         "doughnut".to_string()
     } else if let Some(ac) = find_chart("areaChart") {
-        let grouping = ac.children()
+        let grouping = ac
+            .children()
             .find(|c| c.is_element() && c.tag_name().name() == "grouping")
             .and_then(|n| attr(&n, "val"))
             .unwrap_or_else(|| "standard".into());
@@ -3715,49 +4317,72 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     };
 
     // Title text
-    let title_node_opt = root.descendants()
+    let title_node_opt = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "title");
     let title = title_node_opt.and_then(|title_node| {
-        let texts: Vec<String> = title_node.descendants()
+        let texts: Vec<String> = title_node
+            .descendants()
             .filter(|n| n.is_element() && n.tag_name().name() == "t")
             .filter_map(|n| n.text().map(|t| t.to_string()))
             .collect();
-        if texts.is_empty() { None } else { Some(texts.join("")) }
+        if texts.is_empty() {
+            None
+        } else {
+            Some(texts.join(""))
+        }
     });
     // Title font size in hundredths of a point — taken from the first
     // defRPr@sz or rPr@sz we find inside the title. ECMA-376 uses hpt for size.
-    let title_font_size_hpt = title_node_opt
-        .and_then(|t| t.descendants().find_map(|n| {
-            if !n.is_element() { return None; }
+    let title_font_size_hpt = title_node_opt.and_then(|t| {
+        t.descendants().find_map(|n| {
+            if !n.is_element() {
+                return None;
+            }
             let tag = n.tag_name().name();
-            if tag != "defRPr" && tag != "rPr" { return None; }
+            if tag != "defRPr" && tag != "rPr" {
+                return None;
+            }
             attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
-        }));
+        })
+    });
 
     // val axis max / min and visibility — shared helpers in ooxml-common
     // so xlsx & pptx stay in sync (`<c:scaling><c:min|max val>` and
     // `<c:delete val>` ECMA-376 §21.2.2.40 / §21.2.2.43).
-    let val_ax = root.descendants()
+    let val_ax = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "valAx");
-    let cat_ax = root.descendants()
+    let cat_ax = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "catAx");
     let (val_min, val_max) = val_ax
         .map(ooxml_common::chart::extract_axis_min_max)
         .unwrap_or((None, None));
-    let val_axis_hidden = val_ax.map(ooxml_common::chart::axis_is_deleted).unwrap_or(false);
-    let cat_axis_hidden = cat_ax.map(ooxml_common::chart::axis_is_deleted).unwrap_or(false);
+    let val_axis_hidden = val_ax
+        .map(ooxml_common::chart::axis_is_deleted)
+        .unwrap_or(false);
+    let cat_axis_hidden = cat_ax
+        .map(ooxml_common::chart::axis_is_deleted)
+        .unwrap_or(false);
 
     // Series
-    let plot_area = root.descendants()
+    let plot_area = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "plotArea")?;
 
     // Plot area background: <c:plotArea><c:spPr><a:solidFill>
-    let plot_area_bg = plot_area.children()
+    let plot_area_bg = plot_area
+        .children()
         .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-        .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+        .and_then(|sp| {
+            sp.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+        })
         .and_then(|fill| parse_color_node(fill, theme));
 
-    let ser_nodes: Vec<_> = plot_area.descendants()
+    let ser_nodes: Vec<_> = plot_area
+        .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "ser")
         .collect();
 
@@ -3767,18 +4392,21 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
 
     // Helper: collect <c:pt> values from a cache node (strCache or numCache)
     let collect_pt_strings = |cache: roxmltree::Node<'_, '_>| -> Vec<String> {
-        cache.children()
+        cache
+            .children()
             .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-            .filter_map(|pt| pt.children().find(|n| n.is_element() && n.tag_name().name() == "v"))
+            .filter_map(|pt| {
+                pt.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "v")
+            })
             .filter_map(|v| v.text().map(|t| t.to_string()))
             .collect()
     };
 
     // ECMA-376 §21.2.2: category data may be in a *Cache (backing a *Ref) or a *Lit (inline literal).
     // Accept strCache/numCache (external refs with cached values) AND strLit/numLit (inline literals).
-    let is_pt_container = |name: &str| {
-        matches!(name, "strCache" | "numCache" | "strLit" | "numLit")
-    };
+    let is_pt_container =
+        |name: &str| matches!(name, "strCache" | "numCache" | "strLit" | "numLit");
 
     let categories: Vec<String> = ser_nodes[0]
         .children()
@@ -3787,168 +4415,259 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             cat.descendants()
                 .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
         })
-        .map(|cache| collect_pt_strings(cache))
+        .map(&collect_pt_strings)
         .unwrap_or_default();
 
     let pt_count = categories.len().max(1);
 
     let is_scatter_like = chart_type == "scatter" || chart_type == "bubble";
 
-    let series: Vec<ChartSeriesData> = ser_nodes.iter().map(|ser| {
-        // Series name from <c:tx>  (can be strRef/strCache, strLit, or a bare <c:v>)
-        let name = ser.children()
-            .find(|n| n.is_element() && n.tag_name().name() == "tx")
-            .and_then(|tx| {
-                // Preferred: first pt > v inside any cache/lit container
-                tx.descendants()
-                    .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
-                    .and_then(|cache| {
-                        cache.children()
-                            .find(|n| n.is_element() && n.tag_name().name() == "pt")
-                            .and_then(|pt| pt.children().find(|n| n.is_element() && n.tag_name().name() == "v"))
-                            .and_then(|v| v.text().map(|t| t.to_string()))
+    let series: Vec<ChartSeriesData> = ser_nodes
+        .iter()
+        .map(|ser| {
+            // Series name from <c:tx>  (can be strRef/strCache, strLit, or a bare <c:v>)
+            let name = ser
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "tx")
+                .and_then(|tx| {
+                    // Preferred: first pt > v inside any cache/lit container
+                    tx.descendants()
+                        .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
+                        .and_then(|cache| {
+                            cache
+                                .children()
+                                .find(|n| n.is_element() && n.tag_name().name() == "pt")
+                                .and_then(|pt| {
+                                    pt.children()
+                                        .find(|n| n.is_element() && n.tag_name().name() == "v")
+                                })
+                                .and_then(|v| v.text().map(|t| t.to_string()))
+                        })
+                        // Fallback: <c:tx><c:v>Name</c:v></c:tx>
+                        .or_else(|| {
+                            tx.children()
+                                .find(|n| n.is_element() && n.tag_name().name() == "v")
+                                .and_then(|v| v.text().map(|t| t.to_string()))
+                        })
+                })
+                .unwrap_or_default();
+
+            // Per-series X values for scatter/bubble: ECMA-376 §21.2.2.43 puts numeric
+            // X data in `<c:xVal>` (with its own numCache / numLit) instead of the
+            // shared `<c:cat>`. Read it as strings so the core ChartSeries.categories
+            // field can stay string-typed (renderScatterChart parses each entry back
+            // to a float).
+            let x_cache = if is_scatter_like {
+                ser.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "xVal")
+                    .and_then(|x| {
+                        x.descendants()
+                            .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
                     })
-                    // Fallback: <c:tx><c:v>Name</c:v></c:tx>
-                    .or_else(|| tx.children()
-                        .find(|n| n.is_element() && n.tag_name().name() == "v")
-                        .and_then(|v| v.text().map(|t| t.to_string())))
-            })
-            .unwrap_or_default();
+            } else {
+                None
+            };
+            let series_categories: Option<Vec<String>> = x_cache.map(&collect_pt_strings);
 
-        // Per-series X values for scatter/bubble: ECMA-376 §21.2.2.43 puts numeric
-        // X data in `<c:xVal>` (with its own numCache / numLit) instead of the
-        // shared `<c:cat>`. Read it as strings so the core ChartSeries.categories
-        // field can stay string-typed (renderScatterChart parses each entry back
-        // to a float).
-        let x_cache = if is_scatter_like {
-            ser.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "xVal")
-                .and_then(|x| x.descendants().find(|n| n.is_element() && is_pt_container(n.tag_name().name())))
-        } else { None };
-        let series_categories: Option<Vec<String>> = x_cache.map(|cache| collect_pt_strings(cache));
+            // Y values: scatter/bubble use `<c:yVal>`, everything else uses `<c:val>`.
+            // Restrict the descendant walk to the matching tag so a sibling `<c:xVal>`
+            // (also a numCache) can't be picked up as the Y series.
+            let val_cache = if is_scatter_like {
+                ser.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "yVal")
+                    .and_then(|y| {
+                        y.descendants().find(|n| {
+                            n.is_element()
+                                && (n.tag_name().name() == "numCache"
+                                    || n.tag_name().name() == "numLit")
+                        })
+                    })
+            } else {
+                ser.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "val")
+                    .and_then(|v| {
+                        v.descendants().find(|n| {
+                            n.is_element()
+                                && (n.tag_name().name() == "numCache"
+                                    || n.tag_name().name() == "numLit")
+                        })
+                    })
+            };
 
-        // Y values: scatter/bubble use `<c:yVal>`, everything else uses `<c:val>`.
-        // Restrict the descendant walk to the matching tag so a sibling `<c:xVal>`
-        // (also a numCache) can't be picked up as the Y series.
-        let val_cache = if is_scatter_like {
-            ser.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "yVal")
-                .and_then(|y| y.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")))
-        } else {
-            ser.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "val")
-                .and_then(|v| v.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")))
-        };
+            // For scatter/bubble the point count comes from this series' xVal (each
+            // series can have a different point count). For other charts it's the
+            // shared category count.
+            let series_pt_count = if is_scatter_like {
+                series_categories
+                    .as_ref()
+                    .map(|c| c.len())
+                    .unwrap_or(0)
+                    .max(1)
+            } else {
+                pt_count
+            };
 
-        // For scatter/bubble the point count comes from this series' xVal (each
-        // series can have a different point count). For other charts it's the
-        // shared category count.
-        let series_pt_count = if is_scatter_like {
-            series_categories.as_ref().map(|c| c.len()).unwrap_or(0).max(1)
-        } else { pt_count };
-
-        let mut values: Vec<Option<f64>> = vec![None; series_pt_count];
-        if let Some(cache) = val_cache {
-            for pt in cache.children().filter(|n| n.is_element() && n.tag_name().name() == "pt") {
-                let idx: usize = attr(&pt, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
-                let val: Option<f64> = pt.children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "v")
-                    .and_then(|v| v.text())
-                    .and_then(|t| t.parse().ok());
-                if idx < values.len() {
-                    values[idx] = val;
-                }
-            }
-        }
-
-        // Bubble per-point sizes (ECMA-376 §21.2.2.4 `<c:bubbleSize>`).
-        // Only meaningful for bubble charts; scatter / others ignore.
-        let bubble_sizes: Option<Vec<Option<f64>>> = if chart_type == "bubble" {
-            let bub_cache = ser.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "bubbleSize")
-                .and_then(|b| b.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")));
-            bub_cache.map(|cache| {
-                let mut sizes: Vec<Option<f64>> = vec![None; series_pt_count];
-                for pt in cache.children().filter(|n| n.is_element() && n.tag_name().name() == "pt") {
+            let mut values: Vec<Option<f64>> = vec![None; series_pt_count];
+            if let Some(cache) = val_cache {
+                for pt in cache
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                {
                     let idx: usize = attr(&pt, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let val: Option<f64> = pt.children()
+                    let val: Option<f64> = pt
+                        .children()
                         .find(|n| n.is_element() && n.tag_name().name() == "v")
                         .and_then(|v| v.text())
                         .and_then(|t| t.parse().ok());
-                    if idx < sizes.len() { sizes[idx] = val; }
+                    if idx < values.len() {
+                        values[idx] = val;
+                    }
                 }
-                sizes
-            })
-        } else { None };
+            }
 
-        // Series color from spPr > solidFill (bar/area/pie) or spPr > ln > solidFill (line)
-        let color = ser.children()
-            .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-            .and_then(|sp| {
-                sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill")
-                    .or_else(|| sp.children()
-                        .find(|n| n.is_element() && n.tag_name().name() == "ln")
-                        .and_then(|ln| ln.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill")))
-            })
-            .and_then(|fill| parse_color_node(fill, theme));
+            // Bubble per-point sizes (ECMA-376 §21.2.2.4 `<c:bubbleSize>`).
+            // Only meaningful for bubble charts; scatter / others ignore.
+            let bubble_sizes: Option<Vec<Option<f64>>> = if chart_type == "bubble" {
+                let bub_cache = ser
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "bubbleSize")
+                    .and_then(|b| {
+                        b.descendants().find(|n| {
+                            n.is_element()
+                                && (n.tag_name().name() == "numCache"
+                                    || n.tag_name().name() == "numLit")
+                        })
+                    });
+                bub_cache.map(|cache| {
+                    let mut sizes: Vec<Option<f64>> = vec![None; series_pt_count];
+                    for pt in cache
+                        .children()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                    {
+                        let idx: usize = attr(&pt, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let val: Option<f64> = pt
+                            .children()
+                            .find(|n| n.is_element() && n.tag_name().name() == "v")
+                            .and_then(|v| v.text())
+                            .and_then(|t| t.parse().ok());
+                        if idx < sizes.len() {
+                            sizes[idx] = val;
+                        }
+                    }
+                    sizes
+                })
+            } else {
+                None
+            };
 
-        // Per-data-point colors from <c:dPt> (important for pie charts)
-        let data_point_colors: Vec<Option<String>> = (0..series_pt_count).map(|i| {
-            ser.children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "dPt")
-                .find(|dpt| attr(dpt, "idx").and_then(|v| v.parse::<usize>().ok()) == Some(i))
-                .and_then(|dpt| dpt.descendants().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
-                .and_then(|fill| parse_color_node(fill, theme))
-        }).collect();
+            // Series color from spPr > solidFill (bar/area/pie) or spPr > ln > solidFill (line)
+            let color = ser
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+                .and_then(|sp| {
+                    sp.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                        .or_else(|| {
+                            sp.children()
+                                .find(|n| n.is_element() && n.tag_name().name() == "ln")
+                                .and_then(|ln| {
+                                    ln.children().find(|n| {
+                                        n.is_element() && n.tag_name().name() == "solidFill"
+                                    })
+                                })
+                        })
+                })
+                .and_then(|fill| parse_color_node(fill, theme));
 
-        let has_dpt_colors = data_point_colors.iter().any(|c| c.is_some());
+            // Per-data-point colors from <c:dPt> (important for pie charts)
+            let data_point_colors: Vec<Option<String>> = (0..series_pt_count)
+                .map(|i| {
+                    ser.children()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "dPt")
+                        .find(|dpt| {
+                            attr(dpt, "idx").and_then(|v| v.parse::<usize>().ok()) == Some(i)
+                        })
+                        .and_then(|dpt| {
+                            dpt.descendants()
+                                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                        })
+                        .and_then(|fill| parse_color_node(fill, theme))
+                })
+                .collect();
 
-        // Series value number format from `<c:val>…<c:numCache><c:formatCode>`.
-        // Used for data labels when `<c:dLbls>` carries no explicit `<c:numFmt>`
-        // (ECMA-376 §21.2.2.121). "General" means "no format" → drop it so the
-        // renderer's default integer/decimal formatter takes over.
-        let val_format_code = val_cache
-            .and_then(|cache| cache.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "formatCode")
-                .and_then(|fc| fc.text().map(|t| t.to_string())))
-            .filter(|s| !s.is_empty() && s != "General");
+            let has_dpt_colors = data_point_colors.iter().any(|c| c.is_some());
 
-        // Series-level data-label text colour from `<c:dLbls><c:txPr>…solidFill`.
-        // Scoped to this `<c:ser>` (not chart-root) so stacked-bar segments keep
-        // their independent label colours (white on dark fill, black on light).
-        let label_color = ser.children()
-            .find(|n| n.is_element() && n.tag_name().name() == "dLbls")
-            .and_then(|dlbls| dlbls.children().find(|n| n.is_element() && n.tag_name().name() == "txPr"))
-            .and_then(|txpr| txpr.descendants().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
-            .and_then(|fill| parse_color_node(fill, theme));
+            // Series value number format from `<c:val>…<c:numCache><c:formatCode>`.
+            // Used for data labels when `<c:dLbls>` carries no explicit `<c:numFmt>`
+            // (ECMA-376 §21.2.2.121). "General" means "no format" → drop it so the
+            // renderer's default integer/decimal formatter takes over.
+            let val_format_code = val_cache
+                .and_then(|cache| {
+                    cache
+                        .children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "formatCode")
+                        .and_then(|fc| fc.text().map(|t| t.to_string()))
+                })
+                .filter(|s| !s.is_empty() && s != "General");
 
-        ChartSeriesData {
-            name, values, color,
-            data_point_colors: if has_dpt_colors { Some(data_point_colors) } else { None },
-            // Legacy `<c:chart>` per-point label colors are extracted via
-            // `<c:dLbls><c:dLbl idx>` — not yet wired here; chartEx is the only
-            // path that needs it for sample-2's waterfall.
-            data_label_colors: None,
-            categories: series_categories,
-            bubble_sizes,
-            val_format_code,
-            label_color,
-        }
-    }).collect();
+            // Series-level data-label text colour from `<c:dLbls><c:txPr>…solidFill`.
+            // Scoped to this `<c:ser>` (not chart-root) so stacked-bar segments keep
+            // their independent label colours (white on dark fill, black on light).
+            let label_color = ser
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "dLbls")
+                .and_then(|dlbls| {
+                    dlbls
+                        .children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "txPr")
+                })
+                .and_then(|txpr| {
+                    txpr.descendants()
+                        .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                })
+                .and_then(|fill| parse_color_node(fill, theme));
+
+            ChartSeriesData {
+                name,
+                values,
+                color,
+                data_point_colors: if has_dpt_colors {
+                    Some(data_point_colors)
+                } else {
+                    None
+                },
+                // Legacy `<c:chart>` per-point label colors are extracted via
+                // `<c:dLbls><c:dLbl idx>` — not yet wired here; chartEx is the only
+                // path that needs it for sample-2's waterfall.
+                data_label_colors: None,
+                categories: series_categories,
+                bubble_sizes,
+                val_format_code,
+                label_color,
+            }
+        })
+        .collect();
 
     // Check if data labels (showVal) are enabled — at chart level or in any series
-    let show_data_labels = root.descendants()
+    let show_data_labels = root
+        .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
-        .any(|dLbls| {
-            dLbls.children()
-                .any(|c| c.is_element() && c.tag_name().name() == "showVal"
-                    && attr(&c, "val").as_deref() == Some("1"))
+        .any(|d_lbls| {
+            d_lbls.children().any(|c| {
+                c.is_element()
+                    && c.tag_name().name() == "showVal"
+                    && attr(&c, "val").as_deref() == Some("1")
+            })
         });
 
     // Outer chartSpace spPr: we want the child of chartSpace (not plotArea).
-    let chart_bg = root.children()
+    let chart_bg = root
+        .children()
         .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-        .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+        .and_then(|sp| {
+            sp.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+        })
         .and_then(|fill| parse_color_node(fill, theme));
 
     // <c:legend> + <c:legendPos val> — shared helper.
@@ -3957,9 +4676,13 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     // ECMA-376 §21.2.2.35: `<c:crossBetween>` lives on the VALUE axis (not cat),
     // and describes whether value gridlines land between or on category ticks.
     // Default is "between" (categories inset by half a step each side).
-    let cat_axis_cross_between = root.descendants()
+    let cat_axis_cross_between = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "valAx")
-        .and_then(|ax| ax.children().find(|n| n.is_element() && n.tag_name().name() == "crossBetween"))
+        .and_then(|ax| {
+            ax.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "crossBetween")
+        })
         .and_then(|n| attr(&n, "val"))
         .unwrap_or_else(|| "between".to_string());
 
@@ -3989,20 +4712,23 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     // ColorResolver wrapper around `parse_color_node` so the
     // ECMA-376 §21.2.2.16 dLbls > txPr > solidFill walk lives in one place.
     let resolver = PptxColorResolver { theme };
-    let data_label_font_color =
-        ooxml_common::chart::extract_data_label_font_color(root, &resolver);
+    let data_label_font_color = ooxml_common::chart::extract_data_label_font_color(root, &resolver);
 
     // Axis tick-label text color + axis-line style (color / width / noFill).
     // ECMA-376 §21.2.2.* — `<c:catAx|valAx><c:txPr>…<a:solidFill>` colors the
     // tick labels and `<c:spPr><a:ln>` styles the axis rule. Shared helpers so
     // the gray "2025年3月期" category labels and the light-gray category-axis
     // line in sample-2 slide-16's horizontal bar chart resolve the same way.
-    let cat_axis_font_color = cat_ax.and_then(|n| ooxml_common::chart::extract_axis_tick_label_color(n, &resolver));
-    let val_axis_font_color = val_ax.and_then(|n| ooxml_common::chart::extract_axis_tick_label_color(n, &resolver));
-    let (cat_axis_line_color, cat_axis_line_width_emu, cat_axis_line_hidden) =
-        cat_ax.map(|n| ooxml_common::chart::extract_axis_line_style(n, &resolver)).unwrap_or((None, None, false));
-    let (val_axis_line_color, val_axis_line_width_emu, val_axis_line_hidden) =
-        val_ax.map(|n| ooxml_common::chart::extract_axis_line_style(n, &resolver)).unwrap_or((None, None, false));
+    let cat_axis_font_color =
+        cat_ax.and_then(|n| ooxml_common::chart::extract_axis_tick_label_color(n, &resolver));
+    let val_axis_font_color =
+        val_ax.and_then(|n| ooxml_common::chart::extract_axis_tick_label_color(n, &resolver));
+    let (cat_axis_line_color, cat_axis_line_width_emu, cat_axis_line_hidden) = cat_ax
+        .map(|n| ooxml_common::chart::extract_axis_line_style(n, &resolver))
+        .unwrap_or((None, None, false));
+    let (val_axis_line_color, val_axis_line_width_emu, val_axis_line_hidden) = val_ax
+        .map(|n| ooxml_common::chart::extract_axis_line_style(n, &resolver))
+        .unwrap_or((None, None, false));
 
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(ooxml_common::chart::extract_axis_format_code);
@@ -4012,9 +4738,14 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     // this to keep its horizontal bar chart from spilling into the side
     // annotation column. We parse the same shape xlsx already exposes
     // (xMode, yMode, layoutTarget, x, y, w?, h?).
-    let plot_area_manual_layout = plot_area.children()
+    let plot_area_manual_layout = plot_area
+        .children()
         .find(|n| n.is_element() && n.tag_name().name() == "layout")
-        .and_then(|layout| layout.children().find(|n| n.is_element() && n.tag_name().name() == "manualLayout"))
+        .and_then(|layout| {
+            layout
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "manualLayout")
+        })
         .map(|ml| {
             let mut x_mode = "edge".to_string();
             let mut y_mode = "edge".to_string();
@@ -4026,29 +4757,65 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             for ch in ml.children().filter(|n| n.is_element()) {
                 let val_str = attr(&ch, "val");
                 match ch.tag_name().name() {
-                    "xMode" => { if let Some(v) = val_str { x_mode = v; } }
-                    "yMode" => { if let Some(v) = val_str { y_mode = v; } }
-                    "layoutTarget" => { layout_target = val_str; }
-                    "x" => { if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) { x = v; } }
-                    "y" => { if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) { y = v; } }
-                    "w" => { w = val_str.and_then(|s| s.parse::<f64>().ok()); }
-                    "h" => { h = val_str.and_then(|s| s.parse::<f64>().ok()); }
+                    "xMode" => {
+                        if let Some(v) = val_str {
+                            x_mode = v;
+                        }
+                    }
+                    "yMode" => {
+                        if let Some(v) = val_str {
+                            y_mode = v;
+                        }
+                    }
+                    "layoutTarget" => {
+                        layout_target = val_str;
+                    }
+                    "x" => {
+                        if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) {
+                            x = v;
+                        }
+                    }
+                    "y" => {
+                        if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) {
+                            y = v;
+                        }
+                    }
+                    "w" => {
+                        w = val_str.and_then(|s| s.parse::<f64>().ok());
+                    }
+                    "h" => {
+                        h = val_str.and_then(|s| s.parse::<f64>().ok());
+                    }
                     _ => {}
                 }
             }
-            ChartManualLayout { x_mode, y_mode, layout_target, x, y, w, h }
+            ChartManualLayout {
+                x_mode,
+                y_mode,
+                layout_target,
+                x,
+                y,
+                w,
+                h,
+            }
         });
 
     // `<c:scatterChart><c:scatterStyle val>` — ECMA-376 §21.2.2.42. Lives
     // directly under scatterChart, so a plot_area descendant walk is enough.
     let scatter_style = if chart_type == "scatter" {
-        plot_area.descendants()
+        plot_area
+            .descendants()
             .find(|n| n.is_element() && n.tag_name().name() == "scatterStyle")
             .and_then(|n| attr(&n, "val"))
-    } else { None };
+    } else {
+        None
+    };
 
     Some(ChartElement {
-        x: 0, y: 0, width: 0, height: 0,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
         chart_type,
         title,
         categories,
@@ -4095,16 +4862,24 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
     let root = doc.root_element();
 
     // Chart type from series layoutId attribute
-    let series_node = root.descendants()
+    let series_node = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "series")?;
     let layout_id = attr(&series_node, "layoutId").unwrap_or_default();
     let chart_type = layout_id; // "waterfall", "treemap", etc.
 
     // Categories from chartData > data > strDim[@type="cat"] > lvl > pt
-    let categories: Vec<String> = root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "strDim"
-            && attr(n, "type").as_deref() == Some("cat"))
-        .and_then(|dim| dim.descendants().find(|n| n.is_element() && n.tag_name().name() == "lvl"))
+    let categories: Vec<String> = root
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "strDim"
+                && attr(n, "type").as_deref() == Some("cat")
+        })
+        .and_then(|dim| {
+            dim.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+        })
         .map(|lvl| {
             lvl.children()
                 .filter(|n| n.is_element() && n.tag_name().name() == "pt")
@@ -4116,13 +4891,21 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
     let pt_count = categories.len().max(1);
 
     // Values from chartData > data > numDim[@type="val"] > lvl > pt
-    let raw_values: Vec<Option<f64>> = root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "numDim"
-            && attr(n, "type").as_deref() == Some("val"))
-        .and_then(|dim| dim.descendants().find(|n| n.is_element() && n.tag_name().name() == "lvl"))
+    let raw_values: Vec<Option<f64>> = root
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "numDim"
+                && attr(n, "type").as_deref() == Some("val")
+        })
+        .and_then(|dim| {
+            dim.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+        })
         .map(|lvl| {
             let mut vals: Vec<Option<f64>> = vec![None; pt_count];
-            for (i, pt) in lvl.children()
+            for (i, pt) in lvl
+                .children()
                 .filter(|n| n.is_element() && n.tag_name().name() == "pt")
                 .enumerate()
             {
@@ -4136,10 +4919,14 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
 
     // Subtotal indices (idx=0 is always implicit; add from cx:subtotals)
     let mut subtotal_indices: Vec<u32> = vec![0];
-    if let Some(subtotals_node) = series_node.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "subtotals") {
-        for idx_node in subtotals_node.children()
-            .filter(|n| n.is_element() && n.tag_name().name() == "idx") {
+    if let Some(subtotals_node) = series_node
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "subtotals")
+    {
+        for idx_node in subtotals_node
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "idx")
+        {
             if let Some(v) = attr(&idx_node, "val").and_then(|v| v.parse::<u32>().ok()) {
                 if v != 0 {
                     subtotal_indices.push(v);
@@ -4149,9 +4936,13 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
     }
 
     // Series color (first dataPt or series spPr)
-    let color = series_node.children()
+    let color = series_node
+        .children()
         .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-        .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+        .and_then(|sp| {
+            sp.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+        })
         .and_then(|fill| parse_color_node(fill, theme));
 
     // Per-idx data-label colors. ChartEx writes `<cx:dataLabels>` with
@@ -4161,18 +4952,28 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
     // positive-bar labels stay tx1 (black).
     let mut data_label_colors_vec: Vec<Option<String>> = vec![None; raw_values.len().max(1)];
     let mut has_per_label_color = false;
-    for dl in series_node.descendants()
+    for dl in series_node
+        .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dataLabel")
     {
-        let Some(idx) = attr(&dl, "idx").and_then(|v| v.parse::<usize>().ok()) else { continue; };
-        if idx >= data_label_colors_vec.len() { continue; }
+        let Some(idx) = attr(&dl, "idx").and_then(|v| v.parse::<usize>().ok()) else {
+            continue;
+        };
+        if idx >= data_label_colors_vec.len() {
+            continue;
+        }
         // First `<a:solidFill>` inside the per-idx <cx:txPr>.
-        let txpr = match dl.children().find(|n| n.is_element() && n.tag_name().name() == "txPr") {
+        let txpr = match dl
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "txPr")
+        {
             Some(n) => n,
             None => continue,
         };
         for desc in txpr.descendants().filter(|n| n.is_element()) {
-            if desc.tag_name().name() != "solidFill" { continue; }
+            if desc.tag_name().name() != "solidFill" {
+                continue;
+            }
             if let Some(c) = parse_color_node(desc, theme) {
                 data_label_colors_vec[idx] = Some(c);
                 has_per_label_color = true;
@@ -4186,7 +4987,11 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         values: raw_values,
         color,
         data_point_colors: None,
-        data_label_colors: if has_per_label_color { Some(data_label_colors_vec) } else { None },
+        data_label_colors: if has_per_label_color {
+            Some(data_label_colors_vec)
+        } else {
+            None
+        },
         categories: None,
         bubble_sizes: None,
         val_format_code: None,
@@ -4204,14 +5009,18 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
     // shared renderer's `barW = catGap / (1 + gapWidth/100)` formula works
     // uniformly across chart types. Default 1.5 (= legacy 150%) per PowerPoint
     // when the attribute is omitted.
-    let bar_gap_width = root.descendants()
+    let bar_gap_width = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "catScaling")
         .and_then(|n| attr(&n, "gapWidth"))
         .and_then(|v| v.parse::<f64>().ok())
         .map(|frac| (frac * 100.0).round() as i32);
 
     Some(ChartElement {
-        x: 0, y: 0, width: 0, height: 0,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
         chart_type,
         title: None,
         categories,
@@ -4261,23 +5070,59 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
 fn default_placeholder_transform(ph_type: &str) -> Transform {
     match ph_type {
         "title" | "ctrTitle" => Transform {
-            x: 457200,   y: 274638,   cx: 8229600, cy: 1143000, rot: 0.0, flip_h: false, flip_v: false,
+            x: 457200,
+            y: 274638,
+            cx: 8229600,
+            cy: 1143000,
+            rot: 0.0,
+            flip_h: false,
+            flip_v: false,
         },
         "subTitle" => Transform {
-            x: 457200,   y: 1600200,  cx: 8229600, cy: 899160,  rot: 0.0, flip_h: false, flip_v: false,
+            x: 457200,
+            y: 1600200,
+            cx: 8229600,
+            cy: 899160,
+            rot: 0.0,
+            flip_h: false,
+            flip_v: false,
         },
         "dt" => Transform {
-            x: 0,        y: 6261600,  cx: 2286000, cy: 596900,  rot: 0.0, flip_h: false, flip_v: false,
+            x: 0,
+            y: 6261600,
+            cx: 2286000,
+            cy: 596900,
+            rot: 0.0,
+            flip_h: false,
+            flip_v: false,
         },
         "ftr" => Transform {
-            x: 2972400,  y: 6261600,  cx: 3086100, cy: 596900,  rot: 0.0, flip_h: false, flip_v: false,
+            x: 2972400,
+            y: 6261600,
+            cx: 3086100,
+            cy: 596900,
+            rot: 0.0,
+            flip_h: false,
+            flip_v: false,
         },
         "sldNum" => Transform {
-            x: 6629400,  y: 6261600,  cx: 2057400, cy: 596900,  rot: 0.0, flip_h: false, flip_v: false,
+            x: 6629400,
+            y: 6261600,
+            cx: 2057400,
+            cy: 596900,
+            rot: 0.0,
+            flip_h: false,
+            flip_v: false,
         },
         // "body" and everything else: full-width content area below title
         _ => Transform {
-            x: 457200,   y: 1600200,  cx: 8229600, cy: 4525963, rot: 0.0, flip_h: false, flip_v: false,
+            x: 457200,
+            y: 1600200,
+            cx: 8229600,
+            cy: 4525963,
+            rot: 0.0,
+            flip_h: false,
+            flip_v: false,
         },
     }
 }
@@ -4387,13 +5232,25 @@ fn parse_shape(
     // cy=0 means "auto-height" for body-text shapes, but connector-type
     // geometries (line, *Connector*) legitimately use cy=0 to represent
     // a perfectly horizontal segment — don't inflate their height.
-    let is_connector_geom = matches!(geometry.as_str(),
-        "line" | "straightConnector1"
-        | "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5"
-        | "curvedConnector2" | "curvedConnector3" | "curvedConnector4" | "curvedConnector5"
+    let is_connector_geom = matches!(
+        geometry.as_str(),
+        "line"
+            | "straightConnector1"
+            | "bentConnector2"
+            | "bentConnector3"
+            | "bentConnector4"
+            | "bentConnector5"
+            | "curvedConnector2"
+            | "curvedConnector3"
+            | "curvedConnector4"
+            | "curvedConnector5"
     );
     let cy = if t.cy == 0 && !is_connector_geom {
-        if is_bottom_anchor { 0_i64 } else { 2_000_000_i64 }
+        if is_bottom_anchor {
+            0_i64
+        } else {
+            2_000_000_i64
+        }
     } else {
         t.cy
     };
@@ -4408,7 +5265,11 @@ fn parse_shape(
     };
     let av_node = prst_geom_node.and_then(|n| child(n, "avLst"));
     let gd_nodes: Vec<_> = av_node
-        .map(|av| av.children().filter(|n| n.is_element() && n.tag_name().name() == "gd").collect())
+        .map(|av| {
+            av.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "gd")
+                .collect()
+        })
         .unwrap_or_default();
     // First gd = adj (match by name "adj" or "adj1", fallback to position 0)
     let adj: Option<f64> = gd_nodes
@@ -4461,35 +5322,40 @@ fn parse_shape(
     let style_node = child(sp_node, "style");
 
     // fillRef idx=0 → explicit no-fill; idx>0 → use referenced color as solid fill
-    let style_fill: Option<Fill> = style_node
-        .and_then(|s| child(s, "fillRef"))
-        .and_then(|fr| {
-            let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
-            if idx == 0 {
-                Some(Fill::None)
-            } else {
-                parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
-            }
-        });
+    let style_fill: Option<Fill> = style_node.and_then(|s| child(s, "fillRef")).and_then(|fr| {
+        let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
+        if idx == 0 {
+            Some(Fill::None)
+        } else {
+            parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
+        }
+    });
 
     // lnRef idx=0 → no line; idx>0 → resolve width from theme's fmtScheme >
     // lnStyleLst (stored as "+lnRef-N") and color from the ref's own solidFill.
     // Falling back to 9525 under-weights idx>=2 strokes (Office default theme
     // idx=2 is 19050 EMU = 1.5pt, idx=3 is 25400 EMU = 2pt).
-    let style_stroke: Option<Stroke> = style_node
-        .and_then(|s| child(s, "lnRef"))
-        .and_then(|lr| {
-            let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
-            if idx == 0 { None } else {
-                parse_color_node(lr, theme).map(|c| {
-                    let width = theme
-                        .get(&format!("+lnRef-{}", idx))
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or(9525);
-                    Stroke { color: c, width, dash_style: None, head_end: None, tail_end: None, cmpd: None }
-                })
-            }
-        });
+    let style_stroke: Option<Stroke> = style_node.and_then(|s| child(s, "lnRef")).and_then(|lr| {
+        let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
+        if idx == 0 {
+            None
+        } else {
+            parse_color_node(lr, theme).map(|c| {
+                let width = theme
+                    .get(&format!("+lnRef-{}", idx))
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(9525);
+                Stroke {
+                    color: c,
+                    width,
+                    dash_style: None,
+                    head_end: None,
+                    tail_end: None,
+                    cmpd: None,
+                }
+            })
+        }
+    });
 
     // fontRef → default text color for this shape.
     // Fall back to layout/master placeholder inherited color (lstStyle > lvl1pPr > defRPr
@@ -4529,7 +5395,9 @@ fn parse_shape(
     // spPr stroke: if ln element is present, respect it (even if noFill → None);
     // otherwise fall back to layout placeholder stroke, then style stroke.
     let stroke = if sp_pr.and_then(|p| child(p, "ln")).is_some() {
-        sp_pr.and_then(|p| child(p, "ln")).and_then(|n| parse_stroke(n, theme))
+        sp_pr
+            .and_then(|p| child(p, "ln"))
+            .and_then(|n| parse_stroke(n, theme))
     } else if ph_node.is_some() {
         lph.lookup_stroke(&ph_type, ph_idx).or(style_stroke)
     } else {
@@ -4537,8 +5405,17 @@ fn parse_shape(
     };
 
     // Inherited defaults from layout/master for this placeholder type/idx
-    let (inherited_font_size, inherited_bold, inherited_italic, inherited_caps, inherited_anchor, inherited_alignment,
-         inherited_space_before, inherited_space_after, inherited_line_spacing) = if ph_node.is_some() {
+    let (
+        inherited_font_size,
+        inherited_bold,
+        inherited_italic,
+        inherited_caps,
+        inherited_anchor,
+        inherited_alignment,
+        inherited_space_before,
+        inherited_space_after,
+        inherited_line_spacing,
+    ) = if ph_node.is_some() {
         (
             lph.lookup_font_size(&ph_type, ph_idx),
             lph.lookup_bold(&ph_type),
@@ -4567,7 +5444,11 @@ fn parse_shape(
         .and_then(|n| attr(&n, "txBox"))
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let shape_kind = if is_text_box { ShapeKind::Tx } else { ShapeKind::Sp };
+    let shape_kind = if is_text_box {
+        ShapeKind::Tx
+    } else {
+        ShapeKind::Sp
+    };
     // Per-level bullets a paragraph inherits when it declares no explicit one
     // (ECMA-376 §19.7.10): the layout/master placeholder cascade for this slot.
     let inherited_level_bullets: LevelBullets = if ph_node.is_some() {
@@ -4575,8 +5456,25 @@ fn parse_shape(
     } else {
         empty_level_bullets()
     };
-    let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, rels, inherited_font_size, inherited_level_font_sizes, &inherited_level_bullets, inherited_bold, inherited_italic, inherited_caps.clone(), inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing, shape_kind));
+    let text_body = child(sp_node, "txBody").map(|n| {
+        parse_text_body(
+            n,
+            theme,
+            rels,
+            inherited_font_size,
+            inherited_level_font_sizes,
+            &inherited_level_bullets,
+            inherited_bold,
+            inherited_italic,
+            inherited_caps.clone(),
+            inherited_anchor,
+            inherited_alignment,
+            inherited_space_before,
+            inherited_space_after,
+            inherited_line_spacing,
+            shape_kind,
+        )
+    });
 
     // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
     // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
@@ -4588,11 +5486,32 @@ fn parse_shape(
     let reflection = effect_lst.and_then(parse_reflection);
 
     Some(ShapeElement {
-        x: t.x, y: t.y, width: t.cx, height: cy,
-        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-        geometry, fill, stroke, text_body, default_text_color, cust_geom,
-        adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8,
-        shadow, inner_shadow, glow, soft_edge, reflection,
+        x: t.x,
+        y: t.y,
+        width: t.cx,
+        height: cy,
+        rotation: t.rot,
+        flip_h: t.flip_h,
+        flip_v: t.flip_v,
+        geometry,
+        fill,
+        stroke,
+        text_body,
+        default_text_color,
+        cust_geom,
+        adj,
+        adj2,
+        adj3,
+        adj4,
+        adj5,
+        adj6,
+        adj7,
+        adj8,
+        shadow,
+        inner_shadow,
+        glow,
+        soft_edge,
+        reflection,
         id: cnv_id,
         name: cnv_name,
         placeholder_type: placeholder_type_out,
@@ -4636,9 +5555,15 @@ fn parse_picture(
     let cust_geom = child(sp_pr, "custGeom").map(parse_cust_geom);
 
     Some(PictureElement {
-        x: t.x, y: t.y, width: t.cx, height: t.cy,
-        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-        data_url, clip_adjust: None,
+        x: t.x,
+        y: t.y,
+        width: t.cx,
+        height: t.cy,
+        rotation: t.rot,
+        flip_h: t.flip_h,
+        flip_v: t.flip_v,
+        data_url,
+        clip_adjust: None,
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
         cust_geom,
@@ -4663,23 +5588,29 @@ fn png_size_from_data_url(data_url: &str) -> Option<(u32, u32)> {
 const EMU_PER_PX_96DPI: i64 = 9525;
 
 fn mime_from_ext(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
-        "png"  => "image/png",
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
-        "gif"  => "image/gif",
-        "bmp"  => "image/bmp",
-        "svg"  => "image/svg+xml",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
         "webp" => "image/webp",
-        "mp3"  => "audio/mpeg",
-        "m4a"  => "audio/mp4",
-        "wav"  => "audio/wav",
-        "aac"  => "audio/aac",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "aac" => "audio/aac",
         "ogg" | "oga" => "audio/ogg",
-        "mp4"  => "video/mp4",
-        "mov"  => "video/quicktime",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
         "webm" => "video/webm",
-        "ogv"  => "video/ogg",
-        _      => "application/octet-stream",
+        "ogv" => "video/ogg",
+        _ => "application/octet-stream",
     }
 }
 
@@ -4699,11 +5630,17 @@ fn parse_media(
     let (media_kind, media_rid) = nv_pr
         .children()
         .find_map(|n| {
-            if !n.is_element() { return None; }
+            if !n.is_element() {
+                return None;
+            }
             let name = n.tag_name().name();
             if name == "videoFile" || name == "audioFile" {
                 let rid = attr_r(&n, "link").or_else(|| attr_r(&n, "embed"))?;
-                let kind = if name == "videoFile" { "video" } else { "audio" };
+                let kind = if name == "videoFile" {
+                    "video"
+                } else {
+                    "audio"
+                };
                 Some((kind, rid))
             } else {
                 None
@@ -4712,14 +5649,19 @@ fn parse_media(
         .or_else(|| {
             // p14:media lives inside p:extLst > p:ext
             let ext_lst = child(nv_pr, "extLst")?;
-            ext_lst.children().filter(|c| c.is_element()).find_map(|ext| {
-                ext.children().filter(|c| c.is_element()).find_map(|m| {
-                    if m.tag_name().name() != "media" { return None; }
-                    let rid = attr_r(&m, "link").or_else(|| attr_r(&m, "embed"))?;
-                    // ext has no way to say audio vs video by itself; decide from file ext
-                    Some(("", rid))
+            ext_lst
+                .children()
+                .filter(|c| c.is_element())
+                .find_map(|ext| {
+                    ext.children().filter(|c| c.is_element()).find_map(|m| {
+                        if m.tag_name().name() != "media" {
+                            return None;
+                        }
+                        let rid = attr_r(&m, "link").or_else(|| attr_r(&m, "embed"))?;
+                        // ext has no way to say audio vs video by itself; decide from file ext
+                        Some(("", rid))
+                    })
                 })
-            })
         })?;
 
     let rel_target = rels.get(&media_rid)?;
@@ -4741,7 +5683,9 @@ fn parse_media(
     let sp_pr = child(pic_node, "spPr")?;
     let xfrm_node = child(sp_pr, "xfrm")?;
     let t = parse_xfrm(xfrm_node);
-    if t.cx == 0 || t.cy == 0 { return None; }
+    if t.cx == 0 || t.cy == 0 {
+        return None;
+    }
 
     // Poster image (from blipFill). Optional — the renderer falls back to a
     // solid fill when the poster is absent or still loading. We emit just the
@@ -4758,7 +5702,10 @@ fn parse_media(
     .unwrap_or_default();
 
     Some(MediaElement {
-        x: t.x, y: t.y, width: t.cx, height: t.cy,
+        x: t.x,
+        y: t.y,
+        width: t.cx,
+        height: t.cy,
         media_kind,
         poster_path,
         poster_mime_type,
@@ -4804,7 +5751,7 @@ fn parse_table_style_fill(
     use ooxml_common::color::TintMode::WordLiteral;
     for c in fill_wrapper.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
-            "noFill"    => return Some(Fill::None),
+            "noFill" => return Some(Fill::None),
             "solidFill" => {
                 return parse_color_node_tint(c, theme, WordLiteral)
                     .map(|color| Fill::Solid { color });
@@ -4816,21 +5763,39 @@ fn parse_table_style_fill(
 }
 
 /// Parse ppt/tableStyles.xml into a map of styleId → TableStyleDef.
-fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap<String, TableStyleDef> {
+fn parse_table_styles_xml(
+    xml: &str,
+    theme: &HashMap<String, String>,
+) -> HashMap<String, TableStyleDef> {
     let mut map = HashMap::new();
-    let Ok(doc) = roxmltree::Document::parse(xml) else { return map; };
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return map;
+    };
     let root = doc.root_element();
-    for style_node in root.children().filter(|n| n.is_element() && n.tag_name().name() == "tblStyle") {
-        let Some(style_id) = attr(&style_node, "styleId") else { continue };
+    for style_node in root
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "tblStyle")
+    {
+        let Some(style_id) = attr(&style_node, "styleId") else {
+            continue;
+        };
         let style_id = style_id.to_string();
         let mut def = TableStyleDef::default();
 
-        let parse_tc_style = |role: roxmltree::Node<'_, '_>|
-            -> (Option<Fill>, Option<Stroke>, Option<Stroke>, Option<Stroke>, Option<Stroke>, Option<Stroke>)
-        {
+        // (fill, inside-horizontal, inside-vertical, diagonal/unused, outer-horizontal,
+        // outer-vertical) borders for one table-style role (ECMA-376 §20.1.4.2.27).
+        type TcStyle = (
+            Option<Fill>,
+            Option<Stroke>,
+            Option<Stroke>,
+            Option<Stroke>,
+            Option<Stroke>,
+            Option<Stroke>,
+        );
+        let parse_tc_style = |role: roxmltree::Node<'_, '_>| -> TcStyle {
             let tc_style = match child(role, "tcStyle") {
                 Some(n) => n,
-                None    => return (None, None, None, None, None, None),
+                None => return (None, None, None, None, None, None),
             };
             // ECMA-376 §20.1.4.2.27 — the cell fill is wrapped in `<a:fill>`
             // (CT_FillProperties), so descend into it before reading the actual
@@ -4838,13 +5803,15 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
             let fill = child(tc_style, "fill")
                 .and_then(|f| parse_table_style_fill(f, theme))
                 .or_else(|| {
-                child(tc_style, "fillRef").and_then(|fr| {
-                    let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    if idx == 0 { Some(Fill::None) } else {
-                        parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
-                    }
-                })
-            });
+                    child(tc_style, "fillRef").and_then(|fr| {
+                        let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        if idx == 0 {
+                            Some(Fill::None)
+                        } else {
+                            parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
+                        }
+                    })
+                });
             let tc_bdr = child(tc_style, "tcBdr");
             let parse_side = |side: &str| -> Option<Stroke> {
                 let side_node = tc_bdr.and_then(|b| child(b, side))?;
@@ -4854,19 +5821,34 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
                 }
                 // <a:lnRef idx="N">: use standard themed width + provided color
                 if let Some(ln_ref) = child(side_node, "lnRef") {
-                    let idx: u32 = attr(&ln_ref, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    if idx == 0 { return None; }
+                    let idx: u32 = attr(&ln_ref, "idx")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if idx == 0 {
+                        return None;
+                    }
                     let color = parse_color_node(ln_ref, theme)?;
-                    let width: i64 = match idx { 1 => 6350, 2 => 12700, _ => 19050 };
-                    return Some(Stroke { color, width, dash_style: None, head_end: None, tail_end: None, cmpd: None });
+                    let width: i64 = match idx {
+                        1 => 6350,
+                        2 => 12700,
+                        _ => 19050,
+                    };
+                    return Some(Stroke {
+                        color,
+                        width,
+                        dash_style: None,
+                        head_end: None,
+                        tail_end: None,
+                        cmpd: None,
+                    });
                 }
                 None
             };
             let inside_h = parse_side("insideH");
             let inside_v = parse_side("insideV");
             let border_b = parse_side("bottom");
-            let outer_h  = parse_side("top");
-            let outer_v  = parse_side("left");
+            let outer_h = parse_side("top");
+            let outer_v = parse_side("left");
             (fill, inside_h, inside_v, border_b, outer_h, outer_v)
         };
 
@@ -4888,8 +5870,8 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
             def.whole_fill = fill;
             def.whole_inside_h = ih;
             def.whole_inside_v = iv;
-            def.whole_outer_h  = oh;
-            def.whole_outer_v  = ov;
+            def.whole_outer_h = oh;
+            def.whole_outer_v = ov;
             def.whole_text_color = parse_tc_tx_color(whole);
         }
         if let Some(band) = child(style_node, "band1H") {
@@ -4945,24 +5927,29 @@ fn parse_table(
         .and_then(|n| n.text())
         .map(|s| s.to_string());
     let flag = |attr_name: &str| -> bool {
-        tbl_pr.and_then(|n| attr(&n, attr_name))
-            .map(|v| v == "1" || v == "true").unwrap_or(false)
+        tbl_pr
+            .and_then(|n| attr(&n, attr_name))
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false)
     };
     let first_row = flag("firstRow");
-    let last_row  = flag("lastRow");
+    let last_row = flag("lastRow");
     // ECMA-376 §21.1.3.13 (a:tblPr@rtl): right-to-left table layout.
     let rtl = flag("rtl");
-    let band_row  = flag("bandRow");
+    let band_row = flag("bandRow");
     let first_col = flag("firstCol");
-    let last_col  = flag("lastCol");
+    let last_col = flag("lastCol");
 
     // Load style definitions once
     let table_styles_xml = read_zip_str(zip, "ppt/tableStyles.xml").ok();
-    let table_styles = table_styles_xml.as_deref()
+    let table_styles = table_styles_xml
+        .as_deref()
         .map(|xml| parse_table_styles_xml(xml, theme))
         .unwrap_or_default();
     let style_owned: Option<TableStyleDef> = style_id.as_deref().and_then(|id| {
-        table_styles.get(id).cloned()
+        table_styles
+            .get(id)
+            .cloned()
             .or_else(|| table_style_presets::lookup_builtin_table_style(id, theme))
     });
     let style = style_owned.as_ref();
@@ -5006,23 +5993,33 @@ fn parse_table(
                     let band_ri = ri.saturating_sub(if first_row { 1 } else { 0 });
                     if !(first_row && ri == 0) {
                         if band_ri % 2 == 0 {
-                            if let Some(f) = s.band1h_fill.clone() { effective_fill = Some(f); }
+                            if let Some(f) = s.band1h_fill.clone() {
+                                effective_fill = Some(f);
+                            }
                         } else if let Some(f) = s.band2h_fill.clone() {
                             effective_fill = Some(f);
                         }
                     }
                 }
                 if first_row && ri == 0 {
-                    if let Some(f) = s.first_row_fill.clone() { effective_fill = Some(f); }
+                    if let Some(f) = s.first_row_fill.clone() {
+                        effective_fill = Some(f);
+                    }
                 }
                 if last_row && ri == last_row_idx {
-                    if let Some(f) = s.last_row_fill.clone() { effective_fill = Some(f); }
+                    if let Some(f) = s.last_row_fill.clone() {
+                        effective_fill = Some(f);
+                    }
                 }
                 if first_col && ci == 0 {
-                    if let Some(f) = s.first_col_fill.clone() { effective_fill = Some(f); }
+                    if let Some(f) = s.first_col_fill.clone() {
+                        effective_fill = Some(f);
+                    }
                 }
                 if last_col && ci == last_col_idx {
-                    if let Some(f) = s.last_col_fill.clone() { effective_fill = Some(f); }
+                    if let Some(f) = s.last_col_fill.clone() {
+                        effective_fill = Some(f);
+                    }
                 }
                 // Cell's own tcPr fill wins
                 if cell.fill.is_none() {
@@ -5035,16 +6032,24 @@ fn parse_table(
                 // explicit colour still wins later, at render time.
                 let mut effective_text = s.whole_text_color.clone();
                 if first_row && ri == 0 {
-                    if let Some(c) = s.first_row_text_color.clone() { effective_text = Some(c); }
+                    if let Some(c) = s.first_row_text_color.clone() {
+                        effective_text = Some(c);
+                    }
                 }
                 if last_row && ri == last_row_idx {
-                    if let Some(c) = s.last_row_text_color.clone() { effective_text = Some(c); }
+                    if let Some(c) = s.last_row_text_color.clone() {
+                        effective_text = Some(c);
+                    }
                 }
                 if first_col && ci == 0 {
-                    if let Some(c) = s.first_col_text_color.clone() { effective_text = Some(c); }
+                    if let Some(c) = s.first_col_text_color.clone() {
+                        effective_text = Some(c);
+                    }
                 }
                 if last_col && ci == last_col_idx {
-                    if let Some(c) = s.last_col_text_color.clone() { effective_text = Some(c); }
+                    if let Some(c) = s.last_col_text_color.clone() {
+                        effective_text = Some(c);
+                    }
                 }
                 if cell.text_color.is_none() {
                     cell.text_color = effective_text;
@@ -5053,12 +6058,22 @@ fn parse_table(
                 // ── Bold cascade (style `<a:tcTxStyle b="on">`, role-keyed) ──
                 // Applied as the cell text body's default bold; a run's own @b wins.
                 let mut effective_bold: Option<bool> = None;
-                if first_row && ri == 0 { effective_bold = effective_bold.or(s.first_row_bold); }
-                if last_row && ri == last_row_idx { effective_bold = effective_bold.or(s.last_row_bold); }
-                if first_col && ci == 0 { effective_bold = effective_bold.or(s.first_col_bold); }
-                if last_col && ci == last_col_idx { effective_bold = effective_bold.or(s.last_col_bold); }
+                if first_row && ri == 0 {
+                    effective_bold = effective_bold.or(s.first_row_bold);
+                }
+                if last_row && ri == last_row_idx {
+                    effective_bold = effective_bold.or(s.last_row_bold);
+                }
+                if first_col && ci == 0 {
+                    effective_bold = effective_bold.or(s.first_col_bold);
+                }
+                if last_col && ci == last_col_idx {
+                    effective_bold = effective_bold.or(s.last_col_bold);
+                }
                 if let (Some(b), Some(tb)) = (effective_bold, cell.text_body.as_mut()) {
-                    if tb.default_bold.is_none() { tb.default_bold = Some(b); }
+                    if tb.default_bold.is_none() {
+                        tb.default_bold = Some(b);
+                    }
                 }
 
                 // ── Border cascade (style provides inside and outer borders) ──
@@ -5077,7 +6092,9 @@ fn parse_table(
                 // Inner bottom separator; firstRow gets its own bottom definition
                 if cell.border_b.is_none() {
                     if first_row && ri == 0 {
-                        cell.border_b = s.first_row_border_b.clone()
+                        cell.border_b = s
+                            .first_row_border_b
+                            .clone()
                             .or_else(|| s.whole_inside_h.clone());
                     } else if ri < last_row_idx {
                         cell.border_b = s.whole_inside_h.clone();
@@ -5102,10 +6119,19 @@ fn parse_table(
             } else {
                 // ── Fallback for built-in styles not defined in tableStyles.xml ──
                 // Approximate "Medium Style 2": accent1 header fill + thin outer box + row separators.
-                let thin = Stroke { color: "A0A096".to_string(), width: 9525, dash_style: None, head_end: None, tail_end: None, cmpd: None };
+                let thin = Stroke {
+                    color: "A0A096".to_string(),
+                    width: 9525,
+                    dash_style: None,
+                    head_end: None,
+                    tail_end: None,
+                    cmpd: None,
+                };
                 if cell.fill.is_none() && first_row && ri == 0 {
                     if let Some(color) = theme.get("accent1") {
-                        cell.fill = Some(Fill::Solid { color: color.clone() });
+                        cell.fill = Some(Fill::Solid {
+                            color: color.clone(),
+                        });
                     }
                 }
                 // Outer top
@@ -5133,8 +6159,13 @@ fn parse_table(
     }
 
     Some(TableElement {
-        x: t.x, y: t.y, width: t.cx, height: t.cy,
-        cols, rows, rtl,
+        x: t.x,
+        y: t.y,
+        width: t.cx,
+        height: t.cy,
+        cols,
+        rows,
+        rtl,
     })
 }
 
@@ -5159,31 +6190,79 @@ fn parse_table_cell(
 ) -> TableCell {
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
-    let anchor = tc_pr.and_then(|n| attr(&n, "anchor")).map(|a| a.to_string());
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, rels, None, [None; 9], &empty_level_bullets(), None, None, None, anchor, None, None, None, None, ShapeKind::Sp));
+    let anchor = tc_pr
+        .and_then(|n| attr(&n, "anchor"))
+        .map(|a| a.to_string());
+    let text_body = child(tc, "txBody").map(|n| {
+        parse_text_body(
+            n,
+            theme,
+            rels,
+            None,
+            [None; 9],
+            &empty_level_bullets(),
+            None,
+            None,
+            None,
+            anchor,
+            None,
+            None,
+            None,
+            None,
+            ShapeKind::Sp,
+        )
+    });
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
-    let border_l = tc_pr.and_then(|n| child(n, "lnL")).and_then(|n| parse_stroke(n, theme));
-    let border_r = tc_pr.and_then(|n| child(n, "lnR")).and_then(|n| parse_stroke(n, theme));
-    let border_t = tc_pr.and_then(|n| child(n, "lnT")).and_then(|n| parse_stroke(n, theme));
-    let border_b = tc_pr.and_then(|n| child(n, "lnB")).and_then(|n| parse_stroke(n, theme));
+    let border_l = tc_pr
+        .and_then(|n| child(n, "lnL"))
+        .and_then(|n| parse_stroke(n, theme));
+    let border_r = tc_pr
+        .and_then(|n| child(n, "lnR"))
+        .and_then(|n| parse_stroke(n, theme));
+    let border_t = tc_pr
+        .and_then(|n| child(n, "lnT"))
+        .and_then(|n| parse_stroke(n, theme));
+    let border_b = tc_pr
+        .and_then(|n| child(n, "lnB"))
+        .and_then(|n| parse_stroke(n, theme));
     // Diagonal borders: lnTlToBr (top-left→bottom-right) and lnBlToTr (bottom-left→top-right)
     // These are CT_LineProperties elements (same structure as lnL/lnR/lnT/lnB)
-    let diagonal_tl = tc_pr.and_then(|n| child(n, "lnTlToBr")).and_then(|n| parse_stroke(n, theme));
-    let diagonal_tr = tc_pr.and_then(|n| child(n, "lnBlToTr")).and_then(|n| parse_stroke(n, theme));
+    let diagonal_tl = tc_pr
+        .and_then(|n| child(n, "lnTlToBr"))
+        .and_then(|n| parse_stroke(n, theme));
+    let diagonal_tr = tc_pr
+        .and_then(|n| child(n, "lnBlToTr"))
+        .and_then(|n| parse_stroke(n, theme));
 
-    let grid_span: u32 = attr(&tc, "gridSpan").and_then(|v| v.parse().ok()).unwrap_or(1);
-    let row_span: u32  = attr(&tc, "rowSpan").and_then(|v| v.parse().ok()).unwrap_or(1);
-    let h_merge = attr(&tc, "hMerge").map(|v| v == "1" || v == "true").unwrap_or(false);
-    let v_merge = attr(&tc, "vMerge").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let grid_span: u32 = attr(&tc, "gridSpan")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let row_span: u32 = attr(&tc, "rowSpan")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let h_merge = attr(&tc, "hMerge")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    let v_merge = attr(&tc, "vMerge")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
 
     TableCell {
-        text_body, fill,
+        text_body,
+        fill,
         text_color: None,
-        border_l, border_r, border_t, border_b,
-        diagonal_tl, diagonal_tr,
-        grid_span, row_span, h_merge, v_merge,
+        border_l,
+        border_r,
+        border_t,
+        border_b,
+        diagonal_tl,
+        diagonal_tr,
+        grid_span,
+        row_span,
+        h_merge,
+        v_merge,
     }
 }
 
@@ -5191,6 +6270,11 @@ fn parse_table_cell(
 //  Slide parser
 // ===========================
 
+// Threads the full master+layout inheritance context (per-type font sizes,
+// bullets, anchors, transforms, alignments, spacing, bold/italic/caps/color
+// maps) plus zip/theme into one slide parse; this is the inheritance chain
+// ECMA-376 requires, not an arbitrary parameter bag.
+#[allow(clippy::too_many_arguments)]
 fn parse_slide(
     xml: &str,
     layout_xml: Option<&str>,
@@ -5217,7 +6301,22 @@ fn parse_slide(
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     let mut lph = match layout_xml {
-        Some(x) => parse_layout_placeholders(x, master_font_sizes, master_level_font_sizes, master_level_bullets, master_anchors, master_transforms, master_alignments, master_space_before, master_space_after, master_line_spacing, theme, layout_dir, layout_rels, zip),
+        Some(x) => parse_layout_placeholders(
+            x,
+            master_font_sizes,
+            master_level_font_sizes,
+            master_level_bullets,
+            master_anchors,
+            master_transforms,
+            master_alignments,
+            master_space_before,
+            master_space_after,
+            master_line_spacing,
+            theme,
+            layout_dir,
+            layout_rels,
+            zip,
+        ),
         None => LayoutPlaceholders::default(),
     };
     // Fall back to master txStyles defRPr @b/@i when the layout did not specify
@@ -5233,7 +6332,9 @@ fn parse_slide(
         lph.by_type_caps.entry(t.clone()).or_insert(c.clone());
     }
     for (t, c) in master_color.iter() {
-        lph.by_type_master_color.entry(t.clone()).or_insert(c.clone());
+        lph.by_type_master_color
+            .entry(t.clone())
+            .or_insert(c.clone());
     }
 
     let doc = roxmltree::Document::parse(xml)?;
@@ -5246,8 +6347,7 @@ fn parse_slide(
         .or_else(|| {
             layout_xml.and_then(|lx| {
                 let doc2 = roxmltree::Document::parse(lx).ok()?;
-                child(doc2.root_element(), "cSld")
-                    .and_then(|n| parse_background(n, theme))
+                child(doc2.root_element(), "cSld").and_then(|n| parse_background(n, theme))
             })
         })
         .or(master_bg);
@@ -5269,8 +6369,14 @@ fn parse_slide(
                 let empty_lph = LayoutPlaceholders::default();
                 for node in lsp_tree.children().filter(|n| n.is_element()) {
                     parse_sp_tree_node(
-                        node, &empty_lph, layout_dir, layout_rels, smartart_drawings,
-                        zip, theme, &mut elements,
+                        node,
+                        &empty_lph,
+                        layout_dir,
+                        layout_rels,
+                        smartart_drawings,
+                        zip,
+                        theme,
+                        &mut elements,
                         true, // skip placeholder shapes
                         None, // no inherited group fill at top level
                     );
@@ -5281,14 +6387,32 @@ fn parse_slide(
 
     // ── Slide shapes ─────────────────────────────────────────────────────
     for node in sp_tree.children().filter(|n| n.is_element()) {
-        parse_sp_tree_node(node, &lph, slide_dir, rels, smartart_drawings, zip, theme, &mut elements, false, None);
+        parse_sp_tree_node(
+            node,
+            &lph,
+            slide_dir,
+            rels,
+            smartart_drawings,
+            zip,
+            theme,
+            &mut elements,
+            false,
+            None,
+        );
     }
 
     // ── Notes slide & comments (Phase 2 surfacing only — no rendering) ────
     let notes = load_notes_slide(zip, rels);
     let comments = load_pptx_comments(zip, rels);
 
-    Ok(Slide { index, slide_number: index + 1, background, elements, notes, comments })
+    Ok(Slide {
+        index,
+        slide_number: index + 1,
+        background,
+        elements,
+        notes,
+        comments,
+    })
 }
 
 /// Resolve the slide's `notesSlide` relationship, read the notes part, and
@@ -5311,7 +6435,9 @@ fn load_notes_slide(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> Op
     let mut buf = String::new();
     let mut prev_was_text = false;
     for n in doc.descendants() {
-        if !n.is_element() { continue }
+        if !n.is_element() {
+            continue;
+        }
         let name = n.tag_name().name();
         if name == "p" && prev_was_text {
             buf.push('\n');
@@ -5325,28 +6451,41 @@ fn load_notes_slide(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> Op
         }
     }
     let trimmed = buf.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Resolve and parse the slide's `comments` relationship (legacy
 /// `<p:cmLst>` format). Modern threaded comments live in a different
 /// namespace and are not yet supported.
 fn load_pptx_comments(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> Vec<PptxComment> {
-    let Some(target) = rels.values().find(|t| t.contains("comments/")) else { return Vec::new(); };
+    let Some(target) = rels.values().find(|t| t.contains("comments/")) else {
+        return Vec::new();
+    };
     let path = if target.starts_with('/') {
         target.trim_start_matches('/').to_string()
     } else {
         resolve_path("ppt/slides", target)
     };
-    let Ok(xml) = read_zip_str(zip, &path) else { return Vec::new(); };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else { return Vec::new(); };
+    let Ok(xml) = read_zip_str(zip, &path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        return Vec::new();
+    };
 
     // commentAuthors.xml is a top-level part — look it up directly.
     let author_xml = read_zip_str(zip, "ppt/commentAuthors.xml").ok();
     let mut authors: HashMap<String, String> = HashMap::new();
     if let Some(ax) = author_xml {
         if let Ok(adoc) = roxmltree::Document::parse(&ax) {
-            for a in adoc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "cmAuthor") {
+            for a in adoc
+                .descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "cmAuthor")
+            {
                 let id = a.attribute("id").unwrap_or("").to_string();
                 let name = a.attribute("name").unwrap_or("").to_string();
                 if !id.is_empty() && !name.is_empty() {
@@ -5357,10 +6496,16 @@ fn load_pptx_comments(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> 
     }
 
     let mut out = Vec::new();
-    for cm in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "cm") {
+    for cm in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "cm")
+    {
         let author_id = cm.attribute("authorId").unwrap_or("");
         let author = authors.get(author_id).cloned();
-        let date = cm.attribute("dt").map(String::from).filter(|s| !s.is_empty());
+        let date = cm
+            .attribute("dt")
+            .map(String::from)
+            .filter(|s| !s.is_empty());
         let text = cm
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == "text")
@@ -5371,6 +6516,9 @@ fn load_pptx_comments(zip: &mut PptxZip<'_>, rels: &HashMap<String, String>) -> 
     out
 }
 
+// Recurses the shape tree carrying placeholder/layout context, theme, rels,
+// smartart drawings, the zip, the output buffer and inherited group fill.
+#[allow(clippy::too_many_arguments)]
 fn parse_sp_tree_node(
     node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
@@ -5410,14 +6558,23 @@ fn parse_sp_tree_node(
                                     .and_then(|pg| child(pg, "avLst"))
                                     .and_then(|avlst| avlst.children().find(|n| n.is_element()))
                                     .and_then(|gd| attr(&gd, "fmla"))
-                                    .and_then(|fmla| fmla.strip_prefix("val ").and_then(|v| v.parse::<i64>().ok()));
+                                    .and_then(|fmla| {
+                                        fmla.strip_prefix("val ")
+                                            .and_then(|v| v.parse::<i64>().ok())
+                                    });
                                 let cust_geom = sp_pr_node
                                     .and_then(|p| child(p, "custGeom"))
                                     .map(parse_cust_geom);
                                 out.push(SlideElement::Picture(PictureElement {
-                                    x: t.x, y: t.y, width: t.cx, height: t.cy,
-                                    rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-                                    data_url, clip_adjust,
+                                    x: t.x,
+                                    y: t.y,
+                                    width: t.cx,
+                                    height: t.cy,
+                                    rotation: t.rot,
+                                    flip_h: t.flip_h,
+                                    flip_v: t.flip_v,
+                                    data_url,
+                                    clip_adjust,
                                     src_rect: blip_fill_node.and_then(parse_src_rect),
                                     alpha: blip_fill_node.and_then(parse_blip_alpha),
                                     cust_geom,
@@ -5432,19 +6589,27 @@ fn parse_sp_tree_node(
             // look up an inherited blipFill from the layout placeholder. Transform
             // comes from the slide's xfrm when present, otherwise from the layout.
             if blip_rid.is_none() {
-                if let Some(ph) = node.descendants().find(|n| n.is_element() && n.tag_name().name() == "ph") {
+                if let Some(ph) = node
+                    .descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "ph")
+                {
                     let ph_type = attr(&ph, "type").unwrap_or_else(|| "body".into());
                     let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
                     if let Some(bf) = lph.lookup_blip_fill(&ph_type, ph_idx) {
                         let slide_xfrm = sp_pr_node.and_then(|p| child(p, "xfrm")).map(parse_xfrm);
-                        let t = slide_xfrm
-                            .or_else(|| lph.lookup(&ph_type, ph_idx).cloned());
+                        let t = slide_xfrm.or_else(|| lph.lookup(&ph_type, ph_idx).cloned());
                         if let Some(t) = t {
                             if t.cx > 0 && t.cy > 0 {
                                 out.push(SlideElement::Picture(PictureElement {
-                                    x: t.x, y: t.y, width: t.cx, height: t.cy,
-                                    rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-                                    data_url: bf.data_url, clip_adjust: None,
+                                    x: t.x,
+                                    y: t.y,
+                                    width: t.cx,
+                                    height: t.cy,
+                                    rotation: t.rot,
+                                    flip_h: t.flip_h,
+                                    flip_v: t.flip_v,
+                                    data_url: bf.data_url,
+                                    clip_adjust: None,
                                     src_rect: bf.src_rect,
                                     alpha: bf.alpha,
                                     cust_geom: None,
@@ -5466,7 +6631,8 @@ fn parse_sp_tree_node(
                 out.push(SlideElement::Picture(pic));
             } else {
                 // Placeholder pic: no xfrm in spPr — position comes from layout by_idx
-                let ph_idx = node.descendants()
+                let ph_idx = node
+                    .descendants()
                     .find(|n| n.is_element() && n.tag_name().name() == "ph")
                     .and_then(|ph| attr(&ph, "idx"))
                     .and_then(|s| s.parse::<u32>().ok());
@@ -5481,11 +6647,18 @@ fn parse_sp_tree_node(
                                 let image_path = resolve_path(slide_dir, rel_target);
                                 if let Some(image_bytes) = read_zip_bytes(zip, &image_path) {
                                     let mime = mime_from_ext(&image_path);
-                                    let data_url = format!("data:{mime};base64,{}", B64.encode(&image_bytes));
+                                    let data_url =
+                                        format!("data:{mime};base64,{}", B64.encode(&image_bytes));
                                     out.push(SlideElement::Picture(PictureElement {
-                                        x: t.x, y: t.y, width: t.cx, height: t.cy,
-                                        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-                                        data_url, clip_adjust: None,
+                                        x: t.x,
+                                        y: t.y,
+                                        width: t.cx,
+                                        height: t.cy,
+                                        rotation: t.rot,
+                                        flip_h: t.flip_h,
+                                        flip_v: t.flip_v,
+                                        data_url,
+                                        clip_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
                                         alpha: blip_fill.and_then(parse_blip_alpha),
                                         cust_geom: None,
@@ -5503,26 +6676,51 @@ fn parse_sp_tree_node(
             // nothing (Choice contains an element we don't render, like contentPart),
             // fall back to Fallback which usually carries a rasterized p:pic alternative.
             let before = out.len();
-            let choice_node = node.children()
+            let choice_node = node
+                .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "Choice");
             // Choice contains p:contentPart → ink/handwriting. PowerPoint renders the
             // InkML directly; the Fallback PNG is a low-resolution rasterization at
             // the stroke's actual pixel extent. For empty/single-tap strokes the PNG
             // is only a few pixels and should not be stretched to the bounding box.
             let is_ink_fallback = choice_node.is_some_and(|c| {
-                c.descendants().any(|n| n.is_element() && n.tag_name().name() == "contentPart")
+                c.descendants()
+                    .any(|n| n.is_element() && n.tag_name().name() == "contentPart")
             });
             if let Some(choice_node) = choice_node {
                 for child_node in choice_node.children().filter(|n| n.is_element()) {
-                    parse_sp_tree_node(child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out, skip_placeholders, group_fill);
+                    parse_sp_tree_node(
+                        child_node,
+                        lph,
+                        slide_dir,
+                        rels,
+                        smartart_drawings,
+                        zip,
+                        theme,
+                        out,
+                        skip_placeholders,
+                        group_fill,
+                    );
                 }
             }
             if out.len() == before {
-                if let Some(fallback_node) = node.children()
+                if let Some(fallback_node) = node
+                    .children()
                     .find(|n| n.is_element() && n.tag_name().name() == "Fallback")
                 {
                     for child_node in fallback_node.children().filter(|n| n.is_element()) {
-                        parse_sp_tree_node(child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out, skip_placeholders, group_fill);
+                        parse_sp_tree_node(
+                            child_node,
+                            lph,
+                            slide_dir,
+                            rels,
+                            smartart_drawings,
+                            zip,
+                            theme,
+                            out,
+                            skip_placeholders,
+                            group_fill,
+                        );
                     }
                 }
                 if is_ink_fallback {
@@ -5533,7 +6731,8 @@ fn parse_sp_tree_node(
                     // matches the box keep their existing extent.
                     for el in &mut out[before..] {
                         if let SlideElement::Picture(p) = el {
-                            if let Some((nat_w_px, nat_h_px)) = png_size_from_data_url(&p.data_url) {
+                            if let Some((nat_w_px, nat_h_px)) = png_size_from_data_url(&p.data_url)
+                            {
                                 let nat_w = (nat_w_px as i64) * EMU_PER_PX_96DPI;
                                 let nat_h = (nat_h_px as i64) * EMU_PER_PX_96DPI;
                                 if nat_w < p.width && nat_h < p.height {
@@ -5565,7 +6764,8 @@ fn parse_sp_tree_node(
 
             // SmartArt: render the PowerPoint-prebaked fallback drawing1.xml when present.
             // Layout-engine reconstruction is not implemented; we rely on the cached dsp:spTree.
-            if let Some(gd) = node.descendants()
+            if let Some(gd) = node
+                .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
             {
                 let uri = attr(&gd, "uri").unwrap_or_default();
@@ -5582,11 +6782,14 @@ fn parse_sp_tree_node(
             }
 
             // Chart
-            if let Some(gd) = node.descendants()
-                .find(|n| n.is_element() && n.tag_name().name() == "graphicData") {
+            if let Some(gd) = node
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
+            {
                 let uri = attr(&gd, "uri").unwrap_or_default();
                 // Both <c:chart> and <cx:chart> share the local name "chart"
-                let chart_rid = gd.descendants()
+                let chart_rid = gd
+                    .descendants()
                     .find(|n| n.is_element() && n.tag_name().name() == "chart")
                     .and_then(|n| attr_r(&n, "id"));
                 if let Some(rid) = chart_rid {
@@ -5599,8 +6802,10 @@ fn parse_sp_tree_node(
                                 parse_legacy_chart(&chart_xml, theme)
                             };
                             if let Some(mut chart) = chart_opt {
-                                chart.x = t.x; chart.y = t.y;
-                                chart.width = t.cx; chart.height = t.cy;
+                                chart.x = t.x;
+                                chart.y = t.y;
+                                chart.width = t.cx;
+                                chart.height = t.cy;
                                 out.push(SlideElement::Chart(chart));
                             }
                         }
@@ -5610,24 +6815,27 @@ fn parse_sp_tree_node(
         }
         "grpSp" => {
             let grp_sp_pr = child(node, "grpSpPr");
-            let gt: Option<GroupTransform> = grp_sp_pr
-                .and_then(|pr| child(pr, "xfrm"))
-                .map(|xfrm| {
-                    let off    = child(xfrm, "off");
-                    let ext    = child(xfrm, "ext");
+            let gt: Option<GroupTransform> =
+                grp_sp_pr.and_then(|pr| child(pr, "xfrm")).map(|xfrm| {
+                    let off = child(xfrm, "off");
+                    let ext = child(xfrm, "ext");
                     let ch_off = child(xfrm, "chOff");
                     let ch_ext = child(xfrm, "chExt");
                     GroupTransform {
-                        x:     off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
-                        y:     off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
-                        cx:    ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
-                        cy:    ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
-                        ch_x:  ch_off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
-                        ch_y:  ch_off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
+                        x: off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
+                        y: off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
+                        cx: ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
+                        cy: ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
+                        ch_x: ch_off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
+                        ch_y: ch_off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
                         ch_cx: ch_ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
                         ch_cy: ch_ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
-                        flip_h: attr(&xfrm, "flipH").map(|v| v == "1" || v == "true").unwrap_or(false),
-                        flip_v: attr(&xfrm, "flipV").map(|v| v == "1" || v == "true").unwrap_or(false),
+                        flip_h: attr(&xfrm, "flipH")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false),
+                        flip_v: attr(&xfrm, "flipV")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false),
                         rot: attr_f64(&xfrm, "rot").unwrap_or(0.0) / 60000.0,
                     }
                 });
@@ -5649,8 +6857,16 @@ fn parse_sp_tree_node(
             let start = out.len();
             for child_node in node.children().filter(|n| n.is_element()) {
                 parse_sp_tree_node(
-                    child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out,
-                    skip_placeholders, child_group_fill.as_ref(),
+                    child_node,
+                    lph,
+                    slide_dir,
+                    rels,
+                    smartart_drawings,
+                    zip,
+                    theme,
+                    out,
+                    skip_placeholders,
+                    child_group_fill.as_ref(),
                 );
             }
             if let Some(gt) = gt {
@@ -5706,7 +6922,9 @@ fn parse_smartart_drawing(
         Err(_) => return,
     };
     let root = doc.root_element();
-    let Some(sp_tree) = child(root, "spTree") else { return };
+    let Some(sp_tree) = child(root, "spTree") else {
+        return;
+    };
 
     let empty_lph = LayoutPlaceholders::default();
 
@@ -5737,24 +6955,27 @@ fn parse_smartart_drawing(
                 // Recursively render a group by collecting its children into a temp buffer
                 // and applying the group's xfrm, mirroring the grpSp branch in parse_sp_tree_node.
                 let grp_sp_pr = child(node, "grpSpPr");
-                let gt: Option<GroupTransform> = grp_sp_pr
-                    .and_then(|pr| child(pr, "xfrm"))
-                    .map(|xfrm| {
+                let gt: Option<GroupTransform> =
+                    grp_sp_pr.and_then(|pr| child(pr, "xfrm")).map(|xfrm| {
                         let off = child(xfrm, "off");
                         let ext = child(xfrm, "ext");
                         let ch_off = child(xfrm, "chOff");
                         let ch_ext = child(xfrm, "chExt");
                         GroupTransform {
-                            x:     off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
-                            y:     off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
-                            cx:    ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
-                            cy:    ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
-                            ch_x:  ch_off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
-                            ch_y:  ch_off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
+                            x: off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
+                            y: off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
+                            cx: ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
+                            cy: ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
+                            ch_x: ch_off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
+                            ch_y: ch_off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
                             ch_cx: ch_ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
                             ch_cy: ch_ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
-                            flip_h: attr(&xfrm, "flipH").map(|v| v == "1" || v == "true").unwrap_or(false),
-                            flip_v: attr(&xfrm, "flipV").map(|v| v == "1" || v == "true").unwrap_or(false),
+                            flip_h: attr(&xfrm, "flipH")
+                                .map(|v| v == "1" || v == "true")
+                                .unwrap_or(false),
+                            flip_v: attr(&xfrm, "flipV")
+                                .map(|v| v == "1" || v == "true")
+                                .unwrap_or(false),
                             rot: attr_f64(&xfrm, "rot").unwrap_or(0.0) / 60000.0,
                         }
                     });
@@ -5763,7 +6984,9 @@ fn parse_smartart_drawing(
                 for child_node in node.children().filter(|n| n.is_element()) {
                     match child_node.tag_name().name() {
                         "sp" => {
-                            if let Some(mut shape) = parse_shape(child_node, &empty_lph, theme, &empty_rels, None) {
+                            if let Some(mut shape) =
+                                parse_shape(child_node, &empty_lph, theme, &empty_rels, None)
+                            {
                                 shape.text_rect = parse_tx_xfrm(child_node);
                                 out.push(SlideElement::Shape(shape));
                             }
@@ -5794,11 +7017,30 @@ fn parse_smartart_drawing(
 
 fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
     match el {
-        SlideElement::Shape(s)   => { s.x += dx; s.y += dy; if let Some(tr) = &mut s.text_rect { tr.x += dx; tr.y += dy; } }
-        SlideElement::Picture(p) => { p.x += dx; p.y += dy; }
-        SlideElement::Table(t)   => { t.x += dx; t.y += dy; }
-        SlideElement::Chart(c)   => { c.x += dx; c.y += dy; }
-        SlideElement::Media(m)   => { m.x += dx; m.y += dy; }
+        SlideElement::Shape(s) => {
+            s.x += dx;
+            s.y += dy;
+            if let Some(tr) = &mut s.text_rect {
+                tr.x += dx;
+                tr.y += dy;
+            }
+        }
+        SlideElement::Picture(p) => {
+            p.x += dx;
+            p.y += dy;
+        }
+        SlideElement::Table(t) => {
+            t.x += dx;
+            t.y += dy;
+        }
+        SlideElement::Chart(c) => {
+            c.x += dx;
+            c.y += dy;
+        }
+        SlideElement::Media(m) => {
+            m.x += dx;
+            m.y += dy;
+        }
     }
 }
 
@@ -5819,20 +7061,27 @@ fn parse_connector(
     // theme fmtScheme lnStyleLst entry N (1-based). We look up the canonical
     // width from the theme map ("+lnRef-N") rather than hardcoding 9525.
     let style_node = child(node, "style");
-    let style_stroke: Option<Stroke> = style_node
-        .and_then(|s| child(s, "lnRef"))
-        .and_then(|lr| {
-            let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
-            if idx == 0 { None } else {
-                parse_color_node(lr, theme).map(|c| {
-                    let width = theme
-                        .get(&format!("+lnRef-{}", idx))
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or(9525);
-                    Stroke { color: c, width, dash_style: None, head_end: None, tail_end: None, cmpd: None }
-                })
-            }
-        });
+    let style_stroke: Option<Stroke> = style_node.and_then(|s| child(s, "lnRef")).and_then(|lr| {
+        let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
+        if idx == 0 {
+            None
+        } else {
+            parse_color_node(lr, theme).map(|c| {
+                let width = theme
+                    .get(&format!("+lnRef-{}", idx))
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(9525);
+                Stroke {
+                    color: c,
+                    width,
+                    dash_style: None,
+                    head_end: None,
+                    tail_end: None,
+                    cmpd: None,
+                }
+            })
+        }
+    });
 
     // Merge <a:ln> attributes onto style_stroke: <a:ln> commonly contains only
     // arrow ends (headEnd/tailEnd) while the color/width come from lnRef.
@@ -5850,16 +7099,24 @@ fn parse_connector(
                 let ln_dash = child(ln, "prstDash")
                     .and_then(|n| attr(&n, "val"))
                     .filter(|v| v != "solid");
-                let ln_head = child(ln, "headEnd").map(parse_arrow_end).filter(|a| a.kind != "none");
-                let ln_tail = child(ln, "tailEnd").map(parse_arrow_end).filter(|a| a.kind != "none");
+                let ln_head = child(ln, "headEnd")
+                    .map(parse_arrow_end)
+                    .filter(|a| a.kind != "none");
+                let ln_tail = child(ln, "tailEnd")
+                    .map(parse_arrow_end)
+                    .filter(|a| a.kind != "none");
                 let ln_cmpd = attr(&ln, "cmpd").filter(|v| v != "sng");
                 match (ln_color, style_stroke) {
                     (Some(c), base) => Some(Stroke {
                         color: c,
-                        width: ln_width.unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
-                        dash_style: ln_dash.or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
-                        head_end: ln_head.or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
-                        tail_end: ln_tail.or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
+                        width: ln_width
+                            .unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
+                        dash_style: ln_dash
+                            .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
+                        head_end: ln_head
+                            .or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
+                        tail_end: ln_tail
+                            .or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
                         cmpd: ln_cmpd.or_else(|| base.as_ref().and_then(|s| s.cmpd.clone())),
                     }),
                     (None, Some(base)) => Some(Stroke {
@@ -5876,8 +7133,7 @@ fn parse_connector(
         }
     };
 
-    let shadow = child(sp_pr, "effectLst")
-        .and_then(|n| parse_shadow(n, theme));
+    let shadow = child(sp_pr, "effectLst").and_then(|n| parse_shadow(n, theme));
 
     let cy = if t.cy == 0 { 1 } else { t.cy };
 
@@ -5897,7 +7153,11 @@ fn parse_connector(
     };
     let av_node = prst_geom_node.and_then(|n| child(n, "avLst"));
     let gd_nodes: Vec<_> = av_node
-        .map(|av| av.children().filter(|n| n.is_element() && n.tag_name().name() == "gd").collect())
+        .map(|av| {
+            av.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "gd")
+                .collect()
+        })
         .unwrap_or_default();
     let adj: Option<f64> = gd_nodes
         .iter()
@@ -5921,8 +7181,13 @@ fn parse_connector(
         .and_then(|n| parse_gd_val(*n));
 
     Some(ShapeElement {
-        x: t.x, y: t.y, width: t.cx, height: cy,
-        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
+        x: t.x,
+        y: t.y,
+        width: t.cx,
+        height: cy,
+        rotation: t.rot,
+        flip_h: t.flip_h,
+        flip_v: t.flip_v,
         geometry,
         fill: None,
         stroke,
@@ -5964,7 +7229,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
     let pres_root = pres_doc.root_element();
 
     let sld_sz = child(pres_root, "sldSz");
-    let slide_width  = sld_sz.and_then(|n| attr_i64(&n, "cx")).unwrap_or(9_144_000);
+    let slide_width = sld_sz.and_then(|n| attr_i64(&n, "cx")).unwrap_or(9_144_000);
     let slide_height = sld_sz.and_then(|n| attr_i64(&n, "cy")).unwrap_or(6_858_000);
 
     // Ordered slide rIds
@@ -5995,18 +7260,17 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
 
     let master_bg: Option<Fill> = master_xml_opt.as_deref().and_then(|master_xml| {
         let doc = roxmltree::Document::parse(master_xml).ok()?;
-        child(doc.root_element(), "cSld")
-            .and_then(|n| parse_background(n, &theme))
+        child(doc.root_element(), "cSld").and_then(|n| parse_background(n, &theme))
     });
 
     let master_font_sizes: HashMap<String, f64> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_font_sizes(xml))
+        .map(parse_master_font_sizes)
         .unwrap_or_default();
 
     let master_level_font_sizes: HashMap<String, LevelFontSizes> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_level_font_sizes(xml))
+        .map(parse_master_level_font_sizes)
         .unwrap_or_default();
 
     let master_level_bullets: HashMap<String, LevelBullets> = master_xml_opt
@@ -6016,27 +7280,35 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
 
     let master_anchors: HashMap<String, String> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_anchors(xml))
+        .map(parse_master_anchors)
         .unwrap_or_default();
 
     let master_transforms: HashMap<String, Transform> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_transforms(xml))
+        .map(parse_master_transforms)
         .unwrap_or_default();
 
     let master_alignments: HashMap<String, String> = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_alignments(xml))
+        .map(parse_master_alignments)
         .unwrap_or_default();
 
-    let (master_space_before, master_space_after, master_line_spacing): (HashMap<String, i64>, HashMap<String, i64>, HashMap<String, f64>) = master_xml_opt
+    let (master_space_before, master_space_after, master_line_spacing): (
+        HashMap<String, i64>,
+        HashMap<String, i64>,
+        HashMap<String, f64>,
+    ) = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_txstyle_spacing(xml))
+        .map(parse_master_txstyle_spacing)
         .unwrap_or_default();
 
-    let (master_bold, master_italic, master_caps): (HashMap<String, bool>, HashMap<String, bool>, HashMap<String, String>) = master_xml_opt
+    let (master_bold, master_italic, master_caps): (
+        HashMap<String, bool>,
+        HashMap<String, bool>,
+        HashMap<String, String>,
+    ) = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_txstyle_bold_italic(xml))
+        .map(parse_master_txstyle_bold_italic)
         .unwrap_or_default();
 
     let master_color: HashMap<String, String> = master_xml_opt
@@ -6063,7 +7335,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             None => continue,
         };
         let slide_path = format!("ppt/{rel_target}");
-        let slide_file = rel_target.split('/').last().unwrap_or("slide.xml").to_owned();
+        let slide_file = rel_target
+            .split('/')
+            .next_back()
+            .unwrap_or("slide.xml")
+            .to_owned();
         let rels_path = format!("ppt/slides/_rels/{slide_file}.rels");
 
         let slide_xml = read_zip_str(&mut zip, &slide_path)?;
@@ -6075,13 +7351,15 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let layout_path = find_rel_target_by_type(&slide_rels_xml, "/slideLayout")
             .map(|target| resolve_path("ppt/slides", &target));
 
-        let layout_xml = layout_path.as_deref()
+        let layout_xml = layout_path
+            .as_deref()
             .and_then(|path| read_zip_str(&mut zip, path).ok());
 
         // Layout rels (for resolving images inside the layout)
-        let layout_rels = layout_path.as_deref()
+        let layout_rels = layout_path
+            .as_deref()
             .and_then(|path| {
-                let file = path.split('/').last().unwrap_or("layout.xml");
+                let file = path.split('/').next_back().unwrap_or("layout.xml");
                 let rels_p = format!("ppt/slideLayouts/_rels/{file}.rels");
                 read_zip_str(&mut zip, &rels_p).ok()
             })
@@ -6094,8 +7372,13 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             .unwrap_or_else(|| "ppt/slideLayouts".to_owned());
 
         raw_slides.push(SlideRaw {
-            index: idx, slide_xml, slide_rels, smartart_drawings,
-            layout_xml, layout_rels, layout_dir,
+            index: idx,
+            slide_xml,
+            slide_rels,
+            smartart_drawings,
+            layout_xml,
+            layout_rels,
+            layout_dir,
         });
     }
 
@@ -6134,25 +7417,40 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
     let minor_font = theme.get("+mn-lt").cloned();
     let hlink_color = theme.get("hlink").cloned();
     let fol_hlink_color = theme.get("folHlink").cloned();
-    Ok(Presentation { slide_width, slide_height, slides, default_text_color, major_font, minor_font, hlink_color, fol_hlink_color })
+    Ok(Presentation {
+        slide_width,
+        slide_height,
+        slides,
+        default_text_color,
+        major_font,
+        minor_font,
+        hlink_color,
+        fol_hlink_color,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Local-only sample (redistribution-prohibited, gitignored). Tests that
+    // depend on it must skip gracefully on a clean checkout / in CI where the
+    // file is absent. See packages/pptx/public/private/.
+    const LOCAL_SAMPLE_2: &str = "../public/private/sample-2.pptx";
+
     #[test]
     fn test_parse_chartex() {
-        let xml = std::fs::read_to_string("../public/sample-2.pptx").ok()
-            .and_then(|_| None::<String>)
-            .unwrap_or_else(|| {
-                // read from zip directly
-                let data = std::fs::read("../public/sample-2.pptx").unwrap();
-                let cursor = std::io::Cursor::new(data.as_slice());
-                let mut zip = zip::ZipArchive::new(cursor).unwrap();
-                let mut s = String::new();
-                zip.by_name("ppt/charts/chartEx1.xml").unwrap().read_to_string(&mut s).unwrap();
-                s
-            });
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
+            eprintln!("skipping test_parse_chartex: local sample not found");
+            return;
+        };
+        let cursor = std::io::Cursor::new(data.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let mut xml = String::new();
+        zip.by_name("ppt/charts/chartEx1.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
         let theme = HashMap::new();
         let result = parse_chartex(&xml, &theme);
         println!("parse_chartex result: {:?}", result.is_some());
@@ -6170,24 +7468,44 @@ mod tests {
 
     #[test]
     fn test_slide8_chart_rid() {
-        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
+            eprintln!("skipping test_slide8_chart_rid: local sample not found");
+            return;
+        };
         let cursor = std::io::Cursor::new(data.as_slice());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
         let mut slide_xml = String::new();
-        zip.by_name("ppt/slides/slide8.xml").unwrap().read_to_string(&mut slide_xml).unwrap();
-        
+        zip.by_name("ppt/slides/slide8.xml")
+            .unwrap()
+            .read_to_string(&mut slide_xml)
+            .unwrap();
+
         let doc = roxmltree::Document::parse(&slide_xml).unwrap();
         let root = doc.root_element();
-        
-        for gf in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "graphicFrame") {
+
+        for gf in root
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "graphicFrame")
+        {
             println!("Found graphicFrame");
-            if let Some(gd) = gf.descendants().find(|n| n.is_element() && n.tag_name().name() == "graphicData") {
+            if let Some(gd) = gf
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
+            {
                 let uri = attr(&gd, "uri").unwrap_or_default();
                 println!("  graphicData uri: {}", uri);
-                if let Some(chart_node) = gd.descendants().find(|n| n.is_element() && n.tag_name().name() == "chart") {
+                if let Some(chart_node) = gd
+                    .descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "chart")
+                {
                     println!("  chart node found, tag: {:?}", chart_node.tag_name());
                     for a in chart_node.attributes() {
-                        println!("  attr: name={} ns={:?} val={}", a.name(), a.namespace(), a.value());
+                        println!(
+                            "  attr: name={} ns={:?} val={}",
+                            a.name(),
+                            a.namespace(),
+                            a.value()
+                        );
                     }
                     let rid = attr_r(&chart_node, "id");
                     println!("  attr_r id: {:?}", rid);
@@ -6198,13 +7516,21 @@ mod tests {
 
     #[test]
     fn test_slide8_full_parse() {
-        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
+            eprintln!("skipping test_slide8_full_parse: local sample not found");
+            return;
+        };
         let pres = parse_presentation(&data).unwrap();
         let slide = &pres.slides[7]; // 0-indexed, slide 8
         println!("Slide 8 elements: {}", slide.elements.len());
         for (i, el) in slide.elements.iter().enumerate() {
             match el {
-                SlideElement::Chart(c) => println!("  [{}] CHART type={} cats={}", i, c.chart_type, c.categories.len()),
+                SlideElement::Chart(c) => println!(
+                    "  [{}] CHART type={} cats={}",
+                    i,
+                    c.chart_type,
+                    c.categories.len()
+                ),
                 SlideElement::Shape(s) => println!("  [{}] shape x={}", i, s.x),
                 SlideElement::Table(_) => println!("  [{}] table", i),
                 SlideElement::Picture(_) => println!("  [{}] picture", i),
@@ -6215,21 +7541,27 @@ mod tests {
 
     #[test]
     fn test_slide8_chartex_pipeline() {
-        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
+            eprintln!("skipping test_slide8_chartex_pipeline: local sample not found");
+            return;
+        };
         let cursor = std::io::Cursor::new(data.as_slice());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
-        
+
         let mut rels_xml = String::new();
-        zip.by_name("ppt/slides/_rels/slide8.xml.rels").unwrap().read_to_string(&mut rels_xml).unwrap();
+        zip.by_name("ppt/slides/_rels/slide8.xml.rels")
+            .unwrap()
+            .read_to_string(&mut rels_xml)
+            .unwrap();
         let rels = parse_rels(&rels_xml);
         println!("rels: {:?}", rels);
-        
+
         let chart_path = resolve_path("ppt/slides", "../charts/chartEx1.xml");
         println!("chart_path: {}", chart_path);
-        
+
         let result = read_zip_str(&mut zip, &chart_path);
         println!("read_zip_str ok: {}", result.is_ok());
-        
+
         if let Ok(chart_xml) = result {
             let theme = HashMap::new();
             let r = parse_chartex(&chart_xml, &theme);
@@ -6349,7 +7681,11 @@ mod tests {
     fn test_parse_run_caps_attribute() {
         let theme = HashMap::new();
         let rels = HashMap::new();
-        let cases = [("all", Some("all")), ("small", Some("small")), ("none", None)];
+        let cases = [
+            ("all", Some("all")),
+            ("small", Some("small")),
+            ("none", None),
+        ];
         for (val, expected) in cases {
             let xml = format!(
                 r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr cap="{val}"/><t>x</t></r>"#
@@ -6405,13 +7741,13 @@ mod tests {
         let theme = HashMap::new();
         let rels = HashMap::new();
         let cases: &[(&str, bool, Option<&str>)] = &[
-            ("none",    false, None),
-            ("sng",     true,  None),
-            ("dbl",     true,  Some("dbl")),
-            ("heavy",   true,  Some("heavy")),
-            ("dotted",  true,  Some("dotted")),
-            ("wavy",    true,  Some("wavy")),
-            ("dashLong",true,  Some("dashLong")),
+            ("none", false, None),
+            ("sng", true, None),
+            ("dbl", true, Some("dbl")),
+            ("heavy", true, Some("heavy")),
+            ("dotted", true, Some("dotted")),
+            ("wavy", true, Some("wavy")),
+            ("dashLong", true, Some("dashLong")),
         ];
         for (val, expected_bool, expected_style) in cases {
             let xml = format!(
@@ -6435,7 +7771,13 @@ mod tests {
         let with_ufill = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr u="sng"><uFill><solidFill><srgbClr val="FF0000"/></solidFill></uFill></rPr><t>x</t></r>"#;
         let doc = roxmltree::Document::parse(with_ufill).unwrap();
         let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
-        assert_eq!(r.underline_color.as_deref().map(str::to_uppercase).as_deref(), Some("FF0000"));
+        assert_eq!(
+            r.underline_color
+                .as_deref()
+                .map(str::to_uppercase)
+                .as_deref(),
+            Some("FF0000")
+        );
 
         let with_ufilltx = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr u="sng"><uFillTx/></rPr><t>x</t></r>"#;
         let doc = roxmltree::Document::parse(with_ufilltx).unwrap();
@@ -6555,8 +7897,8 @@ mod tests {
         assert_eq!(body[0], Some(28.0)); // lvl1 → level 0
         assert_eq!(body[1], Some(24.0)); // lvl2 → level 1
         assert_eq!(body[2], Some(20.0)); // lvl3 → level 2
-        assert_eq!(body[3], None);       // unspecified
-        // body style also keys the empty placeholder type and "obj".
+        assert_eq!(body[3], None); // unspecified
+                                   // body style also keys the empty placeholder type and "obj".
         assert_eq!(m.get("").unwrap()[2], Some(20.0));
         // title style is captured separately.
         assert_eq!(m.get("title").unwrap()[0], Some(44.0));
@@ -6591,19 +7933,34 @@ mod tests {
         }
         assert!(body[2].is_none(), "lvl3 unspecified");
         // body style also keys the empty placeholder type and "obj".
-        assert!(matches!(m.get("").and_then(|b| b[0].clone()), Some(Bullet::Char { .. })));
-        assert!(matches!(m.get("obj").and_then(|b| b[0].clone()), Some(Bullet::Char { .. })));
+        assert!(matches!(
+            m.get("").and_then(|b| b[0].clone()),
+            Some(Bullet::Char { .. })
+        ));
+        assert!(matches!(
+            m.get("obj").and_then(|b| b[0].clone()),
+            Some(Bullet::Char { .. })
+        ));
         // titleStyle's explicit buNone is captured (so titles don't inherit a bullet).
-        assert!(matches!(m.get("title").and_then(|b| b[0].clone()), Some(Bullet::None)));
+        assert!(matches!(
+            m.get("title").and_then(|b| b[0].clone()),
+            Some(Bullet::None)
+        ));
     }
 
     #[test]
     fn merge_level_sizes_prefers_primary_per_edge() {
         let primary: LevelFontSizes = {
-            let mut a = [None; 9]; a[1] = Some(28.0); a
+            let mut a = [None; 9];
+            a[1] = Some(28.0);
+            a
         };
         let fallback: LevelFontSizes = {
-            let mut a = [None; 9]; a[0] = Some(32.0); a[1] = Some(24.0); a[2] = Some(20.0); a
+            let mut a = [None; 9];
+            a[0] = Some(32.0);
+            a[1] = Some(24.0);
+            a[2] = Some(20.0);
+            a
         };
         let merged = merge_level_sizes(&primary, &fallback);
         assert_eq!(merged[0], Some(32.0)); // only fallback
@@ -6644,7 +8001,12 @@ mod tests {
         push_math_runs(ac, Some(18.0), &theme, &mut runs);
         assert_eq!(runs.len(), 1, "exactly one math run, fallback ignored");
         match &runs[0] {
-            TextRun::Math { display, nodes, font_size, .. } => {
+            TextRun::Math {
+                display,
+                nodes,
+                font_size,
+                ..
+            } => {
                 assert!(*display, "oMathPara → display math");
                 assert_eq!(*font_size, Some(18.0));
                 assert_eq!(nodes_to_text(nodes), "x");
@@ -6674,10 +8036,19 @@ mod tests {
         push_math_runs(doc.root_element(), None, &theme, &mut runs);
         assert_eq!(runs.len(), 1);
         match &runs[0] {
-            TextRun::Math { display, font_size, nodes, color } => {
+            TextRun::Math {
+                display,
+                font_size,
+                nodes,
+                color,
+            } => {
                 assert!(!*display, "bare a14:m with m:oMath → inline");
                 assert_eq!(*font_size, Some(28.0), "size read from math run rPr sz");
-                assert_eq!(color.as_deref(), Some("7030A0"), "colour read from math run rPr solidFill");
+                assert_eq!(
+                    color.as_deref(),
+                    Some("7030A0"),
+                    "colour read from math run rPr solidFill"
+                );
                 assert_eq!(nodes_to_text(nodes), "n");
             }
             other => panic!("expected math run, got {other:?}"),
@@ -6697,8 +8068,10 @@ mod tests {
     fn idx_placeholder_inherits_master_txstyle_color() {
         let mut lph = LayoutPlaceholders::default();
         // Master bodyStyle resolves to white and is keyed by type (incl. "" and "body").
-        lph.by_type_master_color.insert("body".to_string(), "FFFFFF".to_string());
-        lph.by_type_master_color.insert("".to_string(), "FFFFFF".to_string());
+        lph.by_type_master_color
+            .insert("body".to_string(), "FFFFFF".to_string());
+        lph.by_type_master_color
+            .insert("".to_string(), "FFFFFF".to_string());
 
         // Layout idx=35 placeholder declared size only → no by_idx_color entry.
         assert_eq!(
@@ -6724,9 +8097,11 @@ mod tests {
     /// white header text was ignored (tcTxStyle was never read).
     #[test]
     fn table_style_resolves_fill_wrapper_and_tctxstyle_colour() {
-        let theme: HashMap<String, String> = [
-            ("dk1", "000000"), ("lt1", "FFFFFF"), ("accent2", "B83903"),
-        ].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let theme: HashMap<String, String> =
+            [("dk1", "000000"), ("lt1", "FFFFFF"), ("accent2", "B83903")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
 
         let xml = r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
           <a:tblStyle styleId="{TEST}" styleName="Medium Style 1 - Accent 2">
@@ -6769,25 +8144,43 @@ mod tests {
             Some(Fill::Solid { color }) => Some(color.clone()),
             _ => None,
         };
-        assert_eq!(solid(&def.whole_fill).as_deref(), Some("FFFFFF"),
-            "wholeTbl fill should be lt1 white");
-        assert_eq!(solid(&def.first_row_fill).as_deref(), Some("B83903"),
-            "firstRow header fill should be accent2 orange");
+        assert_eq!(
+            solid(&def.whole_fill).as_deref(),
+            Some("FFFFFF"),
+            "wholeTbl fill should be lt1 white"
+        );
+        assert_eq!(
+            solid(&def.first_row_fill).as_deref(),
+            Some("B83903"),
+            "firstRow header fill should be accent2 orange"
+        );
         // band1H = accent2 + `<a:tint val="20000">`. Table styles use the literal
         // ECMA-376 tint (val·input + (1-val)·white), giving a near-white wash —
         // NOT the saturated linear-lerp. 0.2·B83903 + 0.8·white = F1D7CD.
-        assert_eq!(solid(&def.band1h_fill).as_deref(), Some("F1D7CD"),
-            "band1H tint should be the literal near-white wash, not a saturated lerp");
+        assert_eq!(
+            solid(&def.band1h_fill).as_deref(),
+            Some("F1D7CD"),
+            "band1H tint should be the literal near-white wash, not a saturated lerp"
+        );
 
         // Text colours from tcTxStyle.
-        assert_eq!(def.whole_text_color.as_deref(), Some("000000"),
-            "wholeTbl text colour should be dk1 black");
-        assert_eq!(def.first_row_text_color.as_deref(), Some("FFFFFF"),
-            "firstRow header text colour should be lt1 white");
+        assert_eq!(
+            def.whole_text_color.as_deref(),
+            Some("000000"),
+            "wholeTbl text colour should be dk1 black"
+        );
+        assert_eq!(
+            def.first_row_text_color.as_deref(),
+            Some("FFFFFF"),
+            "firstRow header text colour should be lt1 white"
+        );
 
         // firstRow `<a:tcTxStyle b="on">` → bold header.
-        assert_eq!(def.first_row_bold, Some(true),
-            "firstRow header should be bold from tcTxStyle b=on");
+        assert_eq!(
+            def.first_row_bold,
+            Some(true),
+            "firstRow header should be bold from tcTxStyle b=on"
+        );
     }
 
     /// ECMA-376 §21.1.2.1.1 — `<a:bodyPr rtlCol="1">` lays out a multi-column
@@ -6804,9 +8197,20 @@ mod tests {
             );
             let doc = roxmltree::Document::parse(&xml).unwrap();
             parse_text_body(
-                doc.root_element(), &theme, &rels,
-                None, [None; 9], &empty_level_bullets(),
-                None, None, None, None, None, None, None, None,
+                doc.root_element(),
+                &theme,
+                &rels,
+                None,
+                [None; 9],
+                &empty_level_bullets(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
                 ShapeKind::Sp,
             )
         };
@@ -6821,15 +8225,24 @@ mod tests {
 
         // Absent attribute → false (spec default).
         let tb_absent = parse(r#"<bodyPr numCol="2"/>"#);
-        assert!(!tb_absent.rtl_col, "absent rtlCol should yield rtl_col=false");
+        assert!(
+            !tb_absent.rtl_col,
+            "absent rtlCol should yield rtl_col=false"
+        );
 
         // false is omitted from the serialized JSON.
         let json = serde_json::to_string(&tb_absent).unwrap();
-        assert!(!json.contains("rtlCol"), "rtl_col=false must be omitted from JSON; got {json}");
+        assert!(
+            !json.contains("rtlCol"),
+            "rtl_col=false must be omitted from JSON; got {json}"
+        );
 
         // rtlCol="1" appears under the camelCase key "rtlCol".
         let json_true = serde_json::to_string(&tb).unwrap();
-        assert!(json_true.contains("\"rtlCol\":true"), "expected rtlCol:true in JSON; got {json_true}");
+        assert!(
+            json_true.contains("\"rtlCol\":true"),
+            "expected rtlCol:true in JSON; got {json_true}"
+        );
     }
 
     /// ECMA-376 §21.1.3.13 (`a:tblPr@rtl`): a right-to-left table sets `rtl=true`
@@ -6854,11 +8267,20 @@ mod tests {
                 r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{tbl_xml}</root>"#
             );
             let doc = roxmltree::Document::parse(&xml).unwrap();
-            let tbl = doc.root_element()
+            let tbl = doc
+                .root_element()
                 .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "tbl")
                 .unwrap();
-            let t = Transform { x: 0, y: 0, cx: 100, cy: 100, rot: 0.0, flip_h: false, flip_v: false };
+            let t = Transform {
+                x: 0,
+                y: 0,
+                cx: 100,
+                cy: 100,
+                rot: 0.0,
+                flip_h: false,
+                flip_v: false,
+            };
             let theme: HashMap<String, String> = HashMap::new();
             let rels: HashMap<String, String> = HashMap::new();
             let bytes = empty_zip();
@@ -6874,7 +8296,10 @@ mod tests {
         );
         assert!(t_rtl.rtl, "rtl=\"1\" should yield rtl=true");
         let json = serde_json::to_string(&t_rtl).unwrap();
-        assert!(json.contains("\"rtl\":true"), "expected rtl:true in JSON; got {json}");
+        assert!(
+            json.contains("\"rtl\":true"),
+            "expected rtl:true in JSON; got {json}"
+        );
 
         // Absent tblPr@rtl → false, omitted from JSON.
         let t_ltr = parse_tbl(
@@ -6883,6 +8308,9 @@ mod tests {
         );
         assert!(!t_ltr.rtl, "absent rtl should yield rtl=false");
         let json_ltr = serde_json::to_string(&t_ltr).unwrap();
-        assert!(!json_ltr.contains("\"rtl\""), "rtl=false must be omitted; got {json_ltr}");
+        assert!(
+            !json_ltr.contains("\"rtl\""),
+            "rtl=false must be omitted; got {json_ltr}"
+        );
     }
 }

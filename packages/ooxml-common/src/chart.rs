@@ -33,7 +33,9 @@ use roxmltree::Node;
 
 /// Find a direct child of `parent` whose local name is `name`.
 fn child<'a, 'i>(parent: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
-    parent.children().find(|n| n.is_element() && n.tag_name().name() == name)
+    parent
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == name)
 }
 
 /// Theme-aware color resolution for chart text-color helpers.
@@ -66,11 +68,14 @@ pub fn extract_legend(root: Node) -> (bool, Option<String>) {
     // The legend can sit anywhere inside `<c:chart>` but in practice it's a
     // direct child of `<c:chart>`. Use descendants to be tolerant of either
     // structure — there's only one `<c:legend>` element per chart.
-    let legend = root.descendants()
+    let legend = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "legend");
     let show = legend.is_some();
     let pos = legend.and_then(|ln| {
-        child(ln, "legendPos").and_then(|p| p.attribute("val")).map(|s| s.to_string())
+        child(ln, "legendPos")
+            .and_then(|p| p.attribute("val"))
+            .map(|s| s.to_string())
     });
     (show, pos)
 }
@@ -79,10 +84,12 @@ pub fn extract_legend(root: Node) -> (bool, Option<String>) {
 /// §21.2.2.25). Returns `(gap%, overlap%)`. Defaults to (None, None) when
 /// the file relies on Office's defaults (gap 150, overlap 0).
 pub fn extract_bar_gap_overlap(root: Node) -> (Option<i32>, Option<i32>) {
-    let gap = root.descendants()
+    let gap = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "gapWidth")
         .and_then(|n| n.attribute("val").and_then(|v| v.parse::<i32>().ok()));
-    let ov = root.descendants()
+    let ov = root
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "overlap")
         .and_then(|n| n.attribute("val").and_then(|v| v.parse::<i32>().ok()));
     (gap, ov)
@@ -94,7 +101,9 @@ pub fn extract_data_label_position(root: Node) -> Option<String> {
     root.descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
         .find_map(|dlbls| {
-            child(dlbls, "dLblPos").and_then(|n| n.attribute("val")).map(|s| s.to_string())
+            child(dlbls, "dLblPos")
+                .and_then(|n| n.attribute("val"))
+                .map(|s| s.to_string())
         })
 }
 
@@ -160,9 +169,13 @@ pub fn extract_axis_tick_mark(axis_node: Node, name: &str) -> Option<String> {
 pub fn extract_axis_tick_label_size(axis_node: Node) -> Option<i32> {
     let txpr = child(axis_node, "txPr")?;
     txpr.descendants().find_map(|n| {
-        if !n.is_element() { return None; }
+        if !n.is_element() {
+            return None;
+        }
         let tag = n.tag_name().name();
-        if tag != "defRPr" && tag != "rPr" { return None; }
+        if tag != "defRPr" && tag != "rPr" {
+            return None;
+        }
         n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
     })
 }
@@ -174,12 +187,18 @@ pub fn extract_data_label_font_size(root: Node) -> Option<i32> {
     root.descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
         .find_map(|dl| {
-            child(dl, "txPr").and_then(|tx| tx.descendants().find_map(|n| {
-                if !n.is_element() { return None; }
-                let tag = n.tag_name().name();
-                if tag != "defRPr" && tag != "rPr" { return None; }
-                n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
-            }))
+            child(dl, "txPr").and_then(|tx| {
+                tx.descendants().find_map(|n| {
+                    if !n.is_element() {
+                        return None;
+                    }
+                    let tag = n.tag_name().name();
+                    if tag != "defRPr" && tag != "rPr" {
+                        return None;
+                    }
+                    n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+                })
+            })
         })
 }
 
@@ -197,10 +216,17 @@ pub fn extract_data_label_font_size(root: Node) -> Option<i32> {
 /// sibling `<c:dLbls><c:spPr><a:solidFill>` (the label *background*
 /// fill, distinct from the text color) can't shadow the answer.
 pub fn extract_data_label_font_color(root: Node, resolver: &dyn ColorResolver) -> Option<String> {
-    for dlbls in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "dLbls") {
-        let Some(txpr) = child(dlbls, "txPr") else { continue; };
+    for dlbls in root
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+    {
+        let Some(txpr) = child(dlbls, "txPr") else {
+            continue;
+        };
         for desc in txpr.descendants().filter(|n| n.is_element()) {
-            if desc.tag_name().name() != "solidFill" { continue; }
+            if desc.tag_name().name() != "solidFill" {
+                continue;
+            }
             if let Some(c) = resolver.resolve_solid_fill(desc) {
                 return Some(c);
             }
@@ -215,10 +241,15 @@ pub fn extract_data_label_font_color(root: Node, resolver: &dyn ColorResolver) -
 /// that ECMA-376 §21.2.2.* / §21.1.2.2.* uses to color the axis tick labels
 /// (e.g. PowerPoint's "category labels in gray"). Scoped to `<c:txPr>` so the
 /// sibling `<c:spPr>` axis-line fill can't shadow the answer.
-pub fn extract_axis_tick_label_color(axis_node: Node, resolver: &dyn ColorResolver) -> Option<String> {
+pub fn extract_axis_tick_label_color(
+    axis_node: Node,
+    resolver: &dyn ColorResolver,
+) -> Option<String> {
     let txpr = child(axis_node, "txPr")?;
     for desc in txpr.descendants().filter(|n| n.is_element()) {
-        if desc.tag_name().name() != "solidFill" { continue; }
+        if desc.tag_name().name() != "solidFill" {
+            continue;
+        }
         if let Some(c) = resolver.resolve_solid_fill(desc) {
             return Some(c);
         }
@@ -240,8 +271,12 @@ pub fn extract_axis_line_style(
     axis_node: Node,
     resolver: &dyn ColorResolver,
 ) -> (Option<String>, Option<u32>, bool) {
-    let Some(sp_pr) = child(axis_node, "spPr") else { return (None, None, false); };
-    let Some(ln) = child(sp_pr, "ln") else { return (None, None, false); };
+    let Some(sp_pr) = child(axis_node, "spPr") else {
+        return (None, None, false);
+    };
+    let Some(ln) = child(sp_pr, "ln") else {
+        return (None, None, false);
+    };
     let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
     let no_fill = child(ln, "noFill").is_some();
     let color = child(ln, "solidFill").and_then(|sf| resolver.resolve_solid_fill(sf));
@@ -259,13 +294,26 @@ pub fn extract_axis_line_style(
 pub fn extract_chartex_axis_hidden(root: Node) -> (bool, bool) {
     let mut cat_hidden = false;
     let mut val_hidden = false;
-    for ax in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "axis") {
+    for ax in root
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "axis")
+    {
         let hidden = ax.attribute("hidden").map(|v| v == "1").unwrap_or(false);
-        if !hidden { continue; }
-        let is_val = ax.children().any(|c| c.is_element() && c.tag_name().name() == "valScaling");
-        let is_cat = ax.children().any(|c| c.is_element() && c.tag_name().name() == "catScaling");
-        if is_val { val_hidden = true; }
-        if is_cat { cat_hidden = true; }
+        if !hidden {
+            continue;
+        }
+        let is_val = ax
+            .children()
+            .any(|c| c.is_element() && c.tag_name().name() == "valScaling");
+        let is_cat = ax
+            .children()
+            .any(|c| c.is_element() && c.tag_name().name() == "catScaling");
+        if is_val {
+            val_hidden = true;
+        }
+        if is_cat {
+            cat_hidden = true;
+        }
     }
     (cat_hidden, val_hidden)
 }
@@ -301,7 +349,8 @@ mod tests {
 
     #[test]
     fn bar_gap_overlap_default_to_none() {
-        let xml = r#"<c:barChart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let xml =
+            r#"<c:barChart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
         let d = root_of(xml);
         assert_eq!(extract_bar_gap_overlap(d.root_element()), (None, None));
     }
@@ -313,7 +362,10 @@ mod tests {
             <c:overlap val="100"/>
         </c:barChart>"#;
         let d = root_of(xml);
-        assert_eq!(extract_bar_gap_overlap(d.root_element()), (Some(50), Some(100)));
+        assert_eq!(
+            extract_bar_gap_overlap(d.root_element()),
+            (Some(50), Some(100))
+        );
     }
 
     #[test]
@@ -322,15 +374,26 @@ mod tests {
             <c:plotArea><c:dLbls><c:dLblPos val="ctr"/></c:dLbls></c:plotArea>
         </c:chart>"#;
         let d = root_of(xml);
-        assert_eq!(extract_data_label_position(d.root_element()).as_deref(), Some("ctr"));
+        assert_eq!(
+            extract_data_label_position(d.root_element()).as_deref(),
+            Some("ctr")
+        );
     }
 
     #[test]
     fn axis_delete_truthy_variants() {
-        for (val, expect) in [("1", true), ("0", false), ("true", true), ("false", false), ("True", true)] {
-            let xml = format!(r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        for (val, expect) in [
+            ("1", true),
+            ("0", false),
+            ("true", true),
+            ("false", false),
+            ("True", true),
+        ] {
+            let xml = format!(
+                r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
                 <c:delete val="{val}"/>
-            </c:valAx>"#);
+            </c:valAx>"#
+            );
             let d = root_of(&xml);
             assert_eq!(axis_is_deleted(d.root_element()), expect, "val={val}");
         }
@@ -349,7 +412,10 @@ mod tests {
             <c:scaling><c:max val="2500"/><c:min val="0"/></c:scaling>
         </c:valAx>"#;
         let d = root_of(xml);
-        assert_eq!(extract_axis_min_max(d.root_element()), (Some(0.0), Some(2500.0)));
+        assert_eq!(
+            extract_axis_min_max(d.root_element()),
+            (Some(0.0), Some(2500.0))
+        );
     }
 
     #[test]
@@ -367,7 +433,10 @@ mod tests {
             <c:numFmt formatCode="0.0%"/>
         </c:valAx>"#;
         let d = root_of(xml);
-        assert_eq!(extract_axis_format_code(d.root_element()).as_deref(), Some("0.0%"));
+        assert_eq!(
+            extract_axis_format_code(d.root_element()).as_deref(),
+            Some("0.0%")
+        );
     }
 
     /// Test resolver: returns the schemeClr@val verbatim, or the srgbClr@val
@@ -413,7 +482,10 @@ mod tests {
         </c:chart>"#;
         let d = root_of(xml);
         let got = extract_data_label_font_color(d.root_element(), &StubResolver);
-        assert!(got.is_none(), "spPr fill must not leak into the font color: got {got:?}");
+        assert!(
+            got.is_none(),
+            "spPr fill must not leak into the font color: got {got:?}"
+        );
     }
 
     #[test]
@@ -484,7 +556,10 @@ mod tests {
     fn axis_line_style_absent() {
         let xml = r#"<c:catAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
         let d = root_of(xml);
-        assert_eq!(extract_axis_line_style(d.root_element(), &StubResolver), (None, None, false));
+        assert_eq!(
+            extract_axis_line_style(d.root_element(), &StubResolver),
+            (None, None, false)
+        );
     }
 
     #[test]

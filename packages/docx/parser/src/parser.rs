@@ -1,14 +1,16 @@
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use roxmltree::Document as XmlDoc;
 use std::collections::HashMap;
 use std::io::Read;
 use zip::ZipArchive;
-use roxmltree::Document as XmlDoc;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
 
-use crate::xml_util::*;
-use crate::types::*;
-use crate::styles::{StyleMap, parse_para_fmt, parse_run_fmt, ParaFmt, RunFmt, CondFmt, RawTblBorders, EdgeBorder};
 use crate::numbering::NumberingMap;
+use crate::styles::{
+    parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, ParaFmt, RawTblBorders, RunFmt, StyleMap,
+};
+use crate::types::*;
+use crate::xml_util::*;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 
@@ -26,21 +28,32 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let cursor = std::io::Cursor::new(data);
     let mut zip = ZipArchive::new(cursor).map_err(|e| e.to_string())?;
 
-    let rels_xml = read_zip_entry(&mut zip, "word/_rels/document.xml.rels")
-        .unwrap_or_default();
+    let rels_xml = read_zip_entry(&mut zip, "word/_rels/document.xml.rels").unwrap_or_default();
     let rel_map = parse_rels(&rels_xml);
 
     // Styles are referenced from the document relationships (Target may be
     // "styles.xml" or "styles2.xml"). Fall back to "word/styles.xml" for old files.
     let styles_path = find_rel_target(&rels_xml, "styles")
-        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .map(|t| {
+            if t.starts_with('/') {
+                t.trim_start_matches('/').to_string()
+            } else {
+                format!("word/{}", t)
+            }
+        })
         .unwrap_or_else(|| "word/styles.xml".to_string());
     let style_map = read_zip_entry(&mut zip, &styles_path)
         .map(|s| StyleMap::parse(&s))
         .unwrap_or_else(|_| StyleMap::parse(""));
 
     let numbering_path = find_rel_target(&rels_xml, "numbering")
-        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .map(|t| {
+            if t.starts_with('/') {
+                t.trim_start_matches('/').to_string()
+            } else {
+                format!("word/{}", t)
+            }
+        })
         .unwrap_or_else(|| "word/numbering.xml".to_string());
     let mut num_map = read_zip_entry(&mut zip, &numbering_path)
         .map(|s| NumberingMap::parse(&s))
@@ -50,15 +63,27 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     // to word/<target> and parse the clrScheme.
     let mut theme = find_rel_target(&rels_xml, "theme")
         .map(|t| {
-            let p = if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) };
-            read_zip_entry(&mut zip, &p).map(|s| ThemeColors::parse(&s)).unwrap_or_default()
+            let p = if t.starts_with('/') {
+                t.trim_start_matches('/').to_string()
+            } else {
+                format!("word/{}", t)
+            };
+            read_zip_entry(&mut zip, &p)
+                .map(|s| ThemeColors::parse(&s))
+                .unwrap_or_default()
         })
         .unwrap_or_default();
 
     // §17.15.1.88 w:themeFontLang — when the theme leaves a cs typeface empty,
     // the settings' bidi language decides the actual complex-script face.
     let settings_path = find_rel_target(&rels_xml, "settings")
-        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .map(|t| {
+            if t.starts_with('/') {
+                t.trim_start_matches('/').to_string()
+            } else {
+                format!("word/{}", t)
+            }
+        })
         .unwrap_or_else(|| "word/settings.xml".to_string());
     let mut document_settings: Option<crate::types::DocumentSettings> = None;
     if let Ok(settings_xml) = read_zip_entry(&mut zip, &settings_path) {
@@ -74,22 +99,44 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let doc_xml = read_zip_entry(&mut zip, "word/document.xml")?;
     let xml_doc = XmlDoc::parse(&doc_xml).map_err(|e| e.to_string())?;
 
-    let body_node = xml_doc.root_element()
+    let body_node = xml_doc
+        .root_element()
         .descendants()
         .find(|n| n.tag_name().name() == "body")
         .ok_or("No body element")?;
 
-    let sect_pr = body_node.children()
-        .filter(|n| n.is_element())
-        .last()
+    let sect_pr = body_node
+        .children()
+        .rfind(|n| n.is_element())
         .filter(|n| n.tag_name().name() == "sectPr");
 
     let (section, refs) = parse_section(sect_pr, &rel_map);
 
-    let body = parse_body_elements(body_node, &style_map, &mut num_map, &media_map, &rel_map, &theme);
+    let body = parse_body_elements(
+        body_node,
+        &style_map,
+        &mut num_map,
+        &media_map,
+        &rel_map,
+        &theme,
+    );
 
-    let headers = load_header_footer_set(&mut zip, &refs.headers, "hdr", &style_map, &mut num_map, &theme);
-    let footers = load_header_footer_set(&mut zip, &refs.footers, "ftr", &style_map, &mut num_map, &theme);
+    let headers = load_header_footer_set(
+        &mut zip,
+        &refs.headers,
+        "hdr",
+        &style_map,
+        &mut num_map,
+        &theme,
+    );
+    let footers = load_header_footer_set(
+        &mut zip,
+        &refs.footers,
+        "ftr",
+        &style_map,
+        &mut num_map,
+        &theme,
+    );
 
     let major_font = theme.theme_font("major", "latin");
     let minor_font = theme.theme_font("minor", "latin");
@@ -98,7 +145,13 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     // Resolve via relationship (Type ending in "/fontTable"); fall back to
     // "word/fontTable.xml" for documents that omit the relationship.
     let font_table_path = find_rel_target(&rels_xml, "fontTable")
-        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .map(|t| {
+            if t.starts_with('/') {
+                t.trim_start_matches('/').to_string()
+            } else {
+                format!("word/{}", t)
+            }
+        })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
     let font_family_classes = read_zip_entry(&mut zip, &font_table_path)
         .map(|s| parse_font_table(&s))
@@ -111,24 +164,51 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let revisions = collect_revisions(body_node);
 
     let comments = find_rel_target(&rels_xml, "comments")
-        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .map(|t| {
+            if t.starts_with('/') {
+                t.trim_start_matches('/').to_string()
+            } else {
+                format!("word/{}", t)
+            }
+        })
         .and_then(|p| read_zip_entry(&mut zip, &p).ok())
         .map(|xml| parse_comments(&xml))
         .unwrap_or_default();
     let footnotes = find_rel_target(&rels_xml, "footnotes")
-        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .map(|t| {
+            if t.starts_with('/') {
+                t.trim_start_matches('/').to_string()
+            } else {
+                format!("word/{}", t)
+            }
+        })
         .and_then(|p| read_zip_entry(&mut zip, &p).ok())
         .map(|xml| parse_notes(&xml, "footnote"))
         .unwrap_or_default();
     let endnotes = find_rel_target(&rels_xml, "endnotes")
-        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .map(|t| {
+            if t.starts_with('/') {
+                t.trim_start_matches('/').to_string()
+            } else {
+                format!("word/{}", t)
+            }
+        })
         .and_then(|p| read_zip_entry(&mut zip, &p).ok())
         .map(|xml| parse_notes(&xml, "endnote"))
         .unwrap_or_default();
 
     Ok(Document {
-        section, body, headers, footers, major_font, minor_font, font_family_classes,
-        revisions, comments, footnotes, endnotes,
+        section,
+        body,
+        headers,
+        footers,
+        major_font,
+        minor_font,
+        font_family_classes,
+        revisions,
+        comments,
+        footnotes,
+        endnotes,
         settings: document_settings,
     })
 }
@@ -178,19 +258,53 @@ fn collect_revisions(body: roxmltree::Node) -> Vec<crate::types::DocxRevision> {
 
 /// Parse word/comments.xml into a flat list of `<w:comment>` entries.
 fn parse_comments(xml: &str) -> Vec<crate::types::DocxComment> {
-    let Ok(doc) = roxmltree::Document::parse(xml) else { return Vec::new(); };
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for c in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "comment") {
-        let id = c.attributes().find(|a| a.name() == "id").map(|a| a.value().to_string()).unwrap_or_default();
-        if id.is_empty() { continue }
-        let author = c.attributes().find(|a| a.name() == "author").map(|a| a.value().to_string()).filter(|s| !s.is_empty());
-        let initials = c.attributes().find(|a| a.name() == "initials").map(|a| a.value().to_string()).filter(|s| !s.is_empty());
-        let date = c.attributes().find(|a| a.name() == "date").map(|a| a.value().to_string()).filter(|s| !s.is_empty());
-        let mut text = String::new();
-        for t in c.descendants().filter(|n| n.is_element() && n.tag_name().name() == "t") {
-            if let Some(s) = t.text() { text.push_str(s); }
+    for c in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "comment")
+    {
+        let id = c
+            .attributes()
+            .find(|a| a.name() == "id")
+            .map(|a| a.value().to_string())
+            .unwrap_or_default();
+        if id.is_empty() {
+            continue;
         }
-        out.push(crate::types::DocxComment { id, author, initials, date, text });
+        let author = c
+            .attributes()
+            .find(|a| a.name() == "author")
+            .map(|a| a.value().to_string())
+            .filter(|s| !s.is_empty());
+        let initials = c
+            .attributes()
+            .find(|a| a.name() == "initials")
+            .map(|a| a.value().to_string())
+            .filter(|s| !s.is_empty());
+        let date = c
+            .attributes()
+            .find(|a| a.name() == "date")
+            .map(|a| a.value().to_string())
+            .filter(|s| !s.is_empty());
+        let mut text = String::new();
+        for t in c
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+        {
+            if let Some(s) = t.text() {
+                text.push_str(s);
+            }
+        }
+        out.push(crate::types::DocxComment {
+            id,
+            author,
+            initials,
+            date,
+            text,
+        });
     }
     out
 }
@@ -199,14 +313,30 @@ fn parse_comments(xml: &str) -> Vec<crate::types::DocxComment> {
 /// reserved entries (id="-1" separator, id="0" continuation separator)
 /// per ECMA-376 §17.11.10.
 fn parse_notes(xml: &str, element_name: &str) -> Vec<crate::types::DocxNote> {
-    let Ok(doc) = roxmltree::Document::parse(xml) else { return Vec::new(); };
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for n in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == element_name) {
-        let id = n.attributes().find(|a| a.name() == "id").map(|a| a.value().to_string()).unwrap_or_default();
-        if id.is_empty() || id == "-1" || id == "0" { continue }
+    for n in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == element_name)
+    {
+        let id = n
+            .attributes()
+            .find(|a| a.name() == "id")
+            .map(|a| a.value().to_string())
+            .unwrap_or_default();
+        if id.is_empty() || id == "-1" || id == "0" {
+            continue;
+        }
         let mut text = String::new();
-        for t in n.descendants().filter(|t| t.is_element() && t.tag_name().name() == "t") {
-            if let Some(s) = t.text() { text.push_str(s); }
+        for t in n
+            .descendants()
+            .filter(|t| t.is_element() && t.tag_name().name() == "t")
+        {
+            if let Some(s) = t.text() {
+                text.push_str(s);
+            }
         }
         out.push(crate::types::DocxNote { id, text });
     }
@@ -234,9 +364,21 @@ impl ThemeColors {
         let mut map: HashMap<String, String> = HashMap::new();
         let mut fonts: HashMap<String, String> = HashMap::new();
         let theme_xml = Some(xml.to_string());
-        let doc = match XmlDoc::parse(xml) { Ok(d) => d, Err(_) => return Self { map, fonts, theme_xml } };
+        let doc = match XmlDoc::parse(xml) {
+            Ok(d) => d,
+            Err(_) => {
+                return Self {
+                    map,
+                    fonts,
+                    theme_xml,
+                }
+            }
+        };
         let root = doc.root_element();
-        if let Some(scheme) = root.descendants().find(|n| n.is_element() && n.tag_name().name() == "clrScheme") {
+        if let Some(scheme) = root
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "clrScheme")
+        {
             for child in scheme.children().filter(|n| n.is_element()) {
                 let name = child.tag_name().name().to_string();
                 let hex = child.children().filter(|n| n.is_element()).find_map(|n| {
@@ -246,19 +388,31 @@ impl ThemeColors {
                         _ => None,
                     }
                 });
-                if let Some(h) = hex { map.insert(name, h); }
+                if let Some(h) = hex {
+                    map.insert(name, h);
+                }
             }
         }
-        if let Some(font_scheme) = root.descendants().find(|n| n.is_element() && n.tag_name().name() == "fontScheme") {
+        if let Some(font_scheme) = root
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "fontScheme")
+        {
             for group_name in &["majorFont", "minorFont"] {
-                let prefix = if *group_name == "majorFont" { "major" } else { "minor" };
-                if let Some(group) = font_scheme.children().find(|n| n.is_element() && n.tag_name().name() == *group_name) {
+                let prefix = if *group_name == "majorFont" {
+                    "major"
+                } else {
+                    "minor"
+                };
+                if let Some(group) = font_scheme
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == *group_name)
+                {
                     for child in group.children().filter(|n| n.is_element()) {
                         let typ = match child.tag_name().name() {
                             "latin" => Some("latin"),
-                            "ea"    => Some("ea"),
-                            "cs"    => Some("cs"),
-                            _       => None,
+                            "ea" => Some("ea"),
+                            "cs" => Some("cs"),
+                            _ => None,
                         };
                         if let Some(t) = typ {
                             if let Some(face) = child.attribute("typeface") {
@@ -271,7 +425,11 @@ impl ThemeColors {
                 }
             }
         }
-        Self { map, fonts, theme_xml }
+        Self {
+            map,
+            fonts,
+            theme_xml,
+        }
     }
 
     fn resolve(&self, scheme_name: &str) -> Option<String> {
@@ -312,7 +470,11 @@ impl ThemeColors {
     /// against sample-7.pdf: the no-rFonts table cells embed ArialMT while
     /// explicit-rFonts runs embed Sakkal Majalla).
     pub fn fill_default_cs_font(&mut self, bidi_lang: &str) {
-        let primary = bidi_lang.split('-').next().unwrap_or("").to_ascii_lowercase();
+        let primary = bidi_lang
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let default = match primary.as_str() {
             "ar" | "he" => "Arial",
             _ => return,
@@ -329,11 +491,11 @@ impl ThemeColors {
     pub fn resolve_font(&self, theme_ref: &str) -> Option<String> {
         let (group, axis) = match theme_ref {
             "minorHAnsi" | "minorAscii" => ("minor", "latin"),
-            "minorBidi"                 => ("minor", "cs"),
-            "minorEastAsia"             => ("minor", "ea"),
+            "minorBidi" => ("minor", "cs"),
+            "minorEastAsia" => ("minor", "ea"),
             "majorHAnsi" | "majorAscii" => ("major", "latin"),
-            "majorBidi"                 => ("major", "cs"),
-            "majorEastAsia"             => ("major", "ea"),
+            "majorBidi" => ("major", "cs"),
+            "majorEastAsia" => ("major", "ea"),
             _ => return None,
         };
         self.fonts.get(&format!("{group}/{axis}")).cloned()
@@ -343,7 +505,8 @@ impl ThemeColors {
 /// Extract `<w:themeFontLang w:bidi="…"/>` from word/settings.xml (§17.15.1.88).
 fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
     let doc = XmlDoc::parse(settings_xml).ok()?;
-    let node = doc.root_element()
+    let node = doc
+        .root_element()
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "themeFontLang")?;
     attr_w(node, "bidi").filter(|s| !s.is_empty())
@@ -372,13 +535,20 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     let collect = |tag: &str| -> Option<String> {
         let mut found = false;
         let mut acc = String::new();
-        for node in root.children().filter(|n| n.is_element() && n.tag_name().name() == tag) {
+        for node in root
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == tag)
+        {
             found = true;
             if let Some(val) = attr_w(node, "val") {
                 acc.push_str(&val);
             }
         }
-        if found { Some(acc) } else { None }
+        if found {
+            Some(acc)
+        } else {
+            None
+        }
     };
     let no_line_breaks_before = collect("noLineBreaksBefore");
     let no_line_breaks_after = collect("noLineBreaksAfter");
@@ -394,9 +564,15 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
 }
 
 fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
-    if rels_xml.is_empty() { return None; }
+    if rels_xml.is_empty() {
+        return None;
+    }
     let doc = XmlDoc::parse(rels_xml).ok()?;
-    for rel in doc.root_element().children().filter(|n| n.tag_name().name() == "Relationship") {
+    for rel in doc
+        .root_element()
+        .children()
+        .filter(|n| n.tag_name().name() == "Relationship")
+    {
         if let (Some(ty), Some(target)) = (rel.attribute("Type"), rel.attribute("Target")) {
             if ty.ends_with(&format!("/{}", type_suffix)) {
                 return Some(target.to_string());
@@ -416,15 +592,23 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// as `auto`.
 fn parse_font_table(xml: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let Ok(doc) = XmlDoc::parse(xml) else { return map };
+    let Ok(doc) = XmlDoc::parse(xml) else {
+        return map;
+    };
     let w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-    for font in doc.root_element()
-        .descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "font" && n.tag_name().namespace() == Some(w_ns))
-    {
-        let Some(name) = font.attribute((w_ns, "name")) else { continue };
-        let family = font.children()
-            .find(|n| n.is_element() && n.tag_name().name() == "family" && n.tag_name().namespace() == Some(w_ns))
+    for font in doc.root_element().descendants().filter(|n| {
+        n.is_element() && n.tag_name().name() == "font" && n.tag_name().namespace() == Some(w_ns)
+    }) {
+        let Some(name) = font.attribute((w_ns, "name")) else {
+            continue;
+        };
+        let family = font
+            .children()
+            .find(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "family"
+                    && n.tag_name().namespace() == Some(w_ns)
+            })
             .and_then(|n| n.attribute((w_ns, "val")));
         if let Some(f) = family {
             map.insert(name.to_string(), f.to_string());
@@ -455,11 +639,15 @@ fn parse_body_elements(
     for child in body_children {
         match child.tag_name().name() {
             "p" => {
-                let result = parse_paragraph(child, style_map, num_map, media_map, rel_map, theme, None);
-                let is_page_break_only = result.runs.len() == 1 && matches!(
-                    result.runs[0],
-                    DocRun::Break { break_type: BreakType::Page }
-                );
+                let result =
+                    parse_paragraph(child, style_map, num_map, media_map, rel_map, theme, None);
+                let is_page_break_only = result.runs.len() == 1
+                    && matches!(
+                        result.runs[0],
+                        DocRun::Break {
+                            break_type: BreakType::Page
+                        }
+                    );
                 if is_page_break_only {
                     body.push(BodyElement::PageBreak { parity: None });
                     continue;
@@ -481,11 +669,16 @@ fn parse_body_elements(
                 //   - "continuous" → no page break
                 //   - "nextPage" / missing → plain page break
                 //   - "oddPage" / "evenPage" → page break + parity padding
-                if let Some(sect_pr) = child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr")) {
+                if let Some(sect_pr) = child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
+                {
                     match read_section_break_type(sect_pr).as_deref() {
                         Some("continuous") => { /* no page break */ }
-                        Some("oddPage") => body.push(BodyElement::PageBreak { parity: Some("odd".to_string()) }),
-                        Some("evenPage") => body.push(BodyElement::PageBreak { parity: Some("even".to_string()) }),
+                        Some("oddPage") => body.push(BodyElement::PageBreak {
+                            parity: Some("odd".to_string()),
+                        }),
+                        Some("evenPage") => body.push(BodyElement::PageBreak {
+                            parity: Some("even".to_string()),
+                        }),
                         _ => body.push(BodyElement::PageBreak { parity: None }),
                     }
                 }
@@ -494,16 +687,18 @@ fn parse_body_elements(
                 let tbl = parse_table(child, style_map, num_map, media_map, rel_map, theme);
                 body.push(BodyElement::Table(tbl));
             }
-            "sectPr" => {
-                // Mid-body loose sectPr (rare) would behave like a page break.
-                // The final body-level sectPr only defines section settings — skip it.
-                if Some(child.id()) != body_level_sect_id {
-                    match read_section_break_type(child).as_deref() {
-                        Some("continuous") => {}
-                        Some("oddPage") => body.push(BodyElement::PageBreak { parity: Some("odd".to_string()) }),
-                        Some("evenPage") => body.push(BodyElement::PageBreak { parity: Some("even".to_string()) }),
-                        _ => body.push(BodyElement::PageBreak { parity: None }),
-                    }
+            // Mid-body loose sectPr (rare) behaves like a page break. The
+            // final body-level sectPr only defines section settings — skip it.
+            "sectPr" if Some(child.id()) != body_level_sect_id => {
+                match read_section_break_type(child).as_deref() {
+                    Some("continuous") => {}
+                    Some("oddPage") => body.push(BodyElement::PageBreak {
+                        parity: Some("odd".to_string()),
+                    }),
+                    Some("evenPage") => body.push(BodyElement::PageBreak {
+                        parity: Some("even".to_string()),
+                    }),
+                    _ => body.push(BodyElement::PageBreak { parity: None }),
                 }
             }
             _ => {}
@@ -512,6 +707,10 @@ fn parse_body_elements(
     body
 }
 
+// Short-lived intermediate consumed immediately by the caller into BodyElement;
+// boxing the Para variant would add a heap allocation per paragraph on the hot
+// parse path with no real memory benefit for a transient `Vec<ParaPiece>`.
+#[allow(clippy::large_enum_variant)]
 enum ParaPiece {
     Para(DocParagraph),
     PageBreak,
@@ -549,12 +748,26 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // have since absorbed: with this gate gone, private/sample-5 — 66 ruby runs,
     // 5 lastRenderedPageBreak hints, 7 pages — is byte-identical and still
     // matches its Word export.)
-    let is_break_run = |r: &DocRun| matches!(r, DocRun::Break { break_type: BreakType::Page });
+    let is_break_run = |r: &DocRun| {
+        matches!(
+            r,
+            DocRun::Break {
+                break_type: BreakType::Page
+            }
+        )
+    };
     let has_break = para.runs.iter().any(is_break_run);
     if !has_break {
         // Strip the (ignored) RenderedPage runs so they don't pollute layout.
         let mut p = para;
-        p.runs.retain(|r| !matches!(r, DocRun::Break { break_type: BreakType::RenderedPage }));
+        p.runs.retain(|r| {
+            !matches!(
+                r,
+                DocRun::Break {
+                    break_type: BreakType::RenderedPage
+                }
+            )
+        });
         return vec![ParaPiece::Para(p)];
     }
 
@@ -562,16 +775,22 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     let mut chunks: Vec<Vec<DocRun>> = vec![Vec::new()];
     for run in para.runs.iter().cloned() {
         match &run {
-            DocRun::Break { break_type: BreakType::Page } => chunks.push(Vec::new()),
-            DocRun::Break { break_type: BreakType::RenderedPage } => { /* ignored hint */ }
+            DocRun::Break {
+                break_type: BreakType::Page,
+            } => chunks.push(Vec::new()),
+            DocRun::Break {
+                break_type: BreakType::RenderedPage,
+            } => { /* ignored hint */ }
             _ => chunks.last_mut().unwrap().push(run),
         }
     }
 
     let has_visible = |runs: &Vec<DocRun>| {
-        runs.iter().any(|r| matches!(r,
+        runs.iter().any(|r| {
+            matches!(r,
             DocRun::Text(t) if !t.text.trim().is_empty())
-            || matches!(r, DocRun::Field(_) | DocRun::Image(_) | DocRun::Shape(_)))
+                || matches!(r, DocRun::Field(_) | DocRun::Image(_) | DocRun::Shape(_))
+        })
     };
 
     // Drop trailing chunks that carry no visible content too — this
@@ -638,10 +857,15 @@ fn load_media_map(
                 format!("{}{}", base_dir, target)
             };
             if let Ok(bytes) = read_zip_bytes(zip, &path) {
-                let mime = if path.ends_with(".png") { "image/png" }
-                    else if path.ends_with(".jpg") || path.ends_with(".jpeg") { "image/jpeg" }
-                    else if path.ends_with(".gif") { "image/gif" }
-                    else { "image/png" };
+                let mime = if path.ends_with(".png") {
+                    "image/png"
+                } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+                    "image/jpeg"
+                } else if path.ends_with(".gif") {
+                    "image/gif"
+                } else {
+                    "image/png"
+                };
                 let b64 = B64.encode(&bytes);
                 media_map.insert(rid.clone(), format!("data:{};base64,{}", mime, b64));
             }
@@ -677,11 +901,22 @@ fn load_header_footer_set(
             Ok(d) => d,
             Err(_) => continue,
         };
-        let Some(root) = xml_doc.root_element().descendants().find(|n| n.tag_name().name() == root_tag) else {
+        let Some(root) = xml_doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == root_tag)
+        else {
             continue;
         };
 
-        let body = parse_body_elements(root, style_map, num_map, &local_media_map, &local_rel_map, theme);
+        let body = parse_body_elements(
+            root,
+            style_map,
+            num_map,
+            &local_media_map,
+            &local_rel_map,
+            theme,
+        );
         let hf = HeaderFooter { body };
         match kind.as_str() {
             "first" => out.first = Some(hf),
@@ -692,7 +927,10 @@ fn load_header_footer_set(
     out
 }
 
-fn parse_section(sect_pr: Option<roxmltree::Node>, rel_map: &HashMap<String, String>) -> (SectionProps, SectionRefs) {
+fn parse_section(
+    sect_pr: Option<roxmltree::Node>,
+    rel_map: &HashMap<String, String>,
+) -> (SectionProps, SectionRefs) {
     let default = SectionProps {
         page_width: 612.0,
         page_height: 792.0,
@@ -708,20 +946,38 @@ fn parse_section(sect_pr: Option<roxmltree::Node>, rel_map: &HashMap<String, Str
         doc_grid_line_pitch: None,
     };
 
-    let Some(sp) = sect_pr else { return (default, SectionRefs::default()) };
+    let Some(sp) = sect_pr else {
+        return (default, SectionRefs::default());
+    };
 
     let mut props = default;
     if let Some(pg_sz) = child_w(sp, "pgSz") {
-        if let Some(w) = attr_w(pg_sz, "w") { props.page_width = twips_to_pt(&w); }
-        if let Some(h) = attr_w(pg_sz, "h") { props.page_height = twips_to_pt(&h); }
+        if let Some(w) = attr_w(pg_sz, "w") {
+            props.page_width = twips_to_pt(&w);
+        }
+        if let Some(h) = attr_w(pg_sz, "h") {
+            props.page_height = twips_to_pt(&h);
+        }
     }
     if let Some(pg_mar) = child_w(sp, "pgMar") {
-        if let Some(v) = attr_w(pg_mar, "top") { props.margin_top = twips_to_pt(&v); }
-        if let Some(v) = attr_w(pg_mar, "right") { props.margin_right = twips_to_pt(&v); }
-        if let Some(v) = attr_w(pg_mar, "bottom") { props.margin_bottom = twips_to_pt(&v); }
-        if let Some(v) = attr_w(pg_mar, "left") { props.margin_left = twips_to_pt(&v); }
-        if let Some(v) = attr_w(pg_mar, "header") { props.header_distance = twips_to_pt(&v); }
-        if let Some(v) = attr_w(pg_mar, "footer") { props.footer_distance = twips_to_pt(&v); }
+        if let Some(v) = attr_w(pg_mar, "top") {
+            props.margin_top = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "right") {
+            props.margin_right = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "bottom") {
+            props.margin_bottom = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "left") {
+            props.margin_left = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "header") {
+            props.header_distance = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "footer") {
+            props.footer_distance = twips_to_pt(&v);
+        }
     }
     props.title_page = child_w(sp, "titlePg").is_some();
 
@@ -746,13 +1002,18 @@ fn parse_section(sect_pr: Option<roxmltree::Node>, rel_map: &HashMap<String, Str
     let mut refs = SectionRefs::default();
     for child in sp.children().filter(|n| n.is_element()) {
         let local = child.tag_name().name();
-        if local != "headerReference" && local != "footerReference" { continue; }
+        if local != "headerReference" && local != "footerReference" {
+            continue;
+        }
         let kind = attr_w(child, "type").unwrap_or_else(|| "default".to_string());
-        let rid = child.attribute((R_NS, "id"))
+        let rid = child
+            .attribute((R_NS, "id"))
             .or_else(|| child.attribute("id"))
             .map(|s| s.to_string());
         let Some(rid) = rid else { continue };
-        let Some(target) = rel_map.get(&rid) else { continue };
+        let Some(target) = rel_map.get(&rid) else {
+            continue;
+        };
         let target = target.trim_start_matches('/').to_string();
         if local == "headerReference" {
             refs.headers.insert(kind, target);
@@ -781,7 +1042,8 @@ fn parse_paragraph(
         .and_then(|s| attr_w(s, "val"));
 
     // Resolve base formatting from style
-    let (mut base_para, mut base_run) = style_map.resolve_para(explicit_style_id.as_deref(), table_style_id);
+    let (mut base_para, mut base_run) =
+        style_map.resolve_para(explicit_style_id.as_deref(), table_style_id);
 
     // Apply direct paragraph formatting overrides
     if let Some(ppr) = ppr_node {
@@ -794,59 +1056,100 @@ fn parse_paragraph(
         }
     }
 
-    let mut alignment = base_para.alignment.as_deref().map(normalize_align).unwrap_or("left").to_string();
+    let mut alignment = base_para
+        .alignment
+        .as_deref()
+        .map(normalize_align)
+        .unwrap_or("left")
+        .to_string();
     let alignment_explicit = base_para.alignment.is_some();
     let indent_right = base_para.indent_right.unwrap_or(0.0);
     let space_before = base_para.space_before.unwrap_or(0.0);
     let space_after = base_para.space_after.unwrap_or(0.0);
     let line_spacing = base_para.line_spacing_val.map(|v| LineSpacing {
         value: v,
-        rule: base_para.line_spacing_rule.clone().unwrap_or_else(|| "auto".to_string()),
+        rule: base_para
+            .line_spacing_rule
+            .clone()
+            .unwrap_or_else(|| "auto".to_string()),
         explicit: base_para.line_spacing_explicit.unwrap_or(false),
     });
 
     // Numbering — extract level data before advancing counter (avoids borrow conflict)
-    let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level) {
+    let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level)
+    {
         if num_id != 0 {
-            let (format, ind_left, tab) = num_map.get_level(num_id, num_level)
+            let (format, ind_left, tab) = num_map
+                .get_level(num_id, num_level)
                 .map(|l| (l.format.clone(), l.indent_left, l.tab))
                 .unwrap_or_else(|| ("decimal".to_string(), 36.0, 18.0));
             let counter = num_map.advance(num_id, num_level);
             let text = num_map.resolve_text(num_id, num_level, counter);
-            Some(NumberingInfo { num_id, level: num_level, format, text, indent_left: ind_left, tab })
-        } else { None }
-    } else { None };
+            Some(NumberingInfo {
+                num_id,
+                level: num_level,
+                format,
+                text,
+                indent_left: ind_left,
+                tab,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Numbering level's pPr/ind overrides the paragraph style's indent
     let (indent_left, indent_first) = if let Some(ref num) = numbering {
-        num_map.get_level(num.num_id, num.level)
+        num_map
+            .get_level(num.num_id, num.level)
             .map(|l| (l.indent_left, -l.tab))
-            .unwrap_or((base_para.indent_left.unwrap_or(0.0), base_para.indent_first.unwrap_or(0.0)))
+            .unwrap_or((
+                base_para.indent_left.unwrap_or(0.0),
+                base_para.indent_first.unwrap_or(0.0),
+            ))
     } else {
-        (base_para.indent_left.unwrap_or(0.0), base_para.indent_first.unwrap_or(0.0))
+        (
+            base_para.indent_left.unwrap_or(0.0),
+            base_para.indent_first.unwrap_or(0.0),
+        )
     };
     // Same for the end-side indent (w:ind@right ≡ end): an RTL list level
     // defines its indent there (e.g. w:right="720" w:hanging="360").
-    let indent_right = numbering.as_ref()
+    let indent_right = numbering
+        .as_ref()
         .and_then(|num| num_map.get_level(num.num_id, num.level))
         .and_then(|l| l.indent_right)
         .unwrap_or(indent_right);
 
     // Parse runs
     let mut runs = vec![];
-    parse_para_content(node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None);
+    parse_para_content(
+        node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None,
+    );
 
     // OMML display equations (m:oMathPara) are center-justified by default (§22.1.2.88
     // m:jc). When the paragraph has no explicit alignment, centering the block math
     // matches Word.
     if !alignment_explicit
-        && runs.iter().any(|r| matches!(r, DocRun::Math { display: true, .. }))
+        && runs
+            .iter()
+            .any(|r| matches!(r, DocRun::Math { display: true, .. }))
     {
         alignment = "center".to_string();
     }
 
-    let tab_stops = base_para.tab_stops.clone().unwrap_or_default().into_iter()
-        .map(|(pos, alignment, leader)| TabStop { pos, alignment, leader })
+    let tab_stops = base_para
+        .tab_stops
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(pos, alignment, leader)| TabStop {
+            pos,
+            alignment,
+            leader,
+        })
         .collect();
 
     DocParagraph {
@@ -867,7 +1170,9 @@ fn parse_paragraph(
         // when styles.xml doesn't spell it out — demoted heading paragraphs
         // (outlineLvl 0..8) are pinned to the next paragraph so the heading
         // never orphans at page bottom. Honor an explicit false to opt out.
-        keep_next: base_para.keep_next.unwrap_or_else(|| base_para.outline_level.is_some()),
+        keep_next: base_para
+            .keep_next
+            .unwrap_or_else(|| base_para.outline_level.is_some()),
         keep_lines: base_para.keep_lines.unwrap_or(false),
         // ECMA-376 §17.3.1.44: widowControl defaults to true when absent.
         widow_control: base_para.widow_control.unwrap_or(true),
@@ -884,7 +1189,8 @@ fn parse_paragraph(
         // Resolve the paragraph's default font the same way runs do (ascii
         // first, then eastAsia, through theme refs) so empty paragraphs can be
         // sized with the intended font's line metrics.
-        default_font_family: theme.resolve_font_ref(base_run.font_family_ascii.clone())
+        default_font_family: theme
+            .resolve_font_ref(base_run.font_family_ascii.clone())
             .or_else(|| theme.resolve_font_ref(base_run.font_family_east_asia.clone())),
         outline_level: base_para.outline_level,
         // ECMA-376 §17.3.1.6 — RTL paragraph flag resolved through the style
@@ -910,6 +1216,10 @@ struct FieldState {
     substitute: bool,
 }
 
+// Threads the immutable parse context (style/media/rel maps, theme) plus the
+// running output buffer and revision state through the paragraph walk; grouping
+// these into a context struct would only relocate the same fields.
+#[allow(clippy::too_many_arguments)]
 fn parse_para_content(
     node: roxmltree::Node,
     base_run: &RunFmt,
@@ -925,15 +1235,31 @@ fn parse_para_content(
     for child in element_children_flat(node) {
         match child.tag_name().name() {
             "r" => {
-                handle_run_in_para(child, base_run, style_map, media_map, theme, runs, &mut field, None, revision);
+                handle_run_in_para(
+                    child, base_run, style_map, media_map, theme, runs, &mut field, None, revision,
+                );
             }
             "hyperlink" => {
                 // Resolve URL from r:id via relationships
-                let href = child.attribute((R_NS, "id"))
+                let href = child
+                    .attribute((R_NS, "id"))
                     .or_else(|| child.attribute("id"))
                     .and_then(|rid| rel_map.get(rid).cloned());
-                for r in child.children().filter(|n| n.is_element() && n.tag_name().name() == "r") {
-                    handle_run_in_para(r, base_run, style_map, media_map, theme, runs, &mut field, Some(href.clone()), revision);
+                for r in child
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "r")
+                {
+                    handle_run_in_para(
+                        r,
+                        base_run,
+                        style_map,
+                        media_map,
+                        theme,
+                        runs,
+                        &mut field,
+                        Some(href.clone()),
+                        revision,
+                    );
                 }
             }
             "ins" | "del" => {
@@ -941,22 +1267,40 @@ fn parse_para_content(
                 // every descendant run so the renderer can paint tracked
                 // changes inline. Nested ins/del isn't legal per spec; the
                 // inner block wins if it occurs anyway.
-                let kind = if child.tag_name().name() == "ins" { "insertion" } else { "deletion" };
+                let kind = if child.tag_name().name() == "ins" {
+                    "insertion"
+                } else {
+                    "deletion"
+                };
                 let inner = RunRevision {
                     kind: kind.to_string(),
                     author: attr_w(child, "author"),
                     date: attr_w(child, "date"),
                 };
-                parse_para_content(child, base_run, style_map, media_map, rel_map, theme, runs, Some(&inner));
+                parse_para_content(
+                    child,
+                    base_run,
+                    style_map,
+                    media_map,
+                    rel_map,
+                    theme,
+                    runs,
+                    Some(&inner),
+                );
             }
             "smartTag" => {
-                parse_para_content(child, base_run, style_map, media_map, rel_map, theme, runs, revision);
+                parse_para_content(
+                    child, base_run, style_map, media_map, rel_map, theme, runs, revision,
+                );
             }
             "fldSimple" => {
                 let instr = attr_w(child, "instr").unwrap_or_default();
                 // Collect formatting from the first contained run (if any)
                 let mut fmt = base_run.clone();
-                if let Some(r) = child.children().find(|n| n.is_element() && n.tag_name().name() == "r") {
+                if let Some(r) = child
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "r")
+                {
                     if let Some(rpr) = child_w(r, "rPr") {
                         apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
                     }
@@ -995,6 +1339,9 @@ fn parse_para_content(
     }
 }
 
+// Same parse-context threading as parse_para_content, with the additional
+// hyperlink/field state carried per run.
+#[allow(clippy::too_many_arguments)]
 fn handle_run_in_para(
     r_node: roxmltree::Node,
     base_run: &RunFmt,
@@ -1047,7 +1394,12 @@ fn handle_run_in_para(
             "end" => {
                 if field.active && field.substitute {
                     let fmt = field.fmt.clone().unwrap_or_else(|| base_run.clone());
-                    runs.push(make_field_run(&field.instruction, &fmt, &field.fallback, theme));
+                    runs.push(make_field_run(
+                        &field.instruction,
+                        &fmt,
+                        &field.fallback,
+                        theme,
+                    ));
                 }
                 *field = FieldState::default();
             }
@@ -1074,7 +1426,10 @@ fn handle_run_in_para(
 
     if field.active && field.substitute {
         // Cached result of a recomputed field (PAGE/NUMPAGES) — swallow it.
-        for c in r_node.children().filter(|n| n.is_element() && n.tag_name().name() == "t") {
+        for c in r_node
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+        {
             if let Some(t) = c.text() {
                 field.fallback.push_str(t);
             }
@@ -1084,7 +1439,9 @@ fn handle_run_in_para(
     // field.active && past_separate && !substitute → fall through and render the result.
 
     // Normal run
-    parse_run_inner(r_node, base_run, style_map, media_map, theme, runs, link_href, revision);
+    parse_run_inner(
+        r_node, base_run, style_map, media_map, theme, runs, link_href, revision,
+    );
 }
 
 fn extract_text_from_runs(node: roxmltree::Node) -> String {
@@ -1124,7 +1481,11 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
 }
 
 fn classify_field(instr: &str) -> String {
-    let token = instr.trim().split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+    let token = instr
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
     match token.as_str() {
         "PAGE" => "page".to_string(),
         "NUMPAGES" => "numPages".to_string(),
@@ -1132,6 +1493,8 @@ fn classify_field(instr: &str) -> String {
     }
 }
 
+// Same parse-context threading as handle_run_in_para.
+#[allow(clippy::too_many_arguments)]
 fn parse_run_inner(
     node: roxmltree::Node,
     base_run: &RunFmt,
@@ -1159,7 +1522,9 @@ fn parse_run_inner(
     }
 
     // Skip hidden runs entirely
-    if fmt.vanish.unwrap_or(false) { return; }
+    if fmt.vanish.unwrap_or(false) {
+        return;
+    }
 
     // External links (URL) vs internal-document links (anchor: TOC entries,
     // cross-references). Word renders internal links as plain body text — NOT with
@@ -1274,11 +1639,14 @@ fn parse_run_inner(
                 }));
             }
             "br" => {
-                let break_type = attr_w(child, "type").as_deref().map(|v| match v {
-                    "page" => BreakType::Page,
-                    "column" => BreakType::Column,
-                    _ => BreakType::Line,
-                }).unwrap_or(BreakType::Line);
+                let break_type = attr_w(child, "type")
+                    .as_deref()
+                    .map(|v| match v {
+                        "page" => BreakType::Page,
+                        "column" => BreakType::Column,
+                        _ => BreakType::Line,
+                    })
+                    .unwrap_or(BreakType::Line);
                 runs.push(DocRun::Break { break_type });
             }
             "lastRenderedPageBreak" => {
@@ -1287,7 +1655,9 @@ fn parse_run_inner(
                 // it as a separate `RenderedPage` break type so the
                 // paragraph splitter can decide whether to honor it
                 // (currently: only inside ruby-bearing paragraphs).
-                runs.push(DocRun::Break { break_type: BreakType::RenderedPage });
+                runs.push(DocRun::Break {
+                    break_type: BreakType::RenderedPage,
+                });
             }
             "ruby" => {
                 // ECMA-376 §17.3.3.25 w:ruby — phonetic guide (furigana).
@@ -1310,14 +1680,29 @@ fn parse_run_inner(
                     .map(|hp| hp / 2.0) // half-points → points
                     .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
                 let ruby = if !rt_text.is_empty() {
-                    Some(RubyAnnotation { text: rt_text, font_size_pt: rt_size_pt })
+                    Some(RubyAnnotation {
+                        text: rt_text,
+                        font_size_pt: rt_size_pt,
+                    })
                 } else {
                     None
                 };
                 if let Some(rb) = child_w(child, "rubyBase") {
                     let before = runs.len();
-                    for inner in rb.children().filter(|n| n.is_element() && n.tag_name().name() == "r") {
-                        parse_run_inner(inner, &fmt, style_map, media_map, theme, runs, link_href.clone(), revision);
+                    for inner in rb
+                        .children()
+                        .filter(|n| n.is_element() && n.tag_name().name() == "r")
+                    {
+                        parse_run_inner(
+                            inner,
+                            &fmt,
+                            style_map,
+                            media_map,
+                            theme,
+                            runs,
+                            link_href.clone(),
+                            revision,
+                        );
                     }
                     // Attach ruby to the FIRST text run produced from rubyBase
                     // (typical case is a single base run carrying one or two
@@ -1413,7 +1798,10 @@ fn parse_inline_drawing(
             Some(c) => c,
             None => return vec![],
         };
-        let extent = match container.children().find(|n| n.tag_name().name() == "extent") {
+        let extent = match container
+            .children()
+            .find(|n| n.tag_name().name() == "extent")
+        {
             Some(e) => e,
             None => return vec![],
         };
@@ -1429,7 +1817,10 @@ fn parse_inline_drawing(
             Some(b) => b,
             None => return vec![],
         };
-        let r_id = match blip.attribute((R_NS, "embed")).or_else(|| blip.attribute("r:embed")) {
+        let r_id = match blip
+            .attribute((R_NS, "embed"))
+            .or_else(|| blip.attribute("r:embed"))
+        {
             Some(r) => r,
             None => return vec![],
         };
@@ -1464,13 +1855,16 @@ fn parse_inline_drawing(
 
     // Parse positionH / positionV with relativeFrom
     let (pos_x, x_from_margin, x_align) = parse_anchor_pos_h(&container);
-    let (pos_y, y_from_para,   y_align) = parse_anchor_pos_v(&container);
+    let (pos_y, y_from_para, y_align) = parse_anchor_pos_v(&container);
     let (pct_h, pct_v, rel_h, rel_v) = parse_anchor_pct_pos(&container);
     let (size_w_pct, size_h_pct, size_w_rel, size_h_rel) = parse_anchor_size_rel(&container);
     let anchor_meta = parse_anchor_wrap(&container);
 
     // behindDoc="1" flag — renderer uses this to draw shapes before text
-    let behind_doc = container.attribute("behindDoc").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let behind_doc = container
+        .attribute("behindDoc")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
 
     let apply_pos_meta = |shp: &mut ShapeRun| {
         shp.anchor_x_align = x_align.clone();
@@ -1486,12 +1880,31 @@ fn parse_inline_drawing(
     };
 
     // Check for wgp (Word Graphics Group) — expands to multiple per-element entries
-    if let Some(wgp) = container.descendants().find(|n| n.tag_name().name() == "wgp") {
+    if let Some(wgp) = container
+        .descendants()
+        .find(|n| n.tag_name().name() == "wgp")
+    {
         let mut out: Vec<DocRun> = Vec::new();
-        for img in parse_wgp_images(wgp, media_map, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta) {
+        for img in parse_wgp_images(
+            wgp,
+            media_map,
+            pos_x,
+            x_from_margin,
+            pos_y,
+            y_from_para,
+            &anchor_meta,
+        ) {
             out.push(DocRun::Image(img));
         }
-        for mut shp in parse_wgp_shapes(wgp, theme, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta) {
+        for mut shp in parse_wgp_shapes(
+            wgp,
+            theme,
+            pos_x,
+            x_from_margin,
+            pos_y,
+            y_from_para,
+            &anchor_meta,
+        ) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
             out.push(DocRun::Shape(shp));
@@ -1500,8 +1913,24 @@ fn parse_inline_drawing(
     }
 
     // wps:wsp directly under the anchor (no wgp wrapper)
-    if let Some(wsp) = container.descendants().find(|n| n.tag_name().name() == "wsp") {
-        if let Some(mut shp) = parse_wsp_shape(wsp, theme, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta, 1.0, 1.0, 0.0, 0.0, 0) {
+    if let Some(wsp) = container
+        .descendants()
+        .find(|n| n.tag_name().name() == "wsp")
+    {
+        if let Some(mut shp) = parse_wsp_shape(
+            wsp,
+            theme,
+            pos_x,
+            x_from_margin,
+            pos_y,
+            y_from_para,
+            &anchor_meta,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0,
+        ) {
             shp.behind_doc = behind_doc;
             apply_pos_meta(&mut shp);
             return vec![DocRun::Shape(shp)];
@@ -1509,7 +1938,10 @@ fn parse_inline_drawing(
     }
 
     // Regular single-blip anchor
-    let extent = match container.children().find(|n| n.tag_name().name() == "extent") {
+    let extent = match container
+        .children()
+        .find(|n| n.tag_name().name() == "extent")
+    {
         Some(e) => e,
         None => return vec![],
     };
@@ -1525,7 +1957,10 @@ fn parse_inline_drawing(
         Some(b) => b,
         None => return vec![],
     };
-    let r_id = match blip.attribute((R_NS, "embed")).or_else(|| blip.attribute("r:embed")) {
+    let r_id = match blip
+        .attribute((R_NS, "embed"))
+        .or_else(|| blip.attribute("r:embed"))
+    {
         Some(r) => r,
         None => return vec![],
     };
@@ -1576,16 +2011,41 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
     for child in container.children().filter(|n| n.is_element()) {
         let name = child.tag_name().name();
         match name {
-            "wrapSquare"       => { wrap_mode = Some("square".into());       wrap_side = child.attribute("wrapText").map(|s| s.to_string()); break; }
-            "wrapTopAndBottom" => { wrap_mode = Some("topAndBottom".into()); break; }
-            "wrapNone"         => { wrap_mode = Some("none".into());         break; }
-            "wrapTight"        => { wrap_mode = Some("tight".into());        wrap_side = child.attribute("wrapText").map(|s| s.to_string()); break; }
-            "wrapThrough"      => { wrap_mode = Some("through".into());      wrap_side = child.attribute("wrapText").map(|s| s.to_string()); break; }
+            "wrapSquare" => {
+                wrap_mode = Some("square".into());
+                wrap_side = child.attribute("wrapText").map(|s| s.to_string());
+                break;
+            }
+            "wrapTopAndBottom" => {
+                wrap_mode = Some("topAndBottom".into());
+                break;
+            }
+            "wrapNone" => {
+                wrap_mode = Some("none".into());
+                break;
+            }
+            "wrapTight" => {
+                wrap_mode = Some("tight".into());
+                wrap_side = child.attribute("wrapText").map(|s| s.to_string());
+                break;
+            }
+            "wrapThrough" => {
+                wrap_mode = Some("through".into());
+                wrap_side = child.attribute("wrapText").map(|s| s.to_string());
+                break;
+            }
             _ => {}
         }
     }
 
-    AnchorMeta { wrap_mode, wrap_side, dist_top, dist_bottom, dist_left, dist_right }
+    AnchorMeta {
+        wrap_mode,
+        wrap_side,
+        dist_top,
+        dist_bottom,
+        dist_left,
+        dist_right,
+    }
 }
 
 /// Parse positionH — returns (posOffset_pt, needs_margin_offset).
@@ -1602,9 +2062,15 @@ fn find_position_node<'a, 'i>(
     if let Some(n) = container.children().find(|n| n.tag_name().name() == name) {
         return Some(n);
     }
-    for ac in container.children().filter(|n| n.tag_name().name() == "AlternateContent") {
+    for ac in container
+        .children()
+        .filter(|n| n.tag_name().name() == "AlternateContent")
+    {
         if let Some(choice) = ac.children().find(|n| n.tag_name().name() == "Choice") {
-            if let Some(n) = choice.descendants().find(|n| n.is_element() && n.tag_name().name() == name) {
+            if let Some(n) = choice
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == name)
+            {
                 return Some(n);
             }
         }
@@ -1618,7 +2084,8 @@ fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool, Option<String>
         None => return (0.0, false, None),
     };
     let rel = pos.attribute("relativeFrom").unwrap_or("page");
-    let offset = pos.children()
+    let offset = pos
+        .children()
         .find(|n| n.tag_name().name() == "posOffset")
         .and_then(|n| n.text())
         .and_then(|t| t.parse::<f64>().ok())
@@ -1626,7 +2093,8 @@ fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool, Option<String>
         .unwrap_or(0.0);
     // ECMA-376 §20.4.3.1: <wp:align>left|center|right</wp:align> takes
     // precedence over posOffset when both are present.
-    let align = pos.children()
+    let align = pos
+        .children()
         .find(|n| n.is_element() && n.tag_name().name() == "align")
         .and_then(|n| n.text())
         .map(|s| s.trim().to_string())
@@ -1642,13 +2110,15 @@ fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool, Option<String>
         None => return (0.0, false, None),
     };
     let rel = pos.attribute("relativeFrom").unwrap_or("page");
-    let offset = pos.children()
+    let offset = pos
+        .children()
         .find(|n| n.tag_name().name() == "posOffset")
         .and_then(|n| n.text())
         .and_then(|t| t.parse::<f64>().ok())
         .map(|emu| emu / 12700.0)
         .unwrap_or(0.0);
-    let align = pos.children()
+    let align = pos
+        .children()
         .find(|n| n.is_element() && n.tag_name().name() == "align")
         .and_then(|n| n.text())
         .map(|s| s.trim().to_string())
@@ -1698,7 +2168,9 @@ fn parse_anchor_size_rel(
     container: &roxmltree::Node,
 ) -> (Option<f64>, Option<f64>, Option<String>, Option<String>) {
     let read = |outer_tag: &str, inner_tag: &str| -> (Option<f64>, Option<String>) {
-        let node = container.children().find(|n| n.tag_name().name() == outer_tag);
+        let node = container
+            .children()
+            .find(|n| n.tag_name().name() == outer_tag);
         let pct = node
             .and_then(|n| {
                 n.descendants()
@@ -1747,19 +2219,40 @@ fn parse_wgp_images(
             Some(e) => e,
             None => continue,
         };
-        let ox = off.attribute("x").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-        let oy = off.attribute("y").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-        let cx = ext.attribute("cx").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
-        let cy = ext.attribute("cy").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
+        let ox = off
+            .attribute("x")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 12700.0;
+        let oy = off
+            .attribute("y")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 12700.0;
+        let cx = ext
+            .attribute("cx")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 12700.0;
+        let cy = ext
+            .attribute("cy")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 12700.0;
 
-        if cx <= 0.0 || cy <= 0.0 { continue; }
+        if cx <= 0.0 || cy <= 0.0 {
+            continue;
+        }
 
         // Find the blip inside this pic
         let blip = match pic.descendants().find(|n| n.tag_name().name() == "blip") {
             Some(b) => b,
             None => continue,
         };
-        let r_id = match blip.attribute((R_NS, "embed")).or_else(|| blip.attribute("r:embed")) {
+        let r_id = match blip
+            .attribute((R_NS, "embed"))
+            .or_else(|| blip.attribute("r:embed"))
+        {
             Some(r) => r,
             None => continue,
         };
@@ -1770,7 +2263,8 @@ fn parse_wgp_images(
 
         // Parse a:clrChange if present — used to make a specific color transparent.
         // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
-        let color_replace_from = blip.children()
+        let color_replace_from = blip
+            .children()
             .find(|n| n.tag_name().name() == "clrChange")
             .and_then(|cc| cc.children().find(|n| n.tag_name().name() == "clrFrom"))
             .and_then(|cf| cf.children().find(|n| n.tag_name().name() == "srgbClr"))
@@ -1810,30 +2304,62 @@ fn parse_wgp_shapes(
     anchor_meta: &AnchorMeta,
 ) -> Vec<ShapeRun> {
     // Read group transform: off/ext (page-relative) vs chOff/chExt (child coord space).
-    let grp_xfrm = wgp.descendants()
+    let grp_xfrm = wgp
+        .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "grpSpPr")
-        .and_then(|gsp| gsp.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm"));
+        .and_then(|gsp| {
+            gsp.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
+        });
     let (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy) = grp_xfrm
         .map(|x| {
-            let off = x.children().find(|n| n.is_element() && n.tag_name().name() == "off");
-            let ext = x.children().find(|n| n.is_element() && n.tag_name().name() == "ext");
-            let ch_off = x.children().find(|n| n.is_element() && n.tag_name().name() == "chOff");
-            let ch_ext = x.children().find(|n| n.is_element() && n.tag_name().name() == "chExt");
+            let off = x
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "off");
+            let ext = x
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "ext");
+            let ch_off = x
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "chOff");
+            let ch_ext = x
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "chExt");
             (
-                off.and_then(|o| o.attribute("x").and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0),
-                off.and_then(|o| o.attribute("y").and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0),
-                ext.and_then(|e| e.attribute("cx").and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0),
-                ext.and_then(|e| e.attribute("cy").and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0),
-                ch_off.and_then(|o| o.attribute("x").and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0),
-                ch_off.and_then(|o| o.attribute("y").and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0),
-                ch_ext.and_then(|e| e.attribute("cx").and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0),
-                ch_ext.and_then(|e| e.attribute("cy").and_then(|v| v.parse::<f64>().ok())).unwrap_or(0.0),
+                off.and_then(|o| o.attribute("x").and_then(|v| v.parse::<f64>().ok()))
+                    .unwrap_or(0.0),
+                off.and_then(|o| o.attribute("y").and_then(|v| v.parse::<f64>().ok()))
+                    .unwrap_or(0.0),
+                ext.and_then(|e| e.attribute("cx").and_then(|v| v.parse::<f64>().ok()))
+                    .unwrap_or(0.0),
+                ext.and_then(|e| e.attribute("cy").and_then(|v| v.parse::<f64>().ok()))
+                    .unwrap_or(0.0),
+                ch_off
+                    .and_then(|o| o.attribute("x").and_then(|v| v.parse::<f64>().ok()))
+                    .unwrap_or(0.0),
+                ch_off
+                    .and_then(|o| o.attribute("y").and_then(|v| v.parse::<f64>().ok()))
+                    .unwrap_or(0.0),
+                ch_ext
+                    .and_then(|e| e.attribute("cx").and_then(|v| v.parse::<f64>().ok()))
+                    .unwrap_or(0.0),
+                ch_ext
+                    .and_then(|e| e.attribute("cy").and_then(|v| v.parse::<f64>().ok()))
+                    .unwrap_or(0.0),
             )
         })
         .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 
-    let sx = if ch_ext_cx > 0.0 && ext_cx > 0.0 { ext_cx / ch_ext_cx } else { 1.0 };
-    let sy = if ch_ext_cy > 0.0 && ext_cy > 0.0 { ext_cy / ch_ext_cy } else { 1.0 };
+    let sx = if ch_ext_cx > 0.0 && ext_cx > 0.0 {
+        ext_cx / ch_ext_cx
+    } else {
+        1.0
+    };
+    let sy = if ch_ext_cy > 0.0 && ext_cy > 0.0 {
+        ext_cy / ch_ext_cy
+    } else {
+        1.0
+    };
     // Page-relative offset of the group origin, in EMU. ch_off is subtracted
     // because child coordinates are measured relative to chOff.
     let group_page_off_x_emu = off_x - ch_off_x * sx;
@@ -1847,14 +2373,23 @@ fn parse_wgp_shapes(
     let group_h_pt = (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0;
 
     let mut results = Vec::new();
-    for (idx, wsp) in wgp.descendants().filter(|n| n.is_element() && n.tag_name().name() == "wsp").enumerate() {
+    for (idx, wsp) in wgp
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "wsp")
+        .enumerate()
+    {
         if let Some(mut shape) = parse_wsp_shape(
-            wsp, theme,
-            anchor_pos_x, x_from_margin,
-            anchor_pos_y, y_from_para,
+            wsp,
+            theme,
+            anchor_pos_x,
+            x_from_margin,
+            anchor_pos_y,
+            y_from_para,
             anchor_meta,
-            sx, sy,
-            group_page_off_x_emu / 12700.0, group_page_off_y_emu / 12700.0,
+            sx,
+            sy,
+            group_page_off_x_emu / 12700.0,
+            group_page_off_y_emu / 12700.0,
             idx as u32,
         ) {
             shape.group_width_pt = Some(group_w_pt);
@@ -1869,6 +2404,10 @@ fn parse_wgp_shapes(
 /// from group child coord space to page EMU; `group_off_pt_*` are the group origin
 /// on the page (in pt) so the shape's off.x/off.y (in child coord space) can be
 /// translated to page-relative pt. For a standalone wsp (no wgp), pass sx=sy=1, group_off=0.
+// Carries the accumulated anchor/group coordinate transform (offsets, scale,
+// relative-from flags, z-order) needed to place a wsp shape in page space;
+// these are interdependent transform parameters, not an arbitrary bag.
+#[allow(clippy::too_many_arguments)]
 fn parse_wsp_shape(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
@@ -1883,16 +2422,27 @@ fn parse_wsp_shape(
     group_off_pt_y: f64,
     z_order: u32,
 ) -> Option<ShapeRun> {
-    let sp_pr = wsp.children().find(|n| n.is_element() && n.tag_name().name() == "spPr")?;
-    let xfrm = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm")?;
-    let off = xfrm.children().find(|n| n.is_element() && n.tag_name().name() == "off")?;
-    let ext = xfrm.children().find(|n| n.is_element() && n.tag_name().name() == "ext")?;
+    let sp_pr = wsp
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "spPr")?;
+    let xfrm = sp_pr
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "xfrm")?;
+    let off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "off")?;
+    let ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "ext")?;
     let ox = off.attribute("x").and_then(|v| v.parse::<f64>().ok())?;
     let oy = off.attribute("y").and_then(|v| v.parse::<f64>().ok())?;
     let cx = ext.attribute("cx").and_then(|v| v.parse::<f64>().ok())?;
     let cy = ext.attribute("cy").and_then(|v| v.parse::<f64>().ok())?;
-    if cx <= 0.0 || cy <= 0.0 { return None; }
-    let rotation = xfrm.attribute("rot")
+    if cx <= 0.0 || cy <= 0.0 {
+        return None;
+    }
+    let rotation = xfrm
+        .attribute("rot")
         .and_then(|v| v.parse::<f64>().ok())
         .map(|r| r / 60000.0) // OOXML rotation: 60000ths of a degree
         .unwrap_or(0.0);
@@ -1902,7 +2452,9 @@ fn parse_wsp_shape(
     let anchor_x_pt = anchor_pos_x + group_off_pt_x + ox * sx / 12700.0;
     let anchor_y_pt = anchor_pos_y + group_off_pt_y + oy * sy / 12700.0;
 
-    let cust_geom = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "custGeom");
+    let cust_geom = sp_pr
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "custGeom");
     let (subpaths, preset_geometry, adj_values) = if let Some(cg) = cust_geom {
         (parse_custom_geometry(cg), None, Vec::new())
     } else {
@@ -1920,7 +2472,10 @@ fn parse_wsp_shape(
             .unwrap_or("rect")
             .to_string();
         let adj_values = prst_node
-            .and_then(|p| p.children().find(|n| n.is_element() && n.tag_name().name() == "avLst"))
+            .and_then(|p| {
+                p.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "avLst")
+            })
             .map(|av| {
                 av.children()
                     .filter(|n| n.is_element() && n.tag_name().name() == "gd")
@@ -1934,7 +2489,9 @@ fn parse_wsp_shape(
             .unwrap_or_default();
         (Vec::new(), Some(prst), adj_values)
     };
-    if subpaths.is_empty() && preset_geometry.is_none() { return None; }
+    if subpaths.is_empty() && preset_geometry.is_none() {
+        return None;
+    }
 
     // Direct fills on spPr take priority over wps:style/fillRef. ECMA-376
     // §20.1.4.1.30: when no direct fill is set, the shape's appearance comes
@@ -1943,18 +2500,30 @@ fn parse_wsp_shape(
     let fill = parse_shape_fill(sp_pr, theme).or_else(|| {
         wsp.children()
             .find(|n| n.is_element() && n.tag_name().name() == "style")
-            .and_then(|st| st.children().find(|n| n.is_element() && n.tag_name().name() == "fillRef"))
+            .and_then(|st| {
+                st.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "fillRef")
+            })
             .and_then(|fr| resolve_fill_ref(fr, theme))
     });
-    let (stroke, stroke_width) = sp_pr.children()
+    let (stroke, stroke_width) = sp_pr
+        .children()
         .find(|n| n.is_element() && n.tag_name().name() == "ln")
         .map(|ln| {
-            let has_no_fill = ln.children().any(|n| n.is_element() && n.tag_name().name() == "noFill");
-            if has_no_fill { return (None, 0.0); }
-            let color = ln.children()
+            let has_no_fill = ln
+                .children()
+                .any(|n| n.is_element() && n.tag_name().name() == "noFill");
+            if has_no_fill {
+                return (None, 0.0);
+            }
+            let color = ln
+                .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
                 .and_then(|sf| resolve_color_element(sf, theme));
-            let w_emu = ln.attribute("w").and_then(|v| v.parse::<f64>().ok()).unwrap_or(9525.0);
+            let w_emu = ln
+                .attribute("w")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(9525.0);
             (color, w_emu / 12700.0)
         })
         .unwrap_or((None, 0.0));
@@ -2005,21 +2574,40 @@ fn parse_shape_text_body(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
 ) -> (Vec<ShapeText>, Option<String>, f64, f64, f64, f64) {
-    let txbx = wsp.children().find(|n| n.is_element() && n.tag_name().name() == "txbx");
-    let body_pr = wsp.children().find(|n| n.is_element() && n.tag_name().name() == "bodyPr");
+    let txbx = wsp
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "txbx");
+    let body_pr = wsp
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "bodyPr");
 
     let anchor = body_pr
         .and_then(|b| b.attribute("anchor"))
         .map(|s| s.to_string());
     let emu_to_pt = |v: &str| v.parse::<f64>().ok().map(|e| e / 12700.0).unwrap_or(0.0);
     // ECMA-376 §21.1.2.1.1 defaults: lIns=rIns=91440 EMU, tIns=bIns=45720 EMU
-    let l = body_pr.and_then(|b| b.attribute("lIns")).map(emu_to_pt).unwrap_or(91440.0 / 12700.0);
-    let t = body_pr.and_then(|b| b.attribute("tIns")).map(emu_to_pt).unwrap_or(45720.0 / 12700.0);
-    let r = body_pr.and_then(|b| b.attribute("rIns")).map(emu_to_pt).unwrap_or(91440.0 / 12700.0);
-    let b = body_pr.and_then(|b| b.attribute("bIns")).map(emu_to_pt).unwrap_or(45720.0 / 12700.0);
+    let l = body_pr
+        .and_then(|b| b.attribute("lIns"))
+        .map(emu_to_pt)
+        .unwrap_or(91440.0 / 12700.0);
+    let t = body_pr
+        .and_then(|b| b.attribute("tIns"))
+        .map(emu_to_pt)
+        .unwrap_or(45720.0 / 12700.0);
+    let r = body_pr
+        .and_then(|b| b.attribute("rIns"))
+        .map(emu_to_pt)
+        .unwrap_or(91440.0 / 12700.0);
+    let b = body_pr
+        .and_then(|b| b.attribute("bIns"))
+        .map(emu_to_pt)
+        .unwrap_or(45720.0 / 12700.0);
 
     let blocks: Vec<ShapeText> = txbx
-        .and_then(|t| t.children().find(|n| n.is_element() && n.tag_name().name() == "txbxContent"))
+        .and_then(|t| {
+            t.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+        })
         .map(|content| {
             children_w_flat(content, "p")
                 .into_iter()
@@ -2036,17 +2624,25 @@ fn parse_shape_text_body(
 fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeText> {
     let mut text = String::new();
     let mut first_rpr: Option<roxmltree::Node> = None;
-    for r in p.descendants().filter(|n| n.is_element() && n.tag_name().name() == "r") {
+    for r in p
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "r")
+    {
         if first_rpr.is_none() {
             first_rpr = child_w(r, "rPr");
         }
-        for t in r.descendants().filter(|n| n.is_element() && n.tag_name().name() == "t") {
+        for t in r
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+        {
             if let Some(text_node) = t.text() {
                 text.push_str(text_node);
             }
         }
     }
-    if text.is_empty() { return None; }
+    if text.is_empty() {
+        return None;
+    }
 
     let alignment = child_w(p, "pPr")
         .and_then(|ppr| child_w(ppr, "jc"))
@@ -2058,7 +2654,8 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
         (
             fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
             fmt.color.clone(),
-            theme.resolve_font_ref(fmt.font_family_ascii.clone())
+            theme
+                .resolve_font_ref(fmt.font_family_ascii.clone())
                 .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
             fmt.bold.unwrap_or(false),
             fmt.italic.unwrap_or(false),
@@ -2093,8 +2690,7 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
 fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun> {
     // v:shape / v:rect / v:roundrect — any VML shape element with geometry.
     let shape = pict.descendants().find(|n| {
-        n.is_element()
-            && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+        n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
     })?;
 
     // CSS-like `style`: "position:relative;width:300pt;height:60pt;…"
@@ -2216,20 +2812,21 @@ fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> Option<Shape
 /// indirectly as `fillRef idx="1003"` with the actual color and gradient
 /// parameters living in the theme part. Without this lookup, the shape ends
 /// up with no fill and the cover panel renders blank.
-fn resolve_fill_ref(
-    fill_ref: roxmltree::Node,
-    theme: &ThemeColors,
-) -> Option<ShapeFill> {
+fn resolve_fill_ref(fill_ref: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFill> {
     let idx: u32 = fill_ref.attribute("idx")?.parse().ok()?;
-    if idx == 0 { return None; }
-    let scheme_clr = fill_ref.children()
+    if idx == 0 {
+        return None;
+    }
+    let scheme_clr = fill_ref
+        .children()
         .find(|n| n.is_element() && n.tag_name().name() == "schemeClr")
         .and_then(|n| n.attribute("val"))
         .unwrap_or("dk1");
 
     let xml = theme.theme_xml.as_ref()?;
     let doc = XmlDoc::parse(xml).ok()?;
-    let fmt = doc.root_element()
+    let fmt = doc
+        .root_element()
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "fmtScheme")?;
     // ECMA-376 §20.1.4.1.30: fillRef idx is 1-indexed.
@@ -2240,14 +2837,14 @@ fn resolve_fill_ref(
     } else {
         ("fillStyleLst", (idx - 1) as usize)
     };
-    let lst = fmt.children().find(|n| n.is_element() && n.tag_name().name() == lst_name)?;
+    let lst = fmt
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == lst_name)?;
     let entry = lst.children().filter(|n| n.is_element()).nth(local_idx)?;
 
     match entry.tag_name().name() {
-        "solidFill" => {
-            resolve_color_element_with_phclr(entry, theme, scheme_clr)
-                .map(|c| ShapeFill::Solid { color: c })
-        }
+        "solidFill" => resolve_color_element_with_phclr(entry, theme, scheme_clr)
+            .map(|c| ShapeFill::Solid { color: c }),
         "gradFill" => parse_grad_fill_phclr(entry, theme, scheme_clr),
         // blipFill / pattFill recipes aren't supported yet — fall back to no fill.
         _ => None,
@@ -2263,44 +2860,87 @@ fn parse_grad_fill_phclr(
     theme: &ThemeColors,
     ph_clr: &str,
 ) -> Option<ShapeFill> {
-    let gs_lst = node.children().find(|n| n.is_element() && n.tag_name().name() == "gsLst")?;
+    let gs_lst = node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "gsLst")?;
     let mut stops: Vec<GradientStop> = Vec::new();
-    for gs in gs_lst.children().filter(|n| n.is_element() && n.tag_name().name() == "gs") {
-        let pos = gs.attribute("pos").and_then(|v| v.parse::<f64>().ok()).map(|p| p / 100000.0).unwrap_or(0.0);
+    for gs in gs_lst
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "gs")
+    {
+        let pos = gs
+            .attribute("pos")
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|p| p / 100000.0)
+            .unwrap_or(0.0);
         if let Some(color) = resolve_color_element_with_phclr(gs, theme, ph_clr) {
-            stops.push(GradientStop { position: pos, color });
+            stops.push(GradientStop {
+                position: pos,
+                color,
+            });
         }
     }
-    if stops.is_empty() { return None; }
+    if stops.is_empty() {
+        return None;
+    }
 
     // Linear direction (a:lin ang = "60000"ths of a degree)
-    let (angle, grad_type) = if let Some(lin) = node.children().find(|n| n.is_element() && n.tag_name().name() == "lin") {
-        let ang = lin.attribute("ang").and_then(|v| v.parse::<f64>().ok()).map(|a| a / 60000.0).unwrap_or(0.0);
+    let (angle, grad_type) = if let Some(lin) = node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "lin")
+    {
+        let ang = lin
+            .attribute("ang")
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|a| a / 60000.0)
+            .unwrap_or(0.0);
         (ang, "linear".to_string())
-    } else if node.children().any(|n| n.is_element() && n.tag_name().name() == "path") {
+    } else if node
+        .children()
+        .any(|n| n.is_element() && n.tag_name().name() == "path")
+    {
         (0.0, "radial".to_string())
     } else {
         (0.0, "linear".to_string())
     };
 
-    Some(ShapeFill::Gradient { stops, angle, grad_type })
+    Some(ShapeFill::Gradient {
+        stops,
+        angle,
+        grad_type,
+    })
 }
 
 /// Parse <a:custGeom><a:pathLst><a:path w="W" h="H">...</a:path></a:pathLst>.
 /// Path coords inside each <a:path> are absolute within W×H; normalize to [0,1].
 fn parse_custom_geometry(cust_geom: roxmltree::Node) -> Vec<Vec<PathCmd>> {
-    let Some(path_lst) = cust_geom.children().find(|n| n.is_element() && n.tag_name().name() == "pathLst") else {
+    let Some(path_lst) = cust_geom
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "pathLst")
+    else {
         return vec![];
     };
     let mut subpaths: Vec<Vec<PathCmd>> = Vec::new();
-    for path in path_lst.children().filter(|n| n.is_element() && n.tag_name().name() == "path") {
-        let pw = path.attribute("w").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        let ph = path.attribute("h").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        if pw <= 0.0 || ph <= 0.0 { continue; }
+    for path in path_lst
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "path")
+    {
+        let pw = path
+            .attribute("w")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let ph = path
+            .attribute("h")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        if pw <= 0.0 || ph <= 0.0 {
+            continue;
+        }
         let mut cmds: Vec<PathCmd> = Vec::new();
         for cmd in path.children().filter(|n| n.is_element()) {
             let name = cmd.tag_name().name();
-            let pts: Vec<(f64, f64)> = cmd.children()
+            let pts: Vec<(f64, f64)> = cmd
+                .children()
                 .filter(|n| n.is_element() && n.tag_name().name() == "pt")
                 .filter_map(|p| {
                     let x = p.attribute("x").and_then(|v| v.parse::<f64>().ok())?;
@@ -2309,29 +2949,63 @@ fn parse_custom_geometry(cust_geom: roxmltree::Node) -> Vec<Vec<PathCmd>> {
                 })
                 .collect();
             match name {
-                "moveTo" => { if let Some(p) = pts.first() { cmds.push(PathCmd::MoveTo { x: p.0, y: p.1 }); } }
-                "lnTo" => { if let Some(p) = pts.first() { cmds.push(PathCmd::LineTo { x: p.0, y: p.1 }); } }
+                "moveTo" => {
+                    if let Some(p) = pts.first() {
+                        cmds.push(PathCmd::MoveTo { x: p.0, y: p.1 });
+                    }
+                }
+                "lnTo" => {
+                    if let Some(p) = pts.first() {
+                        cmds.push(PathCmd::LineTo { x: p.0, y: p.1 });
+                    }
+                }
                 "cubicBezTo" => {
                     if pts.len() >= 3 {
                         cmds.push(PathCmd::CubicBezTo {
-                            x1: pts[0].0, y1: pts[0].1,
-                            x2: pts[1].0, y2: pts[1].1,
-                            x:  pts[2].0, y:  pts[2].1,
+                            x1: pts[0].0,
+                            y1: pts[0].1,
+                            x2: pts[1].0,
+                            y2: pts[1].1,
+                            x: pts[2].0,
+                            y: pts[2].1,
                         });
                     }
                 }
                 "arcTo" => {
-                    let wr = cmd.attribute("wR").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / pw;
-                    let hr = cmd.attribute("hR").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / ph;
-                    let st_ang = cmd.attribute("stAng").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 60000.0;
-                    let sw_ang = cmd.attribute("swAng").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 60000.0;
-                    cmds.push(PathCmd::ArcTo { wr, hr, st_ang, sw_ang });
+                    let wr = cmd
+                        .attribute("wR")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / pw;
+                    let hr = cmd
+                        .attribute("hR")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / ph;
+                    let st_ang = cmd
+                        .attribute("stAng")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / 60000.0;
+                    let sw_ang = cmd
+                        .attribute("swAng")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                        / 60000.0;
+                    cmds.push(PathCmd::ArcTo {
+                        wr,
+                        hr,
+                        st_ang,
+                        sw_ang,
+                    });
                 }
                 "close" => cmds.push(PathCmd::Close),
                 _ => {}
             }
         }
-        if !cmds.is_empty() { subpaths.push(cmds); }
+        if !cmds.is_empty() {
+            subpaths.push(cmds);
+        }
     }
     subpaths
 }
@@ -2357,10 +3031,16 @@ fn resolve_color_element_with_phclr(
             "srgbClr" => c.attribute("val").map(|v| v.to_uppercase()),
             "schemeClr" => {
                 let raw_name = c.attribute("val")?;
-                let name = if raw_name == "phClr" && !ph_clr.is_empty() { ph_clr } else { raw_name };
+                let name = if raw_name == "phClr" && !ph_clr.is_empty() {
+                    ph_clr
+                } else {
+                    raw_name
+                };
                 theme.resolve(name)
             }
-            "sysClr" => c.attribute("lastClr").map(|v| v.to_uppercase())
+            "sysClr" => c
+                .attribute("lastClr")
+                .map(|v| v.to_uppercase())
                 .or_else(|| c.attribute("val").map(|v| v.to_uppercase())),
             _ => None,
         };
@@ -2405,12 +3085,14 @@ fn parse_table(
         .and_then(|s| attr_w(s, "val"));
 
     // Column widths from tblGrid
-    let col_widths: Vec<f64> = tbl_grid.map(|g| {
-        children_w(g, "gridCol")
-            .iter()
-            .map(|c| attr_w(*c, "w").map(|v| twips_to_pt(&v)).unwrap_or(72.0))
-            .collect()
-    }).unwrap_or_default();
+    let col_widths: Vec<f64> = tbl_grid
+        .map(|g| {
+            children_w(g, "gridCol")
+                .iter()
+                .map(|c| attr_w(*c, "w").map(|v| twips_to_pt(&v)).unwrap_or(72.0))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Resolve the table style's cell/border formatting (shading, banding, borders,
     // vAlign) — these live in styles.xml, not inline (§17.7.6). tblLook selects which
@@ -2426,7 +3108,8 @@ fn parse_table(
 
     // Table borders: inline tblBorders win; otherwise the table style's borders
     // (so styles like "Table Grid" show their gridlines).
-    let mut borders = tbl_pr.and_then(|p| child_w(p, "tblBorders"))
+    let mut borders = tbl_pr
+        .and_then(|p| child_w(p, "tblBorders"))
         .map(|b| parse_table_borders(b))
         .unwrap_or_default();
     apply_style_borders(&mut borders, &tstyle.borders);
@@ -2434,12 +3117,26 @@ fn parse_table(
     // Cell margins
     let (cm_top, cm_bot, cm_left, cm_right) = tbl_pr
         .and_then(|p| child_w(p, "tblCellMar"))
-        .map(|m| (
-            child_w(m, "top").and_then(|n| attr_w(n, "w")).map(|v| twips_to_pt(&v)).unwrap_or(0.0),
-            child_w(m, "bottom").and_then(|n| attr_w(n, "w")).map(|v| twips_to_pt(&v)).unwrap_or(0.0),
-            child_w(m, "left").and_then(|n| attr_w(n, "w")).map(|v| twips_to_pt(&v)).unwrap_or(3.6),
-            child_w(m, "right").and_then(|n| attr_w(n, "w")).map(|v| twips_to_pt(&v)).unwrap_or(3.6),
-        ))
+        .map(|m| {
+            (
+                child_w(m, "top")
+                    .and_then(|n| attr_w(n, "w"))
+                    .map(|v| twips_to_pt(&v))
+                    .unwrap_or(0.0),
+                child_w(m, "bottom")
+                    .and_then(|n| attr_w(n, "w"))
+                    .map(|v| twips_to_pt(&v))
+                    .unwrap_or(0.0),
+                child_w(m, "left")
+                    .and_then(|n| attr_w(n, "w"))
+                    .map(|v| twips_to_pt(&v))
+                    .unwrap_or(3.6),
+                child_w(m, "right")
+                    .and_then(|n| attr_w(n, "w"))
+                    .map(|v| twips_to_pt(&v))
+                    .unwrap_or(3.6),
+            )
+        })
         .unwrap_or((0.0, 0.0, 3.6, 3.6));
 
     let mut rows = vec![];
@@ -2451,7 +3148,15 @@ fn parse_table(
                 .and_then(|p| child_w(p, "cnfStyle"))
                 .and_then(|c| attr_w(c, "val")),
         );
-        let row = parse_table_row(tr_node, style_map, num_map, media_map, rel_map, theme, table_style_id.as_deref());
+        let row = parse_table_row(
+            tr_node,
+            style_map,
+            num_map,
+            media_map,
+            rel_map,
+            theme,
+            table_style_id.as_deref(),
+        );
         rows.push(row);
     }
 
@@ -2473,13 +3178,26 @@ fn parse_table(
         } else if r == 0 && first_row_styled {
             Some("firstRow".to_string())
         } else if h_band {
-            let bi = if first_row_styled { r as i64 - 1 } else { r as i64 };
-            Some(if bi % 2 == 0 { "band1Horz" } else { "band2Horz" }.to_string())
+            let bi = if first_row_styled {
+                r as i64 - 1
+            } else {
+                r as i64
+            };
+            Some(
+                if bi % 2 == 0 {
+                    "band1Horz"
+                } else {
+                    "band2Horz"
+                }
+                .to_string(),
+            )
         } else {
             None
         };
         let cond: Option<&CondFmt> = cond_name.as_deref().and_then(|n| tstyle.cond.get(n));
-        let row_shd = cond.and_then(|c| c.shd.clone()).or_else(|| tstyle.cell_shd.clone());
+        let row_shd = cond
+            .and_then(|c| c.shd.clone())
+            .or_else(|| tstyle.cell_shd.clone());
         for cell in row.cells.iter_mut() {
             if cell.background.is_none() {
                 cell.background = row_shd.clone();
@@ -2511,8 +3229,16 @@ fn parse_table(
         .map(|w| {
             let wtype = attr_w(w, "type").unwrap_or_else(|| "dxa".to_string());
             match wtype.as_str() {
-                "dxa" => (attr_w(w, "w").map(|v| twips_to_pt(&v)).filter(|v| *v > 0.0), None),
-                "pct" => (None, attr_w(w, "w").and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0)),
+                "dxa" => (
+                    attr_w(w, "w").map(|v| twips_to_pt(&v)).filter(|v| *v > 0.0),
+                    None,
+                ),
+                "pct" => (
+                    None,
+                    attr_w(w, "w")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .filter(|v| *v > 0.0),
+                ),
                 _ => (None, None),
             }
         })
@@ -2560,11 +3286,24 @@ fn parse_table_row(
 
     let mut cells = vec![];
     for tc_node in children_w_flat(node, "tc") {
-        let cell = parse_table_cell(tc_node, style_map, num_map, media_map, rel_map, theme, table_style_id);
+        let cell = parse_table_cell(
+            tc_node,
+            style_map,
+            num_map,
+            media_map,
+            rel_map,
+            theme,
+            table_style_id,
+        );
         cells.push(cell);
     }
 
-    DocTableRow { cells, row_height, row_height_rule, is_header }
+    DocTableRow {
+        cells,
+        row_height,
+        row_height_rule,
+        is_header,
+    }
 }
 
 fn parse_table_cell(
@@ -2587,21 +3326,24 @@ fn parse_table_cell(
     // ECMA-376 §17.4.85: ST_Merge default is "continue", so a <w:vMerge/>
     // element with no val attribute means the cell continues the merged
     // region from the row above. Only val="restart" begins a new merge.
-    let v_merge = tc_pr.and_then(|p| child_w(p, "vMerge")).map(|m| {
-        attr_w(m, "val").map(|v| v == "restart").unwrap_or(false)
-    });
+    let v_merge = tc_pr
+        .and_then(|p| child_w(p, "vMerge"))
+        .map(|m| attr_w(m, "val").map(|v| v == "restart").unwrap_or(false));
 
-    let borders = tc_pr.and_then(|p| child_w(p, "tcBorders"))
+    let borders = tc_pr
+        .and_then(|p| child_w(p, "tcBorders"))
         .map(|b| parse_cell_borders(b))
         .unwrap_or_default();
 
-    let background = tc_pr.and_then(|p| child_w(p, "shd"))
+    let background = tc_pr
+        .and_then(|p| child_w(p, "shd"))
         .and_then(|s| attr_w(s, "fill"))
         .filter(|f| f != "auto" && f.len() == 6)
         .map(|f| f.to_lowercase());
 
     // Empty = not set inline; parse_table fills it from the table style (else "top").
-    let v_align = tc_pr.and_then(|p| child_w(p, "vAlign"))
+    let v_align = tc_pr
+        .and_then(|p| child_w(p, "vAlign"))
         .and_then(|v| attr_w(v, "val"))
         .unwrap_or_default();
 
@@ -2627,10 +3369,12 @@ fn parse_table_cell(
     // when present, overrides the table-level `<w:tblCellMar>` default; absent
     // edges stay None so the renderer falls back to the table default.
     let tc_mar = tc_pr.and_then(|p| child_w(p, "tcMar"));
-    let edge_mar = |name: &str| tc_mar
-        .and_then(|m| child_w(m, name))
-        .and_then(|n| attr_w(n, "w"))
-        .map(|v| twips_to_pt(&v));
+    let edge_mar = |name: &str| {
+        tc_mar
+            .and_then(|m| child_w(m, name))
+            .and_then(|n| attr_w(n, "w"))
+            .map(|v| twips_to_pt(&v))
+    };
     let margin_top = edge_mar("top");
     let margin_bottom = edge_mar("bottom");
     let margin_left = edge_mar("left");
@@ -2641,19 +3385,35 @@ fn parse_table_cell(
     let mut content: Vec<CellElement> = vec![];
     for child in element_children_flat(node) {
         match child.tag_name().name() {
-            "p" => content.push(CellElement::Paragraph(
-                parse_paragraph(child, style_map, num_map, media_map, rel_map, theme, table_style_id)
-            )),
-            "tbl" => content.push(CellElement::Table(
-                parse_table(child, style_map, num_map, media_map, rel_map, theme)
-            )),
+            "p" => content.push(CellElement::Paragraph(parse_paragraph(
+                child,
+                style_map,
+                num_map,
+                media_map,
+                rel_map,
+                theme,
+                table_style_id,
+            ))),
+            "tbl" => content.push(CellElement::Table(parse_table(
+                child, style_map, num_map, media_map, rel_map, theme,
+            ))),
             _ => {}
         }
     }
 
     DocTableCell {
-        content, col_span, v_merge, borders, background, v_align, width_pt, width_pct,
-        margin_top, margin_bottom, margin_left, margin_right,
+        content,
+        col_span,
+        v_merge,
+        borders,
+        background,
+        v_align,
+        width_pt,
+        width_pct,
+        margin_top,
+        margin_bottom,
+        margin_left,
+        margin_right,
     }
 }
 
@@ -2667,8 +3427,12 @@ fn parse_table_borders(node: roxmltree::Node) -> TableBorders {
     TableBorders {
         top: child_w(node, "top").map(parse_border_spec),
         bottom: child_w(node, "bottom").map(parse_border_spec),
-        left: child_w(node, "left").or_else(|| child_w(node, "start")).map(parse_border_spec),
-        right: child_w(node, "right").or_else(|| child_w(node, "end")).map(parse_border_spec),
+        left: child_w(node, "left")
+            .or_else(|| child_w(node, "start"))
+            .map(parse_border_spec),
+        right: child_w(node, "right")
+            .or_else(|| child_w(node, "end"))
+            .map(parse_border_spec),
         inside_h: child_w(node, "insideH").map(parse_border_spec),
         inside_v: child_w(node, "insideV").map(parse_border_spec),
     }
@@ -2681,8 +3445,12 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
     CellBorders {
         top: child_w(node, "top").map(parse_border_spec),
         bottom: child_w(node, "bottom").map(parse_border_spec),
-        left: child_w(node, "left").or_else(|| child_w(node, "start")).map(parse_border_spec),
-        right: child_w(node, "right").or_else(|| child_w(node, "end")).map(parse_border_spec),
+        left: child_w(node, "left")
+            .or_else(|| child_w(node, "start"))
+            .map(parse_border_spec),
+        right: child_w(node, "right")
+            .or_else(|| child_w(node, "end"))
+            .map(parse_border_spec),
     }
 }
 
@@ -2712,21 +3480,65 @@ fn apply_style_borders(dst: &mut TableBorders, src: &RawTblBorders) {
         color: e.color.clone(),
         style: e.style.clone(),
     };
-    if dst.top.is_none() { if let Some(e) = &src.top { if usable(e) { dst.top = Some(conv(e)); } } }
-    if dst.bottom.is_none() { if let Some(e) = &src.bottom { if usable(e) { dst.bottom = Some(conv(e)); } } }
-    if dst.left.is_none() { if let Some(e) = &src.left { if usable(e) { dst.left = Some(conv(e)); } } }
-    if dst.right.is_none() { if let Some(e) = &src.right { if usable(e) { dst.right = Some(conv(e)); } } }
-    if dst.inside_h.is_none() { if let Some(e) = &src.inside_h { if usable(e) { dst.inside_h = Some(conv(e)); } } }
-    if dst.inside_v.is_none() { if let Some(e) = &src.inside_v { if usable(e) { dst.inside_v = Some(conv(e)); } } }
+    if dst.top.is_none() {
+        if let Some(e) = &src.top {
+            if usable(e) {
+                dst.top = Some(conv(e));
+            }
+        }
+    }
+    if dst.bottom.is_none() {
+        if let Some(e) = &src.bottom {
+            if usable(e) {
+                dst.bottom = Some(conv(e));
+            }
+        }
+    }
+    if dst.left.is_none() {
+        if let Some(e) = &src.left {
+            if usable(e) {
+                dst.left = Some(conv(e));
+            }
+        }
+    }
+    if dst.right.is_none() {
+        if let Some(e) = &src.right {
+            if usable(e) {
+                dst.right = Some(conv(e));
+            }
+        }
+    }
+    if dst.inside_h.is_none() {
+        if let Some(e) = &src.inside_h {
+            if usable(e) {
+                dst.inside_h = Some(conv(e));
+            }
+        }
+    }
+    if dst.inside_v.is_none() {
+        if let Some(e) = &src.inside_v {
+            if usable(e) {
+                dst.inside_v = Some(conv(e));
+            }
+        }
+    }
 }
 
 fn parse_border_spec(node: roxmltree::Node) -> BorderSpec {
     let style = attr_w(node, "val").unwrap_or_else(|| "none".to_string());
-    let width = attr_w(node, "sz").map(|v| {
-        v.parse::<f64>().unwrap_or(4.0) / 8.0  // eighth-points → pt
-    }).unwrap_or(0.5);
-    let color = attr_w(node, "color").filter(|c| c != "auto").map(|c| c.to_lowercase());
-    BorderSpec { width, color, style }
+    let width = attr_w(node, "sz")
+        .map(|v| {
+            v.parse::<f64>().unwrap_or(4.0) / 8.0 // eighth-points → pt
+        })
+        .unwrap_or(0.5);
+    let color = attr_w(node, "color")
+        .filter(|c| c != "auto")
+        .map(|c| c.to_lowercase());
+    BorderSpec {
+        width,
+        color,
+        style,
+    }
 }
 
 // ===== Helpers =====
@@ -2747,39 +3559,99 @@ fn normalize_align(s: &str) -> &str {
 }
 
 fn apply_direct_para(base: &mut ParaFmt, direct: &ParaFmt) {
-    if direct.alignment.is_some() { base.alignment = direct.alignment.clone(); }
-    if direct.indent_left.is_some() { base.indent_left = direct.indent_left; }
-    if direct.indent_right.is_some() { base.indent_right = direct.indent_right; }
-    if direct.indent_first.is_some() { base.indent_first = direct.indent_first; }
-    if direct.space_before.is_some() { base.space_before = direct.space_before; }
-    if direct.space_after.is_some() { base.space_after = direct.space_after; }
-    if direct.line_spacing_val.is_some() { base.line_spacing_val = direct.line_spacing_val; }
-    if direct.line_spacing_rule.is_some() { base.line_spacing_rule = direct.line_spacing_rule.clone(); }
-    if direct.line_spacing_explicit.is_some() { base.line_spacing_explicit = direct.line_spacing_explicit; }
-    if direct.outline_level.is_some() { base.outline_level = direct.outline_level; }
-    if direct.num_id.is_some() { base.num_id = direct.num_id; }
-    if direct.num_level.is_some() { base.num_level = direct.num_level; }
-    if direct.tab_stops.is_some() { base.tab_stops = direct.tab_stops.clone(); }
-    if direct.bidi.is_some() { base.bidi = direct.bidi; }
+    if direct.alignment.is_some() {
+        base.alignment = direct.alignment.clone();
+    }
+    if direct.indent_left.is_some() {
+        base.indent_left = direct.indent_left;
+    }
+    if direct.indent_right.is_some() {
+        base.indent_right = direct.indent_right;
+    }
+    if direct.indent_first.is_some() {
+        base.indent_first = direct.indent_first;
+    }
+    if direct.space_before.is_some() {
+        base.space_before = direct.space_before;
+    }
+    if direct.space_after.is_some() {
+        base.space_after = direct.space_after;
+    }
+    if direct.line_spacing_val.is_some() {
+        base.line_spacing_val = direct.line_spacing_val;
+    }
+    if direct.line_spacing_rule.is_some() {
+        base.line_spacing_rule = direct.line_spacing_rule.clone();
+    }
+    if direct.line_spacing_explicit.is_some() {
+        base.line_spacing_explicit = direct.line_spacing_explicit;
+    }
+    if direct.outline_level.is_some() {
+        base.outline_level = direct.outline_level;
+    }
+    if direct.num_id.is_some() {
+        base.num_id = direct.num_id;
+    }
+    if direct.num_level.is_some() {
+        base.num_level = direct.num_level;
+    }
+    if direct.tab_stops.is_some() {
+        base.tab_stops = direct.tab_stops.clone();
+    }
+    if direct.bidi.is_some() {
+        base.bidi = direct.bidi;
+    }
 }
 
 fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
-    if direct.bold.is_some() { base.bold = direct.bold; }
-    if direct.italic.is_some() { base.italic = direct.italic; }
-    if direct.underline.is_some() { base.underline = direct.underline; }
-    if direct.strikethrough.is_some() { base.strikethrough = direct.strikethrough; }
-    if direct.font_size.is_some() { base.font_size = direct.font_size; }
-    if direct.color.is_some() { base.color = direct.color.clone(); }
-    if direct.font_family_ascii.is_some() { base.font_family_ascii = direct.font_family_ascii.clone(); }
-    if direct.font_family_east_asia.is_some() { base.font_family_east_asia = direct.font_family_east_asia.clone(); }
-    if direct.background.is_some() { base.background = direct.background.clone(); }
-    if direct.vert_align.is_some() { base.vert_align = direct.vert_align.clone(); }
-    if direct.rtl.is_some() { base.rtl = direct.rtl; }
-    if direct.cs_toggle.is_some() { base.cs_toggle = direct.cs_toggle; }
-    if direct.font_family_cs.is_some() { base.font_family_cs = direct.font_family_cs.clone(); }
-    if direct.bold_cs.is_some() { base.bold_cs = direct.bold_cs; }
-    if direct.italic_cs.is_some() { base.italic_cs = direct.italic_cs; }
-    if direct.lang_bidi.is_some() { base.lang_bidi = direct.lang_bidi.clone(); }
+    if direct.bold.is_some() {
+        base.bold = direct.bold;
+    }
+    if direct.italic.is_some() {
+        base.italic = direct.italic;
+    }
+    if direct.underline.is_some() {
+        base.underline = direct.underline;
+    }
+    if direct.strikethrough.is_some() {
+        base.strikethrough = direct.strikethrough;
+    }
+    if direct.font_size.is_some() {
+        base.font_size = direct.font_size;
+    }
+    if direct.color.is_some() {
+        base.color = direct.color.clone();
+    }
+    if direct.font_family_ascii.is_some() {
+        base.font_family_ascii = direct.font_family_ascii.clone();
+    }
+    if direct.font_family_east_asia.is_some() {
+        base.font_family_east_asia = direct.font_family_east_asia.clone();
+    }
+    if direct.background.is_some() {
+        base.background = direct.background.clone();
+    }
+    if direct.vert_align.is_some() {
+        base.vert_align = direct.vert_align.clone();
+    }
+    if direct.rtl.is_some() {
+        base.rtl = direct.rtl;
+    }
+    if direct.cs_toggle.is_some() {
+        base.cs_toggle = direct.cs_toggle;
+    }
+    if direct.font_family_cs.is_some() {
+        base.font_family_cs = direct.font_family_cs.clone();
+    }
+    if direct.bold_cs.is_some() {
+        base.bold_cs = direct.bold_cs;
+    }
+    if direct.italic_cs.is_some() {
+        base.italic_cs = direct.italic_cs;
+    }
+    if direct.lang_bidi.is_some() {
+        base.lang_bidi = direct.lang_bidi.clone();
+    }
 
     // Complex-script font size: a directly-applied `w:sz` without an
     // accompanying `w:szCs` mirrors into the cs size (ECMA-376 §17.3.2.18 —
@@ -2798,9 +3670,18 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
 
 fn parse_rels(xml: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    if xml.is_empty() { return map; }
-    let doc = match XmlDoc::parse(xml) { Ok(d) => d, Err(_) => return map };
-    for rel in doc.root_element().children().filter(|n| n.tag_name().name() == "Relationship") {
+    if xml.is_empty() {
+        return map;
+    }
+    let doc = match XmlDoc::parse(xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    for rel in doc
+        .root_element()
+        .children()
+        .filter(|n| n.tag_name().name() == "Relationship")
+    {
         if let (Some(id), Some(target)) = (rel.attribute("Id"), rel.attribute("Target")) {
             map.insert(id.to_string(), target.to_string());
         }
@@ -2815,7 +3696,11 @@ fn read_zip_entry(zip: &mut Zip, path: &str) -> Result<String, String> {
         return Err(format!("{}: exceeds size limit", path));
     }
     let mut s = String::new();
-    entry.by_ref().take(max).read_to_string(&mut s).map_err(|e| e.to_string())?;
+    entry
+        .by_ref()
+        .take(max)
+        .read_to_string(&mut s)
+        .map_err(|e| e.to_string())?;
     Ok(s)
 }
 
@@ -2826,7 +3711,11 @@ fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
         return Err(format!("{}: exceeds size limit", path));
     }
     let mut buf = vec![];
-    entry.by_ref().take(max).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    entry
+        .by_ref()
+        .take(max)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
     Ok(buf)
 }
 
@@ -2928,14 +3817,27 @@ mod cs_toggle_tests {
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body_inner}</w:body></w:document>"#
         );
         let doc = XmlDoc::parse(&xml).unwrap();
-        let body = doc.root_element().descendants().find(|n| n.tag_name().name() == "body").unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
         let style_map = StyleMap::parse("");
         let mut num_map = NumberingMap::default();
-        let elems = parse_body_elements(body, &style_map, &mut num_map, &HashMap::new(), &HashMap::new(), &ThemeColors::default());
+        let elems = parse_body_elements(
+            body,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+        );
         for e in elems {
             if let BodyElement::Paragraph(p) = e {
                 for r in p.runs {
-                    if let DocRun::Text(t) = r { return t; }
+                    if let DocRun::Text(t) = r {
+                        return t;
+                    }
                 }
             }
         }
@@ -2952,7 +3854,8 @@ mod cs_toggle_tests {
     #[test]
     fn rfonts_cs_attribute_does_not_set_the_toggle() {
         // rFonts@cs is only a font SLOT (§17.3.2.26) — it must not force cs.
-        let run = run_of(r#"<w:p><w:r><w:rPr><w:rFonts w:cs="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+        let run =
+            run_of(r#"<w:p><w:r><w:rPr><w:rFonts w:cs="Arial"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(run.cs, None);
         assert_eq!(run.font_family_cs.as_deref(), Some("Arial"));
     }
@@ -2973,7 +3876,11 @@ mod theme_cs_tests {
             <a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>
           </a:fontScheme></a:themeElements></a:theme>"#;
         let mut theme = ThemeColors::parse(theme_xml);
-        assert_eq!(theme.resolve_font("minorBidi"), None, "empty cs typeface is unset");
+        assert_eq!(
+            theme.resolve_font("minorBidi"),
+            None,
+            "empty cs typeface is unset"
+        );
         theme.fill_default_cs_font("ar-SA");
         assert_eq!(theme.resolve_font("minorBidi").as_deref(), Some("Arial"));
         assert_eq!(theme.resolve_font("majorBidi").as_deref(), Some("Arial"));
@@ -2989,12 +3896,17 @@ mod theme_cs_tests {
           </a:fontScheme></a:themeElements></a:theme>"#;
         let mut theme = ThemeColors::parse(theme_xml);
         theme.fill_default_cs_font("ar-SA");
-        assert_eq!(theme.resolve_font("minorBidi").as_deref(), Some("Sakkal Majalla"));
+        assert_eq!(
+            theme.resolve_font("minorBidi").as_deref(),
+            Some("Sakkal Majalla")
+        );
     }
 
     #[test]
     fn non_rtl_bidi_lang_adds_no_default() {
-        let mut theme = ThemeColors::parse("<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"/>");
+        let mut theme = ThemeColors::parse(
+            "<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"/>",
+        );
         theme.fill_default_cs_font("en-US");
         assert_eq!(theme.resolve_font("minorBidi"), None);
     }
@@ -3003,7 +3915,10 @@ mod theme_cs_tests {
     fn theme_font_lang_bidi_is_extracted_from_settings() {
         let settings = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
           <w:themeFontLang w:val="en-AE" w:bidi="ar-SA"/></w:settings>"#;
-        assert_eq!(parse_theme_font_bidi_lang(settings).as_deref(), Some("ar-SA"));
+        assert_eq!(
+            parse_theme_font_bidi_lang(settings).as_deref(),
+            Some("ar-SA")
+        );
         let none = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
         assert_eq!(parse_theme_font_bidi_lang(none), None);
     }
@@ -3079,7 +3994,14 @@ mod rtl_tests {
         let media_map: HashMap<String, String> = HashMap::new();
         let rel_map: HashMap<String, String> = HashMap::new();
         let theme = ThemeColors::default();
-        parse_body_elements(body_node, &style_map, &mut num_map, &media_map, &rel_map, &theme)
+        parse_body_elements(
+            body_node,
+            &style_map,
+            &mut num_map,
+            &media_map,
+            &rel_map,
+            &theme,
+        )
     }
 
     /// ECMA-376 §17.3.1.6 w:bidi, §17.3.2.30 w:rtl, §17.3.2.26 w:rFonts@cs,
@@ -3108,27 +4030,49 @@ mod rtl_tests {
         );
 
         // Paragraph w:bidi
-        let para = body.iter().find_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
-            _ => None,
-        }).expect("paragraph present");
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("paragraph present");
         assert_eq!(para.bidi, Some(true), "w:bidi should set paragraph.bidi");
 
         // Run w:rtl + w:cs + w:szCs
-        let run = para.runs.iter().find_map(|r| match r {
-            DocRun::Text(t) => Some(t),
-            _ => None,
-        }).expect("text run present");
+        let run = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .expect("text run present");
         assert_eq!(run.rtl, Some(true), "w:rtl should set run.rtl");
-        assert_eq!(run.font_family_cs.as_deref(), Some("Arial"), "w:rFonts@cs → run.fontFamilyCs");
-        assert_eq!(run.font_size_cs, Some(14.0), "w:szCs val=28 half-pts → 14pt run.fontSizeCs");
+        assert_eq!(
+            run.font_family_cs.as_deref(),
+            Some("Arial"),
+            "w:rFonts@cs → run.fontFamilyCs"
+        );
+        assert_eq!(
+            run.font_size_cs,
+            Some(14.0),
+            "w:szCs val=28 half-pts → 14pt run.fontSizeCs"
+        );
 
         // Table w:bidiVisual
-        let tbl = body.iter().find_map(|e| match e {
-            BodyElement::Table(t) => Some(t),
-            _ => None,
-        }).expect("table present");
-        assert_eq!(tbl.bidi_visual, Some(true), "w:bidiVisual should set table.bidiVisual");
+        let tbl = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table present");
+        assert_eq!(
+            tbl.bidi_visual,
+            Some(true),
+            "w:bidiVisual should set table.bidiVisual"
+        );
     }
 
     /// On-off toggles honor an explicit `w:val="0"` (off), per §17.3.2.22, so
@@ -3138,15 +4082,22 @@ mod rtl_tests {
         let body = body_from(
             r#"<w:p><w:pPr><w:bidi w:val="0"/></w:pPr><w:r><w:rPr><w:rtl w:val="false"/></w:rPr><w:t>a</w:t></w:r></w:p>"#,
         );
-        let para = body.iter().find_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
-            _ => None,
-        }).unwrap();
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(para.bidi, Some(false));
-        let run = para.runs.iter().find_map(|r| match r {
-            DocRun::Text(t) => Some(t),
-            _ => None,
-        }).unwrap();
+        let run = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(run.rtl, Some(false));
     }
 
@@ -3161,13 +4112,16 @@ mod rtl_tests {
         let body = body_from(
             r#"<w:p><w:r><w:rPr><w:b/><w:sz w:val="36"/></w:rPr><w:t>نبذة</w:t></w:r></w:p>"#,
         );
-        let run = body.iter().find_map(|e| match e {
-            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
-                DocRun::Text(t) => Some(t),
+        let run = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::Text(t) => Some(t),
+                    _ => None,
+                }),
                 _ => None,
-            }),
-            _ => None,
-        }).expect("text run present");
+            })
+            .expect("text run present");
         assert_eq!(run.font_size, 18.0, "sz=36 half-pts → 18pt");
         assert_eq!(
             run.font_size_cs,
@@ -3179,15 +4133,22 @@ mod rtl_tests {
         let body2 = body_from(
             r#"<w:p><w:r><w:rPr><w:sz w:val="36"/><w:szCs w:val="24"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
         );
-        let run2 = body2.iter().find_map(|e| match e {
-            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
-                DocRun::Text(t) => Some(t),
+        let run2 = body2
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::Text(t) => Some(t),
+                    _ => None,
+                }),
                 _ => None,
-            }),
-            _ => None,
-        }).unwrap();
+            })
+            .unwrap();
         assert_eq!(run2.font_size, 18.0);
-        assert_eq!(run2.font_size_cs, Some(12.0), "explicit szCs wins over sz mirroring");
+        assert_eq!(
+            run2.font_size_cs,
+            Some(12.0),
+            "explicit szCs wins over sz mirroring"
+        );
     }
 
     /// ECMA-376 §17.3.2.3 w:bCs, §17.3.2.17 w:iCs, §17.3.2.20 w:lang/@w:bidi —
@@ -3199,13 +4160,16 @@ mod rtl_tests {
             r#"<w:p><w:r><w:rPr><w:rtl/><w:bCs/><w:iCs/>
               <w:lang w:val="en-AE" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
         );
-        let run = body.iter().find_map(|e| match e {
-            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
-                DocRun::Text(t) => Some(t),
+        let run = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::Text(t) => Some(t),
+                    _ => None,
+                }),
                 _ => None,
-            }),
-            _ => None,
-        }).expect("text run present");
+            })
+            .expect("text run present");
         assert_eq!(run.bold_cs, Some(true), "w:bCs → run.boldCs");
         assert_eq!(run.italic_cs, Some(true), "w:iCs → run.italicCs");
         assert_eq!(
@@ -3234,14 +4198,21 @@ mod rtl_tests {
               </v:shape>
             </w:pict></w:r></w:p>"##,
         );
-        let para = body.iter().find_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
-            _ => None,
-        }).expect("paragraph present");
-        let shape = para.runs.iter().find_map(|r| match r {
-            DocRun::Shape(s) => Some(s),
-            _ => None,
-        }).expect("VML pict should produce a ShapeRun");
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("paragraph present");
+        let shape = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Shape(s) => Some(s),
+                _ => None,
+            })
+            .expect("VML pict should produce a ShapeRun");
 
         assert_eq!(shape.width_pt, 300.0, "width from CSS style");
         assert_eq!(shape.height_pt, 60.0, "height from CSS style");
@@ -3282,13 +4253,24 @@ mod rtl_tests {
             </w:tbl>
             "#,
         );
-        let tbl = body.iter().find_map(|e| match e {
-            BodyElement::Table(t) => Some(t),
-            _ => None,
-        }).expect("table present");
+        let tbl = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table present");
         let cell = &tbl.rows[0].cells[0];
-        let left = cell.borders.left.as_ref().expect("w:start should map to cell.left");
-        let right = cell.borders.right.as_ref().expect("w:end should map to cell.right");
+        let left = cell
+            .borders
+            .left
+            .as_ref()
+            .expect("w:start should map to cell.left");
+        let right = cell
+            .borders
+            .right
+            .as_ref()
+            .expect("w:end should map to cell.right");
         assert_eq!(left.color.as_deref(), Some("d9d9d9"), "start color → left");
         assert_eq!(left.style, "single");
         assert_eq!(right.color.as_deref(), Some("d9d9d9"), "end color → right");
@@ -3316,12 +4298,21 @@ mod rtl_tests {
             </w:tbl>
             "#,
         );
-        let tbl = body.iter().find_map(|e| match e {
-            BodyElement::Table(t) => Some(t),
-            _ => None,
-        }).expect("table present");
-        assert!(tbl.borders.left.is_some(), "w:start should map to tblBorders.left");
-        assert!(tbl.borders.right.is_some(), "w:end should map to tblBorders.right");
+        let tbl = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("table present");
+        assert!(
+            tbl.borders.left.is_some(),
+            "w:start should map to tblBorders.left"
+        );
+        assert!(
+            tbl.borders.right.is_some(),
+            "w:end should map to tblBorders.right"
+        );
     }
 
     /// ECMA-376 §17.3.2.4 w:bCs / §17.3.2.6 w:iCs are INDEPENDENT toggles from
@@ -3339,21 +4330,34 @@ mod rtl_tests {
                 <w:t>28-02-2026</w:t>
             </w:r></w:p>"#,
         );
-        let para = body.iter().find_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
-            _ => None,
-        }).unwrap();
-        let run = para.runs.iter().find_map(|r| match r {
-            DocRun::Text(t) => Some(t),
-            _ => None,
-        }).unwrap();
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+        let run = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
         // `w:b` sets the non-CS bold…
-        assert_eq!(run.bold, true, "w:b sets non-CS bold");
+        assert!(run.bold, "w:b sets non-CS bold");
         // …and `w:bCs` is absent, so the parser leaves the CS bold axis None.
         // The renderer mirrors it from `bold` (boldCs ?? bold) per the PDF-
         // verified sample-7 page-1 behaviour; that fallback lives in renderer.ts.
-        assert_eq!(run.bold_cs, None, "absent w:bCs stays None at the parser level");
-        assert_eq!(run.italic_cs, None, "absent w:iCs stays None at the parser level");
+        assert_eq!(
+            run.bold_cs, None,
+            "absent w:bCs stays None at the parser level"
+        );
+        assert_eq!(
+            run.italic_cs, None,
+            "absent w:iCs stays None at the parser level"
+        );
     }
 
     /// An explicit `w:bCs` / `w:iCs` is surfaced on its own axis (and honors the
@@ -3366,15 +4370,26 @@ mod rtl_tests {
                 <w:t>عربي</w:t>
             </w:r></w:p>"#,
         );
-        let para = body.iter().find_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
-            _ => None,
-        }).unwrap();
-        let run = para.runs.iter().find_map(|r| match r {
-            DocRun::Text(t) => Some(t),
-            _ => None,
-        }).unwrap();
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+        let run = para
+            .runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(run.bold_cs, Some(true), "w:bCs sets the CS bold axis");
-        assert_eq!(run.italic_cs, Some(false), "w:iCs val=0 turns CS italic off");
+        assert_eq!(
+            run.italic_cs,
+            Some(false),
+            "w:iCs val=0 turns CS italic off"
+        );
     }
 }

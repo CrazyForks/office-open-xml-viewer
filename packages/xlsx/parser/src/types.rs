@@ -890,14 +890,37 @@ pub struct PathInfo {
 #[derive(Debug, Serialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum PathCmd {
-    MoveTo { x: f64, y: f64 },
-    LineTo { x: f64, y: f64 },
-    CubicBezTo { x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64 },
-    QuadBezTo { x1: f64, y1: f64, x2: f64, y2: f64 },
+    MoveTo {
+        x: f64,
+        y: f64,
+    },
+    LineTo {
+        x: f64,
+        y: f64,
+    },
+    CubicBezTo {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        x3: f64,
+        y3: f64,
+    },
+    QuadBezTo {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+    },
     /// ECMA-376 §20.1.9.3 `a:arcTo`. `stAng`/`swAng` are in 60000ths of a
     /// degree. The start point is the current pen position; the ellipse
     /// center is derived so the pen lies on the ellipse at `stAng`.
-    ArcTo { wr: f64, hr: f64, st_ang: f64, sw_ang: f64 },
+    ArcTo {
+        wr: f64,
+        hr: f64,
+        st_ang: f64,
+        sw_ang: f64,
+    },
     Close,
 }
 
@@ -983,17 +1006,43 @@ pub struct ConditionalFormat {
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CfRule {
     #[serde(rename_all = "camelCase")]
-    CellIs { operator: String, formulas: Vec<String>, dxf_id: Option<u32>, priority: i32 },
+    CellIs {
+        operator: String,
+        formulas: Vec<String>,
+        dxf_id: Option<u32>,
+        priority: i32,
+    },
     #[serde(rename_all = "camelCase")]
-    Expression { formula: String, dxf_id: Option<u32>, priority: i32, stop_if_true: bool },
+    Expression {
+        formula: String,
+        dxf_id: Option<u32>,
+        priority: i32,
+        stop_if_true: bool,
+    },
     #[serde(rename_all = "camelCase")]
     ColorScale { stops: Vec<CfStop>, priority: i32 },
     #[serde(rename_all = "camelCase")]
-    DataBar { color: String, min: CfValue, max: CfValue, priority: i32, gradient: bool },
+    DataBar {
+        color: String,
+        min: CfValue,
+        max: CfValue,
+        priority: i32,
+        gradient: bool,
+    },
     #[serde(rename_all = "camelCase")]
-    Top10 { top: bool, percent: bool, rank: u32, dxf_id: Option<u32>, priority: i32 },
+    Top10 {
+        top: bool,
+        percent: bool,
+        rank: u32,
+        dxf_id: Option<u32>,
+        priority: i32,
+    },
     #[serde(rename_all = "camelCase")]
-    AboveAverage { above_average: bool, dxf_id: Option<u32>, priority: i32 },
+    AboveAverage {
+        above_average: bool,
+        dxf_id: Option<u32>,
+        priority: i32,
+    },
     #[serde(rename_all = "camelCase")]
     IconSet {
         icon_set: String,
@@ -1071,9 +1120,15 @@ pub enum CellValue {
         #[serde(skip_serializing_if = "Option::is_none")]
         runs: Option<Vec<Run>>,
     },
-    Number { number: f64 },
-    Bool { bool: bool },
-    Error { error: String },
+    Number {
+        number: f64,
+    },
+    Bool {
+        bool: bool,
+    },
+    Error {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Default)]

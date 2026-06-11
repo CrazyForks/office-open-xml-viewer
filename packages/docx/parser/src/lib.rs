@@ -1,21 +1,21 @@
 use wasm_bindgen::prelude::*;
 
-mod types;
-mod xml_util;
-mod styles;
-mod numbering;
-mod parser;
 mod markdown;
 mod math;
+mod numbering;
+mod parser;
+mod styles;
+mod types;
+mod xml_util;
 
 #[wasm_bindgen]
 pub fn parse_docx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> String {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
     match parser::parse(data) {
-        Ok(doc) => serde_json::to_string(&doc).unwrap_or_else(|e| {
-            format!("{{\"error\":\"{}\"}}", e)
-        }),
+        Ok(doc) => {
+            serde_json::to_string(&doc).unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+        }
         Err(e) => format!("{{\"error\":\"{}\"}}", e),
     }
 }
@@ -34,8 +34,7 @@ pub fn docx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result
 /// Native equivalent of `parse_docx` for use from the MCP server.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_docx_native(data: &[u8]) -> Result<String, String> {
-    parser::parse(data)
-        .and_then(|doc| serde_json::to_string(&doc).map_err(|e| e.to_string()))
+    parser::parse(data).and_then(|doc| serde_json::to_string(&doc).map_err(|e| e.to_string()))
 }
 
 /// Parse a docx and project the result to GitHub-flavoured markdown:

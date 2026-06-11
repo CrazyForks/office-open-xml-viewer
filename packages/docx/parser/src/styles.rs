@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use roxmltree::Document as XmlDoc;
 use crate::xml_util::*;
+use roxmltree::Document as XmlDoc;
+use std::collections::HashMap;
 
 /// Resolved run (character) formatting.
 #[derive(Debug, Clone, Default)]
@@ -9,11 +9,11 @@ pub struct RunFmt {
     pub italic: Option<bool>,
     pub underline: Option<bool>,
     pub strikethrough: Option<bool>,
-    pub font_size: Option<f64>,       // pt
-    pub color: Option<String>,        // hex 6
+    pub font_size: Option<f64>, // pt
+    pub color: Option<String>,  // hex 6
     pub font_family_ascii: Option<String>,
     pub font_family_east_asia: Option<String>,
-    pub background: Option<String>,   // hex 6
+    pub background: Option<String>, // hex 6
     /// "super" | "sub" — mapped from w:vertAlign val="superscript|subscript"
     pub vert_align: Option<String>,
     /// All caps (w:caps)
@@ -62,11 +62,11 @@ pub struct RunFmt {
 #[derive(Debug, Clone, Default)]
 pub struct ParaFmt {
     pub alignment: Option<String>,
-    pub indent_left: Option<f64>,     // pt
-    pub indent_right: Option<f64>,    // pt
-    pub indent_first: Option<f64>,    // pt
-    pub space_before: Option<f64>,    // pt
-    pub space_after: Option<f64>,     // pt
+    pub indent_left: Option<f64>,  // pt
+    pub indent_right: Option<f64>, // pt
+    pub indent_first: Option<f64>, // pt
+    pub space_before: Option<f64>, // pt
+    pub space_after: Option<f64>,  // pt
     pub line_spacing_val: Option<f64>,
     pub line_spacing_rule: Option<String>,
     /// True when `w:spacing/@w:line` was declared on the paragraph's own pPr
@@ -82,7 +82,6 @@ pub struct ParaFmt {
     pub tab_stops: Option<Vec<(f64, String, String)>>,
     /// merged run defaults from pPr/rPr
     pub run: RunFmt,
-    pub based_on: Option<String>,
     /// Paragraph background hex color (w:shd fill on paragraph)
     pub shading: Option<String>,
     /// Force page break before paragraph (w:pageBreakBefore)
@@ -204,22 +203,25 @@ impl StyleMap {
         let mut default_para_style_id: Option<String> = None;
         let mut table_styles: HashMap<String, TableStyleDef> = HashMap::new();
         for style_node in children_w(root, "style") {
-            let Some(style_id) = attr_w(style_node, "styleId") else { continue };
+            let Some(style_id) = attr_w(style_node, "styleId") else {
+                continue;
+            };
             let style_type = attr_w(style_node, "type").unwrap_or_default();
-            if style_type != "paragraph"
-                && style_type != "character"
-                && style_type != "table" { continue; }
+            if style_type != "paragraph" && style_type != "character" && style_type != "table" {
+                continue;
+            }
 
-            if style_type == "paragraph"
-                && attr_w(style_node, "default").as_deref() == Some("1")
-            {
+            if style_type == "paragraph" && attr_w(style_node, "default").as_deref() == Some("1") {
                 default_para_style_id = Some(style_id.clone());
             }
 
             let based_on = child_w(style_node, "basedOn").and_then(|n| attr_w(n, "val"));
 
             if style_type == "table" {
-                table_styles.insert(style_id.clone(), parse_tbl_style_def(style_node, based_on.clone()));
+                table_styles.insert(
+                    style_id.clone(),
+                    parse_tbl_style_def(style_node, based_on.clone()),
+                );
             }
 
             let para = if let Some(ppr) = child_w(style_node, "pPr") {
@@ -234,10 +236,23 @@ impl StyleMap {
                 RunFmt::default()
             };
 
-            styles.insert(style_id, StyleDef { para, run, based_on });
+            styles.insert(
+                style_id,
+                StyleDef {
+                    para,
+                    run,
+                    based_on,
+                },
+            );
         }
 
-        StyleMap { styles, table_styles, defaults_para, defaults_run, default_para_style_id }
+        StyleMap {
+            styles,
+            table_styles,
+            defaults_para,
+            defaults_run,
+            default_para_style_id,
+        }
     }
 
     fn empty() -> Self {
@@ -259,18 +274,29 @@ impl StyleMap {
         while let Some(def) = cur {
             chain.push(def);
             guard += 1;
-            if guard > 16 { break; }
-            cur = def.based_on.as_deref().and_then(|b| self.table_styles.get(b));
+            if guard > 16 {
+                break;
+            }
+            cur = def
+                .based_on
+                .as_deref()
+                .and_then(|b| self.table_styles.get(b));
         }
         // Merge from base (end of chain) to derived (front).
         let mut out = TableStyleDef::default();
         for def in chain.into_iter().rev() {
             merge_raw_borders(&mut out.borders, &def.borders);
-            if def.cell_shd.is_some() { out.cell_shd = def.cell_shd.clone(); }
-            if def.cell_valign.is_some() { out.cell_valign = def.cell_valign.clone(); }
+            if def.cell_shd.is_some() {
+                out.cell_shd = def.cell_shd.clone();
+            }
+            if def.cell_valign.is_some() {
+                out.cell_valign = def.cell_valign.clone();
+            }
             for (k, v) in &def.cond {
                 let slot = out.cond.entry(k.clone()).or_default();
-                if v.shd.is_some() { slot.shd = v.shd.clone(); }
+                if v.shd.is_some() {
+                    slot.shd = v.shd.clone();
+                }
                 merge_raw_borders(&mut slot.borders, &v.borders);
             }
         }
@@ -342,50 +368,132 @@ impl StyleMap {
 }
 
 fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
-    if src.alignment.is_some() { dst.alignment = src.alignment.clone(); }
-    if src.indent_left.is_some() { dst.indent_left = src.indent_left; }
-    if src.indent_right.is_some() { dst.indent_right = src.indent_right; }
-    if src.indent_first.is_some() { dst.indent_first = src.indent_first; }
-    if src.space_before.is_some() { dst.space_before = src.space_before; }
-    if src.space_after.is_some() { dst.space_after = src.space_after; }
-    if src.line_spacing_val.is_some() { dst.line_spacing_val = src.line_spacing_val; }
-    if src.line_spacing_rule.is_some() { dst.line_spacing_rule = src.line_spacing_rule.clone(); }
-    if src.line_spacing_explicit.is_some() { dst.line_spacing_explicit = src.line_spacing_explicit; }
-    if src.num_id.is_some() { dst.num_id = src.num_id; }
-    if src.num_level.is_some() { dst.num_level = src.num_level; }
-    if src.tab_stops.is_some() { dst.tab_stops = src.tab_stops.clone(); }
-    if src.shading.is_some() { dst.shading = src.shading.clone(); }
-    if src.page_break_before.is_some() { dst.page_break_before = src.page_break_before; }
-    if src.contextual_spacing.is_some() { dst.contextual_spacing = src.contextual_spacing; }
-    if src.keep_next.is_some() { dst.keep_next = src.keep_next; }
-    if src.outline_level.is_some() { dst.outline_level = src.outline_level; }
-    if src.keep_lines.is_some() { dst.keep_lines = src.keep_lines; }
-    if src.widow_control.is_some() { dst.widow_control = src.widow_control; }
-    if src.para_borders.is_some() { dst.para_borders = src.para_borders.clone(); }
-    if src.bidi.is_some() { dst.bidi = src.bidi; }
+    if src.alignment.is_some() {
+        dst.alignment = src.alignment.clone();
+    }
+    if src.indent_left.is_some() {
+        dst.indent_left = src.indent_left;
+    }
+    if src.indent_right.is_some() {
+        dst.indent_right = src.indent_right;
+    }
+    if src.indent_first.is_some() {
+        dst.indent_first = src.indent_first;
+    }
+    if src.space_before.is_some() {
+        dst.space_before = src.space_before;
+    }
+    if src.space_after.is_some() {
+        dst.space_after = src.space_after;
+    }
+    if src.line_spacing_val.is_some() {
+        dst.line_spacing_val = src.line_spacing_val;
+    }
+    if src.line_spacing_rule.is_some() {
+        dst.line_spacing_rule = src.line_spacing_rule.clone();
+    }
+    if src.line_spacing_explicit.is_some() {
+        dst.line_spacing_explicit = src.line_spacing_explicit;
+    }
+    if src.num_id.is_some() {
+        dst.num_id = src.num_id;
+    }
+    if src.num_level.is_some() {
+        dst.num_level = src.num_level;
+    }
+    if src.tab_stops.is_some() {
+        dst.tab_stops = src.tab_stops.clone();
+    }
+    if src.shading.is_some() {
+        dst.shading = src.shading.clone();
+    }
+    if src.page_break_before.is_some() {
+        dst.page_break_before = src.page_break_before;
+    }
+    if src.contextual_spacing.is_some() {
+        dst.contextual_spacing = src.contextual_spacing;
+    }
+    if src.keep_next.is_some() {
+        dst.keep_next = src.keep_next;
+    }
+    if src.outline_level.is_some() {
+        dst.outline_level = src.outline_level;
+    }
+    if src.keep_lines.is_some() {
+        dst.keep_lines = src.keep_lines;
+    }
+    if src.widow_control.is_some() {
+        dst.widow_control = src.widow_control;
+    }
+    if src.para_borders.is_some() {
+        dst.para_borders = src.para_borders.clone();
+    }
+    if src.bidi.is_some() {
+        dst.bidi = src.bidi;
+    }
 }
 
 fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
-    if src.bold.is_some() { dst.bold = src.bold; }
-    if src.italic.is_some() { dst.italic = src.italic; }
-    if src.underline.is_some() { dst.underline = src.underline; }
-    if src.strikethrough.is_some() { dst.strikethrough = src.strikethrough; }
-    if src.font_size.is_some() { dst.font_size = src.font_size; }
-    if src.color.is_some() { dst.color = src.color.clone(); }
-    if src.font_family_ascii.is_some() { dst.font_family_ascii = src.font_family_ascii.clone(); }
-    if src.font_family_east_asia.is_some() { dst.font_family_east_asia = src.font_family_east_asia.clone(); }
-    if src.background.is_some() { dst.background = src.background.clone(); }
-    if src.vert_align.is_some() { dst.vert_align = src.vert_align.clone(); }
-    if src.all_caps.is_some() { dst.all_caps = src.all_caps; }
-    if src.small_caps.is_some() { dst.small_caps = src.small_caps; }
-    if src.dstrike.is_some() { dst.dstrike = src.dstrike; }
-    if src.vanish.is_some() { dst.vanish = src.vanish; }
-    if src.highlight.is_some() { dst.highlight = src.highlight.clone(); }
-    if src.rtl.is_some() { dst.rtl = src.rtl; }
-    if src.font_family_cs.is_some() { dst.font_family_cs = src.font_family_cs.clone(); }
-    if src.bold_cs.is_some() { dst.bold_cs = src.bold_cs; }
-    if src.italic_cs.is_some() { dst.italic_cs = src.italic_cs; }
-    if src.lang_bidi.is_some() { dst.lang_bidi = src.lang_bidi.clone(); }
+    if src.bold.is_some() {
+        dst.bold = src.bold;
+    }
+    if src.italic.is_some() {
+        dst.italic = src.italic;
+    }
+    if src.underline.is_some() {
+        dst.underline = src.underline;
+    }
+    if src.strikethrough.is_some() {
+        dst.strikethrough = src.strikethrough;
+    }
+    if src.font_size.is_some() {
+        dst.font_size = src.font_size;
+    }
+    if src.color.is_some() {
+        dst.color = src.color.clone();
+    }
+    if src.font_family_ascii.is_some() {
+        dst.font_family_ascii = src.font_family_ascii.clone();
+    }
+    if src.font_family_east_asia.is_some() {
+        dst.font_family_east_asia = src.font_family_east_asia.clone();
+    }
+    if src.background.is_some() {
+        dst.background = src.background.clone();
+    }
+    if src.vert_align.is_some() {
+        dst.vert_align = src.vert_align.clone();
+    }
+    if src.all_caps.is_some() {
+        dst.all_caps = src.all_caps;
+    }
+    if src.small_caps.is_some() {
+        dst.small_caps = src.small_caps;
+    }
+    if src.dstrike.is_some() {
+        dst.dstrike = src.dstrike;
+    }
+    if src.vanish.is_some() {
+        dst.vanish = src.vanish;
+    }
+    if src.highlight.is_some() {
+        dst.highlight = src.highlight.clone();
+    }
+    if src.rtl.is_some() {
+        dst.rtl = src.rtl;
+    }
+    if src.font_family_cs.is_some() {
+        dst.font_family_cs = src.font_family_cs.clone();
+    }
+    if src.bold_cs.is_some() {
+        dst.bold_cs = src.bold_cs;
+    }
+    if src.italic_cs.is_some() {
+        dst.italic_cs = src.italic_cs;
+    }
+    if src.lang_bidi.is_some() {
+        dst.lang_bidi = src.lang_bidi.clone();
+    }
 
     // Complex-script font size resolution (ECMA-376 §17.3.2.18). Word treats a
     // directly-applied `w:sz` as also setting the complex-script size UNLESS the
@@ -420,8 +528,12 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // Spacing
     if let Some(sp) = child_w(ppr, "spacing") {
-        if let Some(v) = attr_w(sp, "before") { fmt.space_before = Some(twips_to_pt(&v)); }
-        if let Some(v) = attr_w(sp, "after") { fmt.space_after = Some(twips_to_pt(&v)); }
+        if let Some(v) = attr_w(sp, "before") {
+            fmt.space_before = Some(twips_to_pt(&v));
+        }
+        if let Some(v) = attr_w(sp, "after") {
+            fmt.space_after = Some(twips_to_pt(&v));
+        }
         if let Some(v) = attr_w(sp, "line") {
             let rule = attr_w(sp, "lineRule").unwrap_or_else(|| "auto".to_string());
             let raw: f64 = v.parse().unwrap_or(240.0);
@@ -436,9 +548,9 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             // the section enables a line grid, which is where those oversized
             // values are actually authored.
             let (val, effective_rule) = match rule.as_str() {
-                "exact"   => (raw / 20.0, "exact".to_string()),
+                "exact" => (raw / 20.0, "exact".to_string()),
                 "atLeast" => (raw / 20.0, "atLeast".to_string()),
-                _         => (raw / 240.0, "auto".to_string()),
+                _ => (raw / 240.0, "auto".to_string()),
             };
             fmt.line_spacing_val = Some(val);
             fmt.line_spacing_rule = Some(effective_rule);
@@ -451,13 +563,25 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // identical; use either if present, with start/end taking precedence when
     // both appear (logical wins for bidi correctness).
     if let Some(ind) = child_w(ppr, "ind") {
-        if let Some(v) = attr_w(ind, "left")  { fmt.indent_left  = Some(twips_to_pt(&v)); }
-        if let Some(v) = attr_w(ind, "start") { fmt.indent_left  = Some(twips_to_pt(&v)); }
-        if let Some(v) = attr_w(ind, "right") { fmt.indent_right = Some(twips_to_pt(&v)); }
-        if let Some(v) = attr_w(ind, "end")   { fmt.indent_right = Some(twips_to_pt(&v)); }
-        if let Some(v) = attr_w(ind, "firstLine") { fmt.indent_first = Some(twips_to_pt(&v)); }
+        if let Some(v) = attr_w(ind, "left") {
+            fmt.indent_left = Some(twips_to_pt(&v));
+        }
+        if let Some(v) = attr_w(ind, "start") {
+            fmt.indent_left = Some(twips_to_pt(&v));
+        }
+        if let Some(v) = attr_w(ind, "right") {
+            fmt.indent_right = Some(twips_to_pt(&v));
+        }
+        if let Some(v) = attr_w(ind, "end") {
+            fmt.indent_right = Some(twips_to_pt(&v));
+        }
+        if let Some(v) = attr_w(ind, "firstLine") {
+            fmt.indent_first = Some(twips_to_pt(&v));
+        }
         // hanging overrides firstLine per §17.3.1.12 when both are present.
-        if let Some(v) = attr_w(ind, "hanging")   { fmt.indent_first = Some(-twips_to_pt(&v)); }
+        if let Some(v) = attr_w(ind, "hanging") {
+            fmt.indent_first = Some(-twips_to_pt(&v));
+        }
     }
 
     // Numbering
@@ -478,7 +602,9 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         for t in children_w(tabs_node, "tab") {
             let val = attr_w(t, "val").unwrap_or_else(|| "left".to_string());
             // val="clear" removes an inherited tab — MVP: skip (no tab to emit)
-            if val == "clear" { continue; }
+            if val == "clear" {
+                continue;
+            }
             let pos = match attr_w(t, "pos").map(|s| twips_to_pt(&s)) {
                 Some(p) => p,
                 None => continue,
@@ -535,18 +661,22 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     if let Some(lvl) = child_w(ppr, "outlineLvl") {
         if let Some(v) = attr_w(lvl, "val") {
             if let Ok(n) = v.parse::<u32>() {
-                if n <= 8 { fmt.outline_level = Some(n); }
+                if n <= 8 {
+                    fmt.outline_level = Some(n);
+                }
             }
         }
     }
 
     // Paragraph borders (pBdr)
     if let Some(pbdr) = child_w(ppr, "pBdr") {
-        use crate::types::{ParagraphBorders, ParaBorderEdge};
+        use crate::types::{ParaBorderEdge, ParagraphBorders};
         let parse_edge = |name: &str| -> Option<ParaBorderEdge> {
             let node = child_w(pbdr, name)?;
             let style = attr_w(node, "val").unwrap_or_else(|| "none".to_string());
-            if style == "none" || style == "nil" { return None; }
+            if style == "none" || style == "nil" {
+                return None;
+            }
             let width = attr_w(node, "sz")
                 .and_then(|s| s.parse::<f64>().ok())
                 .map(|v| v / 8.0)
@@ -557,7 +687,12 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             let color = attr_w(node, "color")
                 .filter(|c| c != "auto")
                 .map(|c| c.to_lowercase());
-            Some(ParaBorderEdge { style, color, width, space })
+            Some(ParaBorderEdge {
+                style,
+                color,
+                width,
+                space,
+            })
         };
         let borders = ParagraphBorders {
             top: parse_edge("top"),
@@ -566,7 +701,11 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             right: parse_edge("right"),
             between: parse_edge("between"),
         };
-        if borders.top.is_some() || borders.bottom.is_some() || borders.left.is_some() || borders.right.is_some() {
+        if borders.top.is_some()
+            || borders.bottom.is_some()
+            || borders.left.is_some()
+            || borders.right.is_some()
+        {
             fmt.para_borders = Some(borders);
         }
     }
@@ -575,11 +714,12 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 }
 
 pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
-    let mut fmt = RunFmt::default();
-
-    fmt.bold = bool_prop(rpr, "b");
-    fmt.italic = bool_prop(rpr, "i");
-    fmt.strikethrough = bool_prop(rpr, "strike");
+    let mut fmt = RunFmt {
+        bold: bool_prop(rpr, "b"),
+        italic: bool_prop(rpr, "i"),
+        strikethrough: bool_prop(rpr, "strike"),
+        ..Default::default()
+    };
 
     // Underline
     if let Some(u) = child_w(rpr, "u") {
@@ -649,17 +789,17 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // precedence over theme refs per spec.
     if let Some(rf) = child_w(rpr, "rFonts") {
         let direct_ascii = attr_w(rf, "ascii").or_else(|| attr_w(rf, "hAnsi"));
-        let theme_ascii  = attr_w(rf, "asciiTheme").or_else(|| attr_w(rf, "hAnsiTheme"));
+        let theme_ascii = attr_w(rf, "asciiTheme").or_else(|| attr_w(rf, "hAnsiTheme"));
         fmt.font_family_ascii = direct_ascii.or_else(|| theme_ascii.map(|t| format!("@theme:{t}")));
 
         let direct_ea = attr_w(rf, "eastAsia");
-        let theme_ea  = attr_w(rf, "eastAsiaTheme");
+        let theme_ea = attr_w(rf, "eastAsiaTheme");
         fmt.font_family_east_asia = direct_ea.or_else(|| theme_ea.map(|t| format!("@theme:{t}")));
 
         // Complex-script typeface (§17.3.2.26 @cs / @cstheme). Same direct-wins
         // rule and "@theme:<ref>" marker convention as the other axes.
         let direct_cs = attr_w(rf, "cs");
-        let theme_cs  = attr_w(rf, "cstheme");
+        let theme_cs = attr_w(rf, "cstheme");
         fmt.font_family_cs = direct_cs.or_else(|| theme_cs.map(|t| format!("@theme:{t}")));
     }
 
@@ -722,8 +862,14 @@ fn parse_edge_border(node: roxmltree::Node) -> EdgeBorder {
         .and_then(|v| v.parse::<f64>().ok())
         .map(|v| v / 8.0)
         .unwrap_or(0.5);
-    let color = attr_w(node, "color").filter(|c| c != "auto").map(|c| c.to_lowercase());
-    EdgeBorder { width, color, style }
+    let color = attr_w(node, "color")
+        .filter(|c| c != "auto")
+        .map(|c| c.to_lowercase());
+    EdgeBorder {
+        width,
+        color,
+        style,
+    }
 }
 
 fn parse_raw_tbl_borders(node: roxmltree::Node) -> RawTblBorders {
@@ -744,16 +890,31 @@ fn parse_raw_tbl_borders(node: roxmltree::Node) -> RawTblBorders {
 }
 
 fn merge_raw_borders(dst: &mut RawTblBorders, src: &RawTblBorders) {
-    if src.top.is_some() { dst.top = src.top.clone(); }
-    if src.bottom.is_some() { dst.bottom = src.bottom.clone(); }
-    if src.left.is_some() { dst.left = src.left.clone(); }
-    if src.right.is_some() { dst.right = src.right.clone(); }
-    if src.inside_h.is_some() { dst.inside_h = src.inside_h.clone(); }
-    if src.inside_v.is_some() { dst.inside_v = src.inside_v.clone(); }
+    if src.top.is_some() {
+        dst.top = src.top.clone();
+    }
+    if src.bottom.is_some() {
+        dst.bottom = src.bottom.clone();
+    }
+    if src.left.is_some() {
+        dst.left = src.left.clone();
+    }
+    if src.right.is_some() {
+        dst.right = src.right.clone();
+    }
+    if src.inside_h.is_some() {
+        dst.inside_h = src.inside_h.clone();
+    }
+    if src.inside_v.is_some() {
+        dst.inside_v = src.inside_v.clone();
+    }
 }
 
 fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) -> TableStyleDef {
-    let mut def = TableStyleDef { based_on, ..Default::default() };
+    let mut def = TableStyleDef {
+        based_on,
+        ..Default::default()
+    };
     if let Some(tbl_pr) = child_w(style_node, "tblPr") {
         if let Some(borders) = child_w(tbl_pr, "tblBorders") {
             def.borders = parse_raw_tbl_borders(borders);
@@ -764,7 +925,9 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
         def.cell_valign = child_w(tc_pr, "vAlign").and_then(|v| attr_w(v, "val"));
     }
     for sp in children_w(style_node, "tblStylePr") {
-        let Some(typ) = attr_w(sp, "type") else { continue };
+        let Some(typ) = attr_w(sp, "type") else {
+            continue;
+        };
         let mut cf = CondFmt::default();
         if let Some(tc_pr) = child_w(sp, "tcPr") {
             cf.shd = shd_fill(tc_pr);

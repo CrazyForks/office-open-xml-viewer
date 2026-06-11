@@ -138,20 +138,30 @@ fn slide_title(slide: &Value) -> Option<String> {
 
     // First pass: prefer the explicit title placeholder.
     for el in elements {
-        if el["type"].as_str() != Some("shape") { continue }
-        let Some(ph) = el["placeholderType"].as_str() else { continue };
+        if el["type"].as_str() != Some("shape") {
+            continue;
+        }
+        let Some(ph) = el["placeholderType"].as_str() else {
+            continue;
+        };
         if ph == "title" || ph == "ctrTitle" {
             let trimmed = read_text(el);
-            if !trimmed.is_empty() { return Some(trimmed); }
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
         }
     }
 
     // Fallback: first non-empty shape text. Same heuristic the previous
     // implementation used; kept for slides without a title placeholder.
     for el in elements {
-        if el["type"].as_str() != Some("shape") { continue }
+        if el["type"].as_str() != Some("shape") {
+            continue;
+        }
         let trimmed = read_text(el);
-        if !trimmed.is_empty() { return Some(trimmed); }
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
     }
     None
 }
@@ -235,6 +245,10 @@ fn slide_structure(slide: &Value) -> Value {
 
 // ─── Spatial geometry helpers (used by `pptx_get_shape_relations`) ───────────
 
+/// A named alignment axis: its label plus an accessor extracting the edge/center
+/// coordinate (EMU) used to group shapes that share that axis.
+type AlignmentAxis = (&'static str, fn(&Bbox) -> i64);
+
 /// EMU values are i64 in the parser output. Bounding box in EMU.
 #[derive(Debug, Clone, Copy)]
 struct Bbox {
@@ -253,10 +267,18 @@ impl Bbox {
         Some(Bbox { x, y, w, h })
     }
 
-    fn right(&self) -> i64 { self.x + self.w }
-    fn bottom(&self) -> i64 { self.y + self.h }
-    fn cx(&self) -> i64 { self.x + self.w / 2 }
-    fn cy(&self) -> i64 { self.y + self.h / 2 }
+    fn right(&self) -> i64 {
+        self.x + self.w
+    }
+    fn bottom(&self) -> i64 {
+        self.y + self.h
+    }
+    fn cx(&self) -> i64 {
+        self.x + self.w / 2
+    }
+    fn cy(&self) -> i64 {
+        self.y + self.h / 2
+    }
 
     /// Intersection-over-union with another bbox. Returns 0.0 when either box
     /// has zero area or they don't overlap.
@@ -272,7 +294,11 @@ impl Bbox {
         let a = (self.w as f64) * (self.h as f64);
         let b = (other.w as f64) * (other.h as f64);
         let union = a + b - inter;
-        if union <= 0.0 { 0.0 } else { inter / union }
+        if union <= 0.0 {
+            0.0
+        } else {
+            inter / union
+        }
     }
 
     /// True when `self` fully contains `other`, allowing `tol` EMU of slack
@@ -298,15 +324,15 @@ fn is_connector(geometry: &str) -> bool {
     matches!(
         geometry,
         "line"
-        | "straightConnector1"
-        | "bentConnector2"
-        | "bentConnector3"
-        | "bentConnector4"
-        | "bentConnector5"
-        | "curvedConnector2"
-        | "curvedConnector3"
-        | "curvedConnector4"
-        | "curvedConnector5"
+            | "straightConnector1"
+            | "bentConnector2"
+            | "bentConnector3"
+            | "bentConnector4"
+            | "bentConnector5"
+            | "curvedConnector2"
+            | "curvedConnector3"
+            | "curvedConnector4"
+            | "curvedConnector5"
     )
 }
 
@@ -325,22 +351,31 @@ fn arrow_is_directional(arrow: &Value) -> bool {
 /// further than `tol` from every side.
 fn point_on_shape(point: (i64, i64), bbox: &Bbox, tol: i64) -> Option<&'static str> {
     let (px, py) = point;
-    if px < bbox.x - tol
-        || px > bbox.right() + tol
-        || py < bbox.y - tol
-        || py > bbox.bottom() + tol
+    if px < bbox.x - tol || px > bbox.right() + tol || py < bbox.y - tol || py > bbox.bottom() + tol
     {
         return None;
     }
     let candidates: [(&'static str, i64); 8] = [
         ("topLeft", (px - bbox.x).abs() + (py - bbox.y).abs()),
         ("topRight", (px - bbox.right()).abs() + (py - bbox.y).abs()),
-        ("bottomLeft", (px - bbox.x).abs() + (py - bbox.bottom()).abs()),
-        ("bottomRight", (px - bbox.right()).abs() + (py - bbox.bottom()).abs()),
+        (
+            "bottomLeft",
+            (px - bbox.x).abs() + (py - bbox.bottom()).abs(),
+        ),
+        (
+            "bottomRight",
+            (px - bbox.right()).abs() + (py - bbox.bottom()).abs(),
+        ),
         ("top", (py - bbox.y).abs() + (px - bbox.cx()).abs() / 4),
-        ("bottom", (py - bbox.bottom()).abs() + (px - bbox.cx()).abs() / 4),
+        (
+            "bottom",
+            (py - bbox.bottom()).abs() + (px - bbox.cx()).abs() / 4,
+        ),
         ("left", (px - bbox.x).abs() + (py - bbox.cy()).abs() / 4),
-        ("right", (px - bbox.right()).abs() + (py - bbox.cy()).abs() / 4),
+        (
+            "right",
+            (px - bbox.right()).abs() + (py - bbox.cy()).abs() / 4,
+        ),
     ];
     let best = candidates.iter().min_by_key(|(_, d)| *d)?;
     Some(best.0)
@@ -452,7 +487,7 @@ mod relations_tests {
     fn nearest_shape_skips_self_and_connectors() {
         let shapes = vec![
             (0usize, b(0, 0, 100, 100), false),
-            (1, b(100, 0, 50, 50), true),  // connector
+            (1, b(100, 0, 50, 50), true), // connector
             (2, b(150, 0, 100, 100), false),
         ];
         // Point at the right edge of shape 0
@@ -483,7 +518,10 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let summary: Vec<Value> = slides
             .iter()
             .map(|s| {
@@ -501,7 +539,9 @@ impl PptxTools {
         .to_string()
     }
 
-    #[tool(description = "Extract plain text from a PPTX file; optionally filter to a single slide by 0-based index")]
+    #[tool(
+        description = "Extract plain text from a PPTX file; optionally filter to a single slide by 0-based index"
+    )]
     pub fn pptx_extract_text(Parameters(p): Parameters<PptxTextParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -515,7 +555,10 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
 
         if let Some(idx) = p.slide_index {
             let slide = match slides.get(idx) {
@@ -540,7 +583,9 @@ impl PptxTools {
         out
     }
 
-    #[tool(description = "Return the structure (elements with position, size, text) of a single slide")]
+    #[tool(
+        description = "Return the structure (elements with position, size, text) of a single slide"
+    )]
     pub fn pptx_get_slide_structure(Parameters(p): Parameters<PptxSlideParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -554,7 +599,10 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let slide = match slides.get(p.slide_index) {
             Some(s) => s,
             None => {
@@ -568,7 +616,9 @@ impl PptxTools {
         serde_json::to_string(&slide_structure(slide)).unwrap_or_else(|e| format!("Error: {}", e))
     }
 
-    #[tool(description = "Search for a substring across all text in a PPTX file; returns matching slide numbers and the text snippets that matched")]
+    #[tool(
+        description = "Search for a substring across all text in a PPTX file; returns matching slide numbers and the text snippets that matched"
+    )]
     pub fn pptx_search_text(Parameters(p): Parameters<PptxSearchParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -582,7 +632,10 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let query_lower = p.query.to_lowercase();
         let mut matches: Vec<Value> = Vec::new();
 
@@ -645,7 +698,9 @@ impl PptxTools {
         .to_string()
     }
 
-    #[tool(description = "Return one shape's full detail by slide and shape index. `shapeIndex` matches the element index in `pptx_get_slide_structure`. Includes geometry name, position/size, rotation/flip, fill, stroke (with arrow ends), adjustment values, effects (shadow/glow/etc.), and the text body when present")]
+    #[tool(
+        description = "Return one shape's full detail by slide and shape index. `shapeIndex` matches the element index in `pptx_get_slide_structure`. Includes geometry name, position/size, rotation/flip, fill, stroke (with arrow ends), adjustment values, effects (shadow/glow/etc.), and the text body when present"
+    )]
     pub fn pptx_get_shape(Parameters(p): Parameters<PptxShapeParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -659,23 +714,31 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let slide = match slides.get(p.slide_index) {
             Some(s) => s,
             None => {
                 return format!(
                     "Error: slide index {} out of range (total: {})",
-                    p.slide_index, slides.len()
+                    p.slide_index,
+                    slides.len()
                 )
             }
         };
-        let elements = slide["elements"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let elements = slide["elements"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let element = match elements.get(p.shape_index) {
             Some(e) => e,
             None => {
                 return format!(
                     "Error: shape index {} out of range (slide elements: {})",
-                    p.shape_index, elements.len()
+                    p.shape_index,
+                    elements.len()
                 )
             }
         };
@@ -687,7 +750,9 @@ impl PptxTools {
         out.to_string()
     }
 
-    #[tool(description = "Return one shape's text body in detail: paragraphs with alignment, list level, bullets, and per-run formatting (text/bold/italic/size/color/font/hyperlink)")]
+    #[tool(
+        description = "Return one shape's text body in detail: paragraphs with alignment, list level, bullets, and per-run formatting (text/bold/italic/size/color/font/hyperlink)"
+    )]
     pub fn pptx_get_shape_text(Parameters(p): Parameters<PptxShapeParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -701,23 +766,31 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let slide = match slides.get(p.slide_index) {
             Some(s) => s,
             None => {
                 return format!(
                     "Error: slide index {} out of range (total: {})",
-                    p.slide_index, slides.len()
+                    p.slide_index,
+                    slides.len()
                 )
             }
         };
-        let elements = slide["elements"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let elements = slide["elements"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let element = match elements.get(p.shape_index) {
             Some(e) => e,
             None => {
                 return format!(
                     "Error: shape index {} out of range (slide elements: {})",
-                    p.shape_index, elements.len()
+                    p.shape_index,
+                    elements.len()
                 )
             }
         };
@@ -730,7 +803,9 @@ impl PptxTools {
         .to_string()
     }
 
-    #[tool(description = "List all charts on a slide (or every slide when `slideIndex` is omitted). Each entry exposes type, position, title, categories, and series (with values)")]
+    #[tool(
+        description = "List all charts on a slide (or every slide when `slideIndex` is omitted). Each entry exposes type, position, title, categories, and series (with values)"
+    )]
     pub fn pptx_get_charts(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -744,15 +819,24 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let mut charts: Vec<Value> = Vec::new();
         for (slide_idx, slide) in slides.iter().enumerate() {
             if let Some(filter) = p.slide_index {
-                if slide_idx != filter { continue; }
+                if slide_idx != filter {
+                    continue;
+                }
             }
-            let Some(elements) = slide["elements"].as_array() else { continue };
+            let Some(elements) = slide["elements"].as_array() else {
+                continue;
+            };
             for (shape_idx, el) in elements.iter().enumerate() {
-                if el["type"].as_str() != Some("chart") { continue }
+                if el["type"].as_str() != Some("chart") {
+                    continue;
+                }
                 charts.push(serde_json::json!({
                     "slideIndex": slide_idx,
                     "shapeIndex": shape_idx,
@@ -773,7 +857,9 @@ impl PptxTools {
         serde_json::json!({ "charts": charts }).to_string()
     }
 
-    #[tool(description = "List all tables on a slide (or every slide when `slideIndex` is omitted). Each entry includes column widths, row heights, and per-cell content (textBody) plus colSpan/rowSpan/merge information")]
+    #[tool(
+        description = "List all tables on a slide (or every slide when `slideIndex` is omitted). Each entry includes column widths, row heights, and per-cell content (textBody) plus colSpan/rowSpan/merge information"
+    )]
     pub fn pptx_get_tables(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -787,15 +873,24 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let mut tables: Vec<Value> = Vec::new();
         for (slide_idx, slide) in slides.iter().enumerate() {
             if let Some(filter) = p.slide_index {
-                if slide_idx != filter { continue; }
+                if slide_idx != filter {
+                    continue;
+                }
             }
-            let Some(elements) = slide["elements"].as_array() else { continue };
+            let Some(elements) = slide["elements"].as_array() else {
+                continue;
+            };
             for (shape_idx, el) in elements.iter().enumerate() {
-                if el["type"].as_str() != Some("table") { continue }
+                if el["type"].as_str() != Some("table") {
+                    continue;
+                }
                 tables.push(serde_json::json!({
                     "slideIndex": slide_idx,
                     "shapeIndex": shape_idx,
@@ -811,7 +906,9 @@ impl PptxTools {
         serde_json::json!({ "tables": tables }).to_string()
     }
 
-    #[tool(description = "List all picture elements on a slide (or every slide when `slideIndex` is omitted). Returns metadata only by default; pass `includeDataUrl=true` to include the inline base64 bytes")]
+    #[tool(
+        description = "List all picture elements on a slide (or every slide when `slideIndex` is omitted). Returns metadata only by default; pass `includeDataUrl=true` to include the inline base64 bytes"
+    )]
     pub fn pptx_get_pictures(Parameters(p): Parameters<PptxPicturesParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -825,15 +922,24 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let mut pictures: Vec<Value> = Vec::new();
         for (slide_idx, slide) in slides.iter().enumerate() {
             if let Some(filter) = p.slide_index {
-                if slide_idx != filter { continue; }
+                if slide_idx != filter {
+                    continue;
+                }
             }
-            let Some(elements) = slide["elements"].as_array() else { continue };
+            let Some(elements) = slide["elements"].as_array() else {
+                continue;
+            };
             for (shape_idx, el) in elements.iter().enumerate() {
-                if el["type"].as_str() != Some("picture") { continue }
+                if el["type"].as_str() != Some("picture") {
+                    continue;
+                }
                 let mut entry = serde_json::json!({
                     "slideIndex": slide_idx,
                     "shapeIndex": shape_idx,
@@ -856,7 +962,9 @@ impl PptxTools {
         serde_json::json!({ "pictures": pictures }).to_string()
     }
 
-    #[tool(description = "Return presentation-level metadata: slide width/height (EMU), default text color, theme major/minor fonts, and hyperlink colors")]
+    #[tool(
+        description = "Return presentation-level metadata: slide width/height (EMU), default text color, theme major/minor fonts, and hyperlink colors"
+    )]
     pub fn pptx_get_presentation_meta(Parameters(p): Parameters<PptxPathParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -884,7 +992,9 @@ impl PptxTools {
         .to_string()
     }
 
-    #[tool(description = "Convert a PPTX file to GitHub-flavoured markdown. Preserves textual structure (titles, bullets at correct nesting, tables, chart summaries, speaker notes, comments) and discards presentation details (geometry, fills, strokes, theme inheritance, positions). Designed for agents that need to *read* a deck efficiently — typical 10-30× token reduction vs. `pptx_get_slides` / `pptx_extract_text`. Lossy by design: when you need precise layout or styling, fall back to the structured tools (`pptx_get_shape`, `pptx_get_slide_structure`, etc.)")]
+    #[tool(
+        description = "Convert a PPTX file to GitHub-flavoured markdown. Preserves textual structure (titles, bullets at correct nesting, tables, chart summaries, speaker notes, comments) and discards presentation details (geometry, fills, strokes, theme inheritance, positions). Designed for agents that need to *read* a deck efficiently — typical 10-30× token reduction vs. `pptx_get_slides` / `pptx_extract_text`. Lossy by design: when you need precise layout or styling, fall back to the structured tools (`pptx_get_shape`, `pptx_get_slide_structure`, etc.)"
+    )]
     pub fn pptx_to_markdown(Parameters(p): Parameters<PptxPathParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -896,7 +1006,9 @@ impl PptxTools {
         }
     }
 
-    #[tool(description = "Return speaker-notes text for one or all slides. Each entry: { slideIndex, slideNumber, notes }. Slides without a notesSlide part are omitted")]
+    #[tool(
+        description = "Return speaker-notes text for one or all slides. Each entry: { slideIndex, slideNumber, notes }. Slides without a notesSlide part are omitted"
+    )]
     pub fn pptx_get_notes(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -910,13 +1022,20 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let mut notes: Vec<Value> = Vec::new();
         for (slide_idx, slide) in slides.iter().enumerate() {
             if let Some(filter) = p.slide_index {
-                if slide_idx != filter { continue }
+                if slide_idx != filter {
+                    continue;
+                }
             }
-            let Some(text) = slide["notes"].as_str() else { continue };
+            let Some(text) = slide["notes"].as_str() else {
+                continue;
+            };
             notes.push(serde_json::json!({
                 "slideIndex": slide_idx,
                 "slideNumber": slide["slideNumber"],
@@ -926,7 +1045,9 @@ impl PptxTools {
         serde_json::json!({ "notes": notes }).to_string()
     }
 
-    #[tool(description = "Return legacy (non-threaded) slide comments. Each entry: { slideIndex, slideNumber, author?, date?, text }. Office365 modern threaded comments are not yet supported")]
+    #[tool(
+        description = "Return legacy (non-threaded) slide comments. Each entry: { slideIndex, slideNumber, author?, date?, text }. Office365 modern threaded comments are not yet supported"
+    )]
     pub fn pptx_get_comments(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -940,13 +1061,20 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let mut comments: Vec<Value> = Vec::new();
         for (slide_idx, slide) in slides.iter().enumerate() {
             if let Some(filter) = p.slide_index {
-                if slide_idx != filter { continue }
+                if slide_idx != filter {
+                    continue;
+                }
             }
-            let Some(arr) = slide["comments"].as_array() else { continue };
+            let Some(arr) = slide["comments"].as_array() else {
+                continue;
+            };
             for c in arr {
                 comments.push(serde_json::json!({
                     "slideIndex": slide_idx,
@@ -960,7 +1088,9 @@ impl PptxTools {
         serde_json::json!({ "comments": comments }).to_string()
     }
 
-    #[tool(description = "Infer geometric relations between shapes on a slide: connector hookups (with arrow direction when stroke ends are arrows), containment, overlap, axis-aligned alignment groups, and equal distribution. Detection is purely spatial — `confidence: \"inferred\"` flags this — until the parser exposes ECMA-376 §20.5.2.2 stCxn/endCxn references")]
+    #[tool(
+        description = "Infer geometric relations between shapes on a slide: connector hookups (with arrow direction when stroke ends are arrows), containment, overlap, axis-aligned alignment groups, and equal distribution. Detection is purely spatial — `confidence: \"inferred\"` flags this — until the parser exposes ECMA-376 §20.5.2.2 stCxn/endCxn references"
+    )]
     pub fn pptx_get_shape_relations(Parameters(p): Parameters<PptxRelationsParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
@@ -974,17 +1104,24 @@ impl PptxTools {
             Ok(v) => v,
             Err(e) => return format!("Error: {}", e),
         };
-        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let slides = pres["slides"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
         let slide = match slides.get(p.slide_index) {
             Some(s) => s,
             None => {
                 return format!(
                     "Error: slide index {} out of range (total: {})",
-                    p.slide_index, slides.len()
+                    p.slide_index,
+                    slides.len()
                 )
             }
         };
-        let elements = slide["elements"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let elements = slide["elements"]
+            .as_array()
+            .map(|s| s.as_slice())
+            .unwrap_or(&[]);
 
         let tol: i64 = p.tolerance_emu.unwrap_or(50_000).max(0);
 
@@ -993,7 +1130,9 @@ impl PptxTools {
         let mut shape_summaries: Vec<Value> = Vec::with_capacity(elements.len());
         let mut bboxes: Vec<(usize, Bbox, bool)> = Vec::with_capacity(elements.len());
         for (idx, el) in elements.iter().enumerate() {
-            let Some(bbox) = Bbox::from_element(el) else { continue };
+            let Some(bbox) = Bbox::from_element(el) else {
+                continue;
+            };
             let geometry = el["geometry"].as_str().unwrap_or("");
             let is_conn = el["type"].as_str() == Some("shape") && is_connector(geometry);
             // Pull a one-line text snippet for reader convenience.
@@ -1024,11 +1163,19 @@ impl PptxTools {
 
         // ── Connections (connector → resolved endpoints) ──────────────────
         for (idx, bbox, is_conn) in &bboxes {
-            if !*is_conn { continue }
+            if !*is_conn {
+                continue;
+            }
             let element = &elements[*idx];
             let stroke = &element["stroke"];
-            let head_arrow = stroke.get("headEnd").map(arrow_is_directional).unwrap_or(false);
-            let tail_arrow = stroke.get("tailEnd").map(arrow_is_directional).unwrap_or(false);
+            let head_arrow = stroke
+                .get("headEnd")
+                .map(arrow_is_directional)
+                .unwrap_or(false);
+            let tail_arrow = stroke
+                .get("tailEnd")
+                .map(arrow_is_directional)
+                .unwrap_or(false);
 
             let endpoints = line_endpoints(bbox);
             let head_target = nearest_shape_to_point(endpoints[0].1, &bboxes, *idx, tol);
@@ -1073,11 +1220,16 @@ impl PptxTools {
         // ── Contains (real shapes only — connectors don't "contain") ──────
         for i in 0..bboxes.len() {
             let (idx_outer, outer_bb, outer_conn) = bboxes[i];
-            if outer_conn { continue }
-            for j in 0..bboxes.len() {
-                if i == j { continue }
-                let (idx_inner, inner_bb, inner_conn) = bboxes[j];
-                if inner_conn { continue }
+            if outer_conn {
+                continue;
+            }
+            for (j, &(idx_inner, inner_bb, inner_conn)) in bboxes.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                if inner_conn {
+                    continue;
+                }
                 if outer_bb.contains(&inner_bb, tol) {
                     relations.push(serde_json::json!({
                         "kind": "contains",
@@ -1091,11 +1243,16 @@ impl PptxTools {
         // ── Overlap (excluding contains) ──────────────────────────────────
         for i in 0..bboxes.len() {
             let (idx_a, a_bb, a_conn) = bboxes[i];
-            if a_conn { continue }
-            for j in (i + 1)..bboxes.len() {
-                let (idx_b, b_bb, b_conn) = bboxes[j];
-                if b_conn { continue }
-                if a_bb.contains(&b_bb, tol) || b_bb.contains(&a_bb, tol) { continue }
+            if a_conn {
+                continue;
+            }
+            for &(idx_b, b_bb, b_conn) in bboxes.iter().skip(i + 1) {
+                if b_conn {
+                    continue;
+                }
+                if a_bb.contains(&b_bb, tol) || b_bb.contains(&a_bb, tol) {
+                    continue;
+                }
                 let iou = a_bb.iou(&b_bb);
                 if iou > 0.0 {
                     relations.push(serde_json::json!({
@@ -1115,7 +1272,7 @@ impl PptxTools {
             .map(|(i, b, _)| (*i, *b))
             .collect();
 
-        let alignment_axes: [(&str, fn(&Bbox) -> i64); 3] = [
+        let alignment_axes: [AlignmentAxis; 3] = [
             ("top", |b| b.y),
             ("center", |b| b.cy()),
             ("bottom", |b| b.bottom()),
@@ -1123,7 +1280,7 @@ impl PptxTools {
         for (axis, get_y) in alignment_axes {
             push_alignment_groups(&real, "alignH", axis, get_y, tol, &mut relations);
         }
-        let alignment_axes_v: [(&str, fn(&Bbox) -> i64); 3] = [
+        let alignment_axes_v: [AlignmentAxis; 3] = [
             ("left", |b| b.x),
             ("center", |b| b.cx()),
             ("right", |b| b.right()),
@@ -1210,8 +1367,14 @@ mod sample_tests {
         }
         let out = PptxTools::pptx_get_presentation_meta(pp(&path));
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
-        assert!(v["slideWidth"].as_i64().unwrap_or(0) > 0, "slideWidth should be > 0");
-        assert!(v["slideHeight"].as_i64().unwrap_or(0) > 0, "slideHeight should be > 0");
+        assert!(
+            v["slideWidth"].as_i64().unwrap_or(0) > 0,
+            "slideWidth should be > 0"
+        );
+        assert!(
+            v["slideHeight"].as_i64().unwrap_or(0) > 0,
+            "slideHeight should be > 0"
+        );
     }
 
     #[test]
@@ -1226,8 +1389,14 @@ mod sample_tests {
             tolerance_emu: None,
         }));
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
-        assert!(v["shapes"].as_array().is_some(), "missing 'shapes' array: {out}");
-        assert!(v["relations"].as_array().is_some(), "missing 'relations' array: {out}");
+        assert!(
+            v["shapes"].as_array().is_some(),
+            "missing 'shapes' array: {out}"
+        );
+        assert!(
+            v["relations"].as_array().is_some(),
+            "missing 'relations' array: {out}"
+        );
         assert_eq!(v["slideIndex"].as_u64(), Some(0));
     }
 
@@ -1259,7 +1428,10 @@ mod sample_tests {
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
         let pics = v["pictures"].as_array().expect("missing 'pictures'");
         for p in pics {
-            assert!(p.get("dataUrl").is_none(), "dataUrl should be omitted by default");
+            assert!(
+                p.get("dataUrl").is_none(),
+                "dataUrl should be omitted by default"
+            );
         }
     }
 
@@ -1358,11 +1530,18 @@ mod sample_tests {
         let out = PptxTools::pptx_to_markdown(pp(&path));
         assert!(!out.starts_with("Error:"), "errored: {out}");
         // Slide titles should appear as level-1 headings.
-        assert!(out.contains("# STATE OF THE FOREST"), "missing slide-1 heading: {}", &out[..200.min(out.len())]);
+        assert!(
+            out.contains("# STATE OF THE FOREST"),
+            "missing slide-1 heading: {}",
+            &out[..200.min(out.len())]
+        );
         // Slide separator between slides.
         assert!(out.contains("\n---\n"), "missing slide separator");
         // Bold/italic markers from rich-text runs should be preserved.
-        assert!(out.contains("**3.4%**") || out.contains("**+3.4%**"), "missing bold marker");
+        assert!(
+            out.contains("**3.4%**") || out.contains("**+3.4%**"),
+            "missing bold marker"
+        );
         // Tables → pipe rows.
         assert!(out.contains("| Taxon |"), "biodiversity table missing");
         // Chart → markdown summary.
@@ -1394,7 +1573,10 @@ mod sample_tests {
             slide_index: None,
         }));
         let v: Value = serde_json::from_str(&out).expect("must return JSON");
-        assert!(v["comments"].as_array().is_some(), "missing 'comments' array");
+        assert!(
+            v["comments"].as_array().is_some(),
+            "missing 'comments' array"
+        );
     }
 
     #[test]
@@ -1408,6 +1590,9 @@ mod sample_tests {
             slide_index: 0,
             shape_index: 999_999,
         }));
-        assert!(out.starts_with("Error:"), "expected out-of-range error, got: {out}");
+        assert!(
+            out.starts_with("Error:"),
+            "expected out-of-range error, got: {out}"
+        );
     }
 }

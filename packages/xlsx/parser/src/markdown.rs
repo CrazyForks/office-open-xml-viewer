@@ -111,11 +111,7 @@ pub(crate) fn render_sheet(sheet: &Value, out: &mut String) {
 
 fn write_table_row(out: &mut String, row: &[String], n_cols: usize) {
     let cells: Vec<String> = (0..n_cols)
-        .map(|i| {
-            row.get(i)
-                .map(|s| escape_cell(s))
-                .unwrap_or_default()
-        })
+        .map(|i| row.get(i).map(|s| escape_cell(s)).unwrap_or_default())
         .collect();
     let _ = writeln!(out, "| {} |", cells.join(" | "));
 }
@@ -140,7 +136,13 @@ fn cell_display(cell: &Value) -> String {
             .unwrap_or_default(),
         "bool" => value["bool"]
             .as_bool()
-            .map(|b| if b { "TRUE".to_string() } else { "FALSE".to_string() })
+            .map(|b| {
+                if b {
+                    "TRUE".to_string()
+                } else {
+                    "FALSE".to_string()
+                }
+            })
             .unwrap_or_default(),
         "error" => value["error"].as_str().unwrap_or("#ERR").to_string(),
         _ => String::new(),
@@ -156,11 +158,12 @@ fn format_number(n: f64) -> String {
     // round-trips through XML as 702.5999999999999). Trim trailing zeros so
     // 702.6 doesn't render as 702.6000000000.
     let s = format!("{n:.10}");
-    let trimmed = s
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string();
-    if trimmed.is_empty() { "0".to_string() } else { trimmed }
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed
+    }
 }
 
 /// Returns the set of (row, col) coordinates that are continuation cells of a
