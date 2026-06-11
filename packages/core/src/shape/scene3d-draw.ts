@@ -88,11 +88,34 @@ function applyH(h: H, u: number, v: number): Vec2 {
  * fractional-pixel sampling. The bleed is symmetric so adjacent cells overlap
  * rather than gap.
  */
+/** A 2D affine transform as the canvas 6-tuple (a,b,c,d,e,f). */
+type Affine = [number, number, number, number, number, number];
+
+/**
+ * Compose two canvas affine transforms: `base ∘ m` (apply m first, then base).
+ * Matches DOMMatrix.multiply semantics for the 2D 6-tuple form, so the cell
+ * transform stacks ON TOP of the live ctx transform (DPR scale, rotation, flip)
+ * instead of replacing it.
+ */
+function composeAffine(base: Affine, m: Affine): Affine {
+  const [a0, b0, c0, d0, e0, f0] = base;
+  const [a1, b1, c1, d1, e1, f1] = m;
+  return [
+    a0 * a1 + c0 * b1,
+    b0 * a1 + d0 * b1,
+    a0 * c1 + c0 * d1,
+    b0 * c1 + d0 * d1,
+    a0 * e1 + c0 * f1 + e0,
+    b0 * e1 + d0 * f1 + f0,
+  ];
+}
+
 function drawCell(
   ctx: AnyCtx,
   img: AnyImage,
   imgW: number,
   imgH: number,
+  base: Affine,
   sx0: number,
   sy0: number,
   sx1: number,
@@ -128,13 +151,14 @@ function drawCell(
   if (bw <= 0 || bh <= 0) return;
 
   ctx.save();
-  // setTransform maps source pixel (sx,sy) → dest:
+  // The cell maps source pixel (sx,sy) → dest (in the SAME space as the quad
+  // corners, i.e. the caller's CSS-pixel space):
   //   dest = p0 + (sx - sx0)*u_basis + (sy - sy0)*v_basis
-  // i.e. matrix (a,b,c,d,e,f) with a=ux, b=uy, c=vx, d=vy and translation
-  // chosen so source (sx0,sy0) lands on p0.
   const e = p0.x - sx0 * ux - sy0 * vx;
   const f = p0.y - sx0 * uy - sy0 * vy;
-  ctx.setTransform(ux, uy, vx, vy, e, f);
+  // Compose ON TOP of the live transform so DPR / rotation / flip are preserved.
+  const [ca, cb, cc, cd, ce, cf] = composeAffine(base, [ux, uy, vx, vy, e, f]);
+  ctx.setTransform(ca, cb, cc, cd, ce, cf);
   ctx.drawImage(img, bx0, by0, bw, bh, bx0, by0, bw, bh);
   ctx.restore();
 }
@@ -151,6 +175,7 @@ function warpRecursive(
   img: AnyImage,
   imgW: number,
   imgH: number,
+  base: Affine,
   h: H,
   u0: number,
   v0: number,
@@ -186,7 +211,7 @@ function warpRecursive(
     const sy0 = v0 * imgH;
     const sx1 = u1 * imgW;
     const sy1 = v1 * imgH;
-    drawCell(ctx, img, imgW, imgH, sx0, sy0, sx1, sy1, c00, c10, c01);
+    drawCell(ctx, img, imgW, imgH, base, sx0, sy0, sx1, sy1, c00, c10, c01);
     return;
   }
 
@@ -194,11 +219,11 @@ function warpRecursive(
   const du = u1 - u0;
   const dv = v1 - v0;
   if (du >= dv) {
-    warpRecursive(ctx, img, imgW, imgH, h, u0, v0, um, v1, tol, depth - 1);
-    warpRecursive(ctx, img, imgW, imgH, h, um, v0, u1, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, h, u0, v0, um, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, h, um, v0, u1, v1, tol, depth - 1);
   } else {
-    warpRecursive(ctx, img, imgW, imgH, h, u0, v0, u1, vm, tol, depth - 1);
-    warpRecursive(ctx, img, imgW, imgH, h, u0, vm, u1, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, h, u0, v0, u1, vm, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, h, u0, vm, u1, v1, tol, depth - 1);
   }
 }
 
@@ -238,11 +263,18 @@ export function drawProjected(
   const h = unitSquareToQuad(corners[0], corners[1], corners[2], corners[3]);
   if (!h) return; // degenerate quad — skip rather than draw garbage.
 
-  // Recursion cap: 2^7 = 128 splits per axis is far past sub-pixel for any sane
+  // Recursion cap: 2^14 splits per axis is far past sub-pixel for any sane
   // tilt; the error test almost always stops much sooner.
   const MAX_DEPTH = 14;
   dst.save();
+  // Capture the live transform (DPR scale, the element's rotation/flip). Each
+  // cell composes ITS map on top of this so the warp inherits the live
+  // coordinate system instead of `setTransform` wiping it to the identity.
+  const t = dst.getTransform();
+  const base: Affine = [t.a, t.b, t.c, t.d, t.e, t.f];
   // Clip to the quad so the bleed overlap can't spill past the projected shape.
+  // The clip is built under the live transform (corners are in that space), so
+  // it matches the cells which also run under the same base transform.
   dst.beginPath();
   dst.moveTo(corners[0].x, corners[0].y);
   dst.lineTo(corners[1].x, corners[1].y);
@@ -250,6 +282,6 @@ export function drawProjected(
   dst.lineTo(corners[3].x, corners[3].y);
   dst.closePath();
   dst.clip();
-  warpRecursive(dst, src, srcW, srcH, h, 0, 0, 1, 1, tol, MAX_DEPTH);
+  warpRecursive(dst, src, srcW, srcH, base, h, 0, 0, 1, 1, tol, MAX_DEPTH);
   dst.restore();
 }
