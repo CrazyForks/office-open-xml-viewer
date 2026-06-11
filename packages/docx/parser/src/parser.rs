@@ -364,8 +364,14 @@ fn parse_notes(
         if id.is_empty() || id == "-1" || id == "0" || is_special {
             continue;
         }
-        let content =
-            parse_body_elements(n, style_map, num_map, &local_media_map, &local_rel_map, theme);
+        let content = parse_body_elements(
+            n,
+            style_map,
+            num_map,
+            &local_media_map,
+            &local_rel_map,
+            theme,
+        );
         out.push(crate::types::DocxNote { id, content });
     }
     out
