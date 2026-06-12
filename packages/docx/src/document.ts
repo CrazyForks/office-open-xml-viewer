@@ -3,6 +3,8 @@ import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   WorkerBridge,
+  SCRIPT_GOOGLE_FONTS,
+  SCRIPT_PRELOAD_NAMES,
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
@@ -47,6 +49,11 @@ const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // is enabled — see `load`, which always queues these names.
   'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
   'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
+  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
+  // Noto faces, shared with pptx/xlsx via @silurus/ooxml-core. The renderer
+  // appends these to the font chain (CJK ordered by document language); they are
+  // loaded only when useGoogleFonts is on — no binaries ship in the bundle.
+  ...SCRIPT_GOOGLE_FONTS,
 };
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
@@ -98,6 +105,10 @@ export class DocxDocument {
           doc._document?.minorFont,
           'Noto Naskh Arabic',
           'Noto Sans Arabic',
+          // Always queue every script Noto face so a glyph that falls through
+          // the chain (CJK / Cyrillic / Thai / Devanagari / Hebrew) resolves to
+          // a real web font even when no document font maps to it by name.
+          ...SCRIPT_PRELOAD_NAMES,
         ],
         DOCX_GOOGLE_FONTS,
       );
