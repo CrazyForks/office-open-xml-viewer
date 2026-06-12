@@ -19,13 +19,14 @@
  *      surface height in [0,1]: 0 at the rim (d=0), 1 once `d ≥ w` (the flat top).
  *      `circle` is a quarter-circle (rounded lip), `hardEdge` a linear chamfer,
  *      etc. (§20.1.10.9).
- *   3. The surface normal combines two INDEPENDENT sources (the scale-invariant
- *      redesign — see `computeBevelNormals`): its TILT MAGNITUDE comes from the
- *      profile's local slope at the exact EDT distance, and its in-plane AZIMUTH
- *      comes from the gradient of a Gaussian-blurred coverage field. Distance is
- *      exact; direction is analytically smooth at every raster scale. On the flat
- *      interior the tilt is zero → n = (0,0,1); on the lip it tilts outward toward
- *      the rim along the silhouette's macroscopic normal.
+ *   3. The surface normal combines two sources, both grounded in the exact EDT
+ *      distance (see `computeBevelNormals`): its TILT MAGNITUDE comes from the
+ *      profile's local slope at the exact distance, and its in-plane AZIMUTH from
+ *      the gradient of a Gaussian-blurred copy of that same distance field. The
+ *      distance is exact; the direction is analytically smooth at every raster scale
+ *      AND free of the high-curvature "apex plateau" a blurred-coverage gradient
+ *      suffers (#418). On the flat interior the tilt is zero → n = (0,0,1); on the
+ *      lip it tilts outward toward the rim along the silhouette's outward normal.
  *   4. Lambert diffuse + a weak specular term against the light-rig direction
  *      give a per-pixel brightness factor, applied as a multiply/screen over the
  *      already-painted body.
@@ -329,8 +330,15 @@ export function distanceToEdge(
   return f;
 }
 
-/** Fraction of the band width used as the coverage-blur σ. See COVERAGE_SIGMA. */
-const COVERAGE_SIGMA_FRACTION = 0.25;
+/**
+ * Fraction of the band width used as the σ of the Gaussian applied to the EXACT
+ * EDT distance field before its gradient is taken for the lip azimuth. A quarter
+ * of the band is large enough to wash out the per-pixel EDT quantisation (the raw
+ * `∇dist` Voronoi facets) yet small enough to keep the gradient local to one rim.
+ * See `computeBevelNormals` for why the azimuth comes from ∇(blurred DISTANCE) and
+ * not ∇(blurred coverage) — the latter plateaus at a high-curvature apex (#418).
+ */
+const DISTANCE_SIGMA_FRACTION = 0.25;
 
 /**
  * Fraction of the band width over which the lip's shading eases back to the flat
@@ -378,47 +386,54 @@ const HARD_EDGE_SHELF_FRACTION = 0.5;
  * `bandMask` (W·H of 0/1; 1 where the pixel is inside the shape and within the
  * bevel band, i.e. where shading should be applied).
  *
- * ## Scale-invariant azimuth (this redesign — issue lineage #410→#413→#415→here)
+ * ## Distance-gradient azimuth (issue lineage #410→#413→#415→#416→#417→#418)
  *
- * The lip normal has two parts that we derive from two INDEPENDENT, decoupled
- * sources so each is correct on its own terms:
+ * The lip normal has two parts derived from two INDEPENDENT sources so each is
+ * correct on its own terms, BOTH ultimately grounded in the exact EDT distance:
  *
  *   • TILT MAGNITUDE (how steeply the lip rises) — from the cross-section profile's
  *     local slope at the EXACT EDT distance `d`. Distance is the geometrically
  *     meaningful quantity for the height (a `circle` lip at d=band/2 is at a precise
- *     height), and the EDT gives it exactly. This is what the PDF-calibrated slide-3
- *     brightness curve depends on, so it is preserved bit-for-bit in spirit.
+ *     height), and the EDT gives it exactly. The PDF-calibrated slide-3 brightness
+ *     curve depends on this, so it is preserved.
  *
- *   • IN-PLANE AZIMUTH (which way the lip faces) — from the gradient of a Gaussian-
- *     blurred COVERAGE field `C = G_σ * alpha`, σ = 0.25·bandPx. This is the load-
- *     bearing change. `∇C = (∇G_σ) * alpha` is a convolution with the smooth kernel
- *     ∇G_σ, so C ∈ C^∞ regardless of how the silhouette was rasterised: the azimuth
- *     field rotates continuously around any smooth boundary, with a per-step turn
- *     bounded only by the silhouette's curvature. Because σ scales with the band and
- *     the geometry scales with devScale TOGETHER, the smoothness is identical at
- *     every raster scale — it is scale-invariant by construction.
+ *   • IN-PLANE AZIMUTH (which way the lip faces) — from −∇C where C is the EDT
+ *     distance itself, Gaussian-blurred by σ = 0.25·bandPx. The distance field's
+ *     level sets ARE the silhouette's offset curves, so −∇C is the true outward
+ *     radial normal everywhere; the blur is a smooth (C^∞) convolution, so the
+ *     direction rotates continuously and is scale-invariant (σ and the geometry
+ *     scale with devScale together).
  *
- * ### Why this finally fixes the size-dependent facet (and the patches didn't)
+ * ### Why each prior fix was insufficient (the history this comment preserves)
  *
- * The OLD method took BOTH parts from the finite-difference gradient of the EDT
- * height field. But ∇(distance-to-point-set) is piecewise-constant: each band
- * pixel's nearest boundary sample dominates, so the gradient DIRECTION snaps to
- * that sample's Voronoi-cell direction, chording the lip into facets. The screen-
- * blend highlight amplifies the chord at the lit/shadow terminator. Both prior
- * fixes were post-filters on that same broken field:
- *   - #413: box-blur the scalar height → smooths gradient MAGNITUDE, not direction
- *     (fixed devScale ≤ 2 only).
- *   - #415: tangential low-pass of the normal VECTOR over radius 0.25·bandPx, gated
- *     at bandPx ≥ 24 → fixed devScale 4, REGRESSED at devScale 8.
- * Every band-proportional blur radius chases a moving target: the Voronoi cell's
- * angular width depends on radial distance from the rim, which grows with the band,
- * so a large enough band always re-opens the chord. Sourcing the azimuth from ∇C
- * removes the Voronoi structure at the SOURCE — there is no discrete cell field
- * left to facet — so no gate and no post-blur are needed at any scale.
+ *  - #410 (first bevel): azimuth from the 1px finite-difference gradient of the EDT
+ *    HEIGHT field. ∇(distance-to-point-set) is piecewise-constant — each band pixel's
+ *    nearest boundary sample dominates, so the direction snaps to that sample's
+ *    Voronoi-cell direction and chords the lip into facets (worse as the shape grows).
+ *  - #413: box-blurred the scalar HEIGHT → smoothed gradient MAGNITUDE, not
+ *    direction. Fixed devScale ≤ 2 only.
+ *  - #415: tangential low-pass of the normal VECTOR (radius 0.25·band, gated ≥24px).
+ *    Fixed devScale 4, REGRESSED at devScale 8 — every band-proportional post-blur
+ *    chases a Voronoi cell whose angular width grows with the band.
+ *  - #416: moved the azimuth source to −∇(blurred COVERAGE) `G_σ * alpha`. This
+ *    killed the Voronoi facets (no discrete cell field left) and the scale sweep
+ *    went green — BUT coverage FLAT-TOPS at a high-curvature convex apex: the blur
+ *    of a sharply curved tip plateaus, so ∇C there is near-constant over a wide
+ *    angular span. The azimuth rotated TOO SLOWLY across the apex → the lit factor
+ *    went flat → the "flat horizontal cut" at the top of the slide-6 ellipse. The
+ *    ring/ellipse scale-sweep (a JUMP detector) never caught it because a plateau is
+ *    a SMOOTH error, not a jump.
+ *  - #417: corrected the `hardEdge` profile (rim shelf) and added the inner-crease
+ *    feather. Necessary for the band GEOMETRY, but orthogonal to the azimuth — the
+ *    flat cut persisted because its cause was the coverage plateau, not the profile.
+ *  - #418 (this): source the azimuth from −∇(blurred DISTANCE). Distance does NOT
+ *    plateau (it grows linearly inward with the same radial direction at the apex),
+ *    so the lit factor follows the true elliptical curve; the blur still removes the
+ *    raw-EDT Voronoi facets, keeping the scale-sweep green. One field, both
+ *    pathologies gone.
  *
- * The coverage blur is O(N) (three cascaded box passes, running-sum, independent of
- * σ), runs once per bevel on the device offscreen — the same order as the EDT it
- * sits beside, and cheaper than the two post-filter passes it replaces.
+ * The distance blur is O(N) (three cascaded box passes, running-sum, independent of
+ * σ), runs once per bevel on the device offscreen — same order as the EDT beside it.
  */
 export function computeBevelNormals(
   alpha: ArrayLike<number>,
@@ -447,16 +462,29 @@ export function computeBevelNormals(
   const heightScale = bandPx > 0 ? heightPx / bandPx : 0;
   const tiltScale = heightScale * bandPx;
 
-  // ── Azimuth source: gradient of a Gaussian-blurred coverage field ──────────
-  // Blur the raw coverage (alpha/255) by σ ∝ band. σ is a quarter of the band: a
-  // fraction of the bevel's OWN length scale, large enough to wash out the per-
-  // pixel Voronoi noise yet small enough to stay local to a single rim (a larger σ
-  // would blur the inner and outer rims of a thin ring together and flip the
-  // azimuth at the medial axis). See COVERAGE_SIGMA_FRACTION.
-  const coverage = new Float64Array(w * h);
-  for (let i = 0; i < w * h; i++) coverage[i] = (alpha[i] ?? 0) / 255;
-  const sigma = Math.max(1, bandPx * COVERAGE_SIGMA_FRACTION);
-  const C = gaussianBlur(coverage, w, h, sigma);
+  // ── Azimuth source: gradient of a Gaussian-blurred EXACT DISTANCE field ─────
+  // The lip azimuth is the silhouette's outward normal. We read it from ∇C where C
+  // is the EDT distance `dist` smoothed by σ = 0.25·band (a fraction of the bevel's
+  // own length scale). Two pathologies are avoided BY CONSTRUCTION:
+  //   • Voronoi facets (raw ∇dist): the EDT's nearest-seed direction is piecewise
+  //     constant, so a 1px finite difference of the bare distance snaps to facet
+  //     directions. The blur is a smooth (C^∞) convolution, so ∇C rotates
+  //     continuously around the rim — no facets at any raster scale.
+  //   • Apex plateau (∇ of blurred COVERAGE, the #416 design): coverage `G_σ*alpha`
+  //     FLAT-TOPS at a high-curvature convex apex, so its gradient points near-
+  //     constant over a wide angular span there and the lit factor goes flat — the
+  //     "flat horizontal cut" users reported at the top of the slide-6 ellipse. The
+  //     DISTANCE field does NOT plateau: its level sets are the silhouette's offset
+  //     curves, so it keeps growing linearly inward with the SAME radial direction
+  //     everywhere, apex included. Blurring distance therefore preserves the true
+  //     normal direction while only removing the per-pixel quantisation.
+  // σ stays local to a single rim (a larger σ would blur a thin ring's inner and
+  // outer rims together and flip the azimuth at the medial axis). The spatial
+  // STRUCTURE of the shading (band membership, the inner-crease feather, the tilt
+  // magnitude) is taken from the exact `dist` below; only the DIRECTION uses C.
+  // See DISTANCE_SIGMA_FRACTION.
+  const sigma = Math.max(1, bandPx * DISTANCE_SIGMA_FRACTION);
+  const C = gaussianBlur(dist, w, h, sigma);
 
   // Local profile slope dh/dd at distance d (per px), via a centred 1px difference
   // of the profile. Drives the lip's tilt magnitude; the height stays distance-exact.
@@ -492,8 +520,10 @@ export function computeBevelNormals(
         weight = 1 - u * u * (3 - 2 * u); // 1→0 smoothstep
       }
       bandWeight[i] = weight;
-      // Outward azimuth = −∇C/|∇C| (coverage decreases toward the rim, so the
-      // negative gradient points outward, along the silhouette's outward normal).
+      // Outward azimuth = −∇C/|∇C|. C is the blurred DISTANCE, which DECREASES
+      // toward the rim (distance 0 at the boundary), so −∇C points outward along
+      // the silhouette's outward normal — the same sign the blurred-coverage field
+      // used (coverage also decreases outward), so only the SOURCE of C changed.
       const xl = x > 0 ? x - 1 : x;
       const xr = x < w - 1 ? x + 1 : x;
       const yu = y > 0 ? y - 1 : y;

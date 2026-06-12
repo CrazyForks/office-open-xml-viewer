@@ -270,42 +270,41 @@ describe('gaussianBlur (3-box cascade, zero-padded)', () => {
   });
 });
 
-describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#415→here)', () => {
-  // DECISIVE SCALE SWEEP. The bevel facet bug has now slipped through THREE times,
-  // each time at a LARGER raster scale, because every prior fix was a post-filter
-  // on the EDT gradient whose radius was a fraction of the (growing) band:
+describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#415→#416→#418)', () => {
+  // DECISIVE SCALE SWEEP. The bevel facet bug slipped through repeatedly, each time
+  // at a LARGER raster scale, because every early fix was a post-filter on the EDT
+  // gradient whose radius was a fraction of the (growing) band:
   //   1. #410 mesh cracks — grew with shape size.
   //   2. #413 height-field blur — fixed devScale ≤ 2, regressed at 4.
   //   3. #415 tangential normal blur (radius 0.25·band, gated ≥24px) — fixed
   //      devScale 4, REGRESSED at devScale 8 (the user's real DPR-8 render).
-  // Each prior test pinned a SINGLE scale (e.g. #415 asserted band=128 / devScale 4
-  // only), so the next larger scale walked straight through. This suite instead
-  // PARAMETRISES devScale ∈ {1,2,4,8} and asserts ONE scale-independent threshold
-  // for every scale, so a regression at any DPR fails here.
+  // Each early test pinned a SINGLE scale, so the next larger scale walked straight
+  // through. This suite instead PARAMETRISES devScale ∈ {1,2,4,8} and asserts ONE
+  // scale-independent threshold for every scale, so a facet at any DPR fails here.
   //
-  // The redesign sources the lip AZIMUTH from ∇(Gaussian-blurred coverage), which
-  // is analytically C^∞ at every scale (no EDT Voronoi structure enters the
-  // direction), so smoothness is invariant — and in fact IMPROVES with scale.
-  // Measured ceilings (production code): ellipse & ring max 1-step azimuth jump
-  // ≤ 0.0094 rad at devScale 1, shrinking to ≤ 0.0030 at devScale 8; highlight
-  // luminance 2nd-difference ≤ 0.0011 → ≤ 0.0002. For comparison the RAW EDT
-  // gradient (pre-patch) jumps 0.12–0.24 rad — a 7°–13° chord — at all scales.
-  // A single ceiling of 0.02 rad / 0.003 lum sits well above the redesign at
-  // every scale yet an order of magnitude below the raw facet.
+  // The azimuth is now sourced from ∇(Gaussian-blurred DISTANCE) (#418; #416 used
+  // blurred COVERAGE, which removed the facet but PLATEAUED at the ellipse apex —
+  // see the separate "apex plateau" suite). Blurring the EXACT distance is C^∞ at
+  // every scale (no EDT Voronoi structure enters the direction), so smoothness is
+  // scale-invariant — and in fact improves with scale. Measured (production code):
+  // ellipse & ring max 1-step azimuth jump ≤ 0.0128 rad at devScale 1, shrinking to
+  // ≤ 0.0046 at devScale 8; highlight luminance 2nd-difference ≤ 0.0050 → ≤ 0.0007.
+  // For comparison the RAW EDT gradient (pre-#416) jumps 0.12–0.24 rad — a 7°–13°
+  // chord — at all scales. The ceilings below sit just above the devScale-1
+  // quantisation floor yet an order of magnitude below the raw facet.
   const DEV_SCALES = [1, 2, 4, 8];
   // sample-11 slide 6 body offscreen at devScale 1 ≈ 397×503 px, hardEdge band 32.
   const BASE = { W: 397, H: 503, band: 32 };
   const AZ_JUMP_MAX = 0.02; // rad, scale-independent
   // The lip AZIMUTH is the facet detector (AZ_JUMP_MAX). LUM_2ND_DIFF_MAX bounds the
   // tangential highlight 2nd-difference: it must stay far below the raw EDT facet
-  // (0.12–0.24) but is otherwise quantisation-limited at the smallest raster. Since
-  // `hardEdge` now concentrates its turn-down in the rim shelf, the lit lip is
-  // steeper at the 0.25·band sample point than the old full-width flat chamfer, so
-  // the measured 2nd-difference is ≈0.0044 at devScale 1 (32px band, pixel-limited)
-  // shrinking to ≈0.0010 at devScale 8. A ceiling of 0.005 sits just above the
-  // devScale-1 quantisation floor yet ~30× below the raw facet — still a decisive
-  // facet test, now matched to the rim-concentrated profile.
-  const LUM_2ND_DIFF_MAX = 0.005; // scale-independent
+  // (0.12–0.24) but is otherwise quantisation-limited at the smallest raster. With
+  // the rim-concentrated `hardEdge` profile the lit lip is steeper at the 0.25·band
+  // sample point, so the measured 2nd-difference is ≈0.0050 at devScale 1 (32px band,
+  // pixel-limited) shrinking to ≈0.0007 at devScale 8. A ceiling of 0.006 sits just
+  // above the devScale-1 quantisation floor yet ~25× below the raw facet — still a
+  // decisive facet test.
+  const LUM_2ND_DIFF_MAX = 0.006; // scale-independent
 
   function ringAzimuthAndHighlight(alpha: Uint8ClampedArray, W: number, H: number, band: number) {
     const { normals, bandMask } = computeBevelNormals(alpha, W, H, band, 'hardEdge', band / 2);
@@ -401,6 +400,129 @@ describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#
     );
     expect(large.maxJump).toBeLessThanOrEqual(small.maxJump + 1e-6);
   });
+});
+
+describe('bevel lip azimuth tracks the TRUE silhouette normal (issue #417→#418 apex plateau)', () => {
+  // THE #418 BUG. #416 sourced the lip azimuth from ∇(Gaussian-blurred COVERAGE).
+  // Coverage `C = G_σ * alpha` PLATEAUS at a high-curvature convex apex: the blur of
+  // a sharply curved silhouette tip flat-tops, so ∇C there points near-constant over
+  // a wide angular span. The lip azimuth then ROTATES TOO SLOWLY across the apex, so
+  // the lit factor is near-constant over a band of the rim → the "flat horizontal
+  // cut" users saw at the top of the slide-6 ellipse (bevel OFF = smooth arc, bevel
+  // ON = flat-topped band). The geometry (`dist`, the band, the feather) was always
+  // correct; only the DIRECTION was wrong.
+  //
+  // The fix sources the azimuth from ∇(Gaussian-blurred DISTANCE) instead. The EDT
+  // distance field's level sets ARE the offset curves of the silhouette, so its
+  // gradient points along the true radial normal EVERYWHERE — including the apex,
+  // where distance keeps growing linearly inward and so does NOT plateau. Blurring
+  // the distance (same σ) makes the gradient C¹ and washes out the raw-EDT Voronoi
+  // facets, without reintroducing a plateau. These tests assert the computed lip
+  // azimuth matches the ANALYTIC ellipse outward normal across the apex — the check
+  // the coverage-gradient azimuth fails and the distance-gradient azimuth passes —
+  // parametrised over devScale {1,2,4} so it is a scale-invariant property.
+
+  /** Anti-aliased ellipse filling the W×H canvas (matches a Canvas clip raster). */
+  function ellipseA(W: number, H: number, ss = 4): Uint8ClampedArray {
+    const a = new Uint8ClampedArray(W * H);
+    const cx = W / 2, cy = H / 2, rx = W / 2 - 1, ry = H / 2 - 1;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        let cnt = 0;
+        for (let sy = 0; sy < ss; sy++)
+          for (let sx = 0; sx < ss; sx++) {
+            const px = x + (sx + 0.5) / ss - 0.5, py = y + (sy + 0.5) / ss - 0.5;
+            if (((px - cx) / rx) ** 2 + ((py - cy) / ry) ** 2 <= 1) cnt++;
+          }
+        a[y * W + x] = Math.round((255 * cnt) / (ss * ss));
+      }
+    return a;
+  }
+
+  // slide-6 ellipse is 298×377 pt; its apex radius of curvature rx²/ry ≈ 118 pt is
+  // only ≈5× the 24 pt band — exactly the high-curvature regime where the coverage
+  // blur plateaus. Use the same proportions (W:H ≈ 298:377) so the synthetic case
+  // reproduces the reported geometry.
+  for (const devScale of [1, 2, 4]) {
+    const W = 298 * devScale;
+    const H = 377 * devScale;
+    const band = 24 * devScale;
+
+    it(`apex lip azimuth follows the analytic ellipse normal, not a plateau [devScale ${devScale}]`, () => {
+      const a = ellipseA(W, H);
+      const { normals, bandMask } = computeBevelNormals(a, W, H, band, 'hardEdge', band / 2);
+      const cx = W / 2, cy = H / 2, rx = W / 2 - 1, ry = H / 2 - 1;
+      // Sample band pixels just inside the TOP arc, sweeping x across the apex. For
+      // each, compare the computed in-plane azimuth to the analytic ellipse outward
+      // normal at the nearest rim point on the same column.
+      let maxErrRad = 0;
+      let samples = 0;
+      // Across the apex the column sweep spans roughly ±0.5·rx; that is where the
+      // coverage plateau bites (the curvature is highest near x=cx).
+      for (let x = Math.round(cx - 0.5 * rx); x <= Math.round(cx + 0.5 * rx); x++) {
+        // topmost opaque row on this column = rim.
+        let rimY = -1;
+        for (let y = 0; y < H; y++) if (a[y * W + x] >= 128) { rimY = y; break; }
+        if (rimY < 0) continue;
+        // a band pixel a quarter-band inside the rim (inside the lit shelf).
+        const y = rimY + Math.max(1, Math.round(band * 0.25));
+        const i = y * W + x;
+        if (!bandMask[i]) continue;
+        const nx = normals[i * 3], ny = normals[i * 3 + 1];
+        if (Math.hypot(nx, ny) < 1e-3) continue;
+        const computed = Math.atan2(ny, nx);
+        // analytic outward normal of the ellipse at the rim point (gradient of the
+        // implicit form): ((x-cx)/rx², (y-cy)/ry²), normalised.
+        const ex = (x - cx) / (rx * rx), ey = (rimY - cy) / (ry * ry);
+        const analytic = Math.atan2(ey, ex);
+        let e = computed - analytic;
+        while (e > Math.PI) e -= 2 * Math.PI;
+        while (e < -Math.PI) e += 2 * Math.PI;
+        maxErrRad = Math.max(maxErrRad, Math.abs(e));
+        samples++;
+      }
+      expect(samples).toBeGreaterThan(50);
+      // The distance-gradient azimuth matches the analytic normal to within a few
+      // degrees (raster + AA-rim limited). The coverage-gradient azimuth plateaus
+      // and overshoots ≈15–25° near the apex, so a 6° (0.105 rad) ceiling cleanly
+      // separates the two. Scale-independent.
+      expect(maxErrRad).toBeLessThan(0.105);
+    });
+
+    it(`apex lit factor is PEAKED (curved), not a flat plateau [devScale ${devScale}]`, () => {
+      // End-to-end: the lit factor sampled along the top rim must rise to a single
+      // peak at the apex and fall off to either side (the ellipse curving away from
+      // the top light), NOT sit flat over a wide span. We measure the lit factor at
+      // a fixed inset along the rim across the apex and require the central peak to
+      // exceed the flanks by a clear margin — a plateau would make them equal.
+      const a = ellipseA(W, H);
+      const { normals, bandMask } = computeBevelNormals(a, W, H, band, 'hardEdge', band / 2);
+      const params = shadeParamsFor('matte', lightDirFromRig('threePt', 't'));
+      const face = shadePixel({ x: 0, y: 0, z: 1 }, params) || 1;
+      const cx = W / 2, rx = W / 2 - 1;
+      const inset = Math.max(1, Math.round(band * 0.25));
+      const litAt = (x: number): number | null => {
+        let rimY = -1;
+        for (let y = 0; y < H; y++) if (a[y * W + x] >= 128) { rimY = y; break; }
+        if (rimY < 0) return null;
+        const i = (rimY + inset) * W + x;
+        if (!bandMask[i]) return null;
+        const nx = normals[i * 3], ny = normals[i * 3 + 1], nz = normals[i * 3 + 2];
+        return shadePixel({ x: nx, y: ny, z: nz }, params) / face;
+      };
+      const peak = litAt(Math.round(cx));
+      const flankL = litAt(Math.round(cx - 0.45 * rx));
+      const flankR = litAt(Math.round(cx + 0.45 * rx));
+      expect(peak).not.toBeNull();
+      expect(flankL).not.toBeNull();
+      expect(flankR).not.toBeNull();
+      // The apex faces straight at the top light → brightest; the flanks tilt away
+      // → dimmer. A genuine curve shows a measurable drop. The coverage-plateau bug
+      // made peak ≈ flanks (flat lit band). Require ≥1.5% relative drop on each side.
+      expect((peak as number) - (flankL as number)).toBeGreaterThan(0.015);
+      expect((peak as number) - (flankR as number)).toBeGreaterThan(0.015);
+    });
+  }
 });
 
 describe('bevel band geometry — slide-6 ellipse rim (issue #410→…→band-geometry)', () => {
