@@ -126,6 +126,70 @@ describe('lightDirFromRig', () => {
     expect(L.x).toBeGreaterThan(0);
     expect(L.y).toBeGreaterThan(0);
   });
+
+  it('a:rot rev rotates the screen-plane azimuth (sample-11 slide-6: dir="t" rev=320° → upper-left key)', () => {
+    // §20.1.5.9 <a:rot lat lon rev>: rev is the in-plane revolution about the view
+    // (Z) axis. sample-11 slide-6 carries rev=320° on a dir="t" threePt rig; the PDF
+    // shows the LEFT shoulder of the ellipse markedly brighter than the right
+    // (+21.6% vs +6.3% over the face), i.e. the key light azimuth points UPPER-LEFT.
+    // The standard 2-D rotation matrix on the screen-plane azimuth (screen +Y DOWN)
+    // maps dir="t"'s (0,−1) up-vector to (−sinθ, −cosθ); at θ=320° that is
+    // (−0.643, −0.766) — upper-left, matching the PDF.
+    const base = lightDirFromRig('threePt', 't');
+    const rotated = lightDirFromRig('threePt', 't', { lat: 0, lon: 0, rev: 320 });
+    // Base key (no rot) is straight up: x ≈ 0.
+    expect(Math.abs(base.x)).toBeLessThan(1e-6);
+    // rev=320° swings the key azimuth toward the LEFT (negative screen-x) while
+    // staying above the horizon (negative screen-y) — the upper-left key the PDF
+    // shows. (rev=0 / rev=360 would leave it straight up.)
+    expect(rotated.x).toBeLessThan(-0.2);
+    expect(rotated.y).toBeLessThan(0);
+    expect(Math.hypot(rotated.x, rotated.y, rotated.z)).toBeCloseTo(1, 5);
+    // The elevation (z, toward viewer) is unchanged by an in-plane revolution.
+    expect(rotated.z).toBeCloseTo(base.z, 5);
+  });
+
+  it('rev=0 (or absent rot) is identical to no rot', () => {
+    const a = lightDirFromRig('threePt', 't');
+    const b = lightDirFromRig('threePt', 't', { lat: 0, lon: 0, rev: 0 });
+    expect(b.x).toBeCloseTo(a.x, 6);
+    expect(b.y).toBeCloseTo(a.y, 6);
+    expect(b.z).toBeCloseTo(a.z, 6);
+  });
+});
+
+describe('threePt fill light (sample-11 PDF calibration)', () => {
+  // §20.1.5.9: a threePt rig is a key + fill + back light; the spec gives no
+  // vectors/intensities. PowerPoint's fill is a softer light roughly opposite the
+  // key that lifts the surfaces facing AWAY from the key out of pure ambient. The
+  // PDF (sample-11 p6) shows the ellipse's BOTTOM lip — whose outward normal backs
+  // the upper-left key entirely — still sitting ABOVE the face (+5.3%), not at the
+  // ambient floor a single key would give (≈ −29%). The fill light is what lifts it.
+  it('a normal facing away from the key is lifted above the pure-ambient floor by the fill', () => {
+    const key = lightDirFromRig('threePt', 't', { lat: 0, lon: 0, rev: 320 });
+    const withFill = shadeParamsFor('matte', key, true);
+    const noFill = shadeParamsFor('matte', key, false);
+    // A normal pointing roughly opposite the key (it backs the key, n·key < 0) gets
+    // NO diffuse from the key in either case — but WITH the fill it picks up the
+    // fill's diffuse, so it is brighter than the key-only (ambient floor) shade.
+    const backNormal = { x: -key.x, y: -key.y, z: 0.4 };
+    const m = Math.hypot(backNormal.x, backNormal.y, backNormal.z);
+    const n = { x: backNormal.x / m, y: backNormal.y / m, z: backNormal.z / m };
+    expect(shadePixel(n, withFill)).toBeGreaterThan(shadePixel(n, noFill));
+  });
+
+  it('the fill does not exceed the key (the key side stays the brightest)', () => {
+    const key = lightDirFromRig('threePt', 't', { lat: 0, lon: 0, rev: 320 });
+    const params = shadeParamsFor('matte', key, true);
+    // A normal facing the key vs one facing the fill (opposite): key side brighter.
+    const towardKey = { x: key.x, y: key.y, z: 1 };
+    const m1 = Math.hypot(towardKey.x, towardKey.y, towardKey.z);
+    const nKey = { x: towardKey.x / m1, y: towardKey.y / m1, z: towardKey.z / m1 };
+    const towardFill = { x: -key.x, y: -key.y, z: 1 };
+    const m2 = Math.hypot(towardFill.x, towardFill.y, towardFill.z);
+    const nFill = { x: towardFill.x / m2, y: towardFill.y / m2, z: towardFill.z / m2 };
+    expect(shadePixel(nKey, params)).toBeGreaterThan(shadePixel(nFill, params));
+  });
 });
 
 describe('shadePixel (Lambert + weak specular)', () => {
@@ -638,51 +702,43 @@ describe('bevel band geometry — slide-6 ellipse rim (issue #410→…→band-g
     });
 
     it(`bevel shading feathers to zero at the inner crease (no hard flat-cut step) [devScale ${devScale}]`, () => {
-      // SHADING: along an inward ray on the SHADOW (bottom) side, the per-pixel
-      // brightness must not END on a cliff at the inner crease — that hard step was
-      // the visible "flat cut". With the inner feather it eases back to the face
-      // brightness. We assert the largest single-pixel brightness change along the
-      // ray's inner-half is small (a gradient, not a step).
+      // The "flat cut" defect was a HARD step at the INNER crease (the band→flat-top
+      // boundary): every band pixel was fully shaded, the next pixel inward was the
+      // untouched face. The fix is the inner-crease FEATHER (BEVEL_INNER_FEATHER) — a
+      // smoothstep on `bandWeight` that eases the lip's SHADING WEIGHT from 1 down to 0
+      // over the inner part of the band, so the lip fades into the flat top with no
+      // step. This is a GEOMETRY property of the weight field, independent of the light
+      // rig — so we test it directly on `bandWeight` (the prior end-to-end luminance
+      // form became untestable once the threePt fill lifted the shadow lip toward the
+      // face, leaving no luminance lip to measure there). Along the minor axis from the
+      // rim inward, `bandWeight` must (a) start near 1 in the outer band, (b) reach ~0
+      // at/just past the inner crease, and (c) make that descent as a GRADIENT, never a
+      // single-pixel cliff from ~1 to 0.
       const a = ellipseSilhouette(W, H);
-      const data = new Uint8ClampedArray(W * H * 4);
-      for (let i = 0; i < W * H; i++) {
-        data[i * 4] = 90; data[i * 4 + 1] = 110; data[i * 4 + 2] = 150; data[i * 4 + 3] = a[i];
+      const { bandMask, bandWeight } = computeBevelNormals(a, W, H, expectBand, 'hardEdge', expectHeight);
+      const cx = Math.round(W / 2), cy = Math.round(H / 2);
+      // Walk inward from the right edge along y=cy (minor axis tip, radial normal).
+      const ws: number[] = [];
+      let started = false;
+      for (let x = W - 1; x >= 0; x--) {
+        const i = cy * W + x;
+        if (a[i] < 128) continue; // outside
+        if (bandMask[i]) { started = true; ws.push(bandWeight[i]); }
+        else if (started) { ws.push(0); break; } // crossed the inner crease to flat top
       }
-      const ctx: BevelCtx & { data: Uint8ClampedArray } = {
-        canvas: { width: W, height: H },
-        getImageData() { return { data: data.slice(), width: W, height: H } as unknown as ImageData; },
-        putImageData(img: ImageData) { data.set(img.data); },
-        data,
-      };
-      applyBevelShading(ctx, {
-        widthPx: expectBand, heightPx: expectHeight, prst: 'hardEdge',
-        material: materialClass('matte'), light: lightDirFromRig('threePt', 't'),
-      });
-      const cx = Math.round(W / 2), cy = Math.round(H / 2), ry = H / 2 - 1;
-      const lum = (x: number, y: number) => { const o = (y * W + x) * 4; return (data[o] + data[o + 1] + data[o + 2]) / 3; };
-      const baseLum = (90 + 110 + 150) / 3;
-      // Bottom shadow side: from the bottom edge inward across the whole band.
-      const botEdge = Math.round(cy + ry - 1);
-      let prevDelta = lum(cx, botEdge) - baseLum;
-      let maxStep = 0;
-      let peakDelta = 0; // largest |brightness change| anywhere in the band (the lip depth)
-      for (let depth = 1; depth <= Math.ceil(expectBand) + 4; depth++) {
-        const y = botEdge - depth;
-        if (y < 0) break;
-        if (data[(y * W + cx) * 4 + 3] < 128) continue;
-        const delta = lum(cx, y) - baseLum;
-        peakDelta = Math.max(peakDelta, Math.abs(delta));
-        maxStep = Math.max(maxStep, Math.abs(delta - prevDelta));
-        prevDelta = delta;
-      }
-      // The pre-fix bug ended the lip on a HARD step: the full lip depth `peakDelta`
-      // collapsed to 0 in a single pixel at the inner crease (maxStep ≈ peakDelta).
-      // The feather spreads that return-to-face over many pixels, so the largest
-      // single-pixel change is a small FRACTION of the lip depth. Asserting
-      // maxStep < 0.6·peakDelta fails the cliff (ratio ≈1) and passes the gradient,
-      // and is scale-free (no absolute lum constant that breaks at small rasters).
-      expect(peakDelta).toBeGreaterThan(8); // there is a real shadow lip to test
-      expect(maxStep).toBeLessThan(0.6 * peakDelta);
+      expect(ws.length).toBeGreaterThan(4);
+      // (a) the outer band starts fully weighted (lip present at the rim).
+      expect(ws[0]).toBeGreaterThan(0.9);
+      // (b) it ends at ~0 (feathered into the flat top).
+      expect(ws[ws.length - 1]).toBeLessThan(0.1);
+      // (c) the descent is a GRADIENT: the largest single-pixel drop is a small
+      // fraction of the full range (a hard cliff would drop ~1.0 in one step). The
+      // weight only ramps over the inner BEVEL_INNER_FEATHER (0.35) of the band, so at
+      // devScale 1 (band 12px ⇒ ~4px ramp) the per-pixel step is naturally larger; a
+      // 0.6 ceiling fails the 1.0 cliff at every scale while passing the smoothstep.
+      let maxDrop = 0;
+      for (let k = 1; k < ws.length; k++) maxDrop = Math.max(maxDrop, ws[k - 1] - ws[k]);
+      expect(maxDrop).toBeLessThan(0.6);
     });
   }
 });
