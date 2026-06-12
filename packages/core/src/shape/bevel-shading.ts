@@ -19,9 +19,13 @@
  *      surface height in [0,1]: 0 at the rim (d=0), 1 once `d ≥ w` (the flat top).
  *      `circle` is a quarter-circle (rounded lip), `hardEdge` a linear chamfer,
  *      etc. (§20.1.10.9).
- *   3. The surface normal is the finite-difference gradient of that height field
- *      (n = normalize(-∂h/∂x, -∂h/∂y, 1)). On the flat interior the gradient is
- *      zero → n = (0,0,1); on the lip it tilts outward toward the rim.
+ *   3. The surface normal combines two INDEPENDENT sources (the scale-invariant
+ *      redesign — see `computeBevelNormals`): its TILT MAGNITUDE comes from the
+ *      profile's local slope at the exact EDT distance, and its in-plane AZIMUTH
+ *      comes from the gradient of a Gaussian-blurred coverage field. Distance is
+ *      exact; direction is analytically smooth at every raster scale. On the flat
+ *      interior the tilt is zero → n = (0,0,1); on the lip it tilts outward toward
+ *      the rim along the silhouette's macroscopic normal.
  *   4. Lambert diffuse + a weak specular term against the light-rig direction
  *      give a per-pixel brightness factor, applied as a multiply/screen over the
  *      already-painted body.
@@ -150,6 +154,105 @@ export function edt1d(f: ArrayLike<number>): Float64Array {
 }
 
 /**
+ * Box sizes whose 3-fold convolution approximates a Gaussian of std-dev `sigma`
+ * (Wells 1986, "Efficient synthesis of Gaussian filters by cascaded uniform
+ * filters"). Three equal-radius box blurs already give a good Gaussian; mixing two
+ * adjacent odd widths (`wl` and `wl+2`) matches the target variance more exactly.
+ * Returns `n` odd box widths. Used by `gaussianBlur` below.
+ */
+function boxSizesForGaussian(sigma: number, n = 3): number[] {
+  if (sigma <= 0) return new Array(n).fill(1);
+  const wIdeal = Math.sqrt((12 * sigma * sigma) / n + 1);
+  let wl = Math.floor(wIdeal);
+  if (wl % 2 === 0) wl--;
+  const wu = wl + 2;
+  const mIdeal =
+    (12 * sigma * sigma - n * wl * wl - 4 * n * wl - 3 * n) / (-4 * wl - 4);
+  const m = Math.round(mIdeal);
+  const sizes: number[] = [];
+  for (let i = 0; i < n; i++) sizes.push(i < m ? wl : wu);
+  return sizes;
+}
+
+/**
+ * One separable box-blur pass with ZERO padding (out-of-bounds treated as 0).
+ * `horizontal` selects the axis. Uses a running sum so cost is O(N) independent
+ * of the radius.
+ *
+ * Zero padding (NOT clamp-to-edge) is the correct boundary condition for a COVERAGE
+ * field: a silhouette flush with the canvas edge has transparent (coverage 0) just
+ * outside the bounds, so the blurred coverage falls off across that edge and ∇C
+ * points outward there — exactly as `distanceToEdge` folds in the out-of-bounds
+ * transparent region for the EDT. Clamp-to-edge would instead make the field flat
+ * at the border, giving a zero gradient and no lip along a clipped edge.
+ */
+function boxBlurPass(
+  src: Float64Array,
+  dst: Float64Array,
+  w: number,
+  h: number,
+  r: number,
+  horizontal: boolean,
+): void {
+  const norm = 1 / (2 * r + 1);
+  if (horizontal) {
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      // Seed the window [−r, r]: indices < 0 contribute 0 (zero padding).
+      let acc = 0;
+      for (let k = 0; k <= r; k++) if (k < w) acc += src[row + k];
+      for (let x = 0; x < w; x++) {
+        dst[row + x] = acc * norm;
+        const ai = x + r + 1;
+        const si = x - r;
+        if (ai < w) acc += src[row + ai];
+        if (si >= 0) acc -= src[row + si];
+      }
+    }
+  } else {
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let k = 0; k <= r; k++) if (k < h) acc += src[k * w + x];
+      for (let y = 0; y < h; y++) {
+        dst[y * w + x] = acc * norm;
+        const ai = y + r + 1;
+        const si = y - r;
+        if (ai < h) acc += src[ai * w + x];
+        if (si >= 0) acc -= src[si * w + x];
+      }
+    }
+  }
+}
+
+/**
+ * Approximate Gaussian blur of std-dev `sigma` over a scalar field, via three
+ * cascaded separable box blurs (zero-padded). O(N) total, independent of sigma.
+ *
+ * This is the SAME code path in every environment (browser, OffscreenCanvas,
+ * node/skia headless), so the bevel azimuth never depends on `ctx.filter='blur'`
+ * — whose support and exact kernel differ across canvas backends. The blur is run
+ * on the in-memory coverage field, not on a canvas, so it is fully unit-testable.
+ */
+export function gaussianBlur(
+  src: ArrayLike<number>,
+  w: number,
+  h: number,
+  sigma: number,
+): Float64Array {
+  const a = Float64Array.from(src as ArrayLike<number> & Iterable<number>);
+  if (sigma <= 0 || w <= 0 || h <= 0) return a;
+  const scratch = new Float64Array(w * h);
+  // Each box does a horizontal pass into `scratch`, then a vertical pass back into
+  // `a`, so the result always lands in `a` (no buffer swap to track).
+  for (const size of boxSizesForGaussian(sigma, 3)) {
+    const r = Math.max(1, (size - 1) / 2);
+    boxBlurPass(a, scratch, w, h, r, true);
+    boxBlurPass(scratch, a, w, h, r, false);
+  }
+  return a;
+}
+
+/**
  * Exact 2-D Euclidean distance (in px) from every pixel to the nearest pixel
  * whose alpha is below `threshold` (i.e. the boundary of the silhouette). The
  * region OUTSIDE the image bounds is also treated as below-threshold, so a
@@ -209,6 +312,9 @@ export function distanceToEdge(
   return f;
 }
 
+/** Fraction of the band width used as the coverage-blur σ. See COVERAGE_SIGMA. */
+const COVERAGE_SIGMA_FRACTION = 0.25;
+
 /**
  * Compute per-pixel surface normals for the bevel lip of a silhouette.
  *
@@ -223,6 +329,48 @@ export function distanceToEdge(
  * Returns `normals` (W·H·3 floats, unit vectors, +Z toward viewer) and
  * `bandMask` (W·H of 0/1; 1 where the pixel is inside the shape and within the
  * bevel band, i.e. where shading should be applied).
+ *
+ * ## Scale-invariant azimuth (this redesign — issue lineage #410→#413→#415→here)
+ *
+ * The lip normal has two parts that we derive from two INDEPENDENT, decoupled
+ * sources so each is correct on its own terms:
+ *
+ *   • TILT MAGNITUDE (how steeply the lip rises) — from the cross-section profile's
+ *     local slope at the EXACT EDT distance `d`. Distance is the geometrically
+ *     meaningful quantity for the height (a `circle` lip at d=band/2 is at a precise
+ *     height), and the EDT gives it exactly. This is what the PDF-calibrated slide-3
+ *     brightness curve depends on, so it is preserved bit-for-bit in spirit.
+ *
+ *   • IN-PLANE AZIMUTH (which way the lip faces) — from the gradient of a Gaussian-
+ *     blurred COVERAGE field `C = G_σ * alpha`, σ = 0.25·bandPx. This is the load-
+ *     bearing change. `∇C = (∇G_σ) * alpha` is a convolution with the smooth kernel
+ *     ∇G_σ, so C ∈ C^∞ regardless of how the silhouette was rasterised: the azimuth
+ *     field rotates continuously around any smooth boundary, with a per-step turn
+ *     bounded only by the silhouette's curvature. Because σ scales with the band and
+ *     the geometry scales with devScale TOGETHER, the smoothness is identical at
+ *     every raster scale — it is scale-invariant by construction.
+ *
+ * ### Why this finally fixes the size-dependent facet (and the patches didn't)
+ *
+ * The OLD method took BOTH parts from the finite-difference gradient of the EDT
+ * height field. But ∇(distance-to-point-set) is piecewise-constant: each band
+ * pixel's nearest boundary sample dominates, so the gradient DIRECTION snaps to
+ * that sample's Voronoi-cell direction, chording the lip into facets. The screen-
+ * blend highlight amplifies the chord at the lit/shadow terminator. Both prior
+ * fixes were post-filters on that same broken field:
+ *   - #413: box-blur the scalar height → smooths gradient MAGNITUDE, not direction
+ *     (fixed devScale ≤ 2 only).
+ *   - #415: tangential low-pass of the normal VECTOR over radius 0.25·bandPx, gated
+ *     at bandPx ≥ 24 → fixed devScale 4, REGRESSED at devScale 8.
+ * Every band-proportional blur radius chases a moving target: the Voronoi cell's
+ * angular width depends on radial distance from the rim, which grows with the band,
+ * so a large enough band always re-opens the chord. Sourcing the azimuth from ∇C
+ * removes the Voronoi structure at the SOURCE — there is no discrete cell field
+ * left to facet — so no gate and no post-blur are needed at any scale.
+ *
+ * The coverage blur is O(N) (three cascaded box passes, running-sum, independent of
+ * σ), runs once per bevel on the device offscreen — the same order as the EDT it
+ * sits beside, and cheaper than the two post-filter passes it replaces.
  */
 export function computeBevelNormals(
   alpha: ArrayLike<number>,
@@ -234,83 +382,69 @@ export function computeBevelNormals(
 ): { normals: Float32Array; bandMask: Uint8Array } {
   const normals = new Float32Array(w * h * 3);
   const bandMask = new Uint8Array(w * h);
+  if (w <= 0 || h <= 0) return { normals, bandMask };
   const dist = distanceToEdge(alpha, w, h);
   const profile = bevelHeightProfile(prst, bandPx);
-
-  // Height field: profile(d) scaled by the bevel's height/width aspect. A height
-  // of `heightPx` over a band of `bandPx` means the lip rises heightPx px over
-  // bandPx px of run, so the surface-space gradient scale is heightPx/bandPx.
-  const heightScale = bandPx > 0 ? heightPx / bandPx : 0;
-
-  // Dense height field over the whole mask: profile(d)·heightScale·bandPx inside
-  // the silhouette, 0 (ground) outside. Materialising it lets us regularise the
-  // gradient (below) before differencing, instead of sampling it per-neighbour.
   const inside = (x: number, y: number) => (alpha[y * w + x] ?? 0) >= 128;
-  const height = new Float64Array(w * h);
-  for (let i = 0; i < w * h; i++) {
-    height[i] = (alpha[i] ?? 0) >= 128 ? profile(dist[i]) * heightScale * bandPx : 0;
-  }
 
-  // ── Anti-facet smoothing of the height field ──────────────────────────────
-  // The EDT `dist` is exact, but its *gradient* is piecewise-constant: every
-  // band pixel's distance is dominated by ONE nearest boundary sample, so ∇d (and
-  // hence the lip normal) snaps to that sample's Voronoi-cell direction. On a
-  // curved silhouette (e.g. an ellipse) this turns the lip into flat chords — a
-  // visible polygonal facet whose coarseness grows with the band width (the wider
-  // the band, the larger the cells). A bevel lip is geometrically a smooth ruled
-  // surface swept along the silhouette, so its normal must follow the silhouette's
-  // *macroscopic* direction, not the per-pixel nearest-sample direction.
-  //
-  // We recover that by box-blurring the height field over a radius proportional to
-  // the band width before differencing. The radius is NOT an empirical fudge: it
-  // is the only length scale in the problem — averaging ∇h over a neighbourhood a
-  // small fraction of the band removes the sub-pixel Voronoi noise while staying
-  // far more local than the band itself, so the iso-contours (band mask) and the
-  // calibrated brightness curve along the lip are unchanged (the profile is ~linear
-  // across a few px, so a symmetric blur preserves its value). `dist`/`bandMask`
-  // stay exact — only the gradient used for the normal is regularised.
-  //
-  // Cost vs. a "full-resolution exact" alternative: the EDT is already exact and
-  // full-res (Felzenszwalb O(N) per pass). The faceting is intrinsic to sampling
-  // ∇(distance-to-point-set), so a higher-res EDT would NOT remove it — only push
-  // the cells smaller. A band-scaled separable box blur is O(N) (two passes,
-  // running-sum) and adds a constant factor to a step we already pay, which is why
-  // it is preferred over, say, re-deriving the analytic silhouette normal.
-  const blurR = Math.max(1, Math.round(bandPx * 0.12));
-  const sm = boxBlurClampedInside(height, alpha, w, h, blurR);
+  // Height-field aspect scale: the lip rises `heightPx` over `bandPx` of run, so a
+  // unit of profile change maps to heightScale·bandPx of surface height (the same
+  // mapping the old height field used — preserves the calibrated tilt magnitude).
+  const heightScale = bandPx > 0 ? heightPx / bandPx : 0;
+  const tiltScale = heightScale * bandPx;
 
-  const heightSmooth = (x: number, y: number): number => sm[y * w + x];
+  // ── Azimuth source: gradient of a Gaussian-blurred coverage field ──────────
+  // Blur the raw coverage (alpha/255) by σ ∝ band. σ is a quarter of the band: a
+  // fraction of the bevel's OWN length scale, large enough to wash out the per-
+  // pixel Voronoi noise yet small enough to stay local to a single rim (a larger σ
+  // would blur the inner and outer rims of a thin ring together and flip the
+  // azimuth at the medial axis). See COVERAGE_SIGMA_FRACTION.
+  const coverage = new Float64Array(w * h);
+  for (let i = 0; i < w * h; i++) coverage[i] = (alpha[i] ?? 0) / 255;
+  const sigma = Math.max(1, bandPx * COVERAGE_SIGMA_FRACTION);
+  const C = gaussianBlur(coverage, w, h, sigma);
+
+  // Local profile slope dh/dd at distance d (per px), via a centred 1px difference
+  // of the profile. Drives the lip's tilt magnitude; the height stays distance-exact.
+  const slopeAt = (d: number): number => {
+    const a = profile(Math.max(0, d - 0.5));
+    const b = profile(d + 0.5);
+    return b - a; // change in profile over 1 px of distance
+  };
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
       if (!inside(x, y)) {
-        // Outside the silhouette: flat ground normal, no shading.
-        normals[i * 3 + 2] = 1;
+        normals[i * 3 + 2] = 1; // flat ground outside the silhouette
         continue;
       }
       const d = dist[i];
       const inBand = d > 0 && d < bandPx;
       bandMask[i] = inBand ? 1 : 0;
       if (!inBand) {
-        // Flat top of the shape (or right at the rim) — face the viewer.
-        normals[i * 3 + 2] = 1;
+        normals[i * 3 + 2] = 1; // flat top of the shape
         continue;
       }
-      // Central finite difference of the SMOOTHED height field. Clamp neighbours
-      // that step outside the silhouette to the current pixel's height so the lip
-      // gradient is measured against the rim, not against ground level beyond.
-      const hC = heightSmooth(x, y);
-      const hL = x > 0 && inside(x - 1, y) ? heightSmooth(x - 1, y) : hC;
-      const hR = x < w - 1 && inside(x + 1, y) ? heightSmooth(x + 1, y) : hC;
-      const hU = y > 0 && inside(x, y - 1) ? heightSmooth(x, y - 1) : hC;
-      const hD = y < h - 1 && inside(x, y + 1) ? heightSmooth(x, y + 1) : hC;
-      // Gradient (∂h/∂x, ∂h/∂y) via central difference (px units cancel: 2px run).
-      const dhdx = (hR - hL) / 2;
-      const dhdy = (hD - hU) / 2;
-      // Surface normal of z=h(x,y): n = normalize(-dh/dx, -dh/dy, 1).
-      let nx = -dhdx;
-      let ny = -dhdy;
+      // Outward azimuth = −∇C/|∇C| (coverage decreases toward the rim, so the
+      // negative gradient points outward, along the silhouette's outward normal).
+      const xl = x > 0 ? x - 1 : x;
+      const xr = x < w - 1 ? x + 1 : x;
+      const yu = y > 0 ? y - 1 : y;
+      const yd = y < h - 1 ? y + 1 : y;
+      const gx = (C[y * w + xr] - C[y * w + xl]) / (xr - xl || 1);
+      const gy = (C[yd * w + x] - C[yu * w + x]) / (yd - yu || 1);
+      const gm = Math.hypot(gx, gy);
+      let ax = 0;
+      let ay = 0;
+      if (gm > 1e-9) {
+        ax = -gx / gm;
+        ay = -gy / gm;
+      }
+      // Tilt magnitude from the exact-distance profile slope; azimuth from ∇C.
+      const s = slopeAt(d) * tiltScale;
+      let nx = s * ax;
+      let ny = s * ay;
       let nz = 1;
       const m = Math.hypot(nx, ny, nz) || 1;
       nx /= m;
@@ -321,183 +455,7 @@ export function computeBevelNormals(
       normals[i * 3 + 2] = nz;
     }
   }
-  // ── Anti-facet stage 2: regularise the in-plane normal DIRECTION ───────────
-  // Stage 1 (the height-field box blur above) smooths the gradient MAGNITUDE and
-  // removes the facet for narrow bands (≤ ~32 px / devScale ≤ 2). But for a wide
-  // band on a strongly-curved silhouette — sample-11 slide 6 at high DPR, where
-  // the hardEdge band is ~128 px deep — the facet returns on the lit/shadow
-  // terminator. Root cause: the height field of a `hardEdge` (linear) profile is
-  // ~linear in `dist`, so its gradient *direction* (the lip azimuth) still flips
-  // sharply across the EDT's Voronoi-cell boundaries; a blur of the scalar height
-  // barely rotates that gradient. The screen-blend highlight (lit lip → white,
-  // SCREEN_GAIN) is a high-contrast operator that amplifies tiny azimuth jitter
-  // at the terminator into a visible bright chord. The shadow (plain multiply)
-  // and the un-modulated band do not show it — only the lit highlight does
-  // (confirmed by ablation: bevel off → smooth; lit-only → faceted; flat → smooth).
-  //
-  // The geometrically correct regulariser is therefore a *direct* low-pass of the
-  // in-plane normal VECTOR (nx, ny) — the azimuth itself — over a tangential
-  // neighbourhood proportional to the band. The Voronoi cell's tangential extent
-  // grows with the band depth, so the only intrinsic length scale is the band
-  // width; a radius of ~0.25·bandPx spans several cells at every devScale,
-  // collapsing the chorded azimuth onto the silhouette's macroscopic direction
-  // while leaving the lip's rise (height) and the band mask exact. (0.12·bandPx —
-  // the stage-1 fraction — still leaves a faint chord at 128 px; 0.25 clears it
-  // with margin.) Separable, masked to band pixels, O(N·r); paid once per bevel
-  // on the device offscreen, like stage 1.
-  //
-  // GATE — only for bands wide enough to actually facet. The Voronoi facet is
-  // invisible until the band is many px deep: at devScale ≤ ~1 the band is a
-  // handful of px (sample-11 slide 3's circle bevel is ~11 px) and stage 1 alone
-  // already reads as smooth. Running stage 2 there would low-pass the few-px lip
-  // and perturb the PDF-CALIBRATED slide-3 shading for no visible gain. We
-  // therefore engage stage 2 only when `bandPx ≥ 24` — comfortably above slide-3
-  // (≈11 px, left exactly as #410/#413 calibrated it) and below the facet's onset
-  // band (slide 6 is 32 px at devScale 1, 64/96/128 px at devScale 2/3/4, all
-  // smoothed). This is the only data-dependent constant; it is a *visibility*
-  // gate, not a per-sample fudge, and is documented as such per CLAUDE.md.
-  const FACET_MIN_BAND_PX = 24;
-  if (bandPx >= FACET_MIN_BAND_PX) {
-    const normalBlurR = Math.max(1, Math.round(bandPx * 0.25));
-    smoothNormalsTangential(normals, bandMask, w, h, normalBlurR);
-  }
   return { normals, bandMask };
-}
-
-/**
- * Separable box blur of the in-plane normal components (nx, ny) over band pixels
- * only, then re-normalise (recovering nz from the unit-length constraint). This
- * regularises the lip AZIMUTH along the silhouette — see the "Anti-facet stage 2"
- * note in computeBevelNormals for why direction (not just height magnitude) must
- * be smoothed to kill the high-DPR terminator facet. Out-of-band taps are skipped
- * so the smoothing is purely tangential and never averages the flat interior /
- * exterior into the lip. O(N·r), r small (≈ 0.25·bandPx).
- */
-function smoothNormalsTangential(
-  normals: Float32Array,
-  bandMask: Uint8Array,
-  w: number,
-  h: number,
-  r: number,
-): void {
-  const nx = new Float64Array(w * h);
-  const ny = new Float64Array(w * h);
-  for (let i = 0; i < w * h; i++) {
-    nx[i] = normals[i * 3];
-    ny[i] = normals[i * 3 + 1];
-  }
-  const tmpX = new Float64Array(w * h);
-  const tmpY = new Float64Array(w * h);
-  // Horizontal.
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      if (!bandMask[i]) { tmpX[i] = nx[i]; tmpY[i] = ny[i]; continue; }
-      let sx = 0, sy = 0, n = 0;
-      for (let k = -r; k <= r; k++) {
-        const xx = x + k;
-        if (xx < 0 || xx >= w) continue;
-        const j = y * w + xx;
-        if (!bandMask[j]) continue;
-        sx += nx[j]; sy += ny[j]; n++;
-      }
-      tmpX[i] = n ? sx / n : nx[i];
-      tmpY[i] = n ? sy / n : ny[i];
-    }
-  }
-  // Vertical + re-normalise.
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      if (!bandMask[i]) continue;
-      let sx = 0, sy = 0, n = 0;
-      for (let k = -r; k <= r; k++) {
-        const yy = y + k;
-        if (yy < 0 || yy >= h) continue;
-        const j = yy * w + x;
-        if (!bandMask[j]) continue;
-        sx += tmpX[j]; sy += tmpY[j]; n++;
-      }
-      const ax = n ? sx / n : nx[i];
-      const ay = n ? sy / n : ny[i];
-      const m = Math.hypot(ax, ay, 1) || 1;
-      normals[i * 3] = ax / m;
-      normals[i * 3 + 1] = ay / m;
-      normals[i * 3 + 2] = 1 / m;
-    }
-  }
-}
-
-/**
- * Separable box blur of a height field, with samples that fall OUTSIDE the
- * silhouette (alpha < 128) skipped rather than averaged in as ground level.
- *
- * Why skip instead of clamp-to-zero: averaging in the exterior ground (h=0) near
- * the rim would pull the smoothed height down and bias the gradient inward,
- * weakening the lip exactly at the rim where the shading matters most. Skipping
- * out-of-silhouette taps keeps the smoothing a pure *tangential* regulariser of
- * the lip surface — it averages along the band, not across the rim into the void.
- *
- * O(N·r) here (a plain windowed mean, not a running sum) because the per-tap
- * inside test makes a constant-time sliding sum awkward; r is small (≈ band·0.12,
- * a handful of px) so this stays well within the EDT's own cost. The blur runs
- * once per bevel, on the device-resolution offscreen, so it is paid only for
- * shapes that actually carry an sp3d bevel.
- */
-function boxBlurClampedInside(
-  src: Float64Array,
-  alpha: ArrayLike<number>,
-  w: number,
-  h: number,
-  r: number,
-): Float64Array {
-  const tmp = new Float64Array(w * h);
-  const out = new Float64Array(w * h);
-  const isInside = (idx: number) => (alpha[idx] ?? 0) >= 128;
-  // Horizontal pass.
-  for (let y = 0; y < h; y++) {
-    const row = y * w;
-    for (let x = 0; x < w; x++) {
-      const i = row + x;
-      if (!isInside(i)) {
-        tmp[i] = 0;
-        continue;
-      }
-      let s = 0;
-      let n = 0;
-      for (let k = -r; k <= r; k++) {
-        const xx = x + k;
-        if (xx < 0 || xx >= w) continue;
-        const j = row + xx;
-        if (!isInside(j)) continue;
-        s += src[j];
-        n++;
-      }
-      tmp[i] = n > 0 ? s / n : src[i];
-    }
-  }
-  // Vertical pass.
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      if (!isInside(i)) {
-        out[i] = 0;
-        continue;
-      }
-      let s = 0;
-      let n = 0;
-      for (let k = -r; k <= r; k++) {
-        const yy = y + k;
-        if (yy < 0 || yy >= h) continue;
-        const j = yy * w + x;
-        if (!isInside(j)) continue;
-        s += tmp[j];
-        n++;
-      }
-      out[i] = n > 0 ? s / n : tmp[i];
-    }
-  }
-  return out;
 }
 
 // ── Light rig ───────────────────────────────────────────────────────────────

@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   bevelHeightProfile,
   edt1d,
+  gaussianBlur,
   computeBevelNormals,
   shadePixel,
+  shadeParamsFor,
   lightDirFromRig,
   applyBevelShading,
   applyExtrusion,
@@ -151,7 +153,7 @@ describe('shadePixel (Lambert + weak specular)', () => {
   });
 });
 
-describe('computeBevelNormals (finite-difference of height field)', () => {
+describe('computeBevelNormals (distance-driven tilt, coverage-gradient azimuth)', () => {
   it('produces (0,0,1) on the flat interior and tilted normals on the band', () => {
     // 7x7 filled square, bevel width 2. Interior pixels (far from edge) flat;
     // band pixels tilt outward.
@@ -205,117 +207,98 @@ function ellipseAlpha(W: number, H: number, ss = 4): Uint8ClampedArray {
   return a;
 }
 
-describe('computeBevelNormals — smooth lip on a curved silhouette (anti-facet)', () => {
-  // REGRESSION (PR #410): a wide hardEdge bevel on an ellipse produced a faceted
-  // (polygonal) lip because the per-pixel finite-difference gradient of the EDT
-  // height field is piecewise-constant — each band pixel's distance is dominated
-  // by ONE nearest boundary sample, so ∇d snaps to the Voronoi-cell direction of
-  // the silhouette's sampled rim. The lip normal must instead track the
-  // *macroscopic* silhouette direction so a circle reads as a circle, not an
-  // N-gon. We assert that the in-plane normal azimuth varies MONOTONICALLY and
-  // SMOOTHLY around the ring, with no large angular jumps between neighbouring
-  // boundary samples (a facet shows up as a long run of identical azimuths broken
-  // by a sudden kink).
-  it('in-plane normal azimuth rotates smoothly around a wide-band ellipse', () => {
-    const W = 240;
-    const H = 320;
-    const band = 40; // wide band — the regime where faceting was visible
-    const alpha = ellipseAlpha(W, H);
-    const { normals, bandMask } = computeBevelNormals(alpha, W, H, band, 'hardEdge', band / 2);
-
-    // Walk a ring near the OUTER rim (just inside the silhouette) sampling the
-    // in-plane normal azimuth at many angles; it should rotate ~once around 2π.
-    const cx = W / 2;
-    const cy = H / 2;
-    const rx = W / 2 - 1;
-    const ry = H / 2 - 1;
-    // Sample along the band MIDLINE (~band/2 inside the rim) where the lip faces
-    // the camera at its steepest and where the facets were most visible. The very
-    // outermost 1-2 px are the anti-aliased rim fringe (sub-pixel coverage noise),
-    // which is not a facet, so we measure inside it.
-    const inset = band / 2;
-    const azimuths: number[] = [];
-    for (let deg = 0; deg < 360; deg += 1) {
-      const ang = (deg * Math.PI) / 180;
-      const ex = Math.cos(ang) * (rx - inset);
-      const ey = Math.sin(ang) * (ry - inset);
-      const x = Math.round(cx + ex);
-      const y = Math.round(cy + ey);
-      if (x < 0 || y < 0 || x >= W || y >= H) continue;
-      const i = y * W + x;
-      if (!bandMask[i]) continue;
-      const nx = normals[i * 3];
-      const ny = normals[i * 3 + 1];
-      if (Math.hypot(nx, ny) < 1e-3) continue;
-      azimuths.push(Math.atan2(ny, nx));
+/**
+ * Anti-aliased annulus (ring) coverage: outer ellipse minus a concentric inner
+ * ellipse. A wide bevel band reaching toward the ring's medial axis is the
+ * worst case for the OLD EDT-gradient azimuth (the nearest-feature flips across
+ * the medial ridge). Used by the scale-sweep below to prove the coverage-gradient
+ * azimuth tracks a SINGLE rim smoothly even on a thin ring at every scale.
+ */
+function ringAlpha(W: number, H: number, thickFrac: number, ss = 4): Uint8ClampedArray {
+  const a = new Uint8ClampedArray(W * H);
+  const cx = W / 2;
+  const cy = H / 2;
+  const rx = W / 2 - 1;
+  const ry = H / 2 - 1;
+  const irx = rx * (1 - thickFrac);
+  const iry = ry * (1 - thickFrac);
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      let cnt = 0;
+      for (let sy = 0; sy < ss; sy++)
+        for (let sx = 0; sx < ss; sx++) {
+          const px = x + (sx + 0.5) / ss - 0.5;
+          const py = y + (sy + 0.5) / ss - 0.5;
+          const outer = ((px - cx) / rx) ** 2 + ((py - cy) / ry) ** 2 <= 1;
+          const inner = ((px - cx) / irx) ** 2 + ((py - cy) / iry) ** 2 <= 1;
+          if (outer && !inner) cnt++;
+        }
+      a[y * W + x] = Math.round((255 * cnt) / (ss * ss));
     }
-    expect(azimuths.length).toBeGreaterThan(300);
+  return a;
+}
 
-    // Unwrap and measure the largest jump between consecutive samples. For a
-    // smooth lip the azimuth advances by ~(2π / N) ≈ 0.017 rad per degree-step;
-    // a facet would hold one azimuth for many steps then jump by a big angle.
-    // Allow up to ~12° (0.21 rad) between adjacent 1° samples — generous enough
-    // for the rim discretisation yet far below the >30° jumps the facets caused.
-    let maxJump = 0;
-    for (let i = 1; i < azimuths.length; i++) {
-      let d = azimuths[i] - azimuths[i - 1];
-      while (d > Math.PI) d -= 2 * Math.PI;
-      while (d < -Math.PI) d += 2 * Math.PI;
-      maxJump = Math.max(maxJump, Math.abs(d));
+describe('gaussianBlur (3-box cascade, zero-padded)', () => {
+  it('smooths a step and falls off across a clipped (canvas-edge) boundary', () => {
+    // A solid block touching the left edge: coverage 1 for x<W/2, 0 otherwise.
+    const W = 32;
+    const H = 4;
+    const src = new Float64Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W / 2; x++) src[y * W + x] = 1;
+    const out = gaussianBlur(src, W, H, 4);
+    // Monotonic falloff across the interior step (x from W/2-4 to W/2+4).
+    const row = 1 * W;
+    for (let x = W / 2 - 3; x < W / 2 + 3; x++) {
+      expect(out[row + x]).toBeGreaterThan(out[row + x + 1]);
     }
-    expect(maxJump).toBeLessThan(0.21);
-
-    // And the azimuth must make ~one full turn (net rotation ≈ 2π), i.e. the lip
-    // faces radially outward all the way round — not collapse onto a few facet
-    // directions.
-    let net = 0;
-    for (let i = 1; i < azimuths.length; i++) {
-      let d = azimuths[i] - azimuths[i - 1];
-      while (d > Math.PI) d -= 2 * Math.PI;
-      while (d < -Math.PI) d += 2 * Math.PI;
-      net += d;
-    }
-    expect(Math.abs(Math.abs(net) - 2 * Math.PI)).toBeLessThan(0.5);
+    // Zero padding (NOT clamp-to-edge): the solid block flush with x=0 falls off
+    // toward the left border, so the value AT the border is below the interior
+    // plateau — this is what gives a clipped silhouette an outward ∇C lip.
+    expect(out[row + 0]).toBeLessThan(out[row + 4]);
   });
+});
 
-  // REGRESSION (high-DPR facet, this PR): the size-dependent bevel bug has now
-  // slipped through THREE times, each time at a larger raster scale:
-  //   1. PR #410 mesh cracks — grew with shape size.
-  //   2. PR #413 lip facets — grew with band width (devScale ≤ 2 fixed).
-  //   3. THIS PR — the lit/shadow-terminator facet on sample-11 slide 6 at
-  //      deviceScaleFactor 4, where the hardEdge band is ~128 px deep (4× the
-  //      ~32 px of devScale 1). #413's height-field blur smooths the gradient
-  //      MAGNITUDE but not its DIRECTION; on a linear (hardEdge) profile the
-  //      gradient azimuth still snaps to EDT Voronoi cells, and the screen-blend
-  //      highlight amplifies that into a visible chord. The fix low-passes the
-  //      in-plane normal DIRECTION over a band-proportional radius.
-  // This case mirrors the real geometry at devScale 4 (large ellipse, band 128).
-  // It is RED before the direction-smoothing fix (azimuth holds across a Voronoi
-  // cell then jumps) and GREEN after. The deep-band sampling (inset = band·0.7)
-  // is where the terminator sits and where the chord was visible.
-  it('lip azimuth stays smooth at the real high-DPR body scale (1590×2014, band 128)', () => {
-    // Match sample-11 slide 6's BODY offscreen at deviceScaleFactor 4 exactly:
-    // the diagnostic build logged w=1590 h=2014 bandPx=128 (hardEdge). At that
-    // scale the per-pixel EDT-gradient azimuth holds across each Voronoi cell then
-    // jumps — and the lit/shadow terminator (amplified by the screen-blend
-    // highlight) renders those jumps as the visible chord. Stage 1's height blur
-    // does NOT remove it (the hardEdge profile is ~linear, so its gradient
-    // *direction* still snaps); stage 2's tangential normal-direction blur does.
-    const W = 1590;
-    const H = 2014;
-    const band = 128;
-    const alpha = ellipseAlpha(W, H);
+describe('computeBevelNormals — scale-invariant azimuth (issue #410→#413→#415→here)', () => {
+  // DECISIVE SCALE SWEEP. The bevel facet bug has now slipped through THREE times,
+  // each time at a LARGER raster scale, because every prior fix was a post-filter
+  // on the EDT gradient whose radius was a fraction of the (growing) band:
+  //   1. #410 mesh cracks — grew with shape size.
+  //   2. #413 height-field blur — fixed devScale ≤ 2, regressed at 4.
+  //   3. #415 tangential normal blur (radius 0.25·band, gated ≥24px) — fixed
+  //      devScale 4, REGRESSED at devScale 8 (the user's real DPR-8 render).
+  // Each prior test pinned a SINGLE scale (e.g. #415 asserted band=128 / devScale 4
+  // only), so the next larger scale walked straight through. This suite instead
+  // PARAMETRISES devScale ∈ {1,2,4,8} and asserts ONE scale-independent threshold
+  // for every scale, so a regression at any DPR fails here.
+  //
+  // The redesign sources the lip AZIMUTH from ∇(Gaussian-blurred coverage), which
+  // is analytically C^∞ at every scale (no EDT Voronoi structure enters the
+  // direction), so smoothness is invariant — and in fact IMPROVES with scale.
+  // Measured ceilings (production code): ellipse & ring max 1-step azimuth jump
+  // ≤ 0.0094 rad at devScale 1, shrinking to ≤ 0.0030 at devScale 8; highlight
+  // luminance 2nd-difference ≤ 0.0011 → ≤ 0.0002. For comparison the RAW EDT
+  // gradient (pre-patch) jumps 0.12–0.24 rad — a 7°–13° chord — at all scales.
+  // A single ceiling of 0.02 rad / 0.003 lum sits well above the redesign at
+  // every scale yet an order of magnitude below the raw facet.
+  const DEV_SCALES = [1, 2, 4, 8];
+  // sample-11 slide 6 body offscreen at devScale 1 ≈ 397×503 px, hardEdge band 32.
+  const BASE = { W: 397, H: 503, band: 32 };
+  const AZ_JUMP_MAX = 0.02; // rad, scale-independent
+  const LUM_2ND_DIFF_MAX = 0.003; // scale-independent
+
+  function ringAzimuthAndHighlight(alpha: Uint8ClampedArray, W: number, H: number, band: number) {
     const { normals, bandMask } = computeBevelNormals(alpha, W, H, band, 'hardEdge', band / 2);
-
+    const params = shadeParamsFor('matte', lightDirFromRig('threePt', 't'));
+    const faceFactor = shadePixel({ x: 0, y: 0, z: 1 }, params) || 1;
     const cx = W / 2;
     const cy = H / 2;
     const rx = W / 2 - 1;
     const ry = H / 2 - 1;
-    // Sample at the band midline (inset = band/2), where the lit/shadow terminator
-    // sits and the chord was visible. 0.1° steps so a chord spanning several
-    // degrees registers as a run of equal azimuths broken by a sudden jump.
-    const inset = band * 0.5;
-    const azimuths: number[] = [];
+    const inset = band * 0.5; // band midline, where the lit/shadow terminator sits
+    const az: number[] = [];
+    const lum: number[] = [];
+    // 0.1° steps so a chord spanning several degrees registers as a run of equal
+    // azimuths broken by a sudden jump.
     for (let deg = 0; deg < 360; deg += 0.1) {
       const ang = (deg * Math.PI) / 180;
       const x = Math.round(cx + Math.cos(ang) * (rx - inset));
@@ -325,24 +308,73 @@ describe('computeBevelNormals — smooth lip on a curved silhouette (anti-facet)
       if (!bandMask[i]) continue;
       const nx = normals[i * 3];
       const ny = normals[i * 3 + 1];
+      const nz = normals[i * 3 + 2];
       if (Math.hypot(nx, ny) < 1e-3) continue;
-      azimuths.push(Math.atan2(ny, nx));
+      az.push(Math.atan2(ny, nx));
+      lum.push(shadePixel({ x: nx, y: ny, z: nz }, params) / faceFactor);
     }
-    expect(azimuths.length).toBeGreaterThan(3000);
-
-    // Largest single-step azimuth jump. Measured: without stage-2 smoothing the
-    // un-regularised field peaks at ~0.016 rad/step (the Voronoi-cell jumps);
-    // with it the azimuth advances continuously at ~0.004 rad/step. A ceiling of
-    // 0.010 rad sits cleanly between the two, so this is RED before the fix and
-    // GREEN after, at the exact scale that regressed.
     let maxJump = 0;
-    for (let i = 1; i < azimuths.length; i++) {
-      let d = azimuths[i] - azimuths[i - 1];
+    let net = 0;
+    for (let i = 1; i < az.length; i++) {
+      let d = az[i] - az[i - 1];
       while (d > Math.PI) d -= 2 * Math.PI;
       while (d < -Math.PI) d += 2 * Math.PI;
       maxJump = Math.max(maxJump, Math.abs(d));
+      net += d;
     }
-    expect(maxJump).toBeLessThan(0.01);
+    let maxLum2 = 0;
+    for (let i = 2; i < lum.length; i++) {
+      maxLum2 = Math.max(maxLum2, Math.abs(lum[i] - 2 * lum[i - 1] + lum[i - 2]));
+    }
+    return { maxJump, maxLum2, net, n: az.length };
+  }
+
+  for (const ds of DEV_SCALES) {
+    const W = BASE.W * ds;
+    const H = BASE.H * ds;
+    const band = BASE.band * ds;
+
+    it(`ellipse lip is smooth at devScale ${ds} (band ${band}px)`, () => {
+      const r = ringAzimuthAndHighlight(ellipseAlpha(W, H), W, H, band);
+      expect(r.n).toBeGreaterThan(3000);
+      // (a) no facet: largest single-step azimuth jump under the shared ceiling.
+      expect(r.maxJump).toBeLessThan(AZ_JUMP_MAX);
+      // (b) highlight has no chorded kink: tangential 2nd-difference bounded.
+      expect(r.maxLum2).toBeLessThan(LUM_2ND_DIFF_MAX);
+      // (c) the azimuth makes one full turn — it tracks the rim, not a few facets.
+      expect(Math.abs(Math.abs(r.net) - 2 * Math.PI)).toBeLessThan(0.5);
+    });
+
+    it(`thin-ring lip is smooth at devScale ${ds} (band ${band}px)`, () => {
+      // A ring whose band reaches toward the medial axis — the medial-ridge case
+      // that breaks an EDT-nearest-feature azimuth. The coverage σ (0.25·band) is
+      // small enough to stay local to the OUTER rim, so it stays smooth.
+      const r = ringAzimuthAndHighlight(ringAlpha(W, H, 0.18), W, H, band);
+      expect(r.n).toBeGreaterThan(3000);
+      expect(r.maxJump).toBeLessThan(AZ_JUMP_MAX);
+      expect(r.maxLum2).toBeLessThan(LUM_2ND_DIFF_MAX);
+      expect(Math.abs(Math.abs(r.net) - 2 * Math.PI)).toBeLessThan(0.5);
+    });
+  }
+
+  it('smoothness does NOT degrade as scale grows (the property prior patches lacked)', () => {
+    // The defining scale-invariance assertion: the max azimuth jump at devScale 8
+    // must be NO WORSE than at devScale 1. Every prior EDT-gradient patch had the
+    // opposite behaviour (smooth at the tuned scale, faceted above it); this would
+    // be RED for all of them and is GREEN for the coverage-gradient azimuth.
+    const small = ringAzimuthAndHighlight(
+      ellipseAlpha(BASE.W * 1, BASE.H * 1),
+      BASE.W * 1,
+      BASE.H * 1,
+      BASE.band * 1,
+    );
+    const large = ringAzimuthAndHighlight(
+      ellipseAlpha(BASE.W * 8, BASE.H * 8),
+      BASE.W * 8,
+      BASE.H * 8,
+      BASE.band * 8,
+    );
+    expect(large.maxJump).toBeLessThanOrEqual(small.maxJump + 1e-6);
   });
 });
 
