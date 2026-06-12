@@ -1,5 +1,10 @@
 export { PptxViewer, type PptxViewerOptions } from './viewer';
-export { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
+export {
+  PptxPresentation,
+  type LoadOptions,
+  type RenderSlideOptions,
+  type RenderSlideToBitmapOptions,
+} from './presentation';
 export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
 export type { PresentationHandle } from './presentation-handle';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
