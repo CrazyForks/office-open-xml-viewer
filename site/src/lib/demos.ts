@@ -168,6 +168,9 @@ function mountMasterDetail(el: HTMLElement, format: Format, url: string): void {
       const select = async (i: number) => {
         cells.forEach((c, k) => c.classList.toggle('active', k === i));
         await viewer.go(i);
+        // Reset scroll so the new page is shown from its top, not wherever the
+        // previous page was scrolled to.
+        detail.scrollTop = 0;
       };
       for (let i = 0; i < doc.count; i++) {
         const cell = document.createElement('div');

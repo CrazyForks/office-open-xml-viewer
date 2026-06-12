@@ -257,7 +257,7 @@ h1, h2, h3 { line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
 .demo-rail-cell { cursor: pointer; border-radius: 5px; outline: 2px solid transparent; transition: outline-color 0.15s; }
 .demo-rail-cell .demo-page { width: 100%; height: auto; }
 .demo-rail-cell.active { outline-color: var(--accent); }
-.demo-detail { flex: 1 1 auto; overflow: auto; padding: 22px; display: flex; justify-content: center; align-items: center; }
+.demo-detail { flex: 1 1 auto; overflow: auto; padding: 22px; display: flex; justify-content: center; align-items: flex-start; }
 .demo-detail .demo-page { width: 100%; max-width: 960px; height: auto; }
 
 /* xlsx full viewer */
