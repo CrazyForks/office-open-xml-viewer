@@ -1,8 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { Canvas, loadImage } from 'skia-canvas';
 import { renderSlideNode } from './render';
 import type { NodeCanvasFactory } from './render';
 import type { Presentation, Slide, PictureElement } from '@silurus/ooxml-pptx';
+
+// skia-canvas ships a native binding that CI deliberately omits (VRT and other
+// canvas-backed checks are local-only). Load it dynamically so the suite skips
+// cleanly when the binding is absent instead of failing at module load.
+const skia = await import('skia-canvas').catch(() => null);
+// Non-null aliases for use inside the (skia-gated) test bodies. When `skia` is
+// null the whole suite is skipped via `describe.skipIf`, so these are never
+// dereferenced; the cast keeps the helpers strongly typed without `as any`.
+type Skia = typeof import('skia-canvas');
+const { Canvas, loadImage } = (skia ?? {}) as Skia;
 
 /**
  * Regression test for the Node OffscreenCanvas shim.
@@ -18,10 +27,15 @@ import type { Presentation, Slide, PictureElement } from '@silurus/ooxml-pptx';
  * renders match and this fails.
  */
 
-const factory: NodeCanvasFactory = {
-  createCanvas: (w, h) => new Canvas(w, h) as unknown as ReturnType<NodeCanvasFactory['createCanvas']>,
-  loadImage: (buf) => loadImage(buf as Buffer) as unknown as ReturnType<NodeCanvasFactory['loadImage']>,
-};
+const factory: NodeCanvasFactory | null =
+  Canvas && loadImage
+    ? {
+        createCanvas: (w, h) =>
+          new Canvas(w, h) as unknown as ReturnType<NodeCanvasFactory['createCanvas']>,
+        loadImage: (buf) =>
+          loadImage(buf as Buffer) as unknown as ReturnType<NodeCanvasFactory['loadImage']>,
+      }
+    : null;
 
 const g = globalThis as unknown as { createImageBitmap?: unknown; OffscreenCanvas?: unknown };
 
@@ -95,7 +109,10 @@ async function renderToRgba(
       canvas as unknown as Parameters<typeof renderSlideNode>[0],
       presentation,
       0,
-      { width, dpr, ...(withShim ? { factory } : {}) },
+      // `factory` is non-null whenever this suite runs (it is gated by
+      // describe.skipIf(!skia)); the `&& factory` narrows the nullable type
+      // away so the spread matches renderSlideNode's `factory?` option.
+      { width, dpr, ...(withShim && factory ? { factory } : {}) },
     );
   } finally {
     g2.createImageBitmap = prevBitmap as typeof globalThis.createImageBitmap;
@@ -105,7 +122,7 @@ async function renderToRgba(
   return { data: img.data as unknown as Uint8ClampedArray, width: width * dpr, height: 400 * dpr };
 }
 
-describe('node bevel rendering (OffscreenCanvas shim)', () => {
+describe.skipIf(!skia)('node bevel rendering (OffscreenCanvas shim)', () => {
   it('shim activates sp3d bevel shading — rim pixels differ from the flat fallback', async () => {
     // Guard: no ambient OffscreenCanvas in the test runtime, so the only way the
     // bevel can appear is via the shim installed by renderSlideNode(factory).

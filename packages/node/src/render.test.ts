@@ -1,7 +1,15 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { Canvas, loadImage } from 'skia-canvas';
 import { installOffscreenCanvasShim, installImageBitmapShim } from './render';
 import type { NodeCanvasFactory } from './render';
+
+// skia-canvas ships a native binding that CI deliberately omits (it is a
+// peerDependency, not installed by `pnpm install --frozen-lockfile`, and the
+// canvas-backed checks are local-only like the VRT suites). Load it dynamically
+// so these suites skip cleanly when the binding is absent instead of failing
+// the whole run at module load. `describe.skipIf(!skia)` gates every block.
+const skia = await import('skia-canvas').catch(() => null);
+type Skia = typeof import('skia-canvas');
+const { Canvas, loadImage } = (skia ?? {}) as Skia;
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) => new Canvas(w, h) as unknown as ReturnType<NodeCanvasFactory['createCanvas']>,
@@ -10,7 +18,7 @@ const factory: NodeCanvasFactory = {
 
 const g = globalThis as unknown as { OffscreenCanvas?: unknown };
 
-describe('installOffscreenCanvasShim', () => {
+describe.skipIf(!skia)('installOffscreenCanvasShim', () => {
   afterEach(() => {
     // Make sure each test cleans up; restore is the responsibility of the test
     // body, but guard against leakage if an assertion threw.
@@ -86,7 +94,7 @@ describe('installOffscreenCanvasShim', () => {
   });
 });
 
-describe('installImageBitmapShim', () => {
+describe.skipIf(!skia)('installImageBitmapShim', () => {
   it('restores the previous global', () => {
     const gg = globalThis as unknown as { createImageBitmap?: unknown };
     const before = gg.createImageBitmap;
