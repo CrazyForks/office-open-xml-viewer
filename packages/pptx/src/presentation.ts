@@ -1,4 +1,4 @@
-import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
+import type { Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import { selectNotes } from './notes';
@@ -6,55 +6,13 @@ import {
   preloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
-  type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
+import { PPTX_GOOGLE_FONTS } from './google-fonts';
+import { findMimeTypeForPath } from './media-mime';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
-
-/** Theme-referenced typefaces commonly used by PPTX templates. Keys are
- *  lower-cased family names. Entries that substitute a metric-compatible
- *  family (Calibri → Carlito, Cambria → Caladea) include `loadFamily` so the
- *  FontFaceSet load is driven against the substitute; the renderer puts the
- *  substitute into the canvas font stack so missing Office fonts degrade to a
- *  same-width webfont instead of a wider system serif/sans. The remaining
- *  entries omit `loadFamily` because Google Fonts ships the same family name. */
-const NOTO_NASKH_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';
-const NOTO_SANS_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;700&display=swap';
-
-const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  'calibri':           { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
-  'calibri light':     { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
-  'cambria':           { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
-  'cambria math':      { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
-  'nunito sans':       { url: 'https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'nunito':            { url: 'https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'open sans':         { url: 'https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'roboto':            { url: 'https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'lato':              { url: 'https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'montserrat':        { url: 'https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'poppins':           { url: 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'raleway':           { url: 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
-  // substitutes so RTL slides (e.g. sample-10, which requests Sakkal Majalla /
-  // Univers Next Arabic) render with a real web font instead of an oversized
-  // OS fallback. "Naskh" covers traditional serif-like Arabic faces; "Sans"
-  // covers the modern geometric ones.
-  'sakkal majalla':      { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'traditional arabic':  { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'simplified arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'arabic typesetting':  { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'univers next arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-  // Self-referencing entries so the generic Arabic fallback fonts (appended to
-  // the renderer's font stack) are themselves loaded whenever useGoogleFonts is
-  // enabled — see `load`, which always queues these names.
-  'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-};
 
 /** Options for {@link PptxPresentation.load}. The shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
@@ -249,15 +207,7 @@ export class PptxPresentation {
 
   private _findMimeTypeForPath(mediaPath: string): string {
     if (!this._presentation) return '';
-    for (const slide of this._presentation.slides) {
-      for (const el of slide.elements) {
-        if (el.type !== 'media') continue;
-        const m = el as MediaElement;
-        if (m.mediaPath === mediaPath) return m.mimeType;
-        if (m.posterPath === mediaPath) return m.posterMimeType;
-      }
-    }
-    return '';
+    return findMimeTypeForPath(this._presentation, mediaPath);
   }
 
   /**
