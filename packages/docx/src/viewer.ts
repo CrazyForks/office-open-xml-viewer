@@ -23,10 +23,17 @@ export class DocxViewer {
   private _wrapper: HTMLDivElement;
   private _textLayer: HTMLDivElement | null = null;
   private _opts: DocxViewerOptions;
+  private readonly _mode: 'main' | 'worker';
+  /** The canvas's bitmaprenderer context, used only in worker mode (a canvas
+   *  holds one context type for its lifetime; the main-mode 2d render path is
+   *  never used on the same canvas). */
+  private _bitmapCtx: ImageBitmapRenderingContext | null = null;
+  private _warnedNoTextSelection = false;
 
   constructor(canvas: HTMLCanvasElement, opts: DocxViewerOptions = {}) {
     this._canvas = canvas;
     this._opts = opts;
+    this._mode = opts.mode ?? 'main';
 
     // Wrap canvas in a positioned container for the optional text layer overlay
     const parent = canvas.parentElement;
@@ -44,6 +51,12 @@ export class DocxViewer {
       parent.insertBefore(this._wrapper, canvas);
     }
     this._wrapper.appendChild(canvas);
+
+    // Worker mode paints worker-produced bitmaps via a bitmaprenderer context,
+    // grabbed once (a canvas holds one context type for its lifetime).
+    if (this._mode === 'worker') {
+      this._bitmapCtx = canvas.getContext('bitmaprenderer');
+    }
 
     if (opts.enableTextSelection) {
       this._textLayer = document.createElement('div');
@@ -67,6 +80,7 @@ export class DocxViewer {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         math: this._opts.math,
+        mode: this._mode,
       });
       this._currentPage = 0;
       await this._render();
@@ -112,11 +126,39 @@ export class DocxViewer {
 
   private async _render(): Promise<void> {
     if (!this._doc) return;
-    const runs: DocxTextRunInfo[] = [];
-    const onTextRun = this._textLayer ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
-    await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, onTextRun });
-    if (this._textLayer) {
-      this._buildTextLayer(this._textLayer, runs);
+    const isWorker = this._mode === 'worker';
+    // In worker mode rendering happens off the main thread, so the onTextRun
+    // callback can't fire — the text-selection overlay is unavailable.
+    if (isWorker && this._textLayer && !this._warnedNoTextSelection) {
+      this._warnedNoTextSelection = true;
+      console.warn(
+        "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
+      );
+    }
+    if (isWorker) {
+      const dpr = this._opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
+      // Only serializable render options may cross to the worker — spreading the
+      // full viewer opts would postMessage non-cloneable values (the math
+      // engine, callbacks, container element) and throw a DataCloneError.
+      const bmp = await this._doc.renderPageToBitmap(this._currentPage, {
+        width: this._opts.width,
+        dpr: this._opts.dpr,
+        showTrackChanges: this._opts.showTrackChanges,
+      });
+      this._canvas.width = bmp.width;
+      this._canvas.height = bmp.height;
+      // The bitmap is sized in device px; mirror the main renderer by setting
+      // the CSS size to the logical (÷dpr) dimensions so it isn't 2× on HiDPI.
+      this._canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
+      this._canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
+      this._bitmapCtx?.transferFromImageBitmap(bmp);
+    } else {
+      const runs: DocxTextRunInfo[] = [];
+      const onTextRun = this._textLayer ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
+      await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, onTextRun });
+      if (this._textLayer) {
+        this._buildTextLayer(this._textLayer, runs);
+      }
     }
     this._opts.onPageChange?.(this._currentPage, this.pageCount);
   }

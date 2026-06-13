@@ -40,10 +40,17 @@ export class PptxViewer {
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
   private handle: PresentationHandle | null = null;
+  private readonly _mode: 'main' | 'worker';
+  /** The canvas's bitmaprenderer context, used only by the static worker-mode
+   *  render path. The media-playback path keeps a 2d context (via presentSlide),
+   *  so this is obtained only when worker mode renders without media playback. */
+  private _bitmapCtx: ImageBitmapRenderingContext | null = null;
+  private _warnedNoTextSelection = false;
 
   constructor(canvas: HTMLCanvasElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
     this.canvas = canvas;
+    this._mode = opts.mode ?? 'main';
 
     const parent = canvas.parentElement;
     this.wrapper = document.createElement('div');
@@ -58,6 +65,14 @@ export class PptxViewer {
     if (!canvas.style.display) canvas.style.display = 'block';
     if (parent) parent.insertBefore(this.wrapper, canvas);
     this.wrapper.appendChild(canvas);
+
+    // Static worker-mode rendering paints worker-produced bitmaps via a
+    // bitmaprenderer context (grabbed once — a canvas holds one context type for
+    // its lifetime). The media-playback path uses presentSlide, which keeps a 2d
+    // context, so skip bitmaprenderer there.
+    if (this._mode === 'worker' && !opts.enableMediaPlayback) {
+      this._bitmapCtx = canvas.getContext('bitmaprenderer');
+    }
 
     if (opts.enableTextSelection) {
       this.textLayer = document.createElement('div');
@@ -81,6 +96,7 @@ export class PptxViewer {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         math: this.opts.math,
+        mode: this._mode,
       });
       this.currentSlide = 0;
       await this.renderCurrentSlide();
@@ -138,15 +154,31 @@ export class PptxViewer {
     this.handle?.destroy();
     this.handle = null;
 
+    const isWorker = this._mode === 'worker';
+    // In worker mode rendering happens off the main thread, so the onTextRun
+    // callback can't fire — the text-selection overlay is unavailable.
+    if (isWorker && this.textLayer && !this._warnedNoTextSelection) {
+      this._warnedNoTextSelection = true;
+      console.warn(
+        "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
+      );
+    }
     const runs: PptxTextRunInfo[] = [];
-    const onTextRun = this.textLayer ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
+    const onTextRun = !isWorker && this.textLayer ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
     try {
       if (this.opts.enableMediaPlayback) {
+        // presentSlide supports both modes (worker: base off-thread, video
+        // overlay composited on the main thread).
         this.handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
           width: targetWidth,
           dpr,
         });
+      } else if (isWorker) {
+        const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr });
+        this.canvas.width = bmp.width;
+        this.canvas.height = bmp.height;
+        this._bitmapCtx?.transferFromImageBitmap(bmp);
       } else {
         await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun });
       }
@@ -155,7 +187,7 @@ export class PptxViewer {
       this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
 
-    if (this.textLayer) {
+    if (this.textLayer && !isWorker) {
       this._buildTextLayer(this.textLayer, runs, targetWidth, cssHeight);
     }
   }

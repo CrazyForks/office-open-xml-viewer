@@ -25,6 +25,7 @@ const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'L
 const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
 const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~4 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped — the engine tree-shakes away entirely.' };
 const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' parses in a worker and renders on the main thread (default). 'worker' parses AND renders entirely inside the worker; the main thread only paints the ImageBitmap returned by the render*ToBitmap method via a `bitmaprenderer` context. Requires Worker + OffscreenCanvas. The canvas-target render methods are unavailable in 'worker' mode, and equations require 'main'." };
+const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' renders on the main thread (default). 'worker' renders the whole viewer off the main thread — every frame is produced in a Web Worker and painted via a `bitmaprenderer` context — so document rendering never blocks the UI. Scroll, sheet tabs, zoom and (xlsx) cell selection are unchanged. Requires Worker + OffscreenCanvas. The pptx/docx text-selection overlay is unavailable in 'worker' mode (onTextRun can't cross the worker boundary), and equations require 'main'." };
 
 export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
   pptx: [
@@ -40,6 +41,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'enableMediaPlayback', type: 'boolean', def: 'false', desc: 'Make embedded audio/video interactive (the viewer draws its own play chrome).' },
         ZIP,
         MATH,
+        VIEWER_MODE,
         { name: 'onSlideChange', type: '(index: number, total: number) => void', desc: 'Called after a slide finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -85,6 +87,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours.' },
         ZIP,
         MATH,
+        VIEWER_MODE,
         { name: 'onPageChange', type: '(index: number, total: number) => void', desc: 'Called after a page finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -125,6 +128,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         GFONTS,
         ZIP,
         MATH,
+        VIEWER_MODE,
         { name: 'onReady', type: '(sheetNames: string[]) => void', desc: 'Called once the workbook is parsed.' },
         { name: 'onSheetChange', type: '(index: number, total: number) => void', desc: 'Called when the active sheet changes; `total` is the sheet count. Read the name via `sheetNames[index]`.' },
         { name: 'onSelectionChange', type: '(sel: CellRange | null) => void', desc: 'Called when the selected range changes; null clears it.' },
