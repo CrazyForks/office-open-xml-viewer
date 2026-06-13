@@ -29,7 +29,8 @@ type Story = StoryObj<Args>;
 // ---------------------------------------------------------------------------
 export function buildViewerUI(
   args: Args,
-  autoLoadUrl?: string
+  autoLoadUrl?: string,
+  extra?: { mode?: 'main' | 'worker' }
 ): { root: HTMLElement; viewer: PptxViewer } {
   const root = document.createElement('div');
   root.style.cssText = 'font-family:sans-serif;padding:16px;';
@@ -76,6 +77,7 @@ export function buildViewerUI(
       nextBtn.disabled = idx === total - 1;
     },
     onError: (err) => { status.textContent = `Error: ${err.message}`; },
+    ...extra,
   });
 
   prevBtn.addEventListener('click', () => viewer.prevSlide());

@@ -31,6 +31,7 @@ type Story = StoryObj<Args>;
 export function buildViewerUI(
   args: Args,
   autoLoadUrl?: string,
+  extra?: { mode?: 'main' | 'worker' },
 ): { root: HTMLElement; doc: DocxDocument | null } {
   const root = document.createElement('div');
   root.style.cssText = 'font-family:sans-serif;padding:16px;';
@@ -69,6 +70,7 @@ export function buildViewerUI(
     enableTextSelection: true,
     useGoogleFonts: true,
     math,
+    ...extra,
   });
 
   const updateNav = () => {

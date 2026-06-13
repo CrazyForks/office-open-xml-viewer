@@ -78,6 +78,15 @@ export interface XlsxViewerOptions {
    * dependency-injection contract as the docx/pptx viewers.
    */
   math?: MathRenderer;
+  /**
+   * `'main'` (default): parse in a worker, render on the main thread. `'worker'`:
+   * parse AND render entirely inside the worker and paint the returned
+   * ImageBitmap onto the viewer's canvas, so document rendering never blocks the
+   * UI thread. All interaction (scroll, sheet tabs, frozen panes, zoom, cell
+   * selection) is unchanged. Requires `Worker` + `OffscreenCanvas`. Equations
+   * require `'main'` (the math engine cannot cross the worker boundary).
+   */
+  mode?: 'main' | 'worker';
 }
 
 export interface CellAddress {
@@ -185,6 +194,12 @@ export class XlsxViewer {
   private currentSheet = 0;
   private currentWorksheet: Worksheet | null = null;
   private opts: XlsxViewerOptions;
+  /** 'main' renders on this thread; 'worker' paints worker-produced bitmaps. */
+  private readonly _mode: 'main' | 'worker';
+  /** The canvas's bitmaprenderer context, used only in worker mode. A canvas
+   *  holds one context type for its lifetime, so this is obtained once and the
+   *  main-mode 2d render path is never used on the same canvas. */
+  private _bitmapCtx: ImageBitmapRenderingContext | null = null;
   private resizeObserver: ResizeObserver | null = null;
   /**
    * Start-anchored horizontal scroll position (the {@link effectiveScrollLeft}
@@ -244,6 +259,7 @@ export class XlsxViewer {
 
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     this.opts = opts;
+    this._mode = opts.mode ?? 'main';
 
     const wrapper = document.createElement('div');
     wrapper.style.cssText =
@@ -255,6 +271,11 @@ export class XlsxViewer {
 
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = `position:absolute;top:0;left:0;z-index:0;display:block;`;
+    // Worker mode paints worker-produced bitmaps; grab the bitmaprenderer
+    // context once (a canvas can hold only one context type for its lifetime).
+    if (this._mode === 'worker') {
+      this._bitmapCtx = this.canvas.getContext('bitmaprenderer');
+    }
 
     // Selection overlay: sits above canvas, below scrollHost (z-index 0.5 via fractional z not possible,
     // use pointer-events:none so scrollHost still receives events)
@@ -413,6 +434,7 @@ export class XlsxViewer {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         math: this.opts.math,
+        mode: this._mode,
       });
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
@@ -1793,7 +1815,7 @@ export class XlsxViewer {
 
     const { selectedRowRange, selectedColRange } = this.computeHeaderHighlight();
 
-    await this.workbook.renderViewport(this.canvas, this.currentSheet, viewport, {
+    const renderOpts = {
       width: w,
       height: h,
       dpr,
@@ -1804,7 +1826,20 @@ export class XlsxViewer {
       freezeCols,
       selectedRowRange,
       selectedColRange,
-    });
+    };
+
+    if (this._mode === 'worker') {
+      // Render the viewport off the main thread and paint the returned bitmap.
+      // The selection overlay (geometry-based, from getCellRect) is unaffected.
+      const bmp = await this.workbook.renderViewportToBitmap(this.currentSheet, viewport, renderOpts);
+      this.canvas.width = bmp.width;
+      this.canvas.height = bmp.height;
+      this.canvas.style.width = `${w}px`;
+      this.canvas.style.height = `${h}px`;
+      this._bitmapCtx?.transferFromImageBitmap(bmp);
+    } else {
+      await this.workbook.renderViewport(this.canvas, this.currentSheet, viewport, renderOpts);
+    }
   }
 
   private computeHeaderHighlight(): {

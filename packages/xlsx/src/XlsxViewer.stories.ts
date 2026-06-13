@@ -31,6 +31,7 @@ type Story = StoryObj<Args>;
 export function buildViewerUI(
   args: Args,
   autoLoadUrl?: string,
+  extra?: { mode?: 'main' | 'worker' },
 ): { root: HTMLElement; viewer: XlsxViewer } {
   const root = document.createElement('div');
   root.style.cssText = 'width:100%;height:100vh;display:flex;flex-direction:column;overflow:hidden;font-family:sans-serif;box-sizing:border-box;';
@@ -57,6 +58,7 @@ export function buildViewerUI(
       status.textContent = `Sheet ${idx + 1} / ${total}: ${sheetNames[idx] ?? ''}`;
     },
     onError: (err) => { status.textContent = `Error: ${err.message}`; },
+    ...extra,
   });
 
   if (autoLoadUrl) {
