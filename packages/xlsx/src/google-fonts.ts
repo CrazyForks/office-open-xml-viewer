@@ -1,4 +1,4 @@
-import type { FontPreloadEntry } from '@silurus/ooxml-core';
+import { SCRIPT_GOOGLE_FONTS, type FontPreloadEntry } from '@silurus/ooxml-core';
 
 /** Office font name → metric-compatible Google Fonts substitute. These are
  *  the well-known pairings Microsoft and Google both publish and ship on
@@ -36,4 +36,9 @@ export const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // is enabled — see `_load`, which always queues these names.
   'noto naskh arabic': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
   'noto sans arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
+  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
+  // Noto faces, shared with docx/pptx via @silurus/ooxml-core. The renderer
+  // chooses the CJK Noto per cell from the cell's font name; non-CJK scripts are
+  // appended to the default chain. Loaded only when useGoogleFonts is on.
+  ...SCRIPT_GOOGLE_FONTS,
 };

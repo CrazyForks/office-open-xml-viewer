@@ -4,6 +4,7 @@ import {
   preloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
+  SCRIPT_PRELOAD_NAMES,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -132,6 +133,10 @@ export class XlsxWorkbook {
       // renderer's DEFAULT_FONT_FAMILY chain ends with these two Noto faces).
       names.add('Noto Naskh Arabic');
       names.add('Noto Sans Arabic');
+      // Always queue every script Noto face so a glyph falling through the
+      // chain (CJK / Cyrillic / Thai / Devanagari / Hebrew) resolves to a real
+      // web font even when no cell font maps to it by name.
+      for (const n of SCRIPT_PRELOAD_NAMES) names.add(n);
       await preloadGoogleFonts(names, XLSX_GOOGLE_FONTS);
     }
   }

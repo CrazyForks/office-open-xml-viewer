@@ -4,6 +4,7 @@ import {
   preloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
+  SCRIPT_PRELOAD_NAMES,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -99,6 +100,10 @@ export class DocxDocument {
           doc._document.minorFont,
           'Noto Naskh Arabic',
           'Noto Sans Arabic',
+          // Always queue every script Noto face so a glyph that falls through
+          // the chain (CJK / Cyrillic / Thai / Devanagari / Hebrew) resolves to
+          // a real web font even when no document font maps to it by name.
+          ...SCRIPT_PRELOAD_NAMES,
         ],
         DOCX_GOOGLE_FONTS,
       );

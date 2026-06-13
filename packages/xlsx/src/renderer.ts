@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -26,8 +26,51 @@ import { parseA1 } from './a1.js';
 // codepoint resolves to a real web font (loaded by `XlsxWorkbook.load`'s
 // useGoogleFonts path) instead of an oversized OS Arabic face. Latin glyphs
 // still bind to the earlier faces, so Latin rendering is unchanged.
+// The trailing non-CJK Noto faces (Hebrew / Thai / Devanagari, plus "Noto Sans"
+// for Cyrillic) extend the same per-glyph fallback idea to the other
+// non-Latin, non-CJK scripts: any such codepoint resolves to a real web font
+// (loaded opt-in via useGoogleFonts) instead of an OS face or tofu. CJK is NOT
+// appended here — shared Han glyphs differ in shape per language, so the
+// correct Noto CJK is chosen per cell from the cell's font name; see
+// fontStackFor() / cssTailFor().
+const NON_CJK_SANS_TAIL = NON_CJK_SANS_FALLBACKS.map((n) => `"${n}"`).join(', ');
+const NON_CJK_SERIF_TAIL = NON_CJK_SERIF_FALLBACKS.map((n) => `"${n}"`).join(', ');
 const DEFAULT_FONT_FAMILY =
-  '"Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif';
+  `"Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", ${NON_CJK_SANS_TAIL}, sans-serif`;
+
+/** Markers of a CJK *serif* (song/ming/kai/fangsong) cell face — Noto CJK then
+ *  uses its serif variant. Verified against the Office default font set. */
+function isCjkSerifName(l: string): boolean {
+  return /song|sung|simsun|nsimsun|batang|gungsuh|mincho|mingliu|pmingliu|fangsong|kaiti|simkai|simfang|stsong|stkaiti|新細明|細明|宋体|明朝|楷体|楷體|仿宋|標楷|游明朝/.test(
+    l,
+  );
+}
+
+/**
+ * CSS font-family TAIL (everything after the cell's named face) for an xlsx
+ * cell. For a CJK cell font the matching Noto CJK leads (so shared Han glyphs
+ * take the document language's shapes; see core/fonts/scripts.ts), followed by
+ * the standard Latin/Arabic/non-CJK fallbacks. Non-CJK or unnamed cells get the
+ * historical {@link DEFAULT_FONT_FAMILY}. Exported for unit testing.
+ */
+export function cssTailFor(name: string | null | undefined): string {
+  const cjk = name ? classifyCjkFont(name) : null;
+  if (!cjk) return DEFAULT_FONT_FAMILY;
+  const serif = isCjkSerifName((name ?? '').toLowerCase());
+  const cjkPart = cjkFallbackChain(cjk, serif ? 'serif' : 'sans')
+    .map((n) => `"${n}"`)
+    .join(', ');
+  const tail = serif ? NON_CJK_SERIF_TAIL : NON_CJK_SANS_TAIL;
+  const generic = serif ? 'serif' : 'sans-serif';
+  // CJK Noto leads, then Latin/metric substitutes, Arabic, non-CJK scripts.
+  return `${cjkPart}, "Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", ${tail}, ${generic}`;
+}
+
+/** Full CSS font-family list for a cell font name (named face first). */
+export function fontStackFor(name: string | null | undefined): string {
+  return name ? `"${name}", ${cssTailFor(name)}` : DEFAULT_FONT_FAMILY;
+}
+
 const DEFAULT_FONT_SIZE = 11;
 // Fallback Max Digit Width of the Normal-style font when the workbook's
 // default font isn't known. Calibri 11 pt at 96 DPI ≈ 8 px (Canvas2D
@@ -123,7 +166,7 @@ export function computeMdw(family: string, sizePt: number): number {
   const ctx = canvas.getContext('2d');
   if (!ctx) return MDW_FALLBACK;
   // Quote the family so multi-word names like "Meiryo UI" parse as one face.
-  ctx.font = `${sizePx}px "${family}", ${DEFAULT_FONT_FAMILY}`;
+  ctx.font = `${sizePx}px ${fontStackFor(family)}`;
   let mdw = 0;
   for (const d of '0123456789') {
     const w = ctx.measureText(d).width;
@@ -526,8 +569,7 @@ function buildFont(font: CellFont, cs = 1): string {
   const style = font.italic ? 'italic ' : '';
   const weight = font.bold ? 'bold ' : '';
   const sizePx = Math.max(1, Math.round(font.size * PT_TO_PX * cs));
-  const family = font.name ? `"${font.name}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
-  return `${style}${weight}${sizePx}px ${family}`;
+  return `${style}${weight}${sizePx}px ${fontStackFor(font.name)}`;
 }
 
 /**
@@ -2998,7 +3040,7 @@ function drawShapeText(
   const textFont = (run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>): { font: string; px: number } => {
     const size = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
     const px = size * PT_TO_PX * cs;
-    const family = run.fontFace ? `"${run.fontFace}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
+    const family = fontStackFor(run.fontFace);
     return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
   };
 

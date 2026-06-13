@@ -1,4 +1,4 @@
-import type { FontPreloadEntry } from '@silurus/ooxml-core';
+import { SCRIPT_GOOGLE_FONTS, type FontPreloadEntry } from '@silurus/ooxml-core';
 
 /** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
  *  PPTX map — these are the well-known free webfont alternatives Microsoft
@@ -37,4 +37,9 @@ export const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // is enabled — see `load`, which always queues these names.
   'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
   'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
+  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
+  // Noto faces, shared with pptx/xlsx via @silurus/ooxml-core. The renderer
+  // appends these to the font chain (CJK ordered by document language); they are
+  // loaded only when useGoogleFonts is on — no binaries ship in the bundle.
+  ...SCRIPT_GOOGLE_FONTS,
 };

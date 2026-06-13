@@ -1,4 +1,4 @@
-import type { FontPreloadEntry } from '@silurus/ooxml-core';
+import { SCRIPT_GOOGLE_FONTS, type FontPreloadEntry } from '@silurus/ooxml-core';
 
 /** Theme-referenced typefaces commonly used by PPTX templates. Keys are
  *  lower-cased family names. Entries that substitute a metric-compatible
@@ -41,4 +41,9 @@ export const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // enabled — see `load`, which always queues these names.
   'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
   'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
+  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
+  // Noto faces, shared with docx/xlsx via @silurus/ooxml-core. The renderer
+  // appends these to the canvas font stack (CJK ordered by document language);
+  // loaded only when useGoogleFonts is on — no binaries ship in the bundle.
+  ...SCRIPT_GOOGLE_FONTS,
 };

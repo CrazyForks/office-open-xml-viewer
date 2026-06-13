@@ -8,7 +8,7 @@
  * Single-document contract: the proxy issues one `parse` and then renders.
  */
 import init, { parse_docx } from './wasm/docx_parser.js';
-import { decodeDataUrl, preloadGoogleFonts } from '@silurus/ooxml-core';
+import { decodeDataUrl, preloadGoogleFonts, SCRIPT_PRELOAD_NAMES } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
 import { paginateDocument, renderDocumentToCanvas } from './renderer';
 import { DOCX_GOOGLE_FONTS } from './google-fonts';
@@ -42,7 +42,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         // Pagination measures text, so fonts must land BEFORE computePages —
         // same ordering the main-mode load() guarantees.
         await preloadGoogleFonts(
-          [doc.majorFont, doc.minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic'],
+          [doc.majorFont, doc.minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic', ...SCRIPT_PRELOAD_NAMES],
           DOCX_GOOGLE_FONTS,
         );
       }

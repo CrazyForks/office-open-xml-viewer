@@ -7,6 +7,7 @@ import {
   WorkerBridge,
   defaultDpr,
   isHTMLCanvas,
+  SCRIPT_PRELOAD_NAMES,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
@@ -150,7 +151,16 @@ export class PptxPresentation {
       // a real web font even when its named family is unmapped (the renderer's
       // canvas font stack ends with these two Noto faces).
       await preloadGoogleFonts(
-        [parsed.majorFont, parsed.minorFont, 'Noto Naskh Arabic', 'Noto Sans Arabic'],
+        [
+          parsed.majorFont,
+          parsed.minorFont,
+          'Noto Naskh Arabic',
+          'Noto Sans Arabic',
+          // Always queue every script Noto face so a glyph falling through the
+          // stack (CJK / Cyrillic / Thai / Devanagari / Hebrew) resolves to a
+          // real web font even when no slide font maps to it by name.
+          ...SCRIPT_PRELOAD_NAMES,
+        ],
         PPTX_GOOGLE_FONTS,
       );
     }

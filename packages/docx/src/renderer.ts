@@ -14,6 +14,10 @@ import {
   resolveBaseDirection,
   isHTMLCanvas,
   defaultDpr,
+  classifyCjkFont,
+  cjkFallbackChain,
+  NON_CJK_SANS_FALLBACKS,
+  NON_CJK_SERIF_FALLBACKS,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -3980,6 +3984,53 @@ function isArabicSubstituteFont(family: string): boolean {
   return ARABIC_SUBSTITUTE_FONTS.has(family.toLowerCase());
 }
 
+/** Quote each family for a CSS font-family list. */
+function quoteAll(names: readonly string[]): string {
+  return names.map((n) => `"${n}"`).join(', ');
+}
+
+/** Generic Arabic web-font fallbacks (loaded when `useGoogleFonts` is on). */
+const ARABIC_TAIL_SANS = ['Noto Naskh Arabic', 'Noto Sans Arabic'] as const;
+
+/**
+ * Sans fallback TAIL (everything after the requested face) for a Latin/CJK run.
+ *
+ * - `cjk`: the document's CJK language inferred from the font name, or `null`
+ *   for a plain Latin face — in which case the existing Japanese system-font
+ *   companions (Hiragino Sans / Meiryo) lead, preserving the long-standing JP
+ *   default. For a non-JP CJK language the matching Noto CJK leads so shared
+ *   Han glyphs take that language's shapes (see core/fonts/scripts.ts).
+ *
+ * Order: [CJK companions] → Arabic → non-CJK scripts (Hebrew/Thai/Devanagari,
+ * Cyrillic via Noto Sans) → `sans-serif`. The non-CJK scripts have no Han
+ * collision so their position is immaterial; they sit before the generic so
+ * the browser's per-glyph fallback can reach them.
+ */
+function sansTail(cjk: ReturnType<typeof classifyCjkFont>): string {
+  const cjkPart =
+    cjk && cjk !== 'jp'
+      ? cjkFallbackChain(cjk, 'sans')
+      : // JP / Latin default: keep the historical system-font hints first, then
+        // the Noto CJK siblings so a CJK glyph still resolves on hosts lacking
+        // the system faces.
+        ['Noto Sans JP', 'Hiragino Sans', 'Meiryo', ...cjkFallbackChain('jp', 'sans').slice(1)];
+  return `${quoteAll([...cjkPart, ...ARABIC_TAIL_SANS, ...NON_CJK_SANS_FALLBACKS])}, sans-serif`;
+}
+
+/** Serif counterpart of {@link sansTail}. */
+function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
+  const cjkPart =
+    cjk && cjk !== 'jp'
+      ? cjkFallbackChain(cjk, 'serif')
+      : // JP / Latin default: historical mincho system hints, then Noto serif
+        // CJK siblings.
+        [
+          'Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', 'MS Mincho',
+          'Noto Serif JP', ...cjkFallbackChain('jp', 'serif').slice(1),
+        ];
+  return `${quoteAll([...cjkPart, ...ARABIC_TAIL_SANS, ...NON_CJK_SERIF_FALLBACKS])}, serif`;
+}
+
 /** Resolve a requested font-family name to a CSS font-family string with
  *  appropriate fallback chain.
  *
@@ -3998,11 +4049,16 @@ export function normalizeFontFamily(
   family: string | null,
   fontFamilyClasses: Record<string, string> = {},
 ): string {
-  if (!family) return '"Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif';
+  if (!family) return sansTail(null);
 
   const escape = (s: string) => s.replace(/"/g, '\\"');
   const head = `"${escape(family)}"`;
   const lower = family.toLowerCase();
+
+  // CJK language inferred from the font name (null for plain Latin faces). For a
+  // non-JP CJK language the matching Noto CJK leads the fallback tail so shared
+  // Han glyphs render with that language's shapes; see core/fonts/scripts.ts.
+  const cjk = classifyCjkFont(family);
 
   // 0) Arabic-script faces substituted by Noto Naskh/Sans Arabic. A single
   //    Sakkal Majalla / Traditional Arabic run carries Arabic glyphs AND
@@ -4031,14 +4087,26 @@ export function normalizeFontFamily(
     return `${head}, "Noto Sans Arabic", "Noto Naskh Arabic", "Noto Sans JP", "Hiragino Sans", sans-serif`;
   }
 
+  // A CJK face's stroke style (song/ming = serif, gothic/hei = sans) decides
+  // which Noto CJK variant leads its tail. Names verified against the Office
+  // default font set: song (宋/SimSun/Batang), ming (明/MingLiU/PMingLiU),
+  // kai (楷/KaiTi/標楷體), fangsong (仿宋) and any *Mincho are serif; the rest
+  // (hei/黑, gothic/ゴシック, YaHei, JhengHei, Malgun, Gulim, Dotum, 角ゴ) are sans.
+  const isCjkSerif =
+    cjk != null &&
+    (/song|sung|simsun|nsimsun|batang|gungsuh|mincho|mingliu|pmingliu|ming\s*liu|fang\s*song|fangsong|kai\s*ti|kaiti|stsong|stkaiti|stfangsong|stzhongsong|simkai|simfang|新細明|細明|宋体|明朝|楷体|楷體|仿宋|標楷|游明朝|ＭＳ 明朝/.test(
+      lower,
+    ) ||
+      /新細明體|細明體|宋体|明朝|楷体|楷體|仿宋|標楷體|游明朝|ＭＳ 明朝/.test(family));
+
   // 1) Authoritative classification from word/fontTable.xml §17.8.3.10.
   const tableClass = fontFamilyClasses[family];
   if (tableClass && tableClass !== 'auto') {
     switch (tableClass) {
       case 'roman':
-        return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", "Noto Naskh Arabic", "Noto Sans Arabic", serif`;
+        return `${head}, ${serifTail(cjk)}`;
       case 'swiss':
-        return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
+        return `${head}, ${sansTail(cjk)}`;
       case 'modern':
         return `${head}, "Courier New", monospace`;
       default:
@@ -4049,6 +4117,7 @@ export function normalizeFontFamily(
 
   // 2) Name-pattern fallback for fonts absent from fontTable or classified "auto".
   const isSerif =
+    isCjkSerif ||
     family.includes('明朝') ||
     family.includes('明朝体') ||
     /\bmincho\b/i.test(family) ||
@@ -4070,22 +4139,26 @@ export function normalizeFontFamily(
     family.includes('Noto Serif');
 
   if (isSerif) {
-    return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", "Noto Naskh Arabic", "Noto Sans Arabic", serif`;
+    return `${head}, ${serifTail(cjk)}`;
   }
 
-  if (lower.includes('meiryo') || family.includes('メイリオ')) {
-    return `${head}, "Meiryo UI", "Meiryo", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
+  // Japanese system-font hints (only meaningful for JP / Latin faces; a non-JP
+  // CJK face skips these so its matching Noto CJK leads the tail).
+  if (cjk == null || cjk === 'jp') {
+    if (lower.includes('meiryo') || family.includes('メイリオ')) {
+      return `${head}, "Meiryo UI", "Meiryo", ${sansTail(cjk)}`;
+    }
+    if (family.includes('游ゴシック') || /\byu\s*gothic\b/i.test(family) || lower.includes('yugothic')) {
+      return `${head}, "Yu Gothic", "YuGothic", ${sansTail(cjk)}`;
+    }
+    if (lower.includes('ipa')) {
+      return `${head}, "IPAexGothic", ${sansTail(cjk)}`;
+    }
+    if (lower.includes('segoe')) {
+      return `${head}, "Segoe UI", ${quoteAll([...ARABIC_TAIL_SANS, ...NON_CJK_SANS_FALLBACKS])}, sans-serif`;
+    }
   }
-  if (family.includes('游ゴシック') || /\byu\s*gothic\b/i.test(family) || lower.includes('yugothic')) {
-    return `${head}, "Yu Gothic", "YuGothic", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
-  }
-  if (lower.includes('ipa')) {
-    return `${head}, "IPAexGothic", "Noto Sans JP", "Hiragino Sans", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
-  }
-  if (lower.includes('segoe')) {
-    return `${head}, "Segoe UI", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
-  }
-  return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", "Noto Naskh Arabic", "Noto Sans Arabic", sans-serif`;
+  return `${head}, ${sansTail(cjk)}`;
 }
 
 function getDefaultFontSize(para: DocParagraph): number {
