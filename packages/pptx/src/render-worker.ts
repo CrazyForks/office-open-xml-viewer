@@ -9,7 +9,7 @@
  * A re-parse while a render is suspended mid-await would let that render
  * resume against the new model — callers must not interleave them.
  */
-import type { Presentation } from './types';
+import type { MediaElement, Presentation } from './types';
 import init, { parse_pptx, extract_media } from './wasm/pptx_parser.js';
 import { renderSlide } from './renderer';
 import { selectNotes } from './notes';
@@ -84,6 +84,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         majorFont: pres.majorFont ?? null,
         minorFont: pres.minorFont ?? null,
         notes: pres.slides.map((_, i) => selectNotes(pres!.slides, i)),
+        mediaElements: pres.slides.map((s) =>
+          s.elements.filter((el): el is MediaElement => el.type === 'media')),
       };
       post({ kind: 'parsedMeta', id: req.id, meta });
       return;
@@ -103,6 +105,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         minorFont: pres.minorFont,
         hlinkColor: pres.hlinkColor ?? null,
         fetchMedia: getMedia,
+        skipMediaControls: req.skipMediaControls,
         // math intentionally omitted: MathJax needs a DOM <script>; worker
         // mode skips equations (documented in the design spec).
       });

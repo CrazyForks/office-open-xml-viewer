@@ -1,4 +1,4 @@
-import type { Presentation, WorkerRequest, WorkerResponse } from './types';
+import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import { selectNotes } from './notes';
@@ -37,6 +37,12 @@ export interface RenderSlideToBitmapOptions {
   width?: number;
   /** Device pixel ratio. Defaults to window.devicePixelRatio (workers have none). */
   dpr?: number;
+  /**
+   * Skip the static media play-badge so a live overlay can draw its own
+   * controls. Used internally by {@link PptxPresentation.presentSlide}.
+   * @internal
+   */
+  skipMediaControls?: boolean;
 }
 
 /** Options for rendering a single slide onto a canvas. */
@@ -269,12 +275,12 @@ export class PptxPresentation {
         throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
       }
       const res = await this._bridge.request(
-        (id) => ({ kind: 'renderSlide', id, slideIndex, width, dpr }) satisfies RenderWorkerRequest,
+        (id) => ({ kind: 'renderSlide', id, slideIndex, width, dpr, skipMediaControls: opts.skipMediaControls }) satisfies RenderWorkerRequest,
       );
       return (res as Extract<RenderWorkerResponse, { kind: 'slideRendered' }>).bitmap;
     }
     const off = new OffscreenCanvas(1, 1);
-    await this.renderSlide(off, slideIndex, { width, dpr });
+    await this.renderSlide(off, slideIndex, { width, dpr, skipMediaControls: opts.skipMediaControls });
     return off.transferToImageBitmap();
   }
 
@@ -317,25 +323,61 @@ export class PptxPresentation {
     slideIndex: number,
     opts: RenderSlideOptions = {},
   ): Promise<PresentationHandle> {
-    if (this._mode === 'worker') {
-      throw new Error("presentSlide(canvas) is not yet supported in mode: 'worker'");
+    if (this._mode === 'main' && !this._presentation) {
+      throw new Error('Presentation not loaded');
     }
-    if (!this._presentation) throw new Error('Presentation not loaded');
-    const slide = this._presentation.slides[slideIndex];
-    if (!slide) throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+    if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= this.slideCount) {
+      throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+    }
     const dpr = opts.dpr ?? defaultDpr();
     const width = opts.width ?? (canvas.offsetWidth || 960);
-    return createPresentationHandle(canvas, slide, {
+
+    if (this._mode === 'worker' && opts.onTextRun) {
+      // The callback can't cross the worker boundary.
+      console.warn(
+        "[ooxml] onTextRun is unavailable in mode: 'worker'; the text selection overlay will be empty for this slide.",
+      );
+    }
+
+    const drawBase =
+      this._mode === 'worker'
+        ? async () => {
+            // Whole slide rendered off-thread; the handle snapshots this paint
+            // into its own base copy, so the bitmap can be closed right after.
+            const bmp = await this.renderSlideToBitmap(slideIndex, { width, dpr, skipMediaControls: true });
+            canvas.width = bmp.width;
+            canvas.height = bmp.height;
+            // Set only the CSS width and let height follow the intrinsic aspect
+            // ratio — mirrors the main renderer (renderer.ts), which avoids an
+            // explicit style.height that could fight the ratio.
+            canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
+            if (!canvas.style.display) canvas.style.display = 'block';
+            const ctx = canvas.getContext('2d');
+            if (!ctx) throw new Error('2D context not available');
+            ctx.drawImage(bmp, 0, 0);
+            bmp.close();
+          }
+        : () =>
+            this.renderSlide(canvas, slideIndex, {
+              width,
+              dpr,
+              skipMediaControls: true,
+              onTextRun: opts.onTextRun,
+            });
+
+    const mediaElements =
+      this._mode === 'worker'
+        ? (this._meta?.mediaElements[slideIndex] ?? [])
+        : (this._presentation as Presentation).slides[slideIndex].elements.filter(
+            (el): el is MediaElement => el.type === 'media',
+          );
+
+    return createPresentationHandle(canvas, mediaElements, {
       width,
       dpr,
-      slideWidthEmu: this._presentation.slideWidth,
+      slideWidthEmu: this.slideWidth,
       fetchMedia: (path) => this.getMedia(path),
-      drawBase: () => this.renderSlide(canvas, slideIndex, {
-        width,
-        dpr,
-        skipMediaControls: true,
-        onTextRun: opts.onTextRun,
-      }),
+      drawBase,
     });
   }
 

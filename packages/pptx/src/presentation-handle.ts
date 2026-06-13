@@ -1,4 +1,4 @@
-import type { MediaElement, Slide } from './types';
+import type { MediaElement } from './types';
 import { drawPlayBadge } from './media-chrome';
 import { tabularDigitWidth, tabularTextWidth, drawTabularText } from './tabular-text';
 import { EMU_PER_PX } from '@silurus/ooxml-core';
@@ -50,7 +50,7 @@ export interface PresentOptions {
  */
 export async function createPresentationHandle(
   canvas: HTMLCanvasElement,
-  slide: Slide,
+  mediaElements: MediaElement[],
   opts: PresentOptions,
 ): Promise<PresentationHandle> {
   const ctx = canvas.getContext('2d');
@@ -67,7 +67,6 @@ export async function createPresentationHandle(
   if (!baseCtx) throw new Error('base 2D context not available');
   baseCtx.drawImage(canvas, 0, 0);
 
-  const mediaElements = slide.elements.filter((e): e is MediaElement => e.type === 'media');
   const states: MediaState[] = [];
 
   for (const el of mediaElements) {
