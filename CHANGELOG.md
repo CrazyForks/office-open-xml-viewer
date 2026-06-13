@@ -4,6 +4,24 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.59.1 — 2026-06-14
+
+Patch: fix a first-paint regression introduced in 0.59.0. With `useGoogleFonts: true`,
+`load()` force-loaded a fixed set of script-fallback Noto families before first
+paint — including all eight CJK families (Noto Sans/Serif KR/SC/TC/JP) requested
+with no `text=` subset, i.e. the full multi-MB families — regardless of the
+document's content, so a pure-Latin document showed a blank viewer until every
+CJK font downloaded. (The 0.59.0 preload fix unmasked this: before it, `.load()`
+silently never fired.)
+
+- **fonts**: preload only the Noto families whose script the document's text
+  actually contains. A new pure `scriptPreloadNamesForText(text, cjkLang)` scans
+  the parsed model's text by Unicode block (early-exit) — Latin-only documents
+  preload no script fonts at all; CJK/Arabic/Thai/Hebrew/Devanagari documents
+  still preload their faces. The main-thread `load()` and the render worker
+  derive the set from the same parsed model, so worker/main rendering stays
+  pixel-equivalent.
+
 ## 0.59.0 — 2026-06-14
 
 The off-main-thread release: an opt-in `mode: 'worker'` that parses **and**
