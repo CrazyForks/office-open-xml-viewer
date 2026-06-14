@@ -130,6 +130,16 @@ interface FloatRect {
   yBottom: number;
   /** wrapText: "bothSides" | "left" | "right" | "largest" (only square uses this). */
   side: string;
+  /** dist* padding (px) — needed when displacing a float to keep its exclusion
+   *  padding when re-seating next to a blocking float (ECMA-376 §20.4.2.x). */
+  distLeft: number;
+  distRight: number;
+  distTop: number;
+  distBottom: number;
+  /** Identifier of the anchoring paragraph. Floats with the SAME paraId belong
+   *  to one paragraph and never displace each other; different-paragraph floats
+   *  are subject to de-facto overlap avoidance (Word/LibreOffice). */
+  paraId: number;
   /** true once the image itself has been drawn (drawn after its paragraph lays out). */
   drawn: boolean;
 }
@@ -162,6 +172,11 @@ interface RenderState {
   pageWidth: number;
   /** Active anchor-image floats that constrain text layout on the current page. */
   floats: FloatRect[];
+  /** Monotonic counter assigning a unique id to each registerAnchorFloats call,
+   *  i.e. one id per paragraph. Used to scope float overlap avoidance to
+   *  DIFFERENT paragraphs (floats from the same paragraph never displace each
+   *  other). */
+  floatParaSeq: number;
   /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
   docGrid: DocGridCtx;
   /** ECMA-376 §17.8.3.10 — font→family map from word/fontTable.xml. Used by
@@ -407,6 +422,7 @@ export async function renderDocumentToCanvas(
     marginBottom: sec.marginBottom,
     pageWidth: sec.pageWidth,
     floats: [],
+    floatParaSeq: 0,
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
@@ -984,6 +1000,7 @@ function buildMeasureState(
     marginBottom: section.marginBottom,
     pageWidth: section.pageWidth,
     floats: [],
+    floatParaSeq: 0,
     docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
     fontFamilyClasses,
     kinsoku,
@@ -2788,12 +2805,19 @@ function layoutLines(
   let lineXOffset = 0;
   let currentLineTopY = wrapCtx?.startPageY ?? 0;
 
-  // Compute wrap constraints for a new line about to start. Mutates lineXOffset/lineMaxWidth/currentLineTopY.
-  const startLine = (): void => {
+  // Compute wrap constraints for a new line about to start. Mutates
+  // lineXOffset/lineMaxWidth/currentLineTopY. `minWidth` is the smallest width
+  // the upcoming line must have to be placeable here (the width of its first
+  // atomic token, or the paragraph-mark em for an empty line); a free gap
+  // narrower than this is treated as unusable and the line is sent below the
+  // intervening float(s) — the ECMA-376 wrap rule that text which cannot fit
+  // beside a floating object flows past it.
+  const startLine = (minWidth: number = 0): void => {
     lineXOffset = 0;
     lineMaxWidth = maxWidth;
     if (!wrapCtx) return;
-    // Probe height: the smallest plausible line height; good enough for float intersection check.
+    // Small fixed probe height for float intersection (matches the historical
+    // wrap behaviour for the topAndBottom skip and horizontal-gap scan).
     const probeH = 10 * scale;
     // Keep pushing past any topAndBottom block we sit inside.
     for (let guard = 0; guard < 16; guard++) {
@@ -2808,38 +2832,91 @@ function layoutLines(
       if (skip === null) break;
       currentLineTopY = skip;
     }
-    // Now compute horizontal constraint from square floats.
+    // Horizontal constraint from square floats. A line can be split into
+    // several free segments by floats; ECMA-376 §20.4.2.17 (wrapSquare) defines
+    // text wrapping around a single float's rect + dist padding, but when
+    // multiple floats cover a row we
+    // must pick a free horizontal gap that the line can use. We compute the
+    // open sub-intervals of [paraXLeft, paraXRight] and take the WIDEST. If the
+    // floats leave NO usable gap (e.g. two full-width side-by-side images that
+    // together span the whole column), the line cannot sit here at all: we send
+    // it down to the nearest float bottom and re-evaluate, which is the wrap
+    // spec's "flow below the obstruction" behaviour. Without this, a fully
+    // blocked line (and following empty/caption lines) would render INSIDE the
+    // float band.
     const paraXLeft = wrapCtx.paraX;
     const paraXRight = wrapCtx.paraX + maxWidth;
-    let left = paraXLeft;
-    let right = paraXRight;
-    const lineBot = currentLineTopY + probeH;
-    for (const f of wrapCtx.floats) {
-      if (f.mode !== 'square') continue;
-      if (lineBot <= f.yTop || currentLineTopY >= f.yBottom) continue;
-      // Decide which side text should flow on. "left"/"right" refer to the side TEXT occupies.
-      const spaceLeft = f.xLeft - paraXLeft;
-      const spaceRight = paraXRight - f.xRight;
-      let textOnLeft: boolean;
-      switch (f.side) {
-        case 'left':    textOnLeft = true;  break;
-        case 'right':   textOnLeft = false; break;
-        case 'largest':
-        case 'bothSides':
-        default:        textOnLeft = spaceLeft >= spaceRight; break;
+    // A gap must fit the line's first atomic token to be usable. Floor at 1px so
+    // a zero-width probe (no content yet) still rejects sub-pixel slivers.
+    const usableGap = Math.max(minWidth, 1);
+    for (let guard = 0; guard < 64; guard++) {
+      const lineBot = currentLineTopY + probeH;
+      // Collect square floats intersecting this Y band and the X interval they
+      // block (depends on wrapText side: the float plus, for one-sided wrap,
+      // the column edge on the forbidden side).
+      const blocked: { l: number; r: number }[] = [];
+      const intersecting: FloatRect[] = [];
+      for (const f of wrapCtx.floats) {
+        if (f.mode !== 'square') continue;
+        if (lineBot <= f.yTop || currentLineTopY >= f.yBottom) continue;
+        intersecting.push(f);
+        switch (f.side) {
+          // Text may sit only on the LEFT of the float ⇒ everything from the
+          // float's left edge to the column right is unavailable.
+          case 'left':  blocked.push({ l: f.xLeft, r: paraXRight }); break;
+          // Text may sit only on the RIGHT ⇒ column left .. float right blocked.
+          case 'right': blocked.push({ l: paraXLeft, r: f.xRight }); break;
+          case 'largest':
+          case 'bothSides':
+          default:      blocked.push({ l: f.xLeft, r: f.xRight }); break;
+        }
       }
-      if (textOnLeft) {
-        if (f.xLeft < right) right = Math.max(left, f.xLeft);
-      } else {
-        if (f.xRight > left) left = Math.min(right, f.xRight);
+      if (intersecting.length === 0) {
+        lineXOffset = 0;
+        lineMaxWidth = maxWidth;
+        break;
       }
+      // Sweep [paraXLeft, paraXRight] removing blocked spans; collect free gaps.
+      blocked.sort((a, b) => a.l - b.l);
+      let cursor = paraXLeft;
+      let best: { l: number; r: number } | null = null;
+      const consider = (l: number, r: number) => {
+        if (r - l > (best ? best.r - best.l : 0)) best = { l, r };
+      };
+      for (const b of blocked) {
+        if (b.l > cursor) consider(cursor, Math.min(b.l, paraXRight));
+        cursor = Math.max(cursor, Math.min(b.r, paraXRight));
+        if (cursor >= paraXRight) break;
+      }
+      if (cursor < paraXRight) consider(cursor, paraXRight);
+
+      if (best && (best as { l: number; r: number }).r - (best as { l: number; r: number }).l >= usableGap) {
+        const seg = best as { l: number; r: number };
+        lineXOffset = Math.max(0, seg.l - paraXLeft);
+        lineMaxWidth = Math.min(maxWidth - lineXOffset, seg.r - seg.l);
+        if (lineMaxWidth < 0) lineMaxWidth = 0;
+        break;
+      }
+
+      // No usable gap on this row: the intersecting floats cover the whole
+      // column width here (otherwise a gap would have been found above). The
+      // line therefore cannot sit beside ANY of them, so it must clear them all
+      // — advance to the LOWEST blocking float bottom (max yBottom). Dropping
+      // only to the nearest bottom would leave the line squeezed into a side gap
+      // beside a still-active float (placing a full-width caption off-centre
+      // under one image); clearing all the full-width floats at once puts it
+      // centred below the band, matching Word. (Partial-width floats never reach
+      // this branch because they leave a usable side gap above.)
+      const nextY = Math.max(...intersecting.map((f) => f.yBottom));
+      if (nextY <= currentLineTopY) {
+        // Degenerate guard (shouldn't happen): keep full width to avoid a stall.
+        lineXOffset = 0;
+        lineMaxWidth = maxWidth;
+        break;
+      }
+      currentLineTopY = nextY;
     }
-    const eff = Math.max(0, right - left);
-    lineXOffset = Math.max(0, left - paraXLeft);
-    lineMaxWidth = Math.min(maxWidth - lineXOffset, eff);
-    if (lineMaxWidth < 0) lineMaxWidth = 0;
   };
-  startLine();
 
   const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);
 
@@ -2878,7 +2955,7 @@ function layoutLines(
     lineIntendedSingle = 0;
     lineHasRuby = false;
     isFirst = false;
-    startLine();
+    startLine(requiredLineWidth());
   };
 
   const addToLine = (
@@ -2924,11 +3001,47 @@ function layoutLines(
   // Use an explicit queue so CJK split-tails can be re-queued
   const queue: LayoutSeg[] = [...segs];
 
+  // Smallest width the NEXT line must have to be placeable beside a float: the
+  // width of its first atomic token. For text we measure the first wrap unit
+  // (CJK: one grapheme — kinsoku may force more, but one char is the floor;
+  // Latin: up to the first space). For an image/math the whole object. An empty
+  // line (no remaining content) still reserves the paragraph-mark em so a
+  // sliver gap between full-width floats does not "fit" it. Used by startLine to
+  // decide whether to wrap in a gap or send the line below the floats.
+  const requiredLineWidth = (): number => {
+    // First inline token that actually occupies width on the line. Anchor-image
+    // segments are floats (drawn separately, measuredWidth 0) and lineBreaks
+    // carry no width, so skip them — otherwise the float's own width would be
+    // mistaken for the line's required width and wrongly push every wrap line
+    // below the float.
+    const q = queue.find((s) => !('lineBreak' in s) && !('dataUrl' in s && s.anchor));
+    if (!q) {
+      // Empty/paragraph-mark line: reserve one em of the paragraph font so a
+      // sub-glyph gap is rejected and the mark line drops below the floats.
+      const fs = trailingBreakFontSize ?? (segs[0] && 'fontSize' in segs[0] ? segs[0].fontSize : 10);
+      return fs * scale;
+    }
+    if ('isTab' in q) return q.measuredWidth || 0;
+    if ('dataUrl' in q) return q.widthPt * scale;
+    if ('mathNodes' in q) return q.measuredWidth || 0;
+    const ts = q as LayoutTextSeg;
+    // First wrap unit: leading run up to the first space (Latin word) or the
+    // first character (CJK / no space). Whichever is shorter bounds the floor.
+    const sp = ts.text.indexOf(' ');
+    const head = sp > 0 ? ts.text.slice(0, sp) : ts.text;
+    const firstChar = [...head][0] ?? '';
+    const probe = { ...ts, text: firstChar };
+    return measureText(probe).width;
+  };
+
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
   // content of the paragraph that new line is an EMPTY line that still
   // occupies one line height (Word reserves it; visible e.g. as extra table
   // row height). Track the trailing break so it can be flushed after the loop.
   let trailingBreakFontSize: number | null = null;
+
+  // Establish the first line's wrap window now that the content queue exists.
+  startLine(requiredLineWidth());
 
   while (queue.length > 0) {
     const seg = queue.shift()!;
@@ -3576,8 +3689,76 @@ function isWrapFloat(mode?: string): boolean {
   return mode === 'square' || mode === 'topAndBottom' || mode === 'tight' || mode === 'through';
 }
 
+/** Two exclusion rects intersect (strict overlap, touching edges allowed). */
+function rectsOverlap(
+  aL: number, aR: number, aT: number, aB: number,
+  bL: number, bR: number, bT: number, bB: number,
+): boolean {
+  const EPS = 0.01;
+  return aL < bR - EPS && aR > bL + EPS && aT < bB - EPS && aB > bT + EPS;
+}
+
+/**
+ * De-facto multi-float collision resolution for a NEW wrap float, against
+ * floats already registered on the page that belong to OTHER paragraphs.
+ *
+ * Per ECMA-376 Part 1 §20.4.2.3 (wp:anchor/@allowOverlap): an object that
+ * "cannot overlap other DrawingML object … shall be repositioned when displayed
+ * to prevent this overlap" — i.e. allowOverlap="false" MANDATES repositioning,
+ * while allowOverlap="true" only *permits* overlap (it does not require it, nor
+ * does it forbid the renderer from avoiding it). Word and LibreOffice keep
+ * floats anchored in different paragraphs from overlapping regardless — for
+ * allowOverlap="false" that is spec-mandated, and for the common allowOverlap=
+ * "true" case (e.g. sample-9 figure 9) it is a spec-permitted layout policy we
+ * mirror to match the reference rendering. Single-float wrap geometry and the
+ * dist* padding reused below are defined by §20.4.2.17 (wrapSquare).
+ *
+ * We re-seat horizontally to the right of the blocking float(s) first (margins
+ * may be used — Word lets a displaced float sit in the page margin), and only
+ * fall back to a vertical push when no horizontal room remains.
+ *
+ * Coordinates are page-absolute px. (x,y) is the image box origin (no dist).
+ */
+function resolveFloatOverlap(
+  x: number, y: number, w: number, h: number,
+  dl: number, dr: number, dt: number, db: number,
+  paraId: number, state: RenderState,
+): { x: number; y: number } {
+  const pageRight = state.pageWidth * state.scale;
+  for (let guard = 0; guard < 16; guard++) {
+    const exL = x - dl, exR = x + w + dr, exT = y - dt, exB = y + h + db;
+    // Blocking floats: different paragraph, exclusion rects intersect.
+    const blockers = state.floats.filter(
+      (f) => f.paraId !== paraId &&
+        rectsOverlap(exL, exR, exT, exB, f.xLeft, f.xRight, f.yTop, f.yBottom),
+    );
+    if (blockers.length === 0) return { x, y };
+
+    // Horizontal: re-seat just right of the right-most blocker. Setting our
+    // left exclusion edge (x - dl) flush against the blocker's right exclusion
+    // edge means x = maxRight + dl (gap = blocker.distRight + our distLeft).
+    const maxRight = Math.max(...blockers.map((f) => f.xRight));
+    const newX = maxRight + dl;
+    if (newX + w + dr <= pageRight + 0.5) {
+      x = newX;
+      continue; // re-check against all other-paragraph floats
+    }
+
+    // No horizontal room: push below the lowest blocker (smallest displacement
+    // that clears them). Our top exclusion edge (y - dt) flush with the
+    // blocker's bottom exclusion edge ⇒ y = maxBottom + dt.
+    const maxBottom = Math.max(...blockers.map((f) => f.yBottom));
+    y = maxBottom + dt;
+  }
+  return { x, y };
+}
+
 /** Register floats from a paragraph's anchor images and draw the image bitmap immediately. */
 function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphAnchorY: number): void {
+  // One id per registerAnchorFloats call ⇒ one id per paragraph. Floats sharing
+  // a paraId (e.g. two side-by-side photos in one paragraph) never displace each
+  // other; floats from different paragraphs do (de-facto overlap avoidance).
+  const paraId = state.floatParaSeq++;
   for (const run of para.runs) {
     if (run.type !== 'image') continue;
     const img = run as unknown as ImageRun;
@@ -3590,16 +3771,30 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
     const scale = state.scale;
     const w = img.widthPt * scale;
     const h = img.heightPt * scale;
-    const pageX = img.anchorXFromMargin
+    let pageX = img.anchorXFromMargin
       ? (state.marginLeft + (img.anchorXPt ?? 0)) * scale
       : (img.anchorXPt ?? 0) * scale;
-    const pageY = img.anchorYFromPara
+    let pageY = img.anchorYFromPara
       ? paragraphAnchorY + (img.anchorYPt ?? 0) * scale
       : (img.anchorYPt ?? 0) * scale;
     const dt = (img.distTop    ?? 0) * scale;
     const db = (img.distBottom ?? 0) * scale;
     const dl = (img.distLeft   ?? 0) * scale;
     const dr = (img.distRight  ?? 0) * scale;
+
+    // Overlap avoidance (ECMA-376 §20.4.2.3 allowOverlap: "false" mandates
+    // repositioning to prevent overlap; "true" only permits it). Word/LibreOffice
+    // keep floats anchored in different paragraphs from overlapping — the later
+    // (document-order) float is displaced. We resolve against already-registered
+    // floats from OTHER paragraphs — first horizontally (re-seat to the right of
+    // the blockers, honoring dist padding), then, if that runs off the page,
+    // vertically. (allowOverlap is not yet surfaced by the parser, so this fires
+    // for every different-paragraph overlap; all current samples are "true".)
+    const resolved = resolveFloatOverlap(
+      pageX, pageY, w, h, dl, dr, dt, db, paraId, state,
+    );
+    pageX = resolved.x;
+    pageY = resolved.y;
 
     const key = imageKey(img.dataUrl, img.colorReplaceFrom);
     const rect: FloatRect = {
@@ -3614,6 +3809,11 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
       yTop: pageY - dt,
       yBottom: pageY + h + db,
       side: img.wrapSide ?? 'bothSides',
+      distLeft: dl,
+      distRight: dr,
+      distTop: dt,
+      distBottom: db,
+      paraId,
       drawn: false,
     };
     state.floats.push(rect);
