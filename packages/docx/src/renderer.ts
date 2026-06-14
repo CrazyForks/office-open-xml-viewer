@@ -2923,6 +2923,17 @@ function resolveLineFloatWindow(
   floats: FloatRect[],
 ): { topY: number; xOffset: number; maxWidth: number } {
   // 1. Keep pushing past any topAndBottom block we sit inside.
+  //
+  // ASSUMPTION (M3): step 1 runs ONCE, before the square sweep, and is not
+  // re-checked after a square push in step 2. This relies on "no topAndBottom
+  // float sits below a square float in the same column band." topAndBottom
+  // objects span the full content width (ECMA-376 §20.4.2.16) and are normally
+  // anchored above/below the square-wrapped region, so the square push in step 2
+  // lands in float-free space below the band. If a document ever places a
+  // topAndBottom strictly below a square the pushed line could clip into it; the
+  // spec-correct fix is to make steps 1+2 a single fixpoint loop. Left as a
+  // documented assumption here to preserve current behavior (no observed sample
+  // exercises the inverted ordering).
   for (let guard = 0; guard < 16; guard++) {
     const lineBot = topY + probeH;
     let skip: number | null = null;
