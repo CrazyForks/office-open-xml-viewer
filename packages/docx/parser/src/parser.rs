@@ -2295,97 +2295,166 @@ fn parse_wgp_images(
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
 ) -> Vec<ImageRun> {
+    // Pictures inside a wpg group live in the group's child coordinate space and
+    // must be mapped to page space through the cumulative transform of every
+    // group on the path from the wgp down to the pic (ECMA-376 §20.1.7.5/.6),
+    // exactly like parse_wgp_shapes. The base transform is the outermost wgp's
+    // own grpSpPr/xfrm (chOff/chExt → off/ext); nested wpg:grpSp groups compose
+    // their transforms on top as we descend. (The old code applied only each
+    // pic's own offset, ignoring both the group's scale/offset and any nested
+    // grpSp transform, mis-placing/mis-sizing grouped pictures.)
+    let base = match group_xfrm(wgp) {
+        Some(x) => GroupTransform::IDENTITY.compose_child(x),
+        None => GroupTransform::IDENTITY,
+    };
     let mut results = Vec::new();
-    // Iterate all pic descendants in the wgp (covers both direct children and nested grpSp)
-    for pic in wgp.descendants().filter(|n| n.tag_name().name() == "pic") {
-        // Position and size come from the pic's spPr > a:xfrm
-        let sp_pr = match pic.children().find(|n| n.tag_name().name() == "spPr") {
-            Some(s) => s,
-            None => continue,
-        };
-        let xfrm = match sp_pr.children().find(|n| n.tag_name().name() == "xfrm") {
-            Some(x) => x,
-            None => continue,
-        };
-        let off = match xfrm.children().find(|n| n.tag_name().name() == "off") {
-            Some(o) => o,
-            None => continue,
-        };
-        let ext = match xfrm.children().find(|n| n.tag_name().name() == "ext") {
-            Some(e) => e,
-            None => continue,
-        };
-        let ox = off
-            .attribute("x")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 12700.0;
-        let oy = off
-            .attribute("y")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 12700.0;
-        let cx = ext
-            .attribute("cx")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 12700.0;
-        let cy = ext
-            .attribute("cy")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 12700.0;
-
-        if cx <= 0.0 || cy <= 0.0 {
-            continue;
-        }
-
-        // Find the blip inside this pic
-        let blip = match pic.descendants().find(|n| n.tag_name().name() == "blip") {
-            Some(b) => b,
-            None => continue,
-        };
-        let r_id = match blip
-            .attribute((R_NS, "embed"))
-            .or_else(|| blip.attribute("r:embed"))
-        {
-            Some(r) => r,
-            None => continue,
-        };
-        let data_url = match media_map.get(r_id) {
-            Some(u) => u.clone(),
-            None => continue,
-        };
-
-        // Parse a:clrChange if present — used to make a specific color transparent.
-        // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
-        let color_replace_from = blip
-            .children()
-            .find(|n| n.tag_name().name() == "clrChange")
-            .and_then(|cc| cc.children().find(|n| n.tag_name().name() == "clrFrom"))
-            .and_then(|cf| cf.children().find(|n| n.tag_name().name() == "srgbClr"))
-            .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
-
-        results.push(ImageRun {
-            data_url,
-            width_pt: cx,
-            height_pt: cy,
-            anchor: true,
-            // Combine the group's anchor offset with this pic's offset within the group
-            anchor_x_pt: anchor_pos_x + ox,
-            anchor_y_pt: anchor_pos_y + oy,
-            anchor_x_from_margin: x_from_margin,
-            anchor_y_from_para: y_from_para,
-            color_replace_from,
-            wrap_mode: anchor_meta.wrap_mode.clone(),
-            dist_top: anchor_meta.dist_top,
-            dist_bottom: anchor_meta.dist_bottom,
-            dist_left: anchor_meta.dist_left,
-            dist_right: anchor_meta.dist_right,
-            wrap_side: anchor_meta.wrap_side.clone(),
-        });
-    }
+    walk_group_images(
+        wgp,
+        base,
+        media_map,
+        anchor_pos_x,
+        x_from_margin,
+        anchor_pos_y,
+        y_from_para,
+        anchor_meta,
+        &mut results,
+    );
     results
+}
+
+/// Recursively walk the element children of a group (`wpg:wgp` or nested
+/// `wpg:grpSp`), composing each nested grpSp's transform into `xform` before
+/// descending, and emit an `ImageRun` for every `pic:pic` using the cumulative
+/// transform. Mirror image of `walk_group_children` (shapes); pre-order
+/// preserves document order.
+#[allow(clippy::too_many_arguments)]
+fn walk_group_images(
+    group: roxmltree::Node,
+    xform: GroupTransform,
+    media_map: &HashMap<String, String>,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+    results: &mut Vec<ImageRun>,
+) {
+    for child in group.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "pic" => {
+                if let Some(img) = parse_group_pic(
+                    child,
+                    xform,
+                    media_map,
+                    anchor_pos_x,
+                    x_from_margin,
+                    anchor_pos_y,
+                    y_from_para,
+                    anchor_meta,
+                ) {
+                    results.push(img);
+                }
+            }
+            "grpSp" => {
+                let child_xform = match group_xfrm(child) {
+                    Some(x) => xform.compose_child(x),
+                    None => xform,
+                };
+                walk_group_images(
+                    child,
+                    child_xform,
+                    media_map,
+                    anchor_pos_x,
+                    x_from_margin,
+                    anchor_pos_y,
+                    y_from_para,
+                    anchor_meta,
+                    results,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build an `ImageRun` for a single `pic:pic` inside a group, mapping its
+/// spPr/xfrm off (position) and ext (size) from the immediate group's child
+/// coordinate space to page space via the cumulative transform `xform`. The
+/// position/size math matches `parse_wsp_shape`:
+///   width_pt    = cx * scale_x / EMU_PER_PT
+///   anchor_x_pt = anchor_pos_x + xform.off_x_pt + ox * scale_x / EMU_PER_PT
+#[allow(clippy::too_many_arguments)]
+fn parse_group_pic(
+    pic: roxmltree::Node,
+    xform: GroupTransform,
+    media_map: &HashMap<String, String>,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+) -> Option<ImageRun> {
+    // Position and size come from the pic's spPr > a:xfrm (child-coord EMU).
+    let sp_pr = pic.children().find(|n| n.tag_name().name() == "spPr")?;
+    let xfrm = sp_pr.children().find(|n| n.tag_name().name() == "xfrm")?;
+    let off = xfrm.children().find(|n| n.tag_name().name() == "off")?;
+    let ext = xfrm.children().find(|n| n.tag_name().name() == "ext")?;
+    let ox = off
+        .attribute("x")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let oy = off
+        .attribute("y")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cx = ext
+        .attribute("cx")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cy = ext
+        .attribute("cy")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    if cx <= 0.0 || cy <= 0.0 {
+        return None;
+    }
+
+    // Find the blip inside this pic.
+    let blip = pic.descendants().find(|n| n.tag_name().name() == "blip")?;
+    let r_id = blip
+        .attribute((R_NS, "embed"))
+        .or_else(|| blip.attribute("r:embed"))?;
+    let data_url = media_map.get(r_id)?.clone();
+
+    // Parse a:clrChange if present — used to make a specific color transparent.
+    // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
+    let color_replace_from = blip
+        .children()
+        .find(|n| n.tag_name().name() == "clrChange")
+        .and_then(|cc| cc.children().find(|n| n.tag_name().name() == "clrFrom"))
+        .and_then(|cf| cf.children().find(|n| n.tag_name().name() == "srgbClr"))
+        .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
+
+    Some(ImageRun {
+        data_url,
+        width_pt: cx * xform.scale_x / 12700.0,
+        height_pt: cy * xform.scale_y / 12700.0,
+        anchor: true,
+        // Map the pic offset through the group chain, then add the page-space
+        // anchor offset of the whole group.
+        anchor_x_pt: anchor_pos_x + xform.off_x_emu / 12700.0 + ox * xform.scale_x / 12700.0,
+        anchor_y_pt: anchor_pos_y + xform.off_y_emu / 12700.0 + oy * xform.scale_y / 12700.0,
+        anchor_x_from_margin: x_from_margin,
+        anchor_y_from_para: y_from_para,
+        color_replace_from,
+        wrap_mode: anchor_meta.wrap_mode.clone(),
+        dist_top: anchor_meta.dist_top,
+        dist_bottom: anchor_meta.dist_bottom,
+        dist_left: anchor_meta.dist_left,
+        dist_right: anchor_meta.dist_right,
+        wrap_side: anchor_meta.wrap_side.clone(),
+    })
 }
 
 /// Cumulative child-coord-space → page-space affine transform built up while
@@ -4073,6 +4142,85 @@ mod tests {
         );
         assert_eq!(t.width_pt, None);
         assert_eq!(t.width_pct, None);
+    }
+}
+
+#[cfg(test)]
+mod wgp_image_tests {
+    use super::*;
+    use crate::xml_util::R_NS;
+
+    // ECMA-376 §20.1.7.5/.6 — a picture nested inside a wpg:grpSp must be mapped
+    // to page space through the *composed* group transforms (each grpSp's
+    // off/ext/chOff/chExt scales and offsets its children). The old parser
+    // applied only the pic's own offset, ignoring the group's scale/offset and
+    // any nested grpSp transform.
+    #[test]
+    fn nested_group_pic_composes_transform() {
+        // Outer wgp: identity (off 0, ext == chExt). Inner grpSp: offset
+        // (69850, 295275) EMU and 2× scale (ext 2000 over chExt 1000). Pic at
+        // child-coord off (100000, 200000) EMU, ext (127000, 254000).
+        let xml = format!(
+            r#"<wpg:wgp xmlns:wpg="urn:wpg" xmlns:a="urn:a" xmlns:pic="urn:pic" xmlns:r="{r}">
+                 <wpg:grpSpPr><a:xfrm>
+                   <a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/>
+                   <a:chOff x="0" y="0"/><a:chExt cx="1000" cy="1000"/>
+                 </a:xfrm></wpg:grpSpPr>
+                 <wpg:grpSp>
+                   <wpg:grpSpPr><a:xfrm>
+                     <a:off x="69850" y="295275"/><a:ext cx="2000" cy="2000"/>
+                     <a:chOff x="0" y="0"/><a:chExt cx="1000" cy="1000"/>
+                   </a:xfrm></wpg:grpSpPr>
+                   <pic:pic>
+                     <pic:spPr><a:xfrm>
+                       <a:off x="100000" y="200000"/><a:ext cx="127000" cy="254000"/>
+                     </a:xfrm></pic:spPr>
+                     <pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill>
+                   </pic:pic>
+                 </wpg:grpSp>
+               </wpg:wgp>"#,
+            r = R_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut media = HashMap::new();
+        media.insert("rId1".to_string(), "data:image/png;base64,AAAA".to_string());
+        let meta = AnchorMeta::default();
+        let imgs = parse_wgp_images(
+            doc.root_element(),
+            &media,
+            0.0,   // anchor_pos_x
+            false, // x_from_margin
+            0.0,   // anchor_pos_y
+            false, // y_from_para
+            &meta,
+        );
+        assert_eq!(imgs.len(), 1);
+        let img = &imgs[0];
+        // size = pic ext × inner scale(2): 127000*2/12700 = 20pt, 254000*2/12700 = 40pt.
+        assert!(
+            (img.width_pt - 20.0).abs() < 1e-6,
+            "width_pt = {}",
+            img.width_pt
+        );
+        assert!(
+            (img.height_pt - 40.0).abs() < 1e-6,
+            "height_pt = {}",
+            img.height_pt
+        );
+        // pos = group off + pic off × scale, all /12700:
+        //   x = (69850 + 100000*2)/12700 = 269850/12700 ≈ 21.2480
+        //   y = (295275 + 200000*2)/12700 = 695275/12700 ≈ 54.7461
+        // Pre-fix (buggy) values were x = 100000/12700 ≈ 7.874, width = 10pt.
+        assert!(
+            (img.anchor_x_pt - 21.248_031).abs() < 1e-3,
+            "anchor_x_pt = {}",
+            img.anchor_x_pt
+        );
+        assert!(
+            (img.anchor_y_pt - 54.746_063).abs() < 1e-3,
+            "anchor_y_pt = {}",
+            img.anchor_y_pt
+        );
     }
 }
 
