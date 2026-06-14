@@ -498,6 +498,13 @@ export interface ImageRun {
   distRight?: number;
   /** wrapText attribute: "bothSides" | "left" | "right" | "largest". */
   wrapSide?: string;
+  /**
+   * ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating object
+   * may overlap other floats. Spec default is true (the attribute is optional);
+   * absent/undefined is treated as true. `false` mandates the renderer
+   * reposition the object to prevent any overlap.
+   */
+  allowOverlap?: boolean;
 }
 
 // ===== Table =====

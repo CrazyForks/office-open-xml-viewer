@@ -755,6 +755,11 @@ pub struct ImageRun {
     /// Defaults to "bothSides" (equivalent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_side: Option<String>,
+    /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
+    /// object may overlap other floats. Spec default is true (attribute optional);
+    /// `false` mandates the renderer reposition the object to prevent any overlap.
+    /// Inline images carry true (the no-constraint value).
+    pub allow_overlap: bool,
 }
 
 fn is_zero_f64(v: &f64) -> bool {

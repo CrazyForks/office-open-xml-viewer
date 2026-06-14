@@ -28,6 +28,13 @@ import {
   type AlignEdge,
   type LineVisualOrder,
 } from './bidi-line.js';
+import {
+  type FloatRect,
+  isWrapFloat,
+  resolveLineFloatWindow,
+  resolveFloatOverlap,
+  skipPastTopAndBottom,
+} from './float-layout.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -113,27 +120,6 @@ export async function prepareMathRuns(body: BodyElement[], math: MathRenderer): 
   }
 }
 
-/** Anchor image float that affects text wrap on the current page. */
-interface FloatRect {
-  mode: 'square' | 'topAndBottom';
-  /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
-  imageKey: string;
-  /** Absolute canvas X of the image box (without dist padding). */
-  imageX: number;
-  imageY: number;
-  imageW: number;
-  imageH: number;
-  /** Padded exclusion rectangle for text wrap. */
-  xLeft: number;
-  xRight: number;
-  yTop: number;
-  yBottom: number;
-  /** wrapText: "bothSides" | "left" | "right" | "largest" (only square uses this). */
-  side: string;
-  /** true once the image itself has been drawn (drawn after its paragraph lays out). */
-  drawn: boolean;
-}
-
 interface RenderState {
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   scale: number;    // px per pt
@@ -162,6 +148,11 @@ interface RenderState {
   pageWidth: number;
   /** Active anchor-image floats that constrain text layout on the current page. */
   floats: FloatRect[];
+  /** Monotonic counter assigning a unique id to each registerAnchorFloats call,
+   *  i.e. one id per paragraph per page. Used only to scope the implementation-
+   *  defined (HEURISTIC) overlap avoidance to DIFFERENT paragraphs. Reset to 0
+   *  on every page flip so measure and render assign matching paraIds. */
+  floatParaSeq: number;
   /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
   docGrid: DocGridCtx;
   /** ECMA-376 §17.8.3.10 — font→family map from word/fontTable.xml. Used by
@@ -407,6 +398,7 @@ export async function renderDocumentToCanvas(
     marginBottom: sec.marginBottom,
     pageWidth: sec.pageWidth,
     floats: [],
+    floatParaSeq: 0,
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
@@ -693,9 +685,12 @@ export function computePages(
   // registerAnchorFloats/WrapLayoutCtx anchor relative to where we actually
   // are on the page. Anchor floats are registered on the measureState as
   // paragraphs are processed and cleared when we flip to a new page, exactly
-  // like the real renderer does.
+  // like the real renderer does. floatParaSeq is reset together with floats so
+  // the paraId採番 matches the renderer, which starts each page at 0 (a fresh
+  // RenderState per page in renderDocumentToCanvas).
   measureState.y = section.marginTop;
   measureState.floats = [];
+  measureState.floatParaSeq = 0;
   // Footnote ids already reserved on the current page (so a paragraph that
   // references the same note twice doesn't double-count, and the renderer draws
   // each note once). Reset on every page flip.
@@ -715,6 +710,7 @@ export function computePages(
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
       measureState.floats = [];
+      measureState.floatParaSeq = 0;
       startPageBookkeeping();
     }
   };
@@ -778,6 +774,7 @@ export function computePages(
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
       measureState.floats = [];
+      measureState.floatParaSeq = 0;
       startPageBookkeeping();
       // ECMA-376 §17.18.79 ST_SectionMark: oddPage / evenPage breaks pad
       // with a blank page when the new section would otherwise start on the
@@ -866,9 +863,13 @@ export function computePages(
       const breakForFloat = y > 0 && floatOverflowsHere && floatFitsFresh;
       if ((y > 0 && y + needed > effContentH()) || breakForFloat) {
         newPage();
-        // newPage() cleared measureState.floats; re-register this paragraph's
-        // anchor floats against the new page's top so wrap-around estimates for
-        // this and later paragraphs see them at the correct (post-break) Y.
+        // newPage() cleared measureState.floats AND reset floatParaSeq to 0, so
+        // this is a REPLACE of the earlier register at the top of the loop (whose
+        // floats were just discarded), not an augment: this paragraph is now the
+        // first registrant on the fresh page and gets paraId 0 — exactly matching
+        // the renderer, which re-registers it from a fresh per-page state. The
+        // re-anchoring against the new page top keeps wrap-around estimates for
+        // this and later paragraphs at the correct (post-break) Y.
         registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
         // The references move to the new page; nothing was reserved there yet,
         // so the separator region still applies to the first footnote.
@@ -984,6 +985,7 @@ function buildMeasureState(
     marginBottom: section.marginBottom,
     pageWidth: section.pageWidth,
     floats: [],
+    floatParaSeq: 0,
     docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
     fontFamilyClasses,
     kinsoku,
@@ -1020,6 +1022,7 @@ function estimateParagraphHeight(
       floats: state.floats,
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0),
       pageH: state.pageH,
+      markEmPx: paragraphMarkEmPx(para, 1),
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
     if (lines.length === 0) {
@@ -1110,6 +1113,7 @@ function splitParagraphAcrossPages(
     floats: measureState.floats,
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0),
     pageH: measureState.pageH,
+    markEmPx: paragraphMarkEmPx(para, 1),
   } : undefined;
   const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku);
   if (lines.length === 0) {
@@ -1667,6 +1671,69 @@ function mathJcToEdge(jc: string): AlignEdge {
   }
 }
 
+/**
+ * Render a paragraph that produces NO inline lines — either literally empty
+ * (no segments) or anchor-only (its only content is wrap floats, drawn
+ * separately). Per ECMA-376 §17.3.1.29 such a paragraph still emits ONE
+ * paragraph-mark line box; this advances `state.y` past it, draws its shading /
+ * borders, and lays its wrapNone anchor images at the (possibly float-flowed)
+ * paragraph base.
+ *
+ * Shared by renderParagraph's `segments.length === 0` and `lines.length === 0`
+ * branches (previously duplicated verbatim). The anchor-only branch's
+ * slice-boundary guards (spaceAfter only on the final slice, anchor images only
+ * on the first) are parameterized via `markCtx.totalLines` / `lineSlice`; for
+ * the literally-empty branch `lineSlice` is always undefined (empty paragraphs
+ * are never sliced), so those guards reduce to the unconditional behavior it had.
+ */
+function renderEmptyMarkParagraph(
+  para: DocParagraph,
+  state: RenderState,
+  markCtx: {
+    grid: DocGridCtx;
+    paraHasRuby: boolean;
+    contentX: number;
+    indLeft: number;
+    paraW: number;
+    textAreaTopY: number;
+    paragraphStartY: number;
+    /** Flowed top of the mark line (output of resolveEmptyMarkTop). */
+    markTop: number;
+    /** Total laid-out line count (0 here); used by the slice guards. */
+    totalLines: number;
+    lineSlice?: { start: number; end: number };
+  },
+): void {
+  const { ctx, scale, dryRun } = state;
+  const { grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY,
+    paragraphStartY, markTop, totalLines, lineSlice } = markCtx;
+  // Displacement applied by the float-flow (0 when the mark fits where it is).
+  const flowShift = Math.max(0, markTop - textAreaTopY);
+  if (markTop > state.y) state.y = markTop;
+  const markRectTop = state.y;
+  const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
+  if (para.shading && !dryRun) {
+    ctx.fillStyle = `#${para.shading}`;
+    ctx.fillRect(contentX + indLeft, markRectTop, paraW, emptyH);
+  }
+  state.y += emptyH;
+  if (para.borders && !dryRun) {
+    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale);
+  }
+  // Only the slice covering the FINAL line emits spaceAfter. With no inline
+  // lines there is a single slice, so this is the whole paragraph.
+  const isFinalSlice = !lineSlice || lineSlice.end >= totalLines;
+  if (isFinalSlice) state.y += para.spaceAfter * scale;
+  // wrapNone anchor images anchor relative to the paragraph (ayFromPara); when
+  // the mark line flowed below a float band the paragraph (and its wrapNone
+  // image) drops by the same amount, so shift the anchor base by flowShift while
+  // keeping the un-flowed base (paragraphStartY) otherwise unchanged. Only the
+  // first slice draws them (a continuation slice already did on its page).
+  if (!lineSlice || lineSlice.start === 0) {
+    renderAnchorImages(para, state, paragraphStartY + flowShift);
+  }
+}
+
 function renderParagraph(
   para: DocParagraph,
   state: RenderState,
@@ -1721,18 +1788,40 @@ function renderParagraph(
   const paraHasRuby = paragraphHasRuby(para);
   const grid = paraGrid(para, state);
 
+  // A paragraph with no inline content (literally empty, or anchor-only) still
+  // produces ONE paragraph-mark line box (ECMA-376 §17.3.1.29 regulates only the
+  // existence of that line; the horizontal wrap geometry around a square float is
+  // §20.4.2.17). The behavior below — firing an automatic "flow the mark line
+  // below the float band when it cannot sit beside it" displacement, and using
+  // ONE EM of the mark font as the width the gap must hold — is NOT specified by
+  // ECMA-376 Part 1. It is an implementation-defined HEURISTIC chosen to match
+  // Word: the only spec-mandated flow of a line onto a float-free region is the
+  // explicit `<w:br w:clear>` of §17.18.3, which is not what fires here. Without
+  // this heuristic an empty paragraph mark wedges into a sub-em sliver beside a
+  // full-width float band and the following paragraphs (and any wrapNone image
+  // they anchor) stay pinned inside the band. We resolve the mark line's flowed
+  // top here and use it for the mark advance, the shading/border rect, and the
+  // paragraph-relative base of any wrapNone anchor image drawn below.
+  const resolveEmptyMarkTop = (): number => {
+    if (state.floats.length === 0) return textAreaTopY;
+    // Required width for an empty mark line: one em of the mark font (HEURISTIC,
+    // see above — not a spec-defined threshold). A side gap narrower than this is
+    // treated as unable to hold the line start, so the line flows below.
+    const markEm = paragraphMarkEmPx(para, scale);
+    const probeH = 10 * scale;
+    const win = resolveLineFloatWindow(
+      textAreaTopY, markEm, probeH, paraX, paraW, state.floats,
+    );
+    return win.topY;
+  };
+
   if (segments.length === 0) {
-    const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
-    if (para.shading && !dryRun) {
-      ctx.fillStyle = `#${para.shading}`;
-      ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
-    }
-    state.y += emptyH;
-    if (para.borders && !dryRun) {
-      drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, emptyH, para.borders, scale);
-    }
-    state.y += para.spaceAfter * scale;
-    renderAnchorImages(para, state, paragraphStartY);
+    // Literally-empty paragraph: one paragraph-mark line box, no inline content
+    // and (by construction in the paginator) never sliced.
+    renderEmptyMarkParagraph(para, state, {
+      grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
+      markTop: resolveEmptyMarkTop(), totalLines: 0, lineSlice: undefined,
+    });
     return;
   }
 
@@ -1742,6 +1831,7 @@ function renderParagraph(
     floats: state.floats,
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0),
     pageH: state.pageH,
+    markEmPx: paragraphMarkEmPx(para, scale),
   } : undefined;
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
@@ -1756,20 +1846,14 @@ function renderParagraph(
   // renderAnchorImages on their own absolute-position path, so this only adds the
   // in-flow paragraph-mark advance (no double counting, no double draw).
   if (lines.length === 0) {
-    const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
-    if (para.shading && !dryRun) {
-      ctx.fillStyle = `#${para.shading}`;
-      ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
-    }
-    state.y += emptyH;
-    if (para.borders && !dryRun) {
-      drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, emptyH, para.borders, scale);
-    }
-    const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
-    if (isFinalSlice) state.y += para.spaceAfter * scale;
-    if (!lineSlice || lineSlice.start === 0) {
-      renderAnchorImages(para, state, paragraphStartY);
-    }
+    // Anchor-only paragraph: same content-less mark line as the literally-empty
+    // path (the anchor floats themselves are drawn separately). Slice guards
+    // honor a paginator-split slice (spaceAfter on the final slice, anchor
+    // images on the first).
+    renderEmptyMarkParagraph(para, state, {
+      grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
+      markTop: resolveEmptyMarkTop(), totalLines: lines.length, lineSlice,
+    });
     return;
   }
 
@@ -2218,6 +2302,11 @@ interface WrapLayoutCtx {
   lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
+  /** Paragraph-mark em width (px), from paragraphMarkEmPx(para). Shared with
+   *  resolveEmptyMarkTop so an empty / anchor-only mark line that has no
+   *  trailing-break font of its own falls below a float band on the SAME
+   *  threshold the empty-paragraph path uses. */
+  markEmPx: number;
 }
 
 /**
@@ -2788,58 +2877,27 @@ function layoutLines(
   let lineXOffset = 0;
   let currentLineTopY = wrapCtx?.startPageY ?? 0;
 
-  // Compute wrap constraints for a new line about to start. Mutates lineXOffset/lineMaxWidth/currentLineTopY.
-  const startLine = (): void => {
+  // Compute wrap constraints for a new line about to start. Mutates
+  // lineXOffset/lineMaxWidth/currentLineTopY. `minWidth` is the smallest width
+  // the upcoming line must have to be placeable here (the width of its first
+  // atomic token, or the paragraph-mark em for an empty line); a free gap
+  // narrower than this is treated as unusable and the line is sent below the
+  // intervening float(s) — the ECMA-376 wrap rule that text which cannot fit
+  // beside a floating object flows past it.
+  const startLine = (minWidth: number = 0): void => {
     lineXOffset = 0;
     lineMaxWidth = maxWidth;
     if (!wrapCtx) return;
-    // Probe height: the smallest plausible line height; good enough for float intersection check.
+    // Small fixed probe height for float intersection (matches the historical
+    // wrap behaviour for the topAndBottom skip and horizontal-gap scan).
     const probeH = 10 * scale;
-    // Keep pushing past any topAndBottom block we sit inside.
-    for (let guard = 0; guard < 16; guard++) {
-      const lineBot = currentLineTopY + probeH;
-      let skip: number | null = null;
-      for (const f of wrapCtx.floats) {
-        if (f.mode !== 'topAndBottom') continue;
-        if (lineBot > f.yTop && currentLineTopY < f.yBottom) {
-          skip = skip === null ? f.yBottom : Math.max(skip, f.yBottom);
-        }
-      }
-      if (skip === null) break;
-      currentLineTopY = skip;
-    }
-    // Now compute horizontal constraint from square floats.
-    const paraXLeft = wrapCtx.paraX;
-    const paraXRight = wrapCtx.paraX + maxWidth;
-    let left = paraXLeft;
-    let right = paraXRight;
-    const lineBot = currentLineTopY + probeH;
-    for (const f of wrapCtx.floats) {
-      if (f.mode !== 'square') continue;
-      if (lineBot <= f.yTop || currentLineTopY >= f.yBottom) continue;
-      // Decide which side text should flow on. "left"/"right" refer to the side TEXT occupies.
-      const spaceLeft = f.xLeft - paraXLeft;
-      const spaceRight = paraXRight - f.xRight;
-      let textOnLeft: boolean;
-      switch (f.side) {
-        case 'left':    textOnLeft = true;  break;
-        case 'right':   textOnLeft = false; break;
-        case 'largest':
-        case 'bothSides':
-        default:        textOnLeft = spaceLeft >= spaceRight; break;
-      }
-      if (textOnLeft) {
-        if (f.xLeft < right) right = Math.max(left, f.xLeft);
-      } else {
-        if (f.xRight > left) left = Math.min(right, f.xRight);
-      }
-    }
-    const eff = Math.max(0, right - left);
-    lineXOffset = Math.max(0, left - paraXLeft);
-    lineMaxWidth = Math.min(maxWidth - lineXOffset, eff);
-    if (lineMaxWidth < 0) lineMaxWidth = 0;
+    const win = resolveLineFloatWindow(
+      currentLineTopY, minWidth, probeH, wrapCtx.paraX, maxWidth, wrapCtx.floats,
+    );
+    currentLineTopY = win.topY;
+    lineXOffset = win.xOffset;
+    lineMaxWidth = win.maxWidth;
   };
-  startLine();
 
   const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);
 
@@ -2878,7 +2936,7 @@ function layoutLines(
     lineIntendedSingle = 0;
     lineHasRuby = false;
     isFirst = false;
-    startLine();
+    startLine(requiredLineWidth());
   };
 
   const addToLine = (
@@ -2924,11 +2982,52 @@ function layoutLines(
   // Use an explicit queue so CJK split-tails can be re-queued
   const queue: LayoutSeg[] = [...segs];
 
+  // Smallest width the NEXT line must have to be placeable beside a float: the
+  // width of its first atomic token. For text we measure the first wrap unit
+  // (CJK: one grapheme — kinsoku may force more, but one char is the floor;
+  // Latin: up to the first space). For an image/math the whole object. An empty
+  // line (no remaining content) still reserves the paragraph-mark em so a
+  // sliver gap between full-width floats does not "fit" it. Used by startLine to
+  // decide whether to wrap in a gap or send the line below the floats.
+  const requiredLineWidth = (): number => {
+    // First inline token that actually occupies width on the line. Anchor-image
+    // segments are floats (drawn separately, measuredWidth 0) and lineBreaks
+    // carry no width, so skip them — otherwise the float's own width would be
+    // mistaken for the line's required width and wrongly push every wrap line
+    // below the float.
+    const q = queue.find((s) => !('lineBreak' in s) && !('dataUrl' in s && s.anchor));
+    if (!q) {
+      // Empty/paragraph-mark line: reserve one em so a sub-glyph gap is rejected
+      // and the mark line drops below the floats. A trailing `<w:br/>` carries
+      // its own (line-local) font size; otherwise use the shared paragraph-mark
+      // em (paragraphMarkEmPx, threaded via wrapCtx) so this fallback agrees with
+      // resolveEmptyMarkTop. Outside a float context the result is unused
+      // (startLine no-ops), so fall back to the legacy estimate.
+      if (trailingBreakFontSize !== null) return trailingBreakFontSize * scale;
+      if (wrapCtx) return wrapCtx.markEmPx;
+      return (segs[0] && 'fontSize' in segs[0] ? segs[0].fontSize : 10) * scale;
+    }
+    if ('isTab' in q) return q.measuredWidth || 0;
+    if ('dataUrl' in q) return q.widthPt * scale;
+    if ('mathNodes' in q) return q.measuredWidth || 0;
+    const ts = q as LayoutTextSeg;
+    // First wrap unit: leading run up to the first space (Latin word) or the
+    // first character (CJK / no space). Whichever is shorter bounds the floor.
+    const sp = ts.text.indexOf(' ');
+    const head = sp > 0 ? ts.text.slice(0, sp) : ts.text;
+    const firstChar = [...head][0] ?? '';
+    const probe = { ...ts, text: firstChar };
+    return measureText(probe).width;
+  };
+
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
   // content of the paragraph that new line is an EMPTY line that still
   // occupies one line height (Word reserves it; visible e.g. as extra table
   // row height). Track the trailing break so it can be flushed after the loop.
   let trailingBreakFontSize: number | null = null;
+
+  // Establish the first line's wrap window now that the content queue exists.
+  startLine(requiredLineWidth());
 
   while (queue.length > 0) {
     const seg = queue.shift()!;
@@ -3251,19 +3350,16 @@ function renderAnchorImages(
     if (isWrapFloat(img.wrapMode)) continue;  // drawn as a float
     const bmp = state.images.get(imageKey(img.dataUrl, img.colorReplaceFrom));
     if (!bmp) continue;
-    const w = img.widthPt * state.scale;
-    const h = img.heightPt * state.scale;
 
-    // Resolve X: margin-relative offsets need section.marginLeft added
-    const pageX = img.anchorXFromMargin
-      ? (state.marginLeft + (img.anchorXPt ?? 0)) * state.scale
-      : (img.anchorXPt ?? 0) * state.scale;
-
-    // Resolve Y: paragraph-relative offsets use the paragraph's top Y in canvas px
-    const pageY = img.anchorYFromPara
-      ? paragraphTopPx + (img.anchorYPt ?? 0) * state.scale
-      : (img.anchorYPt ?? 0) * state.scale;
-
+    // wrapNone images anchor against the paragraph's pre-spaceBefore top
+    // (paragraphTopPx). Shared box resolution with the float path. By design the
+    // box-resolution is symmetric but the overlap handling is NOT: wrap floats
+    // (registerAnchorFloats) build an exclusion rect and run resolveFloatOverlap,
+    // whereas wrapNone images carry no exclusion rect — they are positioned
+    // directly in the paragraph flow (ECMA-376 wrapNone, §20.4.2.x: the object
+    // does not displace text and is not displaced by other floats), so dist* is
+    // unused here.
+    const { x: pageX, y: pageY, w, h } = resolveAnchorBox(img, state, paragraphTopPx);
     state.ctx.drawImage(bmp, pageX, pageY, w, h);
   }
 }
@@ -3572,12 +3668,47 @@ function renderShapeText(
   ctx.direction = 'ltr'; // reset for subsequent draws
 }
 
-function isWrapFloat(mode?: string): boolean {
-  return mode === 'square' || mode === 'topAndBottom' || mode === 'tight' || mode === 'through';
+/**
+ * Resolve an anchor image's page-space box origin and dist* padding (px), shared
+ * by registerAnchorFloats (wrap floats) and renderAnchorImages (wrapNone images).
+ *
+ * X: margin-relative offsets add section.marginLeft (ECMA-376 §20.4.3.4
+ * relativeFrom="margin"); otherwise anchorXPt is already page-absolute.
+ * Y: paragraph-relative offsets add `paraBaseY`; otherwise page-absolute. The
+ * caller supplies `paraBaseY` because the two consumers anchor against different
+ * paragraph references — wrap floats use the post-spaceBefore textAreaTop, while
+ * wrapNone images use the pre-spaceBefore paragraph top (see the
+ * anchoredFloatBottomOffset note in the paginator). This is the box origin BEFORE
+ * any overlap displacement; resolveFloatOverlap runs on top of it for floats.
+ */
+function resolveAnchorBox(
+  img: ImageRun,
+  state: RenderState,
+  paraBaseY: number,
+): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } {
+  const scale = state.scale;
+  return {
+    x: img.anchorXFromMargin
+      ? (state.marginLeft + (img.anchorXPt ?? 0)) * scale
+      : (img.anchorXPt ?? 0) * scale,
+    y: img.anchorYFromPara
+      ? paraBaseY + (img.anchorYPt ?? 0) * scale
+      : (img.anchorYPt ?? 0) * scale,
+    w: img.widthPt * scale,
+    h: img.heightPt * scale,
+    dl: (img.distLeft   ?? 0) * scale,
+    dr: (img.distRight  ?? 0) * scale,
+    dt: (img.distTop    ?? 0) * scale,
+    db: (img.distBottom ?? 0) * scale,
+  };
 }
 
 /** Register floats from a paragraph's anchor images and draw the image bitmap immediately. */
 function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphAnchorY: number): void {
+  // One id per registerAnchorFloats call ⇒ one id per paragraph. Floats sharing
+  // a paraId (e.g. two side-by-side photos in one paragraph) never displace each
+  // other; floats from different paragraphs do (de-facto overlap avoidance).
+  const paraId = state.floatParaSeq++;
   for (const run of para.runs) {
     if (run.type !== 'image') continue;
     const img = run as unknown as ImageRun;
@@ -3587,19 +3718,26 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
     const mode: 'square' | 'topAndBottom' =
       img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
 
-    const scale = state.scale;
-    const w = img.widthPt * scale;
-    const h = img.heightPt * scale;
-    const pageX = img.anchorXFromMargin
-      ? (state.marginLeft + (img.anchorXPt ?? 0)) * scale
-      : (img.anchorXPt ?? 0) * scale;
-    const pageY = img.anchorYFromPara
-      ? paragraphAnchorY + (img.anchorYPt ?? 0) * scale
-      : (img.anchorYPt ?? 0) * scale;
-    const dt = (img.distTop    ?? 0) * scale;
-    const db = (img.distBottom ?? 0) * scale;
-    const dl = (img.distLeft   ?? 0) * scale;
-    const dr = (img.distRight  ?? 0) * scale;
+    // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
+    const box = resolveAnchorBox(img, state, paragraphAnchorY);
+    const { w, h, dl, dr, dt, db } = box;
+    let pageX = box.x;
+    let pageY = box.y;
+
+    // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
+    // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
+    // permits overlap. Default true per §20.4.2.3.
+    // Implementation-defined (HEURISTIC, Word-mimicking, no ECMA-376 basis):
+    // displacing the later document-order float, the "other paragraphs only"
+    // gate under allowOverlap=true, and the right-then-down re-seat using dist
+    // padding as the float-to-float gap. See resolveFloatOverlap header.
+    const allowOverlap = img.allowOverlap ?? true;
+    const resolved = resolveFloatOverlap(
+      pageX, pageY, w, h, dl, dr, dt, db, paraId, allowOverlap,
+      state.pageWidth * state.scale, state.floats,
+    );
+    pageX = resolved.x;
+    pageY = resolved.y;
 
     const key = imageKey(img.dataUrl, img.colorReplaceFrom);
     const rect: FloatRect = {
@@ -3614,6 +3752,11 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
       yTop: pageY - dt,
       yBottom: pageY + h + db,
       side: img.wrapSide ?? 'bothSides',
+      distLeft: dl,
+      distRight: dr,
+      distTop: dt,
+      distBottom: db,
+      paraId,
       drawn: false,
     };
     state.floats.push(rect);
@@ -3624,20 +3767,6 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
       rect.drawn = true;
     }
   }
-}
-
-/** If y is inside a topAndBottom float, return the float bottom; otherwise return y. */
-function skipPastTopAndBottom(y: number, floats: FloatRect[]): number {
-  for (let guard = 0; guard < 16; guard++) {
-    let next = y;
-    for (const f of floats) {
-      if (f.mode !== 'topAndBottom') continue;
-      if (y >= f.yTop && y < f.yBottom) next = Math.max(next, f.yBottom);
-    }
-    if (next === y) return y;
-    y = next;
-  }
-  return y;
 }
 
 // ===== Table rendering =====
@@ -4308,6 +4437,16 @@ function getDefaultFontSize(para: DocParagraph): number {
   }
   if (typeof para.defaultFontSize === 'number') return para.defaultFontSize;
   return 10; // pt fallback
+}
+
+/** Width (px) of the paragraph-mark "em" — the smallest horizontal gap a
+ *  float-bordered empty / anchor-only paragraph-mark line is allowed to sit in
+ *  before it flows below the float band. Single source of truth shared by the
+ *  empty-mark float-window probe (resolveEmptyMarkTop) and the layoutLines
+ *  empty-line fallback, so the two paths agree on what "one em of the mark
+ *  font" means. HEURISTIC threshold (see resolveEmptyMarkTop), not spec. */
+function paragraphMarkEmPx(para: DocParagraph, scale: number): number {
+  return getDefaultFontSize(para) * scale;
 }
 
 /** First text/field run's font family — used to size empty paragraphs whose

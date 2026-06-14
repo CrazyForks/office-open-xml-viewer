@@ -1940,6 +1940,9 @@ fn parse_inline_drawing(
             dist_left: 0.0,
             dist_right: 0.0,
             wrap_side: None,
+            // Inline image: not a float, so the overlap constraint is moot.
+            // Carry the spec no-constraint value (true).
+            allow_overlap: true,
         })];
     }
 
@@ -2080,10 +2083,11 @@ fn parse_inline_drawing(
         dist_left: anchor_meta.dist_left,
         dist_right: anchor_meta.dist_right,
         wrap_side: anchor_meta.wrap_side.clone(),
+        allow_overlap: anchor_meta.allow_overlap,
     })]
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct AnchorMeta {
     wrap_mode: Option<String>,
     wrap_side: Option<String>,
@@ -2091,6 +2095,28 @@ struct AnchorMeta {
     dist_bottom: f64,
     dist_left: f64,
     dist_right: f64,
+    /// ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap` — whether this floating
+    /// object may overlap other floating objects. Spec default is **true**
+    /// (the attribute is optional). `false` mandates the object be repositioned
+    /// to prevent overlap. We implement `Default` by hand so the spec default of
+    /// `true` is preserved everywhere `AnchorMeta::default()` is used (a derived
+    /// `Default` would wrongly yield `false`).
+    allow_overlap: bool,
+}
+
+impl Default for AnchorMeta {
+    fn default() -> Self {
+        AnchorMeta {
+            wrap_mode: None,
+            wrap_side: None,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 0.0,
+            dist_right: 0.0,
+            // §20.4.2.3: omitted @allowOverlap ⇒ true.
+            allow_overlap: true,
+        }
+    }
 }
 
 /// Parse wrap element and dist* padding from a wp:anchor container.
@@ -2100,6 +2126,13 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
     let dist_bottom = container.attribute("distB").map(to_pt).unwrap_or(0.0);
     let dist_left = container.attribute("distL").map(to_pt).unwrap_or(0.0);
     let dist_right = container.attribute("distR").map(to_pt).unwrap_or(0.0);
+
+    // ECMA-376 §20.4.2.3 `wp:anchor/@allowOverlap`: "1"/"true" ⇒ true,
+    // "0"/"false" ⇒ false, omitted ⇒ true (spec default).
+    let allow_overlap = container
+        .attribute("allowOverlap")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(true);
 
     let mut wrap_mode: Option<String> = None;
     let mut wrap_side: Option<String> = None;
@@ -2141,6 +2174,7 @@ fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
         dist_bottom,
         dist_left,
         dist_right,
+        allow_overlap,
     }
 }
 
@@ -2454,6 +2488,7 @@ fn parse_group_pic(
         dist_left: anchor_meta.dist_left,
         dist_right: anchor_meta.dist_right,
         wrap_side: anchor_meta.wrap_side.clone(),
+        allow_overlap: anchor_meta.allow_overlap,
     })
 }
 
@@ -4221,6 +4256,50 @@ mod wgp_image_tests {
             "anchor_y_pt = {}",
             img.anchor_y_pt
         );
+    }
+}
+
+#[cfg(test)]
+mod allow_overlap_tests {
+    use super::*;
+
+    fn meta(anchor_attrs: &str) -> AnchorMeta {
+        let xml = format!(
+            r#"<wp:anchor xmlns:wp="urn:wp" {attrs}>
+                 <wp:wrapSquare wrapText="bothSides"/>
+               </wp:anchor>"#,
+            attrs = anchor_attrs
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        parse_anchor_wrap(&doc.root_element())
+    }
+
+    // ECMA-376 §20.4.2.3 — @allowOverlap is optional; when omitted the object
+    // MAY overlap (default true).
+    #[test]
+    fn omitted_allow_overlap_defaults_true() {
+        assert!(meta("").allow_overlap);
+    }
+
+    // §20.4.2.3 — allowOverlap="0" / "false" forbids overlap (false).
+    #[test]
+    fn allow_overlap_false_is_false() {
+        assert!(!meta(r#"allowOverlap="0""#).allow_overlap);
+        assert!(!meta(r#"allowOverlap="false""#).allow_overlap);
+    }
+
+    // §20.4.2.3 — allowOverlap="1" / "true" permits overlap (true).
+    #[test]
+    fn allow_overlap_true_is_true() {
+        assert!(meta(r#"allowOverlap="1""#).allow_overlap);
+        assert!(meta(r#"allowOverlap="true""#).allow_overlap);
+    }
+
+    // The hand-written Default must preserve the spec default of true so any
+    // AnchorMeta::default() (e.g. group images without an anchor) is correct.
+    #[test]
+    fn default_anchor_meta_allows_overlap() {
+        assert!(AnchorMeta::default().allow_overlap);
     }
 }
 
