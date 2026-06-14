@@ -1738,18 +1738,48 @@ function renderParagraph(
   const paraHasRuby = paragraphHasRuby(para);
   const grid = paraGrid(para, state);
 
+  // A paragraph with no inline content (literally empty, or anchor-only) still
+  // produces ONE paragraph-mark line box (ECMA-376 §17.3.1.29). That line box
+  // is subject to the same float-wrap rules as text: if it cannot fit beside the
+  // page's active floats it flows below them (§20.4.2.16/.17). Without this an
+  // empty paragraph mark wedges into a sub-em sliver beside a full-width float
+  // band and the following paragraphs (and any wrapNone image those paragraphs
+  // anchor) stay pinned inside the band. We resolve the mark line's flowed top
+  // here and use it for the mark advance, the shading/border rect, and the
+  // paragraph-relative base of any wrapNone anchor image drawn below.
+  const resolveEmptyMarkTop = (): number => {
+    if (state.floats.length === 0) return textAreaTopY;
+    // Required width for an empty mark line: one em of the mark font. A side gap
+    // narrower than this cannot hold the line start, so the line flows below.
+    const markEm = getDefaultFontSize(para) * scale;
+    const probeH = 10 * scale;
+    const win = resolveLineFloatWindow(
+      textAreaTopY, markEm, probeH, paraX, paraW, state.floats,
+    );
+    return win.topY;
+  };
+
   if (segments.length === 0) {
+    const markTop = resolveEmptyMarkTop();
+    // Displacement applied by the float-flow (0 when the mark fits where it is).
+    const flowShift = Math.max(0, markTop - textAreaTopY);
+    if (markTop > state.y) state.y = markTop;
+    const markRectTop = state.y;
     const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
     if (para.shading && !dryRun) {
       ctx.fillStyle = `#${para.shading}`;
-      ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
+      ctx.fillRect(contentX + indLeft, markRectTop, paraW, emptyH);
     }
     state.y += emptyH;
     if (para.borders && !dryRun) {
-      drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, emptyH, para.borders, scale);
+      drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale);
     }
     state.y += para.spaceAfter * scale;
-    renderAnchorImages(para, state, paragraphStartY);
+    // wrapNone anchor images anchor relative to the paragraph (ayFromPara); when
+    // the mark line flowed below a float band the paragraph (and its wrapNone
+    // image) drops by the same amount, so shift the anchor base by flowShift
+    // while keeping the un-flowed base (paragraphStartY) otherwise unchanged.
+    renderAnchorImages(para, state, paragraphStartY + flowShift);
     return;
   }
 
@@ -1773,19 +1803,26 @@ function renderParagraph(
   // renderAnchorImages on their own absolute-position path, so this only adds the
   // in-flow paragraph-mark advance (no double counting, no double draw).
   if (lines.length === 0) {
+    // Same float-flow as the literally-empty path: an anchor-only paragraph's
+    // mark line (and any wrapNone image it anchors) flows below a float band it
+    // cannot sit beside.
+    const markTop = resolveEmptyMarkTop();
+    const flowShift = Math.max(0, markTop - textAreaTopY);
+    if (markTop > state.y) state.y = markTop;
+    const markRectTop = state.y;
     const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
     if (para.shading && !dryRun) {
       ctx.fillStyle = `#${para.shading}`;
-      ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
+      ctx.fillRect(contentX + indLeft, markRectTop, paraW, emptyH);
     }
     state.y += emptyH;
     if (para.borders && !dryRun) {
-      drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, emptyH, para.borders, scale);
+      drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale);
     }
     const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
     if (isFinalSlice) state.y += para.spaceAfter * scale;
     if (!lineSlice || lineSlice.start === 0) {
-      renderAnchorImages(para, state, paragraphStartY);
+      renderAnchorImages(para, state, paragraphStartY + flowShift);
     }
     return;
   }
@@ -2762,6 +2799,119 @@ function splitTextForLayout(text: string): string[] {
   return result.length ? result : [text];
 }
 
+/**
+ * Resolve where a single line box may sit relative to the page's active floats.
+ *
+ * Given the line's intended top Y and the minimum horizontal width it needs to
+ * be placeable (`requiredWidth` — the width of its first atomic token, or, for
+ * an empty paragraph-mark line, one em of the mark font), this returns the Y at
+ * which the line actually starts plus the horizontal sub-window it may use.
+ *
+ * Two ECMA-376 wrap rules are applied, in order:
+ *   1. topAndBottom floats (§20.4.2.16): a line intersecting one is pushed below
+ *      it — text never sits beside a topAndBottom object.
+ *   2. square floats (§20.4.2.17): text wraps around the float's rect + dist
+ *      padding. When several squares cover a row we take the WIDEST free
+ *      horizontal gap. If no gap is wide enough for `requiredWidth` the line
+ *      cannot sit here at all and flows below the obstruction (advance to the
+ *      lowest blocking float bottom and re-evaluate). This is the same "flow
+ *      below the obstruction" behaviour used for wrapped text; routing empty /
+ *      anchor-only paragraph-mark lines through it makes those lines (and the
+ *      paragraphs that follow them) drop below a full-width float band instead
+ *      of rendering inside it.
+ */
+function resolveLineFloatWindow(
+  topY: number,
+  requiredWidth: number,
+  probeH: number,
+  paraX: number,
+  maxWidth: number,
+  floats: FloatRect[],
+): { topY: number; xOffset: number; maxWidth: number } {
+  // 1. Keep pushing past any topAndBottom block we sit inside.
+  for (let guard = 0; guard < 16; guard++) {
+    const lineBot = topY + probeH;
+    let skip: number | null = null;
+    for (const f of floats) {
+      if (f.mode !== 'topAndBottom') continue;
+      if (lineBot > f.yTop && topY < f.yBottom) {
+        skip = skip === null ? f.yBottom : Math.max(skip, f.yBottom);
+      }
+    }
+    if (skip === null) break;
+    topY = skip;
+  }
+
+  // 2. Horizontal constraint from square floats.
+  const paraXLeft = paraX;
+  const paraXRight = paraX + maxWidth;
+  // A gap must fit the line's first atomic token to be usable. Floor at 1px so a
+  // zero-width probe (no content yet) still rejects sub-pixel slivers.
+  const usableGap = Math.max(requiredWidth, 1);
+  let xOffset = 0;
+  let lineMaxWidth = maxWidth;
+  for (let guard = 0; guard < 64; guard++) {
+    const lineBot = topY + probeH;
+    const blocked: { l: number; r: number }[] = [];
+    const intersecting: FloatRect[] = [];
+    for (const f of floats) {
+      if (f.mode !== 'square') continue;
+      if (lineBot <= f.yTop || topY >= f.yBottom) continue;
+      intersecting.push(f);
+      switch (f.side) {
+        // Text may sit only on the LEFT of the float ⇒ everything from the
+        // float's left edge to the column right is unavailable.
+        case 'left':  blocked.push({ l: f.xLeft, r: paraXRight }); break;
+        // Text may sit only on the RIGHT ⇒ column left .. float right blocked.
+        case 'right': blocked.push({ l: paraXLeft, r: f.xRight }); break;
+        case 'largest':
+        case 'bothSides':
+        default:      blocked.push({ l: f.xLeft, r: f.xRight }); break;
+      }
+    }
+    if (intersecting.length === 0) {
+      xOffset = 0;
+      lineMaxWidth = maxWidth;
+      break;
+    }
+    // Sweep [paraXLeft, paraXRight] removing blocked spans; collect free gaps.
+    blocked.sort((a, b) => a.l - b.l);
+    let cursor = paraXLeft;
+    let best: { l: number; r: number } | null = null;
+    const consider = (l: number, r: number) => {
+      if (r - l > (best ? best.r - best.l : 0)) best = { l, r };
+    };
+    for (const b of blocked) {
+      if (b.l > cursor) consider(cursor, Math.min(b.l, paraXRight));
+      cursor = Math.max(cursor, Math.min(b.r, paraXRight));
+      if (cursor >= paraXRight) break;
+    }
+    if (cursor < paraXRight) consider(cursor, paraXRight);
+
+    if (best && (best as { l: number; r: number }).r - (best as { l: number; r: number }).l >= usableGap) {
+      const seg = best as { l: number; r: number };
+      xOffset = Math.max(0, seg.l - paraXLeft);
+      lineMaxWidth = Math.min(maxWidth - xOffset, seg.r - seg.l);
+      if (lineMaxWidth < 0) lineMaxWidth = 0;
+      break;
+    }
+
+    // No usable gap on this row: the intersecting floats cover the whole column
+    // width here. The line must clear them all — advance to the LOWEST blocking
+    // float bottom (max yBottom) so it sits centred below the band rather than
+    // squeezed into a side sliver beside a still-active float.
+    const nextY = Math.max(...intersecting.map((f) => f.yBottom));
+    if (nextY <= topY) {
+      // Degenerate guard (shouldn't happen): keep full width to avoid a stall.
+      xOffset = 0;
+      lineMaxWidth = maxWidth;
+      break;
+    }
+    topY = nextY;
+  }
+  return { topY, xOffset, maxWidth: lineMaxWidth };
+}
+
 function layoutLines(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   segs: LayoutSeg[],
@@ -2819,103 +2969,12 @@ function layoutLines(
     // Small fixed probe height for float intersection (matches the historical
     // wrap behaviour for the topAndBottom skip and horizontal-gap scan).
     const probeH = 10 * scale;
-    // Keep pushing past any topAndBottom block we sit inside.
-    for (let guard = 0; guard < 16; guard++) {
-      const lineBot = currentLineTopY + probeH;
-      let skip: number | null = null;
-      for (const f of wrapCtx.floats) {
-        if (f.mode !== 'topAndBottom') continue;
-        if (lineBot > f.yTop && currentLineTopY < f.yBottom) {
-          skip = skip === null ? f.yBottom : Math.max(skip, f.yBottom);
-        }
-      }
-      if (skip === null) break;
-      currentLineTopY = skip;
-    }
-    // Horizontal constraint from square floats. A line can be split into
-    // several free segments by floats; ECMA-376 §20.4.2.17 (wrapSquare) defines
-    // text wrapping around a single float's rect + dist padding, but when
-    // multiple floats cover a row we
-    // must pick a free horizontal gap that the line can use. We compute the
-    // open sub-intervals of [paraXLeft, paraXRight] and take the WIDEST. If the
-    // floats leave NO usable gap (e.g. two full-width side-by-side images that
-    // together span the whole column), the line cannot sit here at all: we send
-    // it down to the nearest float bottom and re-evaluate, which is the wrap
-    // spec's "flow below the obstruction" behaviour. Without this, a fully
-    // blocked line (and following empty/caption lines) would render INSIDE the
-    // float band.
-    const paraXLeft = wrapCtx.paraX;
-    const paraXRight = wrapCtx.paraX + maxWidth;
-    // A gap must fit the line's first atomic token to be usable. Floor at 1px so
-    // a zero-width probe (no content yet) still rejects sub-pixel slivers.
-    const usableGap = Math.max(minWidth, 1);
-    for (let guard = 0; guard < 64; guard++) {
-      const lineBot = currentLineTopY + probeH;
-      // Collect square floats intersecting this Y band and the X interval they
-      // block (depends on wrapText side: the float plus, for one-sided wrap,
-      // the column edge on the forbidden side).
-      const blocked: { l: number; r: number }[] = [];
-      const intersecting: FloatRect[] = [];
-      for (const f of wrapCtx.floats) {
-        if (f.mode !== 'square') continue;
-        if (lineBot <= f.yTop || currentLineTopY >= f.yBottom) continue;
-        intersecting.push(f);
-        switch (f.side) {
-          // Text may sit only on the LEFT of the float ⇒ everything from the
-          // float's left edge to the column right is unavailable.
-          case 'left':  blocked.push({ l: f.xLeft, r: paraXRight }); break;
-          // Text may sit only on the RIGHT ⇒ column left .. float right blocked.
-          case 'right': blocked.push({ l: paraXLeft, r: f.xRight }); break;
-          case 'largest':
-          case 'bothSides':
-          default:      blocked.push({ l: f.xLeft, r: f.xRight }); break;
-        }
-      }
-      if (intersecting.length === 0) {
-        lineXOffset = 0;
-        lineMaxWidth = maxWidth;
-        break;
-      }
-      // Sweep [paraXLeft, paraXRight] removing blocked spans; collect free gaps.
-      blocked.sort((a, b) => a.l - b.l);
-      let cursor = paraXLeft;
-      let best: { l: number; r: number } | null = null;
-      const consider = (l: number, r: number) => {
-        if (r - l > (best ? best.r - best.l : 0)) best = { l, r };
-      };
-      for (const b of blocked) {
-        if (b.l > cursor) consider(cursor, Math.min(b.l, paraXRight));
-        cursor = Math.max(cursor, Math.min(b.r, paraXRight));
-        if (cursor >= paraXRight) break;
-      }
-      if (cursor < paraXRight) consider(cursor, paraXRight);
-
-      if (best && (best as { l: number; r: number }).r - (best as { l: number; r: number }).l >= usableGap) {
-        const seg = best as { l: number; r: number };
-        lineXOffset = Math.max(0, seg.l - paraXLeft);
-        lineMaxWidth = Math.min(maxWidth - lineXOffset, seg.r - seg.l);
-        if (lineMaxWidth < 0) lineMaxWidth = 0;
-        break;
-      }
-
-      // No usable gap on this row: the intersecting floats cover the whole
-      // column width here (otherwise a gap would have been found above). The
-      // line therefore cannot sit beside ANY of them, so it must clear them all
-      // — advance to the LOWEST blocking float bottom (max yBottom). Dropping
-      // only to the nearest bottom would leave the line squeezed into a side gap
-      // beside a still-active float (placing a full-width caption off-centre
-      // under one image); clearing all the full-width floats at once puts it
-      // centred below the band, matching Word. (Partial-width floats never reach
-      // this branch because they leave a usable side gap above.)
-      const nextY = Math.max(...intersecting.map((f) => f.yBottom));
-      if (nextY <= currentLineTopY) {
-        // Degenerate guard (shouldn't happen): keep full width to avoid a stall.
-        lineXOffset = 0;
-        lineMaxWidth = maxWidth;
-        break;
-      }
-      currentLineTopY = nextY;
-    }
+    const win = resolveLineFloatWindow(
+      currentLineTopY, minWidth, probeH, wrapCtx.paraX, maxWidth, wrapCtx.floats,
+    );
+    currentLineTopY = win.topY;
+    lineXOffset = win.xOffset;
+    lineMaxWidth = win.maxWidth;
   };
 
   const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);
