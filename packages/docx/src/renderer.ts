@@ -2860,6 +2860,37 @@ function splitTextForLayout(text: string): string[] {
   return result.length ? result : [text];
 }
 
+/** A horizontal interval [l, r] in absolute canvas px. */
+interface Gap {
+  l: number;
+  r: number;
+}
+
+/**
+ * Widest free horizontal interval within [left, right] after removing the
+ * `blocked` spans. Returns null when nothing is free. Factored out of
+ * resolveLineFloatWindow so the caller holds a properly-typed Gap (the previous
+ * inline closure form forced TS to narrow `best` to never, requiring casts).
+ */
+function widestFreeGap(blocked: Gap[], left: number, right: number): Gap | null {
+  const spans = blocked.slice().sort((a, b) => a.l - b.l);
+  let cursor = left;
+  let best: Gap | null = null;
+  const consider = (l: number, r: number): void => {
+    // Adopt only when strictly wider than the current best (0 when none yet),
+    // so a zero/negative-width gap never becomes `best`. Matches the prior inline
+    // form `r - l > (best ? best.r - best.l : 0)`.
+    if (r - l > (best ? best.r - best.l : 0)) best = { l, r };
+  };
+  for (const b of spans) {
+    if (b.l > cursor) consider(cursor, Math.min(b.l, right));
+    cursor = Math.max(cursor, Math.min(b.r, right));
+    if (cursor >= right) break;
+  }
+  if (cursor < right) consider(cursor, right);
+  return best;
+}
+
 /**
  * Resolve where a single line box may sit relative to the page's active floats.
  *
@@ -2908,9 +2939,9 @@ function resolveLineFloatWindow(
   // 2. Horizontal constraint from square floats.
   const paraXLeft = paraX;
   const paraXRight = paraX + maxWidth;
-  // A gap must fit the line's first atomic token to be usable. Floor at 1px so a
+  // A gap must fit the line's first atomic token to be usable. Floor so a
   // zero-width probe (no content yet) still rejects sub-pixel slivers.
-  const usableGap = Math.max(requiredWidth, 1);
+  const usableGap = Math.max(requiredWidth, MIN_LINE_GAP);
   let xOffset = 0;
   let lineMaxWidth = maxWidth;
   for (let guard = 0; guard < 64; guard++) {
@@ -2937,24 +2968,11 @@ function resolveLineFloatWindow(
       lineMaxWidth = maxWidth;
       break;
     }
-    // Sweep [paraXLeft, paraXRight] removing blocked spans; collect free gaps.
-    blocked.sort((a, b) => a.l - b.l);
-    let cursor = paraXLeft;
-    let best: { l: number; r: number } | null = null;
-    const consider = (l: number, r: number) => {
-      if (r - l > (best ? best.r - best.l : 0)) best = { l, r };
-    };
-    for (const b of blocked) {
-      if (b.l > cursor) consider(cursor, Math.min(b.l, paraXRight));
-      cursor = Math.max(cursor, Math.min(b.r, paraXRight));
-      if (cursor >= paraXRight) break;
-    }
-    if (cursor < paraXRight) consider(cursor, paraXRight);
-
-    if (best && (best as { l: number; r: number }).r - (best as { l: number; r: number }).l >= usableGap) {
-      const seg = best as { l: number; r: number };
-      xOffset = Math.max(0, seg.l - paraXLeft);
-      lineMaxWidth = Math.min(maxWidth - xOffset, seg.r - seg.l);
+    // Widest free horizontal gap between the blocked spans across the column.
+    const best = widestFreeGap(blocked, paraXLeft, paraXRight);
+    if (best && best.r - best.l >= usableGap) {
+      xOffset = Math.max(0, best.l - paraXLeft);
+      lineMaxWidth = Math.min(maxWidth - xOffset, best.r - best.l);
       if (lineMaxWidth < 0) lineMaxWidth = 0;
       break;
     }
@@ -3813,13 +3831,33 @@ function isWrapFloat(mode?: string): boolean {
   return mode === 'square' || mode === 'topAndBottom' || mode === 'tight' || mode === 'through';
 }
 
+// ── Float-layout tolerances (px) ──────────────────────────────────────────────
+// Sub-pixel slack used so floating-point coordinate noise (margin/anchor/dist
+// arithmetic at the current scale) doesn't read as a real overlap or a real gap.
+
+/** Overlap epsilon: two exclusion rects must overlap by MORE than this to count
+ *  as intersecting, so coincident/touching edges (and FP noise) are not a clash. */
+const FLOAT_OVERLAP_EPS = 0.01;
+
+/** Slack added to the page-right edge when testing whether a displaced float
+ *  still fits horizontally — a float ending within this many px of the page edge
+ *  is treated as fitting (it would otherwise be pushed down by FP rounding).
+ *  Looser than FLOAT_OVERLAP_EPS because it guards a half-pixel rounding of a
+ *  full-width displacement, not an edge-touch test. */
+const FLOAT_PAGE_RIGHT_SLACK = 0.5;
+
+/** Minimum width (px) a free side-gap must have to hold a line start. Floors the
+ *  required-width probe so a zero-width probe (an empty line with no content yet)
+ *  still rejects sub-pixel slivers between full-width floats. */
+const MIN_LINE_GAP = 1;
+
 /** Two exclusion rects intersect (strict overlap, touching edges allowed). */
 function rectsOverlap(
   aL: number, aR: number, aT: number, aB: number,
   bL: number, bR: number, bT: number, bB: number,
 ): boolean {
-  const EPS = 0.01;
-  return aL < bR - EPS && aR > bL + EPS && aT < bB - EPS && aB > bT + EPS;
+  return aL < bR - FLOAT_OVERLAP_EPS && aR > bL + FLOAT_OVERLAP_EPS &&
+    aT < bB - FLOAT_OVERLAP_EPS && aB > bT + FLOAT_OVERLAP_EPS;
 }
 
 /**
@@ -3881,7 +3919,7 @@ function resolveFloatOverlap(
     // edge means x = maxRight + dl (gap = blocker.distRight + our distLeft).
     const maxRight = Math.max(...blockers.map((f) => f.xRight));
     const newX = maxRight + dl;
-    if (newX + w + dr <= pageRight + 0.5) {
+    if (newX + w + dr <= pageRight + FLOAT_PAGE_RIGHT_SLACK) {
       x = newX;
       continue; // re-check against all other-paragraph floats
     }
