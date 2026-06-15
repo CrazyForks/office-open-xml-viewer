@@ -2782,6 +2782,9 @@ fn parse_wsp_shape(
         .and_then(|v| v.parse::<f64>().ok())
         .map(|r| r / 60000.0) // OOXML rotation: 60000ths of a degree
         .unwrap_or(0.0);
+    // §20.1.7.6 a:xfrm flipH/flipV — "1"/"true" mirror the shape.
+    let flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
+    let flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
 
     let width_pt = cx * sx / 12700.0;
     let height_pt = cy * sy / 12700.0;
@@ -2920,6 +2923,8 @@ fn parse_wsp_shape(
         head_end,
         tail_end,
         rotation,
+        flip_h,
+        flip_v,
         wrap_mode: anchor_meta.wrap_mode.clone(),
         text_blocks,
         text_anchor,

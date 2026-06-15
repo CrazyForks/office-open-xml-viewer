@@ -329,6 +329,10 @@ export interface ShapeRun {
   /** `<a:ln><a:tailEnd>` line-end decoration (ECMA-376 §20.1.8.3). */
   tailEnd?: LineEnd | null;
   rotation?: number;
+  /** `<a:xfrm flipH>` (§20.1.7.6) — mirror about the vertical centre line. */
+  flipH?: boolean;
+  /** `<a:xfrm flipV>` (§20.1.7.6) — mirror about the horizontal centre line. */
+  flipV?: boolean;
   wrapMode?: string | null;
   /** Text rendered INSIDE the shape's bounding box (`<wps:txbx><w:txbxContent>`). */
   textBlocks?: ShapeText[];

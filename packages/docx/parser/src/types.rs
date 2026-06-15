@@ -484,6 +484,14 @@ pub struct ShapeRun {
     /// rotation in degrees (clockwise).
     #[serde(skip_serializing_if = "is_zero_f64")]
     pub rotation: f64,
+    /// Horizontal flip (`<a:xfrm flipH="1">`, §20.1.7.6). Mirrors the shape
+    /// about its vertical centre line — also swaps a connector's start/end so
+    /// arrow heads land on the correct tip.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_h: bool,
+    /// Vertical flip (`<a:xfrm flipV="1">`, §20.1.7.6).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_v: bool,
     /// Text blocks from <wps:txbx><w:txbxContent> — text rendered INSIDE the
     /// shape's bounding box (ECMA-376 §17.3.4.7). Each block is one paragraph
     /// reduced to plain text + the first run's formatting; advanced layout

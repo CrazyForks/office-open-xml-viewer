@@ -3588,10 +3588,18 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   );
 
   const rot = shape.rotation ?? 0;
+  const flipH = shape.flipH ?? false;
+  const flipV = shape.flipV ?? false;
   ctx.save();
-  if (rot !== 0) {
+  // §20.1.7.6 — rotate then mirror about the shape centre, matching the pptx
+  // renderer. Applying flip via the canvas transform keeps the body path, the
+  // connector arrow-head position, and its direction consistent (a flipped
+  // connector swaps which tip carries the head/tail end).
+  if (rot !== 0 || flipH || flipV) {
     ctx.translate(x + w / 2, y + h / 2);
-    ctx.rotate((rot * Math.PI) / 180);
+    if (rot !== 0) ctx.rotate((rot * Math.PI) / 180);
+    if (flipH) ctx.scale(-1, 1);
+    if (flipV) ctx.scale(1, -1);
     ctx.translate(-(x + w / 2), -(y + h / 2));
   }
   // Dispatch to the shared spec-driven preset engine when the geometry is a
