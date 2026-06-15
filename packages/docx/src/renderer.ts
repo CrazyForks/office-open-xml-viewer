@@ -3663,10 +3663,13 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   // expose head/tail tips with a well-defined tangent; for those we place the
   // arrow heads at the path endpoints with the path's outgoing direction. The
   // preset engine does not draw connector arrow heads, so this runs whether or
-  // not the body went through it.
-  if (coreStroke && (coreStroke.headEnd || coreStroke.tailEnd) && shape.presetGeometry) {
+  // not the body went through it. Gate on `isLineGeom` (mirroring the pptx
+  // renderer's CONNECTOR_GEOMS set): getConnectorAnchors resolves path[0] of
+  // *any* preset, so a filled shape carrying an <a:ln> head/tail end would
+  // otherwise get spurious arrow heads at its first subpath's endpoints.
+  if (coreStroke && (coreStroke.headEnd || coreStroke.tailEnd) && isLineGeom) {
     const anchors = getConnectorAnchors(
-      shape.presetGeometry, x, y, w, h,
+      preset, x, y, w, h,
       shape.adjValues ?? [],
     );
     if (anchors) {
