@@ -400,6 +400,13 @@ const WINGDINGS_MAP: Record<number, string> = {
   0x76: '✔', 0xFC: '✓', 0xFB: '✗', 0xFE: '■',
   0xA7: '▪', 0xB7: '•', 0xB8: '◦', 0xB9: '–',
   0xF0A7: '▪', 0xF0B7: '•',
+  // Wingdings barb2 arrow block — glyph names verified against the Wingdings
+  // cmap (0xDF=barb2left … 0xE6=barb2se). Mapped to Unicode arrows so they
+  // render in any font even when Wingdings is unavailable.
+  0xDF: '←', 0xE0: '→', 0xE1: '↑', 0xE2: '↓',
+  0xE3: '↖', 0xE4: '↗', 0xE5: '↙', 0xE6: '↘',
+  0xF0DF: '←', 0xF0E0: '→', 0xF0E1: '↑', 0xF0E2: '↓',
+  0xF0E3: '↖', 0xF0E4: '↗', 0xF0E5: '↙', 0xF0E6: '↘',
 };
 
 function applySymbolFont(char: string, fontFamily: string): string {
@@ -755,6 +762,10 @@ function layoutParagraph(
     const familyEa = run.fontFamilyEa
       ? normalizeFontFamily(run.fontFamilyEa, rc)
       : null;
+    // Symbol font (rPr > a:sym) — used for Private-Use symbol glyphs (U+F0xx).
+    const familySym = run.fontFamilySym
+      ? normalizeFontFamily(run.fontFamilySym, rc)
+      : null;
     // Hyperlink runs without an explicit colour pick up the theme hlink colour
     // (ECMA-376 §20.1.2.3.5 — hyperlinks inherit theme hyperlink slot).
     let color: string;
@@ -841,6 +852,35 @@ function layoutParagraph(
       // If already in tab mode, collect all text into tabStop.segments (no wrap)
       if (tabActive) {
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+        continue;
+      }
+
+      // ── Symbol-font characters (Wingdings/Webdings/Symbol) ───────────────
+      // PowerPoint stores symbol glyphs as Private-Use codepoints U+F020–U+F0FF
+      // and picks the font via rPr > a:sym (ECMA-376 §21.1.2.3.10). Map the
+      // known ones to Unicode equivalents so they render reliably regardless of
+      // whether the symbol font is installed; fall back to the real symbol font
+      // for unmapped glyphs.
+      const SYMBOL_PUA_RE = /[-]/;
+      if (SYMBOL_PUA_RE.test(token) && (familySym || /wingding|webding|symbol/i.test(family))) {
+        const symName = familySym ?? family;
+        for (const ch of token) {
+          let drawCh = ch;
+          let chFont = font;
+          if (SYMBOL_PUA_RE.test(ch)) {
+            const mapped = applySymbolFont(ch, symName);
+            if (mapped !== ch) {
+              drawCh = mapped;
+              chFont = buildFont(isBold, isItalic, sizePx, 'sans-serif', rc);
+            } else {
+              chFont = buildFont(isBold, isItalic, sizePx, symName, rc);
+            }
+          }
+          ctx.font = chFont;
+          const chW = ctx.measureText(drawCh).width;
+          if (lineW + chW > maxWidthPx && lineW > 0) newLine();
+          push(drawCh, chFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+        }
         continue;
       }
 
