@@ -305,7 +305,7 @@ pub(crate) fn parse_chart_xml(
             .find(|n| n.tag_name().name() == "ln" && n.tag_name().namespace() == Some(a_ns))
     });
     let chart_border_width_emu =
-        chart_ln.and_then(|ln| ln.attribute("w").and_then(|v| v.parse::<i64>().ok()));
+        chart_ln.and_then(|ln| ln.attribute("w").and_then(|v| v.parse::<u32>().ok()));
     let chart_border_color = chart_ln.and_then(|ln| {
         // An explicit `<a:noFill/>` turns the border off → no color.
         if ln
@@ -433,12 +433,12 @@ pub(crate) fn parse_chart_xml(
         match elem_name {
             "catAx" => {
                 if cat_axis_title.is_none() {
-                    cat_axis_title = extract_chart_title(&child, c_ns, a_ns);
-                    // Run props only when the axis actually carries a title.
-                    if cat_axis_title.is_some() {
-                        cat_axis_title_size = extract_chart_title_size(&child, c_ns, a_ns);
-                        cat_axis_title_bold = extract_chart_title_bold(&child, c_ns, a_ns);
-                        cat_axis_title_color = extract_chart_title_color(&child, c_ns, a_ns);
+                    let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                    if t.is_some() {
+                        cat_axis_title = t;
+                        cat_axis_title_size = sz;
+                        cat_axis_title_bold = b;
+                        cat_axis_title_color = c;
                     }
                 }
                 if cat_axis_font_size_hpt.is_none() {
@@ -509,12 +509,12 @@ pub(crate) fn parse_chart_xml(
                     // X-axis title of every scatter chart was dropped (the catAx
                     // branch above never runs for scatter — there is no catAx).
                     if cat_axis_title.is_none() {
-                        cat_axis_title = extract_chart_title(&child, c_ns, a_ns);
-                        // Run props only when the axis actually carries a title.
-                        if cat_axis_title.is_some() {
-                            cat_axis_title_size = extract_chart_title_size(&child, c_ns, a_ns);
-                            cat_axis_title_bold = extract_chart_title_bold(&child, c_ns, a_ns);
-                            cat_axis_title_color = extract_chart_title_color(&child, c_ns, a_ns);
+                        let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                        if t.is_some() {
+                            cat_axis_title = t;
+                            cat_axis_title_size = sz;
+                            cat_axis_title_bold = b;
+                            cat_axis_title_color = c;
                         }
                     }
                     if cat_axis_format_code.is_none() {
@@ -566,12 +566,12 @@ pub(crate) fn parse_chart_xml(
                     }
                 } else {
                     if val_axis_title.is_none() {
-                        val_axis_title = extract_chart_title(&child, c_ns, a_ns);
-                        // Run props only when the axis actually carries a title.
-                        if val_axis_title.is_some() {
-                            val_axis_title_size = extract_chart_title_size(&child, c_ns, a_ns);
-                            val_axis_title_bold = extract_chart_title_bold(&child, c_ns, a_ns);
-                            val_axis_title_color = extract_chart_title_color(&child, c_ns, a_ns);
+                        let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                        if t.is_some() {
+                            val_axis_title = t;
+                            val_axis_title_size = sz;
+                            val_axis_title_bold = b;
+                            val_axis_title_color = c;
                         }
                     }
                     if val_axis_font_size_hpt.is_none() {
@@ -1182,6 +1182,26 @@ pub(crate) fn extract_chart_title(
         None
     } else {
         Some(text)
+    }
+}
+
+/// Extract an axis title's text + run props from a `<c:catAx>`/`<c:valAx>` node.
+/// Reuses the chart-title helpers (which scope to the node's direct-child
+/// `<c:title>`); run props are resolved only when title text is present.
+/// Returns (text, size_hpt, bold, color_hex).
+fn extract_axis_title_with_props(
+    axis_node: &roxmltree::Node,
+    c_ns: &str,
+    a_ns: &str,
+) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
+    match extract_chart_title(axis_node, c_ns, a_ns) {
+        None => (None, None, None, None),
+        Some(text) => (
+            Some(text),
+            extract_chart_title_size(axis_node, c_ns, a_ns),
+            extract_chart_title_bold(axis_node, c_ns, a_ns),
+            extract_chart_title_color(axis_node, c_ns, a_ns),
+        ),
     }
 }
 

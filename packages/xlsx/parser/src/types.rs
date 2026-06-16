@@ -751,7 +751,7 @@ pub struct ChartData {
     /// `<c:chartSpace><c:spPr><a:ln@w>` — explicit chart border width in EMU.
     /// None = unset (renderer uses a 1px hairline when a color is present).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub chart_border_width_emu: Option<i64>,
+    pub chart_border_width_emu: Option<u32>,
 }
 
 /// Generic `<c:manualLayout>` block (used for title, plotArea, legend).
