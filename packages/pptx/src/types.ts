@@ -10,7 +10,6 @@ export type {
   SpaceLine,
   Bullet,
   TabStop,
-  Paragraph,
   TextRun, TextRunData, LineBreak,
   RenderOptions,
   ChartModel, ChartSeries,
@@ -20,7 +19,24 @@ export type {
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Fill, Stroke, TextBody as CoreTextBody, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+import type { Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+
+/**
+ * PPTX paragraph. Extends the shared core `Paragraph` with the PPTX-only
+ * `eaLnBrk` flag that the pptx parser emits but the shared core model does not
+ * carry (docx/xlsx paragraphs don't surface it). Mirrors the Rust
+ * `Paragraph` struct's `ea_ln_brk` field 1:1.
+ */
+export interface Paragraph extends CoreParagraph {
+  /**
+   * `<a:pPr eaLnBrk>` (ECMA-376 §21.1.2.2.7, xsd:boolean, default true). When
+   * true, East Asian text may break at character boundaries (kinsoku rules);
+   * when false, an East Asian word must not be split mid-character. The parser
+   * resolves the paragraph → body/list-style → layout/master cascade and always
+   * emits an effective boolean.
+   */
+  eaLnBrk: boolean;
+}
 
 /**
  * PPTX text body. Extends the shared core `TextBody` with PPTX-only bodyPr
@@ -34,6 +50,12 @@ export interface TextBody extends CoreTextBody {
    * omitted from JSON when false. Only meaningful when `numCol > 1`.
    */
   rtlCol?: boolean;
+  /**
+   * Narrow the inherited `paragraphs` to the PPTX `Paragraph` so consumers see
+   * the PPTX-only `eaLnBrk` flag. PPTX `Paragraph extends CoreParagraph`, so
+   * this is a covariant refinement of `CoreTextBody.paragraphs`.
+   */
+  paragraphs: Paragraph[];
 }
 
 export interface Presentation {

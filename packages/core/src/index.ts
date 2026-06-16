@@ -147,3 +147,10 @@ export {
   type VisualSegment,
   type SegmentPart,
 } from './text/bidi';
+export type { KinsokuRules } from './text/kinsoku';
+export {
+  resolveKinsokuRules,
+  DEFAULT_KINSOKU_RULES,
+  kinsokuAdjustedSplit,
+  crossRunKinsokuRetract,
+} from './text/kinsoku';

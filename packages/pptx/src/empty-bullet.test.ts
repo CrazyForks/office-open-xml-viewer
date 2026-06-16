@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import type { Paragraph, Bullet, TextRun } from '@silurus/ooxml-core';
+import type { Bullet, TextRun } from '@silurus/ooxml-core';
+import type { Paragraph } from './types.js';
 import { paragraphHasRenderableContent, resolveBulletLabel } from './renderer.js';
 
 // Build a minimal Paragraph with the given runs / bullet / level. Only the
@@ -22,6 +23,7 @@ function para(runs: TextRun[], bullet: Bullet, lvl = 0): Paragraph {
     defItalic: null,
     defFontFamily: null,
     tabStops: [],
+    eaLnBrk: true,
     runs,
   };
 }

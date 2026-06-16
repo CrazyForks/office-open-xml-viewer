@@ -1528,6 +1528,13 @@ struct Paragraph {
     /// when bidi shaping is added.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     rtl: bool,
+    /// ECMA-376 §21.1.2.2.7 `<a:pPr eaLnBrk>` — whether an East Asian word may
+    /// be broken at a line wrap. xsd:boolean, default true when the attribute is
+    /// omitted. true → CJK may break at character boundaries (kinsoku rules);
+    /// false → an East Asian word must NOT be split mid-character. Resolved
+    /// through the paragraph → body/list-style → layout/master cascade, mirroring
+    /// `alignment`, so the renderer receives the effective value.
+    ea_ln_brk: bool,
     runs: Vec<TextRun>,
 }
 
@@ -2913,6 +2920,9 @@ struct LayoutPlaceholders {
     by_type_anchor: HashMap<String, String>,
     /// Default paragraph alignment per placeholder type, from layout/master lstStyle
     by_type_alignment: HashMap<String, String>,
+    /// Default East Asian line-break (eaLnBrk) per placeholder type, from the
+    /// layout lstStyle > lvl1pPr @eaLnBrk (ECMA-376 §21.1.2.2.7)
+    by_type_ea_ln_brk: HashMap<String, bool>,
     /// Default space-before (hundredths of pt) per placeholder type, from layout lstStyle
     by_type_space_before: HashMap<String, i64>,
     /// Default space-after (hundredths of pt) per placeholder type, from layout lstStyle
@@ -2931,6 +2941,9 @@ struct LayoutPlaceholders {
     by_type_line_spacing: HashMap<String, f64>,
     /// Paragraph alignment per placeholder type from master lstStyle > lvl1pPr algn (fallback)
     by_type_master_alignment: HashMap<String, String>,
+    /// East Asian line-break per placeholder type from master lstStyle > lvl1pPr
+    /// @eaLnBrk (fallback when the layout has none) — ECMA-376 §21.1.2.2.7
+    by_type_master_ea_ln_brk: HashMap<String, bool>,
     /// Default line spacing from master txStyles (fallback when layout has none)
     by_type_master_line_spacing: HashMap<String, f64>,
     /// Inherited blipFill (data URL + src rect) per placeholder idx from layout spPr
@@ -3096,6 +3109,31 @@ impl LayoutPlaceholders {
             .or_else(|| {
                 if ph_type == "body" {
                     self.by_type_master_alignment.get("").cloned()
+                } else {
+                    None
+                }
+            })
+    }
+
+    // ECMA-376 §21.1.2.2.7 eaLnBrk inheritance, mirroring lookup_alignment:
+    // layout per-type → layout generic ("") for body → master per-type →
+    // master generic. None means no ancestor specified it (parse_paragraph then
+    // applies the spec default of true).
+    fn lookup_ea_ln_brk(&self, ph_type: &str) -> Option<bool> {
+        self.by_type_ea_ln_brk
+            .get(ph_type)
+            .copied()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_ea_ln_brk.get("").copied()
+                } else {
+                    None
+                }
+            })
+            .or_else(|| self.by_type_master_ea_ln_brk.get(ph_type).copied())
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_master_ea_ln_brk.get("").copied()
                 } else {
                     None
                 }
@@ -3430,6 +3468,39 @@ fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
                     .and_then(|lp| attr(&lp, "algn"))
                 {
                     map.entry(ph_type).or_insert(algn.to_string());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Parse master-level default East Asian line-break (eaLnBrk) per placeholder
+/// type from each placeholder shape's lstStyle > lvl1pPr @eaLnBrk
+/// (ECMA-376 §21.1.2.2.7). Mirrors parse_master_alignments. xsd:boolean.
+fn parse_master_ea_ln_brk(master_xml: &str) -> HashMap<String, bool> {
+    let mut map = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            let ph_node = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph");
+            if let Some(ph) = ph_node {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(v) = child(sp, "txBody")
+                    .and_then(|tb| child(tb, "lstStyle"))
+                    .and_then(|ls| child(ls, "lvl1pPr"))
+                    .and_then(|lp| attr(&lp, "eaLnBrk"))
+                {
+                    map.entry(ph_type).or_insert(v == "1" || v == "true");
                 }
             }
         }
@@ -3820,6 +3891,7 @@ fn parse_layout_placeholders(
     master_anchors: &HashMap<String, String>,
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
+    master_ea_ln_brk: &HashMap<String, bool>,
     master_space_before: &HashMap<String, i64>,
     master_space_after: &HashMap<String, i64>,
     master_line_spacing: &HashMap<String, f64>,
@@ -3831,6 +3903,7 @@ fn parse_layout_placeholders(
     let mut lph = LayoutPlaceholders {
         master_by_type: master_transforms.clone(),
         by_type_master_alignment: master_alignments.clone(),
+        by_type_master_ea_ln_brk: master_ea_ln_brk.clone(),
         by_type_master_space_before: master_space_before.clone(),
         by_type_master_space_after: master_space_after.clone(),
         by_type_master_line_spacing: master_line_spacing.clone(),
@@ -3897,6 +3970,10 @@ fn parse_layout_placeholders(
         let layout_alignment: Option<String> = layout_lvl1_ppr
             .and_then(|lp| attr(&lp, "algn"))
             .map(|a| a.to_string());
+        // ECMA-376 §21.1.2.2.7 eaLnBrk from the layout placeholder's lvl1pPr.
+        let layout_ea_ln_brk: Option<bool> = layout_lvl1_ppr
+            .and_then(|lp| attr(&lp, "eaLnBrk"))
+            .map(|v| v == "1" || v == "true");
         let layout_space_before: Option<i64> = layout_lvl1_ppr
             .and_then(|lp| child(lp, "spcBef"))
             .and_then(|s| child(s, "spcPts"))
@@ -4025,6 +4102,9 @@ fn parse_layout_placeholders(
             if let Some(a) = layout_alignment {
                 lph.by_type_alignment.entry(ph_type.clone()).or_insert(a);
             }
+            if let Some(e) = layout_ea_ln_brk {
+                lph.by_type_ea_ln_brk.entry(ph_type.clone()).or_insert(e);
+            }
             if let Some(v) = layout_space_before {
                 lph.by_type_space_before.entry(ph_type.clone()).or_insert(v);
             }
@@ -4098,6 +4178,7 @@ fn parse_text_body(
     inherited_caps: Option<String>,
     inherited_anchor: Option<String>,
     inherited_alignment: Option<String>,
+    inherited_ea_ln_brk: Option<bool>,
     inherited_space_before: Option<i64>,
     inherited_space_after: Option<i64>,
     inherited_line_spacing: Option<f64>,
@@ -4236,6 +4317,12 @@ fn parse_text_body(
         .map(|a| a.to_string())
         .or(inherited_alignment);
 
+    // Own lstStyle > lvl1pPr > eaLnBrk overrides inherited (ECMA-376 §21.1.2.2.7)
+    let body_default_ea_ln_brk = own_lvl1_ppr
+        .and_then(|lp| attr(&lp, "eaLnBrk"))
+        .map(|v| v == "1" || v == "true")
+        .or(inherited_ea_ln_brk);
+
     // Own lstStyle > lvl1pPr spacing overrides inherited
     let own_lvl1_spcbef: Option<i64> = own_lvl1_ppr
         .and_then(|lp| child(lp, "spcBef"))
@@ -4263,6 +4350,7 @@ fn parse_text_body(
                 theme,
                 rels,
                 body_default_alignment.as_deref(),
+                body_default_ea_ln_brk,
                 body_default_space_before,
                 body_default_space_after,
                 body_default_line_spacing,
@@ -4400,6 +4488,7 @@ fn parse_paragraph(
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
     body_default_alignment: Option<&str>,
+    body_default_ea_ln_brk: Option<bool>,
     body_default_space_before: Option<i64>,
     body_default_space_after: Option<i64>,
     body_default_line_spacing: Option<f64>,
@@ -4416,6 +4505,15 @@ fn parse_paragraph(
         .and_then(|n| attr(&n, "rtl"))
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
+
+    // ECMA-376 §21.1.2.2.7 `<a:pPr eaLnBrk>` (xsd:boolean). Paragraph's own
+    // value → body/list-style → layout/master default → spec default (true).
+    // Same inheritance shape as `alignment` above.
+    let ea_ln_brk = p_pr
+        .and_then(|n| attr(&n, "eaLnBrk"))
+        .map(|v| v == "1" || v == "true")
+        .or(body_default_ea_ln_brk)
+        .unwrap_or(true);
 
     // Paragraph's own algn → body/layout/master default → "r" if rtl, else "l"
     let alignment = p_pr
@@ -4624,6 +4722,7 @@ fn parse_paragraph(
         def_font_family,
         tab_stops,
         rtl,
+        ea_ln_brk,
         runs,
     }
 }
@@ -6105,6 +6204,7 @@ fn parse_shape(
         inherited_caps,
         inherited_anchor,
         inherited_alignment,
+        inherited_ea_ln_brk,
         inherited_space_before,
         inherited_space_after,
         inherited_line_spacing,
@@ -6116,12 +6216,13 @@ fn parse_shape(
             lph.lookup_caps(&ph_type),
             lph.lookup_anchor(&ph_type),
             lph.lookup_alignment(&ph_type),
+            lph.lookup_ea_ln_brk(&ph_type),
             lph.lookup_space_before(&ph_type),
             lph.lookup_space_after(&ph_type),
             lph.lookup_line_spacing(&ph_type, ph_idx),
         )
     } else {
-        (None, None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None, None)
     };
     let inherited_level_font_sizes: LevelFontSizes = if ph_node.is_some() {
         lph.lookup_level_font_sizes(&ph_type, ph_idx)
@@ -6162,6 +6263,7 @@ fn parse_shape(
             inherited_caps.clone(),
             inherited_anchor,
             inherited_alignment,
+            inherited_ea_ln_brk,
             inherited_space_before,
             inherited_space_after,
             inherited_line_spacing,
@@ -7036,10 +7138,11 @@ fn parse_table_cell(
             None,
             None,
             anchor,
-            None,
-            None,
-            None,
-            None,
+            None, // inherited_alignment
+            None, // inherited_ea_ln_brk
+            None, // inherited_space_before
+            None, // inherited_space_after
+            None, // inherited_line_spacing
             ShapeKind::Sp,
         )
     });
@@ -7135,6 +7238,7 @@ fn parse_slide(
         master_anchors,
         master_transforms,
         master_alignments,
+        master_ea_ln_brk,
         master_space_before,
         master_space_after,
         master_line_spacing,
@@ -7172,6 +7276,7 @@ fn parse_slide(
             master_anchors,
             master_transforms,
             master_alignments,
+            master_ea_ln_brk,
             master_space_before,
             master_space_after,
             master_line_spacing,
@@ -8259,6 +8364,7 @@ struct MasterBundle {
     master_anchors: HashMap<String, String>,
     master_transforms: HashMap<String, Transform>,
     master_alignments: HashMap<String, String>,
+    master_ea_ln_brk: HashMap<String, bool>,
     master_space_before: HashMap<String, i64>,
     master_space_after: HashMap<String, i64>,
     master_line_spacing: HashMap<String, f64>,
@@ -8379,6 +8485,10 @@ fn build_master_bundle(
         .as_deref()
         .map(parse_master_alignments)
         .unwrap_or_default();
+    let master_ea_ln_brk = master_xml_opt
+        .as_deref()
+        .map(parse_master_ea_ln_brk)
+        .unwrap_or_default();
     let (master_space_before, master_space_after, master_line_spacing) = master_xml_opt
         .as_deref()
         .map(parse_master_txstyle_spacing)
@@ -8405,6 +8515,7 @@ fn build_master_bundle(
         master_anchors,
         master_transforms,
         master_alignments,
+        master_ea_ln_brk,
         master_space_before,
         master_space_after,
         master_line_spacing,
@@ -9714,17 +9825,18 @@ mod tests {
                 doc.root_element(),
                 &theme,
                 &rels,
-                None,
-                [None; 9],
+                None,      // inherited_font_size
+                [None; 9], // inherited_level_font_sizes
                 &empty_level_bullets(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                None, // inherited_bold
+                None, // inherited_italic
+                None, // inherited_caps
+                None, // inherited_anchor
+                None, // inherited_alignment
+                None, // inherited_ea_ln_brk
+                None, // inherited_space_before
+                None, // inherited_space_after
+                None, // inherited_line_spacing
                 ShapeKind::Sp,
             )
         };
@@ -9756,6 +9868,89 @@ mod tests {
         assert!(
             json_true.contains("\"rtlCol\":true"),
             "expected rtlCol:true in JSON; got {json_true}"
+        );
+    }
+
+    /// ECMA-376 §21.1.2.2.7 — `<a:pPr eaLnBrk>` (xsd:boolean, default true)
+    /// controls whether East Asian words may break at a line wrap. The parser
+    /// must surface the paragraph's own value, fall back to the body lstStyle
+    /// lvl1pPr default, and default to true when nothing specifies it. Mirrors
+    /// the `alignment` inheritance shape.
+    #[test]
+    fn test_parse_paragraph_ea_ln_brk() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        // `lst_style` lets a test set the body lvl1pPr default; `p_pr` is the
+        // paragraph's own pPr. Returns the single paragraph's ea_ln_brk.
+        let parse_para = |lst_style: &str, p_pr: &str| -> Paragraph {
+            let xml = format!(
+                r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">{lst_style}<p>{p_pr}<r><t>東</t></r></p></txBody>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut tb = parse_text_body(
+                doc.root_element(),
+                &theme,
+                &rels,
+                None,
+                [None; 9],
+                &empty_level_bullets(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                ShapeKind::Sp,
+            );
+            tb.paragraphs.remove(0)
+        };
+
+        // eaLnBrk="0" on the paragraph → false.
+        assert!(
+            !parse_para("", r#"<pPr eaLnBrk="0"/>"#).ea_ln_brk,
+            "eaLnBrk=\"0\" should yield ea_ln_brk=false"
+        );
+        // eaLnBrk="false" (xsd:boolean lexical form) → false.
+        assert!(
+            !parse_para("", r#"<pPr eaLnBrk="false"/>"#).ea_ln_brk,
+            "eaLnBrk=\"false\" should yield ea_ln_brk=false"
+        );
+        // Omitted everywhere → true (spec default).
+        assert!(
+            parse_para("", "").ea_ln_brk,
+            "omitted eaLnBrk should default to ea_ln_brk=true"
+        );
+        // eaLnBrk="1" on the paragraph → true.
+        assert!(
+            parse_para("", r#"<pPr eaLnBrk="1"/>"#).ea_ln_brk,
+            "eaLnBrk=\"1\" should yield ea_ln_brk=true"
+        );
+
+        // Inheritance: body lstStyle lvl1pPr eaLnBrk="0" propagates to a
+        // paragraph that declares no eaLnBrk of its own.
+        let inherited = parse_para(r#"<lstStyle><lvl1pPr eaLnBrk="0"/></lstStyle>"#, "");
+        assert!(
+            !inherited.ea_ln_brk,
+            "paragraph should inherit eaLnBrk=false from body lvl1pPr"
+        );
+        // The paragraph's own value still wins over the inherited body default.
+        let overridden = parse_para(
+            r#"<lstStyle><lvl1pPr eaLnBrk="0"/></lstStyle>"#,
+            r#"<pPr eaLnBrk="1"/>"#,
+        );
+        assert!(
+            overridden.ea_ln_brk,
+            "paragraph's own eaLnBrk=\"1\" should override inherited false"
+        );
+
+        // ea_ln_brk is serialized under the camelCase key "eaLnBrk".
+        let json = serde_json::to_string(&parse_para("", r#"<pPr eaLnBrk="0"/>"#)).unwrap();
+        assert!(
+            json.contains("\"eaLnBrk\":false"),
+            "expected eaLnBrk:false in JSON; got {json}"
         );
     }
 
