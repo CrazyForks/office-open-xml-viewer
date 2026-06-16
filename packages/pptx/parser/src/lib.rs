@@ -598,6 +598,58 @@ struct ChartElement {
     /// renderer falls back to "marker" when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     scatter_style: Option<String>,
+    /// `<c:catAx><c:title>` plain text (ECMA-376 §21.2.2.6). For scatter charts
+    /// (two `<c:valAx>`, no `<c:catAx>`) the bottom `<c:valAx>` (axPos b/t) is
+    /// the horizontal axis, so its title is recorded here. None = no title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cat_axis_title: Option<String>,
+    /// `<c:valAx><c:title>` plain text. For scatter the left `<c:valAx>`
+    /// (axPos l/r) is the vertical axis. None = no title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_title: Option<String>,
+    /// `<c:catAx><c:title>` run-property font size in hundredths of a point
+    /// (first `a:defRPr@sz`/`a:rPr@sz` inside the axis title). Distinct from
+    /// `cat_axis_font_size_hpt` (tick-label size). None = renderer default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cat_axis_title_size: Option<i32>,
+    /// `<c:catAx><c:title>` run-property bold flag. None = inherit (not bold).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cat_axis_title_bold: Option<bool>,
+    /// `<c:catAx><c:title>` run-property color (hex without `#`) from the first
+    /// `a:solidFill/a:srgbClr@val`. None = renderer default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cat_axis_title_color: Option<String>,
+    /// `<c:valAx><c:title>` run-property font size in hundredths of a point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_title_size: Option<i32>,
+    /// `<c:valAx><c:title>` run-property bold flag. None = inherit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_title_bold: Option<bool>,
+    /// `<c:valAx><c:title>` run-property color (hex without `#`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_title_color: Option<String>,
+    /// `<c:title>...defRPr@b` / `rPr@b` — bold flag for the CHART title.
+    /// None = inherit (renderer treats as not bold). Parsed already but
+    /// previously never serialized — now wired through for parity with xlsx.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title_font_bold: Option<bool>,
+    /// `<c:catAx><c:txPr>...defRPr@b>` — bold flag for category-axis tick labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cat_axis_font_bold: Option<bool>,
+    /// `<c:valAx><c:txPr>...defRPr@b>` — bold flag for value-axis tick labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    val_axis_font_bold: Option<bool>,
+    /// `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr@val>` — explicit
+    /// chart border color (hex without `#`). Only populated when the XML
+    /// explicitly declares a paintable line; `<a:noFill/>` or an absent `<a:ln>`
+    /// leaves this None (no default border). schemeClr is not resolved here
+    /// (kept in lockstep with the xlsx parser's locked policy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chart_border_color: Option<String>,
+    /// `<c:chartSpace><c:spPr><a:ln@w>` — explicit chart border width in EMU.
+    /// None = unset (renderer uses a 1px hairline when a color is present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chart_border_width_emu: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -5241,6 +5293,77 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         None
     };
 
+    // Axis titles + run props (ECMA-376 §21.2.2.6 `CT_Title`). Iterate every
+    // `<c:catAx>`/`<c:valAx>` so the scatter case — two `<c:valAx>`, no
+    // `<c:catAx>` — resolves correctly: a `<c:valAx>` whose `<c:axPos val>` is
+    // `b`/`t` is the horizontal (X) axis → cat-axis title; `l`/`r` is the
+    // vertical (Y) axis → val-axis title. A real `<c:catAx>` always feeds the
+    // cat-axis title. First title wins for each axis (matches the xlsx parser).
+    let mut cat_axis_title: Option<String> = None;
+    let mut cat_axis_title_size: Option<i32> = None;
+    let mut cat_axis_title_bold: Option<bool> = None;
+    let mut cat_axis_title_color: Option<String> = None;
+    let mut val_axis_title: Option<String> = None;
+    let mut val_axis_title_size: Option<i32> = None;
+    let mut val_axis_title_bold: Option<bool> = None;
+    let mut val_axis_title_color: Option<String> = None;
+    for ax in plot_area.children().filter(|n| {
+        n.is_element() && (n.tag_name().name() == "catAx" || n.tag_name().name() == "valAx")
+    }) {
+        let is_cat = if ax.tag_name().name() == "catAx" {
+            true
+        } else {
+            // valAx: disambiguate by axPos (b/t → X/cat, l/r → Y/val).
+            let ax_pos = ax
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "axPos")
+                .and_then(|n| attr(&n, "val"))
+                .unwrap_or_default();
+            matches!(ax_pos.as_str(), "b" | "t")
+        };
+        if is_cat {
+            if cat_axis_title.is_none() {
+                let (t, sz, b, col) = ooxml_common::chart::extract_axis_title_with_props(ax);
+                if t.is_some() {
+                    cat_axis_title = t;
+                    cat_axis_title_size = sz;
+                    cat_axis_title_bold = b;
+                    cat_axis_title_color = col;
+                }
+            }
+        } else if val_axis_title.is_none() {
+            let (t, sz, b, col) = ooxml_common::chart::extract_axis_title_with_props(ax);
+            if t.is_some() {
+                val_axis_title = t;
+                val_axis_title_size = sz;
+                val_axis_title_bold = b;
+                val_axis_title_color = col;
+            }
+        }
+    }
+
+    // Axis tick-label bold flags (`<c:txPr>…defRPr@b`) and the chart-title bold
+    // flag (`<c:title>…defRPr@b`). These were never serialized before; wiring
+    // them through reaches parity with the xlsx parser so the renderer's
+    // ST_Style bold handling applies uniformly. All three come from the shared
+    // ooxml-common helpers so the two parsers stay in lockstep. The chart-title
+    // bold helper expects the `<c:title>`'s parent, so pass `title_node_opt`'s
+    // parent (the element that holds it as a direct child).
+    let cat_axis_font_bold = cat_ax.and_then(ooxml_common::chart::extract_axis_tick_label_bold);
+    let val_axis_font_bold = val_ax.and_then(ooxml_common::chart::extract_axis_tick_label_bold);
+    let title_font_bold = title_node_opt
+        .and_then(|t| t.parent())
+        .and_then(ooxml_common::chart::extract_chart_title_bold);
+
+    // Explicit chartSpace border from `<c:chartSpace><c:spPr><a:ln>` (ECMA-376
+    // §21.2.2.5 / DrawingML §20.1.2.2.24). Shared with the xlsx parser via
+    // `ooxml_common::chart::extract_chart_space_border` so the locked policy
+    // (border only on an explicit paintable line; `<a:noFill/>` → color None;
+    // srgb inside solidFill → hex; `@w` captured as u32; schemeClr unresolved)
+    // stays in lockstep. `root` is the `<c:chartSpace>` element here.
+    let (chart_border_color, chart_border_width_emu) =
+        ooxml_common::chart::extract_chart_space_border(root);
+
     Some(ChartElement {
         x: 0,
         y: 0,
@@ -5283,6 +5406,19 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         val_axis_format_code,
         plot_area_manual_layout,
         scatter_style,
+        cat_axis_title,
+        val_axis_title,
+        cat_axis_title_size,
+        cat_axis_title_bold,
+        cat_axis_title_color,
+        val_axis_title_size,
+        val_axis_title_bold,
+        val_axis_title_color,
+        title_font_bold,
+        cat_axis_font_bold,
+        val_axis_font_bold,
+        chart_border_color,
+        chart_border_width_emu,
     })
 }
 
@@ -5488,6 +5624,21 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         val_axis_format_code: None,
         plot_area_manual_layout: None,
         scatter_style: None,
+        // chartEx (waterfall/treemap/etc.) has its own axis model and is not
+        // wired for axis titles or an explicit chartSpace border yet.
+        cat_axis_title: None,
+        val_axis_title: None,
+        cat_axis_title_size: None,
+        cat_axis_title_bold: None,
+        cat_axis_title_color: None,
+        val_axis_title_size: None,
+        val_axis_title_bold: None,
+        val_axis_title_color: None,
+        title_font_bold: None,
+        cat_axis_font_bold: None,
+        val_axis_font_bold: None,
+        chart_border_color: None,
+        chart_border_width_emu: None,
     })
 }
 
@@ -9657,5 +9808,228 @@ mod tests {
                 .any(|e| matches!(e, SlideElement::Picture(_))),
             "showMasterSp=\"1\" must keep master decorations"
         );
+    }
+
+    // ── Chart axis titles + chartSpace border (parity with xlsx) ──────────
+    //
+    // These exercise `parse_legacy_chart` directly with inline chart XML so we
+    // can assert the newly-parsed fields without a full .pptx fixture. Mirrors
+    // the xlsx parser's chart.rs coverage.
+
+    /// A clustered bar chart whose category (X) and value (Y) axes both carry a
+    /// `<c:title>` with explicit run props (sz / b / solidFill), plus an
+    /// explicit `<c:chartSpace><c:spPr><a:ln>` border.
+    fn bar_chart_with_axis_titles_xml() -> &'static str {
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart>
+    <c:plotArea>
+      <c:layout/>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:grouping val="clustered"/>
+        <c:ser>
+          <c:idx val="0"/>
+          <c:order val="0"/>
+          <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Series 1</c:v></c:pt></c:strCache></c:strRef></c:tx>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>A</c:v></c:pt>
+            <c:pt idx="1"><c:v>B</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>3</c:v></c:pt>
+            <c:pt idx="1"><c:v>7</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:barChart>
+      <c:catAx>
+        <c:axId val="111"/>
+        <c:axPos val="b"/>
+        <c:title>
+          <c:tx><c:rich><a:p><a:pPr><a:defRPr sz="1000" b="1">
+            <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+          </a:defRPr></a:pPr><a:r><a:t>Category Axis</a:t></a:r></a:p></c:rich></c:tx>
+        </c:title>
+      </c:catAx>
+      <c:valAx>
+        <c:axId val="222"/>
+        <c:axPos val="l"/>
+        <c:title>
+          <c:tx><c:rich><a:p><a:pPr><a:defRPr sz="1200" b="0">
+            <a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>
+          </a:defRPr></a:pPr><a:r><a:t>Value Axis</a:t></a:r></a:p></c:rich></c:tx>
+        </c:title>
+      </c:valAx>
+    </c:plotArea>
+  </c:chart>
+  <c:spPr>
+    <a:ln w="19050"><a:solidFill><a:srgbClr val="1B4332"/></a:solidFill></a:ln>
+  </c:spPr>
+</c:chartSpace>"#
+    }
+
+    #[test]
+    fn chart_parses_cat_and_val_axis_titles_with_props() {
+        let theme = HashMap::new();
+        let c = parse_legacy_chart(bar_chart_with_axis_titles_xml(), &theme)
+            .expect("legacy chart should parse");
+
+        assert_eq!(c.cat_axis_title.as_deref(), Some("Category Axis"));
+        assert_eq!(c.cat_axis_title_size, Some(1000));
+        assert_eq!(c.cat_axis_title_bold, Some(true));
+        assert_eq!(c.cat_axis_title_color.as_deref(), Some("FF0000"));
+
+        assert_eq!(c.val_axis_title.as_deref(), Some("Value Axis"));
+        assert_eq!(c.val_axis_title_size, Some(1200));
+        assert_eq!(c.val_axis_title_bold, Some(false));
+        assert_eq!(c.val_axis_title_color.as_deref(), Some("00FF00"));
+    }
+
+    #[test]
+    fn chart_parses_explicit_chartspace_border() {
+        let theme = HashMap::new();
+        let c = parse_legacy_chart(bar_chart_with_axis_titles_xml(), &theme)
+            .expect("legacy chart should parse");
+
+        assert_eq!(c.chart_border_color.as_deref(), Some("1B4332"));
+        assert_eq!(c.chart_border_width_emu, Some(19050));
+    }
+
+    #[test]
+    fn chart_border_nofill_yields_no_color() {
+        let xml = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:plotArea>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:ser>
+          <c:idx val="0"/>
+          <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:barChart>
+    </c:plotArea>
+  </c:chart>
+  <c:spPr>
+    <a:ln w="12700"><a:noFill/></a:ln>
+  </c:spPr>
+</c:chartSpace>"#;
+        let theme = HashMap::new();
+        let c = parse_legacy_chart(xml, &theme).expect("legacy chart should parse");
+        // noFill explicitly turns the border OFF → no color, even though @w is set.
+        assert_eq!(c.chart_border_color, None);
+    }
+
+    #[test]
+    fn chart_without_axis_titles_leaves_them_none() {
+        let xml = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:plotArea>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:ser>
+          <c:idx val="0"/>
+          <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:barChart>
+      <c:catAx><c:axId val="1"/><c:axPos val="b"/></c:catAx>
+      <c:valAx><c:axId val="2"/><c:axPos val="l"/></c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#;
+        let theme = HashMap::new();
+        let c = parse_legacy_chart(xml, &theme).expect("legacy chart should parse");
+        assert_eq!(c.cat_axis_title, None);
+        assert_eq!(c.val_axis_title, None);
+        assert_eq!(c.chart_border_color, None);
+        assert_eq!(c.chart_border_width_emu, None);
+    }
+
+    #[test]
+    fn scatter_bottom_valax_title_maps_to_cat_axis() {
+        // Scatter charts have TWO <c:valAx> and no <c:catAx>. The bottom one
+        // (axPos="b") is the horizontal axis → its title is the cat-axis title;
+        // the left one (axPos="l") is the value-axis title. Same disambiguation
+        // as the xlsx parser.
+        let xml = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:plotArea>
+      <c:scatterChart>
+        <c:scatterStyle val="lineMarker"/>
+        <c:ser>
+          <c:idx val="0"/>
+          <c:xVal><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>1</c:v></c:pt>
+            <c:pt idx="1"><c:v>2</c:v></c:pt>
+          </c:numCache></c:numRef></c:xVal>
+          <c:yVal><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>10</c:v></c:pt>
+            <c:pt idx="1"><c:v>20</c:v></c:pt>
+          </c:numCache></c:numRef></c:yVal>
+        </c:ser>
+      </c:scatterChart>
+      <c:valAx>
+        <c:axId val="100"/>
+        <c:axPos val="b"/>
+        <c:title><c:tx><c:rich><a:p><a:r><a:t>X Bottom</a:t></a:r></a:p></c:rich></c:tx></c:title>
+      </c:valAx>
+      <c:valAx>
+        <c:axId val="200"/>
+        <c:axPos val="l"/>
+        <c:title><c:tx><c:rich><a:p><a:r><a:t>Y Left</a:t></a:r></a:p></c:rich></c:tx></c:title>
+      </c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#;
+        let theme = HashMap::new();
+        let c = parse_legacy_chart(xml, &theme).expect("scatter chart should parse");
+        assert_eq!(c.chart_type, "scatter");
+        // Bottom valAx → X → cat-axis title.
+        assert_eq!(c.cat_axis_title.as_deref(), Some("X Bottom"));
+        // Left valAx → Y → val-axis title.
+        assert_eq!(c.val_axis_title.as_deref(), Some("Y Left"));
+    }
+
+    #[test]
+    fn chart_parses_axis_tick_label_bold_flags() {
+        // The bold flags for tick labels (title bold + cat/val tick-label bold)
+        // are parsed from `<c:title>...defRPr@b` and `<c:txPr>...defRPr@b`.
+        let xml = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:title><c:tx><c:rich><a:p><a:pPr><a:defRPr b="1"/></a:pPr>
+      <a:r><a:t>My Chart</a:t></a:r></a:p></c:rich></c:tx></c:title>
+    <c:plotArea>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:ser>
+          <c:idx val="0"/>
+          <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:barChart>
+      <c:catAx>
+        <c:axId val="1"/><c:axPos val="b"/>
+        <c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr b="1"/></a:pPr><a:endParaRPr/></a:p></c:txPr>
+      </c:catAx>
+      <c:valAx>
+        <c:axId val="2"/><c:axPos val="l"/>
+        <c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr b="0"/></a:pPr><a:endParaRPr/></a:p></c:txPr>
+      </c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#;
+        let theme = HashMap::new();
+        let c = parse_legacy_chart(xml, &theme).expect("legacy chart should parse");
+        assert_eq!(c.title_font_bold, Some(true));
+        assert_eq!(c.cat_axis_font_bold, Some(true));
+        assert_eq!(c.val_axis_font_bold, Some(false));
     }
 }

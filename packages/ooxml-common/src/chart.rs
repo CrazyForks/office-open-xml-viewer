@@ -180,6 +180,154 @@ pub fn extract_axis_tick_label_size(axis_node: Node) -> Option<i32> {
     })
 }
 
+/// First `<a:defRPr@b>` / `<a:rPr@b>` bold flag inside the axis's `<c:txPr>`
+/// — the tick-label bold flag (ECMA-376 §21.2.2.17). `None` when unspecified.
+pub fn extract_axis_tick_label_bold(axis_node: Node) -> Option<bool> {
+    let txpr = child(axis_node, "txPr")?;
+    txpr.descendants().find_map(|n| {
+        if !n.is_element() {
+            return None;
+        }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" {
+            return None;
+        }
+        n.attribute("b")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    })
+}
+
+/// Plain text of `node`'s direct-child `<c:title>` (ECMA-376 §21.2.2.6
+/// `CT_Title`). Works for the `<c:chart>` element (chart title) or a
+/// `<c:catAx>` / `<c:valAx>` (axis title). Walks `<a:t>` (rich text runs) and
+/// `<c:v>` (string-ref cache) descendants and concatenates their text.
+/// Returns `None` when there is no `<c:title>` child or it carries no text.
+pub fn extract_chart_title_text(node: Node) -> Option<String> {
+    let title = child(node, "title")?;
+    let mut text = String::new();
+    for d in title.descendants().filter(|n| n.is_element()) {
+        match d.tag_name().name() {
+            "t" | "v" => {
+                if let Some(t) = d.text() {
+                    text.push_str(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// First `<a:defRPr@sz>` / `<a:rPr@sz>` (hundredths of a point) inside `node`'s
+/// direct-child `<c:title>`. `None` when absent.
+pub fn extract_chart_title_size(node: Node) -> Option<i32> {
+    let title = child(node, "title")?;
+    title.descendants().find_map(|n| {
+        if !n.is_element() {
+            return None;
+        }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" {
+            return None;
+        }
+        n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+    })
+}
+
+/// First `<a:defRPr@b>` / `<a:rPr@b>` bold flag inside `node`'s direct-child
+/// `<c:title>`. `None` when not specified (renderer treats as not bold).
+pub fn extract_chart_title_bold(node: Node) -> Option<bool> {
+    let title = child(node, "title")?;
+    title.descendants().find_map(|n| {
+        if !n.is_element() {
+            return None;
+        }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" {
+            return None;
+        }
+        n.attribute("b")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    })
+}
+
+/// First `<a:solidFill>/<a:srgbClr@val>` (hex without `#`) inside `node`'s
+/// direct-child `<c:title>`. Only an `<a:srgbClr>` that is a direct child of a
+/// `<a:solidFill>` is honored — this skips gradient stops and other non-fill
+/// color nodes. `<a:schemeClr>` is left unresolved here (the theme palette is
+/// not wired through to chart title/border parsing yet — a known limitation
+/// shared by both parsers). `None` = renderer default.
+pub fn extract_chart_title_srgb(node: Node) -> Option<String> {
+    let title = child(node, "title")?;
+    title.descendants().find_map(|n| {
+        if !n.is_element() || n.tag_name().name() != "srgbClr" {
+            return None;
+        }
+        // Skip srgbClr nodes that aren't inside a solidFill (e.g. a gradient stop).
+        let parent_is_solid = n
+            .parent()
+            .map(|p| p.tag_name().name() == "solidFill")
+            .unwrap_or(false);
+        if !parent_is_solid {
+            return None;
+        }
+        n.attribute("val").map(|s| s.to_string())
+    })
+}
+
+/// Axis title text + run props from a `<c:catAx>` / `<c:valAx>` node. Reuses
+/// the chart-title helpers (which scope to the node's direct-child `<c:title>`);
+/// run props are resolved only when title text is present, so an axis with no
+/// title yields all `None`. Returns `(text, size_hpt, bold, srgb_color)`.
+pub fn extract_axis_title_with_props(
+    axis_node: Node,
+) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
+    match extract_chart_title_text(axis_node) {
+        None => (None, None, None, None),
+        Some(text) => (
+            Some(text),
+            extract_chart_title_size(axis_node),
+            extract_chart_title_bold(axis_node),
+            extract_chart_title_srgb(axis_node),
+        ),
+    }
+}
+
+/// Explicit chart-frame border from `<c:chartSpace><c:spPr><a:ln>` (ECMA-376
+/// §21.2.2.5 / DrawingML §20.1.2.2.24). `chart_space_root` is the
+/// `<c:chartSpace>` element. Returns `(srgb_color, width_emu)` under the locked
+/// policy shared by both parsers: a border is drawn ONLY when the XML explicitly
+/// declares a paintable line.
+///
+///  - no `<a:ln>` (or no `<c:spPr>`) → `(None, None)` — no default border;
+///  - `<a:ln><a:noFill/>` → border explicitly off → color `None` (width still
+///    reported when `@w` is present);
+///  - `<a:ln><a:solidFill><a:srgbClr@val>` → `(Some(hex), width)`.
+///
+/// `@w` (EMU) is captured as `u32` regardless of the fill. `<a:schemeClr>` is
+/// intentionally left unresolved here (theme not wired through to chart border
+/// parsing yet).
+pub fn extract_chart_space_border(chart_space_root: Node) -> (Option<String>, Option<u32>) {
+    let Some(ln) = child(chart_space_root, "spPr").and_then(|sp| child(sp, "ln")) else {
+        return (None, None);
+    };
+    let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
+    // An explicit `<a:noFill/>` turns the border off → no color.
+    if child(ln, "noFill").is_some() {
+        return (None, width);
+    }
+    // Only an srgbClr inside a direct `<a:solidFill>` is honored.
+    let color = child(ln, "solidFill")
+        .and_then(|sf| child(sf, "srgbClr"))
+        .and_then(|srgb| srgb.attribute("val"))
+        .map(|s| s.to_string());
+    (color, width)
+}
+
 /// First `<c:dLbls><c:txPr>` font size (hpt). Mirrors the per-series + chart
 /// fallback chain: walk every `<c:dLbls>` in document order, returning the
 /// first inner `<a:defRPr@sz>` / `<a:rPr@sz>` we find.
@@ -570,5 +718,149 @@ mod tests {
         </cx:chartSpace>"#;
         let d = root_of(xml);
         assert_eq!(extract_chartex_axis_hidden(d.root_element()), (false, true));
+    }
+
+    #[test]
+    fn chart_title_text_size_bold_srgb() {
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:title><c:tx><c:rich>
+                <a:p><a:pPr><a:defRPr sz="1400" b="1"><a:solidFill><a:srgbClr val="1B4332"/></a:solidFill></a:defRPr></a:pPr>
+                <a:r><a:t>Carbon &amp; Growth</a:t></a:r></a:p>
+            </c:rich></c:tx></c:title>
+        </c:chart>"#;
+        let d = root_of(xml);
+        let root = d.root_element();
+        assert_eq!(
+            extract_chart_title_text(root).as_deref(),
+            Some("Carbon & Growth")
+        );
+        assert_eq!(extract_chart_title_size(root), Some(1400));
+        assert_eq!(extract_chart_title_bold(root), Some(true));
+        assert_eq!(extract_chart_title_srgb(root).as_deref(), Some("1B4332"));
+    }
+
+    #[test]
+    fn chart_title_text_from_strref_cache() {
+        // Title sourced from a strRef cache (`<c:v>`) rather than rich runs.
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:title><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Sales</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title>
+        </c:chart>"#;
+        let d = root_of(xml);
+        assert_eq!(
+            extract_chart_title_text(d.root_element()).as_deref(),
+            Some("Sales")
+        );
+    }
+
+    #[test]
+    fn chart_title_srgb_skips_non_solidfill_srgb() {
+        // An `<a:srgbClr>` that is NOT a direct child of `<a:solidFill>` (here a
+        // gradient stop) must be ignored.
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:title><c:tx><c:rich><a:p><a:r><a:rPr>
+                <a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="ABCDEF"/></a:gs></a:gsLst></a:gradFill>
+            </a:rPr><a:t>T</a:t></a:r></a:p></c:rich></c:tx></c:title>
+        </c:chart>"#;
+        let d = root_of(xml);
+        assert!(extract_chart_title_srgb(d.root_element()).is_none());
+    }
+
+    #[test]
+    fn chart_title_helpers_absent() {
+        let xml = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        let root = d.root_element();
+        assert!(extract_chart_title_text(root).is_none());
+        assert!(extract_chart_title_size(root).is_none());
+        assert!(extract_chart_title_bold(root).is_none());
+        assert!(extract_chart_title_srgb(root).is_none());
+    }
+
+    #[test]
+    fn axis_title_with_props_full() {
+        let xml = r#"<c:catAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:axPos val="b"/>
+            <c:title><c:tx><c:rich>
+                <a:p><a:pPr><a:defRPr sz="1000" b="1"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:defRPr></a:pPr>
+                <a:r><a:t>Category Axis</a:t></a:r></a:p>
+            </c:rich></c:tx></c:title>
+        </c:catAx>"#;
+        let d = root_of(xml);
+        let (text, size, bold, color) = extract_axis_title_with_props(d.root_element());
+        assert_eq!(text.as_deref(), Some("Category Axis"));
+        assert_eq!(size, Some(1000));
+        assert_eq!(bold, Some(true));
+        assert_eq!(color.as_deref(), Some("FF0000"));
+    }
+
+    #[test]
+    fn axis_title_with_props_text_absent_all_none() {
+        // Axis with no `<c:title>` → text None gates the props to None even
+        // though run props could in theory be read elsewhere.
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:axPos val="l"/>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        assert_eq!(
+            extract_axis_title_with_props(d.root_element()),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn axis_tick_label_bold_variants() {
+        for (b, expect) in [("1", Some(true)), ("0", Some(false)), ("true", Some(true))] {
+            let xml = format!(
+                r#"<c:catAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                    <c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr b="{b}"/></a:pPr><a:endParaRPr/></a:p></c:txPr>
+                </c:catAx>"#
+            );
+            let d = root_of(&xml);
+            assert_eq!(
+                extract_axis_tick_label_bold(d.root_element()),
+                expect,
+                "b={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn axis_tick_label_bold_absent() {
+        let xml = r#"<c:catAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        assert!(extract_axis_tick_label_bold(d.root_element()).is_none());
+    }
+
+    #[test]
+    fn chart_space_border_solid() {
+        let xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="1B4332"/></a:solidFill></a:ln></c:spPr>
+        </c:chartSpace>"#;
+        let d = root_of(xml);
+        assert_eq!(
+            extract_chart_space_border(d.root_element()),
+            (Some("1B4332".to_string()), Some(19050))
+        );
+    }
+
+    #[test]
+    fn chart_space_border_nofill_color_none_width_kept() {
+        let xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:spPr><a:ln w="12700"><a:noFill/></a:ln></c:spPr>
+        </c:chartSpace>"#;
+        let d = root_of(xml);
+        // noFill turns the border off → color None, but @w is still reported.
+        assert_eq!(
+            extract_chart_space_border(d.root_element()),
+            (None, Some(12700))
+        );
+    }
+
+    #[test]
+    fn chart_space_border_absent() {
+        let xml =
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        assert_eq!(extract_chart_space_border(d.root_element()), (None, None));
     }
 }
