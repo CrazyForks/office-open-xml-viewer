@@ -118,7 +118,11 @@ function axisTitleMargin(dim: number): number {
  *  labels. `catTitlePx`/`valTitlePx` are the title font sizes the caller used
  *  to size `catTitleH`/`valTitleW`; the anchor centers each title within its
  *  band. cat axis = bottom, val axis = left — the orientation each cartesian
- *  renderer already uses (horizontal bar keeps cat-bottom/val-left too). */
+ *  renderer already uses (horizontal bar keeps cat-bottom/val-left too).
+ *  Axis titles default to BOLD — Excel's built-in chart-style default renders
+ *  them bold (the chart title is likewise unconditionally bold above), and a
+ *  run that should be regular carries an explicit `b="0"`. So only an explicit
+ *  `false` un-bolds; an unspecified weight (most titles) renders bold. */
 function drawAxisTitles(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -132,7 +136,7 @@ function drawAxisTitles(
     const anchorY = py0 + ph / 2;
     drawAxisTitle(
       ctx, chart.valAxisTitle, anchorX, anchorY, 'val',
-      valTitlePx, !!chart.valAxisTitleFontBold, axisTitleColor(chart.valAxisTitleFontColor),
+      valTitlePx, chart.valAxisTitleFontBold ?? true, axisTitleColor(chart.valAxisTitleFontColor),
     );
   }
   if (chart.catAxisTitle) {
@@ -140,7 +144,7 @@ function drawAxisTitles(
     const anchorY = y + h - legBottomH - axisTitleMargin(h) - catTitlePx / 2;
     drawAxisTitle(
       ctx, chart.catAxisTitle, anchorX, anchorY, 'cat',
-      catTitlePx, !!chart.catAxisTitleFontBold, axisTitleColor(chart.catAxisTitleFontColor),
+      catTitlePx, chart.catAxisTitleFontBold ?? true, axisTitleColor(chart.catAxisTitleFontColor),
     );
   }
 }
