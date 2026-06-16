@@ -4,7 +4,7 @@ import {
   crossRunKinsokuRetract,
   resolveKinsokuRules,
   DEFAULT_KINSOKU_RULES,
-} from './renderer.js';
+} from './index.js';
 
 // ECMA-376 §17.15.1.58–.60 Japanese line-breaking (kinsoku) tests.
 //
