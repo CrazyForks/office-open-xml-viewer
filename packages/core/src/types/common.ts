@@ -327,6 +327,13 @@ export interface TextRunData {
    * present; absent means CJK falls back to fontFamily.
    */
   fontFamilyEa?: string;
+  /**
+   * Symbol font family from rPr > a:sym (ECMA-376 §21.1.2.3.10), resolved
+   * through the theme. PowerPoint stores symbol-font glyphs as Private-Use
+   * codepoints U+F020–U+F0FF; the renderer uses this font to resolve them.
+   * Absent means no symbol font was declared.
+   */
+  fontFamilySym?: string;
   /** Baseline shift in thousandths of a point. Positive = superscript, negative = subscript. */
   baseline?: number;
   /**

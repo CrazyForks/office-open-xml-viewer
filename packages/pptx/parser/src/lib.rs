@@ -1528,6 +1528,11 @@ struct TextRunData {
     /// ECMA-376 §21.1.2.3.7 (CT_TextFont, ea variant).
     #[serde(skip_serializing_if = "Option::is_none")]
     font_family_ea: Option<String>,
+    /// Symbol font family from rPr > sym (resolved through the theme).
+    /// Renderer uses this for symbol-range PUA glyphs (U+F0xx).
+    /// ECMA-376 §21.1.2.3.10 (CT_TextFont, sym variant).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    font_family_sym: Option<String>,
     /// Baseline shift in thousandths of a point. Positive = superscript, negative = subscript.
     #[serde(skip_serializing_if = "Option::is_none")]
     baseline: Option<i32>,
@@ -4402,6 +4407,7 @@ fn parse_paragraph(
                     color,
                     font_family,
                     font_family_ea: None,
+                    font_family_sym: None,
                     baseline: None,
                     caps: None,
                     letter_spacing: None,
@@ -4602,6 +4608,19 @@ fn parse_run(
         .map(|tf| resolve_theme_typeface(&tf, theme))
         .filter(|tf| !tf.is_empty());
 
+    // ECMA-376 §21.1.2.3.10 — <a:sym typeface="..."/> sets the font used for
+    // symbol characters. PowerPoint stores those as PUA codepoints (U+F0xx).
+    let font_family_sym = r_pr
+        .and_then(|n| child(n, "sym"))
+        .and_then(|n| attr(&n, "typeface"))
+        .or_else(|| {
+            def_rpr
+                .and_then(|n| child(n, "sym"))
+                .and_then(|n| attr(&n, "typeface"))
+        })
+        .map(|tf| resolve_theme_typeface(&tf, theme))
+        .filter(|tf| !tf.is_empty());
+
     // baseline in thousandths of a point; 30000=superscript, -25000=subscript (OOXML typical)
     let baseline = r_pr
         .and_then(|n| attr(&n, "baseline"))
@@ -4648,6 +4667,7 @@ fn parse_run(
         color,
         font_family,
         font_family_ea,
+        font_family_sym,
         baseline,
         caps,
         letter_spacing,
