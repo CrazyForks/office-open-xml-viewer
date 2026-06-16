@@ -8160,7 +8160,10 @@ fn build_master_bundle(
         .unwrap_or_else(|| "ppt/slideMasters".to_owned());
 
     // Master rels: `<master_dir>/_rels/<file>.rels`.
-    let master_file = master_path.split('/').next_back().unwrap_or("slideMaster1.xml");
+    let master_file = master_path
+        .split('/')
+        .next_back()
+        .unwrap_or("slideMaster1.xml");
     let master_rels_xml: String = {
         let rels_p = format!("{master_dir}/_rels/{master_file}.rels");
         read_zip_str(zip, &rels_p).unwrap_or_default()
@@ -8169,8 +8172,8 @@ fn build_master_bundle(
 
     // The master's own theme (slide→…→slideMaster→theme). Fall back to the
     // presentation theme when the master declares no /theme relationship.
-    let theme_path: Option<String> = find_rel_target_by_type(&master_rels_xml, "/theme")
-        .map(|t| resolve_path(&master_dir, &t));
+    let theme_path: Option<String> =
+        find_rel_target_by_type(&master_rels_xml, "/theme").map(|t| resolve_path(&master_dir, &t));
     let mut theme: HashMap<String, String> = match theme_path
         .as_deref()
         .and_then(|p| read_zip_str(zip, p).ok())
@@ -8385,9 +8388,8 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let layout_rels = parse_rels(&layout_rels_xml);
 
         // Resolve this slide's master via the layout's /slideMaster rel.
-        let master_path: Option<String> =
-            find_rel_target_by_type(&layout_rels_xml, "/slideMaster")
-                .map(|t| resolve_path(&layout_dir, &t));
+        let master_path: Option<String> = find_rel_target_by_type(&layout_rels_xml, "/slideMaster")
+            .map(|t| resolve_path(&layout_dir, &t));
 
         raw_slides.push(SlideRaw {
             index: idx,
