@@ -951,6 +951,16 @@ struct PictureElement {
     flip_h: bool,
     flip_v: bool,
     data_url: String,
+    /// Microsoft 2016 SVG extension (`<a:blip><a:extLst><a:ext
+    /// uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip r:embed>`):
+    /// the `r:embed` points at the `.svg` part that is the *original* vector
+    /// image, while `data_url` (the blip's own `r:embed`) is the PNG fallback
+    /// PowerPoint rasterizes for compatibility. Serialized as a
+    /// `data:image/svg+xml;base64,…` URL so the renderer can prefer the vector
+    /// original and fall back to `data_url` on a decode failure. None when the
+    /// picture has no svgBlip extension (the common case).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    svg_data_url: Option<String>,
     /// Border line from `<p:pic><p:spPr><a:ln>` (ECMA-376 §20.1.2.2.24
     /// CT_LineProperties; §19.3.1.37 routes a `p:pic`'s spPr through
     /// CT_ShapeProperties, so a picture carries the same line as a shape). Same
@@ -6216,6 +6226,38 @@ fn parse_pic_prst_geom(sp_pr: roxmltree::Node<'_, '_>) -> (Option<String>, Optio
     (Some(prst), adjust)
 }
 
+/// Microsoft 2016 SVG extension on an `<a:blip>` (ECMA-376 §20.1.8.14 carries
+/// the core blip fill; the SVG body is a Microsoft extension). When a `<a:blip>`
+/// has `<a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}">` with an
+/// `<asvg:svgBlip r:embed="…">`, resolve that rId to the `.svg` part and return
+/// it as a `data:image/svg+xml;base64,…` URL. Returns None when there is no
+/// svgBlip, the rId is unresolvable, or the part is missing.
+///
+/// Matching is by namespace-local element name (`svgBlip`), so the `asvg:`
+/// prefix (or any other) is irrelevant.
+fn svg_blip_data_url(
+    blip: roxmltree::Node<'_, '_>,
+    slide_dir: &str,
+    rels: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
+) -> Option<String> {
+    let svg_blip = child(blip, "extLst")?
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "ext")
+        .find_map(|ext| {
+            ext.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "svgBlip")
+        })?;
+    let svg_rid = attr_r(&svg_blip, "embed")?;
+    let svg_target = rels.get(&svg_rid)?;
+    let svg_path = resolve_path(slide_dir, svg_target);
+    let svg_bytes = read_zip_bytes(zip, &svg_path)?;
+    Some(format!(
+        "data:image/svg+xml;base64,{}",
+        B64.encode(&svg_bytes)
+    ))
+}
+
 fn parse_picture(
     pic_node: roxmltree::Node<'_, '_>,
     slide_dir: &str,
@@ -6232,7 +6274,8 @@ fn parse_picture(
     }
 
     let blip_fill = child(pic_node, "blipFill")?;
-    let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
+    let blip = child(blip_fill, "blip")?;
+    let r_id = attr_r(&blip, "embed")?;
 
     let rel_target = rels.get(&r_id)?;
     let image_path = resolve_path(slide_dir, rel_target);
@@ -6240,6 +6283,11 @@ fn parse_picture(
     let image_bytes = read_zip_bytes(zip, &image_path)?;
     let mime = mime_from_ext(&image_path);
     let data_url = format!("data:{mime};base64,{}", B64.encode(&image_bytes));
+
+    // Microsoft 2016 SVG extension: the PNG above is only the fallback; the real
+    // vector image rides inside `<a:blip><a:extLst>`. Surface it separately so
+    // the renderer can prefer the SVG and fall back to the PNG on decode error.
+    let svg_data_url = svg_blip_data_url(blip, slide_dir, rels, zip);
 
     // ECMA-376 §20.1.9.8 — `<p:pic>` may carry `<a:custGeom>` inside `<p:spPr>`,
     // in which case the bitmap is clipped to that custom path (e.g. a laptop
@@ -6272,6 +6320,7 @@ fn parse_picture(
         flip_h: t.flip_h,
         flip_v: t.flip_v,
         data_url,
+        svg_data_url,
         stroke,
         prst_geom,
         prst_adjust,
@@ -7400,6 +7449,12 @@ fn parse_sp_tree_node(
                             if let Some(bytes) = read_zip_bytes(zip, &image_path) {
                                 let mime = mime_from_ext(&image_path);
                                 let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+                                // Microsoft 2016 SVG extension — a blipFill-painted
+                                // sp can carry the same svgBlip vector original as a
+                                // real p:pic; surface it so the renderer prefers it.
+                                let svg_data_url = blip_fill_node
+                                    .and_then(|bf| child(bf, "blip"))
+                                    .and_then(|b| svg_blip_data_url(b, slide_dir, rels, zip));
                                 // §20.1.9.18 — the sp's prstGeom (any preset, not
                                 // just roundRect) is the picture's clip silhouette.
                                 let (prst_geom, prst_adjust) =
@@ -7433,6 +7488,7 @@ fn parse_sp_tree_node(
                                     flip_h: t.flip_h,
                                     flip_v: t.flip_v,
                                     data_url,
+                                    svg_data_url,
                                     stroke,
                                     prst_geom,
                                     prst_adjust,
@@ -7484,6 +7540,12 @@ fn parse_sp_tree_node(
                                     flip_h: t.flip_h,
                                     flip_v: t.flip_v,
                                     data_url: bf.data_url,
+                                    // TODO: an inherited layout-placeholder blipFill
+                                    // (LayoutPlaceholders::lookup_blip_fill) does not
+                                    // yet carry the svgBlip extension. Picture
+                                    // placeholders pointing at an SVG are rare; thread
+                                    // the svg URL through BlipFill if a sample needs it.
+                                    svg_data_url: None,
                                     stroke,
                                     prst_geom: None,
                                     prst_adjust: None,
@@ -7523,9 +7585,8 @@ fn parse_sp_tree_node(
                 if let Some(idx) = ph_idx {
                     if let Some(t) = lph.by_idx.get(&idx) {
                         let blip_fill = child(node, "blipFill");
-                        let r_id = blip_fill
-                            .and_then(|bf| child(bf, "blip"))
-                            .and_then(|b| attr_r(&b, "embed"));
+                        let blip = blip_fill.and_then(|bf| child(bf, "blip"));
+                        let r_id = blip.and_then(|b| attr_r(&b, "embed"));
                         if let Some(rid) = r_id {
                             if let Some(rel_target) = rels.get(&rid) {
                                 let image_path = resolve_path(slide_dir, rel_target);
@@ -7533,6 +7594,10 @@ fn parse_sp_tree_node(
                                     let mime = mime_from_ext(&image_path);
                                     let data_url =
                                         format!("data:{mime};base64,{}", B64.encode(&image_bytes));
+                                    // Microsoft 2016 SVG extension on the placeholder
+                                    // p:pic's blip — prefer the vector original.
+                                    let svg_data_url = blip
+                                        .and_then(|b| svg_blip_data_url(b, slide_dir, rels, zip));
                                     // §20.1.2.2.24 — placeholder pic border: the
                                     // p:pic's own `<a:ln>`, else the inherited
                                     // layout placeholder stroke.
@@ -7550,6 +7615,7 @@ fn parse_sp_tree_node(
                                         flip_h: t.flip_h,
                                         flip_v: t.flip_v,
                                         data_url,
+                                        svg_data_url,
                                         stroke,
                                         prst_geom: None,
                                         prst_adjust: None,
@@ -10146,6 +10212,156 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, SlideElement::Picture(_))),
             "showMasterSp=\"1\" must keep master decorations"
+        );
+    }
+
+    // ── Embedded SVG images (Microsoft asvg:svgBlip extension) ────────────
+    //
+    // PowerPoint stores an SVG picture as a `<p:pic>` whose `<a:blip>` points
+    // at a PNG *fallback* (r:embed) and carries the real .svg part inside an
+    // `<a:extLst><a:ext uri="{96DAC541-…}"><asvg:svgBlip r:embed="…"/>`
+    // extension (Microsoft 2016 SVG extension; the core blip fill is
+    // ECMA-376 §20.1.8.14). The parser must keep emitting the PNG fallback as
+    // `data_url` (regression-safe) while additionally surfacing the SVG body in
+    // `svg_data_url` so the renderer can prefer the vector original.
+
+    /// Build a tiny zip containing only the two media parts a `<p:pic>` blip
+    /// references (a PNG fallback and an SVG body), so `parse_picture` can be
+    /// driven directly with a hand-rolled rels map.
+    fn build_blip_media_zip(png: &[u8], svg: &[u8]) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            zw.start_file("ppt/media/image1.png", opts).unwrap();
+            {
+                use std::io::Write;
+                zw.write_all(png).unwrap();
+            }
+            zw.start_file("ppt/media/image2.svg", opts).unwrap();
+            {
+                use std::io::Write;
+                zw.write_all(svg).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// A `<p:pic>` carrying a PNG fallback blip plus an `asvg:svgBlip`
+    /// extension must yield both the PNG `data_url` and the SVG `svg_data_url`.
+    #[test]
+    fn picture_with_svg_blip_extension_emits_both_urls() {
+        // 1×1 transparent PNG (smallest valid PNG).
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        const SVG: &[u8] =
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="#0a0"/></svg>"##;
+
+        // The svgBlip uses a different prefix (asvg:) on purpose — matching is by
+        // namespace-local name, so the prefix must not matter.
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+  xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main">
+  <p:nvPicPr><p:cNvPr id="5" name="SvgPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill>
+    <a:blip r:embed="rIdPng">
+      <a:extLst>
+        <a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}">
+          <asvg:svgBlip r:embed="rIdSvg"/>
+        </a:ext>
+      </a:extLst>
+    </a:blip>
+    <a:stretch><a:fillRect/></a:stretch>
+  </p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+</p:pic>"#;
+
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let pic_node = doc.root_element();
+
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        rels.insert("rIdSvg".to_string(), "../media/image2.svg".to_string());
+
+        let theme = HashMap::new();
+        let data = build_blip_media_zip(PNG_1X1, SVG);
+        let cursor = Cursor::new(data.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+
+        let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
+            .expect("parse_picture should succeed for an SVG-blip picture");
+
+        // PNG fallback is preserved on data_url (regression-safe).
+        assert!(
+            pic.data_url.starts_with("data:image/png;base64,"),
+            "data_url must remain the PNG fallback; got {}",
+            &pic.data_url[..pic.data_url.len().min(40)]
+        );
+
+        // The SVG body is surfaced separately as an image/svg+xml data URL.
+        let svg_url = pic
+            .svg_data_url
+            .as_deref()
+            .expect("svg_data_url must be Some when an svgBlip extension is present");
+        assert!(
+            svg_url.starts_with("data:image/svg+xml;base64,"),
+            "svg_data_url must be a base64 image/svg+xml data URL; got {}",
+            &svg_url[..svg_url.len().min(40)]
+        );
+        // And it must decode back to the original SVG bytes.
+        let decoded = B64
+            .decode(svg_url.strip_prefix("data:image/svg+xml;base64,").unwrap())
+            .expect("svg_data_url payload must be valid base64");
+        assert_eq!(
+            decoded, SVG,
+            "decoded svg_data_url must equal the .svg part"
+        );
+    }
+
+    /// A plain `<p:pic>` with no svgBlip extension must leave `svg_data_url`
+    /// as None (and still emit the PNG data_url) — guards against the new
+    /// branch firing spuriously.
+    #[test]
+    fn picture_without_svg_blip_has_no_svg_url() {
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:nvPicPr><p:cNvPr id="5" name="PngPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill><a:blip r:embed="rIdPng"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+</p:pic>"#;
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let pic_node = doc.root_element();
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        let theme = HashMap::new();
+        let data = build_blip_media_zip(PNG_1X1, b"<svg/>");
+        let cursor = Cursor::new(data.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
+            .expect("parse_picture should succeed");
+        assert!(pic.data_url.starts_with("data:image/png;base64,"));
+        assert!(
+            pic.svg_data_url.is_none(),
+            "svg_data_url must be None without an svgBlip extension"
         );
     }
 

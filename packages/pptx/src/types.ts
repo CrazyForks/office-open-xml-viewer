@@ -438,6 +438,16 @@ export interface PictureElement {
   /** Data URL, e.g. "data:image/png;base64,..." */
   dataUrl: string;
   /**
+   * Microsoft 2016 SVG extension (`<a:blip><a:extLst><a:ext
+   * uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip r:embed>`). When
+   * PowerPoint embeds an SVG image, `dataUrl` above is only the PNG fallback it
+   * rasterizes for compatibility; this is the original vector image as a
+   * `data:image/svg+xml;base64,…` URL. The renderer prefers this and falls back
+   * to `dataUrl` if the SVG fails to decode. Omitted when the picture has no
+   * svgBlip extension (the common case).
+   */
+  svgDataUrl?: string;
+  /**
    * Border line from `<p:pic><p:spPr><a:ln>` (ECMA-376 §20.1.2.2.24). A
    * `p:pic`'s spPr is `CT_ShapeProperties` (§19.3.1.37), so a picture carries
    * the same line model as a shape. `null` when there is no `<a:ln>` or it
