@@ -4,7 +4,7 @@
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
-import { niceStep, niceAxisMax, niceAxisMin } from './axis-scale.js';
+import { niceStep, valueAxisScale } from './axis-scale.js';
 import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
 import { hexToRgba } from '../shape/paint.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
@@ -578,8 +578,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
 
-  const step  = niceStep(dataMax);
-  const axMax = chart.valMax ?? niceAxisMax(dataMax, step);
+  // Bar/column anchors the value axis at 0; ignore the returned min.
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
 
   const gridColor = '#e0e0e0';
   const steps = Math.round(axMax / step);
@@ -877,9 +877,7 @@ function renderLineChart(
   else if (dataMax < 0) dataMax = 0;
   if (dataMax === dataMin) dataMax = dataMin + 1;
 
-  const step  = niceStep(dataMax - dataMin);
-  const axMin = chart.valMin ?? niceAxisMin(dataMin, step);
-  const axMax = chart.valMax ?? niceAxisMax(dataMax, step);
+  const { min: axMin, max: axMax, step } = valueAxisScale(dataMin, dataMax, chart.valMin, chart.valMax);
   const range = axMax - axMin; if (range === 0) return;
 
   const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
@@ -1025,8 +1023,8 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   }
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
-  const step  = niceStep(dataMax);
-  const axMax = chart.valMax ?? niceAxisMax(dataMax, step);
+  // Area anchors the value axis at 0; ignore the returned min.
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
 
   const toX = (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
   const toY = (v: number) => py0 + ph - (v / axMax) * ph;
@@ -1215,8 +1213,8 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   for (const s of chart.series) for (const v of s.values) dataMax = Math.max(dataMax, v ?? 0);
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
-  const step  = niceStep(dataMax);
-  const axMax = chart.valMax ?? niceAxisMax(dataMax, step);
+  // Radar anchors the value axis at 0; ignore the returned min.
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
 
   const angle0 = -Math.PI / 2;
   const spoke  = (i: number) => angle0 + (i / n) * Math.PI * 2;
@@ -1413,20 +1411,19 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   else if (yMin > 0) yMin = 0;
   if (chart.valMax != null) yMax = chart.valMax;
   // Auto value (Y) axis: ONE major unit (the "nice" step) drives both the
-  // rounded maximum and the gridlines — identical to bar/line/area. niceAxisMax
+  // rounded bounds and the gridlines — identical to bar/line/area. niceAxisMax
   // adds ~5% headroom above the data max and rounds up to that step, so the top
   // point sits below the top gridline (data 3.5 → step 0.5, max 4 → 0,.5,…,4;
   // 0.1129 → step 0.02, max 0.12). The step is taken from the DATA range and
-  // reused for the gridline loop below — recomputing it on the rounded range
-  // would wrongly coarsen it (niceStep(4)=1 vs the 0.5 Excel uses for 0–4).
-  // Explicit <c:valAx><c:scaling> wins. NB: the auto major unit is not specified
-  // by ECMA-376 (Excel-proprietary); niceStep approximates it and may differ
-  // from Excel by one step on some ranges.
-  const yAxisStep = niceStep(yMax - yMin);
-  if (yAxisStep > 0) {
-    if (chart.valMin == null) yMin = niceAxisMin(yMin, yAxisStep);
-    if (chart.valMax == null) yMax = niceAxisMax(yMax, yAxisStep, yMin);
-  }
+  // reused for the gridline loop below. The post-anchor yMin (which already had
+  // chart.valMin and the >0→0 anchor applied above) is the data extent; passing
+  // chart.valMin/valMax as the explicit args reproduces the prior `?? niceAxis…`
+  // behavior exactly. Explicit <c:valAx><c:scaling> wins. NB: the auto major
+  // unit is not specified by ECMA-376 (Excel-proprietary); niceStep approximates
+  // it and may differ from Excel by one step on some ranges.
+  const { min: niceYMin, max: niceYMax, step: yAxisStep } =
+    valueAxisScale(yMin, yMax, chart.valMin, chart.valMax);
+  yMin = niceYMin; yMax = niceYMax;
   if (chart.catAxisMin != null) xMin = chart.catAxisMin;
   if (chart.catAxisMax != null) xMax = chart.catAxisMax;
   // Excel snaps auto-derived axis bounds outward to a multiple of the
@@ -1448,10 +1445,9 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   if (!chart.valAxisHidden) {
     const yTickFontPx = Math.max(8, Math.min(11, ph / 20));
     ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px sans-serif`;
-    const yStep = yAxisStep;
-    const ySteps = Math.round((yMax - yMin) / yStep) + 1;
+    const ySteps = Math.round((yMax - yMin) / yAxisStep) + 1;
     for (let si = 0; si < ySteps; si++) {
-      const v = yMin + si * yStep; if (v > yMax + yStep * 0.01) break;
+      const v = yMin + si * yAxisStep; if (v > yMax + yAxisStep * 0.01) break;
       const gy = toY(v);
       ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 0.5;
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();

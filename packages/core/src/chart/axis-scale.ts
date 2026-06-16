@@ -38,3 +38,17 @@ export function niceAxisMin(dataMin: number, step: number): number {
   const ax = Math.floor(dataMin / step) * step;
   return Math.abs(ax - dataMin) < step * 1e-9 ? ax - step : ax;
 }
+
+/** Excel-style auto value-axis bounds + major unit. ONE `niceStep` (of the data
+ *  range) drives the rounded min, max AND the gridline step, so they can never
+ *  desync. Explicit `<c:valAx><c:scaling><c:min/max>` wins. The auto major unit
+ *  is Excel-proprietary (not in ECMA-376); niceStep approximates it. */
+export function valueAxisScale(
+  dataMin: number, dataMax: number,
+  explicitMin?: number | null, explicitMax?: number | null,
+): { min: number; max: number; step: number } {
+  const step = niceStep(dataMax - dataMin);
+  const min = explicitMin ?? niceAxisMin(dataMin, step);
+  const max = explicitMax ?? niceAxisMax(dataMax, step, min);
+  return { min, max, step };
+}
