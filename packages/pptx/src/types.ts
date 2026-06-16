@@ -392,6 +392,38 @@ export interface ChartElement {
   scatterStyle?: string | null;
   /** `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). */
   radarStyle?: string | null;
+  /** `<c:catAx><c:title>` plain text (ECMA-376 §21.2.2.6). For scatter the
+   * bottom `<c:valAx>` (axPos b/t) feeds this. null = no title. */
+  catAxisTitle?: string | null;
+  /** `<c:valAx><c:title>` plain text. For scatter the left `<c:valAx>`
+   * (axPos l/r) feeds this. null = no title. */
+  valAxisTitle?: string | null;
+  /** `<c:catAx><c:title>` run-prop font size (hpt). Distinct from
+   * `catAxisFontSizeHpt` (tick labels). null = renderer default. */
+  catAxisTitleSize?: number | null;
+  /** `<c:catAx><c:title>` run-prop bold flag. null = not bold. */
+  catAxisTitleBold?: boolean | null;
+  /** `<c:catAx><c:title>` run-prop color (hex without '#'). null = default. */
+  catAxisTitleColor?: string | null;
+  /** `<c:valAx><c:title>` run-prop font size (hpt). null = renderer default. */
+  valAxisTitleSize?: number | null;
+  /** `<c:valAx><c:title>` run-prop bold flag. null = not bold. */
+  valAxisTitleBold?: boolean | null;
+  /** `<c:valAx><c:title>` run-prop color (hex without '#'). null = default. */
+  valAxisTitleColor?: string | null;
+  /** `<c:title>...defRPr@b` chart title bold flag. null = not bold. */
+  titleFontBold?: boolean | null;
+  /** `<c:catAx><c:txPr>...defRPr@b` X-axis tick-label bold flag. null = not bold. */
+  catAxisFontBold?: boolean | null;
+  /** `<c:valAx><c:txPr>...defRPr@b` Y-axis tick-label bold flag. null = not bold. */
+  valAxisFontBold?: boolean | null;
+  /** Explicit chart border color (hex without '#') from
+   * `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr>`. Only set when the
+   * XML explicitly declares a paintable line; null otherwise (no default border). */
+  chartBorderColor?: string | null;
+  /** `<c:chartSpace><c:spPr><a:ln@w>` border width in EMU. null = 1px hairline
+   * when a color is present. */
+  chartBorderWidthEmu?: number | null;
 }
 
 export interface PictureElement {
