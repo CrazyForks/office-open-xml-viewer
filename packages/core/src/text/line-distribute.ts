@@ -81,7 +81,10 @@ export interface DistributeOptions {
    *  gap. Default `segments.length - 1`. The match is EXACT, not `>=`: under
    *  bidi this is the visually-last segment's LOGICAL index, which is not the
    *  maximum si, so `>=` would wrongly suppress every logically-later segment
-   *  (a pure-RTL line would skip the whole line → no justification). */
+   *  (a pure-RTL line would skip the whole line → no justification). Pass a value
+   *  ≥ segments.length (e.g. `segments.length`) to exclude NO segment: the pptx
+   *  adapter does this because it draws every segment in one loop and relies on
+   *  the content-span trim to suppress only the final glyph's gap. */
   lastDrawnSi?: number;
   /** Lower bound on a (negative) `perGap` when compressing (slack < 0), so a
    *  compression never eats more than a capped amount per gap. Default

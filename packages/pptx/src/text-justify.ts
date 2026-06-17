@@ -49,16 +49,15 @@
 // sum to the whole-line `naturalWidth` passed in, and the painted line lands on
 // `availWidth` without measurement drift.
 
-import { distributeLineSlack, isCjkBreakChar } from '@silurus/ooxml-core';
+import { distributeLineSlack, isCjkBreakChar, type DistributeSeg } from '@silurus/ooxml-core';
 
-/** A laid-out segment as seen by the justifier. Only the optional text matters;
- *  an undefined `text` marks an inline object (math / image), which is one
- *  opaque unit that bears no stretch of its own (a CJK neighbour can still open
- *  a gap against it). The generic `T` lets the renderer pass its full LayoutSeg
- *  and get pieces that keep every style field, plus `jext`. */
-export interface JustifySeg {
-  text?: string;
-}
+/** A laid-out segment as seen by the justifier: structurally the shared core
+ *  `DistributeSeg`, aliased (not re-declared) so there is a single structural
+ *  source. Only the optional `text` matters; an undefined `text` marks an inline
+ *  object that bears no stretch of its own (a CJK neighbour can still open a gap
+ *  against it). The generic `T` lets the renderer pass its full LayoutSeg and
+ *  get pieces that keep every style field, plus `jext`. */
+export type JustifySeg = DistributeSeg;
 
 export type JustifyMode = 'just' | 'dist';
 

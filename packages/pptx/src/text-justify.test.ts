@@ -124,6 +124,34 @@ describe('justifyLine', () => {
     ]);
   });
 
+  it('emits an empty-text segment (inline OMML equation) so it is still drawn', () => {
+    // In pptx an inline equation is a segment with text==='' (plus a `math`
+    // field), NOT text===undefined. The pre-extraction justifyLine accumulated
+    // glyphs into a buffer and pushed only NON-empty buffers, so it silently
+    // DROPPED the equation from a justified line (not drawn, pen not advanced →
+    // trailing text overlapped the gap). The shared-kernel adapter emits every
+    // text-bearing segment, so the equation survives with jext 0 and all fields
+    // (here `tag`, in production `math`) preserved; the gap distribution among
+    // the real glyphs is unchanged (the empty segment contributes no units).
+    const r = justifyLine<Seg>(
+      [
+        { text: '日', tag: 'a' },
+        { text: '', tag: 'math' },
+        { text: '本', tag: 'b' },
+      ],
+      120,
+      60,
+      'just',
+      false,
+    );
+    expect(r).not.toBeNull();
+    expect(r!.map((p) => [p.text, +p.jext.toFixed(3), p.tag])).toEqual([
+      ['日', 60, 'a'],
+      ['', 0, 'math'],
+      ['本', 0, 'b'],
+    ]);
+  });
+
   it('the jext advances sum to the slack (line reaches availWidth)', () => {
     const r = justifyLine<Seg>([{ text: 'Hello world foo bar' }], 300, 120, 'just', false);
     const sum = r!.reduce((a, p) => a + p.jext, 0);
