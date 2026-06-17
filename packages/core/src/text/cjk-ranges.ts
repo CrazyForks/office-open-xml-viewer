@@ -3,7 +3,7 @@
 // intervening whitespace. This is the single source of truth consumed by every
 // renderer; previously the same four ranges were hand-duplicated in
 // packages/{pptx,docx,xlsx} and had drifted (the Hangul upper bound was D7FF in
-// one copy and D7AF in two others — both wrong, see below).
+// the two pptx copies and D7AF in the docx/xlsx copies — both wrong, see below).
 //
 // ── Canonical ranges ────────────────────────────────────────────────────────
 //   U+3000–U+9FFF  Ideographic space, CJK Symbols & Punctuation, Hiragana,
@@ -18,10 +18,10 @@
 // precomposed modern syllable blocks). The code points above it are NOT
 // standalone CJK break units and must be excluded:
 //   • U+D7A4–U+D7AF  unassigned (no characters).
-//   • U+D7B0–U+D7FF  "Hangul Jamo Extended-B" — combining/conjoining jamo, i.e.
-//                    pieces that attach to a base syllable. A combining mark is
-//                    never an independent line-break or justification unit, so
-//                    it must stay with its base and is excluded here too.
+//   • U+D7B0–U+D7FF  "Hangul Jamo Extended-B" — conjoining jamo (Grapheme_
+//                    Cluster_Break V/T) that compose onto a preceding syllable.
+//                    They are not independent line-break or justification units,
+//                    so they stay with their base and are excluded here too.
 // The earlier copies' D7AF (included 12 unassigned code points) and D7FF
 // (additionally swept in all of Jamo Extended-B) were both over-broad; D7A3 is
 // the strict, correct boundary. Behaviour is unchanged for real content: no

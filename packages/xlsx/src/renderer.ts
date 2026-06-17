@@ -831,12 +831,6 @@ export function layoutRichTextLines(
     if (font.size > curMaxSize) curMaxSize = font.size;
   };
 
-  const isCJK = (cp: number) =>
-    (cp >= 0x3000 && cp <= 0x9FFF) ||
-    (cp >= 0xF900 && cp <= 0xFAFF) ||
-    (cp >= 0xAC00 && cp <= 0xD7AF) ||
-    (cp >= 0xFF00 && cp <= 0xFFEF);
-
   for (const run of runs) {
     const font = applyRunFont(baseFont, run);
     // Tokenize: runs of non-space latin, spaces, or individual CJK chars
@@ -848,7 +842,7 @@ export function layoutRichTextLines(
       if (cp === 0x000A) {
         // Explicit newline: force break
         tokens.push('\n'); i += 1;
-      } else if (isCJK(cp)) {
+      } else if (isCjkBreakChar(cp)) {
         tokens.push(ch);
         i += cp > 0xFFFF ? 2 : 1;
       } else if (ch === ' ') {
@@ -861,7 +855,7 @@ export function layoutRichTextLines(
         while (j < run.text.length) {
           const c = run.text[j];
           const p = c.codePointAt(0) ?? 0;
-          if (c === ' ' || c === '\n' || isCJK(p)) break;
+          if (c === ' ' || c === '\n' || isCjkBreakChar(p)) break;
           j += p > 0xFFFF ? 2 : 1;
         }
         tokens.push(run.text.slice(i, j));
