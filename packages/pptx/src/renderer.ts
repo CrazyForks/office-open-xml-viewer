@@ -56,6 +56,7 @@ import {
   NON_CJK_SERIF_FALLBACKS,
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
+  getCachedSvgImage,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -2483,15 +2484,6 @@ function renderTextBody(
 const IMAGE_BITMAP_CACHE_MAX = 256;
 const imageBitmapCache = new Map<string, Promise<ImageBitmap>>();
 
-// Decoded-SVG cache keyed by the `data:image/svg+xml;base64,…` URL. SVG
-// pictures (Microsoft's svgBlip extension) are decoded via an <img> element
-// (createImageBitmap cannot rasterize SVG in every browser), and the same
-// picture is re-drawn on every render. Cache the decoded HTMLImageElement
-// (the Promise, so concurrent first-renders dedupe). Unlike ImageBitmap, an
-// HTMLImageElement holds no GPU resource that must be released, so eviction
-// just drops the entry — there is nothing to `.close()`. Bounded FIFO.
-const SVG_IMAGE_CACHE_MAX = 256;
-const svgImageCache = new Map<string, Promise<HTMLImageElement>>();
 
 /** Local view of the parsed `<a:sp3d>` (1:1 with the Sp3d TS type). */
 interface Sp3dLike {
@@ -2811,48 +2803,6 @@ function getCachedBitmap(dataUrl: string): Promise<ImageBitmap> {
   return p;
 }
 
-/**
- * Decode a `data:image/svg+xml;base64,…` URL to an HTMLImageElement, cached by
- * URL. Used for pictures that carry Microsoft's svgBlip extension so the vector
- * original is drawn instead of the rasterized PNG fallback. Rejects (so callers
- * can fall back to the PNG) if the SVG fails to load. The returned image is
- * drawable with `ctx.drawImage` exactly like an ImageBitmap; it must NOT be
- * `.close()`d (only ImageBitmaps own a releasable resource).
- */
-function getCachedSvgImage(dataUrl: string): Promise<HTMLImageElement> {
-  const existing = svgImageCache.get(dataUrl);
-  if (existing) {
-    // Refresh LRU position.
-    svgImageCache.delete(dataUrl);
-    svgImageCache.set(dataUrl, existing);
-    return existing;
-  }
-  const p = new Promise<HTMLImageElement>((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      // `decode()` guarantees the bitmap is ready before the first draw, so the
-      // synchronous paint pass never draws an undecoded image. Fall back to the
-      // already-fired load event if decode() is unavailable / rejects.
-      if (typeof img.decode === 'function') {
-        img.decode().then(() => resolve(img)).catch(() => resolve(img));
-      } else {
-        resolve(img);
-      }
-    };
-    img.onerror = () => reject(new Error('SVG image failed to load'));
-    img.src = dataUrl;
-  });
-  // Don't poison the cache on a transient decode failure.
-  p.catch(() => svgImageCache.delete(dataUrl));
-  svgImageCache.set(dataUrl, p);
-  if (svgImageCache.size > SVG_IMAGE_CACHE_MAX) {
-    // HTMLImageElement holds no GPU handle — just drop the oldest entry.
-    const oldestKey = svgImageCache.keys().next().value as string;
-    svgImageCache.delete(oldestKey);
-  }
-  return p;
-}
-
 /** Poster bitmaps decoded once per media element; renderSlide's prefetch pass
  *  warms this so the sequential draw loop never waits on the network. Keyed by
  *  element identity (not posterPath), so the bitmap releases when the slide
@@ -2888,22 +2838,34 @@ async function renderPicture(
     // two drawable sources — both expose numeric .width/.height (used for the
     // srcRect crop below) and both are valid `ctx.drawImage` sources, so every
     // downstream path stays unchanged.
+    // `dataUrl` is normally a raster (PNG/JPEG), but for a pure-SVG picture with
+    // no raster blip it is the SVG itself — and `createImageBitmap` (getCachedBitmap)
+    // cannot rasterize SVG in every browser, so such a `dataUrl` must also go
+    // through the <img>-based SVG decoder.
+    const dataIsSvg = el.dataUrl.startsWith('data:image/svg+xml');
     let bitmap: ImageBitmap | HTMLImageElement;
     if (el.svgDataUrl != null && !el.srcRect) {
-      // No crop: prefer the vector original. With an a:srcRect crop, fall back
-      // to the PNG instead — the crop math below multiplies fractional srcRect
-      // edges by the source's pixel dims, and an SVG HTMLImageElement that
-      // declares only a viewBox (no intrinsic width/height) reports the
-      // 300×150 default rather than its logical size, so a 9-arg drawImage with
-      // a source rect samples the wrong basis (and Chromium draws nothing). The
-      // PNG fallback (el.dataUrl, always populated alongside svgDataUrl) has
-      // exact pixel dims that make the ECMA-376 §20.1.8.55 fractional crop
-      // well-defined and drawable.
+      // No crop: prefer the vector original. With an a:srcRect crop we skip this
+      // branch — the crop math below multiplies fractional srcRect edges by the
+      // source's pixel dims, and an SVG HTMLImageElement that declares only a
+      // viewBox (no intrinsic width/height) reports the 300×150 default rather
+      // than its logical size, so a 9-arg drawImage with a source rect samples
+      // the wrong basis. When a real raster exists it has exact pixel dims that
+      // make the ECMA-376 §20.1.8.55 fractional crop well-defined (handled in
+      // the final branch); when only the SVG exists the `dataIsSvg` branch below
+      // still draws it (uncropped is the overwhelmingly common case for icons).
       try {
         bitmap = await getCachedSvgImage(el.svgDataUrl);
       } catch {
-        bitmap = await getCachedBitmap(el.dataUrl);
+        bitmap = dataIsSvg
+          ? await getCachedSvgImage(el.dataUrl)
+          : await getCachedBitmap(el.dataUrl);
       }
+    } else if (dataIsSvg) {
+      // SVG-only picture (here either because it has a crop, or — defensively —
+      // because no svgDataUrl was surfaced): decode through the SVG path since
+      // createImageBitmap can't.
+      bitmap = await getCachedSvgImage(el.dataUrl);
     } else {
       bitmap = await getCachedBitmap(el.dataUrl);
     }
@@ -3724,8 +3686,11 @@ export async function renderSlide(
       // (The draw path still falls back to getCachedBitmap on SVG decode
       // failure, so the PNG stays cold only in that rare case.)
       const p = el as PictureElement;
+      const pDataIsSvg = p.dataUrl.startsWith('data:image/svg+xml');
       if (p.svgDataUrl != null && !p.srcRect) {
         void getCachedSvgImage(p.svgDataUrl).catch(() => undefined);
+      } else if (pDataIsSvg) {
+        void getCachedSvgImage(p.dataUrl).catch(() => undefined);
       } else {
         void getCachedBitmap(p.dataUrl).catch(() => undefined);
       }

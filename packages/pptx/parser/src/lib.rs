@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use ooxml_common::blip::{mime_from_ext, svg_blip_rid};
 use ooxml_common::math::{nodes_to_text, parse_omath_nodes, MathNode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -950,6 +951,10 @@ struct PictureElement {
     rotation: f64,
     flip_h: bool,
     flip_v: bool,
+    /// The raster image from the blip's own `r:embed` (PNG/JPEG). When the
+    /// picture is a pure SVG with no raster `r:embed` (only the svgBlip
+    /// extension below), this falls back to the SVG data URL so the element is
+    /// always drawable; `svg_data_url` then holds the same vector source.
     data_url: String,
     /// Microsoft 2016 SVG extension (`<a:blip><a:extLst><a:ext
     /// uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip r:embed>`):
@@ -6376,14 +6381,7 @@ fn svg_blip_data_url(
     rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
 ) -> Option<String> {
-    let svg_blip = child(blip, "extLst")?
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "ext")
-        .find_map(|ext| {
-            ext.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "svgBlip")
-        })?;
-    let svg_rid = attr_r(&svg_blip, "embed")?;
+    let svg_rid = svg_blip_rid(blip)?;
     let svg_target = rels.get(&svg_rid)?;
     let svg_path = resolve_path(slide_dir, svg_target);
     let svg_bytes = read_zip_bytes(zip, &svg_path)?;
@@ -6410,19 +6408,35 @@ fn parse_picture(
 
     let blip_fill = child(pic_node, "blipFill")?;
     let blip = child(blip_fill, "blip")?;
-    let r_id = attr_r(&blip, "embed")?;
 
-    let rel_target = rels.get(&r_id)?;
-    let image_path = resolve_path(slide_dir, rel_target);
-
-    let image_bytes = read_zip_bytes(zip, &image_path)?;
-    let mime = mime_from_ext(&image_path);
-    let data_url = format!("data:{mime};base64,{}", B64.encode(&image_bytes));
-
-    // Microsoft 2016 SVG extension: the PNG above is only the fallback; the real
-    // vector image rides inside `<a:blip><a:extLst>`. Surface it separately so
-    // the renderer can prefer the SVG and fall back to the PNG on decode error.
+    // Microsoft 2016 SVG extension: the real vector image rides inside
+    // `<a:blip><a:extLst>`, while `<a:blip r:embed>` carries a raster (PNG/JPEG)
+    // *fallback* for SVG-incapable clients. Resolve the SVG first so a picture
+    // that carries ONLY the svgBlip — with no raster `r:embed`, e.g. an icon
+    // inserted as a pure SVG — still parses instead of being dropped. Surfaced
+    // separately so the renderer can prefer the vector original and fall back to
+    // the raster on decode error.
     let svg_data_url = svg_blip_data_url(blip, slide_dir, rels, zip);
+
+    // Raster blip (`<a:blip r:embed>` → PNG/JPEG data URL). Optional: a pure-SVG
+    // picture omits it, so this is no longer a hard requirement for the element.
+    let raster_data_url = (|| -> Option<String> {
+        let r_id = attr_r(&blip, "embed")?;
+        let rel_target = rels.get(&r_id)?;
+        let image_path = resolve_path(slide_dir, rel_target);
+        let image_bytes = read_zip_bytes(zip, &image_path)?;
+        let mime = mime_from_ext(&image_path);
+        Some(format!("data:{mime};base64,{}", B64.encode(&image_bytes)))
+    })();
+
+    // A picture needs at least one drawable source. Keep the raster as `data_url`
+    // (the renderer's srcRect / SVG-decode-failure fallback path); when no raster
+    // is embedded, fall back to the SVG itself so the element is always drawable.
+    let data_url = match (raster_data_url, svg_data_url.as_ref()) {
+        (Some(raster), _) => raster,
+        (None, Some(svg)) => svg.clone(),
+        (None, None) => return None,
+    };
 
     // ECMA-376 §20.1.9.8 — `<p:pic>` may carry `<a:custGeom>` inside `<p:spPr>`,
     // in which case the bitmap is clipped to that custom path (e.g. a laptop
@@ -6488,40 +6502,6 @@ fn png_size_from_data_url(data_url: &str) -> Option<(u32, u32)> {
 
 /// EMU per CSS pixel at PowerPoint's default 96 DPI (914400 EMU/inch ÷ 96).
 const EMU_PER_PX_96DPI: i64 = 9525;
-
-fn mime_from_ext(path: &str) -> &'static str {
-    match path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "mp3" => "audio/mpeg",
-        "m4a" => "audio/mp4",
-        "wav" => "audio/wav",
-        "aac" => "audio/aac",
-        "wma" => "audio/x-ms-wma",
-        "flac" => "audio/flac",
-        "ogg" | "oga" => "audio/ogg",
-        "mp4" | "m4v" => "video/mp4",
-        "mov" | "qt" => "video/quicktime",
-        "avi" => "video/x-msvideo",
-        "wmv" => "video/x-ms-wmv",
-        "mpg" | "mpeg" => "video/mpeg",
-        "3gp" => "video/3gpp",
-        "mkv" => "video/x-matroska",
-        "webm" => "video/webm",
-        "ogv" => "video/ogg",
-        _ => "application/octet-stream",
-    }
-}
 
 /// If a `p:pic` declares an `a:audioFile` / `a:videoFile` in its `nvPr`
 /// (or the newer `p14:media` extension), emit a `MediaElement` with the
@@ -10713,6 +10693,78 @@ mod tests {
         assert!(
             pic.svg_data_url.is_none(),
             "svg_data_url must be None without an svgBlip extension"
+        );
+    }
+
+    /// A `<p:pic>` whose `<a:blip>` carries ONLY the `asvg:svgBlip` extension —
+    /// no raster `r:embed` fallback at all (an icon inserted as a pure SVG, as
+    /// in sample-12) — must still parse. Previously the mandatory raster embed
+    /// (`attr_r(&blip, "embed")?`) made `parse_picture` return None, so the whole
+    /// picture was silently dropped and the SVG never rendered.
+    #[test]
+    fn picture_with_only_svg_blip_and_no_raster_embed_still_parses() {
+        const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M0 0h24v24H0z" fill="#0a0"/></svg>"##;
+
+        // The `<a:blip>` has NO r:embed attribute — the image is referenced only
+        // through the svgBlip extension.
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+  xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main">
+  <p:nvPicPr><p:cNvPr id="4" name="SvgOnly"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill>
+    <a:blip>
+      <a:extLst>
+        <a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}">
+          <asvg:svgBlip r:embed="rIdSvg"/>
+        </a:ext>
+      </a:extLst>
+    </a:blip>
+    <a:stretch><a:fillRect/></a:stretch>
+  </p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+</p:pic>"#;
+
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let pic_node = doc.root_element();
+
+        let mut rels = HashMap::new();
+        rels.insert("rIdSvg".to_string(), "../media/image2.svg".to_string());
+
+        let theme = HashMap::new();
+        // Only the .svg part is referenced; the PNG arg is unused here.
+        let data = build_blip_media_zip(b"", SVG);
+        let cursor = Cursor::new(data.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+
+        let pic = parse_picture(pic_node, "ppt/slides", &rels, &theme, &mut zip)
+            .expect("parse_picture must succeed for an svgBlip-only picture (sample-12 case)");
+
+        // The SVG body is surfaced on svg_data_url so the renderer prefers it.
+        let svg_url = pic
+            .svg_data_url
+            .as_deref()
+            .expect("svg_data_url must be Some for an svgBlip-only picture");
+        assert!(
+            svg_url.starts_with("data:image/svg+xml;base64,"),
+            "svg_data_url must be a base64 image/svg+xml data URL; got {}",
+            &svg_url[..svg_url.len().min(40)]
+        );
+
+        // With no raster blip, data_url falls back to the SVG itself so the
+        // element is always drawable (rather than being dropped or empty).
+        assert!(
+            pic.data_url.starts_with("data:image/svg+xml;base64,"),
+            "data_url must fall back to the SVG when no raster blip is embedded; got {}",
+            &pic.data_url[..pic.data_url.len().min(40)]
+        );
+        let decoded = B64
+            .decode(svg_url.strip_prefix("data:image/svg+xml;base64,").unwrap())
+            .expect("svg_data_url payload must be valid base64");
+        assert_eq!(
+            decoded, SVG,
+            "decoded svg_data_url must equal the .svg part"
         );
     }
 
