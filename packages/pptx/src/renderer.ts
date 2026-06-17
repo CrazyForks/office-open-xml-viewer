@@ -57,6 +57,7 @@ import {
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
   getCachedSvgImage,
+  highlightBox,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -120,6 +121,31 @@ function emuToPx(emu: number, scale: number): number {
 }
 
 const hexToRgba = hexToRgbaCore;
+
+/**
+ * Paint a run's text-highlight (marker) box behind the glyphs.
+ * ECMA-376 §21.1.2.3.4 — `<a:rPr><a:highlight>`. Called before the glyphs are
+ * drawn so they (and any underline / strikethrough) sit on top, and before any
+ * shadow is set on the context so the box itself isn't shadowed. `width` is the
+ * glyph advance computed by the caller (it differs between the normal and
+ * tab-stop paths only by the justification stretch added to it). The vertical
+ * band comes from the shared `highlightBox` helper. `glyphColor` restores
+ * `ctx.fillStyle` so the subsequent fillText draws in the run colour.
+ */
+export function paintHighlight(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  baseline: number,
+  width: number,
+  fontPx: number,
+  highlight: string,
+  glyphColor: string,
+): void {
+  const { top, height } = highlightBox(baseline, fontPx);
+  ctx.fillStyle = highlight;
+  ctx.fillRect(x, top, width, height);
+  ctx.fillStyle = glyphColor;
+}
 
 /** Simple fill resolver that returns a CSS color string.
  *  For gradient/pattern fills, returns a flat colour (used by table cells etc.,
@@ -370,6 +396,11 @@ type LayoutSegment = {
   shadow?: import('@silurus/ooxml-core').Shadow;
   /** Run-level glyph outline (rPr > a:ln). Width in EMU; renderer scales. */
   outline?: import('@silurus/ooxml-core').TextOutline;
+  /**
+   * Run-level text highlight (rPr > a:highlight, ECMA-376 §21.1.2.3.4) as an
+   * rgba() string. Renderer fills a background box behind the glyphs.
+   */
+  highlight?: string;
   /**
    * Present when this segment is an OMML equation drawn as an image instead of
    * text (`text` is then ""). Box metrics are in px at the current scale.
@@ -628,7 +659,7 @@ function tokenHasCjk(s: string): boolean {
   return false;
 }
 
-function layoutParagraph(
+export function layoutParagraph(
   ctx: CanvasRenderingContext2D,
   para: Paragraph,
   maxWidthPx: number,
@@ -681,6 +712,7 @@ function layoutParagraph(
       underlineColor?: string;
       shadow?: import('@silurus/ooxml-core').Shadow;
       outline?: import('@silurus/ooxml-core').TextOutline;
+      highlight?: string;
     },
   ) => {
     if (!text) return;
@@ -697,6 +729,7 @@ function layoutParagraph(
     const underlineColor = extras?.underlineColor;
     const shadow = extras?.shadow;
     const outline = extras?.outline;
+    const highlight = extras?.highlight;
     // Shadow / outline use object identity for merging — adjacent runs share
     // the same object since the run is parsed once. Different objects (or
     // one set / one missing) force a new segment.
@@ -712,14 +745,15 @@ function layoutParagraph(
       (a.letterSpacingPx ?? 0) === lsPx &&
       a.baseline === baseline &&
       a.shadow === shadow &&
-      a.outline === outline;
+      a.outline === outline &&
+      (a.highlight ?? '') === (highlight ?? '');
     if (tabActive && currentLine.tabStop) {
       const segs = currentLine.tabStop.segments;
       const last = segs.at(-1);
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        segs.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline });
+        segs.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight });
       }
     } else {
       lineW += w;
@@ -727,7 +761,7 @@ function layoutParagraph(
       if (last && sameMeta(last)) {
         last.text += text;
       } else {
-        currentLine.segments.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline });
+        currentLine.segments.push({ text, font, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight });
       }
     }
   };
@@ -827,6 +861,10 @@ function layoutParagraph(
       underlineColor: run.underlineColor ? hexToRgba(run.underlineColor) : undefined,
       shadow: run.shadow,
       outline: run.outline,
+      // §21.1.2.3.4 — highlight is a resolved hex (6-char opaque or 8-char
+      // RRGGBBAA); hexToRgba handles both, matching how text/underline colours
+      // are converted for canvas.
+      highlight: run.highlight ? hexToRgba(run.highlight) : undefined,
     };
 
     // Split on whitespace boundaries, keeping the whitespace tokens
@@ -2294,6 +2332,15 @@ function renderTextBody(
       const segBaseline = baseline + baselineShift;
       const ls = seg.letterSpacingPx ?? 0;
 
+      // Run-level text highlight (rPr > a:highlight, ECMA-376 §21.1.2.3.4).
+      // Box advance = glyph measure + letter spacing + justification stretch.
+      if (seg.highlight && seg.text) {
+        const hlW = ctx.measureText(seg.text).width
+          + (ls > 0 ? ls * seg.text.length : 0)
+          + (seg.jext ?? 0);
+        paintHighlight(ctx, penX, segBaseline, hlW, seg.sizePx, seg.highlight, seg.color);
+      }
+
       // Run-level text shadow (rPr > effectLst > outerShdw). Set on the
       // context so the fillText below picks it up, then cleared after so
       // the outline / underline / strikethrough don't get shadowed too.
@@ -2439,6 +2486,13 @@ function renderTextBody(
         ctx.font = seg.font;
         ctx.fillStyle = seg.color;
         const tabLs = seg.letterSpacingPx ?? 0;
+        // Highlight box behind tab-stop-aligned glyphs (ECMA-376 §21.1.2.3.4).
+        // No justification stretch on tab-stop runs, so the advance is just
+        // glyph measure + letter spacing.
+        if (seg.highlight && seg.text) {
+          const hlW = ctx.measureText(seg.text).width + tabLs * seg.text.length;
+          paintHighlight(ctx, tabPenX, baseline, hlW, seg.sizePx, seg.highlight, seg.color);
+        }
         if (tabLs > 0 && seg.text.length > 1) {
           let cx = tabPenX;
           for (const ch of seg.text) {

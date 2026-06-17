@@ -1634,6 +1634,15 @@ struct TextRunData {
     /// width (EMU) and colour.
     #[serde(skip_serializing_if = "Option::is_none")]
     outline: Option<TextOutline>,
+    /// ECMA-376 §21.1.2.3.4 — text highlight (marker) colour from
+    /// `<a:rPr><a:highlight>`. The DrawingML highlight is a full CT_Color (any
+    /// srgbClr / schemeClr / sysClr / prstClr + transforms), NOT the fixed
+    /// 16-name enum WordprocessingML uses — so it resolves through the same
+    /// colour pipeline as solidFill. Resolved hex without `#` (6-char opaque,
+    /// or 8-char RRGGBBAA when an alpha transform applies). None = no
+    /// highlight; renderer draws no background box.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    highlight: Option<String>,
 }
 
 /// Run-level text outline (`<a:rPr><a:ln>`). The width is the OOXML EMU
@@ -4661,6 +4670,11 @@ fn parse_paragraph(
                     .and_then(|n| child(n, "latin"))
                     .and_then(|n| attr(&n, "typeface"))
                     .map(|tf| resolve_theme_typeface(&tf, theme));
+                // §21.1.2.3.4 — a field's rPr can also carry a highlight; resolve
+                // it the same way as a normal run (CT_Color via the shared path).
+                let highlight = r_pr
+                    .and_then(|n| child(n, "highlight"))
+                    .and_then(|n| parse_color_node(n, theme));
                 runs.push(TextRun::Text(TextRunData {
                     text,
                     bold,
@@ -4686,6 +4700,7 @@ fn parse_paragraph(
                     hyperlink: None,
                     shadow: None,
                     outline: None,
+                    highlight,
                 }));
             }
             _ => {}
@@ -4922,6 +4937,22 @@ fn parse_run(
             color: child(ln, "solidFill").and_then(|n| parse_color_node(n, theme)),
         });
 
+    // ECMA-376 §21.1.2.3.4 — `<a:rPr><a:highlight>` text highlight (marker).
+    // The element IS a CT_Color, so pass the <a:highlight> node straight to the
+    // shared colour resolver — the same one solidFill uses — which walks its
+    // srgbClr / schemeClr / sysClr / prstClr child and applies any tint / alpha
+    // transforms. schemeClr therefore resolves through the master clrMap +
+    // theme exactly like other run colours. Falls back to defRPr when the run
+    // itself doesn't set a highlight.
+    let highlight = r_pr
+        .and_then(|n| child(n, "highlight"))
+        .and_then(|n| parse_color_node(n, theme))
+        .or_else(|| {
+            def_rpr
+                .and_then(|n| child(n, "highlight"))
+                .and_then(|n| parse_color_node(n, theme))
+        });
+
     Some(TextRunData {
         text,
         bold,
@@ -4943,6 +4974,7 @@ fn parse_run(
         hyperlink,
         shadow,
         outline,
+        highlight,
     })
 }
 
@@ -9257,6 +9289,68 @@ mod tests {
         let doc = roxmltree::Document::parse(with_ufilltx).unwrap();
         let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
         assert!(r.underline_color.is_none());
+    }
+
+    /// ECMA-376 §21.1.2.3.4 — rPr > highlight is a CT_Color (the marker /
+    /// text-highlight colour). Unlike WordprocessingML's CT_Highlight (a fixed
+    /// 16-name enum), the DrawingML highlight is any colour, so it must resolve
+    /// through the same colour pipeline as solidFill: srgbClr literal,
+    /// schemeClr via the theme/clrMap, plus alpha transforms (8-char hex).
+    #[test]
+    fn test_parse_run_highlight_srgb() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><highlight><srgbClr val="FFFF00"/></highlight></rPr><t>x</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(
+            r.highlight.as_deref().map(str::to_uppercase).as_deref(),
+            Some("FFFF00")
+        );
+    }
+
+    /// schemeClr highlight resolves through the theme map (same path as
+    /// solidFill scheme colours), proving we did not hard-code a name table.
+    #[test]
+    fn test_parse_run_highlight_scheme_resolves_theme() {
+        let rels = HashMap::new();
+        let mut theme = HashMap::new();
+        theme.insert("accent1".to_owned(), "E46970".to_owned());
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><highlight><schemeClr val="accent1"/></highlight></rPr><t>x</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(
+            r.highlight.as_deref().map(str::to_uppercase).as_deref(),
+            Some("E46970")
+        );
+    }
+
+    /// An alpha transform on the highlight colour yields 8-char RRGGBBAA, the
+    /// same encoding the shared colour helper emits for translucent fills.
+    #[test]
+    fn test_parse_run_highlight_alpha_is_8char() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><highlight><srgbClr val="00FF00"><alpha val="50000"/></srgbClr></highlight></rPr><t>x</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        let hl = r
+            .highlight
+            .expect("highlight should resolve")
+            .to_uppercase();
+        assert_eq!(hl.len(), 8, "alpha < 1 → RRGGBBAA, got {hl}");
+        assert!(hl.starts_with("00FF00"), "rgb preserved, got {hl}");
+    }
+
+    /// No highlight element → field stays None (omitted from JSON).
+    #[test]
+    fn test_parse_run_without_highlight_is_none() {
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let xml = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr/><t>x</t></r>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let r = parse_run(doc.root_element(), None, &theme, &rels).unwrap();
+        assert!(r.highlight.is_none());
     }
 
     /// ECMA-376 §21.1.2.3.7 — rPr > ea sets a separate East Asian font.
