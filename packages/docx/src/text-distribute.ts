@@ -24,9 +24,13 @@
 // boundaries; it does NOT widen the boundary between two Latin letters of one
 // word.
 //
-// `both` and `distribute` therefore select the SAME gap opportunities and differ
-// ONLY in the last line: `both` leaves the paragraph's final line natural;
-// `distribute` fills it too. (The renderer decides whether to call this kernel
+// In this kernel `both` and `distribute` select the same gap opportunities and
+// differ only in the last line: `both` leaves the paragraph's final line natural,
+// `distribute` fills it too. NOTE: per spec `distribute` should additionally add
+// pitch between Latin letters within a word ("all characters on the line"); that
+// pure-Latin refinement is unimplemented (rare, and it needs a Word ground truth)
+// and is tracked as a follow-up — CJK content, this kernel's target, is
+// unaffected. (The renderer decides whether to call this kernel
 // for a given line; the kernel just stretches whatever line it is handed.) This
 // mirrors the pptx text-justify kernel — see packages/pptx/src/text-justify.ts —
 // which reached the same gap model from the PowerPoint PDFs.
@@ -42,22 +46,14 @@
 // trailing-edge flag (the inter-segment boundary). The renderer applies `perGap`
 // at each.
 
-/** Single-code-point CJK test, sharing the ranges hasCJKBreakOpportunity uses in
- *  renderer.ts (CJK symbols/punctuation + Unified incl. Ext-A via 0x3000–0x9FFF,
- *  CJK Compatibility Ideographs, Hangul syllables, and Halfwidth/Fullwidth
- *  forms). A boundary between two non-space code points is a stretch opportunity
- *  when either side is one of these. NOTE: U+3000 (ideographic space) falls in
- *  the 0x3000–0x9FFF block but the gap walker classifies whitespace FIRST (see
- *  isJustifyWhitespace), so an ideographic space is treated as one inter-word gap
- *  and never reaches this test — matching the pptx CJK_RE which starts at U+3001. */
-export function isCJKCodePoint(cp: number): boolean {
-  return (
-    (cp >= 0x3000 && cp <= 0x9fff) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0xac00 && cp <= 0xd7af) ||
-    (cp >= 0xff00 && cp <= 0xffef)
-  );
-}
+import { isCjkBreakChar } from '@silurus/ooxml-core';
+
+// A boundary between two non-space code points is a CJK stretch opportunity when
+// either side is a CJK / ideographic glyph, tested via the shared
+// core.isCjkBreakChar (the single CJK-range source across pptx/docx/xlsx). NOTE:
+// U+3000 (ideographic space) is inside that predicate's range, but the gap walker
+// classifies whitespace FIRST (see isJustifyWhitespace), so an ideographic space
+// becomes one inter-word gap and never reaches the CJK test.
 
 /** Whitespace that participates as an INTER-WORD gap: the ASCII space (U+0020)
  *  and the ideographic space (U+3000). Both are stretched as one gap each, like
@@ -211,8 +207,8 @@ export function distributeLineSlack(
     const lc = u.cp;
     const rc = nx.cp;
     if (
-      (lc !== undefined && isCJKCodePoint(lc)) ||
-      (rc !== undefined && isCJKCodePoint(rc))
+      (lc !== undefined && isCjkBreakChar(lc)) ||
+      (rc !== undefined && isCjkBreakChar(rc))
     ) {
       gapAfter[k] = true;
       total++;

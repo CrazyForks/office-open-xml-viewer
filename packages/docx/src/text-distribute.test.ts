@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { distributeLineSlack, isCJKCodePoint } from './text-distribute.js';
+import { distributeLineSlack } from './text-distribute.js';
 import type { DistributeSeg, DistributeResult } from './text-distribute.js';
 
 // ECMA-376 §17.18.44 ST_Jc: `both` and `distribute` fill a line to the margin by
@@ -26,23 +26,6 @@ function totalStretch(r: DistributeResult): number {
   }
   return gaps * r.perGap;
 }
-
-describe('isCJKCodePoint', () => {
-  it('classifies CJK ideographs, kana, hangul, fullwidth as CJK', () => {
-    expect(isCJKCodePoint('観'.codePointAt(0)!)).toBe(true); // CJK Unified
-    expect(isCJKCodePoint('す'.codePointAt(0)!)).toBe(true); // Hiragana
-    expect(isCJKCodePoint('カ'.codePointAt(0)!)).toBe(true); // Katakana
-    expect(isCJKCodePoint('가'.codePointAt(0)!)).toBe(true); // Hangul syllable
-    expect(isCJKCodePoint('、'.codePointAt(0)!)).toBe(true); // CJK punctuation
-    expect(isCJKCodePoint('Ａ'.codePointAt(0)!)).toBe(true); // Fullwidth Latin A
-  });
-  it('classifies Latin letters, digits, ASCII space as non-CJK', () => {
-    expect(isCJKCodePoint('A'.codePointAt(0)!)).toBe(false);
-    expect(isCJKCodePoint('z'.codePointAt(0)!)).toBe(false);
-    expect(isCJKCodePoint('5'.codePointAt(0)!)).toBe(false);
-    expect(isCJKCodePoint(' '.codePointAt(0)!)).toBe(false);
-  });
-});
 
 describe('distributeLineSlack — pure CJK (the bug)', () => {
   // A pure-CJK phrase is ONE segment with no ASCII spaces. The old space-only
