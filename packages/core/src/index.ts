@@ -60,6 +60,9 @@ export { drawArrowHead } from './shape/arrow';
 // Shared embedded-SVG decoder (Microsoft asvg:svgBlip extension) — used by all
 // three renderers to prefer the vector original over the raster fallback.
 export { getCachedSvgImage } from './image/svg-image';
+// Path-keyed variant for the lazy byte-on-demand pipeline: fetches SVG bytes via
+// a caller-supplied fetchImage(path, mimeType) and owns the object-URL lifecycle.
+export { getCachedSvgImageByPath } from './image/svg-image-by-path';
 // ECMA-376 §20.1.9 spec-driven preset geometry engine (presets.json from
 // presetShapeDefinitions.xml). Coexists with the legacy hand-rolled
 // `buildShapePath` above, which the pptx renderer still uses as a silhouette /
