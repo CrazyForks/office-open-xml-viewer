@@ -2236,10 +2236,14 @@ function renderTextBody(
       alignment === 'just' || alignment === 'justLow' ? 'just' as const
       : alignment === 'dist' || alignment === 'thaiDist' ? 'dist' as const
       : null;
-    const drawSegs = justifyMode && !paraNeedsBidi
+    // A line broken at a right/centre tab stop keeps its pre-tab text natural:
+    // justifying it would spread that text across the whole column and overlap
+    // the tab-aligned remainder drawn after this loop. Skip justify for it.
+    const hasTabStop = !!line.tabStop && line.tabStop.segments.length > 0;
+    const drawSegs = justifyMode && !paraNeedsBidi && !hasTabStop
       ? justifyLine(line.segments, textMaxW - textXOffset, lineWidth, justifyMode, isLastLine)
       : null;
-    const segs = drawSegs ?? line.segments;
+    const segs: (LayoutSegment & { jext?: number })[] = drawSegs ?? line.segments;
 
     // Visual draw order: under bidi, reorder segments per UAX#9 (rule L2) and
     // draw each with ctx.direction matching its resolved direction. textAlign
@@ -2253,6 +2257,12 @@ function renderTextBody(
       const seg = segs[li];
       const segRtl = visual ? visual.rtl[li] : false;
       if (paraNeedsBidi) ctx.direction = segRtl ? 'rtl' : 'ltr';
+      // Justification advance after this piece (0 when not justifying). Added to
+      // the pen, and folded into the trailing edge of underline / strikethrough
+      // and the reported onTextRun width, so decorations and the text layer span
+      // the widened gap instead of leaving a hole. The last content piece always
+      // has jext 0 (justifyLine never stretches after the final glyph).
+      const jext = seg.jext ?? 0;
       // ── Equation segment: draw the cached image instead of text ──────────
       if (seg.math) {
         const render = mathRenders.get(seg.math.nodes);
@@ -2264,7 +2274,7 @@ function renderTextBody(
           ctx.drawImage(img, penX, top, w, h);
         }
         penX += w;
-        penX += (seg as { jext?: number }).jext ?? 0;
+        penX += jext;
         continue;
       }
       ctx.font = seg.font;
@@ -2352,7 +2362,7 @@ function renderTextBody(
           text: seg.text,
           inShapeX: penX - bx,
           inShapeY: cursorY - by,
-          w: segW,
+          w: segW + jext,
           h: lineHeight,
           fontSize: seg.sizePx,
           font: seg.font,
@@ -2365,7 +2375,7 @@ function renderTextBody(
       }
 
       if (seg.underline) {
-        drawUnderline(ctx, penX, segBaseline, segW, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle);
+        drawUnderline(ctx, penX, segBaseline, segW + jext, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle);
       }
 
       if (seg.strikethrough) {
@@ -2381,20 +2391,20 @@ function renderTextBody(
           const yMid = segBaseline - seg.sizePx * 0.32;
           ctx.beginPath();
           ctx.moveTo(penX, yMid - offset);
-          ctx.lineTo(penX + segW, yMid - offset);
+          ctx.lineTo(penX + segW + jext, yMid - offset);
           ctx.moveTo(penX, yMid + offset);
-          ctx.lineTo(penX + segW, yMid + offset);
+          ctx.lineTo(penX + segW + jext, yMid + offset);
           ctx.stroke();
         } else {
           ctx.beginPath();
           ctx.moveTo(penX, segBaseline - seg.sizePx * 0.32);
-          ctx.lineTo(penX + segW, segBaseline - seg.sizePx * 0.32);
+          ctx.lineTo(penX + segW + jext, segBaseline - seg.sizePx * 0.32);
           ctx.stroke();
         }
       }
 
       penX += segW;
-      penX += (seg as { jext?: number }).jext ?? 0;
+      penX += jext;
     }
     if (paraNeedsBidi) ctx.direction = 'ltr'; // reset before tab-stop / next line
 

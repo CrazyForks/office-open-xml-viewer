@@ -10,6 +10,17 @@
 // — same distribution, only the kashida/glyph-stretch sophistication differs,
 // which Canvas cannot reproduce — so we treat just≡justLow and dist≡thaiDist.
 //
+// `just` and `dist` use the SAME gap selection (inter-word AND inter-CJK) and
+// differ ONLY in the last line (just: natural, dist: filled). This is
+// intentionally NOT WordprocessingML's ST_Jc model (§17.18.44), where `both`
+// stretches inter-word space only and `distribute` adds inter-character pitch:
+// DrawingML/PowerPoint justifies CJK under `just` too — a pure-CJK `just` line
+// fills to the column edge in PowerPoint (its same-name PDF is the ground truth
+// here; §17.18.44 governs Word, not PowerPoint). The spec's "smart … does not
+// justify sentences which are short" clause is realized as the last-line rule
+// only; no length threshold is invented for other short lines (the spec gives
+// no metric, and a guess would be a heuristic).
+//
 // Why character-level, not segment-level: the layout merges adjacent
 // same-style tokens into ONE segment (see layoutParagraph's `push`/`sameMeta`),
 // so a plain paragraph line is usually a single segment holding the whole
@@ -23,6 +34,12 @@
 // px to advance AFTER drawing it. The renderer simply draws each piece and adds
 // its `jext` — the existing glyph paths are untouched. The sum of all `jext`
 // equals the slack, so the painted line reaches `availWidth`.
+//
+// Splits land only at gap positions (inter-word spaces and inter-CJK
+// boundaries), never inside a Latin word, so a split never cuts a kerning pair
+// or ligature. The per-piece advance widths the renderer re-measures therefore
+// sum to the whole-line `naturalWidth` passed in, and the painted line lands on
+// `availWidth` without measurement drift.
 
 /** Mirrors the CJK ranges the layout uses to allow a break between adjacent
  *  characters (CJK punctuation & Unified incl. Ext-A, Hangul syllables, CJK
