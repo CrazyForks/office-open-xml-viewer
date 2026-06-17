@@ -7791,9 +7791,8 @@ fn parse_sp_tree_node(
                                     // p:pic's blip — prefer the vector original.
                                     let svg_image_path =
                                         blip.and_then(|b| svg_blip_path(b, slide_dir, rels, zip));
-                                    let svg_mime_type = svg_image_path
-                                        .as_ref()
-                                        .map(|_| "image/svg+xml".to_owned());
+                                    let svg_mime_type =
+                                        svg_image_path.as_ref().map(|_| "image/svg+xml".to_owned());
                                     // §20.1.2.2.24 — placeholder pic border: the
                                     // p:pic's own `<a:ln>`, else the inherited
                                     // layout placeholder stroke.
@@ -8916,8 +8915,14 @@ mod tests {
             json.contains("\"intrinsicWidthPx\":64") && json.contains("\"intrinsicHeightPx\":48"),
             "expected intrinsic size keys; got {json}"
         );
-        assert!(!json.contains("\"dataUrl\""), "must not emit dataUrl; got {json}");
-        assert!(!json.contains(";base64,"), "must not inline base64; got {json}");
+        assert!(
+            !json.contains("\"dataUrl\""),
+            "must not emit dataUrl; got {json}"
+        );
+        assert!(
+            !json.contains(";base64,"),
+            "must not inline base64; got {json}"
+        );
     }
 
     /// A blip `Fill::Image` (the serialized core `ImageFill`) serializes a zip
@@ -8940,9 +8945,18 @@ mod tests {
             json.contains("\"mimeType\":\"image/jpeg\""),
             "expected camelCase mimeType; got {json}"
         );
-        assert!(json.contains("\"fillType\":\"image\""), "tag preserved; got {json}");
-        assert!(!json.contains("\"dataUrl\""), "must not emit dataUrl; got {json}");
-        assert!(!json.contains(";base64,"), "must not inline base64; got {json}");
+        assert!(
+            json.contains("\"fillType\":\"image\""),
+            "tag preserved; got {json}"
+        );
+        assert!(
+            !json.contains("\"dataUrl\""),
+            "must not emit dataUrl; got {json}"
+        );
+        assert!(
+            !json.contains(";base64,"),
+            "must not inline base64; got {json}"
+        );
     }
 
     #[test]
@@ -9303,8 +9317,7 @@ mod tests {
         </p:cSld>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let theme = HashMap::new();
-        let mut resolve =
-            |_: &str| -> Option<String> { Some("ppt/media/image1.png".to_owned()) };
+        let mut resolve = |_: &str| -> Option<String> { Some("ppt/media/image1.png".to_owned()) };
         let fill = parse_background(doc.root_element(), &theme, &mut resolve)
             .expect("tiled blip background should resolve to Fill::Image");
         match fill {
@@ -9337,8 +9350,7 @@ mod tests {
         </p:cSld>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let theme = HashMap::new();
-        let mut resolve =
-            |_: &str| -> Option<String> { Some("ppt/media/image1.png".to_owned()) };
+        let mut resolve = |_: &str| -> Option<String> { Some("ppt/media/image1.png".to_owned()) };
         let fill = parse_background(doc.root_element(), &theme, &mut resolve)
             .expect("bare tile should still resolve to Fill::Image");
         match fill {
@@ -10808,7 +10820,10 @@ mod tests {
         // And the resolved path must hold the original SVG bytes.
         let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None)
             .expect("svg part must be readable by its resolved path");
-        assert_eq!(svg_bytes, SVG, "bytes at svg_image_path must equal the .svg part");
+        assert_eq!(
+            svg_bytes, SVG,
+            "bytes at svg_image_path must equal the .svg part"
+        );
     }
 
     /// A plain `<p:pic>` with no svgBlip extension must leave `svg_image_path`
@@ -10919,7 +10934,10 @@ mod tests {
         // The resolved SVG path must hold the original SVG bytes.
         let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None)
             .expect("svg part must be readable by its resolved path");
-        assert_eq!(svg_bytes, SVG, "bytes at svg_image_path must equal the .svg part");
+        assert_eq!(
+            svg_bytes, SVG,
+            "bytes at svg_image_path must equal the .svg part"
+        );
     }
 
     // ── Per-slide theme/master resolution (slide→layout→master→theme) ─────
