@@ -186,17 +186,20 @@ export function distributeLineSlack(
   if (first === -1 || first === last) return null;
 
   // Mark a gap AFTER unit k, for first <= k < last, when k's owning segment is
-  // eligible to OPEN a gap (si < lastDrawnSi — the final segment opens none and
-  // is never split, but the boundary INTO it still stretches). Whitespace → one
-  // inter-word gap (Word stretches each space). Non-space → an inter-CJK gap only
-  // when the boundary to the next NON-space unit touches a CJK glyph; a boundary
-  // INTO whitespace is already counted by that whitespace, so it is not
-  // double-counted.
+  // eligible to OPEN a gap (its si is not lastDrawnSi — the visually-last segment
+  // opens none and is never split, but the boundary INTO it still stretches).
+  // The match must be EXACT, not `>=`: under bidi lastDrawnSi is the visually-last
+  // segment's LOGICAL index, which is not the maximum si, so `>=` would wrongly
+  // suppress every logically-later segment (for a pure-RTL line that skips the
+  // whole line → no justification). Whitespace → one inter-word gap (Word
+  // stretches each space). Non-space → an inter-CJK gap only when the boundary to
+  // the next NON-space unit touches a CJK glyph; a boundary INTO whitespace is
+  // already counted by that whitespace, so it is not double-counted.
   const gapAfter = new Array<boolean>(units.length).fill(false);
   let total = 0;
   for (let k = first; k < last; k++) {
     const u = units[k];
-    if (u.si >= lastDrawnSi) continue; // final segment opens no gap
+    if (u.si === lastDrawnSi) continue; // the visually-last segment opens no gap
     if (u.ws) {
       gapAfter[k] = true;
       total++;

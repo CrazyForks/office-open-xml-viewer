@@ -254,3 +254,21 @@ describe('distributeLineSlack — non-text atoms', () => {
     expect(totalStretch(r!)).toBeCloseTo(30, 6);
   });
 });
+
+describe('distributeLineSlack — bidi (visually-last segment ≠ logical-last)', () => {
+  // The renderer passes lastDrawnSi = the VISUALLY-last segment's LOGICAL index
+  // (visual.order[segCount-1]); under RTL that is NOT the maximum si. The
+  // exclusion must be an EXACT match, not `>=`: for a pure-RTL line lastDrawnSi
+  // is the logical-FIRST segment (0), so `>=` would suppress every segment →
+  // total 0 → null → the line renders unjustified. This guards that regression.
+  it('justifies when the fixed (visually-last) segment is the logical first (RTL)', () => {
+    // Three word-segments drawn right-to-left: logical seg 0 sits at the physical
+    // (right) end, so it opens no gap; segs 1 and 2 still distribute the slack.
+    const segs = [seg('a '), seg('b '), seg('c')];
+    const r = distributeLineSlack(segs, 30, 0, /* lastDrawnSi = logical-first */ 0);
+    expect(r).not.toBeNull(); // was null under the `>=` regression
+    expect(r!.perSeg.has(0)).toBe(false); // the visually-last segment opens no gap
+    expect(r!.perSeg.get(1)!.trailingGap).toBe(true); // its inter-word space stretches
+    expect(totalStretch(r!)).toBeCloseTo(30, 6);
+  });
+});
