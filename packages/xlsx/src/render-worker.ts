@@ -9,7 +9,7 @@
  * re-`parse` resets all per-document caches so a reused worker never serves
  * stale sheets / images.
  */
-import init, { parse_xlsx, parse_sheet } from './wasm/xlsx_parser.js';
+import init, { parse_xlsx, parse_sheet, extract_image } from './wasm/xlsx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts } from '@silurus/ooxml-core';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
@@ -23,9 +23,30 @@ let maxZipEntryBytes: bigint | undefined;
 let fontsLoaded: Promise<void> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
 const imageCache = new Map<string, CanvasImageSource>();
+// Fetched image *bytes* (as Blobs) keyed by zip path. Twin of the docx render
+// worker's `imageCache`; kept separate from the decoded-source `imageCache`
+// above. Cleared on re-parse so a reused worker never serves a stale file's
+// image.
+const imageBlobCache = new Map<string, Promise<Blob>>();
 
 const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
   (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
+
+/** In-worker image-byte loader (twin of the docx render-worker `getImage`). The
+ *  orchestrator's `fetchImage` routes here in worker mode, so image bytes are
+ *  read straight from the retained `rawData` with no main-thread round-trip.
+ *  Mime travels on the element, so the caller supplies it. */
+function getImage(path: string, mimeType: string): Promise<Blob> {
+  const hit = imageBlobCache.get(path);
+  if (hit) return hit;
+  const p = (async () => {
+    if (!rawData) throw new Error('Workbook not loaded');
+    const bytes = extract_image(new Uint8Array(rawData), path, maxZipEntryBytes);
+    return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
+  })();
+  imageBlobCache.set(path, p);
+  return p;
+}
 
 /** Lazily parse one worksheet directly via WASM and cache it — the worker-side
  *  equivalent of XlsxWorkbook.getWorksheet (same `parse_sheet` call, same
@@ -56,6 +77,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       // we never serve stale data from a previous load.
       sheetCache.clear();
       imageCache.clear();
+      imageBlobCache.clear();
       maxZipEntryBytes =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
@@ -93,10 +115,23 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         { ws, styles: workbook.styles, imageCache },
         canvas,
         req.viewport,
-        req.opts,
+        // Supply the in-worker byte loader so embedded images decode straight
+        // from the retained rawData (no main-thread round-trip).
+        { ...req.opts, fetchImage: getImage },
       );
       const bitmap = canvas.transferToImageBitmap();
       post({ type: 'viewportRendered', id, bitmap }, [bitmap]);
+      return;
+    }
+    if (req.type === 'extractImage') {
+      // Worker render mode decodes images in-worker via the getImage closure;
+      // this arm exists only for protocol parity with worker.ts. Raw bytes are
+      // read straight from the retained rawData (no mime needed for a byte
+      // transfer).
+      if (!rawData) throw new Error('Workbook not loaded');
+      const raw = extract_image(new Uint8Array(rawData), req.path, maxZipEntryBytes);
+      const bytes = new Uint8Array(raw).slice().buffer;
+      post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;
     }
   } catch (err) {

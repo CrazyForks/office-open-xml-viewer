@@ -1,8 +1,12 @@
 import type { ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
 
-/** Serializable subset of RenderViewportOptions: drop the callback and the
- *  image cache (the worker owns its own). */
-export type WireRenderViewportOptions = Omit<RenderViewportOptions, 'onTextRun' | 'loadedImages'>;
+/** Serializable subset of RenderViewportOptions: drop the callback, the image
+ *  cache, and the `fetchImage` loader (all non-cloneable; the worker owns its
+ *  own cache and supplies its own in-worker fetchImage). */
+export type WireRenderViewportOptions = Omit<
+  RenderViewportOptions,
+  'onTextRun' | 'loadedImages' | 'fetchImage'
+>;
 
 // The base `parse` arm from types.ts is intentionally NOT reused: the render
 // worker's `parse` carries an extra `useGoogleFonts` flag, and two `parse`
@@ -19,7 +23,12 @@ export type RenderWorkerRequest =
   // the main-mode message getWorksheet posts but are ignored (the worker parses
   // from its own `rawData` and derives the sheet name from `workbook`).
   | { type: 'parseSheet'; id: number; data?: ArrayBuffer; sheetIndex: number; sheetName?: string; maxZipEntryBytes?: number }
-  | { type: 'renderViewport'; id: number; sheetIndex: number; viewport: ViewportRange; opts: WireRenderViewportOptions };
+  | { type: 'renderViewport'; id: number; sheetIndex: number; viewport: ViewportRange; opts: WireRenderViewportOptions }
+  // Worker render mode decodes images in-worker via a getImage closure; this arm
+  // exists only for protocol parity with worker.ts (so a stray extractImage
+  // never hangs). The render worker reads bytes straight from its retained
+  // rawData.
+  | { type: 'extractImage'; id: number; path: string };
 
 export type RenderWorkerResponse =
   // `parsed` / `parsedSheet` / `error` are reused from WorkerResponse: xlsx DOES
