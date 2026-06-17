@@ -1565,6 +1565,81 @@ mod math_tests {
         assert_eq!(text.paragraphs.len(), 1);
         assert!(!text.paragraphs[0].rtl, "absent @rtl → rtl false");
     }
+
+    /// `ShapeTextRun` uses an enum-level `#[serde(tag = "type", rename_all =
+    /// "camelCase")]`, which renames only the variant tags — not the fields. The
+    /// `Text` variant's `font_face` and the `Math` variant's `font_size`
+    /// therefore need per-variant `rename_all` to serialize as the camelCase
+    /// keys the TS renderer reads (`run.fontFace` / `run.fontSize`). This locks
+    /// the JSON contract so the keys never regress to snake_case (which the
+    /// renderer reads as `undefined`). Same bug class as the pptx serde fix
+    /// (PR #489) and the xlsx ArcTo fix (PR #491).
+    #[test]
+    fn serializes_text_run_font_face_as_camel_case() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:r>
+                  <a:rPr sz="1400"><a:latin typeface="Calibri"/></a:rPr>
+                  <a:t>hi</a:t>
+                </a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let run = &text.paragraphs[0].runs[0];
+        assert!(
+            matches!(run, ShapeTextRun::Text { .. }),
+            "expected Text run"
+        );
+
+        let v: serde_json::Value = serde_json::to_value(run).unwrap();
+        assert_eq!(v["type"], "text", "tag key is `type`");
+        assert_eq!(
+            v["fontFace"], "Calibri",
+            "font_face must serialize as camelCase `fontFace` (renderer reads run.fontFace)"
+        );
+        assert!(
+            v.get("font_face").is_none(),
+            "snake_case `font_face` must not appear"
+        );
+    }
+
+    /// Companion to the Text-run case: the `Math` variant's `font_size` must
+    /// serialize as `fontSize` (renderer reads `run.fontSize`). Without the
+    /// per-variant `rename_all` the equation falls back to the inherited size.
+    #[test]
+    fn serializes_math_run_font_size_as_camel_case() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a14:m><m:oMath><m:r>
+                  <a:rPr sz="2800"/>
+                  <m:t>n</m:t>
+                </m:r></m:oMath></a14:m>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let run = &text.paragraphs[0].runs[0];
+        assert!(
+            matches!(run, ShapeTextRun::Math { .. }),
+            "expected Math run"
+        );
+
+        let v: serde_json::Value = serde_json::to_value(run).unwrap();
+        assert_eq!(v["type"], "math", "tag key is `type`");
+        assert_eq!(
+            v["fontSize"], 28.0,
+            "font_size must serialize as camelCase `fontSize` (renderer reads run.fontSize)"
+        );
+        assert!(
+            v.get("font_size").is_none(),
+            "snake_case `font_size` must not appear"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1960,5 +2035,90 @@ mod blip_svg_tests {
         assert!(json.contains("\"mimeType\":\"image/png\""));
         assert!(!json.contains("dataUrl"), "must not emit dataUrl: {json}");
         assert!(!json.contains(";base64,"), "must not inline base64: {json}");
+    }
+}
+
+#[cfg(test)]
+mod custom_path_arc_tests {
+    use super::*;
+
+    const NS: &str = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#;
+
+    /// `PathCmd`'s enum-level `rename_all = "camelCase"` (tag = "op") renames
+    /// only the variant tags, not the fields. Without a per-variant
+    /// `rename_all`, `ArcTo { st_ang, sw_ang }` serialized as snake_case keys
+    /// `st_ang`/`sw_ang`, which the TS renderer never reads — it reads
+    /// `cmd.stAng`/`cmd.swAng` (`renderer.ts`), so the values came back
+    /// `undefined` → `NaN` and the arc failed to draw. Same root cause as the
+    /// pptx fix in PR #489. This guards the JSON keys the renderer relies on.
+    #[test]
+    fn arc_to_serializes_angle_fields_as_camelcase() {
+        // Non-degenerate arc (wR/hR > 0) — the renderer's degenerate-arc guard
+        // (`if (rx <= 0 || ry <= 0) break;`) short-circuits before the angles
+        // are read, so only non-degenerate arcs surface the missing keys.
+        let xml = format!(
+            r#"<a:path {NS} w="100" h="100">
+                 <a:moveTo><a:pt x="0" y="50"/></a:moveTo>
+                 <a:arcTo wR="50" hR="50" stAng="0" swAng="5400000"/>
+               </a:path>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let path = parse_custom_path(&doc.root_element());
+
+        // The parser keeps angles as raw 60000ths of a degree (the xlsx
+        // convention — the TS renderer divides by 60000). swAng = 5_400_000 =
+        // 90°. wR/hR stay in path-coord units.
+        let arc = path
+            .commands
+            .iter()
+            .find(|c| matches!(c, PathCmd::ArcTo { .. }))
+            .expect("path contains an arcTo command");
+        match arc {
+            PathCmd::ArcTo {
+                wr,
+                hr,
+                st_ang,
+                sw_ang,
+            } => {
+                assert_eq!(*wr, 50.0);
+                assert_eq!(*hr, 50.0);
+                assert_eq!(*st_ang, 0.0);
+                assert_eq!(
+                    *sw_ang, 5_400_000.0,
+                    "raw 60000ths preserved (renderer divides by 60000)"
+                );
+            }
+            other => panic!("expected ArcTo, got {other:?}"),
+        }
+
+        let value = serde_json::to_value(arc).expect("arcTo serializes");
+        let obj = value
+            .as_object()
+            .expect("arcTo serializes to a JSON object");
+
+        // Tag key is "op" (not "cmd"), variant tag is camelCase "arcTo".
+        assert_eq!(
+            obj.get("op").and_then(|v| v.as_str()),
+            Some("arcTo"),
+            "variant tag serializes under key \"op\" as camelCase \"arcTo\""
+        );
+
+        // The angle fields must be camelCase — the TS renderer reads
+        // cmd.stAng / cmd.swAng. snake_case keys here regress the bug.
+        assert!(
+            obj.contains_key("stAng"),
+            "stAng must be camelCase, got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            obj.contains_key("swAng"),
+            "swAng must be camelCase, got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !obj.contains_key("st_ang") && !obj.contains_key("sw_ang"),
+            "snake_case angle keys must not appear (regresses the NaN bug)"
+        );
+        assert_eq!(obj.get("swAng").and_then(|v| v.as_f64()), Some(5_400_000.0));
     }
 }

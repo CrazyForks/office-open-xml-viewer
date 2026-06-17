@@ -898,6 +898,14 @@ pub struct ShapeParagraph {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ShapeTextRun {
+    /// The enum-level `rename_all = "camelCase"` (tag = "type") renames only the
+    /// variant tags, not the fields, so the multi-word `font_face` needs a
+    /// per-variant `rename_all` to serialize as the camelCase key the TS
+    /// renderer reads (`renderer.ts`: `run.fontFace`). Without it the key lands
+    /// as snake_case, the renderer reads `undefined`, and the shape text's font
+    /// face is silently ignored (falls back to the default stack). Same root
+    /// cause as the pptx fix in PR #489 / the xlsx ArcTo fix in PR #491.
+    #[serde(rename_all = "camelCase")]
     Text {
         text: String,
         bold: bool,
@@ -914,6 +922,13 @@ pub enum ShapeTextRun {
     /// Soft line break (`<a:br>`).
     Break,
     /// Inline (`display:false`) or block (`display:true`) OMML equation.
+    ///
+    /// Like `Text`, the multi-word `font_size` needs a per-variant
+    /// `rename_all = "camelCase"` so it serializes as `fontSize` (the key the
+    /// renderer reads at `renderer.ts`: `run.fontSize`). Without it the
+    /// snake_case key is read as `undefined` and the equation always falls back
+    /// to the inherited/default size instead of its explicit `rPr@sz`.
+    #[serde(rename_all = "camelCase")]
     Math {
         nodes: Vec<ooxml_common::math::MathNode>,
         display: bool,
@@ -999,6 +1014,15 @@ pub enum PathCmd {
     /// ECMA-376 §20.1.9.3 `a:arcTo`. `stAng`/`swAng` are in 60000ths of a
     /// degree. The start point is the current pen position; the ellipse
     /// center is derived so the pen lies on the ellipse at `stAng`.
+    ///
+    /// The enum-level `rename_all = "camelCase"` (tag = "op") renames only the
+    /// variant tags, not the fields, so `st_ang`/`sw_ang` need a per-variant
+    /// `rename_all` to serialize as the camelCase keys the TS renderer reads
+    /// (`renderer.ts`: `cmd.stAng`/`cmd.swAng`, then `/ 60000`). Without it the
+    /// keys land as snake_case, the renderer reads `undefined` → `NaN`, and the
+    /// arc fails to draw. Same root cause as the pptx fix in PR #489. The raw
+    /// 60000ths convention is unchanged (the renderer does the division).
+    #[serde(rename_all = "camelCase")]
     ArcTo {
         wr: f64,
         hr: f64,
