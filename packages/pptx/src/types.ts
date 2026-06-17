@@ -457,18 +457,37 @@ export interface PictureElement {
   rotation: number;
   flipH: boolean;
   flipV: boolean;
-  /** Data URL, e.g. "data:image/png;base64,..." */
-  dataUrl: string;
+  /**
+   * Embedded zip path of the raster blip (e.g. "ppt/media/image1.png"). The
+   * renderer fetches the bytes lazily by path (see {@link
+   * PptxPresentation.getImage}) instead of inlining base64. When the picture is
+   * a pure SVG with no raster blip this falls back to the SVG part's path and
+   * {@link PictureElement.mimeType} is `image/svg+xml`.
+   */
+  imagePath: string;
+  /** MIME type of the blip at {@link PictureElement.imagePath} (e.g. `image/png`). */
+  mimeType: string;
   /**
    * Microsoft 2016 SVG extension (`<a:blip><a:extLst><a:ext
    * uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip r:embed>`). When
-   * PowerPoint embeds an SVG image, `dataUrl` above is only the PNG fallback it
-   * rasterizes for compatibility; this is the original vector image as a
-   * `data:image/svg+xml;base64,…` URL. The renderer prefers this and falls back
-   * to `dataUrl` if the SVG fails to decode. Omitted when the picture has no
-   * svgBlip extension (the common case).
+   * PowerPoint embeds an SVG image, `imagePath` above is only the PNG fallback
+   * it rasterizes for compatibility; this is the zip path of the original
+   * vector `.svg` part. The renderer prefers this and falls back to the raster
+   * if the SVG fails to decode. Omitted when the picture has no svgBlip
+   * extension (the common case).
    */
-  svgDataUrl?: string;
+  svgImagePath?: string;
+  /** MIME of the SVG part at {@link PictureElement.svgImagePath} — always
+   *  `image/svg+xml` when present. Omitted without an svgBlip extension. */
+  svgMimeType?: string;
+  /**
+   * Intrinsic pixel width of the raster blip, read from the PNG IHDR at parse
+   * time. Omitted for non-PNG payloads. Used internally for the ink-fallback
+   * (empty-stroke PNG centering).
+   */
+  intrinsicWidthPx?: number;
+  /** Intrinsic pixel height of the raster blip (PNG IHDR). Omitted for non-PNG. */
+  intrinsicHeightPx?: number;
   /**
    * Border line from `<p:pic><p:spPr><a:ln>` (ECMA-376 §20.1.2.2.24). A
    * `p:pic`'s spPr is `CT_ShapeProperties` (§19.3.1.37), so a picture carries
@@ -535,10 +554,12 @@ export interface PictureElement {
 export type WorkerRequest =
   | { kind: 'init'; wasmUrl: string }
   | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number }
-  | { kind: 'extractMedia'; id: number; path: string };
+  | { kind: 'extractMedia'; id: number; path: string }
+  | { kind: 'extractImage'; id: number; path: string };
 
 export type WorkerResponse =
   | { kind: 'ready' }
   | { kind: 'parsed'; id: number; presentation: Presentation }
   | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
+  | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'error'; id: number; message: string };

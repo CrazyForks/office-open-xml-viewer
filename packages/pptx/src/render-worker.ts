@@ -10,7 +10,7 @@
  * resume against the new model — callers must not interleave them.
  */
 import type { MediaElement, Presentation } from './types';
-import init, { parse_pptx, extract_media } from './wasm/pptx_parser.js';
+import init, { parse_pptx, extract_media, extract_image } from './wasm/pptx_parser.js';
 import { renderSlide } from './renderer';
 import { selectNotes } from './notes';
 import { findMimeTypeForPath } from './media-mime';
@@ -25,6 +25,7 @@ let currentMaxZipEntryBytes: bigint | undefined;
 /** Settled before any render when `useGoogleFonts` was requested. */
 let fontsLoaded: Promise<void> = Promise.resolve();
 const mediaCache = new Map<string, Promise<Blob>>();
+const imageCache = new Map<string, Promise<Blob>>();
 
 const post = (msg: RenderWorkerResponse, transfer?: Transferable[]) =>
   (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
@@ -47,6 +48,22 @@ function getMedia(path: string): Promise<Blob> {
   return p;
 }
 
+/** In-worker image-byte loader (twin of {@link getMedia}). The renderer's
+ *  `fetchImage` routes here in worker mode, so image bytes are decoded straight
+ *  from the retained buffer with no main-thread round-trip. Mime travels on the
+ *  element, so the caller supplies it. */
+function getImage(path: string, mimeType: string): Promise<Blob> {
+  const hit = imageCache.get(path);
+  if (hit) return hit;
+  const p = (async () => {
+    if (!currentBuffer) throw new Error('No pptx loaded');
+    const bytes = extract_image(currentBuffer, path, currentMaxZipEntryBytes);
+    return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
+  })();
+  imageCache.set(path, p);
+  return p;
+}
+
 self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
   const req = e.data;
 
@@ -61,8 +78,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     if (req.kind === 'parse') {
       if (!ready) throw new Error('WASM not initialized');
       // Cached blobs belong to the previous document; serving them after a
-      // re-parse would silently return the wrong file's media.
+      // re-parse would silently return the wrong file's media/image.
       mediaCache.clear();
+      imageCache.clear();
       currentBuffer = new Uint8Array(req.buffer);
       currentMaxZipEntryBytes =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
@@ -105,6 +123,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         minorFont: pres.minorFont,
         hlinkColor: pres.hlinkColor ?? null,
         fetchMedia: getMedia,
+        fetchImage: getImage,
         skipMediaControls: req.skipMediaControls,
         // math intentionally omitted: MathJax needs a DOM <script>; worker
         // mode skips equations (documented in the design spec).
@@ -118,6 +137,18 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       const blob = await getMedia(req.path);
       const bytes = await blob.arrayBuffer();
       post({ kind: 'mediaExtracted', id: req.id, bytes }, [bytes]);
+      return;
+    }
+
+    if (req.kind === 'extractImage') {
+      // Worker render mode decodes images in-worker via the getImage closure;
+      // this message arm exists only for protocol parity with worker.ts. Raw
+      // bytes are read straight from the retained buffer (no mime needed for a
+      // byte transfer).
+      if (!currentBuffer) throw new Error('No pptx loaded');
+      const raw = extract_image(currentBuffer, req.path, currentMaxZipEntryBytes);
+      const bytes = new Uint8Array(raw).slice().buffer;
+      post({ kind: 'imageExtracted', id: req.id, bytes }, [bytes]);
       return;
     }
   } catch (err) {
