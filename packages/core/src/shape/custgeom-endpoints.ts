@@ -93,17 +93,52 @@ function startForwardTangent(
 }
 
 /**
+ * Advance the pen across one command, returning the new pen position. This is
+ * the single source of truth for pen traversal and mirrors `buildCustomPath`
+ * **exactly** — in particular a degenerate arc (`wr<=0 || hr<=0`) is a no-op
+ * that leaves the pen unchanged (buildCustomPath does `break` before advancing
+ * the pen), so the next drawn command starts from the pre-arc point.
+ *
+ * `close` and any non-drawing command leave the pen where it is.
+ */
+function advancePen(px: number, py: number, cmd: PathCmd): { x: number; y: number } {
+  switch (cmd.cmd) {
+    case 'moveTo':
+    case 'lineTo':
+    case 'cubicBezTo':
+      return { x: cmd.x, y: cmd.y };
+    case 'arcTo': {
+      // Same degenerate guard as buildCustomPath (`rw<=0 || rh<=0`, with w,h>0
+      // this reduces to wr<=0 || hr<=0): skip the arc and keep the pen put.
+      if (cmd.wr <= 0 || cmd.hr <= 0) return { x: px, y: py };
+      const stRad = (cmd.stAng * Math.PI) / 180;
+      const endRad = stRad + (cmd.swAng * Math.PI) / 180;
+      // Centre back-calculated from the pen at stAng (matches buildCustomPath):
+      // cx = penX - wr cos(stAng); end = (cx + wr cos(endRad), cy + hr sin(endRad)).
+      const cx = px - cmd.wr * Math.cos(stRad);
+      const cy = py - cmd.hr * Math.sin(stRad);
+      return { x: cx + cmd.wr * Math.cos(endRad), y: cy + cmd.hr * Math.sin(endRad) };
+    }
+    default:
+      return { x: px, y: py };
+  }
+}
+
+/**
  * Forward tangent (direction of travel) **arriving** at the end of a drawn
- * command, given the point `(prevX, prevY)` it started from.
+ * command, given the point `(prevX, prevY)` it started from. The end point is
+ * computed via {@link advancePen} so it always agrees with buildCustomPath's
+ * traversal (a degenerate arc contributes no movement and no tangent).
  */
 function endForwardTangent(
   prevX: number,
   prevY: number,
   cmd: PathCmd,
 ): { dx: number; dy: number; x: number; y: number } {
+  const { x, y } = advancePen(prevX, prevY, cmd);
   switch (cmd.cmd) {
     case 'lineTo':
-      return { dx: cmd.x - prevX, dy: cmd.y - prevY, x: cmd.x, y: cmd.y };
+      return { dx: cmd.x - prevX, dy: cmd.y - prevY, x, y };
     case 'cubicBezTo': {
       // Tangent at t=1 points from the second control point to the end.
       let dx = cmd.x - cmd.x2;
@@ -118,25 +153,21 @@ function endForwardTangent(
         dx = cmd.x - prevX;
         dy = cmd.y - prevY;
       }
-      return { dx, dy, x: cmd.x, y: cmd.y };
+      return { dx, dy, x, y };
     }
     case 'arcTo': {
+      // A degenerate arc draws nothing (advancePen kept the pen put), so it has
+      // no outward tangent — matching buildCustomPath, which skips it entirely.
+      if (cmd.wr <= 0 || cmd.hr <= 0) return { dx: 0, dy: 0, x, y };
       const stRad = (cmd.stAng * Math.PI) / 180;
-      const swRad = (cmd.swAng * Math.PI) / 180;
-      const endRad = stRad + swRad;
-      // Centre back-calculated from the pen at stAng (matches buildCustomPath):
-      // cx = penX - wr cos(stAng); end = (cx + wr cos(endRad), cy + hr sin(endRad)).
-      const cxOff = -cmd.wr * Math.cos(stRad); // centre relative to prev point
-      const cyOff = -cmd.hr * Math.sin(stRad);
-      const ex = prevX + cxOff + cmd.wr * Math.cos(endRad);
-      const ey = prevY + cyOff + cmd.hr * Math.sin(endRad);
+      const endRad = stRad + (cmd.swAng * Math.PI) / 180;
       const dir = cmd.swAng < 0 ? -1 : 1;
       const dx = -cmd.wr * Math.sin(endRad) * dir;
       const dy = cmd.hr * Math.cos(endRad) * dir;
-      return { dx, dy, x: ex, y: ey };
+      return { dx, dy, x, y };
     }
     default:
-      return { dx: 0, dy: 0, x: prevX, y: prevY };
+      return { dx: 0, dy: 0, x, y };
   }
 }
 
@@ -146,26 +177,8 @@ function terminalPoint(cmds: PathCmd[]): { x: number; y: number } | null {
   let py = 0;
   let started = false;
   for (const cmd of cmds) {
-    switch (cmd.cmd) {
-      case 'moveTo':
-        px = cmd.x; py = cmd.y; started = true;
-        break;
-      case 'lineTo':
-      case 'cubicBezTo':
-        px = cmd.x; py = cmd.y;
-        break;
-      case 'arcTo': {
-        const stRad = (cmd.stAng * Math.PI) / 180;
-        const endRad = stRad + (cmd.swAng * Math.PI) / 180;
-        const cx = px - cmd.wr * Math.cos(stRad);
-        const cy = py - cmd.hr * Math.sin(stRad);
-        px = cx + cmd.wr * Math.cos(endRad);
-        py = cy + cmd.hr * Math.sin(endRad);
-        break;
-      }
-      case 'close':
-        break;
-    }
+    if (cmd.cmd === 'moveTo') started = true;
+    ({ x: px, y: py } = advancePen(px, py, cmd));
   }
   return started ? { x: px, y: py } : null;
 }
@@ -195,6 +208,23 @@ function isClosed(cmds: PathCmd[]): boolean {
  *
  * An end belonging to a **closed** sub-path returns `null` (no arrow head), which
  * matches PowerPoint: line-end decorations only apply to open paths.
+ *
+ * Relationship to {@link getConnectorAnchors} (preset-geometry/index.ts): that
+ * helper serves the *preset* connector/callout geometries (`straightConnector1`,
+ * `bentConnector*`, `curvedConnector*`, …). It evaluates a preset's guide
+ * formulas and returns tip points + tangent **angles already in device space**,
+ * and it only walks `m`/`l`/`C` commands (presets never emit `arcTo`). This
+ * helper is its custom-geometry counterpart: it consumes the *raw* normalised
+ * `<a:custGeom>` sub-paths (free-form / curve shapes), handles `arcTo`, and
+ * returns the tangent as a **normalised direction vector** so the caller can
+ * scale it for an anisotropic box before taking `atan2`. The two are kept
+ * separate on purpose — they take different inputs and different coordinate
+ * spaces, so merging them would only add branching.
+ *
+ * Currently the only consumer is the pptx renderer (free-form / curve lines with
+ * `<a:ln><a:headEnd|tailEnd>`). When docx / xlsx grow free-form line-end arrow
+ * support they are expected to share this helper rather than re-deriving the
+ * endpoints, which is why it lives in `@silurus/ooxml-core`.
  *
  * @param subpaths Normalised (`[0,1]`) custGeom sub-paths.
  */
@@ -230,25 +260,7 @@ export function getCustGeomEndpoints(subpaths: PathCmd[][]): CustGeomEndpoints {
     }
     if (lastDrawIdx >= 0) {
       for (let i = 0; i < lastDrawIdx; i++) {
-        const cmd = lastSub[i];
-        switch (cmd.cmd) {
-          case 'moveTo':
-          case 'lineTo':
-          case 'cubicBezTo':
-            px = cmd.x; py = cmd.y;
-            break;
-          case 'arcTo': {
-            const stRad = (cmd.stAng * Math.PI) / 180;
-            const endRad = stRad + (cmd.swAng * Math.PI) / 180;
-            const cx = px - cmd.wr * Math.cos(stRad);
-            const cy = py - cmd.hr * Math.sin(stRad);
-            px = cx + cmd.wr * Math.cos(endRad);
-            py = cy + cmd.hr * Math.sin(endRad);
-            break;
-          }
-          case 'close':
-            break;
-        }
+        ({ x: px, y: py } = advancePen(px, py, lastSub[i]));
       }
       const t = endForwardTangent(px, py, lastSub[lastDrawIdx]);
       if (Math.abs(t.dx) > EPS || Math.abs(t.dy) > EPS) {
