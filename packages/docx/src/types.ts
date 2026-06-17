@@ -482,17 +482,25 @@ export interface RubyAnnotation {
 
 export interface ImageRun {
   /**
-   * `data:<mime>;base64,…` — the raster fallback (PNG/JPEG), or the SVG itself
-   * when no raster blip is embedded. Always drawable.
+   * Embedded zip path of the raster blip (e.g. `word/media/image1.png`) — the
+   * raster fallback (PNG/JPEG), or the SVG part itself when no raster blip is
+   * embedded. The renderer fetches the bytes lazily by path (see {@link
+   * DocxDocument.getImage}) instead of inlining base64.
    */
-  dataUrl: string;
+  imagePath: string;
+  /** MIME type of the blip at {@link ImageRun.imagePath} (e.g. `image/png`, or
+   *  `image/svg+xml` for an svg-only picture). */
+  mimeType: string;
   /**
-   * Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML),
-   * as a `data:image/svg+xml;base64,…` URL. When present the renderer prefers it
-   * over `dataUrl` (the raster fallback); `dataUrl` is the SVG itself when no
-   * raster blip is embedded. Absent for a plain raster image.
+   * Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML) —
+   * the zip path of the `.svg` part. When present the renderer prefers it over
+   * {@link ImageRun.imagePath} (the raster fallback). Absent for a plain raster
+   * image.
    */
-  svgDataUrl?: string;
+  svgImagePath?: string;
+  /** MIME of the SVG part at {@link ImageRun.svgImagePath} — always
+   *  `image/svg+xml` when present. Absent without an svgBlip extension. */
+  svgMimeType?: string;
   widthPt: number;
   heightPt: number;
   /** true = wp:anchor (absolute positioned), false/undefined = wp:inline (flows with text) */
