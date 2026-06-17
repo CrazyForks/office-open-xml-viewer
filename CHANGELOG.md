@@ -6,19 +6,36 @@ changes that remain compatible with existing API surfaces.
 
 ## 0.64.0 — 2026-06-17
 
-Minor: embedded SVG images (Microsoft `asvg:svgBlip` extension, MS-ODRAWXML) now
-render across Word and Excel as well as PowerPoint, through shared blip helpers
-in `@silurus/ooxml-core` and the common Rust crate. PowerPoint additionally
-renders pictures that carry *only* the svgBlip (no raster fallback).
+Minor. Two headline changes plus several rendering features. **(1)** Embedded SVG
+images (Microsoft `asvg:svgBlip` extension, MS-ODRAWXML) now render across Word
+and Excel as well as PowerPoint, through shared blip helpers in
+`@silurus/ooxml-core` and the common Rust crate; PowerPoint additionally renders
+pictures that carry *only* the svgBlip (no raster fallback). **(2)** Embedded
+images are extracted lazily by zip path instead of being inlined as base64 at
+parse time, cutting the parsed-model payload ~90% on image-heavy files. Also:
+PowerPoint text highlight, custom-geometry arrow heads, and custom-geometry arc
+fixes across all three formats.
 
 ### Shared
 
+- **Lazy, byte-on-demand image pipeline.** Parsers now emit each embedded image's
+  zip path + MIME instead of a base64 `data:` URL, and the renderers fetch the
+  bytes on demand through a `fetchImage(path, mime)` callback (twin of the
+  existing audio/video extraction). New size-guarded
+  `ooxml_common::zip::extract_zip_entry` plus an `extract_image` WASM export per
+  parser. The parsed-model payload drops ~93% (pptx) / ~89% (docx) on
+  image-bearing files. Decoded bitmaps and SVGs are cached **per document** —
+  keyed by byte source, not by zip path, so two open documents that reuse the
+  same internal path (e.g. `ppt/media/image1.png`) never swap images — and are
+  released on `destroy()`.
 - New `ooxml_common::blip` Rust helpers (`svg_blip_rid`, `blip_embed_rid`,
-  `mime_from_ext`) and a shared `getCachedSvgImage` decoder in
+  `mime_from_ext`) and a shared path-keyed `getCachedSvgImageByPath` decoder in
   `@silurus/ooxml-core`, replacing three divergent `mime_from_ext` copies and the
   previously pptx-only svgBlip logic. `.svg` parts map to `image/svg+xml`
   everywhere; all three renderers prefer the vector original and fall back to the
   raster on decode failure.
+- New `highlightBox` core helper: a single source of truth for text-highlight /
+  marker extents, shared by the docx and pptx renderers.
 
 ### pptx
 
@@ -27,17 +44,31 @@ renders pictures that carry *only* the svgBlip (no raster fallback).
 - An SVG picture with an `a:srcRect` crop no longer routes the SVG through
   `createImageBitmap` (which cannot rasterize SVG in every browser); it decodes
   via the shared `<img>` path.
+- Honor `a:highlight` (text highlight / marker) on runs (§21.1.2.3.4).
+- Draw arrow heads on custom-geometry (freeform / curve) lines, not just preset
+  connectors; degenerate arcs are skipped when locating the line endpoints.
 
 ### docx
 
 - Honor the `asvg:svgBlip` extension on inline, anchored and grouped pictures:
   draw the vector original, fall back to the raster. `.svg` parts are no longer
   mislabeled `image/png`. (§20.1.8.13 + MS-ODRAWXML SVG extension)
+- Custom-geometry `ArcTo` angle fields (`stAng` / `swAng`, §20.1.9.3) now
+  deserialize, so arcs in freeform shapes render instead of being dropped.
 
 ### xlsx
 
 - Honor the `asvg:svgBlip` extension on `xdr:twoCellAnchor` and grouped pictures;
   `.svg` media parts are no longer excluded from collection.
+- Custom-geometry `ArcTo` angle fields (`stAng` / `swAng`) and `ShapeTextRun`
+  font fields (`fontFace` / `fontSize`) now serialize as camelCase, fixing
+  dropped shape arcs and unstyled shape text.
+
+### node
+
+- `renderSlideNode` accepts an optional `sourceBuffer`; when supplied, headless
+  renders extract embedded images for real via `makeSourceBufferFetchImage` (the
+  lazy `extract_image` path) instead of skipping them.
 
 ## 0.63.0 — 2026-06-17
 

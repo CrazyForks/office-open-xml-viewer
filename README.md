@@ -579,6 +579,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Hyperlinks (`hlinkClick` — theme `hlink` colour + auto underline) | ✅ |
 | | Text shadow (`rPr > effectLst > outerShdw`) | ✅ |
 | | Text outline (`rPr > a:ln`) | ✅ |
+| | Text highlight / marker (`a:highlight` — §21.1.2.3.4) | ✅ |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, incl. `a14:m` / `mc:AlternateContent`; STIX Two Math via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | **Text — paragraphs** | Horizontal alignment (left / center / right / justify) | ✅ |
 | | Vertical anchor (top / center / bottom) | ✅ |
