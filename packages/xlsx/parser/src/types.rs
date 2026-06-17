@@ -961,18 +961,17 @@ pub enum ShapeGeom {
     /// §20.5.2.17). `image_path` is the zip path of the drawing's relationship
     /// target (png/jpg/gif/svg/…) — the blip's raster `r:embed` fallback, or the
     /// SVG itself when no raster is embedded — and `mime_type` its MIME via the
-    /// shared `mime_from_ext`. `svg_image_path`/`svg_mime_type` carry the
-    /// Microsoft svgBlip extension's vector original when present, so the
-    /// renderer can prefer it and fall back to `image_path` on a decode failure.
-    /// `None` otherwise. The renderer fetches bytes lazily via `extract_image`.
+    /// shared `mime_from_ext`. `svg_image_path` carries the Microsoft svgBlip
+    /// extension's vector original when present, so the renderer can prefer it
+    /// and fall back to `image_path` on a decode failure. `None` otherwise. Its
+    /// MIME is always `image/svg+xml` and is owned by the SVG decoder. The
+    /// renderer fetches bytes lazily via `extract_image`.
     #[serde(rename_all = "camelCase")]
     Image {
         image_path: String,
         mime_type: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         svg_image_path: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        svg_mime_type: Option<String>,
     },
 }
 
@@ -1105,13 +1104,10 @@ pub struct ImageAnchor {
     /// uri="{96DAC541-…}"><asvg:svgBlip r:embed>`, MS-ODRAWXML): the zip path of
     /// the vector *original*, so the renderer can prefer it and fall back to
     /// `image_path` on a decode failure. `None` when the picture carries no
-    /// svgBlip extension (the common case).
+    /// svgBlip extension (the common case). Its MIME is always `image/svg+xml`
+    /// and is owned by the SVG decoder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub svg_image_path: Option<String>,
-    /// MIME of the SVG part at `svg_image_path` — always `image/svg+xml` when
-    /// present. `None` when there is no svgBlip extension.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub svg_mime_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

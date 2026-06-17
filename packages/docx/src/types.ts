@@ -495,12 +495,9 @@ export interface ImageRun {
    * Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML) —
    * the zip path of the `.svg` part. When present the renderer prefers it over
    * {@link ImageRun.imagePath} (the raster fallback). Absent for a plain raster
-   * image.
+   * image. Its MIME is always `image/svg+xml` and is owned by the SVG decoder.
    */
   svgImagePath?: string;
-  /** MIME of the SVG part at {@link ImageRun.svgImagePath} — always
-   *  `image/svg+xml` when present. Absent without an svgBlip extension. */
-  svgMimeType?: string;
   widthPt: number;
   heightPt: number;
   /** true = wp:anchor (absolute positioned), false/undefined = wp:inline (flows with text) */

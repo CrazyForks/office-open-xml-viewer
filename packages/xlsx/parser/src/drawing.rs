@@ -145,9 +145,6 @@ pub(crate) fn parse_drawing_anchors(
             (None, None) => continue,
         };
         let mime_type = mime_from_ext(&image_path).to_string();
-        let svg_mime_type = svg_image_path
-            .as_ref()
-            .map(|p| mime_from_ext(p).to_string());
 
         anchors.push(ImageAnchor {
             from_col,
@@ -164,7 +161,6 @@ pub(crate) fn parse_drawing_anchors(
             image_path,
             mime_type,
             svg_image_path,
-            svg_mime_type,
         });
     }
     anchors
@@ -1017,9 +1013,6 @@ pub(crate) fn collect_shapes(
                 (None, None) => continue,
             };
             let mime_type = mime_from_ext(&image_path).to_string();
-            let svg_mime_type = svg_image_path
-                .as_ref()
-                .map(|p| mime_from_ext(p).to_string());
 
             let root_x = trans_x + scale_x * xfrm.off_x;
             let root_y = trans_y + scale_y * xfrm.off_y;
@@ -1049,7 +1042,6 @@ pub(crate) fn collect_shapes(
                     image_path,
                     mime_type,
                     svg_image_path,
-                    svg_mime_type,
                 },
                 text: None,
             });
@@ -1915,12 +1907,11 @@ mod blip_svg_tests {
             !anchor.image_path.contains(";base64,"),
             "image_path must be a zip path, not a data URL"
         );
-        // The SVG part is surfaced separately as a zip path + image/svg+xml mime.
+        // The SVG part is surfaced separately as a zip path.
         assert_eq!(
             anchor.svg_image_path.as_deref(),
             Some("xl/media/image2.svg")
         );
-        assert_eq!(anchor.svg_mime_type.as_deref(), Some("image/svg+xml"));
         // native ext is retained alongside the new path refs.
         assert_eq!(anchor.native_ext_cx, 300000);
         assert_eq!(anchor.native_ext_cy, 300000);
@@ -1960,7 +1951,6 @@ mod blip_svg_tests {
             Some("xl/media/image2.svg"),
             "svg_image_path must be Some for a pure-SVG picture"
         );
-        assert_eq!(anchor.svg_mime_type.as_deref(), Some("image/svg+xml"));
     }
 
     /// A plain `<xdr:pic>` with no svgBlip extension must leave `svg_image_path`
@@ -1979,14 +1969,10 @@ mod blip_svg_tests {
             anchor.svg_image_path.is_none(),
             "svg_image_path must be None without an svgBlip extension"
         );
-        assert!(
-            anchor.svg_mime_type.is_none(),
-            "svg_mime_type must be None without an svgBlip extension"
-        );
     }
 
     /// Struct-serialize guard: `ImageAnchor` serializes the new camelCase path
-    /// refs (`imagePath`/`mimeType`/`svgImagePath`/`svgMimeType`) and retains
+    /// refs (`imagePath`/`mimeType`/`svgImagePath`) and retains
     /// `nativeExtCx`/`nativeExtCy`, and never emits the old `dataUrl` /
     /// `;base64,` form. Fixture-free so it always runs in CI.
     #[test]
@@ -2006,13 +1992,11 @@ mod blip_svg_tests {
             image_path: "xl/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: Some("xl/media/image2.svg".to_string()),
-            svg_mime_type: Some("image/svg+xml".to_string()),
         };
         let json = serde_json::to_string(&anchor).unwrap();
         assert!(json.contains("\"imagePath\":\"xl/media/image1.png\""));
         assert!(json.contains("\"mimeType\":\"image/png\""));
         assert!(json.contains("\"svgImagePath\":\"xl/media/image2.svg\""));
-        assert!(json.contains("\"svgMimeType\":\"image/svg+xml\""));
         assert!(json.contains("\"nativeExtCx\":300000"));
         assert!(json.contains("\"nativeExtCy\":200000"));
         assert!(!json.contains("dataUrl"), "must not emit dataUrl: {json}");
@@ -2027,7 +2011,6 @@ mod blip_svg_tests {
             image_path: "xl/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: None,
-            svg_mime_type: None,
         };
         let json = serde_json::to_string(&geom).unwrap();
         assert!(json.contains("\"type\":\"image\""));

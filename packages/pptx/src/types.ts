@@ -474,12 +474,10 @@ export interface PictureElement {
    * it rasterizes for compatibility; this is the zip path of the original
    * vector `.svg` part. The renderer prefers this and falls back to the raster
    * if the SVG fails to decode. Omitted when the picture has no svgBlip
-   * extension (the common case).
+   * extension (the common case). Its MIME is always `image/svg+xml` and is
+   * owned by the SVG decoder.
    */
   svgImagePath?: string;
-  /** MIME of the SVG part at {@link PictureElement.svgImagePath} — always
-   *  `image/svg+xml` when present. Omitted without an svgBlip extension. */
-  svgMimeType?: string;
   /**
    * Intrinsic pixel width of the raster blip, read from the PNG IHDR at parse
    * time. Omitted for non-PNG payloads. Used internally for the ink-fallback

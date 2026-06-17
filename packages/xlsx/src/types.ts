@@ -608,11 +608,9 @@ export type ShapeGeom =
       /** Vector original from the Microsoft `asvg:svgBlip` extension
        *  (MS-ODRAWXML), as a zip path. Prefer this over `imagePath` (the raster
        *  fallback, or the SVG itself when no raster blip is embedded). Absent
-       *  when the picture carries no svgBlip extension. */
+       *  when the picture carries no svgBlip extension. Its MIME is always
+       *  `image/svg+xml` and is owned by the SVG decoder. */
       svgImagePath?: string;
-      /** MIME of the SVG part at {@link svgImagePath} — always `image/svg+xml`
-       *  when present. Absent without an svgBlip extension. */
-      svgMimeType?: string;
     };
 
 export interface PathInfo {
@@ -664,11 +662,9 @@ export interface ImageAnchor {
   /** Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML),
    *  as a zip path. Preferred over `imagePath` (the raster fallback, or the SVG
    *  itself when no raster blip is embedded). Absent when the picture carries no
-   *  svgBlip extension. */
+   *  svgBlip extension. Its MIME is always `image/svg+xml` and is owned by the
+   *  SVG decoder. */
   svgImagePath?: string;
-  /** MIME of the SVG part at {@link ImageAnchor.svgImagePath} — always
-   *  `image/svg+xml` when present. Absent without an svgBlip extension. */
-  svgMimeType?: string;
 }
 
 export interface CellRange {

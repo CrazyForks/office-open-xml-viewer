@@ -773,12 +773,9 @@ pub struct ImageRun {
     /// Vector original from the Microsoft `asvg:svgBlip` extension (MS-ODRAWXML)
     /// — the zip path of the `.svg` part. When present the renderer prefers it
     /// over `image_path` (the raster fallback). `None` for a plain raster blip.
+    /// Its MIME is always `image/svg+xml` and is owned by the SVG decoder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub svg_image_path: Option<String>,
-    /// MIME of the SVG part at `svg_image_path` — always `image/svg+xml` when
-    /// present. `None` without an svgBlip extension.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub svg_mime_type: Option<String>,
     /// pt
     pub width_pt: f64,
     /// pt

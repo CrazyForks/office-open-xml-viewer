@@ -964,13 +964,10 @@ struct PictureElement {
     /// PowerPoint rasterizes for compatibility. The zip path of that `.svg`
     /// part; the renderer prefers the vector original and falls back to the
     /// raster on a decode failure. None when the picture has no svgBlip
-    /// extension (the common case).
+    /// extension (the common case). Its MIME is always `image/svg+xml` and is
+    /// owned by the SVG decoder.
     #[serde(skip_serializing_if = "Option::is_none")]
     svg_image_path: Option<String>,
-    /// MIME of the SVG part at `svg_image_path` — always `image/svg+xml` when
-    /// present. None when there is no svgBlip extension.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    svg_mime_type: Option<String>,
     /// Intrinsic pixel width of the raster blip, read from the PNG IHDR at parse
     /// time. None for non-PNG payloads (unchanged from the prior
     /// `png_size_from_data_url` semantics). Consumed by the ink-fallback sizing.
@@ -6518,7 +6515,6 @@ fn parse_picture(
             (None, Some(svg)) => (svg.clone(), "image/svg+xml".to_owned(), None, None),
             (None, None) => return None,
         };
-    let svg_mime_type = svg_image_path.as_ref().map(|_| "image/svg+xml".to_owned());
 
     // ECMA-376 §20.1.9.8 — `<p:pic>` may carry `<a:custGeom>` inside `<p:spPr>`,
     // in which case the bitmap is clipped to that custom path (e.g. a laptop
@@ -6553,7 +6549,6 @@ fn parse_picture(
         image_path,
         mime_type,
         svg_image_path,
-        svg_mime_type,
         intrinsic_width_px,
         intrinsic_height_px,
         stroke,
@@ -7673,8 +7668,6 @@ fn parse_sp_tree_node(
                                 let svg_image_path = blip_fill_node
                                     .and_then(|bf| child(bf, "blip"))
                                     .and_then(|b| svg_blip_path(b, slide_dir, rels, zip));
-                                let svg_mime_type =
-                                    svg_image_path.as_ref().map(|_| "image/svg+xml".to_owned());
                                 // §20.1.9.18 — the sp's prstGeom (any preset, not
                                 // just roundRect) is the picture's clip silhouette.
                                 let (prst_geom, prst_adjust) =
@@ -7710,7 +7703,6 @@ fn parse_sp_tree_node(
                                     image_path,
                                     mime_type,
                                     svg_image_path,
-                                    svg_mime_type,
                                     intrinsic_width_px,
                                     intrinsic_height_px,
                                     stroke,
@@ -7771,7 +7763,6 @@ fn parse_sp_tree_node(
                                     // placeholders pointing at an SVG are rare; thread
                                     // the svg path through BlipFill if a sample needs it.
                                     svg_image_path: None,
-                                    svg_mime_type: None,
                                     // Intrinsic size is only consumed by the ink
                                     // fallback (PNG-IHDR centering); inherited
                                     // placeholder pictures stretch to the box, so
@@ -7833,8 +7824,6 @@ fn parse_sp_tree_node(
                                     // p:pic's blip — prefer the vector original.
                                     let svg_image_path =
                                         blip.and_then(|b| svg_blip_path(b, slide_dir, rels, zip));
-                                    let svg_mime_type =
-                                        svg_image_path.as_ref().map(|_| "image/svg+xml".to_owned());
                                     // §20.1.2.2.24 — placeholder pic border: the
                                     // p:pic's own `<a:ln>`, else the inherited
                                     // layout placeholder stroke.
@@ -7854,7 +7843,6 @@ fn parse_sp_tree_node(
                                         image_path,
                                         mime_type,
                                         svg_image_path,
-                                        svg_mime_type,
                                         intrinsic_width_px,
                                         intrinsic_height_px,
                                         stroke,
@@ -8927,7 +8915,6 @@ mod tests {
             image_path: "ppt/media/image1.png".to_owned(),
             mime_type: "image/png".to_owned(),
             svg_image_path: None,
-            svg_mime_type: None,
             intrinsic_width_px: Some(64),
             intrinsic_height_px: Some(48),
             stroke: None,
@@ -10910,16 +10897,11 @@ mod tests {
             pic.image_path
         );
 
-        // The SVG original is surfaced separately as a zip path + mime.
+        // The SVG original is surfaced separately as a zip path.
         assert_eq!(
             pic.svg_image_path.as_deref(),
             Some("ppt/media/image2.svg"),
             "svg_image_path must point at the .svg part",
-        );
-        assert_eq!(
-            pic.svg_mime_type.as_deref(),
-            Some("image/svg+xml"),
-            "svg_mime_type",
         );
         // And the resolved path must hold the original SVG bytes.
         let svg_bytes = extract_image(&data, "ppt/media/image2.svg", None)
@@ -10969,7 +10951,6 @@ mod tests {
             pic.svg_image_path.is_none(),
             "svg_image_path must be None without an svgBlip extension"
         );
-        assert!(pic.svg_mime_type.is_none(), "svg_mime_type must be None");
     }
 
     /// A `<p:pic>` whose `<a:blip>` carries ONLY the `asvg:svgBlip` extension —
@@ -11023,7 +11004,6 @@ mod tests {
             Some("ppt/media/image2.svg"),
             "svg_image_path must point at the .svg part",
         );
-        assert_eq!(pic.svg_mime_type.as_deref(), Some("image/svg+xml"));
 
         // With no raster blip, image_path falls back to the SVG part itself so
         // the element is always drawable (rather than being dropped or empty);
