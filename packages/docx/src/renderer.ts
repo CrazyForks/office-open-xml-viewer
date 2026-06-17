@@ -51,6 +51,7 @@ import {
   distributeLineSlack,
   type SegStretch,
 } from './text-distribute.js';
+import { justifiedPiecePositions } from './justify-draw.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -2434,16 +2435,24 @@ function renderParagraph(
         // offsets and the pen advances `distPerGap` between pieces, so the pitch
         // appears BETWEEN the ideographs rather than bunched at the segment end.
         if (stretch && stretch.splitBefore.length > 0) {
+          // Inter-CJK justification pitch. Anchor each sliced piece to the
+          // WHOLE-string cumulative advance (so the contextual CJK metrics baked
+          // into measureText(whole) = measuredWidth — most visibly 約物半角, the
+          // half-width collapse of （「」。） — are honoured) plus the accumulated
+          // pitch, instead of summing the isolated pieces' advances. That sum
+          // drifts wider than the segment's box and would paint the next run over
+          // this segment's tail (a CJK→Latin boundary like 「依頼した|MaxFog」 shows
+          // it worst). See justify-draw.ts.
           const cps = [...s.text]; // code points (handles surrogate pairs)
-          let penX = x;
-          let from = 0;
-          for (const cut of stretch.splitBefore) {
-            const piece = cps.slice(from, cut).join('');
-            ctx.fillText(piece, penX, baseline + yOffset);
-            penX += ctx.measureText(piece).width + distPerGap;
-            from = cut;
+          const measure = (str: string): number => ctx.measureText(str).width;
+          for (const { text: piece, dx } of justifiedPiecePositions(
+            cps,
+            stretch.splitBefore,
+            distPerGap,
+            measure,
+          )) {
+            ctx.fillText(piece, x + dx, baseline + yOffset);
           }
-          ctx.fillText(cps.slice(from).join(''), penX, baseline + yOffset);
         } else {
           ctx.fillText(s.text, x, baseline + yOffset);
         }
