@@ -1894,3 +1894,88 @@ mod blip_svg_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod custom_path_arc_tests {
+    use super::*;
+
+    const NS: &str = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#;
+
+    /// `PathCmd`'s enum-level `rename_all = "camelCase"` (tag = "op") renames
+    /// only the variant tags, not the fields. Without a per-variant
+    /// `rename_all`, `ArcTo { st_ang, sw_ang }` serialized as snake_case keys
+    /// `st_ang`/`sw_ang`, which the TS renderer never reads — it reads
+    /// `cmd.stAng`/`cmd.swAng` (`renderer.ts`), so the values came back
+    /// `undefined` → `NaN` and the arc failed to draw. Same root cause as the
+    /// pptx fix in PR #489. This guards the JSON keys the renderer relies on.
+    #[test]
+    fn arc_to_serializes_angle_fields_as_camelcase() {
+        // Non-degenerate arc (wR/hR > 0) — the renderer's degenerate-arc guard
+        // (`if (rx <= 0 || ry <= 0) break;`) short-circuits before the angles
+        // are read, so only non-degenerate arcs surface the missing keys.
+        let xml = format!(
+            r#"<a:path {NS} w="100" h="100">
+                 <a:moveTo><a:pt x="0" y="50"/></a:moveTo>
+                 <a:arcTo wR="50" hR="50" stAng="0" swAng="5400000"/>
+               </a:path>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let path = parse_custom_path(&doc.root_element());
+
+        // The parser keeps angles as raw 60000ths of a degree (the xlsx
+        // convention — the TS renderer divides by 60000). swAng = 5_400_000 =
+        // 90°. wR/hR stay in path-coord units.
+        let arc = path
+            .commands
+            .iter()
+            .find(|c| matches!(c, PathCmd::ArcTo { .. }))
+            .expect("path contains an arcTo command");
+        match arc {
+            PathCmd::ArcTo {
+                wr,
+                hr,
+                st_ang,
+                sw_ang,
+            } => {
+                assert_eq!(*wr, 50.0);
+                assert_eq!(*hr, 50.0);
+                assert_eq!(*st_ang, 0.0);
+                assert_eq!(
+                    *sw_ang, 5_400_000.0,
+                    "raw 60000ths preserved (renderer divides by 60000)"
+                );
+            }
+            other => panic!("expected ArcTo, got {other:?}"),
+        }
+
+        let value = serde_json::to_value(arc).expect("arcTo serializes");
+        let obj = value
+            .as_object()
+            .expect("arcTo serializes to a JSON object");
+
+        // Tag key is "op" (not "cmd"), variant tag is camelCase "arcTo".
+        assert_eq!(
+            obj.get("op").and_then(|v| v.as_str()),
+            Some("arcTo"),
+            "variant tag serializes under key \"op\" as camelCase \"arcTo\""
+        );
+
+        // The angle fields must be camelCase — the TS renderer reads
+        // cmd.stAng / cmd.swAng. snake_case keys here regress the bug.
+        assert!(
+            obj.contains_key("stAng"),
+            "stAng must be camelCase, got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            obj.contains_key("swAng"),
+            "swAng must be camelCase, got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !obj.contains_key("st_ang") && !obj.contains_key("sw_ang"),
+            "snake_case angle keys must not appear (regresses the NaN bug)"
+        );
+        assert_eq!(obj.get("swAng").and_then(|v| v.as_f64()), Some(5_400_000.0));
+    }
+}

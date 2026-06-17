@@ -995,6 +995,15 @@ pub enum PathCmd {
     /// ECMA-376 §20.1.9.3 `a:arcTo`. `stAng`/`swAng` are in 60000ths of a
     /// degree. The start point is the current pen position; the ellipse
     /// center is derived so the pen lies on the ellipse at `stAng`.
+    ///
+    /// The enum-level `rename_all = "camelCase"` (tag = "op") renames only the
+    /// variant tags, not the fields, so `st_ang`/`sw_ang` need a per-variant
+    /// `rename_all` to serialize as the camelCase keys the TS renderer reads
+    /// (`renderer.ts`: `cmd.stAng`/`cmd.swAng`, then `/ 60000`). Without it the
+    /// keys land as snake_case, the renderer reads `undefined` → `NaN`, and the
+    /// arc fails to draw. Same root cause as the pptx fix in PR #489. The raw
+    /// 60000ths convention is unchanged (the renderer does the division).
+    #[serde(rename_all = "camelCase")]
     ArcTo {
         wr: f64,
         hr: f64,
