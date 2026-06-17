@@ -54,6 +54,11 @@ export {
 export { renderChart } from './chart/renderer';
 export { autoResize, type AutoResizeOptions } from './autoResize';
 export { buildCustomPath } from './shape/custGeom';
+export {
+  getCustGeomEndpoints,
+  type CustGeomEndpoint,
+  type CustGeomEndpoints,
+} from './shape/custgeom-endpoints';
 export { hexToRgba, resolveFill, applyStroke } from './shape/paint';
 export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
 export { drawArrowHead } from './shape/arrow';
@@ -160,6 +165,7 @@ export {
   crossRunKinsokuRetract,
 } from './text/kinsoku';
 export { isCjkBreakChar } from './text/cjk-ranges';
+export { highlightBox } from './text/highlight-box';
 export {
   distributeLineSlack,
   type DistributeSeg,

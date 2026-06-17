@@ -375,6 +375,17 @@ export interface TextRunData {
    * fill-only.
    */
   outline?: TextOutline;
+  /**
+   * Run-level text highlight / marker colour (`<a:rPr><a:highlight>`),
+   * ECMA-376 §21.1.2.3.4. In DrawingML this is a full CT_Color (any
+   * srgbClr / schemeClr / sysClr / prstClr + transforms), unlike
+   * WordprocessingML's fixed 16-name highlight enum — so the parser already
+   * resolves it through the theme/clrMap. The value is a hex string without
+   * `#` (6-char opaque, or 8-char RRGGBBAA when an alpha transform applies);
+   * the renderer paints a background rectangle behind the run's glyphs.
+   * Absent means no highlight.
+   */
+  highlight?: string;
 }
 
 /** Run-level glyph outline. Width is in OOXML EMU (12700 EMU = 1 pt). */
