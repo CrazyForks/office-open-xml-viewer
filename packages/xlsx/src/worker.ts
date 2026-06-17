@@ -1,8 +1,14 @@
-import init, { parse_xlsx, parse_sheet } from './wasm/xlsx_parser.js';
+import init, { parse_xlsx, parse_sheet, extract_image } from './wasm/xlsx_parser.js';
 import { decodeDataUrl } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types.js';
 
 let initPromise: Promise<unknown> | null = null;
+// The buffer is *copied* into the worker on `parse` (xlsx clones rather than
+// transfers, so the main thread keeps its own copy too). Retain it so a later
+// `extractImage` can read media bytes by zip path without re-sending the file —
+// mirroring how docx/pptx worker.ts keep `currentBuffer`.
+let currentBuffer: Uint8Array | null = null;
+let currentMaxZipEntryBytes: bigint | undefined;
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
@@ -18,11 +24,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   try {
     await initPromise;
     if (req.type === 'parse') {
-      const maxBytes =
+      currentMaxZipEntryBytes =
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
-      const json = parse_xlsx(new Uint8Array(req.data), maxBytes);
+      currentBuffer = new Uint8Array(req.data);
+      const json = parse_xlsx(currentBuffer, currentMaxZipEntryBytes);
       const workbook = JSON.parse(json);
       const res: WorkerResponse = { type: 'parsed', id, workbook };
       self.postMessage(res);
@@ -35,6 +42,12 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       const worksheet = JSON.parse(json);
       const res: WorkerResponse = { type: 'parsedSheet', id, worksheet };
       self.postMessage(res);
+    } else if (req.type === 'extractImage') {
+      if (!currentBuffer) throw new Error('No xlsx loaded');
+      const bytes = extract_image(currentBuffer, req.path, currentMaxZipEntryBytes);
+      const copy = new Uint8Array(bytes).slice().buffer;
+      const res: WorkerResponse = { type: 'imageExtracted', id, bytes: copy };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [copy]);
     }
   } catch (err) {
     const res: WorkerResponse = { type: 'error', id, message: String(err) };

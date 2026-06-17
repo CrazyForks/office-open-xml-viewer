@@ -83,6 +83,7 @@ export class PptxPresentation {
   private _presentation: Presentation | null = null;
   private _meta: PresentationMeta | null = null;
   private _mediaCache = new Map<string, Promise<Blob>>();
+  private _imageCache = new Map<string, Promise<Blob>>();
   private _workerReady = false;
   private _workerReadyCallbacks: Array<() => void> = [];
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
@@ -244,6 +245,7 @@ export class PptxPresentation {
         minorFont: this._presentation.minorFont,
         hlinkColor: this._presentation.hlinkColor ?? null,
         fetchMedia: (path) => this.getMedia(path),
+        fetchImage: (path, mime) => this.getImage(path, mime),
         skipMediaControls: opts.skipMediaControls,
         math: this._math,
       },
@@ -306,6 +308,28 @@ export class PptxPresentation {
   private _findMimeTypeForPath(mediaPath: string): string {
     if (!this._presentation) return '';
     return findMimeTypeForPath(this._presentation, mediaPath);
+  }
+
+  /**
+   * Extract raw bytes for an embedded image by zip path (e.g.
+   * "ppt/media/image1.png"), wrapped in a Blob of the given MIME type. Mirrors
+   * {@link getMedia}; results are cached by path for the lifetime of this
+   * instance. The renderer routes its `fetchImage` option here so images are
+   * decoded lazily rather than inlined as base64 at parse time.
+   */
+  async getImage(imagePath: string, mimeType: string): Promise<Blob> {
+    const hit = this._imageCache.get(imagePath);
+    if (hit) return hit;
+    const p = (async () => {
+      await this._waitForWorker();
+      const res = await this._bridge.request(
+        (id) => ({ kind: 'extractImage', id, path: imagePath }) satisfies WorkerRequest,
+      );
+      const bytes = (res as Extract<WorkerResponse, { kind: 'imageExtracted' }>).bytes;
+      return new Blob([bytes], { type: mimeType });
+    })();
+    this._imageCache.set(imagePath, p);
+    return p;
   }
 
   /**
@@ -373,6 +397,7 @@ export class PptxPresentation {
       dpr,
       slideWidthEmu: this.slideWidth,
       fetchMedia: (path) => this.getMedia(path),
+      fetchImage: (path, mime) => this.getImage(path, mime),
       drawBase,
     });
   }
@@ -383,5 +408,6 @@ export class PptxPresentation {
     this._presentation = null;
     this._meta = null;
     this._mediaCache.clear();
+    this._imageCache.clear();
   }
 }

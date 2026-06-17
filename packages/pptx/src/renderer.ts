@@ -57,7 +57,7 @@ import {
   NON_CJK_SERIF_FALLBACKS,
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
-  getCachedSvgImage,
+  getCachedSvgImageByPath,
   highlightBox,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
@@ -1036,6 +1036,7 @@ async function renderBackground(
   canvasW: number,
   canvasH: number,
   scale: number,
+  fetchImage?: (path: string, mime: string) => Promise<Blob>,
 ) {
   // ECMA-376 §20.1.8.14 — image (blipFill) background. Paint an opaque white
   // base first so a partially transparent image (alphaModFix) composites over
@@ -1043,8 +1044,11 @@ async function renderBackground(
   if (fill && fill.fillType === 'image') {
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, canvasW, canvasH);
+    // The lazy pipeline always emits imagePath + mimeType for blip fills; bail
+    // to the white base if either the path or the byte source is missing.
+    if (!fill.imagePath || !fill.mimeType || !fetchImage) return;
     try {
-      const bitmap = await getCachedBitmap(fill.dataUrl);
+      const bitmap = await getCachedBitmap(fill.imagePath, fill.mimeType, fetchImage);
       ctx.save();
       // Clip to the slide rectangle so overscan (negative insets) or tile
       // bleed is cropped at the slide edge rather than spilling onto
@@ -2866,18 +2870,28 @@ function paintBeveledFlat(
   return true;
 }
 
-function getCachedBitmap(dataUrl: string): Promise<ImageBitmap> {
-  const existing = imageBitmapCache.get(dataUrl);
+/**
+ * Decode a raster blip to an ImageBitmap, cached by its zip path. The bytes are
+ * fetched lazily via `fetchImage(imagePath, mimeType)` (twin of the audio/video
+ * `fetchMedia` path) rather than `fetch`-ing an inlined data URL. LRU(256);
+ * evicted bitmaps are `.close()`d to release their GPU backing.
+ */
+export function getCachedBitmap(
+  imagePath: string,
+  mimeType: string,
+  fetchImage: (path: string, mime: string) => Promise<Blob>,
+): Promise<ImageBitmap> {
+  const existing = imageBitmapCache.get(imagePath);
   if (existing) {
     // Refresh LRU position.
-    imageBitmapCache.delete(dataUrl);
-    imageBitmapCache.set(dataUrl, existing);
+    imageBitmapCache.delete(imagePath);
+    imageBitmapCache.set(imagePath, existing);
     return existing;
   }
-  const p = fetch(dataUrl).then((r) => r.blob()).then((b) => createImageBitmap(b));
+  const p = fetchImage(imagePath, mimeType).then((b) => createImageBitmap(b));
   // Don't poison the cache on a transient decode failure.
-  p.catch(() => imageBitmapCache.delete(dataUrl));
-  imageBitmapCache.set(dataUrl, p);
+  p.catch(() => imageBitmapCache.delete(imagePath));
+  imageBitmapCache.set(imagePath, p);
   if (imageBitmapCache.size > IMAGE_BITMAP_CACHE_MAX) {
     const oldestKey = imageBitmapCache.keys().next().value as string;
     const oldest = imageBitmapCache.get(oldestKey);
@@ -2914,21 +2928,25 @@ function getPosterBitmap(
 async function renderPicture(
   ctx: CanvasRenderingContext2D,
   el: PictureElement,
-  scale: number
+  scale: number,
+  fetchImage?: (path: string, mime: string) => Promise<Blob>,
 ) {
+  // No byte source → nothing to draw (the lazy pipeline always supplies one in
+  // both render modes; this guards the rare misconfiguration).
+  if (!fetchImage) return;
   try {
     // Prefer the vector original (Microsoft svgBlip extension); fall back to the
-    // PNG raster on any SVG decode failure. `bitmap` widens to the union of the
-    // two drawable sources — both expose numeric .width/.height (used for the
+    // raster on any SVG decode failure. `bitmap` widens to the union of the two
+    // drawable sources — both expose numeric .width/.height (used for the
     // srcRect crop below) and both are valid `ctx.drawImage` sources, so every
     // downstream path stays unchanged.
-    // `dataUrl` is normally a raster (PNG/JPEG), but for a pure-SVG picture with
-    // no raster blip it is the SVG itself — and `createImageBitmap` (getCachedBitmap)
-    // cannot rasterize SVG in every browser, so such a `dataUrl` must also go
-    // through the <img>-based SVG decoder.
-    const dataIsSvg = el.dataUrl.startsWith('data:image/svg+xml');
+    // `imagePath` is normally a raster (PNG/JPEG), but for a pure-SVG picture
+    // with no raster blip it is the SVG part itself — and `createImageBitmap`
+    // (getCachedBitmap) cannot rasterize SVG in every browser, so such a picture
+    // must also go through the <img>-based SVG decoder (keyed by path).
+    const dataIsSvg = el.mimeType === 'image/svg+xml';
     let bitmap: ImageBitmap | HTMLImageElement;
-    if (el.svgDataUrl != null && !el.srcRect) {
+    if (el.svgImagePath != null && !el.srcRect) {
       // No crop: prefer the vector original. With an a:srcRect crop we skip this
       // branch — the crop math below multiplies fractional srcRect edges by the
       // source's pixel dims, and an SVG HTMLImageElement that declares only a
@@ -2939,19 +2957,19 @@ async function renderPicture(
       // the final branch); when only the SVG exists the `dataIsSvg` branch below
       // still draws it (uncropped is the overwhelmingly common case for icons).
       try {
-        bitmap = await getCachedSvgImage(el.svgDataUrl);
+        bitmap = await getCachedSvgImageByPath(el.svgImagePath, fetchImage);
       } catch {
         bitmap = dataIsSvg
-          ? await getCachedSvgImage(el.dataUrl)
-          : await getCachedBitmap(el.dataUrl);
+          ? await getCachedSvgImageByPath(el.imagePath, fetchImage)
+          : await getCachedBitmap(el.imagePath, el.mimeType, fetchImage);
       }
     } else if (dataIsSvg) {
       // SVG-only picture (here either because it has a crop, or — defensively —
-      // because no svgDataUrl was surfaced): decode through the SVG path since
+      // because no svgImagePath was surfaced): decode through the SVG path since
       // createImageBitmap can't.
-      bitmap = await getCachedSvgImage(el.dataUrl);
+      bitmap = await getCachedSvgImageByPath(el.imagePath, fetchImage);
     } else {
-      bitmap = await getCachedBitmap(el.dataUrl);
+      bitmap = await getCachedBitmap(el.imagePath, el.mimeType, fetchImage);
     }
     ctx.save();
     if (el.alpha != null) ctx.globalAlpha *= el.alpha;
@@ -3739,7 +3757,7 @@ export async function renderSlide(
     themeHlinkColor: opts.hlinkColor ?? null,
   };
 
-  await renderBackground(ctx, slide.background, canvasW, canvasH, scale);
+  await renderBackground(ctx, slide.background, canvasW, canvasH, scale, opts.fetchImage);
   if (superseded()) return canvas;
 
   // Pre-rasterize any equations so the synchronous text layout can place them.
@@ -3759,24 +3777,24 @@ export async function renderSlide(
   // await now hits a settled/in-flight promise instead of starting a serial
   // fetch+decode — first paint cost becomes max(decode) instead of sum.
   for (const el of slide.elements) {
-    if (el.type === 'picture') {
+    if (el.type === 'picture' && opts.fetchImage) {
       // Warm exactly the source the draw loop (renderPicture) will await: the
-      // SVG decode when the picture carries an svgDataUrl and no srcRect crop,
-      // otherwise the PNG bitmap. This mirrors the draw-path source selection
+      // SVG decode when the picture carries an svgImagePath and no srcRect crop,
+      // otherwise the raster bitmap. This mirrors the draw-path source selection
       // above, so the await there hits a settled/in-flight promise instead of
-      // starting a serial fetch + decode. Warming the PNG for an uncropped
+      // starting a serial fetch + decode. Warming the raster for an uncropped
       // SVG-bearing picture would instead leave the hot (SVG) cache cold and
       // waste a fetch + createImageBitmap on a fallback that is never drawn.
       // (The draw path still falls back to getCachedBitmap on SVG decode
-      // failure, so the PNG stays cold only in that rare case.)
+      // failure, so the raster stays cold only in that rare case.)
       const p = el as PictureElement;
-      const pDataIsSvg = p.dataUrl.startsWith('data:image/svg+xml');
-      if (p.svgDataUrl != null && !p.srcRect) {
-        void getCachedSvgImage(p.svgDataUrl).catch(() => undefined);
+      const pDataIsSvg = p.mimeType === 'image/svg+xml';
+      if (p.svgImagePath != null && !p.srcRect) {
+        void getCachedSvgImageByPath(p.svgImagePath, opts.fetchImage).catch(() => undefined);
       } else if (pDataIsSvg) {
-        void getCachedSvgImage(p.dataUrl).catch(() => undefined);
+        void getCachedSvgImageByPath(p.imagePath, opts.fetchImage).catch(() => undefined);
       } else {
-        void getCachedBitmap(p.dataUrl).catch(() => undefined);
+        void getCachedBitmap(p.imagePath, p.mimeType, opts.fetchImage).catch(() => undefined);
       }
     } else if (el.type === 'media') {
       const m = el as MediaElement;
@@ -3793,7 +3811,7 @@ export async function renderSlide(
     if (el.type === 'shape') {
       renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun);
     } else if (el.type === 'picture') {
-      await renderPicture(ctx, el, scale);
+      await renderPicture(ctx, el, scale, opts.fetchImage);
     } else if (el.type === 'table') {
       renderTable(ctx, el, scale, slideNumber, rc);
     } else if (el.type === 'media') {

@@ -41,8 +41,14 @@ export class XlsxWorkbook {
   private bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
-  /** Cache of decoded image bitmaps keyed by their data URL. Shared across sheets. */
+  /** Cache of decoded image sources keyed by their zip `imagePath`. Shared
+   *  across sheets. */
   private imageCache = new Map<string, CanvasImageSource>();
+  /** Cache of fetched image *bytes* (as Blobs) keyed by zip path, populated by
+   *  {@link XlsxWorkbook.getImage}. Twin of pptx/docx's per-instance
+   *  `_imageCache`; kept separate from {@link XlsxWorkbook.imageCache} (decoded
+   *  sources) so each layer dedupes independently. */
+  private imageBlobCache = new Map<string, Promise<Blob>>();
   private rawData: ArrayBuffer | null = null;
   private maxZipEntryBytes: number | undefined;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
@@ -164,6 +170,31 @@ export class XlsxWorkbook {
   }
 
   /**
+   * Fetch an embedded image's bytes by zip path (e.g. `xl/media/image1.png`),
+   * wrapped in a Blob of the given MIME. The bytes are pulled through the
+   * persistent worker via the `extractImage` message (twin of pptx/docx's
+   * `getImage`/`getMedia`); results are cached by path for the lifetime of this
+   * instance. The renderer's `fetchImage` option points here so image bytes are
+   * extracted lazily rather than inlined as base64 at parse time.
+   *
+   * Routed through the worker even though the main thread also retains
+   * `rawData`, to keep all WASM `extract_image` decoding on the worker (the
+   * route-through-worker decision).
+   */
+  async getImage(imagePath: string, mimeType: string): Promise<Blob> {
+    const hit = this.imageBlobCache.get(imagePath);
+    if (hit) return hit;
+    const p = this.bridge
+      .request((id) => ({ type: 'extractImage', id, path: imagePath }) satisfies WorkerRequest)
+      .then((res) => {
+        const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
+        return new Blob([bytes], { type: mimeType });
+      });
+    this.imageBlobCache.set(imagePath, p);
+    return p;
+  }
+
+  /**
    * Resolve a `list`-type data-validation `formula1` (ECMA-376 §18.3.1.32) into
    * the set of allowed values to display, evaluated relative to `sheetIndex`
    * (the sheet that owns the validation, used to resolve unqualified ranges):
@@ -239,7 +270,9 @@ export class XlsxWorkbook {
       { ws, styles: this.parsedWorkbook.styles, imageCache: this.imageCache, math: this.math },
       target,
       viewport,
-      opts,
+      // Supply the lazy byte loader so the orchestrator can decode embedded
+      // images on demand; an explicit caller-provided fetchImage still wins.
+      { fetchImage: (path, mime) => this.getImage(path, mime), ...opts },
     );
   }
 
@@ -279,6 +312,7 @@ export class XlsxWorkbook {
     this.parsedWorkbook = null;
     this.sheetCache.clear();
     this.imageCache.clear();
+    this.imageBlobCache.clear();
     this.rawData = null;
   }
 }

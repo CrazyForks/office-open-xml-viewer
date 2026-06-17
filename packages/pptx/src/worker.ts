@@ -1,5 +1,5 @@
 import type { Presentation, WorkerRequest, WorkerResponse } from './types';
-import init, { parse_pptx, extract_media } from './wasm/pptx_parser.js';
+import init, { parse_pptx, extract_media, extract_image } from './wasm/pptx_parser.js';
 
 let ready = false;
 let currentBuffer: Uint8Array | null = null;
@@ -70,6 +70,28 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
       const bytes = extract_media(currentBuffer, req.path, currentMaxZipEntryBytes);
       const copy = new Uint8Array(bytes).slice().buffer;
       const msg: WorkerResponse = { kind: 'mediaExtracted', id: req.id, bytes: copy };
+      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [copy]);
+    } catch (err) {
+      const msg: WorkerResponse = {
+        kind: 'error',
+        id: req.id,
+        message: err instanceof Error ? err.message : String(err),
+      };
+      self.postMessage(msg);
+    }
+    return;
+  }
+
+  if (req.kind === 'extractImage') {
+    if (!currentBuffer) {
+      const msg: WorkerResponse = { kind: 'error', id: req.id, message: 'No pptx loaded' };
+      self.postMessage(msg);
+      return;
+    }
+    try {
+      const bytes = extract_image(currentBuffer, req.path, currentMaxZipEntryBytes);
+      const copy = new Uint8Array(bytes).slice().buffer;
+      const msg: WorkerResponse = { kind: 'imageExtracted', id: req.id, bytes: copy };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(msg, [copy]);
     } catch (err) {
       const msg: WorkerResponse = {

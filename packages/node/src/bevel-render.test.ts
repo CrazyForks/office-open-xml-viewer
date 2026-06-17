@@ -39,19 +39,21 @@ const factory: NodeCanvasFactory | null =
 
 const g = globalThis as unknown as { createImageBitmap?: unknown; OffscreenCanvas?: unknown };
 
-/** Build a small flat-colour PNG as a data URL using skia-canvas. */
-async function flatPngDataUrl(w: number, h: number, color: string): Promise<string> {
+/** Build a small flat-colour PNG as raw bytes using skia-canvas. The lazy
+ *  image pipeline fetches bytes by path, so the test carries a path on the
+ *  element and serves these bytes through `fetchImage`. */
+async function flatPngBytes(w: number, h: number, color: string): Promise<Uint8Array> {
   const c = new Canvas(w, h);
   const ctx = c.getContext('2d');
   ctx.fillStyle = color;
   ctx.fillRect(0, 0, w, h);
-  const buf = await c.toBuffer('png');
-  return `data:image/png;base64,${buf.toString('base64')}`;
+  return new Uint8Array(await c.toBuffer('png'));
 }
 
 const EMU_PER_PX = 9525; // 96 dpi
+const PIC_IMAGE_PATH = 'ppt/media/image1.png';
 
-function buildBeveledSlide(dataUrl: string): Presentation {
+function buildBeveledSlide(): Presentation {
   // A 300x300 px picture centred on a 400x400 px slide, with a chunky top
   // bevel so the lit/shadowed rim is unmistakable.
   const px = (n: number) => Math.round(n * EMU_PER_PX);
@@ -64,7 +66,8 @@ function buildBeveledSlide(dataUrl: string): Presentation {
     rotation: 0,
     flipH: false,
     flipV: false,
-    dataUrl,
+    imagePath: PIC_IMAGE_PATH,
+    mimeType: 'image/png',
     stroke: null,
     sp3d: {
       prstMaterial: 'warmMatte',
@@ -90,12 +93,13 @@ function buildBeveledSlide(dataUrl: string): Presentation {
 
 async function renderToRgba(
   presentation: Presentation,
+  pngBytes: Uint8Array,
   withShim: boolean,
 ): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
   const width = 400;
   const dpr = 1;
   const canvas = new Canvas(width * dpr, 400 * dpr);
-  // createImageBitmap is always needed to decode the picture's dataUrl.
+  // createImageBitmap is always needed to decode the picture's bytes.
   const g2 = globalThis as unknown as { createImageBitmap?: unknown };
   const prevBitmap = g2.createImageBitmap;
   g2.createImageBitmap = async (source: Blob | ArrayBuffer | Uint8Array) => {
@@ -112,7 +116,14 @@ async function renderToRgba(
       // `factory` is non-null whenever this suite runs (it is gated by
       // describe.skipIf(!skia)); the `&& factory` narrows the nullable type
       // away so the spread matches renderSlideNode's `factory?` option.
-      { width, dpr, ...(withShim && factory ? { factory } : {}) },
+      {
+        width,
+        dpr,
+        // Serve the picture's bytes by path (lazy image pipeline).
+        fetchImage: async (_path: string, mime: string) =>
+          new Blob([pngBytes as BlobPart], { type: mime }),
+        ...(withShim && factory ? { factory } : {}),
+      },
     );
   } finally {
     g2.createImageBitmap = prevBitmap as typeof globalThis.createImageBitmap;
@@ -128,11 +139,11 @@ describe.skipIf(!skia)('node bevel rendering (OffscreenCanvas shim)', () => {
     // bevel can appear is via the shim installed by renderSlideNode(factory).
     expect(typeof g.OffscreenCanvas).toBe('undefined');
 
-    const dataUrl = await flatPngDataUrl(8, 8, '#808080'); // mid-grey face
-    const presentation = buildBeveledSlide(dataUrl);
+    const pngBytes = await flatPngBytes(8, 8, '#808080'); // mid-grey face
+    const presentation = buildBeveledSlide();
 
-    const flat = await renderToRgba(presentation, /* withShim */ false);
-    const beveled = await renderToRgba(presentation, /* withShim */ true);
+    const flat = await renderToRgba(presentation, pngBytes, /* withShim */ false);
+    const beveled = await renderToRgba(presentation, pngBytes, /* withShim */ true);
 
     // Shim must not leak out of renderSlideNode.
     expect(typeof g.OffscreenCanvas).toBe('undefined');
@@ -163,11 +174,11 @@ describe.skipIf(!skia)('node bevel rendering (OffscreenCanvas shim)', () => {
   });
 
   it('without a factory the render is the flat fallback (no aux canvas, no throw)', async () => {
-    const dataUrl = await flatPngDataUrl(8, 8, '#808080');
-    const presentation = buildBeveledSlide(dataUrl);
+    const pngBytes = await flatPngBytes(8, 8, '#808080');
+    const presentation = buildBeveledSlide();
     // Two flat renders must be identical (deterministic, no bevel).
-    const a = await renderToRgba(presentation, false);
-    const b = await renderToRgba(presentation, false);
+    const a = await renderToRgba(presentation, pngBytes, false);
+    const b = await renderToRgba(presentation, pngBytes, false);
     let diff = 0;
     for (let i = 0; i < a.data.length; i++) if (a.data[i] !== b.data[i]) diff++;
     expect(diff).toBe(0);

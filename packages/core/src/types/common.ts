@@ -87,14 +87,21 @@ export interface TileInfo {
 
 /**
  * Image fill — ECMA-376 §20.1.8.14 (CT_BlipFillProperties). The embedded blip
- * is resolved to a base64 data URL at parse time. Both fill-modes are modelled
- * and mutually exclusive: `stretch` (§20.1.8.56) carries {@link ImageFill.fillRect};
- * `tile` (§20.1.8.58) carries {@link ImageFill.tile}.
+ * is carried as a zip path + MIME; the renderer fetches the bytes on demand via
+ * {@link RenderOptions.fetchImage} (no base64 inlined at parse time). Both
+ * fill-modes are modelled and mutually exclusive: `stretch` (§20.1.8.56) carries
+ * {@link ImageFill.fillRect}; `tile` (§20.1.8.58) carries {@link ImageFill.tile}.
  */
 export interface ImageFill {
   fillType: 'image';
-  /** `data:<mime>;base64,…` of the embedded blip. */
-  dataUrl: string;
+  /**
+   * Embedded zip path of the blip (e.g. "word/media/image1.png"), for the lazy
+   * byte-on-demand pipeline. The renderer fetches the bytes via a path-keyed
+   * loader ({@link RenderOptions.fetchImage}) instead of inlining base64.
+   */
+  imagePath: string;
+  /** MIME type of the blip at {@link ImageFill.imagePath} (e.g. `image/png`). */
+  mimeType: string;
   /**
    * `<a:stretch><a:fillRect>` insets. Absent → fills the whole box (or the
    * fill is tiled — see {@link ImageFill.tile}).
@@ -406,6 +413,13 @@ export interface RenderOptions {
    * demand, keeping the parse output free of inlined base64.
    */
   fetchMedia?: (path: string) => Promise<Blob>;
+  /**
+   * Lazily resolve an embedded image (by zip path + MIME) to a Blob. Twin of
+   * {@link RenderOptions.fetchMedia} for pictures and blip fills: the renderer
+   * fetches raster/SVG bytes on demand and decodes them (`createImageBitmap` /
+   * path-keyed `<img>`), so the parse output carries only paths, never base64.
+   */
+  fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
   /**
    * When true, renderMedia draws only the poster frame — play/pause badges
    * and progress bars are left to the caller. Set by the pptx presentSlide

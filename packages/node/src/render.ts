@@ -119,6 +119,34 @@ export function installImageBitmapShim(factory: NodeCanvasFactory): () => void {
   return () => { g.createImageBitmap = prev as typeof globalThis.createImageBitmap; };
 }
 
+/**
+ * Build a `fetchImage` that reads embedded image bytes straight out of the
+ * original `.pptx` archive via the WASM `extract_image` export — the Node twin
+ * of the browser worker's in-worker `getImage` closure (render-worker.ts). The
+ * lazy image pipeline carries only zip paths on pictures/blip fills, so the
+ * source archive bytes are the byte source server-side; no base64 is ever
+ * inlined. Mime travels on the element, so the renderer supplies it.
+ *
+ * `maxZipEntryBytes` mirrors the worker's per-entry guard and is optional
+ * (no cap when omitted).
+ */
+export function makeSourceBufferFetchImage(
+  sourceBuffer: ArrayBuffer | Uint8Array,
+  maxZipEntryBytes?: number,
+): (path: string, mimeType: string) => Promise<Blob> {
+  return async (path: string, mimeType: string): Promise<Blob> => {
+    // Dynamic import keeps the WASM parser binding out of this module's static
+    // import graph: render.ts must load under Node without the git-ignored,
+    // build-on-demand WASM artifacts present (CI runs `pnpm test` before
+    // `pnpm build:wasm`). Mirrors the dynamic renderer import in renderSlideNode.
+    const { extractImage } = await import('./pptx.ts');
+    const bytes = extractImage(sourceBuffer, path, maxZipEntryBytes);
+    // `.slice()` detaches from the WASM linear memory so the Blob owns a stable
+    // copy (the WASM heap can be reused by the next call).
+    return new Blob([new Uint8Array(bytes).slice() as BlobPart], { type: mimeType });
+  };
+}
+
 /** Skeleton: render a single slide into a user-supplied Node canvas. The
  *  caller must:
  *   - have called `parsePptx(buffer)` to obtain `presentation`
@@ -144,7 +172,36 @@ export async function renderSlideNode(
   canvas: NodeCanvasLike,
   presentation: Presentation,
   slideIndex: number,
-  opts: { width?: number; dpr?: number; factory?: NodeCanvasFactory } = {},
+  opts: {
+    width?: number;
+    dpr?: number;
+    factory?: NodeCanvasFactory;
+    /**
+     * The original `.pptx` archive bytes. When supplied (and no explicit
+     * `fetchImage` is given), embedded images are painted by reading their bytes
+     * straight out of this buffer via the WASM `extract_image` export — the Node
+     * twin of the browser worker's in-worker image loader. Pictures and blip
+     * fills carry only zip paths now (no inlined base64), so this is the byte
+     * source server-side. Additive: omit it (and `fetchImage`) to keep the prior
+     * behavior where pictures simply draw nothing.
+     */
+    sourceBuffer?: ArrayBuffer | Uint8Array;
+    /**
+     * Optional per-zip-entry byte cap forwarded to `extract_image`, mirroring the
+     * browser worker's guard. Only consulted when `sourceBuffer` drives the
+     * default `fetchImage`. No cap when omitted.
+     */
+    maxZipEntryBytes?: number;
+    /**
+     * Lazily resolve an embedded image (by zip path + MIME) to a Blob. Pictures
+     * and blip fills carry only zip paths now (no inlined base64). Supplying
+     * `sourceBuffer` builds this automatically; pass an explicit `fetchImage`
+     * only to override that (e.g. a custom byte source). When neither is given,
+     * defaults to an empty-Blob fetcher (images decode to nothing), matching the
+     * media placeholder.
+     */
+    fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
+  } = {},
 ): Promise<void> {
   // Direct import of the pure renderer module — avoids `presentation.ts`
   // and `viewer.ts`, both of which pull Vite-specific worker / asset
@@ -168,6 +225,15 @@ export async function renderSlideNode(
   const restoreOffscreen = opts.factory
     ? installOffscreenCanvasShim(opts.factory)
     : () => {};
+  // Resolve the image byte source: an explicit `fetchImage` wins; otherwise, if
+  // the caller handed us the source archive, read image bytes from it via
+  // `extract_image`; otherwise fall back to the empty-Blob default (pictures
+  // draw nothing) so existing callers without images keep working.
+  const fetchImage =
+    opts.fetchImage ??
+    (opts.sourceBuffer
+      ? makeSourceBufferFetchImage(opts.sourceBuffer, opts.maxZipEntryBytes)
+      : async () => new Blob([]));
   try {
     await renderSlide(
       canvas as unknown as HTMLCanvasElement,
@@ -182,9 +248,12 @@ export async function renderSlideNode(
         minorFont: presentation.minorFont,
         hlinkColor: presentation.hlinkColor ?? null,
         // Node-side renderers don't run media playback, so an empty fetcher
-        // is fine — picture elements with `dataUrl` are handled by the
-        // existing path through createImageBitmap.
+        // is fine for posters.
         fetchMedia: async () => new Blob([]),
+        // Pictures/blip fills now carry zip paths; bytes come from `sourceBuffer`
+        // (via extract_image), an explicit `fetchImage`, or — when neither is
+        // given — an empty Blob so text/shape-only renders still work.
+        fetchImage,
         skipMediaControls: true,
       },
     );

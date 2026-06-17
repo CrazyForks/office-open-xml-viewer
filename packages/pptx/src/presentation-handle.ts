@@ -38,6 +38,14 @@ export interface PresentOptions {
   slideWidthEmu: number;
   /** Retrieve the raw media bytes for the given zip path. */
   fetchMedia: (mediaPath: string) => Promise<Blob>;
+  /**
+   * Retrieve the raw image bytes for an embedded picture by zip path (+ mime).
+   * The static base render (`drawBase` → `renderSlide`) already routes its own
+   * `fetchImage` here; this member keeps the handle's options symmetric with
+   * `fetchMedia` so a future interactive layer that re-decodes pictures has the
+   * same lazy byte source.
+   */
+  fetchImage: (imagePath: string, mimeType: string) => Promise<Blob>;
   /** Draw the static slide (poster + play badge) onto the canvas. */
   drawBase: () => Promise<void>;
 }

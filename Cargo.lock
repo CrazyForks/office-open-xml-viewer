@@ -203,7 +203,6 @@ dependencies = [
 name = "docx-parser"
 version = "0.1.0"
 dependencies = [
- "base64",
  "console_error_panic_hook",
  "ooxml-common",
  "roxmltree",
@@ -495,6 +494,7 @@ dependencies = [
  "roxmltree",
  "serde",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
@@ -553,7 +553,6 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "pptx-parser"
 version = "0.1.0"
 dependencies = [
- "base64",
  "console_error_panic_hook",
  "ooxml-common",
  "roxmltree",
@@ -1096,7 +1095,6 @@ dependencies = [
 name = "xlsx-parser"
 version = "0.1.0"
 dependencies = [
- "base64",
  "console_error_panic_hook",
  "ooxml-common",
  "roxmltree",
