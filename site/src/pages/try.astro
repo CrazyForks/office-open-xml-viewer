@@ -63,7 +63,10 @@ import Nav from '../components/Nav.astro';
   </footer>
 
   <script>
-    import { renderFile } from '../lib/try';
+    import { renderFile, prewarmEngines } from '../lib/try';
+    // Hot standby — prime the WASM engines + fonts on idle so the first dropped
+    // file renders without the cold parser-load cost.
+    prewarmEngines();
     const dz = document.getElementById('dropzone') as HTMLLabelElement;
     const input = document.getElementById('file') as HTMLInputElement;
     const status = document.getElementById('status') as HTMLElement;
