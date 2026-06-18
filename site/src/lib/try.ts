@@ -126,3 +126,41 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
   }
   return { format: 'docx', units: doc.pageCount, unitLabel: 'page' };
 }
+
+// Hot standby: warm each WASM engine (and the Google Fonts CSS) on an idle tick
+// so the user's first real file parses without paying the cold cost of fetching
+// + compiling the parser binaries. Each `renderFile` spawns a fresh inline
+// worker that re-fetches its `*_parser_bg.wasm`; pre-loading the bundled demo of
+// every format primes the browser's HTTP/code cache for that binary, then the
+// throwaway engines are released. Fire-and-forget, errors swallowed — a failed
+// warm-up just means the first real parse is as slow as before, never broken.
+let warmed = false;
+export function prewarmEngines(): void {
+  if (warmed || typeof window === 'undefined') return;
+  warmed = true;
+  // Respect Data Saver / metered connections — don't spend bandwidth warming.
+  const conn = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection;
+  if (conn?.saveData) return;
+
+  const base = import.meta.env.BASE_URL;
+  const sample = (f: string) => `${base}samples/${f}`.replace(/([^:])\/\/+/g, '$1/');
+
+  const run = (): void => {
+    void PptxPresentation.load(sample('sample-1.pptx'), { useGoogleFonts: true })
+      .then((d) => d.destroy())
+      .catch(() => {});
+    void DocxDocument.load(sample('sample-1.docx'), { useGoogleFonts: true })
+      .then((d) => d.destroy())
+      .catch(() => {});
+    // XlsxViewer needs a container; mount into a detached node never added to the
+    // DOM, then dispose. The parse + one render warms the xlsx WASM engine.
+    const host = document.createElement('div');
+    const v = new XlsxViewer(host, { useGoogleFonts: true });
+    void v.load(sample('sample-1.xlsx')).then(() => v.destroy()).catch(() => v.destroy());
+  };
+
+  const ric = (window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => void })
+    .requestIdleCallback;
+  if (ric) ric(run, { timeout: 2500 });
+  else setTimeout(run, 600);
+}
