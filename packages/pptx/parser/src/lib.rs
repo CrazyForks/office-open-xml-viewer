@@ -2962,6 +2962,11 @@ struct LayoutPlaceholders {
     by_type_anchor: HashMap<String, String>,
     /// Default paragraph alignment per placeholder type, from layout/master lstStyle
     by_type_alignment: HashMap<String, String>,
+    /// Paragraph alignment per placeholder idx — layout placeholder's own algn,
+    /// falling back to the master per-type alignment. Checked before the
+    /// type-keyed maps so a body placeholder resolves to its OWN idx's style,
+    /// not an unrelated typeless placeholder (ECMA-376 §19.3.1.x idx matching).
+    by_idx_alignment: HashMap<u32, String>,
     /// Default East Asian line-break (eaLnBrk) per placeholder type, from the
     /// layout lstStyle > lvl1pPr @eaLnBrk (ECMA-376 §21.1.2.2.7)
     by_type_ea_ln_brk: HashMap<String, bool>,
@@ -3138,8 +3143,16 @@ impl LayoutPlaceholders {
         })
     }
 
-    /// Look up inherited paragraph alignment for this placeholder type.
-    fn lookup_alignment(&self, ph_type: &str) -> Option<String> {
+    /// Look up inherited paragraph alignment for this placeholder.
+    /// idx match (same layout/master placeholder slot) wins over type-keyed
+    /// fallbacks so a body placeholder never borrows an unrelated typeless
+    /// placeholder's alignment (ECMA-376 §19.3.1.x).
+    fn lookup_alignment(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
+        if let Some(i) = ph_idx {
+            if let Some(a) = self.by_idx_alignment.get(&i) {
+                return Some(a.clone());
+            }
+        }
         self.by_type_alignment
             .get(ph_type)
             .cloned()
@@ -3512,7 +3525,27 @@ fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
                     .and_then(|ls| child(ls, "lvl1pPr"))
                     .and_then(|lp| attr(&lp, "algn"))
                 {
-                    map.entry(ph_type).or_insert(algn.to_string());
+                    map.entry(ph_type).or_insert(algn);
+                }
+            }
+        }
+    }
+    // Fallback: master <p:txStyles> paragraph alignment (ECMA-376 §19.3.1.49-51).
+    // Per-shape lstStyle (scanned above) wins via or_insert; this fills types
+    // whose master placeholder shape carried no explicit algn (the common case —
+    // PowerPoint stores title/body alignment in txStyles, not the shape lstStyle).
+    if let Some(tx_styles) = child(root, "txStyles") {
+        for (style, types) in [
+            ("titleStyle", &["title", "ctrTitle"][..]),
+            ("bodyStyle", &["body", "subTitle", "obj", ""][..]),
+            ("otherStyle", &["dt", "ftr", "sldNum"][..]),
+        ] {
+            if let Some(algn) = child(tx_styles, style)
+                .and_then(|s| child(s, "lvl1pPr"))
+                .and_then(|lp| attr(&lp, "algn"))
+            {
+                for t in types {
+                    map.entry((*t).to_string()).or_insert_with(|| algn.clone());
                 }
             }
         }
@@ -4111,6 +4144,14 @@ fn parse_layout_placeholders(
                 }
                 if let Some(ref f) = layout_fill {
                     lph.by_idx_fill.entry(idx).or_insert(f.clone());
+                }
+                // Alignment for this idx: layout's own algn, else master per-type
+                // (incl. master txStyles, now folded into master_alignments).
+                let idx_algn = layout_alignment
+                    .clone()
+                    .or_else(|| master_alignments.get(&ph_type).cloned());
+                if let Some(a) = idx_algn {
+                    lph.by_idx_alignment.entry(idx).or_insert(a);
                 }
             }
             let effective_fs =
@@ -6285,7 +6326,7 @@ fn parse_shape(
             lph.lookup_italic(&ph_type),
             lph.lookup_caps(&ph_type),
             lph.lookup_anchor(&ph_type),
-            lph.lookup_alignment(&ph_type),
+            lph.lookup_alignment(&ph_type, ph_idx),
             lph.lookup_ea_ln_brk(&ph_type),
             lph.lookup_space_before(&ph_type),
             lph.lookup_space_after(&ph_type),
@@ -8986,6 +9027,77 @@ mod tests {
             !json.contains(";base64,"),
             "must not inline base64; got {json}"
         );
+    }
+
+    // Synthetic deck for placeholder alignment-inheritance regression
+    // (real reproducer files can't be committed). slide_sp / layout_extra_sp are
+    // injected into the slide spTree / layout spTree.
+    fn build_align_pptx(slide_sp: &str, layout_extra_sp: &str) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        let layout = format!(
+            r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:cSld><p:spTree>
+                <p:sp><p:nvSpPr><p:cNvPr id="2" name="Body 1"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+                  <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>
+                {layout_extra_sp}
+              </p:spTree></p:cSld>
+            </p:sldLayout>"#
+        );
+        let entries: &[(&str, String)] = &[
+            ("ppt/presentation.xml", r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId2"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="12192000" cy="6858000"/></p:presentation>"#.to_owned()),
+            ("ppt/_rels/presentation.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#.to_owned()),
+            ("ppt/slides/slide1.xml", format!(r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>{slide_sp}</p:spTree></p:cSld></p:sld>"#)),
+            ("ppt/slides/_rels/slide1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#.to_owned()),
+            ("ppt/slideLayouts/slideLayout1.xml", layout),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#.to_owned()),
+            ("ppt/slideMasters/slideMaster1.xml", r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld><p:txStyles><p:titleStyle><a:lvl1pPr algn="ctr"><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr algn="l"><a:defRPr sz="2800"/></a:lvl1pPr></p:bodyStyle><p:otherStyle><a:lvl1pPr algn="r"><a:defRPr sz="1800"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>"#.to_owned()),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"#.to_owned()),
+            ("ppt/theme/theme1.xml", r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="t"><a:themeElements><a:clrScheme name="c"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="000000"/></a:dk2><a:lt2><a:srgbClr val="FFFFFF"/></a:lt2><a:accent1><a:srgbClr val="000000"/></a:accent1><a:accent2><a:srgbClr val="000000"/></a:accent2><a:accent3><a:srgbClr val="000000"/></a:accent3><a:accent4><a:srgbClr val="000000"/></a:accent4><a:accent5><a:srgbClr val="000000"/></a:accent5><a:accent6><a:srgbClr val="000000"/></a:accent6><a:hlink><a:srgbClr val="000000"/></a:hlink><a:folHlink><a:srgbClr val="000000"/></a:folHlink></a:clrScheme><a:fontScheme name="f"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="s"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#.to_owned()),
+        ];
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (name, body) in entries {
+                w.start_file(*name, o).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    fn first_para_alignment(data: &[u8]) -> String {
+        let json = parse_pptx_native(data).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["slides"][0]["elements"][0]["textBody"]["paragraphs"][0]["alignment"]
+            .as_str()
+            .unwrap_or("<none>")
+            .to_owned()
+    }
+
+    // body placeholder (idx=1) with no explicit algn anywhere except master bodyStyle="l".
+    const BODY_SP: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Text Placeholder 5"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#;
+
+    #[test]
+    fn align_inherit_body_no_layout_algn_is_left() {
+        // Master bodyStyle="l", nothing in slide/layout → must resolve to left.
+        assert_eq!(first_para_alignment(&build_align_pptx(BODY_SP, "")), "l");
+    }
+
+    #[test]
+    fn align_inherit_body_ignores_unrelated_typeless_center() {
+        // Layout has an unrelated centred typeless placeholder (idx=10). The body
+        // placeholder (idx=1) must NOT borrow it; resolves to master bodyStyle "l".
+        let leak = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Centered obj"/><p:cNvSpPr/><p:nvPr><p:ph idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr algn="ctr"/></a:lstStyle><a:p/></p:txBody></p:sp>"#;
+        assert_eq!(first_para_alignment(&build_align_pptx(BODY_SP, leak)), "l");
+    }
+
+    #[test]
+    fn align_inherit_title_from_master_txstyles_center() {
+        // Master titleStyle="ctr", no algn in slide/layout title → resolves to ctr.
+        let title_sp = r#"<p:sp><p:nvSpPr><p:cNvPr id="6" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>T</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        assert_eq!(first_para_alignment(&build_align_pptx(title_sp, "")), "ctr");
     }
 
     #[test]
