@@ -3510,6 +3510,14 @@ fn parse_master_anchors(master_xml: &str) -> HashMap<String, String> {
     map
 }
 
+/// txStyles style node → the placeholder types it defaults. ECMA-376 §19.3.1.52
+/// txStyles → titleStyle §19.3.1.49 / bodyStyle §19.3.1.5 / otherStyle §19.3.1.35.
+const MASTER_TXSTYLE_PH_TYPES: &[(&str, &[&str])] = &[
+    ("titleStyle", &["title", "ctrTitle"]),
+    ("bodyStyle", &["body", "subTitle", "obj", ""]),
+    ("otherStyle", &["dt", "ftr", "sldNum"]),
+];
+
 /// Parse paragraph alignment from master placeholder shapes' lstStyle > lvl1pPr algn attribute.
 fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -3544,11 +3552,7 @@ fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
     // whose master placeholder shape carried no explicit algn (the common case —
     // PowerPoint stores title/body alignment in txStyles, not the shape lstStyle).
     if let Some(tx_styles) = child(root, "txStyles") {
-        for (style, types) in [
-            ("titleStyle", &["title", "ctrTitle"][..]),
-            ("bodyStyle", &["body", "subTitle", "obj", ""][..]),
-            ("otherStyle", &["dt", "ftr", "sldNum"][..]),
-        ] {
+        for &(style, types) in MASTER_TXSTYLE_PH_TYPES {
             if let Some(algn) = child(tx_styles, style)
                 .and_then(|s| child(s, "lvl1pPr"))
                 .and_then(|lp| attr(&lp, "algn"))
@@ -3628,11 +3632,7 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
 
     // p:txStyles > a:titleStyle / a:bodyStyle / a:otherStyle as fallback
     if let Some(tx_styles) = child(root, "txStyles") {
-        let style_ph_map: &[(&str, &[&str])] = &[
-            ("titleStyle", &["title", "ctrTitle"]),
-            ("bodyStyle", &["body", "subTitle", "obj", ""]),
-            ("otherStyle", &["dt", "ftr", "sldNum"]),
-        ];
+        let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
         for (style_name, ph_types) in style_ph_map {
             let sz = child(tx_styles, style_name)
                 .and_then(|sn| child(sn, "lvl1pPr"))
@@ -3685,11 +3685,7 @@ fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontS
 
     // txStyles fallback.
     if let Some(tx_styles) = child(root, "txStyles") {
-        let style_ph_map: &[(&str, &[&str])] = &[
-            ("titleStyle", &["title", "ctrTitle"]),
-            ("bodyStyle", &["body", "subTitle", "obj", ""]),
-            ("otherStyle", &["dt", "ftr", "sldNum"]),
-        ];
+        let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
         for (style_name, ph_types) in style_ph_map {
             if let Some(style_node) = child(tx_styles, style_name) {
                 let sizes = read_level_font_sizes(style_node);
@@ -3744,11 +3740,7 @@ fn parse_master_level_bullets(
 
     // txStyles fallback.
     if let Some(tx_styles) = child(root, "txStyles") {
-        let style_ph_map: &[(&str, &[&str])] = &[
-            ("titleStyle", &["title", "ctrTitle"]),
-            ("bodyStyle", &["body", "subTitle", "obj", ""]),
-            ("otherStyle", &["dt", "ftr", "sldNum"]),
-        ];
+        let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
         for (style_name, ph_types) in style_ph_map {
             if let Some(style_node) = child(tx_styles, style_name) {
                 let bullets = read_level_bullets(style_node, theme);
@@ -3788,11 +3780,7 @@ fn parse_master_txstyle_bold_italic(
     let Some(tx_styles) = child(root, "txStyles") else {
         return (bold_map, italic_map, caps_map);
     };
-    let style_ph_map: &[(&str, &[&str])] = &[
-        ("titleStyle", &["title", "ctrTitle"]),
-        ("bodyStyle", &["body", "subTitle", "obj", ""]),
-        ("otherStyle", &["dt", "ftr", "sldNum"]),
-    ];
+    let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
     for (style_name, ph_types) in style_ph_map {
         let def_rpr = child(tx_styles, style_name)
             .and_then(|sn| child(sn, "lvl1pPr"))
@@ -3866,11 +3854,7 @@ fn parse_master_txstyle_color(
 
     // Fall back to p:txStyles > titleStyle/bodyStyle/otherStyle > lvl1pPr > defRPr > solidFill.
     if let Some(tx_styles) = child(root, "txStyles") {
-        let style_ph_map: &[(&str, &[&str])] = &[
-            ("titleStyle", &["title", "ctrTitle"]),
-            ("bodyStyle", &["body", "subTitle", "obj", ""]),
-            ("otherStyle", &["dt", "ftr", "sldNum"]),
-        ];
+        let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
         for (style_name, ph_types) in style_ph_map {
             if let Some(color) = child(tx_styles, style_name)
                 .and_then(|sn| child(sn, "lvl1pPr"))
@@ -3913,11 +3897,7 @@ fn parse_master_txstyle_spacing(
         Some(n) => n,
         None => return (before_map, after_map, line_map),
     };
-    let style_ph_map: &[(&str, &[&str])] = &[
-        ("titleStyle", &["title", "ctrTitle"]),
-        ("bodyStyle", &["body", "subTitle", "obj", ""]),
-        ("otherStyle", &["dt", "ftr", "sldNum"]),
-    ];
+    let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
     for (style_name, ph_types) in style_ph_map {
         let lvl1 = child(tx_styles, style_name).and_then(|sn| child(sn, "lvl1pPr"));
         let spc_before = lvl1
