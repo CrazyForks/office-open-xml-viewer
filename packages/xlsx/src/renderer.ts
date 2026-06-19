@@ -3486,14 +3486,19 @@ function renderBorder(
     }
     ctx.beginPath();
     ctx.strokeStyle = color;
-    ctx.lineWidth = borderStyleWidth(edge.style) / dpr;
+    const deviceW = borderStyleWidth(edge.style);
+    ctx.lineWidth = deviceW / dpr;
     const dash = borderStyleDash(edge.style);
     ctx.setLineDash(dash);
-    // Half-pixel offset aligns horizontal lines to a device-pixel row (y offset)
-    // and vertical lines to a device-pixel column (x offset). Diagonals are
-    // inherently anti-aliased so no offset is applied (dpx=dpy=0 for kind 'd').
-    const dpx = kind === 'v' ? hp : 0;
-    const dpy = kind === 'h' ? hp : 0;
+    // Half-pixel offset only helps ODD device-pixel widths. Cell edges sit on
+    // integer device coordinates (cx/cy are integer CSS px), so a 1- or
+    // 3-device-px line is crisp when its center is nudged to a pixel midpoint
+    // (+hp). An even width (medium = 2 device px) is already crisp centered on
+    // the integer edge — adding hp would straddle three rows and blur it.
+    // Diagonals can't be pixel-aligned, so they take no offset.
+    const off = kind !== 'd' && Math.round(deviceW) % 2 === 1 ? hp : 0;
+    const dpx = kind === 'v' ? off : 0;
+    const dpy = kind === 'h' ? off : 0;
     ctx.moveTo(x1 + dpx, y1 + dpy);
     ctx.lineTo(x2 + dpx, y2 + dpy);
     ctx.stroke();
