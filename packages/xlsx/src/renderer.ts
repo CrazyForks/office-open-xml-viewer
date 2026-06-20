@@ -2589,8 +2589,14 @@ function renderHeaders(
   ctx.fillStyle = HEADER_TEXT;
 
   // Helper: draw one column header cell.
-  // Borders are drawn INSET (-hp) so that the next cell's fillRect (which starts at cx+cw)
-  // never overwrites the current cell's right/bottom border line.
+  // The inter-column separator is the LEADING (left) edge at +hp, so it lands on
+  // the SAME device pixel as the data grid's vertical column boundary (gridlines
+  // and cell borders draw the shared boundary at cx+hp). Drawing it as this
+  // cell's own left edge — rather than the previous cell's trailing right edge at
+  // cx+cw-hp — both aligns it with the data column line (the strip used to sit 1
+  // device px to the left) AND survives the next cell's fillRect (which starts at
+  // cx+cw and never touches cx+hp), so no separate fill/stroke pass is needed.
+  // The top/bottom lines stay as the header-strip perimeter.
   const drawColHeader = (col: number, ltrCx: number, cw: number) => {
     const cx = mirrorX(ltrCx, cw);
     ctx.fillStyle = colBg(col);
@@ -2598,9 +2604,9 @@ function renderHeaders(
     ctx.strokeStyle = colBorder(col);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(cx + cw - hp, 0);     ctx.lineTo(cx + cw - hp, hh);  // right (inset)
-    ctx.moveTo(cx, hh - hp);          ctx.lineTo(cx + cw, hh - hp);  // bottom (inset)
-    ctx.moveTo(cx, hp);               ctx.lineTo(cx + cw, hp);        // top
+    ctx.moveTo(cx + hp, 0);          ctx.lineTo(cx + hp, hh);        // left = column boundary (aligns with data grid at +hp)
+    ctx.moveTo(cx, hh - hp);          ctx.lineTo(cx + cw, hh - hp);  // bottom (strip perimeter, inset)
+    ctx.moveTo(cx, hp);               ctx.lineTo(cx + cw, hp);        // top (strip perimeter)
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'center';
@@ -2609,7 +2615,14 @@ function renderHeaders(
   };
 
   // Helper: draw one row header cell.
-  // Borders drawn inset so adjacent cell's fill never overwrites them.
+  // The inter-row separator is the LEADING (top) edge at +hp, so it lands on the
+  // SAME device pixel as the data grid's horizontal row boundary (gridlines and
+  // cell borders draw the shared boundary at cy+hp). Drawing it as this cell's
+  // own top edge — rather than the previous cell's trailing bottom edge at
+  // cy+ch-hp — aligns it with the data row line (the strip used to sit 1 device
+  // px above) AND survives the next cell's fillRect (which starts at cy+ch and
+  // never touches cy+hp), so no separate fill/stroke pass is needed. The
+  // left/right lines stay as the header-strip perimeter.
   const drawRowHeader = (row: number, cy: number, ch: number) => {
     const rx = cornerX;  // left edge of the row-header strip (mirrors to the right in RTL)
     ctx.fillStyle = rowBg(row);
@@ -2617,9 +2630,9 @@ function renderHeaders(
     ctx.strokeStyle = rowBorder(row);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(rx + hw - hp, cy);  ctx.lineTo(rx + hw - hp, cy + ch);   // right (inset)
-    ctx.moveTo(rx, cy + ch - hp); ctx.lineTo(rx + hw, cy + ch - hp);    // bottom (inset)
-    ctx.moveTo(rx + hp, cy);       ctx.lineTo(rx + hp, cy + ch);         // left
+    ctx.moveTo(rx + hw - hp, cy);  ctx.lineTo(rx + hw - hp, cy + ch);   // right (strip perimeter, inset)
+    ctx.moveTo(rx, cy + hp);       ctx.lineTo(rx + hw, cy + hp);         // top = row boundary (aligns with data grid at +hp)
+    ctx.moveTo(rx + hp, cy);       ctx.lineTo(rx + hp, cy + ch);         // left (strip perimeter)
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textBaseline = 'middle';
