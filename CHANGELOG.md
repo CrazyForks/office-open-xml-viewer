@@ -4,6 +4,14 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.64.3 — 2026-06-21
+
+Patch. Crisp 1-px rendering of Excel grid/border lines at devicePixelRatio = 1, header/data alignment, and toned-down homepage copy.
+
+- **xlsx**: Cell borders now render as a crisp single device row at `devicePixelRatio = 1` instead of an anti-aliased ~2-px band. A thin (1-logical-px) stroke drawn on an integer cell edge straddled two device rows at 50% coverage each; an odd-device-width stroke is now nudged half a device pixel onto a pixel midpoint, while even device widths (e.g. a thin border at dpr=2) are left untouched. Border widths stay in logical px — the orchestrator's `ctx.scale(dpr,dpr)` maps them to device px (ECMA-376 §18.18.3 ST_BorderStyle).
+- **xlsx**: Row- and column-header separators now land on the exact device pixel of the matching data-grid line (they previously sat one device pixel to the left / above at dpr=1), and the freeze-pane divider lines use a device-correct half-pixel offset (they used a hardcoded logical `+0.5` that blurred at `dpr > 1`). The odd-device-width crisp offset is factored into a shared `crispOffset` helper.
+- **site**: Toned down the homepage hero — replaced the "most faithful … on the web" / "pixel-faithful" superlatives with an accurate description and added a brief coverage caveat.
+
 ## 0.64.2 — 2026-06-18
 
 Patch. PowerPoint text-rendering fidelity fixes — placeholder alignment now resolves through the slide master, letter spacing counts whole code points, and CJK justification shares the docx code path.
