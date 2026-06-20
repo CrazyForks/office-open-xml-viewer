@@ -31,7 +31,6 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { parseXlsx, parseSheet } from './xlsx.ts';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
 import type {
@@ -45,6 +44,12 @@ import type {
 const skia = await import('skia-canvas').catch(() => null);
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
+
+// xlsx.ts statically imports the gitignored WASM glue (xlsx_parser.js). In CI
+// `pnpm test` runs BEFORE `pnpm build:wasm`, so a static import here would fail
+// at collection; load it dynamically and skip when absent — same gate as skia
+// (see source-buffer-image.test.ts).
+const xlsxMod = await import('./xlsx.ts').catch(() => null);
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>
@@ -82,6 +87,8 @@ function lum(r: number, g: number, b: number): number {
  *  pure-black BOTTOM border, returning the mutated Worksheet + Styles. The new
  *  border / cellXf are appended (existing indices untouched). */
 function buildInjected(): { ws: Worksheet; styles: Styles } {
+  if (!xlsxMod) throw new Error('xlsx WASM unavailable (run pnpm build:wasm)');
+  const { parseXlsx, parseSheet } = xlsxMod;
   const buf = readFileSync(SAMPLE);
   const parsed = parseXlsx(buf);
   const ws = parseSheet(buf, 0, parsed.workbook.sheets[0].name) as Worksheet;
@@ -307,7 +314,7 @@ function savePng(canvas: InstanceType<typeof Canvas>, outPath: string): void {
   if (png) writeFileSync(outPath, png);
 }
 
-describe.skipIf(!skia)('xlsx border crispness (device-pixel probe)', () => {
+describe.skipIf(!skia || !xlsxMod)('xlsx border crispness (device-pixel probe)', () => {
   it('injected thin black horizontal border at dpr=1 collapses to one near-black device row', async () => {
     const { data, w, h, canvas } = await renderInjected(1);
 
