@@ -20,10 +20,9 @@
  * bottom edge. Pure black (RGB all 0) is unambiguous against the green fill
  * (RGB 27/67/50) and the #d0d0d0 gridline.
  *
- * before/after numbers are produced by an external shell wrapper that swaps the
- * worktree's renderer.ts (pre-fix vs fixed) and points RENDERER_ORCH at the
- * worktree orchestrator. This committed test asserts the AFTER (fixed) state so
- * it is meaningful in CI when skia is present, and skips cleanly when it is not.
+ * This committed test asserts the FIXED state (crisp single near-black device row
+ * at dpr=1; clean 2-device-row band at dpr=2). It fails against the pre-fix
+ * renderer, so it is a genuine regression guard — not a tautology.
  *
  * CI-safe: skia-canvas ships a native binding CI omits, so the suite is gated
  * with `describe.skipIf(!skia)` exactly like render.test.ts.
@@ -32,7 +31,6 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { parseXlsx, parseSheet } from './xlsx.ts';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
@@ -57,22 +55,13 @@ const factory: NodeCanvasFactory = {
 };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-// MAIN checkout root (this file lives at <root>/packages/node/src/).
-const MAIN_ROOT = resolve(HERE, '../../..');
-// The render-orchestrator under test. RENDERER_ORCH env overrides the path so a
-// shell wrapper can point this at the WORKTREE's orchestrator (which imports the
-// fixed — or, when swapped, pre-fix — renderer via its relative `./renderer.js`).
-// When unset, defaults to the MAIN checkout's own orchestrator so the committed
-// test runs standalone in CI.
-const ORCH_PATH =
-  process.env.RENDERER_ORCH ??
-  resolve(MAIN_ROOT, 'packages/xlsx/src/render-orchestrator.ts');
-
-const SAMPLE = resolve(MAIN_ROOT, 'packages/xlsx/public/demo/sample-1.xlsx');
-// Diagnostic PNGs land outside the repo (tmpdir) so the committed test never
-// writes tracked files. Override with PROBE_OUT to inspect them elsewhere.
-const OUT_DIR = process.env.PROBE_OUT ?? resolve(tmpdir(), 'xlsx-border-probe');
-const LABEL = process.env.PROBE_LABEL ?? 'after';
+const ROOT = resolve(HERE, '../../..');
+// Render through the package's own orchestrator (which imports renderer.ts).
+const ORCH_PATH = resolve(ROOT, 'packages/xlsx/src/render-orchestrator.ts');
+const SAMPLE = resolve(ROOT, 'packages/xlsx/public/demo/sample-1.xlsx');
+// Opt-in diagnostics: set PROBE_OUT to a directory to dump the full render plus
+// an 8x crop of the measured border. Null by default → the test writes no files.
+const OUT_DIR = process.env.PROBE_OUT ?? null;
 
 const W = 600;
 const H = 400;
@@ -320,7 +309,6 @@ function savePng(canvas: InstanceType<typeof Canvas>, outPath: string): void {
 
 describe.skipIf(!skia)('xlsx border crispness (device-pixel probe)', () => {
   it('injected thin black horizontal border at dpr=1 collapses to one near-black device row', async () => {
-    mkdirSync(OUT_DIR, { recursive: true });
     const { data, w, h, canvas } = await renderInjected(1);
 
     const hit = findInjectedBlackBorder(data, w, h, 1);
@@ -334,25 +322,23 @@ describe.skipIf(!skia)('xlsx border crispness (device-pixel probe)', () => {
 
     // eslint-disable-next-line no-console
     console.log(
-      `\n[PROBE ${LABEL} dpr=1] injected border @ (x=${hit.x}, y=${cy}) runLen=${hit.runLen}\n` +
+      `\n[PROBE dpr=1] injected border @ (x=${hit.x}, y=${cy}) runLen=${hit.runLen}\n` +
         ys.map((yy, k) => `  y=${yy} L=${L[k].toFixed(1)}`).join('\n') +
         `\n  minLum=${minLum.toFixed(1)} darkRowCount(<160)=${darkRowCount}`,
     );
 
-    savePng(canvas, resolve(OUT_DIR, `border-${LABEL}.png`));
-    saveZoomCrop(data, w, h, hit.x, cy, resolve(OUT_DIR, `crop-${LABEL}-8x.png`));
-
-    // AFTER (fixed): a thin (1 device px) black border = one near-black device
-    // row. Enforced only when not the explicit BEFORE run so the same file
-    // documents the bug without failing CI on the fix.
-    if (LABEL !== 'before') {
-      expect(minLum).toBeLessThan(80);
-      expect(darkRowCount).toBe(1);
+    if (OUT_DIR) {
+      mkdirSync(OUT_DIR, { recursive: true });
+      savePng(canvas, resolve(OUT_DIR, 'border-after.png'));
+      saveZoomCrop(data, w, h, hit.x, cy, resolve(OUT_DIR, 'crop-after-8x.png'));
     }
+
+    // A thin (1 device px) black border must collapse to one near-black row.
+    expect(minLum).toBeLessThan(80);
+    expect(darkRowCount).toBe(1);
   });
 
   it('dpr=2 sanity: thin border = even device width → clean 2-row band (no over-correction)', async () => {
-    mkdirSync(OUT_DIR, { recursive: true });
     const { data, w, h } = await renderInjected(2);
 
     const hit = findInjectedBlackBorder(data, w, h, 2);
@@ -365,7 +351,7 @@ describe.skipIf(!skia)('xlsx border crispness (device-pixel probe)', () => {
 
     // eslint-disable-next-line no-console
     console.log(
-      `\n[PROBE ${LABEL} dpr=2] injected border @ (x=${hit.x}, y=${cy}) runLen=${hit.runLen}\n` +
+      `\n[PROBE dpr=2] injected border @ (x=${hit.x}, y=${cy}) runLen=${hit.runLen}\n` +
         ys.map((yy, k) => `  y=${yy} L=${L[k].toFixed(1)}`).join('\n') +
         `\n  darkRowCount(<160)=${darkRowCount}`,
     );
