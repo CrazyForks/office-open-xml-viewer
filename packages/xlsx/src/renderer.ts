@@ -1330,7 +1330,7 @@ function renderQuadrant(
       fillDataBar(ctx, cf.dataBar.color, aCx + bInset, aCy + bInset, bW, cH - bInset * 2, cf.dataBar.gradient);
     }
     const mergedBorder = resolveMergeBorder(border, aRow, aCol, info.right, info.bottom, rc.cellMap, styles);
-    renderBorder(ctx, mergeBorders(mergedBorder, cf.border), aCx, aCy, cW, cH);
+    renderBorder(ctx, mergeBorders(mergedBorder, cf.border), aCx, aCy, cW, cH, false, false, dpr);
 
     if (!cell) continue;
     const text = formatCellValue(cell, styles, cf.numFmt);
@@ -1666,7 +1666,7 @@ function renderQuadrant(
           invertedLeft = picked === leftRight && before !== leftRight;
         }
       }
-      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft);
+      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft, dpr);
 
       // Excel Table style overlay (ECMA-376 §18.8.83). Custom styles draw only
       // their dxf-defined borders; built-in style names fall back to a
@@ -1677,7 +1677,7 @@ function renderQuadrant(
       if (tableStyle) {
         const overlay = tableOverlayBorder(tableStyle, tsDxfWhole, tsDxfHeader, colIndex);
         if (overlay.kind === 'dxf') {
-          renderBorder(ctx, overlay.border, cx, cy, cellW, cellH);
+          renderBorder(ctx, overlay.border, cx, cy, cellW, cellH, false, false, dpr);
         } else if (overlay.kind === 'accent') {
           const hp = 0.5 / dpr;
           ctx.strokeStyle = overlay.color;
@@ -2488,6 +2488,10 @@ export function renderViewport(
   // band (which now anchors at the right). The horizontal divider is
   // unaffected by the x-mirror but its row-header end moves to the right.
   const rtl = worksheet.rightToLeft === true;
+  // Half-device-pixel offset so the 0.5-px divider lands crisp on the device
+  // grid (same convention as gridlines/headers). At dpr=1 this is +0.5; the
+  // previous hardcoded +0.5 was a *logical* px and blurred at dpr>1.
+  const hp = 0.5 / dpr;
   if (freezeRows > 0) {
     ctx.save();
     ctx.strokeStyle = FREEZE_LINE_COLOR;
@@ -2495,11 +2499,11 @@ export function renderViewport(
     ctx.beginPath();
     if (rtl) {
       // cell area is [0, canvasW - hw]
-      ctx.moveTo(0, scrollAreaY + 0.5);
-      ctx.lineTo(canvasW - hw, scrollAreaY + 0.5);
+      ctx.moveTo(0, scrollAreaY + hp);
+      ctx.lineTo(canvasW - hw, scrollAreaY + hp);
     } else {
-      ctx.moveTo(hw, scrollAreaY + 0.5);
-      ctx.lineTo(canvasW, scrollAreaY + 0.5);
+      ctx.moveTo(hw, scrollAreaY + hp);
+      ctx.lineTo(canvasW, scrollAreaY + hp);
     }
     ctx.stroke();
     ctx.restore();
@@ -2512,7 +2516,7 @@ export function renderViewport(
     // Divider sits between the frozen band and the scroll band. In LTR that
     // is at scrollAreaX = hw + frozenW; mirrored that becomes
     // canvasW - scrollAreaX.
-    const dividerX = rtl ? canvasW - scrollAreaX + 0.5 : scrollAreaX + 0.5;
+    const dividerX = rtl ? canvasW - scrollAreaX + hp : scrollAreaX + hp;
     ctx.moveTo(dividerX, hh);
     ctx.lineTo(dividerX, canvasH);
     ctx.stroke();
@@ -2589,8 +2593,14 @@ function renderHeaders(
   ctx.fillStyle = HEADER_TEXT;
 
   // Helper: draw one column header cell.
-  // Borders are drawn INSET (-hp) so that the next cell's fillRect (which starts at cx+cw)
-  // never overwrites the current cell's right/bottom border line.
+  // The inter-column separator is the LEADING (left) edge at +hp, so it lands on
+  // the SAME device pixel as the data grid's vertical column boundary (gridlines
+  // and cell borders draw the shared boundary at cx+hp). Drawing it as this
+  // cell's own left edge — rather than the previous cell's trailing right edge at
+  // cx+cw-hp — both aligns it with the data column line (the strip used to sit 1
+  // device px to the left) AND survives the next cell's fillRect (which starts at
+  // cx+cw and never touches cx+hp), so no separate fill/stroke pass is needed.
+  // The top/bottom lines stay as the header-strip perimeter.
   const drawColHeader = (col: number, ltrCx: number, cw: number) => {
     const cx = mirrorX(ltrCx, cw);
     ctx.fillStyle = colBg(col);
@@ -2598,9 +2608,9 @@ function renderHeaders(
     ctx.strokeStyle = colBorder(col);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(cx + cw - hp, 0);     ctx.lineTo(cx + cw - hp, hh);  // right (inset)
-    ctx.moveTo(cx, hh - hp);          ctx.lineTo(cx + cw, hh - hp);  // bottom (inset)
-    ctx.moveTo(cx, hp);               ctx.lineTo(cx + cw, hp);        // top
+    ctx.moveTo(cx + hp, 0);          ctx.lineTo(cx + hp, hh);        // left = column boundary (aligns with data grid at +hp)
+    ctx.moveTo(cx, hh - hp);          ctx.lineTo(cx + cw, hh - hp);  // bottom (strip perimeter, inset)
+    ctx.moveTo(cx, hp);               ctx.lineTo(cx + cw, hp);        // top (strip perimeter)
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'center';
@@ -2609,7 +2619,14 @@ function renderHeaders(
   };
 
   // Helper: draw one row header cell.
-  // Borders drawn inset so adjacent cell's fill never overwrites them.
+  // The inter-row separator is the LEADING (top) edge at +hp, so it lands on the
+  // SAME device pixel as the data grid's horizontal row boundary (gridlines and
+  // cell borders draw the shared boundary at cy+hp). Drawing it as this cell's
+  // own top edge — rather than the previous cell's trailing bottom edge at
+  // cy+ch-hp — aligns it with the data row line (the strip used to sit 1 device
+  // px above) AND survives the next cell's fillRect (which starts at cy+ch and
+  // never touches cy+hp), so no separate fill/stroke pass is needed. The
+  // left/right lines stay as the header-strip perimeter.
   const drawRowHeader = (row: number, cy: number, ch: number) => {
     const rx = cornerX;  // left edge of the row-header strip (mirrors to the right in RTL)
     ctx.fillStyle = rowBg(row);
@@ -2617,9 +2634,9 @@ function renderHeaders(
     ctx.strokeStyle = rowBorder(row);
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(rx + hw - hp, cy);  ctx.lineTo(rx + hw - hp, cy + ch);   // right (inset)
-    ctx.moveTo(rx, cy + ch - hp); ctx.lineTo(rx + hw, cy + ch - hp);    // bottom (inset)
-    ctx.moveTo(rx + hp, cy);       ctx.lineTo(rx + hp, cy + ch);         // left
+    ctx.moveTo(rx + hw - hp, cy);  ctx.lineTo(rx + hw - hp, cy + ch);   // right (strip perimeter, inset)
+    ctx.moveTo(rx, cy + hp);       ctx.lineTo(rx + hw, cy + hp);         // top = row boundary (aligns with data grid at +hp)
+    ctx.moveTo(rx + hp, cy);       ctx.lineTo(rx + hp, cy + ch);         // left (strip perimeter)
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textBaseline = 'middle';
@@ -3403,6 +3420,7 @@ function renderBorder(
    *  Same idea for `invertedLeft` (inherited from the left cell's right). */
   invertedTop = false,
   invertedLeft = false,
+  dpr = 1,
 ): void {
   type EdgeRef = {
     edge: BorderEdge | null | undefined;
@@ -3440,7 +3458,7 @@ function renderBorder(
       const dx = x2 - x1;
       const dy = y2 - y1;
       const len = Math.hypot(dx, dy);
-      // Perpendicular unit vector. ±off shifts the line ~1px to either side.
+      // Perpendicular unit vector. ±off shifts the line ~1 logical px to either side.
       const off = 1;
       const px = (-dy / len) * off;
       const py = (dx / len) * off;
@@ -3481,14 +3499,35 @@ function renderBorder(
     }
     ctx.beginPath();
     ctx.strokeStyle = color;
-    ctx.lineWidth = borderStyleWidth(edge.style);
+    // Logical-px width (thin=1, medium=2, thick=3). ctx.scale(dpr,dpr) scales it
+    // to device px, so a thin border is 2 device px at dpr=2 — matching Excel's
+    // measured on-screen weight. Do NOT divide by dpr (that halved it to 1 px).
+    const lw = borderStyleWidth(edge.style);
+    ctx.lineWidth = lw;
     const dash = borderStyleDash(edge.style);
     ctx.setLineDash(dash);
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
+    // Crispness nudge (see crispOffset): an odd device-width stroke is centered
+    // on a pixel midpoint so it renders crisp instead of bleeding across two
+    // rows; an even device width is already crisp on the integer cell edge and
+    // gets 0. Diagonals can't be pixel-aligned, so no offset.
+    const crispNudge = kind !== 'd' ? crispOffset(lw, dpr) : 0;
+    const dpx = kind === 'v' ? crispNudge : 0;
+    const dpy = kind === 'h' ? crispNudge : 0;
+    ctx.moveTo(x1 + dpx, y1 + dpy);
+    ctx.lineTo(x2 + dpx, y2 + dpy);
     ctx.stroke();
     ctx.setLineDash([]);
   }
+}
+
+/** Half-device-pixel nudge that keeps an axis-aligned stroke of `logicalWidth`
+ *  logical px crisp. ctx.scale(dpr,dpr) maps the width to round(logicalWidth*dpr)
+ *  device px; an ODD device width must sit on a pixel *midpoint* (offset 0.5/dpr)
+ *  to render as a single sharp row, while an EVEN device width is already crisp
+ *  on the integer coordinate (offset 0 — nudging it would straddle two rows and
+ *  blur). Returns the coordinate offset to add to an integer-aligned edge. */
+function crispOffset(logicalWidth: number, dpr: number): number {
+  return Math.round(logicalWidth * dpr) % 2 === 1 ? 0.5 / dpr : 0;
 }
 
 function borderStyleWidth(style: string): number {
