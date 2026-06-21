@@ -419,7 +419,13 @@ export interface ShapeTextRun {
   text: string;
   fontSizePt: number;
   color?: string | null;
+  /** ECMA-376 §17.3.2.26 ascii axis (`<w:rFonts w:ascii>`), resolved through
+   *  docDefaults. Latin letters/digits in this run render with this family. */
   fontFamily?: string | null;
+  /** ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
+   *  through docDefaults. CJK characters in this run render with this family;
+   *  the renderer falls back to {@link ShapeTextRun.fontFamily} when absent. */
+  fontFamilyEastAsia?: string | null;
   bold?: boolean;
   italic?: boolean;
 }

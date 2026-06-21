@@ -301,6 +301,59 @@ describe('textbox rich text — per-run formatting', () => {
     for (const t of redToks) expect(t.fillStyle.toLowerCase()).toBe('#ff0000');
     for (const t of plainToks) expect(t.fillStyle.toLowerCase()).toBe('#000000');
   });
+
+  // ECMA-376 §17.3.2.26: within ONE run each character picks the ascii font
+  // (Latin/digits) or the eastAsia font (CJK) by its Unicode block. A text-box
+  // run carries BOTH axes (`fontFamily` = ascii, `fontFamilyEastAsia`). sample-10's
+  // title run "第11回…" has eastAsia="ＭＳ ゴシック" (a gothic/sans) and falls through
+  // to the docDefault ascii "Century" (a serif) for the embedded digits — Word
+  // draws "第","回" sans and "11" serif. `fontFamilyClasses` drives the font CLASS
+  // (fontTable §17.8.3.10): Century→roman (serif tail), ＭＳ ゴシック→swiss (sans tail).
+  it('picks the eastAsia font for CJK chars and the ascii font for digits in one run', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    const fontFamilyClasses = { Century: 'roman', 'ＭＳ ゴシック': 'swiss' };
+    const shape = richTextbox([
+      { text: '第11回', fontSizePt: 10, fontFamily: 'Century', fontFamilyEastAsia: 'ＭＳ ゴシック' },
+    ]);
+    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, fontFamilyClasses, new Map());
+
+    // All ink preserved.
+    const ink = fillTextCalls.map((c) => c.text).join('');
+    expect(ink).toBe('第11回');
+
+    // CJK tokens ("第","回") draw with the eastAsia family (ＭＳ ゴシック → sans tail);
+    // the digit token ("11") draws with the ascii family (Century → serif tail).
+    const cjkToks = fillTextCalls.filter((c) => c.text === '第' || c.text === '回');
+    const digitToks = fillTextCalls.filter((c) => c.text.replace(/\s/g, '') === '11');
+    expect(cjkToks.length).toBe(2);
+    expect(digitToks.length).toBeGreaterThan(0);
+    for (const t of cjkToks) {
+      expect(t.font).toContain('"ＭＳ ゴシック"');
+      expect(t.font).toContain('sans-serif');
+      expect(t.font).not.toContain('"Century"');
+    }
+    for (const t of digitToks) {
+      expect(t.font).toContain('"Century"');
+      expect(t.font).toContain('serif');
+      expect(t.font).not.toContain('"ＭＳ ゴシック"');
+    }
+  });
+
+  // Back-compat: a run with only `fontFamily` (no eastAsia axis) keeps drawing
+  // every token — CJK included — with that single family (the renderer falls back
+  // `fontFamilyEastAsia ?? fontFamily`).
+  it('falls back to the ascii font for CJK when no eastAsia axis is present', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    const fontFamilyClasses = { 'Yu Mincho': 'roman' };
+    const shape = richTextbox([
+      { text: '本文 text', fontSizePt: 10, fontFamily: 'Yu Mincho' },
+    ]);
+    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, fontFamilyClasses, new Map());
+
+    for (const c of fillTextCalls.filter((t) => t.text.trim().length > 0)) {
+      expect(c.font).toContain('"Yu Mincho"');
+    }
+  });
 });
 
 // Local alias matching renderer.ts's internal DecodedImage union.

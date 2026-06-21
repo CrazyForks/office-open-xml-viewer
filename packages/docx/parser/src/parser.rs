@@ -3247,6 +3247,27 @@ fn extract_simple_paragraph_text(
     // default-eastAsia (an explicit eastAsia run still wins over the default
     // ascii, while a font-less run lands on the default ascii — Century in
     // sample-10, a serif).
+    // ECMA-376 §17.3.2.26 resolves the ascii and eastAsia font axes
+    // INDEPENDENTLY: within one run, Latin letters/digits take the ascii face and
+    // CJK characters take the eastAsia face. Each axis falls through the
+    // docDefaults for its OWN slot (§17.7.2) — the ascii axis to the default ascii
+    // (Century, a serif, in sample-10), the eastAsia axis to the default eastAsia
+    // (ＭＳ 明朝). Keeping them separate is what lets the renderer pick per character
+    // (so serif digits sit inside a gothic Japanese title).
+    let resolve_ascii_axis = |fmt: &RunFmt| -> Option<String> {
+        theme
+            .resolve_font_ref(fmt.font_family_ascii.clone())
+            .or_else(|| theme.default_ascii_font_ref())
+    };
+    let resolve_east_asia_axis = |fmt: &RunFmt| -> Option<String> {
+        theme
+            .resolve_font_ref(fmt.font_family_east_asia.clone())
+            .or_else(|| theme.default_east_asia_font_ref())
+    };
+    // Block-level single `font_family` keeps the ORIGINAL conflated resolution
+    // (run-ascii → run-eastAsia → default-ascii → default-eastAsia). It feeds the
+    // single-format fallback path / image-block consumers and the legacy
+    // ShapeText tests; the per-run axes above are what the rich renderer uses.
     let resolve_font_with_default = |fmt: &RunFmt| -> Option<String> {
         theme
             .resolve_font_ref(fmt.font_family_ascii.clone())
@@ -3261,6 +3282,11 @@ fn extract_simple_paragraph_text(
     // the single block-level fields below still come from the first text run for
     // backward compatibility.
     let mut runs: Vec<ShapeTextRun> = Vec::new();
+    // The FIRST text run's effective format, kept to derive the block-level
+    // single fields (resolved through the conflated chain — independent of the
+    // per-run ascii axis so the legacy single-`font_family` behaviour is
+    // unchanged).
+    let mut first_run_fmt: Option<RunFmt> = None;
     for r in p
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "r")
@@ -3283,10 +3309,14 @@ fn extract_simple_paragraph_text(
             text: run_text,
             font_size_pt: fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
             color: fmt.color.clone(),
-            font_family: resolve_font_with_default(&fmt),
+            font_family: resolve_ascii_axis(&fmt),
+            font_family_east_asia: resolve_east_asia_axis(&fmt),
             bold: fmt.bold.unwrap_or(false),
             italic: fmt.italic.unwrap_or(false),
         });
+        if first_run_fmt.is_none() {
+            first_run_fmt = Some(fmt);
+        }
     }
 
     // Inline image inside the text-box paragraph. Use the SAME blip resolution
@@ -3332,15 +3362,18 @@ fn extract_simple_paragraph_text(
 
     // Single block-level format fields come from the FIRST text run (kept for
     // backward compatibility with existing consumers and the image-block path).
-    // For an image-only paragraph (no text run) fall back to the document
-    // default font — the same result the previous no-rPr branch produced.
-    let (font_size_pt, color, font_family, bold, italic) = match runs.first() {
-        Some(first) => (
-            first.font_size_pt,
-            first.color.clone(),
-            first.font_family.clone(),
-            first.bold,
-            first.italic,
+    // The block-level `font_family` uses the conflated resolution captured above
+    // (NOT the per-run ascii axis), so the legacy single-font behaviour — and the
+    // ShapeText tests pinned to it — are unchanged. For an image-only paragraph
+    // (no text run) fall back to the document default font, the same result the
+    // previous no-rPr branch produced.
+    let (font_size_pt, color, font_family, bold, italic) = match first_run_fmt {
+        Some(fmt) => (
+            fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+            fmt.color.clone(),
+            resolve_font_with_default(&fmt),
+            fmt.bold.unwrap_or(false),
+            fmt.italic.unwrap_or(false),
         ),
         None => (
             DEFAULT_FONT_SIZE,
@@ -6211,6 +6244,55 @@ mod txbx_inline_image_tests {
         let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
             .expect("text paragraph yields a block");
         assert_eq!(block.font_family.as_deref(), Some("Century"));
+    }
+
+    /// ECMA-376 §17.3.2.26 — a text-box run resolves the ascii and eastAsia
+    /// font axes INDEPENDENTLY so the renderer can pick per character. sample-10's
+    /// Japanese title run carries `<w:rFonts w:eastAsia="ＭＳ ゴシック"/>` (a gothic)
+    /// with NO ascii face; the eastAsia axis takes the gothic while the ascii axis
+    /// (used by the embedded digits "11") falls through to the docDefault ascii
+    /// "Century" (a serif). Splitting the two axes is what lets Word's serif "11"
+    /// inside a gothic CJK title render correctly.
+    #[test]
+    fn extract_simple_paragraph_text_splits_ascii_and_east_asia_axes() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:eastAsia="ＭＳ ゴシック"/></w:rPr><w:t>第11回</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), Some("ＭＳ 明朝".to_string()));
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.runs.len(), 1);
+        // ascii axis: no run ascii face → docDefault ascii "Century" (serif).
+        assert_eq!(block.runs[0].font_family.as_deref(), Some("Century"));
+        // eastAsia axis: the explicit run eastAsia face wins.
+        assert_eq!(
+            block.runs[0].font_family_east_asia.as_deref(),
+            Some("ＭＳ ゴシック")
+        );
+    }
+
+    /// The Abstract/English regression guard at the run level: a run with
+    /// `<w:rFonts w:hint="eastAsia"/>` and no explicit ascii/eastAsia face resolves
+    /// the ascii axis to the docDefault ascii (Century, serif — English stays
+    /// serif) and the eastAsia axis to the docDefault eastAsia (ＭＳ 明朝).
+    #[test]
+    fn extract_simple_paragraph_text_run_axes_fall_to_defaults() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>Abstract</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), Some("ＭＳ 明朝".to_string()));
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.runs.len(), 1);
+        assert_eq!(block.runs[0].font_family.as_deref(), Some("Century"));
+        assert_eq!(
+            block.runs[0].font_family_east_asia.as_deref(),
+            Some("ＭＳ 明朝")
+        );
     }
 
     /// An EXPLICIT eastAsia typeface on the run still wins over the document

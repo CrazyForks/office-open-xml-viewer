@@ -821,8 +821,18 @@ pub struct ShapeTextRun {
     pub font_size_pt: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// ECMA-376 §17.3.2.26 ascii axis (`<w:rFonts w:ascii>`), resolved through
+    /// docDefaults. The renderer draws Latin letters/digits in this run with this
+    /// family.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
+    /// ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`), resolved
+    /// through docDefaults. The renderer draws CJK characters in this run with
+    /// this family (falling back to `font_family` when absent). Splitting the two
+    /// axes lets a serif ascii face and a gothic eastAsia face coexist in one run
+    /// (e.g. serif digits inside a gothic Japanese title).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub bold: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
