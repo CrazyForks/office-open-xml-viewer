@@ -51,9 +51,11 @@ fn render_body(body: &[BodyElement], out: &mut String) {
         match el {
             BodyElement::Paragraph(p) => render_paragraph(p, out),
             BodyElement::Table(t) => render_table(t, out),
-            BodyElement::PageBreak { .. } | BodyElement::ColumnBreak => {
-                // Page / column breaks are layout, not content — skip in the
-                // projection.
+            BodyElement::PageBreak { .. }
+            | BodyElement::ColumnBreak
+            | BodyElement::SectionBreak { .. } => {
+                // Page / column / section breaks are layout, not content — skip
+                // in the projection.
             }
         }
     }

@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote, NumberingInfo,
+  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote, NumberingInfo, ColumnGeom,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -623,15 +623,34 @@ export async function renderDocumentToCanvas(
     renderHeaderFooter(footer, footerTopY, baseState);
   }
 
-  // Body. ECMA-376 §17.6.4: lay out body text in the section's newspaper columns
-  // (one full-width column for a single-column section ⇒ unchanged path).
+  // Body. ECMA-376 §17.6.4: lay out body text in EACH section's newspaper columns
+  // (per-section columns). `columns` is the body-level (final) section's geometry,
+  // used as the fallback for elements that carry no per-section `colGeom` (single-
+  // section docs, where it equals the whole-body geometry — unchanged path).
   const columns = computeColumns(sec);
   const bodyState: RenderState = { ...baseState, y: sec.marginTop * scale };
   // Optional column separator rules (`<w:cols w:sep="1">`), drawn before the text
   // so glyphs sit on top. A thin rule is centred in each inter-column gap and
-  // spans the content height.
-  if (sec.columns?.sep && columns.length > 1) {
-    drawColumnSeparators(ctx, columns, sec, scale);
+  // spans the content height. With per-section columns a page can carry more than
+  // one section's geometry (a continuous break), so draw separators for each
+  // DISTINCT multi-column geometry actually present on this page (derived from the
+  // elements' stamped `colGeom`), falling back to the page-level `columns` when an
+  // element carries none. The `sep` flag is the final section's
+  // (`sec.columns?.sep`); threading a per-section sep toggle is unnecessary until a
+  // document mixes differing sep settings across sections sharing a page (rare,
+  // untested — both bundled samples use sep:false).
+  if (sec.columns?.sep) {
+    const seen = new Set<ColumnGeom[]>();
+    const geoms: ColumnGeom[][] = [];
+    for (const el of elements) {
+      const g = (el as PaginatedBodyElement).colGeom ?? columns;
+      if (g.length > 1 && !seen.has(g)) {
+        seen.add(g);
+        geoms.push(g);
+      }
+    }
+    if (geoms.length === 0 && columns.length > 1) geoms.push(columns);
+    for (const g of geoms) drawColumnSeparators(ctx, g, sec, scale);
   }
   renderBodyElements(elements, bodyState, columns);
 
@@ -878,13 +897,11 @@ function footnoteReserveHeightPt(
  * (ECMA-376 §17.11): the footnote bodies occupy the bottom of the text column,
  * so the body must stop short of them.
  */
-/** One newspaper column's page-absolute horizontal geometry (pt). `xPt` is the
- *  column's left edge measured from the page's left edge (i.e. it already
- *  includes `marginLeft`); `wPt` is the column's text width. */
-export interface ColumnGeom {
-  xPt: number;
-  wPt: number;
-}
+// `ColumnGeom` (one newspaper column's page-absolute x/width, pt) is defined in
+// ./types (alongside ColumnsSpec/ColSpec) so it can be referenced from
+// `PaginatedBodyElement` without a renderer↔types import cycle. Re-exported here
+// for callers that import it from the renderer.
+export type { ColumnGeom } from './types';
 
 /**
  * ECMA-376 §17.6.4 — resolve a section's newspaper columns to page-absolute
@@ -947,13 +964,36 @@ export function computePages(
   // footnote references are placed on the current page.
   const footnoteReservePt: number[] = [0];
 
-  // ECMA-376 §17.6.4 newspaper columns. For a single-column section this is one
-  // full-width column, so the loop below behaves exactly as before. `colIndex`
-  // tracks which column we are filling; `colX()`/`colW()` give its page-absolute
-  // left edge and text width (pt). Measurement uses the column width (not the
-  // full content band) and the column's left x as the float-window paraX, so
-  // square floats only constrain the column(s) their x-range intersects.
-  const columns = computeColumns(section);
+  // ECMA-376 §17.6.4 newspaper columns are PER-SECTION. A `<w:sectPr>` carried in
+  // a paragraph's `pPr` (or a loose mid-body one) ends a section; the parser emits
+  // a `SectionBreak` marker carrying THAT section's `<w:cols>`. The FINAL section's
+  // columns live on `section.columns` (the body-level sectPr). So the columns for
+  // the section that STARTS at body index `startIdx` are the `.columns` of the
+  // NEXT `SectionBreak` at/after `startIdx`; if there is none, the body-level
+  // section's columns. A `<w:cols>`-less section (columns == null) ⇒ one full-width
+  // column (computeColumns's single-column path), exactly as before.
+  const sectionColumnsFrom = (startIdx: number): ColumnGeom[] => {
+    for (let j = startIdx; j < body.length; j++) {
+      const e = body[j];
+      if (e.type === 'sectionBreak') {
+        // computeColumns reads only `section.columns` + the page geometry (which
+        // is constant across the body), so resolve this section's cols by
+        // swapping in its ColumnsSpec.
+        return computeColumns({ ...section, columns: e.columns ?? null });
+      }
+    }
+    return computeColumns(section);
+  };
+
+  // The active section's column geometry. Reassigned (a) here for the first
+  // section and (b) at every `SectionBreak` as the flow enters the next section.
+  // `colIndex` tracks which column we are filling; `colX()`/`colW()` give its
+  // page-absolute left edge and text width (pt). Measurement uses the column
+  // width (not the full content band) and the column's left x as the float-window
+  // paraX, so square floats only constrain the column(s) their x-range intersects.
+  // For a single-section document there are no SectionBreak markers, so `columns`
+  // stays `computeColumns(section)` for the whole body — byte-identical to before.
+  let columns = sectionColumnsFrom(0);
   let colIndex = 0;
   const colX = () => columns[colIndex].xPt;
   const colW = () => columns[colIndex].wPt;
@@ -1088,11 +1128,15 @@ export function computePages(
     return 0;
   };
 
-  // Stamp the active newspaper column on an element and push it onto the current
-  // page. For single-column sections colIndex is always 0 (the renderer treats
-  // 0/absent identically), so this is behaviour-neutral there.
+  // Stamp the active newspaper column (index + this section's geometry) on an
+  // element and push it onto the current page. For single-column sections
+  // colIndex is always 0 (the renderer treats 0/absent identically) and colGeom
+  // equals the page-level columns, so this is behaviour-neutral there. colGeom
+  // lets the renderer resolve the right section's column widths when two sections
+  // share a page (a continuous break).
   const pushTagged = (el: PaginatedBodyElement) => {
     el.colIndex = colIndex;
+    el.colGeom = columns;
     pages[pages.length - 1].push(el);
   };
 
@@ -1124,6 +1168,48 @@ export function computePages(
       } else if (el.parity === 'even' && pages.length % 2 === 1) {
         pages.push([]);
         startPageBookkeeping();
+      }
+      continue;
+    }
+    if (el.type === 'sectionBreak') {
+      // ECMA-376 §17.6.x — a section boundary. Switch the active newspaper-column
+      // geometry to the NEXT section (the one starting at i+1) and reset the
+      // column index, then break per the section's ST_SectionMark (§17.18.79).
+      // This is the per-section-columns fix: each section now lays out in its OWN
+      // columns instead of every section inheriting the body-level section's.
+      columns = sectionColumnsFrom(i + 1);
+      colIndex = 0;
+      if (el.kind === 'continuous') {
+        // ECMA-376 §17.18.79 "continuous": NO page break — the next section's
+        // content continues on the SAME page at the CURRENT vertical position
+        // (y is intentionally NOT reset), just in the new section's column 0.
+        // (sample-5's continuous break is 1-col → 1-col, so the two single-column
+        // sections simply stack; full continuous column-balancing for a column-
+        // count change is out of scope per the task.) prevPara is cleared so the
+        // first paragraph of the new section doesn't collapse spacing against the
+        // last paragraph of the previous one. Floats / footnote reserve stay
+        // (page-scoped). measureState.y already tracks the current y.
+        prevPara = null;
+        prevSpaceAfter = 0;
+      } else {
+        // nextPage (default) / oddPage / evenPage: start a new page (mirrors the
+        // pageBreak path, including parity padding). A new page already resets
+        // colIndex to 0 and clears page-scoped floats.
+        pages.push([]);
+        y = 0;
+        prevPara = null;
+        prevSpaceAfter = 0;
+        measureState.y = section.marginTop;
+        measureState.floats = [];
+        measureState.floatParaSeq = 0;
+        startPageBookkeeping();
+        if (el.kind === 'oddPage' && pages.length % 2 === 0) {
+          pages.push([]);
+          startPageBookkeeping();
+        } else if (el.kind === 'evenPage' && pages.length % 2 === 1) {
+          pages.push([]);
+          startPageBookkeeping();
+        }
       }
       continue;
     }
@@ -1263,9 +1349,11 @@ export function computePages(
           y, pageContentH, pages,
           // Overflow during the split advances to the next column first, then a
           // new page (newspaper fill). Each slice is tagged with the column it
-          // landed in via the colIndex thunk.
+          // landed in via the colIndex thunk, plus this section's column geometry
+          // (constant — a paragraph never spans a section boundary).
           () => { nextColumnOrPage(); },
           () => colIndex,
+          columns,
         );
         // After splitting, `y` is the bottom of the last slice in the
         // current column (continues for the LAST slice; intermediate slices
@@ -1313,6 +1401,7 @@ export function computePages(
           tbl, rowHs, y, tableContentH, pages,
           () => { nextColumnOrPage(); },
           () => colIndex,
+          columns,
         );
         y = endY;
         measureState.y = section.marginTop + endY;
@@ -1573,9 +1662,15 @@ function splitParagraphAcrossPages(
    *  slice is tagged with the column it landed in so the renderer flows it in the
    *  right column. Omitted (single-column / direct unit tests) ⇒ no tag. */
   tagColIndex?: () => number,
+  /** ECMA-376 §17.6.4 — the current SECTION's column geometry. A paragraph is
+   *  never split across a section boundary, so this is constant for all slices;
+   *  stamped so the renderer resolves the slice's column against the right
+   *  section. Omitted ⇒ the renderer uses the page-level columns. */
+  colGeom?: ColumnGeom[],
 ): { endY: number } {
   const stamp = (el: PaginatedBodyElement): PaginatedBodyElement => {
     if (tagColIndex) el.colIndex = tagColIndex();
+    if (colGeom) el.colGeom = colGeom;
     return el;
   };
   const indLeft = para.indentLeft;
@@ -2035,6 +2130,10 @@ export function splitTableAcrossPages(
    *  `newPage()`. When provided, each table slice is tagged with its column.
    *  Omitted (single-column / direct unit tests) ⇒ no tag. */
   tagColIndex?: () => number,
+  /** ECMA-376 §17.6.4 — the current SECTION's column geometry (constant across
+   *  the split; a table is never split across a section boundary). Stamped on
+   *  each slice so the renderer resolves its column against the right section. */
+  colGeom?: ColumnGeom[],
 ): number {
   const n = table.rows.length;
   // Leading tblHeader rows repeat on each continuation page.
@@ -2064,6 +2163,7 @@ export function splitTableAcrossPages(
     const sliceRows = isContinuation ? [...headerRows, ...bodyRows] : bodyRows;
     const sliceEl = { ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement;
     if (tagColIndex) sliceEl.colIndex = tagColIndex();
+    if (colGeom) sliceEl.colGeom = colGeom;
     pages[pages.length - 1].push(sliceEl);
 
     y += used;
@@ -2167,33 +2267,59 @@ function drawColumnSeparators(
 function renderBodyElements(
   elements: PaginatedBodyElement[],
   state: RenderState,
-  /** ECMA-376 §17.6.4 — page-absolute column geometry (pt). When provided and
-   *  the page spans multiple columns, the flow is reset to each element's tagged
-   *  column. Omitted (header/footer, single-column) ⇒ the state's existing
-   *  full-width contentX/contentW is used unchanged. */
+  /** ECMA-376 §17.6.4 — page-absolute column geometry (pt) for the page. Used as
+   *  the fallback when an element carries no per-section `colGeom` (header /
+   *  footer, single-column). Omitted ⇒ the state's existing full-width
+   *  contentX/contentW is used unchanged. */
   columns?: ColumnGeom[],
 ): void {
   let prevPara: DocParagraph | null = null;
   let prevSpaceAfter = 0;
-  // The column whose flow `state` is currently set to. Starts at -1 so the first
-  // element always seeds the column (when `columns` drives multi-column layout).
+  // The (geometry, column index) the flow `state` is currently set to. `activeCol`
+  // starts at -1 so the first element always seeds the column. `activeGeom` tracks
+  // the SECTION whose columns are in effect (per-section newspaper columns,
+  // §17.6.4): elements carry their own section's geometry in `colGeom`, so two
+  // sections sharing a page (a continuous break) each resolve their `colIndex`
+  // against the right widths.
   let activeCol = -1;
-  const multiCol = !!columns && columns.length > 1;
+  let activeGeom: ColumnGeom[] | undefined;
   for (const el of elements) {
-    // Reset the flow when this element belongs to a different newspaper column
-    // than the one currently set up (also seeds the first element). Floats are
-    // NOT cleared here — they are page-scoped and the per-page fresh bodyState
-    // already gave a clean set, so a full-width wrapTopAndBottom band still
-    // pushes down every column and square floats keep constraining their columns.
+    // Per-section column geometry: prefer the element's own (stamped by the
+    // paginator), else the page-level columns. A single full-width column (or no
+    // geometry) is the unchanged single-column path.
+    const cols = el.colGeom ?? columns;
+    const multiCol = !!cols && cols.length > 1;
     const elCol = el.colIndex ?? 0;
-    if (multiCol && elCol !== activeCol) {
-      const col = columns[Math.min(elCol, columns.length - 1)];
+    // Switch the flow when this element's section geometry OR its column index
+    // changed (also seeds the first element). Reset the vertical cursor to the
+    // column TOP only when ADVANCING to a higher column within the page (newspaper
+    // fill); a same-or-lower colIndex from a continuous section break continues at
+    // the current y so the new section stacks below the previous one rather than
+    // overprinting it. Floats are NOT cleared here — they are page-scoped and the
+    // per-page fresh bodyState already gave a clean set.
+    if (multiCol && (cols !== activeGeom || elCol !== activeCol)) {
+      const col = cols[Math.min(elCol, cols.length - 1)];
       state.contentX = col.xPt * state.scale;
       state.contentW = col.wPt * state.scale;
-      state.y = state.marginTop * state.scale;
+      if (elCol > activeCol && cols === activeGeom) {
+        state.y = state.marginTop * state.scale;
+      }
       prevPara = null;
       prevSpaceAfter = 0;
       activeCol = elCol;
+      activeGeom = cols;
+    } else if (!multiCol && cols && cols.length === 1 && cols !== activeGeom) {
+      // A single-column SECTION on a multi-section page (e.g. sample-5 sections
+      // 1–4): set the full-width content band for this section. Continue at the
+      // current y (continuous) — only the page-level fresh state / a page break
+      // resets to the top, both handled by the caller.
+      const col = cols[0];
+      state.contentX = col.xPt * state.scale;
+      state.contentW = col.wPt * state.scale;
+      prevPara = null;
+      prevSpaceAfter = 0;
+      activeCol = elCol;
+      activeGeom = cols;
     }
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;

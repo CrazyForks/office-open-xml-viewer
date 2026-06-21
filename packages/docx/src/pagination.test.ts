@@ -123,6 +123,13 @@ const colOf = (el: PaginatedBodyElement) => el.colIndex;
 /** A body-level column break (ECMA-376 §17.3.1.20, hoisted by the parser). */
 const colBreak = (): BodyElement => ({ type: 'columnBreak' } as BodyElement);
 
+/** A body-level section break (ECMA-376 §17.6.x). `columns` is the ENDING
+ *  section's `<w:cols>` (null/undefined ⇒ single full-width column). */
+const sectionBreak = (
+  kind: 'continuous' | 'nextPage' | 'oddPage' | 'evenPage',
+  columns: SectionProps['columns'] = null,
+): BodyElement => ({ type: 'sectionBreak', kind, columns } as BodyElement);
+
 /** Text of a paragraph element (joins its text runs). */
 const textOf = (el: PaginatedBodyElement): string =>
   el.type === 'paragraph'
@@ -395,5 +402,99 @@ describe('computePages — single-column regression (§17.6.4 absent)', () => {
     expect(sliceOf(pages[1][0])).toEqual({ start: 5, end: 6 });
     expect(colOf(pages[0][0]) ?? 0).toBe(0);
     expect(colOf(pages[1][0]) ?? 0).toBe(0);
+  });
+});
+
+describe('computePages — per-section columns (§17.6.4, regression)', () => {
+  // The sample-5 shape: section 1 is single-column (no <w:cols num>), only the
+  // FINAL section is 2-column. Section 1's content MUST lay out in ONE full-width
+  // column — not in the final section's 2-column grid. `section.columns` carries
+  // the FINAL (body-level) section's columns; each mid-body section's columns ride
+  // on its SectionBreak marker (here None ⇒ single column).
+  const colGeomOf = (el: PaginatedBodyElement): { xPt: number; wPt: number }[] | undefined =>
+    (el as { colGeom?: { xPt: number; wPt: number }[] }).colGeom;
+
+  const finalTwoCol = (): SectionProps =>
+    section({ columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] } });
+
+  it("section 1 lays out in ONE full-width column even though the FINAL section is 2-col", () => {
+    // 8 CJK chars: full width (160 → 8/line) = 1 line; the buggy 2-col path (70px →
+    // 3/line) would wrap it to 3 lines. Section 1 = this para, ended by a nextPage
+    // SectionBreak (cols None). Final section = one 2-col para.
+    const body: BodyElement[] = [
+      para({ text: 'あ'.repeat(8), fontSize: 20 }),
+      sectionBreak('nextPage', null),
+      para({ text: 'final', fontSize: 20 }),
+    ];
+    const pages = computePages(body, finalTwoCol(), makeCtx());
+    // SectionBreak is consumed (not emitted); section 1 on page 1, final on page 2.
+    expect(pages.length).toBe(2);
+    const sec1Para = pages[0][0];
+    // Full-width single column ⇒ NOT split (still one line) and colGeom length 1.
+    expect(sliceOf(sec1Para)).toBeUndefined();
+    expect(colOf(sec1Para) ?? 0).toBe(0);
+    expect(colGeomOf(sec1Para)).toEqual([{ xPt: 20, wPt: 160 }]);
+    // The FINAL section's paragraph gets the 2-column geometry.
+    const finalPara = pages[1][0];
+    expect(colGeomOf(finalPara)).toEqual([
+      { xPt: 20, wPt: 70 },
+      { xPt: 110, wPt: 70 },
+    ]);
+  });
+
+  it('section 1 fills the full column height (5 lines/page) before paginating, not the half-width 2-col height', () => {
+    // 5 single-line paragraphs fill a full-width column exactly (content height 100
+    // / 20px = 5). All land on page 1, column 0, full-width geometry. Under the bug
+    // they would have been squeezed into 2-col width and the flow would differ.
+    const body: BodyElement[] = [
+      ...Array.from({ length: 5 }, (_, i) => para({ text: `s${i}`, fontSize: 20 })),
+      sectionBreak('nextPage', null),
+      para({ text: 'final', fontSize: 20 }),
+    ];
+    const pages = computePages(body, finalTwoCol(), makeCtx());
+    expect(pages[0]).toHaveLength(5);
+    for (const el of pages[0]) {
+      expect(colOf(el) ?? 0).toBe(0);
+      expect(colGeomOf(el)).toEqual([{ xPt: 20, wPt: 160 }]);
+    }
+  });
+
+  it('a continuous section break keeps both single-column sections on the SAME page, stacked', () => {
+    // Section A (1 para) — continuous → Section B (1 para) on the same page; final
+    // 2-col section gets a nextPage break. Both A and B are single-column full width
+    // and must NOT reset to the page top (B stacks below A).
+    const body: BodyElement[] = [
+      para({ text: 'A', fontSize: 20 }),
+      sectionBreak('continuous', null),
+      para({ text: 'B', fontSize: 20 }),
+      sectionBreak('nextPage', null),
+      para({ text: 'final', fontSize: 20 }),
+    ];
+    const pages = computePages(body, finalTwoCol(), makeCtx());
+    expect(pages.length).toBe(2);
+    // A and B share page 1 (continuous), final on page 2.
+    expect(pages[0].map(textOf)).toEqual(['A', 'B']);
+    expect(pages[1].map(textOf)).toEqual(['final']);
+    for (const el of pages[0]) {
+      expect(colGeomOf(el)).toEqual([{ xPt: 20, wPt: 160 }]);
+    }
+  });
+
+  it('single-section 2-col docs are UNCHANGED (no SectionBreak markers ⇒ whole body uses section.columns)', () => {
+    // Guard: with NO section breaks, columns = section.columns for the whole body,
+    // identical to the pre-fix global-columns behavior (sample-10's case).
+    const body = Array.from({ length: 7 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
+    const pages = computePages(body, finalTwoCol(), makeCtx());
+    // 5 fill col0, 2 spill into col1 — one page (the existing newspaper-flow test).
+    expect(pages.length).toBe(1);
+    expect(pages[0].slice(0, 5).map(colOf)).toEqual([0, 0, 0, 0, 0]);
+    expect(pages[0].slice(5).map(colOf)).toEqual([1, 1]);
+    // Every element carries the same 2-col geometry (the body-level section's).
+    for (const el of pages[0]) {
+      expect(colGeomOf(el)).toEqual([
+        { xPt: 20, wPt: 70 },
+        { xPt: 110, wPt: 70 },
+      ]);
+    }
   });
 });

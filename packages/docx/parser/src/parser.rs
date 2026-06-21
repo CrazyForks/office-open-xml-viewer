@@ -776,42 +776,30 @@ fn parse_body_elements(
                     }
                 }
                 // ECMA-376 §17.6.1: a section break inside pPr defines the
-                // section that ENDS at this paragraph. The break TYPE
-                // (`<w:type w:val>`) controls how the next section starts:
-                //   - "continuous" → no page break
-                //   - "nextPage" / missing → plain page break
-                //   - "oddPage" / "evenPage" → page break + parity padding
+                // section that ENDS at this paragraph. Emit a SectionBreak marker
+                // carrying that section's <w:cols> (§17.6.4) AND its break kind
+                // (ST_SectionMark, §17.18.79) so the renderer can switch the
+                // active column geometry per section — even for a "continuous"
+                // break, which produces no page break but may still change the
+                // column count. (Previously a "continuous" break emitted nothing
+                // and the others emitted a column-less PageBreak, so every
+                // section inherited the body-level section's columns — the bug
+                // this fixes.)
                 if let Some(sect_pr) = child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
                 {
-                    match read_section_break_type(sect_pr).as_deref() {
-                        Some("continuous") => { /* no page break */ }
-                        Some("oddPage") => body.push(BodyElement::PageBreak {
-                            parity: Some("odd".to_string()),
-                        }),
-                        Some("evenPage") => body.push(BodyElement::PageBreak {
-                            parity: Some("even".to_string()),
-                        }),
-                        _ => body.push(BodyElement::PageBreak { parity: None }),
-                    }
+                    body.push(section_break_element(sect_pr));
                 }
             }
             "tbl" => {
                 let tbl = parse_table(child, style_map, num_map, media_map, rel_map, theme);
                 body.push(BodyElement::Table(tbl));
             }
-            // Mid-body loose sectPr (rare) behaves like a page break. The
-            // final body-level sectPr only defines section settings — skip it.
+            // Mid-body loose sectPr (rare) defines the section that ENDS here.
+            // Emit a SectionBreak carrying its columns + break kind (see the
+            // pPr-nested case above). The final body-level sectPr only defines
+            // section settings (surfaced on Document.section) — skip it.
             "sectPr" if Some(child.id()) != body_level_sect_id => {
-                match read_section_break_type(child).as_deref() {
-                    Some("continuous") => {}
-                    Some("oddPage") => body.push(BodyElement::PageBreak {
-                        parity: Some("odd".to_string()),
-                    }),
-                    Some("evenPage") => body.push(BodyElement::PageBreak {
-                        parity: Some("even".to_string()),
-                    }),
-                    _ => body.push(BodyElement::PageBreak { parity: None }),
-                }
+                body.push(section_break_element(child));
             }
             _ => {}
         }
@@ -974,6 +962,29 @@ fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "type")
         .find_map(|n| attr_w(n, "val"))
+}
+
+/// Build a `BodyElement::SectionBreak` for a sectPr that ENDS a section
+/// (ECMA-376 §17.6.x). Carries the section's `<w:cols>` (§17.6.4, via
+/// `parse_columns` ⇒ `None` for a single column) and its ST_SectionMark kind
+/// (§17.18.79), normalized: an absent/unknown `<w:type>` ⇒ "nextPage" (the spec
+/// default). `nextColumn` is normalized to "nextPage" — a section-level
+/// nextColumn break is not modeled distinctly (column breaks within a section
+/// come from `<w:br w:type="column"/>` ⇒ `ColumnBreak`); the renderer would
+/// otherwise have no defined column geometry to advance into across a section
+/// boundary.
+fn section_break_element(sect_pr: roxmltree::Node) -> BodyElement {
+    let kind = match read_section_break_type(sect_pr).as_deref() {
+        Some("continuous") => "continuous",
+        Some("oddPage") => "oddPage",
+        Some("evenPage") => "evenPage",
+        _ => "nextPage",
+    }
+    .to_string();
+    BodyElement::SectionBreak {
+        kind,
+        columns: parse_columns(sect_pr),
+    }
 }
 
 /// Build a map of rId → embedded **zip path** (e.g. `word/media/image1.png`) for
@@ -6144,6 +6155,89 @@ mod column_tests {
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
         assert!(matches!(body[3], BodyElement::ColumnBreak));
         assert!(matches!(body[4], BodyElement::Paragraph(_)));
+    }
+
+    /// ECMA-376 §17.6.x — a `<w:sectPr>` carried in a paragraph's `pPr` defines
+    /// the section that ENDS at that paragraph. It must emit a
+    /// `BodyElement::SectionBreak` carrying (a) that section's `<w:cols>`
+    /// (§17.6.4) and (b) its ST_SectionMark kind — NOT a column-less PageBreak.
+    /// This is the per-section-columns fix: previously the columns were dropped
+    /// here and every section inherited the body-level section's columns.
+    #[test]
+    fn ppr_section_break_emits_sectionbreak_with_columns_and_kind() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:pPr>
+                   <w:sectPr>
+                     <w:type w:val="continuous"/>
+                     <w:cols w:num="3" w:space="425"/>
+                   </w:sectPr>
+                 </w:pPr>
+                 <w:r><w:t>sec1 last para</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para("sec1 last para"), SectionBreak { kind: "continuous", cols(3) }.
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        match &body[1] {
+            BodyElement::SectionBreak { kind, columns } => {
+                assert_eq!(kind, "continuous");
+                let c = columns.as_ref().expect("num=3 ⇒ multi-column");
+                assert_eq!(c.count, 3);
+            }
+            other => panic!("expected SectionBreak, got {other:?}"),
+        }
+    }
+
+    /// A single-column ending section (`<w:cols>` with no `@w:num` ⇒ §17.6.4
+    /// default of 1 column) carries `columns: None`, and the default break type
+    /// (absent `<w:type>`) normalizes to "nextPage". This is exactly sample-5's
+    /// section 1 → only the FINAL (body-level) section is 2-column.
+    #[test]
+    fn single_column_section_break_has_none_columns_and_nextpage_kind() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:pPr><w:sectPr><w:cols w:space="425"/></w:sectPr></w:pPr>
+                 <w:r><w:t>a</w:t></w:r>
+               </w:p>
+               <w:p><w:r><w:t>final section content</w:t></w:r></w:p>
+               <w:sectPr><w:cols w:num="2" w:space="425"/></w:sectPr>"#,
+        );
+        // Para(a), SectionBreak { kind: nextPage, cols None }, Para(final).
+        // The body-level (2-col) sectPr is the FINAL section, surfaced on
+        // Document.section — NOT emitted as a body element here.
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        match &body[1] {
+            BodyElement::SectionBreak { kind, columns } => {
+                assert_eq!(kind, "nextPage");
+                assert!(columns.is_none(), "single-column ⇒ None");
+            }
+            other => panic!("expected SectionBreak, got {other:?}"),
+        }
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
+    /// A loose mid-body `<w:sectPr>` (not nested in a pPr) is also a section
+    /// boundary and emits a `SectionBreak` carrying its columns + kind.
+    #[test]
+    fn loose_mid_body_sectpr_emits_sectionbreak() {
+        let body = body_from(
+            r#"<w:p><w:r><w:t>a</w:t></w:r></w:p>
+               <w:sectPr><w:type w:val="oddPage"/><w:cols w:space="425"/></w:sectPr>
+               <w:p><w:r><w:t>b</w:t></w:r></w:p>
+               <w:sectPr><w:cols w:num="2"/></w:sectPr>"#,
+        );
+        // Para(a), SectionBreak{ oddPage, None }, Para(b); final body-level
+        // sectPr skipped.
+        assert_eq!(body.len(), 3);
+        match &body[1] {
+            BodyElement::SectionBreak { kind, columns } => {
+                assert_eq!(kind, "oddPage");
+                assert!(columns.is_none());
+            }
+            other => panic!("expected SectionBreak, got {other:?}"),
+        }
     }
 }
 

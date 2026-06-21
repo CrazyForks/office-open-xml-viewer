@@ -235,6 +235,34 @@ pub enum BodyElement {
     /// without inspecting runs mid-paragraph. In a single-column section it
     /// behaves like a page break.
     ColumnBreak,
+    /// ECMA-376 §17.6.x — a section boundary in the body. A `<w:sectPr>` carried
+    /// in a paragraph's `pPr` (or a loose mid-body `<w:sectPr>`) defines the
+    /// section that ENDS at that point; the FINAL section is the body-level
+    /// `<w:sectPr>` and is surfaced on `Document.section` instead of here.
+    ///
+    /// `columns` is THAT ending section's `<w:cols>` (§17.6.4), parsed via
+    /// `parse_columns` (so `None` ⇒ a single full-width column — the spec default
+    /// when `@w:num` is absent or 1). `kind` is the section's ST_SectionMark
+    /// (`<w:type w:val>`, §17.18.79) which controls how the NEXT section starts:
+    /// "continuous" ⇒ no page break (the next section's columns begin on the same
+    /// page); "nextPage" (default) ⇒ a plain page break; "oddPage"/"evenPage" ⇒ a
+    /// page break + parity padding.
+    ///
+    /// The renderer switches its active column geometry to the *next* section's
+    /// columns at each marker (each marker carries the columns of the section it
+    /// terminates, so the renderer peeks forward to the next marker to size the
+    /// current section).
+    #[serde(rename_all = "camelCase")]
+    SectionBreak {
+        /// ST_SectionMark token: "continuous" | "nextPage" | "oddPage" |
+        /// "evenPage". Always one of these (the parser normalizes the default to
+        /// "nextPage").
+        kind: String,
+        /// The terminating section's `<w:cols>` (§17.6.4). `None` ⇒ single
+        /// full-width column.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        columns: Option<ColumnsSpec>,
+    },
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
