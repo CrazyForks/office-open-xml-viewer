@@ -167,7 +167,34 @@ describe('textbox inline images — rendering', () => {
     // No image drawn …
     expect(drawImageCalls).toHaveLength(0);
     // … but the caption text block still renders (height was still reserved).
-    expect(fillTextCalls.some((c) => c.text === 'Fig. 1: A sample figure.')).toBe(true);
+    // The 80px-wide box wraps the caption across several lines, so assert the
+    // concatenated wrapped lines reproduce the caption (ignoring the spaces
+    // dropped at wrap points) rather than a single full-string fillText.
+    const captionInk = fillTextCalls.map((c) => c.text).join('').replace(/\s/g, '');
+    expect(captionInk).toContain('Fig.1:Asamplefigure.');
+  });
+
+  it('renderShapeText wraps a long text block to multiple lines within the inner width', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    // Single text block (no image). At fontSizePt 10 / scale 1 the mock advance
+    // is 10px per char, so a 100px-wide box holds ~10 chars per line.
+    const shape = {
+      type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+      textBlocks: [{ text: 'aaaa bbbb cccc dddd eeee', fontSizePt: 10, alignment: 'left' }],
+      textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+    } as unknown as ShapeRun;
+
+    renderShapeText(shape, 0, 0, 100, 400, ctx, 1, {}, new Map());
+
+    // The 24-char run cannot fit on one 100px line ⇒ it wraps.
+    expect(fillTextCalls.length).toBeGreaterThan(1);
+    // No drawn line exceeds the inner width (10px/char).
+    for (const c of fillTextCalls) {
+      expect(c.text.length * 10).toBeLessThanOrEqual(100 + 1e-6);
+    }
+    // All ink preserved (only wrap-point spaces dropped).
+    const ink = fillTextCalls.map((c) => c.text).join('').replace(/\s/g, '');
+    expect(ink).toBe('aaaabbbbccccddddeeee');
   });
 });
 

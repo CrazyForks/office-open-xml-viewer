@@ -4284,6 +4284,61 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
  *  natural pt size. If the natural width already fits, draw at natural size ×
  *  scale; otherwise scale down to innerW. Falls back to a square innerW box when
  *  the natural size is unknown (0). Returns px dimensions. */
+/** Greedy line-wrap for text-box body text within `maxWidth` px (ECMA-376
+ *  §21.1.2.1.1 — text-box content wraps to the inset box width unless wrap is
+ *  off). Latin words break at spaces (the space stays with the preceding word);
+ *  CJK / ideographic characters may break between any two (they carry no
+ *  inter-word spaces). `ctx.font` must already be the block's font. A single
+ *  token wider than `maxWidth` is left to overflow its own line (no
+ *  hyphenation). Always returns at least one line. */
+function wrapShapeText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+): string[] {
+  if (!text) return [''];
+  if (maxWidth <= 0) return [text];
+  const isCjk = (cp: number): boolean =>
+    (cp >= 0x3000 && cp <= 0x9fff) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xff00 && cp <= 0xffef) ||
+    (cp >= 0x20000 && cp <= 0x2fa1f);
+  // Tokenize into atomic wrap units: each CJK char alone, or a run of non-CJK
+  // characters up to and including a trailing space.
+  const tokens: string[] = [];
+  let buf = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (isCjk(cp)) {
+      if (buf) {
+        tokens.push(buf);
+        buf = '';
+      }
+      tokens.push(ch);
+    } else if (ch === ' ') {
+      buf += ch;
+      tokens.push(buf);
+      buf = '';
+    } else {
+      buf += ch;
+    }
+  }
+  if (buf) tokens.push(buf);
+
+  const lines: string[] = [];
+  let cur = '';
+  for (const tok of tokens) {
+    if (cur !== '' && ctx.measureText(cur + tok).width > maxWidth) {
+      lines.push(cur.replace(/\s+$/, ''));
+      cur = tok.replace(/^\s+/, ''); // a wrapped line never starts with a space
+    } else {
+      cur += tok;
+    }
+  }
+  if (cur !== '') lines.push(cur.replace(/\s+$/, ''));
+  return lines.length ? lines : [text];
+}
+
 function fitShapeImage(
   widthPt: number,
   heightPt: number,
@@ -4331,15 +4386,27 @@ export function renderShapeText(
   const innerY = y + tIns;
   const innerH = Math.max(0, h - tIns - bIns);
 
-  // First pass: measure each block's reserved height. Image blocks reserve their
-  // fitted height; text blocks reserve one line at fontSize px. The same array
-  // drives both vertical anchoring (totalH) and the per-block draw advance.
-  const lineHeights = blocks.map((b) =>
-    b.imagePath
-      ? fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, innerW, scale).h
-      : b.fontSizePt * scale * 1.2,
+  // First pass: lay out each block. Text blocks WRAP to the inner width
+  // (ECMA-376 §21.1.2.1.1) — a long title/abstract that exceeds the box width
+  // breaks onto multiple lines instead of overflowing the page; image blocks
+  // reserve their fitted height. The computed layout drives both vertical
+  // anchoring (totalH) and the draw pass (no re-wrapping).
+  type BlockLayout =
+    | { kind: 'image'; fitW: number; fitH: number }
+    | { kind: 'text'; lines: string[]; lineH: number };
+  const layouts: BlockLayout[] = blocks.map((b) => {
+    if (b.imagePath) {
+      const { w: fitW, h: fitH } = fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, innerW, scale);
+      return { kind: 'image', fitW, fitH };
+    }
+    const fontPx = b.fontSizePt * scale;
+    ctx.font = buildFont(b.bold ?? false, b.italic ?? false, fontPx, b.fontFamily ?? null, fontFamilyClasses);
+    return { kind: 'text', lines: wrapShapeText(ctx, b.text, innerW), lineH: fontPx * 1.2 };
+  });
+  const totalH = layouts.reduce(
+    (s, l) => s + (l.kind === 'image' ? l.fitH : l.lines.length * l.lineH),
+    0,
   );
-  const totalH = lineHeights.reduce((s, lh) => s + lh, 0);
 
   const anchor = shape.textAnchor ?? 't';
   let cursorY: number;
@@ -4353,14 +4420,15 @@ export function renderShapeText(
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
+    const layout = layouts[i];
 
-    if (block.imagePath) {
+    if (layout.kind === 'image') {
       // Inline image inside the text box. Fit to inner width, place
       // horizontally per the paragraph alignment (figures default to centered),
       // and advance by the reserved height regardless of whether a bitmap is
       // present (a missing decode must not shift the rest of the layout).
-      const { w: fitW, h: fitH } = fitShapeImage(block.imageWidthPt ?? 0, block.imageHeightPt ?? 0, innerW, scale);
-      const bmp = images.get(imageKey(block.imagePath));
+      const { fitW, fitH } = layout;
+      const bmp = block.imagePath ? images.get(imageKey(block.imagePath)) : undefined;
       if (bmp) {
         let drawX = innerX + Math.max(0, (innerW - fitW) / 2); // default: centered
         if (block.alignment === 'left' || block.alignment === 'both') {
@@ -4370,37 +4438,36 @@ export function renderShapeText(
         }
         ctx.drawImage(bmp, drawX, cursorY, fitW, fitH);
       }
-      cursorY += lineHeights[i];
+      cursorY += fitH;
       continue;
     }
 
     const fontPx = block.fontSizePt * scale;
     ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null, fontFamilyClasses);
     ctx.fillStyle = block.color ? `#${block.color}` : '#000000';
-    // The whole block is drawn in one fillText, so Canvas applies UAX#9 over
-    // the full string; we only set the base direction (for neutral resolution)
-    // and resolve alignment. No explicit shape-paragraph rtl flag exists, so
-    // derive the base direction from the content (first-strong).
+    // Base direction (for neutral resolution) + alignment, derived from the
+    // content (first-strong) since shape paragraphs carry no explicit rtl flag.
     const baseRtl = resolveBaseDirection(undefined, block.text) === 'rtl';
-    // Shape text draws one line per block with no inter-word stretching, so
-    // 'distribute' keeps its pre-bidi approximation (centered) rather than the
-    // justify edge resolveAlignEdge reports for paragraphs.
+    // No inter-word stretching in shape text, so 'distribute' stays centered
+    // rather than the justify edge resolveAlignEdge reports for paragraphs.
     const edge = block.alignment === 'distribute'
       ? 'center'
       : resolveAlignEdge(block.alignment, baseRtl);
     ctx.textAlign = 'left';
     ctx.direction = baseRtl ? 'rtl' : 'ltr';
-    const m = ctx.measureText(block.text);
-    let tx = innerX;
-    if (edge === 'center') {
-      tx = innerX + Math.max(0, (innerW - m.width) / 2);
-    } else if (edge === 'right') {
-      tx = innerX + Math.max(0, innerW - m.width);
+    for (const line of layout.lines) {
+      const m = ctx.measureText(line);
+      let tx = innerX;
+      if (edge === 'center') {
+        tx = innerX + Math.max(0, (innerW - m.width) / 2);
+      } else if (edge === 'right') {
+        tx = innerX + Math.max(0, innerW - m.width);
+      }
+      // Baseline = line top + ascent (approx 0.85 of font size for default fonts).
+      const baseline = cursorY + fontPx * 0.85;
+      ctx.fillText(line, tx, baseline);
+      cursorY += layout.lineH;
     }
-    // Baseline = cursorY + ascent (approx 0.85 of font size for default fonts).
-    const baseline = cursorY + fontPx * 0.85;
-    ctx.fillText(block.text, tx, baseline);
-    cursorY += lineHeights[i];
   }
   ctx.direction = 'ltr'; // reset for subsequent draws
 }
