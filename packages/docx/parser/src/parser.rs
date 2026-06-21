@@ -94,6 +94,16 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         }
         document_settings = parse_document_settings(&settings_xml);
     }
+
+    // ECMA-376 §17.7.2 — record the document default run fonts on the theme so
+    // text-box paragraphs (extract_simple_paragraph_text) can inherit them when a
+    // run sets no explicit ascii/eastAsia typeface, exactly like body runs do via
+    // their base_run. `resolve_para(None, None)` is the docDefaults + default
+    // paragraph style ("Normal") chain — the same baseline the body resolves.
+    {
+        let (_def_para, def_run) = style_map.resolve_para(None, None);
+        theme.set_default_run_fonts(def_run.font_family_ascii, def_run.font_family_east_asia);
+    }
     let theme = theme;
 
     let media_map = load_media_map(&mut zip, &rel_map, "word/");
@@ -393,6 +403,14 @@ pub struct ThemeColors {
     /// Re-parsing per shape is fine — the cover usually has only a handful of
     /// shapes that take a fillRef, and theme XML is small.
     theme_xml: Option<String>,
+    /// ECMA-376 §17.7.2 `docDefaults`/`rPrDefault` (folded with the default
+    /// paragraph style) — the document's default run fonts, kept as RAW refs
+    /// (may be `@theme:…`, resolved via [`resolve_font_ref`]). Threaded onto the
+    /// theme so text-box paragraphs (`extract_simple_paragraph_text`) can inherit
+    /// them when a run sets no explicit ascii/eastAsia typeface — the SAME default
+    /// chain the body resolves, instead of falling back to None (→ sans-serif).
+    default_ascii_font: Option<String>,
+    default_east_asia_font: Option<String>,
 }
 
 impl ThemeColors {
@@ -407,6 +425,7 @@ impl ThemeColors {
                     map,
                     fonts,
                     theme_xml,
+                    ..Default::default()
                 }
             }
         };
@@ -465,6 +484,7 @@ impl ThemeColors {
             map,
             fonts,
             theme_xml,
+            ..Default::default()
         }
     }
 
@@ -490,6 +510,27 @@ impl ThemeColors {
             return self.resolve_font(r);
         }
         Some(s)
+    }
+
+    /// Record the document's default run fonts (ECMA-376 §17.7.2 docDefaults
+    /// folded with the default paragraph style), kept RAW (may be `@theme:…`).
+    /// Threaded onto the theme by the document loader so text-box paragraphs can
+    /// inherit them via [`default_ascii_font_ref`] / [`default_east_asia_font_ref`].
+    pub fn set_default_run_fonts(&mut self, ascii: Option<String>, east_asia: Option<String>) {
+        self.default_ascii_font = ascii;
+        self.default_east_asia_font = east_asia;
+    }
+
+    /// The document default ascii (Latin) run font, RESOLVED through any theme
+    /// reference. `None` when docDefaults set no ascii/hAnsi typeface.
+    pub fn default_ascii_font_ref(&self) -> Option<String> {
+        self.resolve_font_ref(self.default_ascii_font.clone())
+    }
+
+    /// The document default East Asian run font, RESOLVED through any theme
+    /// reference. `None` when docDefaults set no eastAsia typeface.
+    pub fn default_east_asia_font_ref(&self) -> Option<String> {
+        self.resolve_font_ref(self.default_east_asia_font.clone())
     }
 
     /// Read a theme typeface directly by group ("major" / "minor") and axis
@@ -3246,19 +3287,42 @@ fn extract_simple_paragraph_text(
         .and_then(|jc| attr_w(jc, "val"))
         .unwrap_or_else(|| "left".to_string());
 
+    // Resolve the run's font through the SAME default chain the body uses
+    // (ECMA-376 §17.7.2 docDefaults). A text-box run with `<w:rFonts
+    // w:hint="eastAsia"/>` and no explicit ascii/eastAsia would otherwise resolve
+    // to None and the renderer would fall back to sans-serif; instead inherit the
+    // document default ascii (Latin-first text, e.g. an English title/abstract) /
+    // eastAsia typeface. Order: run-ascii → run-eastAsia → default-ascii →
+    // default-eastAsia (an explicit eastAsia run still wins over the default
+    // ascii, while a font-less run lands on the default ascii — Century in
+    // sample-10, a serif).
+    let resolve_font_with_default = |fmt: &RunFmt| -> Option<String> {
+        theme
+            .resolve_font_ref(fmt.font_family_ascii.clone())
+            .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()))
+            .or_else(|| theme.default_ascii_font_ref())
+            .or_else(|| theme.default_east_asia_font_ref())
+    };
     let (font_size_pt, color, font_family, bold, italic) = if let Some(rpr) = first_rpr {
         let fmt = parse_run_fmt(rpr);
         (
             fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
             fmt.color.clone(),
-            theme
-                .resolve_font_ref(fmt.font_family_ascii.clone())
-                .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
+            resolve_font_with_default(&fmt),
             fmt.bold.unwrap_or(false),
             fmt.italic.unwrap_or(false),
         )
     } else {
-        (DEFAULT_FONT_SIZE, None, None, false, false)
+        // No run properties at all — still inherit the document default font.
+        (
+            DEFAULT_FONT_SIZE,
+            None,
+            theme
+                .default_ascii_font_ref()
+                .or_else(|| theme.default_east_asia_font_ref()),
+            false,
+            false,
+        )
     };
 
     Some(ShapeText {
@@ -6051,6 +6115,73 @@ mod txbx_inline_image_tests {
                 .expect("image-only paragraph must still yield a block");
         assert_eq!(block.image_path.as_deref(), Some("word/media/image1.emf"));
         assert!(block.text.is_empty());
+    }
+
+    /// ECMA-376 §17.7.2 — a text-box run whose `<w:rFonts>` carries only a
+    /// `w:hint` (no explicit ascii/eastAsia typeface) inherits the document
+    /// default ascii font instead of resolving to None (which the renderer would
+    /// draw sans-serif). Mirrors sample-10's English title/abstract blocks, which
+    /// must come out as the docDefault Century (a serif).
+    #[test]
+    fn extract_simple_paragraph_text_inherits_default_ascii_font() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>Abstract</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), Some("MS Mincho".to_string()));
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.text, "Abstract");
+        // Latin-first run with no explicit face → the default ascii font, NOT None.
+        assert_eq!(block.font_family.as_deref(), Some("Century"));
+    }
+
+    /// A text-box run with NO `<w:rPr>` at all still inherits the document default
+    /// ascii font (§17.7.2) rather than leaving font_family None.
+    #[test]
+    fn extract_simple_paragraph_text_no_rpr_inherits_default_font() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:t>Index Terms</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), None);
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.font_family.as_deref(), Some("Century"));
+    }
+
+    /// An EXPLICIT eastAsia typeface on the run still wins over the document
+    /// default ascii (the fallback only applies when the run sets no face).
+    #[test]
+    fn extract_simple_paragraph_text_explicit_font_overrides_default() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:eastAsia="Yu Mincho"/></w:rPr><w:t>本文</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut theme = ThemeColors::default();
+        theme.set_default_run_fonts(Some("Century".to_string()), Some("MS Mincho".to_string()));
+        let block = extract_simple_paragraph_text(doc.root_element(), &theme, &HashMap::new())
+            .expect("text paragraph yields a block");
+        assert_eq!(block.font_family.as_deref(), Some("Yu Mincho"));
+    }
+
+    /// With NO document defaults recorded (e.g. a styles-less document), a
+    /// face-less run resolves to None exactly as before — no regression.
+    #[test]
+    fn extract_simple_paragraph_text_no_default_stays_none() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>x</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let block = extract_simple_paragraph_text(
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
+        assert_eq!(block.font_family, None);
     }
 
     /// A paragraph with neither text nor an image still yields None (unchanged).
