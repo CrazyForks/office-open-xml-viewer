@@ -3732,6 +3732,7 @@ fn parse_master_level_bullets(
     theme: &HashMap<String, String>,
     master_rels: &HashMap<String, String>,
     master_dir: &str,
+    zip: &mut PptxZip<'_>,
 ) -> HashMap<String, LevelBullets> {
     let mut map: HashMap<String, LevelBullets> = HashMap::new();
     let doc = match roxmltree::Document::parse(master_xml) {
@@ -3744,7 +3745,12 @@ fn parse_master_level_bullets(
     // part directory (ECMA-376 §21.1.2.4.2), mirroring the master background.
     let mut resolve_blip = |rid: &str| -> Option<String> {
         let target = master_rels.get(rid)?;
-        Some(resolve_path(master_dir, target))
+        let path = resolve_path(master_dir, target);
+        // Verify the part exists so a listed-but-missing rId yields None and the
+        // bullet falls through to Bullet::Inherit (matches the variant's doc
+        // comment), mirroring the master background resolver.
+        read_zip_bytes(zip, &path)?;
+        Some(path)
     };
 
     // Per-shape lstStyle first (more specific).
@@ -4053,7 +4059,12 @@ fn parse_layout_placeholders(
         // rels + part directory, mirroring the layout-spPr blipFill above.
         let mut resolve_layout_blip = |rid: &str| -> Option<String> {
             let target = layout_rels.get(rid)?;
-            Some(resolve_path(layout_dir, target))
+            let path = resolve_path(layout_dir, target);
+            // Verify the part exists so a listed-but-missing rId yields None and
+            // the bullet falls through to Bullet::Inherit (matches the variant's
+            // doc comment), mirroring the master/layout background resolvers.
+            read_zip_bytes(zip, &path)?;
+            Some(path)
         };
         let layout_level_bullets: LevelBullets = child(sp, "txBody")
             .map(|tb| extract_level_bullets(tb, theme, &mut resolve_layout_blip))
@@ -4296,6 +4307,7 @@ fn parse_text_body(
     inherited_space_after: Option<i64>,
     inherited_line_spacing: Option<f64>,
     shape_kind: ShapeKind,
+    zip: &mut PptxZip<'_>,
 ) -> TextBody {
     let body_pr = child(tx_body, "bodyPr");
     // ECMA-376 §20.1.6.7 objectDefaults. The theme-level `<a:txDef>` (and
@@ -4420,7 +4432,12 @@ fn parse_text_body(
     // the part directory is always `ppt/slides`.
     let mut resolve_slide_blip = |rid: &str| -> Option<String> {
         let target = rels.get(rid)?;
-        Some(resolve_path("ppt/slides", target))
+        let path = resolve_path("ppt/slides", target);
+        // Verify the part exists so a listed-but-missing rId yields None and the
+        // bullet falls through to Bullet::Inherit (matches the variant's doc
+        // comment), mirroring the slide picture-fill resolvers.
+        read_zip_bytes(zip, &path)?;
+        Some(path)
     };
     let own_level_bullets = extract_level_bullets(tx_body, theme, &mut resolve_slide_blip);
     let effective_level_bullets = merge_level_bullets(&own_level_bullets, inherited_level_bullets);
@@ -4477,6 +4494,7 @@ fn parse_text_body(
                 body_default_line_spacing,
                 &effective_level_sizes,
                 &effective_level_bullets,
+                zip,
             )
         })
         .collect();
@@ -4615,6 +4633,7 @@ fn parse_paragraph(
     body_default_line_spacing: Option<f64>,
     level_font_sizes: &LevelFontSizes,
     level_bullets: &LevelBullets,
+    zip: &mut PptxZip<'_>,
 ) -> Paragraph {
     let p_pr = child(p_node, "pPr");
 
@@ -4654,7 +4673,12 @@ fn parse_paragraph(
     // the same base as the slide's picture fills (§21.1.2.4.2).
     let mut resolve_para_blip = |rid: &str| -> Option<String> {
         let target = rels.get(rid)?;
-        Some(resolve_path("ppt/slides", target))
+        let path = resolve_path("ppt/slides", target);
+        // Verify the part exists so a listed-but-missing rId yields None and the
+        // bullet falls through to Bullet::Inherit (matches the variant's doc
+        // comment), mirroring the slide picture-fill resolvers.
+        read_zip_bytes(zip, &path)?;
+        Some(path)
     };
     let bullet = match parse_bullet(p_pr, theme, &mut resolve_para_blip) {
         Bullet::Inherit => level_bullets
@@ -6140,6 +6164,7 @@ fn parse_shape(
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
     group_fill: Option<&Fill>,
+    zip: &mut PptxZip<'_>,
 ) -> Option<ShapeElement> {
     // --- Placeholder info (for layout fallback) ---
     let ph_node = sp_node
@@ -6453,6 +6478,7 @@ fn parse_shape(
             inherited_space_after,
             inherited_line_spacing,
             shape_kind,
+            zip,
         )
     });
 
@@ -7083,7 +7109,7 @@ fn parse_table(
     let mut rows: Vec<TableRow> = tbl
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "tr")
-        .map(|tr| parse_table_row(tr, theme, rels))
+        .map(|tr| parse_table_row(tr, theme, rels, zip))
         .collect();
 
     let row_count = rows.len();
@@ -7281,12 +7307,13 @@ fn parse_table_row(
     tr: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
 ) -> TableRow {
     let height = attr_i64(&tr, "h").unwrap_or(0);
     let cells: Vec<TableCell> = tr
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "tc")
-        .map(|tc| parse_table_cell(tc, theme, rels))
+        .map(|tc| parse_table_cell(tc, theme, rels, zip))
         .collect();
     TableRow { height, cells }
 }
@@ -7295,6 +7322,7 @@ fn parse_table_cell(
     tc: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
 ) -> TableCell {
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
@@ -7319,6 +7347,7 @@ fn parse_table_cell(
             None, // inherited_space_after
             None, // inherited_line_spacing
             ShapeKind::Sp,
+            zip,
         )
     });
 
@@ -7904,7 +7933,7 @@ fn parse_sp_tree_node(
                     }
                 }
             }
-            if let Some(shape) = parse_shape(node, lph, theme, rels, group_fill) {
+            if let Some(shape) = parse_shape(node, lph, theme, rels, group_fill, zip) {
                 out.push(SlideElement::Shape(shape));
             }
         }
@@ -8085,7 +8114,7 @@ fn parse_sp_tree_node(
                     if let Some(rel_ids) = child(gd, "relIds") {
                         if let Some(dm_rid) = attr_r(&rel_ids, "dm") {
                             if let Some(drawing_xml) = smartart_drawings.get(&dm_rid) {
-                                parse_smartart_drawing(drawing_xml, &t, theme, out);
+                                parse_smartart_drawing(drawing_xml, &t, theme, out, zip);
                                 return;
                             }
                         }
@@ -8228,6 +8257,7 @@ fn parse_smartart_drawing(
     gf_xfrm: &Transform,
     theme: &HashMap<String, String>,
     out: &mut Vec<SlideElement>,
+    zip: &mut PptxZip<'_>,
 ) {
     let doc = match roxmltree::Document::parse(drawing_xml) {
         Ok(d) => d,
@@ -8243,17 +8273,20 @@ fn parse_smartart_drawing(
     let start = out.len();
     for node in sp_tree.children().filter(|n| n.is_element()) {
         // dsp:sp / dsp:cxnSp / dsp:grpSp share local names with their p:* counterparts.
-        // Shapes inside drawing1.xml don't reference external pictures via r:embed, so
-        // we can skip wiring up rels/zip for this pass — pass empty stubs.
+        // Shapes inside drawing1.xml carry no `a:blip r:embed` picture fills, so
+        // `rels` is an empty stub. `zip` is still threaded through: a dsp shape's
+        // text body may declare a `<a:buBlip>` bullet whose part existence must be
+        // verified (it resolves against the empty `rels`, so it always falls
+        // through to Bullet::Inherit, but the resolver still needs the archive).
         let empty_rels: HashMap<String, String> = HashMap::new();
         let empty_smartart: HashMap<String, String> = HashMap::new();
-        // SAFETY: parse_sp_tree_node would need a &mut zip only for embedded pictures;
-        // the dsp subtree never contains a:blip r:embed, so we can pass a dummy archive
-        // reference. To avoid juggling a zip reference here, dispatch the relevant
-        // branches (sp/cxnSp/grpSp) directly.
+        // Dispatch the relevant branches (sp/cxnSp/grpSp) directly rather than via
+        // parse_sp_tree_node, since the dsp subtree never contains embedded pictures.
         match node.tag_name().name() {
             "sp" => {
-                if let Some(mut shape) = parse_shape(node, &empty_lph, theme, &empty_rels, None) {
+                if let Some(mut shape) =
+                    parse_shape(node, &empty_lph, theme, &empty_rels, None, zip)
+                {
                     shape.text_rect = parse_tx_xfrm(node);
                     out.push(SlideElement::Shape(shape));
                 }
@@ -8297,7 +8330,7 @@ fn parse_smartart_drawing(
                     match child_node.tag_name().name() {
                         "sp" => {
                             if let Some(mut shape) =
-                                parse_shape(child_node, &empty_lph, theme, &empty_rels, None)
+                                parse_shape(child_node, &empty_lph, theme, &empty_rels, None, zip)
                             {
                                 shape.text_rect = parse_tx_xfrm(child_node);
                                 out.push(SlideElement::Shape(shape));
@@ -8658,7 +8691,7 @@ fn build_master_bundle(
         .unwrap_or_default();
     let master_level_bullets = master_xml_opt
         .as_deref()
-        .map(|xml| parse_master_level_bullets(xml, &theme, &master_rels, &master_dir))
+        .map(|xml| parse_master_level_bullets(xml, &theme, &master_rels, &master_dir, zip))
         .unwrap_or_default();
     let master_anchors = master_xml_opt
         .as_deref()
@@ -8951,7 +8984,13 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                 .master_xml
                 .as_deref()
                 .map(|x| {
-                    parse_master_level_bullets(x, &theme, &bundle.master_rels, &bundle.master_dir)
+                    parse_master_level_bullets(
+                        x,
+                        &theme,
+                        &bundle.master_rels,
+                        &bundle.master_dir,
+                        &mut zip,
+                    )
                 })
                 .unwrap_or_default();
             EffectiveMaster {
@@ -9002,6 +9041,36 @@ mod tests {
     // depend on it must skip gracefully on a clean checkout / in CI where the
     // file is absent. See packages/pptx/public/private/.
     const LOCAL_SAMPLE_2: &str = "../public/private/sample-2.pptx";
+
+    /// Build an empty in-memory zip — enough for parse_* functions that take a
+    /// `&mut PptxZip` but whose input declares no `<a:buBlip>` / blipFill parts.
+    fn empty_zip_bytes() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let writer = zip::ZipWriter::new(cursor);
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    /// Build an in-memory zip containing exactly `parts` (path → bytes). Used to
+    /// prove a `<a:buBlip>` whose rId resolves to a part that ISN'T in the
+    /// archive falls through to Bullet::Inherit (read_zip_bytes returns None).
+    fn zip_with_parts(parts: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (path, bytes) in parts {
+                w.start_file(*path, o).unwrap();
+                w.write_all(bytes).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
 
     #[test]
     fn extract_image_reads_entry() {
@@ -9750,6 +9819,78 @@ mod tests {
         assert!(levels[2].is_none());
     }
 
+    /// ECMA-376 §21.1.2.4.2 — a `<a:buBlip>` whose `r:embed` IS listed in the
+    /// part's rels (so `resolve_path` succeeds) but whose target part is NOT in
+    /// the package must NOT emit a `Bullet::Blip` carrying a dangling path. The
+    /// resolver verifies part existence with `read_zip_bytes`, so a missing part
+    /// yields `None` and the level falls through to `Bullet::Inherit` (the empty
+    /// `LevelBullets` slot), matching the variant's doc comment. Exercised
+    /// end-to-end through `parse_master_level_bullets` (one of the now-`zip`-
+    /// threaded entry points) against a real in-memory archive.
+    #[test]
+    fn master_bublip_listed_but_missing_part_inherits() {
+        // bodyStyle lvl1 declares a picture bullet whose embed (rId7) IS in the
+        // master rels, pointing at ppt/media/missing.png.
+        let master = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                                     xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                                     xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <p:cSld><p:spTree/></p:cSld>
+          <p:txStyles>
+            <p:bodyStyle>
+              <a:lvl1pPr><a:buBlip><a:blip r:embed="rId7"/></a:buBlip><a:defRPr sz="2000"/></a:lvl1pPr>
+            </p:bodyStyle>
+          </p:txStyles>
+        </p:sldMaster>"#;
+        let theme = HashMap::new();
+        let mut master_rels = HashMap::new();
+        // rId7 resolves (resolve_path succeeds) to ppt/media/missing.png.
+        master_rels.insert("rId7".to_owned(), "../media/missing.png".to_owned());
+
+        // Archive deliberately LACKS ppt/media/missing.png (it holds an unrelated
+        // part so it isn't empty). read_zip_bytes(missing.png) → None.
+        let bytes = zip_with_parts(&[("ppt/media/other.png", b"\x89PNG")]);
+        let cursor = Cursor::new(bytes.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+
+        let m =
+            parse_master_level_bullets(master, &theme, &master_rels, "ppt/slideMasters", &mut zip);
+        // The listed-but-missing part must not produce a Blip anywhere. With only
+        // a buBlip (no char/auto) at lvl1 and the part absent, the level resolves
+        // to Inherit (None) and the bodyStyle contributes no usable bullet, so the
+        // "body" key is never inserted (has_any_level_bullet is false).
+        if let Some(body) = m.get("body") {
+            assert!(
+                !matches!(body[0], Some(Bullet::Blip { .. })),
+                "missing part must not yield Bullet::Blip; got {:?}",
+                body[0]
+            );
+            assert!(
+                body.iter().all(|b| !matches!(b, Some(Bullet::Blip { .. }))),
+                "no level may carry a dangling Bullet::Blip; got {body:?}"
+            );
+        }
+
+        // Positive control: with the SAME rels but the part now PRESENT, the
+        // bullet resolves to Bullet::Blip — proving the test distinguishes
+        // presence from absence rather than always inheriting.
+        let bytes_ok = zip_with_parts(&[("ppt/media/missing.png", b"\x89PNG")]);
+        let cursor_ok = Cursor::new(bytes_ok.as_slice());
+        let mut zip_ok = zip::ZipArchive::new(cursor_ok).unwrap();
+        let m_ok = parse_master_level_bullets(
+            master,
+            &theme,
+            &master_rels,
+            "ppt/slideMasters",
+            &mut zip_ok,
+        );
+        match m_ok.get("body").and_then(|b| b[0].clone()) {
+            Some(Bullet::Blip { image_path, .. }) => {
+                assert_eq!(image_path, "ppt/media/missing.png");
+            }
+            other => panic!("expected Bullet::Blip when part is present, got {other:?}"),
+        }
+    }
+
     /// ECMA-376 §21.1.2.3.16 — underline_style carries non-default underline
     /// values (dbl, dotted, wavy, …) verbatim. The plain bool stays true for
     /// any non-"none" value; "sng" and absent both leave underline_style None
@@ -10133,7 +10274,12 @@ mod tests {
         </p:sldMaster>"#;
         let theme = HashMap::new();
         let master_rels = HashMap::new();
-        let m = parse_master_level_bullets(master, &theme, &master_rels, "ppt/slideMasters");
+        // Char bullets only — no media part lookups, so an empty archive suffices.
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let m =
+            parse_master_level_bullets(master, &theme, &master_rels, "ppt/slideMasters", &mut zip);
         let body = m.get("body").expect("body bullets");
         match &body[0] {
             Some(Bullet::Char { ch, .. }) => assert_eq!(ch, "•", "lvl1 bullet char"),
@@ -10403,7 +10549,12 @@ mod tests {
     fn test_parse_text_body_rtl_col() {
         let theme = HashMap::new();
         let rels = HashMap::new();
-        let parse = |body_pr: &str| -> TextBody {
+        // parse_text_body now takes a &mut PptxZip (to verify buBlip parts). This
+        // body declares no picture bullets, so an empty archive is sufficient.
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let mut parse = |body_pr: &str| -> TextBody {
             let xml = format!(
                 r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">{body_pr}<p><r><t>x</t></r></p></txBody>"#
             );
@@ -10425,6 +10576,7 @@ mod tests {
                 None, // inherited_space_after
                 None, // inherited_line_spacing
                 ShapeKind::Sp,
+                &mut zip,
             )
         };
 
@@ -10467,9 +10619,14 @@ mod tests {
     fn test_parse_paragraph_ea_ln_brk() {
         let theme = HashMap::new();
         let rels = HashMap::new();
+        // parse_text_body now takes a &mut PptxZip (to verify buBlip parts). No
+        // picture bullets here, so an empty archive is sufficient.
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
         // `lst_style` lets a test set the body lvl1pPr default; `p_pr` is the
         // paragraph's own pPr. Returns the single paragraph's ea_ln_brk.
-        let parse_para = |lst_style: &str, p_pr: &str| -> Paragraph {
+        let mut parse_para = |lst_style: &str, p_pr: &str| -> Paragraph {
             let xml = format!(
                 r#"<txBody xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">{lst_style}<p>{p_pr}<r><t>東</t></r></p></txBody>"#
             );
@@ -10491,6 +10648,7 @@ mod tests {
                 None,
                 None,
                 ShapeKind::Sp,
+                &mut zip,
             );
             tb.paragraphs.remove(0)
         };
@@ -10548,16 +10706,6 @@ mod tests {
     fn table_rtl_attribute_parses() {
         // An empty in-memory zip is enough: parse_table only reads
         // ppt/tableStyles.xml (absent → no style cascade) and the tbl node.
-        fn empty_zip() -> Vec<u8> {
-            let mut buf = Vec::new();
-            {
-                let cursor = Cursor::new(&mut buf);
-                let writer = zip::ZipWriter::new(cursor);
-                writer.finish().unwrap();
-            }
-            buf
-        }
-
         fn parse_tbl(tbl_xml: &str) -> TableElement {
             let xml = format!(
                 r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{tbl_xml}</root>"#
@@ -10579,7 +10727,7 @@ mod tests {
             };
             let theme: HashMap<String, String> = HashMap::new();
             let rels: HashMap<String, String> = HashMap::new();
-            let bytes = empty_zip();
+            let bytes = empty_zip_bytes();
             let cursor = Cursor::new(bytes.as_slice());
             let mut zip = zip::ZipArchive::new(cursor).unwrap();
             parse_table(tbl, &t, &theme, &rels, &mut zip).unwrap()

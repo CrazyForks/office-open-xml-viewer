@@ -2374,22 +2374,28 @@ export function renderTextBody(
       }
     }
 
-    // Picture bullet (`<a:buBlip>`, ECMA-376 §21.1.2.4.2). Drawn as a square
-    // bitmap sitting on the text baseline at the same gutter x a char bullet
-    // uses. The image was warmed by renderSlide's prefetch pass; if its decode
-    // hasn't resolved yet (or fetchImage is absent), draw nothing — the marker
-    // simply appears once the bitmap is ready, never blocking the frame.
+    // Picture bullet (`<a:buBlip>`, ECMA-376 §21.1.2.4.2). The bitmap sits on
+    // the text baseline at the same gutter x a char bullet uses. The image was
+    // warmed by renderSlide's prefetch pass; if its decode hasn't resolved yet
+    // (or fetchImage is absent), draw nothing — the marker simply appears once
+    // the bitmap is ready, never blocking the frame.
     if (bulletImage && fetchImage) {
       const bmp = peekCachedBitmap(bulletImage.imagePath, fetchImage);
       if (bmp) {
-        const sz = bulletImage.sizePx;
-        const imgY = baseline - sz; // bottom-aligned to the baseline
+        // The bullet HEIGHT is the text-derived size (× buSzPct); the WIDTH is
+        // derived from the decoded bitmap's intrinsic aspect ratio so a
+        // non-square marker isn't squished. §21.1.2.4.2 is silent on the exact
+        // dimensions; this mirrors the PowerPoint runtime, which scales the
+        // picture to the line text height while preserving its aspect ratio.
+        const h = bulletImage.sizePx;
+        const w = bmp.height > 0 ? h * (bmp.width / bmp.height) : h;
+        const imgY = baseline - h; // bottom-aligned to the baseline
         if (paraNeedsBidi && baseRtl) {
           // Mirror into the right gutter, matching the char-bullet RTL offset.
-          const imgX = textX + textMaxW + (textX - bulletX) - sz;
-          ctx.drawImage(bmp, imgX, imgY, sz, sz);
+          const imgX = textX + textMaxW + (textX - bulletX) - w;
+          ctx.drawImage(bmp, imgX, imgY, w, h);
         } else {
-          ctx.drawImage(bmp, bulletX, imgY, sz, sz);
+          ctx.drawImage(bmp, bulletX, imgY, w, h);
         }
       }
     }
@@ -2704,9 +2710,15 @@ export function renderTextBody(
 // lets a deck's bitmaps be reclaimed with it.
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
 const IMAGE_BITMAP_CACHE_MAX = 256;
-const bitmapCacheByFetch = new WeakMap<FetchImage, Map<string, Promise<ImageBitmap>>>();
+// Each entry pairs the in-flight/settled decode promise with its resolved bitmap.
+// `bitmap` is populated once the promise resolves (see getCachedBitmap), giving
+// the synchronous draw sites (picture bullets, §21.1.2.4.2) a settled value to
+// read via peekCachedBitmap without awaiting — no separate parallel cache to
+// keep in sync, so eviction/teardown only ever drop the whole entry.
+type BitmapCacheEntry = { promise: Promise<ImageBitmap>; bitmap?: ImageBitmap };
+const bitmapCacheByFetch = new WeakMap<FetchImage, Map<string, BitmapCacheEntry>>();
 
-function bitmapCacheFor(fetchImage: FetchImage): Map<string, Promise<ImageBitmap>> {
+function bitmapCacheFor(fetchImage: FetchImage): Map<string, BitmapCacheEntry> {
   let cache = bitmapCacheByFetch.get(fetchImage);
   if (!cache) {
     cache = new Map();
@@ -2715,35 +2727,17 @@ function bitmapCacheFor(fetchImage: FetchImage): Map<string, Promise<ImageBitmap
   return cache;
 }
 
-// Settled mirror of the bitmap cache: path → already-decoded ImageBitmap. The
-// async picture/background paths await the promise cache above, but a few draw
-// sites are synchronous — picture bullets (`<a:buBlip>`, §21.1.2.4.2) are drawn
-// inside the synchronous text-body layout, which cannot await. renderSlide warms
-// the promise cache for every bullet image before the synchronous draw loop, and
-// this mirror lets that draw read the resolved bitmap without going async. A path
-// only enters here once its decode resolves, so a still-loading bullet image is
-// simply skipped (the fallback) rather than blocking the frame.
-const settledBitmapByFetch = new WeakMap<FetchImage, Map<string, ImageBitmap>>();
-
-function settledBitmapCacheFor(fetchImage: FetchImage): Map<string, ImageBitmap> {
-  let cache = settledBitmapByFetch.get(fetchImage);
-  if (!cache) {
-    cache = new Map();
-    settledBitmapByFetch.set(fetchImage, cache);
-  }
-  return cache;
-}
-
 /**
  * Synchronously return a bullet image's decoded bitmap if its decode has already
  * resolved (warmed by {@link getCachedBitmap}), else `undefined`. Used by the
- * synchronous text-body draw to paint picture bullets without awaiting.
+ * synchronous text-body draw to paint picture bullets without awaiting. A
+ * still-loading image has no `bitmap` on its entry yet, so it's simply skipped.
  */
 export function peekCachedBitmap(
   imagePath: string,
   fetchImage: FetchImage,
 ): ImageBitmap | undefined {
-  return settledBitmapByFetch.get(fetchImage)?.get(imagePath);
+  return bitmapCacheByFetch.get(fetchImage)?.get(imagePath)?.bitmap;
 }
 
 
@@ -3061,23 +3055,25 @@ export function getCachedBitmap(
     // Refresh LRU position.
     cache.delete(imagePath);
     cache.set(imagePath, existing);
-    return existing;
+    return existing.promise;
   }
-  const p = fetchImage(imagePath, mimeType).then((b) => createImageBitmap(b));
+  const promise = fetchImage(imagePath, mimeType).then((b) => createImageBitmap(b));
+  const entry: BitmapCacheEntry = { promise };
+  // Record the resolved bitmap on the entry so the synchronous bullet draw
+  // (peekCachedBitmap) can read it after the warm pass awaits this promise.
+  void promise.then((bmp) => {
+    entry.bitmap = bmp;
+  });
   // Don't poison the cache on a transient decode failure.
-  p.catch(() => cache.delete(imagePath));
-  // Mirror the resolved bitmap into the settled cache so the synchronous bullet
-  // draw (peekCachedBitmap) can read it after the warm pass awaits this promise.
-  void p.then((bmp) => settledBitmapCacheFor(fetchImage).set(imagePath, bmp)).catch(() => {});
-  cache.set(imagePath, p);
+  promise.catch(() => cache.delete(imagePath));
+  cache.set(imagePath, entry);
   if (cache.size > IMAGE_BITMAP_CACHE_MAX) {
     const oldestKey = cache.keys().next().value as string;
     const oldest = cache.get(oldestKey);
     cache.delete(oldestKey);
-    settledBitmapByFetch.get(fetchImage)?.delete(oldestKey);
-    oldest?.then((b) => b.close()).catch(() => {});
+    oldest?.promise.then((b) => b.close()).catch(() => {});
   }
-  return p;
+  return promise;
 }
 
 /**
@@ -3087,10 +3083,9 @@ export function getCachedBitmap(
  * raster blips.
  */
 export function dropImageBitmapCache(fetchImage: FetchImage): void {
-  settledBitmapByFetch.delete(fetchImage);
   const cache = bitmapCacheByFetch.get(fetchImage);
   if (!cache) return;
-  for (const p of cache.values()) p.then((b) => b.close()).catch(() => {});
+  for (const entry of cache.values()) entry.promise.then((b) => b.close()).catch(() => {});
   cache.clear();
   bitmapCacheByFetch.delete(fetchImage);
 }

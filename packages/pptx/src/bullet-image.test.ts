@@ -17,8 +17,17 @@ import type { TextRunData } from '@silurus/ooxml-core';
 const SCALE = 1 / 12700;
 
 // A sentinel ImageBitmap the stubbed createImageBitmap returns, so we can assert
-// the exact object reaches drawImage.
-const SENTINEL = { width: 8, height: 8, close: () => {} } as unknown as ImageBitmap;
+// the exact object reaches drawImage. Intentionally NON-square (16×8, ratio 2:1)
+// so the tests catch a forced-square draw: PowerPoint scales a picture bullet to
+// the text height while preserving the bitmap's aspect ratio (§21.1.2.4.2).
+const SENTINEL_W = 16;
+const SENTINEL_H = 8;
+const SENTINEL_RATIO = SENTINEL_W / SENTINEL_H;
+const SENTINEL = {
+  width: SENTINEL_W,
+  height: SENTINEL_H,
+  close: () => {},
+} as unknown as ImageBitmap;
 
 function mockCtx() {
   const draws: Array<{ img: unknown; x: number; y: number; w: number; h: number }> = [];
@@ -152,7 +161,7 @@ describe('renderTextBody — picture bullet (buBlip) draws the bitmap', () => {
     vi.unstubAllGlobals();
   });
 
-  it('draws the warmed bullet bitmap as a square sized to the text, at the bullet gutter', async () => {
+  it('draws the warmed bullet bitmap sized to the text height with the bitmap aspect ratio, at the bullet gutter', async () => {
     const path = 'ppt/media/bullet-warmed.png';
     // Warm the cache the way renderSlide's prefetch pass does, then await it so
     // the settled bitmap is visible to the synchronous draw.
@@ -174,11 +183,11 @@ describe('renderTextBody — picture bullet (buBlip) draws the bitmap', () => {
     expect(draws).toHaveLength(1);
     const d = draws[0];
     expect(d.img).toBe(SENTINEL);
-    // 20pt run × scale(1/12700) × 12700 = 20px, default buSzPct = 100%.
-    expect(d.w).toBeCloseTo(20, 6);
+    // Height = 20pt run × scale(1/12700) × 12700 = 20px (default buSzPct = 100%).
     expect(d.h).toBeCloseTo(20, 6);
-    // Square (w === h), so the marker isn't stretched.
-    expect(d.w).toBeCloseTo(d.h, 6);
+    // Width preserves the bitmap aspect ratio (16:8 = 2:1), not forced square.
+    expect(d.w).toBeCloseTo(20 * SENTINEL_RATIO, 6);
+    expect(d.w).toBeCloseTo(d.h * SENTINEL_RATIO, 6);
   });
 
   it('scales the bullet by buSzPct (§21.1.2.4.3)', async () => {
@@ -199,9 +208,9 @@ describe('renderTextBody — picture bullet (buBlip) draws the bitmap', () => {
     );
 
     expect(draws).toHaveLength(1);
-    // 20px text × 50% = 10px.
-    expect(draws[0].w).toBeCloseTo(10, 6);
+    // Height = 20px text × 50% = 10px; width preserves the 2:1 aspect ratio.
     expect(draws[0].h).toBeCloseTo(10, 6);
+    expect(draws[0].w).toBeCloseTo(10 * SENTINEL_RATIO, 6);
   });
 
   it('draws nothing (no throw) when the bullet image is not yet decoded', () => {
