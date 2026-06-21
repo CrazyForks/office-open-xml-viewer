@@ -131,6 +131,13 @@ export interface SectionProps {
    *  "linesAndChars", auto line spacing multiplies against this pitch instead of
    *  the font's natural line height. */
   docGridLinePitch?: number | null;
+  /** ECMA-376 §17.6.5 w:docGrid/@w:charSpace (ST_DecimalNumber, signed). The
+   *  raw character-grid spacing in 1/4096ths of an em (NOT twips). When
+   *  docGridType is "linesAndChars" or "snapToChars", every full-width East-
+   *  Asian glyph occupies a fixed cell of width `fontSizePt + charSpace/4096` pt
+   *  (negative = tighter). Absent ⇒ East-Asian glyphs keep their natural em
+   *  advance. */
+  docGridCharSpace?: number | null;
   /** ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout. `null`
    *  (or absent) ⇒ single full-width column (unchanged behavior). When present,
    *  body text flows top-to-bottom through `count` columns (newspaper fill);

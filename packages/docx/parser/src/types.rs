@@ -168,6 +168,15 @@ pub struct SectionProps {
     /// this instead of the font's natural line height.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_line_pitch: Option<f64>,
+    /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` (ST_DecimalNumber, signed).
+    /// The per-character-grid spacing in 1/4096ths of an em (NOT twips). When
+    /// `doc_grid_type` is "linesAndChars" or "snapToChars", every full-width
+    /// East-Asian glyph occupies a fixed cell of width `fontSizePt +
+    /// charSpace/4096` pt; a positive value loosens the cell, a negative value
+    /// (the common case) tightens it. `None` when the attribute is absent (the
+    /// renderer then leaves East-Asian glyphs at their natural em advance).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_char_space: Option<f64>,
     /// ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout for the
     /// section. `None` when the section is single-column (`<w:cols>` absent or
     /// `@w:num` <= 1), in which case the renderer keeps its single full-width

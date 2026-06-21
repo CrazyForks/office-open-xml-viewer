@@ -616,7 +616,11 @@ export async function renderDocumentToCanvas(
     pageWidth: sec.pageWidth,
     floats: [],
     floatParaSeq: 0,
-    docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
+    docGrid: {
+      type: sec.docGridType ?? null,
+      linePitchPt: sec.docGridLinePitch ?? null,
+      charSpacePt: sec.docGridCharSpace != null ? sec.docGridCharSpace / 4096 : null,
+    },
     docEastAsian: docEA,
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
@@ -1390,7 +1394,11 @@ function buildMeasureState(
     pageWidth: section.pageWidth,
     floats: [],
     floatParaSeq: 0,
-    docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
+    docGrid: {
+      type: section.docGridType ?? null,
+      linePitchPt: section.docGridLinePitch ?? null,
+      charSpacePt: section.docGridCharSpace != null ? section.docGridCharSpace / 4096 : null,
+    },
     docEastAsian,
     fontFamilyClasses,
     kinsoku,
@@ -1463,7 +1471,7 @@ function estimateParagraphHeight(
       pageH: state.pageH,
       markEmPx: paragraphMarkEmPx(para, 1),
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1));
     if (lines.length === 0) {
       // Anchor-only paragraph: no inline content, but the paragraph mark still
       // occupies one (possibly flowed) line (§17.3.1.29).
@@ -1630,7 +1638,7 @@ function splitParagraphAcrossPages(
     pageH: measureState.pageH,
     markEmPx: paragraphMarkEmPx(para, 1),
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1));
   if (lines.length === 0) {
     // Anchor-only paragraph: no inline lines, but the paragraph mark still
     // occupies one (possibly relocated) line (§17.3.1.29).
@@ -2457,7 +2465,7 @@ function renderParagraph(
   // indent (positive firstLine, or a bare negative hanging without a marker) to
   // the body as usual. RTL lists keep their existing start-edge handling.
   const firstLineIndent = numMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
-  const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
+  const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, scale));
 
   // A paragraph whose only segments are wrap-float anchors (wp:anchor) places no
   // inline content on any line, so layoutLines returns zero lines. Per ECMA-376
@@ -2531,6 +2539,13 @@ function renderParagraph(
   // resets state.y baseline so the slice begins at the page's content top.
   const sliceStart = lineSlice ? lineSlice.start : 0;
   const sliceEnd = lineSlice ? lineSlice.end : lines.length;
+  // ECMA-376 §17.6.5 character-grid delta (px per EA glyph) for the DRAW pass —
+  // the SAME value layoutLines folded into measuredWidth. A pure-EA segment is
+  // drawn so its glyphs occupy exactly `measuredWidth` (= natural + len·Δ): the
+  // draw uses `justifiedPiecePositions(..., letterSpacingPx = Δ)`, whose final
+  // glyph lands on the box edge, so the painted advance equals measuredWidth by
+  // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
+  const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
   for (let li = sliceStart; li < sliceEnd; li++) {
     const line = lines[li];
     // First-line indent and numbering prefix only apply to the paragraph's
@@ -2751,20 +2766,37 @@ function renderParagraph(
         const revActive = state.showTrackChanges && !!s.revision;
         const revColor = revActive ? authorColor(s.revision!.author) : null;
         ctx.fillStyle = revColor ?? (s.color ? `#${s.color}` : defaultColor);
-        // Draw the glyphs. With no internal gap this is a single fillText (the
-        // common path); with inter-CJK gaps the segment is sliced at the gap
-        // offsets and the pen advances `distPerGap` between pieces, so the pitch
-        // appears BETWEEN the ideographs rather than bunched at the segment end.
-        if (stretch && stretch.splitBefore.length > 0) {
+        // Draw the glyphs. Three cases, all anchored to the WHOLE-string
+        // cumulative advance so the browser's contextual CJK metrics (most
+        // visibly 約物半角, the half-width collapse of （「」。）) are honoured and
+        // the painted advance equals the segment's box exactly:
+        //   1. Character grid active on a pure-EA segment (segGridDelta !== 0):
+        //      walk every glyph, advancing each to its cell start
+        //      `measure(prefix) + i·Δ + justGaps·perGap`. The final glyph lands so
+        //      the segment edge is measure(whole) + len·Δ + nGaps·perGap =
+        //      measuredWidth + internalStretch — measure==draw by construction
+        //      (§17.6.5). Folds in any justification pitch at the same time.
+        //   2. Justified inter-CJK pitch only (no grid): the existing
+        //      `justifiedPiecePositions` slice-at-gaps path.
+        //   3. Neither: a single fillText (the common path).
+        const segGridDelta = gridSegDeltaPx(s.text, drawGridDeltaPx);
+        if (segGridDelta !== 0) {
+          const cps = [...s.text]; // code points (handles surrogate pairs)
+          const justGaps = stretch?.splitBefore ?? [];
+          let g = 0; // justification gaps strictly before the current glyph
+          for (let i = 0; i < cps.length; i++) {
+            while (g < justGaps.length && justGaps[g] <= i) g++;
+            const prefix = cps.slice(0, i).join('');
+            const dx = ctx.measureText(prefix).width + i * drawGridDeltaPx + g * distPerGap;
+            ctx.fillText(cps[i], x + dx, baseline + yOffset);
+          }
+        } else if (stretch && stretch.splitBefore.length > 0) {
           // ECMA-376 §17.18.44 `both`/`distribute` inter-CJK justification pitch.
-          // Anchor each sliced piece to the WHOLE-string cumulative advance (so
-          // the contextual CJK metrics baked into measureText(whole) =
-          // measuredWidth — most visibly 約物半角, the half-width collapse of
-          // （「」。） — are honoured) plus the accumulated pitch, instead of
-          // summing the isolated pieces' advances. That sum drifts wider than
-          // the segment's box and would paint the next run over this segment's
-          // tail (most visible at a CJK→Latin boundary).
-          // See `@silurus/ooxml-core` → text/justify-positions.ts.
+          // Anchor each sliced piece to the WHOLE-string cumulative advance plus
+          // the accumulated pitch, instead of summing the isolated pieces'
+          // advances. That sum drifts wider than the segment's box and would paint
+          // the next run over this segment's tail (most visible at a CJK→Latin
+          // boundary). See `@silurus/ooxml-core` → text/justify-positions.ts.
           const cps = [...s.text]; // code points (handles surrogate pairs)
           const measure = (str: string): number => ctx.measureText(str).width;
           for (const { text: piece, dx } of justifiedPiecePositions(
@@ -2815,9 +2847,12 @@ function renderParagraph(
         // horizontal strokes; each snaps onto the nearest crisp device row from
         // its own y (an odd device-width one would otherwise straddle two rows).
         // Compute the offset per line because each stroke sits at a different y.
-        // Underline / strike run the full stretched glyph span (natural glyph
-        // width + the internal justification pitch).
-        const textW = ctx.measureText(s.text).width + internalStretch;
+        // Underline / strike run the full stretched glyph span. Use the
+        // segment's box (measuredWidth, which already folds in the §17.6.5
+        // character-grid delta) plus the internal justification pitch, so the
+        // decoration matches the drawn advance instead of re-measuring the
+        // natural width (which would ignore the grid on a packed EA run).
+        const textW = s.measuredWidth + internalStretch;
 
         const isInsertion = revActive && s.revision?.kind === 'insertion';
         const isDeletion = revActive && s.revision?.kind === 'deletion';
@@ -3218,12 +3253,17 @@ function fitCJKPrefix(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   text: string,
   maxWidth: number,
+  // ECMA-376 §17.6.5 character-grid delta (px per EA glyph, 0 when inactive).
+  // The fit must compare CELL widths so the grid's char count lands per line —
+  // the same `gridWidth` the line box / draw uses, keeping the split consistent.
+  gridDeltaPx = 0,
 ): string {
   const chars = [...text]; // spread handles surrogate pairs
   let lo = 0, hi = chars.length;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
-    if (ctx.measureText(chars.slice(0, mid).join('')).width <= maxWidth) lo = mid;
+    const prefix = chars.slice(0, mid).join('');
+    if (gridWidth(ctx.measureText(prefix).width, prefix, gridDeltaPx) <= maxWidth) lo = mid;
     else hi = mid - 1;
   }
   return chars.slice(0, lo).join('');
@@ -3388,6 +3428,10 @@ function layoutLines(
   // ECMA-376 §17.15.1.58–.60 Japanese line-breaking rules. Default kinsoku is
   // ON; the CJK overflow path retracts the break to a kinsoku-legal position.
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
+  // ECMA-376 §17.6.5 docGrid CHARACTER grid: per-EA-glyph cell delta in px (0
+  // when inactive). Folded into every advance via `gridWidth` so line breaking
+  // packs the grid's char count per line; the draw paths add the SAME delta.
+  gridDeltaPx = 0,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
@@ -3509,13 +3553,26 @@ function layoutLines(
     return ctx.measureText(s.text);
   };
 
+  // The segment's laid-out ADVANCE (= its measuredWidth): natural width plus the
+  // character-grid delta. This is the SINGLE source of truth shared with the
+  // draw paths (gridWidth) — every line-break / fit / tab measurement uses it so
+  // line wrapping packs the grid's char count and the box matches what is drawn.
+  const segAdvance = (s: LayoutTextSeg): number =>
+    gridWidth(measureText(s).width, s.text, gridDeltaPx);
+  // Grid advance of an arbitrary string under a segment's font (for split
+  // prefixes/tails). Selects the font, then applies the same gridWidth model.
+  const strAdvance = (s: LayoutTextSeg, text: string): number => {
+    ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
+    return gridWidth(ctx.measureText(text).width, text, gridDeltaPx);
+  };
+
   // Width of a queued segment, for right/center tab look-ahead.
   const tabFollowWidth = (q: LayoutSeg): number => {
     if ('isTab' in q) return q.measuredWidth || 0;
     if ('imagePath' in q) return q.widthPt * scale;
     if ('mathNodes' in q) return q.measuredWidth || 0;
     if ('lineBreak' in q) return 0;
-    return measureText(q).width;
+    return segAdvance(q);
   };
 
   // Use an explicit queue so CJK split-tails can be re-queued
@@ -3556,7 +3613,7 @@ function layoutLines(
     const head = sp > 0 ? ts.text.slice(0, sp) : ts.text;
     const firstChar = [...head][0] ?? '';
     const probe = { ...ts, text: firstChar };
-    return measureText(probe).width;
+    return segAdvance(probe);
   };
 
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
@@ -3618,10 +3675,11 @@ function layoutLines(
             addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
           } else {
             const m = measureText(q);
-            q.measuredWidth = m.width;
+            const w = gridWidth(m.width, q.text, gridDeltaPx);
+            q.measuredWidth = w;
             const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? q.fontSize * scale * 0.8;
             const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? q.fontSize * scale * 0.2;
-            addToLine(q, m.width, q.fontSize, asc, desc);
+            addToLine(q, w, q.fontSize, asc, desc);
           }
         }
         continue;
@@ -3693,7 +3751,9 @@ function layoutLines(
     // ── Text segment ─────────────────────────────────────
     const s = seg as LayoutTextSeg;
     const m = measureText(s);
-    const w = m.width;
+    // Advance = natural width + character-grid delta (the SINGLE model shared
+    // with the draw paths; 0 unless an active grid AND a pure-EA segment).
+    const w = gridWidth(m.width, s.text, gridDeltaPx);
     // Line-height tracks the un-scaled pt font so super/sub don't shrink the line.
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
@@ -3733,8 +3793,11 @@ function layoutLines(
     //      InDesign, Word) and keeps layout close to Word's output.
     const SPACE_SHRINK_RATIO = 0.25;
     const trimmed = s.text.replace(/ +$/, '');
+    // Subtract the GRID width of the trimmed text (not the natural width) so the
+    // grid delta on EA glyphs cancels and trailingSpaceW is the bare space
+    // advance — keeping `w` and `wForFit` on the one advance model.
     const trailingSpaceW = s.text.endsWith(' ')
-      ? w - ctx.measureText(trimmed).width
+      ? w - gridWidth(ctx.measureText(trimmed).width, trimmed, gridDeltaPx)
       : 0;
     const wForFit = w - trailingSpaceW;
     const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
@@ -3750,7 +3813,7 @@ function layoutLines(
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
-      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available) : '';
+      const rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, gridDeltaPx) : '';
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
       // 行末禁則 char (ECMA-376 §17.15.1.58–.60). When the current line
@@ -3764,9 +3827,10 @@ function layoutLines(
       const split = kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit);
       const prefix = allChars.slice(0, split).join('');
       if (prefix.length > 0) {
-        const pm = ctx.measureText(prefix);
-        const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pm.width };
-        addToLine(headSeg, pm.width, h, asc, desc);
+        // Grid advance for the head piece — the same model as the line box / draw.
+        const pw = strAdvance(s, prefix);
+        const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pw };
+        addToLine(headSeg, pw, h, asc, desc);
         const tail = s.text.slice(prefix.length);
         if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
       } else if (currentLine.length > 0) {
@@ -3787,9 +3851,9 @@ function layoutLines(
           if (k > 0) {
             const headText = chars.slice(0, chars.length - k).join('');
             const tailText = chars.slice(chars.length - k).join('');
-            retracted = { ...lastText, text: tailText, measuredWidth: measureText({ ...lastText, text: tailText }).width };
+            retracted = { ...lastText, text: tailText, measuredWidth: strAdvance(lastText, tailText) };
             if (headText) {
-              const headW = measureText({ ...lastText, text: headText }).width;
+              const headW = strAdvance(lastText, headText);
               currentWidth -= lastText.measuredWidth - headW;
               currentLine[currentLine.length - 1] = { ...lastText, text: headText, measuredWidth: headW };
             } else {
@@ -3808,9 +3872,9 @@ function layoutLines(
         // Empty line and not even one char fits — force-fit one char to guarantee progress
         const firstChar = [...s.text][0] ?? '';
         if (firstChar) {
-          const fm = ctx.measureText(firstChar);
-          const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fm.width };
-          addToLine(headSeg, fm.width, h, asc, desc);
+          const fw = strAdvance(s, firstChar);
+          const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fw };
+          addToLine(headSeg, fw, h, asc, desc);
           const tail = s.text.slice(firstChar.length);
           if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
         }
@@ -4849,7 +4913,7 @@ function measureParaHeight(
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
     return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale), paragraphIsEastAsian(para));
   }
-  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku);
+  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku, gridCharDeltaPx(grid, scale));
   return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)), 0);
 }
 
@@ -5382,6 +5446,82 @@ interface DocGridCtx {
   type: string | null | undefined;
   /** Grid pitch in pt (already converted from twips in the parser). */
   linePitchPt: number | null | undefined;
+  /** ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` divided by 4096 — the per-EA-
+   *  glyph character-grid spacing in EM units (so the cell width is
+   *  `fontSizePt + charSpacePt` pt). Negative tightens. `null`/`undefined` when
+   *  the section declares no charSpace; the character grid is then inactive even
+   *  if `type` is linesAndChars/snapToChars. See {@link gridCharDeltaPx}. */
+  charSpacePt?: number | null;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ECMA-376 §17.6.5 docGrid CHARACTER grid (字詰め). When the section's docGrid
+// `type` is "linesAndChars" or "snapToChars" AND a `charSpace` is declared,
+// every full-width East-Asian glyph occupies a fixed cell whose width is
+// `fontSizePt + charSpace/4096` pt. A full-width EA glyph's NATURAL advance is
+// its em (≈ fontSizePt), so the cell is reached by adding a per-EA-glyph delta
+//   Δpt = charSpace / 4096   (NEGATIVE = tighter)
+// to its natural advance. Latin / digits are NOT snapped (they keep natural
+// advance and span cells), so the grid delta applies only to EA code points.
+//
+// ── The single advance model (measure == draw) ──────────────────────────────
+// To make line-break MEASUREMENT and the draw ADVANCE provably identical, the
+// grid delta enters in exactly ONE way: as a per-code-point spacing on a
+// PURE-EA segment. `gridSegDeltaPx` returns the total delta a segment's box
+// gains (`len × Δpx` for a pure-EA segment, else 0 — mixed/Latin segments get
+// no grid effect, sidestepping any contextual-metric or justification drift),
+// and `gridWidth` adds it to the natural `measureText` width. BOTH the layout's
+// `measuredWidth` and every draw path derive the segment's advance from this
+// SAME quantity:
+//   • non-justified draw walks the glyphs via `justifiedPiecePositions(cps,
+//     [1..n-1], perGap=0, measure, letterSpacingPx=Δ)`, whose final glyph lands
+//     at `measure(whole) + n·Δ` = the box edge;
+//   • justified draw reuses the EXISTING `justifiedPiecePositions` path with the
+//     same `letterSpacingPx = Δ`, so its box edge is `measure(whole) + n·Δ +
+//     nGaps·perGap` = `measuredWidth + internalStretch`.
+// Because both come from `measure(prefix) + (cps before)·Δ`, draw never diverges
+// from `measuredWidth` by construction — there is no separate per-glyph sum to
+// drift against the whole-string measure (約物半角 contextual collapse stays
+// honoured). See packages/core/src/text/justify-positions.ts.
+
+/** Per-EA-glyph character-grid delta in px for a paragraph's grid, or 0 when the
+ *  CHARACTER grid is inactive. Active only for docGrid type ∈ {linesAndChars,
+ *  snapToChars} with a declared charSpace (ECMA-376 §17.6.5). The line grid
+ *  ("lines") and a missing charSpace leave EA glyphs at natural advance. */
+function gridCharDeltaPx(grid: DocGridCtx | undefined, scale: number): number {
+  if (!grid || grid.charSpacePt == null) return 0;
+  if (grid.type !== 'linesAndChars' && grid.type !== 'snapToChars') return 0;
+  return grid.charSpacePt * scale;
+}
+
+/** Count of East-Asian (full-width) code points in `text` — the glyphs the
+ *  character grid snaps to cells. Uses the same {@link EAST_ASIAN_RE} content
+ *  predicate as docGrid line-cell rounding (no font-name heuristic). */
+function eaGlyphCount(text: string): number {
+  let n = 0;
+  for (const ch of text) if (EAST_ASIAN_RE.test(ch)) n++;
+  return n;
+}
+
+/** The total character-grid delta (px) a segment's advance gains under an active
+ *  character grid. Applied ONLY to a PURE East-Asian segment (every code point
+ *  is EA): then `len × deltaPx` cells the whole run, and a uniform per-cp
+ *  letter-spacing of `deltaPx` reproduces it exactly on both draw paths. A mixed
+ *  or pure-Latin segment returns 0 — Latin is never snapped (§17.6.5), and
+ *  skipping mixed segments avoids the per-cp-vs-whole-string and justification
+ *  drift that would break measure==draw. `deltaPx===0` (grid inactive) ⇒ 0. */
+function gridSegDeltaPx(text: string, deltaPx: number): number {
+  if (deltaPx === 0 || text.length === 0) return 0;
+  const cps = [...text];
+  return eaGlyphCount(text) === cps.length ? cps.length * deltaPx : 0;
+}
+
+/** Single source of truth for a text segment's laid-out advance: the natural
+ *  `measureText` width plus the character-grid delta (0 unless an active grid
+ *  AND a pure-EA segment). EVERY line-break / advance measurement and every draw
+ *  path must derive the segment advance from this, so they cannot diverge. */
+function gridWidth(naturalWidthPx: number, text: string, deltaPx: number): number {
+  return naturalWidthPx + gridSegDeltaPx(text, deltaPx);
 }
 
 function isGridLineRule(ctx: DocGridCtx | undefined): boolean {

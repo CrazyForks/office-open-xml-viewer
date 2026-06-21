@@ -1153,6 +1153,7 @@ fn parse_section(
         even_and_odd_headers: false,
         doc_grid_type: None,
         doc_grid_line_pitch: None,
+        doc_grid_char_space: None,
         columns: None,
     };
 
@@ -1205,6 +1206,16 @@ fn parse_section(
             // linePitch is in twentieths of a point (twips), same as other
             // w: unit attributes. twips_to_pt divides by 20.
             props.doc_grid_line_pitch = Some(twips_to_pt(&lp));
+        }
+        // charSpace is ST_DecimalNumber — a raw SIGNED integer in 1/4096ths of
+        // an em (NOT twips). The renderer divides by 4096 to obtain the per-EA-
+        // glyph cell delta in em, then multiplies by the font size. Keep the raw
+        // value here so the conversion (and the em-relative meaning) lives in one
+        // place. parse::<f64> tolerates a leading '-' (the common, tightening case).
+        if let Some(cs) = attr_w(dg, "charSpace") {
+            if let Ok(v) = cs.parse::<f64>() {
+                props.doc_grid_char_space = Some(v);
+            }
         }
     }
 
@@ -5960,6 +5971,38 @@ mod column_tests {
         let (props, _) = parse_section(Some(doc.root_element()), &rel_map);
         let cols = props.columns.expect("columns surfaced on SectionProps");
         assert_eq!(cols.count, 2);
+    }
+
+    /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` surfaces on SectionProps as a
+    /// raw signed integer (1/4096ths of an em), threaded into the renderer's
+    /// character-grid cell width.
+    #[test]
+    fn section_props_carries_doc_grid_char_space() {
+        let parse = |grid: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{grid}</w:sectPr>"#, ns = W_NS);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let rel_map: HashMap<String, String> = HashMap::new();
+            parse_section(Some(doc.root_element()), &rel_map).0
+        };
+
+        // Negative charSpace (the common, tightening case) — sample-10's value.
+        let p =
+            parse(r#"<w:docGrid w:type="linesAndChars" w:charSpace="-1161" w:linePitch="280"/>"#);
+        assert_eq!(p.doc_grid_char_space, Some(-1161.0));
+        assert_eq!(p.doc_grid_type.as_deref(), Some("linesAndChars"));
+        assert_eq!(p.doc_grid_line_pitch, Some(14.0)); // 280 twips / 20
+
+        // Positive charSpace (loosening) is preserved as-is.
+        let p = parse(r#"<w:docGrid w:type="snapToChars" w:charSpace="200"/>"#);
+        assert_eq!(p.doc_grid_char_space, Some(200.0));
+
+        // Absent attribute ⇒ None (renderer leaves EA glyphs at natural advance).
+        let p = parse(r#"<w:docGrid w:type="lines" w:linePitch="360"/>"#);
+        assert_eq!(p.doc_grid_char_space, None);
+
+        // No docGrid element at all ⇒ None.
+        let p = parse(r#"<w:pgSz w:w="11906" w:h="16838"/>"#);
+        assert_eq!(p.doc_grid_char_space, None);
     }
 
     /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` is hoisted to a body-level
