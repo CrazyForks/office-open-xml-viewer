@@ -126,7 +126,7 @@ class Cursor {
   private p = 0;
   constructor(
     private readonly b: Uint8Array,
-    private readonly start: number,
+    start: number,
     private readonly end: number, // exclusive
   ) {
     this.p = start;
