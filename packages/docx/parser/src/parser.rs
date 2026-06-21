@@ -2009,6 +2009,17 @@ fn parse_inline_drawing(
         shp.height_pct = size_h_pct;
         shp.width_relative_from = size_w_rel.clone();
         shp.height_relative_from = size_h_rel.clone();
+        // Float-wrap metadata so an anchored wrap-shape reserves the same
+        // exclusion band an anchored image would (ECMA-376 §20.4.2.16/.17). The
+        // wrap_mode itself is already set from `anchor_meta` inside
+        // parse_wsp_shape; here we carry the dist* padding and wrapText side that
+        // the renderer needs to build the FloatRect (and to displace the shape
+        // around blocking floats), exactly mirroring the ImageRun path.
+        shp.dist_top = anchor_meta.dist_top;
+        shp.dist_bottom = anchor_meta.dist_bottom;
+        shp.dist_left = anchor_meta.dist_left;
+        shp.dist_right = anchor_meta.dist_right;
+        shp.wrap_side = anchor_meta.wrap_side.clone();
     };
 
     // Check for wgp (Word Graphics Group) — expands to multiple per-element entries

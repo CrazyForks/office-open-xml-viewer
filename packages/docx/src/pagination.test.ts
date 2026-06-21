@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { computePages } from './renderer.js';
-import type { BodyElement, DocParagraph, DocxTextRun, SectionProps, PaginatedBodyElement } from './types';
+import type { BodyElement, DocParagraph, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement } from './types';
 
 // Unit tests for computePages pagination behaviour that the renderer-path VRT
 // (local-only, private samples) cannot guard in CI. A deterministic stub canvas
@@ -65,6 +65,56 @@ function para(opts: { text?: string; fontSize?: number; widowControl?: boolean }
   return { type: 'paragraph', ...p } as BodyElement;
 }
 
+/** A minimal anchored text-box shape (wps:wsp under wp:anchor). `wrapMode`
+ *  defaults to topAndBottom so it reserves a full-width float band. */
+function shapeRun(opts: {
+  widthPt: number;
+  heightPt: number;
+  anchorYPt?: number;
+  anchorYFromPara?: boolean;
+  anchorXFromMargin?: boolean;
+  wrapMode?: string | null;
+  wrapSide?: string | null;
+  distTop?: number;
+  distBottom?: number;
+  distLeft?: number;
+  distRight?: number;
+}): DocRun {
+  const s: ShapeRun = {
+    widthPt: opts.widthPt,
+    heightPt: opts.heightPt,
+    anchorXPt: 0,
+    anchorYPt: opts.anchorYPt ?? 0,
+    anchorXFromMargin: opts.anchorXFromMargin ?? true,
+    anchorYFromPara: opts.anchorYFromPara ?? true,
+    zOrder: 0,
+    subpaths: [],
+    presetGeometry: 'rect',
+    fill: { fillType: 'solid', color: 'FFFFFF' },
+    stroke: null,
+    wrapMode: opts.wrapMode === undefined ? 'topAndBottom' : opts.wrapMode,
+    wrapSide: opts.wrapSide ?? null,
+    distTop: opts.distTop ?? 0,
+    distBottom: opts.distBottom ?? 0,
+    distLeft: opts.distLeft ?? 0,
+    distRight: opts.distRight ?? 0,
+  };
+  return { type: 'shape', ...s } as DocRun;
+}
+
+/** A paragraph carrying an explicit run list (e.g. an anchored shape, optionally
+ *  followed by inline text). */
+function paraWith(runs: DocRun[], opts: { fontSize?: number } = {}): BodyElement {
+  const fontSize = opts.fontSize ?? 20;
+  const p: DocParagraph = {
+    alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
+    runs,
+    defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
+  };
+  return { type: 'paragraph', ...p } as BodyElement;
+}
+
 const sliceOf = (el: PaginatedBodyElement) =>
   (el as { lineSlice?: { start: number; end: number } }).lineSlice;
 
@@ -99,5 +149,46 @@ describe('computePages — line-boundary splitting + widowControl (C1: §17.3.1.
     expect(pages.length).toBe(2);
     expect(sliceOf(pages[0][0])).toEqual({ start: 0, end: 5 }); // greedy 5 lines
     expect(sliceOf(pages[1][0])).toEqual({ start: 5, end: 6 }); // lone widow line allowed
+  });
+});
+
+describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)', () => {
+  // A topAndBottom anchored text-box SHAPE must reserve a float band exactly
+  // like an anchored image does, so body text in following paragraphs flows
+  // BELOW it instead of overlapping. Geometry: page content height =
+  // 140 - 20 - 20 = 100pt. The shape is anchored at the first paragraph's top
+  // (≈ marginTop = 20pt) with height 50 ⇒ band y∈[20,70]. The following text
+  // paragraph is 2 lines × 20pt = 40pt.
+  //
+  // Without the shape registering a float (the bug): the shape paragraph's mark
+  // (20pt: y20→40) + the 2-line text (40pt: y40→80) all fit ⇒ 1 page.
+  // With the float (the fix): the mark flows below the band (y70→90) and the
+  // text is pushed under the band, so its 2 lines (≥ y90 → ≈130) overflow the
+  // 100pt content area ⇒ 2 pages.
+  it('pushes following text below a topAndBottom shape (shape registers a float)', () => {
+    const body = [
+      paraWith([shapeRun({ widthPt: 160, heightPt: 50, wrapMode: 'topAndBottom' })]),
+      para({ text: 'あ'.repeat(16), fontSize: 20 }), // 160/20 = 8 chars/line → 2 lines
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages.length).toBe(2);
+    // The text paragraph (with its float-displaced first line) is pushed to the
+    // second page; page 1 holds only the shape-anchoring paragraph.
+    const onPage2 = pages[1].some(
+      (el) => el.type === 'paragraph' &&
+        (el as unknown as DocParagraph).runs.some((r) => r.type === 'text'),
+    );
+    expect(onPage2).toBe(true);
+  });
+
+  it('does NOT reserve a band for a wrapNone shape (no float, text stays on one page)', () => {
+    // Same geometry but wrapMode:'none' ⇒ no exclusion rect; everything fits on
+    // one page. Guards against over-registering floats for non-wrapping shapes.
+    const body = [
+      paraWith([shapeRun({ widthPt: 160, heightPt: 50, wrapMode: 'none' })]),
+      para({ text: 'あ'.repeat(16), fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages.length).toBe(1);
   });
 });

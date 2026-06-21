@@ -337,6 +337,17 @@ export interface ShapeRun {
   /** `<a:xfrm flipV>` (§20.1.7.6) — mirror about the horizontal centre line. */
   flipV?: boolean;
   wrapMode?: string | null;
+  /** Padding top (pt). Anchor-only. Mirrors {@link ImageRun.distTop}; an anchored
+   *  wrap-shape uses these to size its float-exclusion band (ECMA-376 §20.4.2.x). */
+  distTop?: number;
+  /** Padding bottom (pt). Anchor-only. */
+  distBottom?: number;
+  /** Padding left (pt). Anchor-only. */
+  distLeft?: number;
+  /** Padding right (pt). Anchor-only. */
+  distRight?: number;
+  /** wrapText attribute: "bothSides" | "left" | "right" | "largest". */
+  wrapSide?: string | null;
   /** Text rendered INSIDE the shape's bounding box (`<wps:txbx><w:txbxContent>`). */
   textBlocks?: ShapeText[];
   /** "t" | "ctr" | "b" — vertical anchor for the shape's text body (`<wps:bodyPr @anchor>`). */

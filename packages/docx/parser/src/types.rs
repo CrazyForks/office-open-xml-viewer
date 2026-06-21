@@ -518,6 +518,24 @@ pub struct ShapeRun {
     /// Wrap mode matching ImageRun.wrap_mode semantics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_mode: Option<String>,
+    /// distT (top padding, pt). Anchor-only. Mirrors ImageRun.dist_top so an
+    /// anchored wrap-shape reserves the same float-exclusion band as an image
+    /// (ECMA-376 §20.4.2.x — distT/B/L/R are the min text↔object distance).
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_top: f64,
+    /// distB (bottom padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_bottom: f64,
+    /// distL (left padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_left: f64,
+    /// distR (right padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_right: f64,
+    /// wrapSquare/wrapTight "wrapText" attribute: "bothSides" | "left" | "right"
+    /// | "largest". Defaults to "bothSides" when absent. Mirrors ImageRun.wrap_side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_side: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

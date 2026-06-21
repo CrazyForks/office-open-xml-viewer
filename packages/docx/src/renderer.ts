@@ -879,16 +879,33 @@ export function computePages(
   const anchoredFloatBottomOffset = (para: DocParagraph, spaceBeforePt: number): number => {
     let maxBottom = 0;
     for (const run of para.runs) {
-      if (run.type !== 'image') continue;
-      const img = run as unknown as ImageRun;
-      if (!img.anchor || !img.anchorYFromPara) continue;
-      // Wrap floats anchor after spaceBefore (registerAnchorFloats uses
-      // state.y post-spaceBefore); non-wrap floats anchor at the paragraph's
-      // pre-spaceBefore top (renderAnchorImages uses paragraphStartY). Mirror
-      // each so the estimate matches the draw position exactly.
-      const anchorBase = isWrapFloat(img.wrapMode) ? spaceBeforePt : 0;
-      const bottom = anchorBase + (img.anchorYPt ?? 0) + img.heightPt;
-      if (bottom > maxBottom) maxBottom = bottom;
+      if (run.type === 'image') {
+        const img = run as unknown as ImageRun;
+        if (!img.anchor || !img.anchorYFromPara) continue;
+        // Wrap floats anchor after spaceBefore (registerAnchorFloats uses
+        // state.y post-spaceBefore); non-wrap floats anchor at the paragraph's
+        // pre-spaceBefore top (renderAnchorImages uses paragraphStartY). Mirror
+        // each so the estimate matches the draw position exactly.
+        const anchorBase = isWrapFloat(img.wrapMode) ? spaceBeforePt : 0;
+        const bottom = anchorBase + (img.anchorYPt ?? 0) + img.heightPt;
+        if (bottom > maxBottom) maxBottom = bottom;
+      } else if (run.type === 'shape') {
+        // An anchored shape with positionV relativeFrom="paragraph"/"line" is
+        // kept on its anchor's page the same way an image is. Mirror the image
+        // formula exactly — bottom = anchorBase + anchorYPt + height — but take
+        // the height from resolveShapeBox so sizeRelV / wgp-group scaling is
+        // honored. measureState is scale 1 (pt), so box.h is already in pt.
+        // (paragraphTopPx is passed through for shapes whose height depends on a
+        // paragraph/line container via sizeRelV; it does not affect the height
+        // for the common static-extent case.)
+        const shp = run as unknown as ShapeRun;
+        if (!shp.anchorYFromPara) continue;
+        const anchorBase = isWrapFloat(shp.wrapMode) ? spaceBeforePt : 0;
+        const box = resolveShapeBox(shp, measureState, measureState.y + anchorBase);
+        if (box.h <= 0) continue;
+        const bottom = anchorBase + (shp.anchorYPt ?? 0) + box.h;
+        if (bottom > maxBottom) maxBottom = bottom;
+      }
     }
     return maxBottom;
   };
@@ -3774,8 +3791,25 @@ function lineEndToArrowEnd(
   return { type: end.type, w: end.w, len: end.len };
 }
 
-function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
-  const { ctx, scale } = state;
+/**
+ * Resolve an anchored shape's page-space bounding box {x,y,w,h} (px). Shared by
+ * renderAnchorShape (where the shape is drawn) and registerAnchorFloats (where
+ * its float-exclusion rect is built), so the exclusion band matches the paint
+ * box exactly — see root CLAUDE.md (no duplicated geometry).
+ *
+ * Mirrors the renderer's sizing: sizeRelH/sizeRelV (ECMA-376 §20.4.2.18)
+ * override the static extent, and a wgp child scales by the group ratio with its
+ * within-group offset scaled in step; resolveAnchorX/Y then place the box. `w`/`h`
+ * may be 0/negative for degenerate line presets — the caller decides how to
+ * treat those (renderAnchorShape draws a line; a wrap-shape with no area
+ * registers no float).
+ */
+function resolveShapeBox(
+  shape: ShapeRun,
+  state: RenderState,
+  paragraphTopPx: number,
+): { x: number; y: number; w: number; h: number } {
+  const { scale } = state;
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
   // the static wp:extent for that axis. The size is `relativeFrom` container
   // size × pct.
@@ -3815,6 +3849,20 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     }
     alignHeightPt = newSizePt;
   }
+  const x = resolveAnchorX(
+    shape.anchorXAlign, shape.anchorXFromMargin, offsetXPt, w, state,
+    shape.anchorXRelativeFrom, shape.pctPosH, alignWidthPt,
+  );
+  const y = resolveAnchorY(
+    shape.anchorYAlign, shape.anchorYFromPara, offsetYPt, h, paragraphTopPx, state,
+    shape.anchorYRelativeFrom, shape.pctPosV, alignHeightPt,
+  );
+  return { x, y, w, h };
+}
+
+function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
+  const { ctx, scale } = state;
+  const { x, y, w, h } = resolveShapeBox(shape, state, paragraphTopPx);
   // Line/connector presets (ECMA-376 §20.1.9.18) are valid with a degenerate
   // bounding box — a horizontal line has h==0, a vertical line w==0. Stroking
   // such a path still draws a visible segment, so only bail when there is truly
@@ -3827,14 +3875,6 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     preset.startsWith('curvedconnector');
   if (w < 0 || h < 0) return;
   if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
-  const x = resolveAnchorX(
-    shape.anchorXAlign, shape.anchorXFromMargin, offsetXPt, w, state,
-    shape.anchorXRelativeFrom, shape.pctPosH, alignWidthPt,
-  );
-  const y = resolveAnchorY(
-    shape.anchorYAlign, shape.anchorYFromPara, offsetYPt, h, paragraphTopPx, state,
-    shape.anchorYRelativeFrom, shape.pctPosV, alignHeightPt,
-  );
 
   const rot = shape.rotation ?? 0;
   const flipH = shape.flipH ?? false;
@@ -4057,70 +4097,154 @@ function resolveAnchorBox(
   };
 }
 
-/** Register floats from a paragraph's anchor images and draw the image bitmap immediately. */
+/** Register floats from a paragraph's anchor images and shapes. Anchor images
+ *  are drawn immediately; anchor shapes are NOT drawn here (renderAnchorShape
+ *  paints them separately) — we only reserve their float-exclusion band so body
+ *  text wraps around them (ECMA-376 §20.4.2.16/.17), exactly like images. */
 function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphAnchorY: number): void {
   // One id per registerAnchorFloats call ⇒ one id per paragraph. Floats sharing
   // a paraId (e.g. two side-by-side photos in one paragraph) never displace each
   // other; floats from different paragraphs do (de-facto overlap avoidance).
   const paraId = state.floatParaSeq++;
   for (const run of para.runs) {
-    if (run.type !== 'image') continue;
-    const img = run as unknown as ImageRun;
-    if (!img.anchor) continue;
-    if (!isWrapFloat(img.wrapMode)) continue;
-
-    const mode: 'square' | 'topAndBottom' =
-      img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
-
-    // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
-    const box = resolveAnchorBox(img, state, paragraphAnchorY);
-    const { w, h, dl, dr, dt, db } = box;
-    let pageX = box.x;
-    let pageY = box.y;
-
-    // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
-    // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
-    // permits overlap. Default true per §20.4.2.3.
-    // Implementation-defined (HEURISTIC, Word-mimicking, no ECMA-376 basis):
-    // displacing the later document-order float, the "other paragraphs only"
-    // gate under allowOverlap=true, and the right-then-down re-seat using dist
-    // padding as the float-to-float gap. See resolveFloatOverlap header.
-    const allowOverlap = img.allowOverlap ?? true;
-    const resolved = resolveFloatOverlap(
-      pageX, pageY, w, h, dl, dr, dt, db, paraId, allowOverlap,
-      state.pageWidth * state.scale, state.floats,
-    );
-    pageX = resolved.x;
-    pageY = resolved.y;
-
-    const key = imageKey(img.imagePath, img.colorReplaceFrom);
-    const rect: FloatRect = {
-      mode,
-      imageKey: key,
-      imageX: pageX,
-      imageY: pageY,
-      imageW: w,
-      imageH: h,
-      xLeft: pageX - dl,
-      xRight: pageX + w + dr,
-      yTop: pageY - dt,
-      yBottom: pageY + h + db,
-      side: img.wrapSide ?? 'bothSides',
-      distLeft: dl,
-      distRight: dr,
-      distTop: dt,
-      distBottom: db,
-      paraId,
-      drawn: false,
-    };
-    state.floats.push(rect);
-
-    if (!state.dryRun) {
-      const bmp = state.images.get(key);
-      if (bmp) state.ctx.drawImage(bmp, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
-      rect.drawn = true;
+    if (run.type === 'image') {
+      registerImageFloat(run as unknown as ImageRun, state, paragraphAnchorY, paraId);
+    } else if (run.type === 'shape') {
+      registerShapeFloat(run as unknown as ShapeRun, state, paragraphAnchorY, paraId);
     }
   }
+}
+
+/** Reserve the float-exclusion rect for one anchored wrap-image and draw the
+ *  bitmap immediately (the image is the float). */
+function registerImageFloat(
+  img: ImageRun,
+  state: RenderState,
+  paragraphAnchorY: number,
+  paraId: number,
+): void {
+  if (!img.anchor) return;
+  if (!isWrapFloat(img.wrapMode)) return;
+
+  const mode: 'square' | 'topAndBottom' =
+    img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
+
+  // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
+  const box = resolveAnchorBox(img, state, paragraphAnchorY);
+  const { w, h, dl, dr, dt, db } = box;
+  let pageX = box.x;
+  let pageY = box.y;
+
+  // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
+  // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
+  // permits overlap. Default true per §20.4.2.3.
+  // Implementation-defined (HEURISTIC, Word-mimicking, no ECMA-376 basis):
+  // displacing the later document-order float, the "other paragraphs only"
+  // gate under allowOverlap=true, and the right-then-down re-seat using dist
+  // padding as the float-to-float gap. See resolveFloatOverlap header.
+  const allowOverlap = img.allowOverlap ?? true;
+  const resolved = resolveFloatOverlap(
+    pageX, pageY, w, h, dl, dr, dt, db, paraId, allowOverlap,
+    state.pageWidth * state.scale, state.floats,
+  );
+  pageX = resolved.x;
+  pageY = resolved.y;
+
+  const key = imageKey(img.imagePath, img.colorReplaceFrom);
+  const rect: FloatRect = {
+    mode,
+    imageKey: key,
+    imageX: pageX,
+    imageY: pageY,
+    imageW: w,
+    imageH: h,
+    xLeft: pageX - dl,
+    xRight: pageX + w + dr,
+    yTop: pageY - dt,
+    yBottom: pageY + h + db,
+    side: img.wrapSide ?? 'bothSides',
+    distLeft: dl,
+    distRight: dr,
+    distTop: dt,
+    distBottom: db,
+    paraId,
+    drawn: false,
+  };
+  state.floats.push(rect);
+
+  if (!state.dryRun) {
+    const bmp = state.images.get(key);
+    if (bmp) state.ctx.drawImage(bmp, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+    rect.drawn = true;
+  }
+}
+
+/** Reserve the float-exclusion rect for one anchored wrap-shape (wps:txbx /
+ *  DrawingML wp:anchor shape). The shape is drawn separately by
+ *  renderAnchorShape, so here we only push the FloatRect (drawn=true ⇒ the
+ *  deferred-image-draw path never tries to paint it). The box is resolved by the
+ *  SAME resolveShapeBox the renderer draws with, so the band matches the shape. */
+function registerShapeFloat(
+  shape: ShapeRun,
+  state: RenderState,
+  paragraphAnchorY: number,
+  paraId: number,
+): void {
+  if (!isWrapFloat(shape.wrapMode)) return;
+
+  // Match resolveShapeBox's paragraphTopPx convention. resolveAnchorY reads
+  // paragraphTopPx only for relativeFrom="paragraph"/"line" (anchorYFromPara);
+  // wrap floats anchor against the post-spaceBefore textAreaTop, identical to
+  // the image path (resolveAnchorBox uses paragraphAnchorY there).
+  const { x, y, w, h } = resolveShapeBox(shape, state, paragraphAnchorY);
+  // A degenerate (zero/negative-area) box — e.g. a wrap-flagged line preset —
+  // reserves no band; bail like renderAnchorShape skips drawing it.
+  if (w <= 0 || h <= 0) return;
+
+  const mode: 'square' | 'topAndBottom' =
+    shape.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
+
+  const scale = state.scale;
+  const dl = (shape.distLeft   ?? 0) * scale;
+  const dr = (shape.distRight  ?? 0) * scale;
+  const dt = (shape.distTop    ?? 0) * scale;
+  const db = (shape.distBottom ?? 0) * scale;
+  let pageX = x;
+  let pageY = y;
+
+  // Overlap avoidance, kept consistent with the image path. Shapes carry no
+  // parsed allowOverlap field; the spec default is true (§20.4.2.3), so
+  // same-paragraph floats never displace each other and a lone shape is a no-op
+  // here — but running it keeps multi-float behavior identical to images.
+  const resolved = resolveFloatOverlap(
+    pageX, pageY, w, h, dl, dr, dt, db, paraId, /* allowOverlap */ true,
+    state.pageWidth * state.scale, state.floats,
+  );
+  pageX = resolved.x;
+  pageY = resolved.y;
+
+  const rect: FloatRect = {
+    mode,
+    imageKey: '',
+    imageX: pageX,
+    imageY: pageY,
+    imageW: w,
+    imageH: h,
+    xLeft: pageX - dl,
+    xRight: pageX + w + dr,
+    yTop: pageY - dt,
+    yBottom: pageY + h + db,
+    side: shape.wrapSide ?? 'bothSides',
+    distLeft: dl,
+    distRight: dr,
+    distTop: dt,
+    distBottom: db,
+    paraId,
+    // The shape is painted by renderAnchorShape, not by the deferred image-draw
+    // path; mark it drawn so that path skips it (it has no bitmap to draw).
+    drawn: true,
+  };
+  state.floats.push(rect);
 }
 
 // ===== Table rendering =====
