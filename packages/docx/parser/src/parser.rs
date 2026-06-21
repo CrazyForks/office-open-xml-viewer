@@ -753,11 +753,17 @@ fn parse_body_elements(
         .filter(|n| n.tag_name().name() == "sectPr");
     let body_level_sect_id = body_level_sect_pr.map(|n| n.id());
 
+    // Complex fields (e.g. a TOC, §17.16.5.69) are delimited by fldChars and may
+    // span many paragraphs — one per TOC entry. Own the field state here so it
+    // persists across the body's paragraph walk rather than resetting per `<w:p>`.
+    let mut field = FieldState::default();
+
     for child in body_children {
         match child.tag_name().name() {
             "p" => {
-                let result =
-                    parse_paragraph(child, style_map, num_map, media_map, rel_map, theme, None);
+                let result = parse_paragraph(
+                    child, style_map, num_map, media_map, rel_map, theme, None, &mut field,
+                );
                 let lone_break = if result.runs.len() == 1 {
                     match &result.runs[0] {
                         DocRun::Break {
@@ -1285,6 +1291,7 @@ fn parse_section(
     (props, refs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_paragraph(
     node: roxmltree::Node,
     style_map: &StyleMap,
@@ -1293,6 +1300,7 @@ fn parse_paragraph(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     table_style_id: Option<&str>,
+    field: &mut FieldState,
 ) -> DocParagraph {
     parse_paragraph_cond(
         node,
@@ -1303,6 +1311,7 @@ fn parse_paragraph(
         theme,
         table_style_id,
         None,
+        field,
     )
 }
 
@@ -1319,6 +1328,7 @@ fn parse_paragraph_cond(
     theme: &ThemeColors,
     table_style_id: Option<&str>,
     cond: Option<&CondFmt>,
+    field: &mut FieldState,
 ) -> DocParagraph {
     // Get style ID from pPr/pStyle. When absent, resolve_para falls back to the
     // paragraph style marked w:default="1" via StyleMap::default_para_style_id.
@@ -1475,7 +1485,7 @@ fn parse_paragraph_cond(
     // Parse runs
     let mut runs = vec![];
     parse_para_content(
-        node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None,
+        node, &base_run, style_map, media_map, rel_map, theme, &mut runs, None, field,
     );
 
     // NOTE: We do NOT force display-math paragraphs to center here. The math
@@ -1554,13 +1564,15 @@ fn parse_paragraph_cond(
     }
 }
 
+/// One complex-field nesting level (between a `begin` and its matching `end`
+/// fldChar, §17.16.18). Fields nest — a TOC field's result contains a PAGEREF
+/// field per entry — so the parser tracks a stack of these frames rather than a
+/// single flat state.
 #[derive(Default)]
-struct FieldState {
-    /// Currently inside a field (between fldChar begin and end).
-    active: bool,
-    /// Have we passed the `separate` fldChar yet?
+struct FieldFrame {
+    /// Have we passed this frame's `separate` fldChar yet?
     past_separate: bool,
-    /// Accumulated instruction text (PAGE, NUMPAGES, etc.)
+    /// Accumulated instruction text for THIS frame (PAGE, TOC, PAGEREF, …).
     instruction: String,
     /// Formatting from the first instrText run — used as the field's display format.
     fmt: Option<RunFmt>,
@@ -1569,6 +1581,34 @@ struct FieldState {
     /// True when we recompute this field (PAGE/NUMPAGES) and swallow its cached result.
     /// False for complex fields (TOC, PAGEREF, REF, …) whose result is rendered as-is.
     substitute: bool,
+    /// True when this frame's instruction is a TOC field (§17.16.5.69).
+    is_toc: bool,
+}
+
+/// Stack of open field frames for the current paragraph content walk.
+#[derive(Default)]
+struct FieldState {
+    stack: Vec<FieldFrame>,
+}
+
+impl FieldState {
+    /// The innermost open field frame, if any.
+    fn top(&self) -> Option<&FieldFrame> {
+        self.stack.last()
+    }
+    fn top_mut(&mut self) -> Option<&mut FieldFrame> {
+        self.stack.last_mut()
+    }
+    /// True while we are anywhere inside an open TOC field. Word generates each
+    /// TOC entry (and its nested PAGEREF page number) as a hyperlink
+    /// (rStyle="Hyperlink") purely for navigation, but DISPLAYS the entry with
+    /// its TOC paragraph style — not the Hyperlink character style's
+    /// blue/underline. Result runs use this to suppress that styling. Any frame
+    /// on the stack being a TOC field counts, so the nested PAGEREF result is
+    /// covered too; instruction-phase runs never reach the render path.
+    fn in_toc(&self) -> bool {
+        self.stack.iter().any(|f| f.is_toc)
+    }
 }
 
 // Threads the immutable parse context (style/media/rel maps, theme) plus the
@@ -1584,14 +1624,17 @@ fn parse_para_content(
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     revision: Option<&RunRevision>,
+    // Complex-field state threaded across paragraphs. A field is delimited by
+    // its fldChar begin/end (§17.16.18), NOT by paragraph boundaries — a TOC
+    // field's result spans one paragraph per entry. The caller owns this so the
+    // stack survives from one paragraph to the next.
+    field: &mut FieldState,
 ) {
-    let mut field = FieldState::default();
-
     for child in element_children_flat(node) {
         match child.tag_name().name() {
             "r" => {
                 handle_run_in_para(
-                    child, base_run, style_map, media_map, theme, runs, &mut field, None, revision,
+                    child, base_run, style_map, media_map, theme, runs, field, None, revision,
                 );
             }
             "hyperlink" => {
@@ -1611,7 +1654,7 @@ fn parse_para_content(
                         media_map,
                         theme,
                         runs,
-                        &mut field,
+                        field,
                         Some(href.clone()),
                         revision,
                     );
@@ -1641,11 +1684,12 @@ fn parse_para_content(
                     theme,
                     runs,
                     Some(&inner),
+                    field,
                 );
             }
             "smartTag" => {
                 parse_para_content(
-                    child, base_run, style_map, media_map, rel_map, theme, runs, revision,
+                    child, base_run, style_map, media_map, rel_map, theme, runs, revision, field,
                 );
             }
             "fldSimple" => {
@@ -1749,72 +1793,102 @@ fn handle_run_in_para(
     if let Some(ct) = fld_char_type {
         match ct.as_str() {
             "begin" => {
-                field.active = true;
-                field.past_separate = false;
-                field.instruction.clear();
-                field.fallback.clear();
-                field.fmt = None;
-                field.substitute = false;
+                // Push a new (nested) field frame. §17.16.18 — fields nest, so a
+                // TOC field's result region may itself open PAGEREF fields.
+                field.stack.push(FieldFrame::default());
             }
             "separate" => {
-                field.past_separate = true;
-                // Only PAGE / NUMPAGES are recomputed (their cached result is swallowed).
-                // Complex fields (TOC, PAGEREF, REF, HYPERLINK, …) render their result
-                // content as normal runs — so multi-paragraph / nested fields like a TOC
-                // keep their headings, tabs and page numbers.
-                field.substitute = classify_field(&field.instruction) != "other";
+                if let Some(frame) = field.top_mut() {
+                    frame.past_separate = true;
+                    // Only PAGE / NUMPAGES are recomputed (their cached result is swallowed).
+                    // Complex fields (TOC, PAGEREF, REF, HYPERLINK, …) render their result
+                    // content as normal runs — so multi-paragraph / nested fields like a TOC
+                    // keep their headings, tabs and page numbers.
+                    frame.substitute = classify_field(&frame.instruction) != "other";
+                }
             }
             "end" => {
-                if field.active && field.substitute {
-                    let fmt = field.fmt.clone().unwrap_or_else(|| base_run.clone());
-                    runs.push(make_field_run(
-                        &field.instruction,
-                        &fmt,
-                        &field.fallback,
-                        theme,
-                    ));
+                if let Some(frame) = field.stack.pop() {
+                    if frame.substitute {
+                        let fmt = frame.fmt.clone().unwrap_or_else(|| base_run.clone());
+                        runs.push(make_field_run(
+                            &frame.instruction,
+                            &fmt,
+                            &frame.fallback,
+                            theme,
+                        ));
+                    }
                 }
-                *field = FieldState::default();
             }
             _ => {}
         }
         return;
     }
 
-    if field.active && !field.past_separate {
+    // A frame that has NOT yet passed `separate` is consuming its instruction.
+    if field.top().is_some_and(|f| !f.past_separate) {
         // Inside the instruction (before `separate`). Accumulate it and remember the
         // first instruction run's formatting; the (hidden) instruction never renders.
         if !instr_text.is_empty() {
-            field.instruction.push_str(&instr_text);
-            if field.fmt.is_none() {
+            let fmt_run = if field.top().and_then(|f| f.fmt.as_ref()).is_none() {
                 let mut fmt = base_run.clone();
                 if let Some(rpr) = child_w(r_node, "rPr") {
                     apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
                 }
-                field.fmt = Some(fmt);
+                Some(fmt)
+            } else {
+                None
+            };
+            if let Some(frame) = field.top_mut() {
+                frame.instruction.push_str(&instr_text);
+                // §17.16.5.69 — classify as soon as the leading token is known so
+                // `in_toc()` is true for result runs even before this frame's own
+                // `separate`/`end` (e.g. the TOC entry hyperlink that precedes the
+                // nested PAGEREF still sees the enclosing TOC frame).
+                if classify_toc(&frame.instruction) {
+                    frame.is_toc = true;
+                }
+                if let Some(f) = fmt_run {
+                    frame.fmt = Some(f);
+                }
             }
         }
         return;
     }
 
-    if field.active && field.substitute {
+    if field.top().is_some_and(|f| f.substitute) {
         // Cached result of a recomputed field (PAGE/NUMPAGES) — swallow it.
+        let mut swallowed = String::new();
         for c in r_node
             .children()
             .filter(|n| n.is_element() && n.tag_name().name() == "t")
         {
             if let Some(t) = c.text() {
-                field.fallback.push_str(t);
+                swallowed.push_str(t);
             }
+        }
+        if let Some(frame) = field.top_mut() {
+            frame.fallback.push_str(&swallowed);
         }
         return;
     }
-    // field.active && past_separate && !substitute → fall through and render the result.
+    // top frame past_separate && !substitute (or no open field) → render the result.
 
     // Normal run
+    let in_toc = field.in_toc();
     parse_run_inner(
-        r_node, base_run, style_map, media_map, theme, runs, link_href, revision,
+        r_node, base_run, style_map, media_map, theme, runs, link_href, revision, in_toc,
     );
+}
+
+/// §17.16.5.69 — true when the field instruction's leading token is `TOC`
+/// (case-insensitive). The instruction may still be partially accumulated; we
+/// only need the first whitespace-delimited token.
+fn classify_toc(instr: &str) -> bool {
+    instr
+        .split_whitespace()
+        .next()
+        .is_some_and(|tok| tok.eq_ignore_ascii_case("TOC"))
 }
 
 fn extract_text_from_runs(node: roxmltree::Node) -> String {
@@ -1877,6 +1951,9 @@ fn parse_run_inner(
     runs: &mut Vec<DocRun>,
     link_href: Option<Option<String>>,
     revision: Option<&RunRevision>,
+    // True when this run is part of a TOC field's result (§17.16.5.69). Used to
+    // suppress the Hyperlink character style's blue/underline on TOC entries.
+    in_toc: bool,
 ) {
     // Merge run-level formatting
     let rpr_node = child_w(node, "rPr");
@@ -1897,6 +1974,20 @@ fn parse_run_inner(
     // Skip hidden runs entirely
     if fmt.vanish.unwrap_or(false) {
         return;
+    }
+
+    // Word renders TOC-field hyperlinks with the surrounding TOC paragraph style,
+    // NOT the Hyperlink character style's blue/underline — the entries carry
+    // rStyle="Hyperlink" only for navigation. (Word runtime behavior; ECMA-376
+    // §17.16.5.69 doesn't pin field-result display.) We revert only color and
+    // underline back to the paragraph base (TOC1/TOC2), so the bold/italic those
+    // styles supply (PR #524) is kept. A standalone internal link OUTSIDE a TOC
+    // field keeps its Hyperlink blue/underline (PR #516). Restricted to actual
+    // hyperlink runs (`link_href.is_some()`) so non-link TOC runs are untouched.
+    if in_toc && link_href.is_some() {
+        fmt.color = base_run.color.clone();
+        fmt.color_auto = base_run.color_auto;
+        fmt.underline = base_run.underline;
     }
 
     // ECMA-376 §17.16.22 (<w:hyperlink>) defines link *structure* only — the
@@ -2095,6 +2186,7 @@ fn parse_run_inner(
                             runs,
                             link_href.clone(),
                             revision,
+                            in_toc,
                         );
                     }
                     // Attach ruby to the FIRST text run produced from rubyBase
@@ -4396,6 +4488,9 @@ fn parse_table_cell(
     // ECMA-376 §17.4.7: a cell may contain paragraphs AND nested tables in
     // any order. element_children_flat unwraps sdt wrappers like elsewhere.
     let mut content: Vec<CellElement> = vec![];
+    // A complex field cannot cross a cell boundary in well-formed content, so a
+    // cell gets its own field scope (paragraphs within the cell still share it).
+    let mut field = FieldState::default();
     for child in element_children_flat(node) {
         match child.tag_name().name() {
             "p" => content.push(CellElement::Paragraph(parse_paragraph_cond(
@@ -4407,6 +4502,7 @@ fn parse_table_cell(
                 theme,
                 table_style_id,
                 cond,
+                &mut field,
             ))),
             // A nested table resolves its OWN table style + conditional
             // formatting; the outer cell's `cond` does not propagate into it.
@@ -4914,6 +5010,234 @@ mod tests {
         assert_eq!(base.color, None);
         assert!(base.color_auto);
     }
+
+    // A styles part defining a `Hyperlink` character style (blue + underline),
+    // matching the calibre/Word default. Used by the TOC-field suppression tests.
+    fn hyperlink_styles() -> StyleMap {
+        StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="character" w:styleId="Hyperlink">
+                    <w:rPr><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ))
+    }
+
+    fn parse_para(body: &str, base_run: &RunFmt, styles: &StyleMap) -> Vec<DocRun> {
+        let xml = format!(r#"<w:p xmlns:w="{ns}">{body}</w:p>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        let mut runs = Vec::new();
+        let mut field = FieldState::default();
+        parse_para_content(
+            doc.root_element(),
+            base_run,
+            styles,
+            &media,
+            &rels,
+            &theme,
+            &mut runs,
+            None,
+            &mut field,
+        );
+        runs
+    }
+
+    fn first_text(runs: &[DocRun]) -> &TextRun {
+        runs.iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) => Some(t.as_ref()),
+                _ => None,
+            })
+            .expect("expected a text run")
+    }
+
+    // §17.16.5.69 — Word generates each TOC entry as a navigation hyperlink
+    // (rStyle="Hyperlink") but DISPLAYS it with the TOC paragraph style, NOT the
+    // Hyperlink character style's blue/underline. A TOC-field hyperlink result run
+    // therefore reverts color/underline to the paragraph base while keeping the
+    // bold/italic the TOC style supplies. (Word runtime behavior.)
+    #[test]
+    fn toc_field_hyperlink_suppresses_blue_underline_keeps_bold() {
+        // base_run mimics a TOC1 paragraph: bold, no color, no underline.
+        let base = RunFmt {
+            bold: Some(true),
+            ..Default::default()
+        };
+        // TOC field: begin / instrText "TOC ..." / separate / hyperlink entry /
+        // end. The entry run carries rStyle="Hyperlink".
+        let body = r#"
+            <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+            <w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h \z \u </w:instrText></w:r>
+            <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+            <w:hyperlink w:anchor="_Toc1">
+                <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Chapter One</w:t></w:r>
+            </w:hyperlink>
+            <w:r><w:fldChar w:fldCharType="end"/></w:r>
+        "#;
+        let runs = parse_para(body, &base, &hyperlink_styles());
+        let t = first_text(&runs);
+        assert_eq!(t.text, "Chapter One");
+        // Hyperlink blue/underline suppressed → falls back to TOC paragraph base.
+        assert_eq!(t.color, None, "TOC entry color must not be Hyperlink blue");
+        assert!(!t.underline, "TOC entry must not be underlined");
+        // Bold from the TOC paragraph style is preserved.
+        assert!(t.bold, "TOC1 bold must survive the suppression");
+        // Still a link for navigation hit-testing.
+        assert!(t.is_link);
+    }
+
+    // The nested PAGEREF field (the page number) inside a TOC entry is also a
+    // Hyperlink-styled run; it must be black too (it sits inside the open TOC
+    // frame). Verifies the in_toc() predicate spans nested field frames.
+    #[test]
+    fn toc_nested_pageref_hyperlink_also_black() {
+        let base = RunFmt {
+            bold: Some(true),
+            ..Default::default()
+        };
+        let body = r#"
+            <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+            <w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h </w:instrText></w:r>
+            <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+            <w:hyperlink w:anchor="_Toc1">
+                <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry</w:t></w:r>
+                <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>
+                <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:instrText xml:space="preserve"> PAGEREF _Toc1 \h </w:instrText></w:r>
+                <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>
+                <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>7</w:t></w:r>
+                <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>
+            </w:hyperlink>
+            <w:r><w:fldChar w:fldCharType="end"/></w:r>
+        "#;
+        let runs = parse_para(body, &base, &hyperlink_styles());
+        // Find the page-number run "7".
+        let page_num = runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Text(t) if t.text == "7" => Some(t.as_ref()),
+                _ => None,
+            })
+            .expect("page number run");
+        assert_eq!(page_num.color, None, "TOC page number must be black");
+        assert!(
+            !page_num.underline,
+            "TOC page number must not be underlined"
+        );
+    }
+
+    // The decisive multi-paragraph case (sample-11 p6): a real TOC field opens
+    // in the FIRST paragraph (which carries the TOC instrText) and each entry
+    // lives in its OWN paragraph. The field state must survive across paragraph
+    // boundaries, so EVERY entry's Hyperlink run is suppressed, not just the one
+    // in the instrText paragraph. Driven through parse_body_elements to exercise
+    // the cross-paragraph threading.
+    #[test]
+    fn toc_field_spans_paragraphs_all_entries_black() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="character" w:styleId="Hyperlink">
+                    <w:rPr><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr>
+                </w:style>
+                <w:style w:type="paragraph" w:styleId="TOC1">
+                    <w:rPr><w:b/></w:rPr>
+                </w:style>
+                <w:style w:type="paragraph" w:styleId="TOC2">
+                    <w:rPr><w:i/></w:rPr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        // Paragraph 1: TOC1 entry that ALSO carries the field begin/separate.
+        // Paragraph 2: a second TOC2 entry, in its own <w:p>, AFTER the instrText
+        //              paragraph (this is the entry that used to stay blue).
+        // Paragraph 3: closes the field with the `end` fldChar.
+        let body = format!(
+            r#"<w:body xmlns:w="{ns}">
+                <w:p>
+                    <w:pPr><w:pStyle w:val="TOC1"/></w:pPr>
+                    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+                    <w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h \z \u </w:instrText></w:r>
+                    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+                    <w:hyperlink w:anchor="_Toc1">
+                        <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>First Entry</w:t></w:r>
+                    </w:hyperlink>
+                </w:p>
+                <w:p>
+                    <w:pPr><w:pStyle w:val="TOC2"/></w:pPr>
+                    <w:hyperlink w:anchor="_Toc2">
+                        <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Second Entry</w:t></w:r>
+                    </w:hyperlink>
+                </w:p>
+                <w:p>
+                    <w:pPr><w:pStyle w:val="TOC2"/></w:pPr>
+                    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+                </w:p>
+            </w:body>"#,
+            ns = W_NS
+        );
+        let doc = roxmltree::Document::parse(&body).unwrap();
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        let elems = parse_body_elements(
+            doc.root_element(),
+            &styles,
+            &mut num_map,
+            &media,
+            &rels,
+            &theme,
+        );
+        let texts: Vec<&TextRun> = elems
+            .iter()
+            .filter_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .flat_map(|p| {
+                p.runs.iter().filter_map(|r| match r {
+                    DocRun::Text(t) => Some(t.as_ref()),
+                    _ => None,
+                })
+            })
+            .collect();
+        let first = texts.iter().find(|t| t.text == "First Entry").unwrap();
+        let second = texts.iter().find(|t| t.text == "Second Entry").unwrap();
+        // Both entries: Hyperlink blue/underline suppressed.
+        assert_eq!(first.color, None, "entry 1 black");
+        assert!(!first.underline, "entry 1 no underline");
+        assert_eq!(second.color, None, "entry 2 (separate paragraph) black");
+        assert!(!second.underline, "entry 2 no underline");
+        // Paragraph-style bold/italic preserved (PR #524).
+        assert!(first.bold, "TOC1 bold kept");
+        assert!(second.italic, "TOC2 italic kept");
+    }
+
+    // Regression guard for PR #516: a STANDALONE internal hyperlink OUTSIDE any
+    // TOC field keeps its Hyperlink blue/underline. The TOC suppression must not
+    // leak to ordinary links.
+    #[test]
+    fn standalone_internal_hyperlink_keeps_blue_underline() {
+        let base = RunFmt::default();
+        let body = r#"
+            <w:hyperlink w:anchor="_Paragraph_level_formatting">
+                <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>paragraph level formatting</w:t></w:r>
+            </w:hyperlink>
+        "#;
+        let runs = parse_para(body, &base, &hyperlink_styles());
+        let t = first_text(&runs);
+        assert_eq!(
+            t.color.as_deref(),
+            Some("0000ff"),
+            "standalone link stays blue"
+        );
+        assert!(t.underline, "standalone link stays underlined");
+        assert!(t.is_link);
+    }
 }
 
 #[cfg(test)]
@@ -5060,6 +5384,7 @@ mod math_jc_tests {
         let media: HashMap<String, String> = HashMap::new();
         let rels: HashMap<String, String> = HashMap::new();
         let theme = ThemeColors::default();
+        let mut field = FieldState::default();
         parse_paragraph(
             doc.root_element(),
             &style_map,
@@ -5068,6 +5393,7 @@ mod math_jc_tests {
             &rels,
             &theme,
             None,
+            &mut field,
         )
     }
 
@@ -5172,6 +5498,7 @@ mod para_mark_rpr_tests {
         let media: HashMap<String, String> = HashMap::new();
         let rels: HashMap<String, String> = HashMap::new();
         let theme = ThemeColors::default();
+        let mut field = FieldState::default();
         parse_paragraph(
             doc.root_element(),
             sm,
@@ -5180,6 +5507,7 @@ mod para_mark_rpr_tests {
             &rels,
             &theme,
             None,
+            &mut field,
         )
     }
 
