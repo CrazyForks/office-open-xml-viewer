@@ -908,7 +908,7 @@ export interface RenderViewportOptions {
   cellScale?: number;
   /** Pre-decoded image sources keyed by their zip `imagePath` (for ImageAnchor
    *  and group-leaf image rendering). */
-  loadedImages?: Map<string, CanvasImageSource>;
+  loadedImages?: Map<string, CanvasImageSource | null>;
   /** Fetch an embedded image's bytes by zip path, wrapped in a Blob of the given
    *  MIME (twin of pptx/docx `fetchImage`). The orchestrator decodes these into
    *  {@link loadedImages} before the synchronous draw. Supplied by

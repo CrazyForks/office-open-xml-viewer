@@ -31,6 +31,7 @@ const SENTINEL = {
 
 function mockCtx() {
   const draws: Array<{ img: unknown; x: number; y: number; w: number; h: number }> = [];
+  const texts: Array<{ text: string; x: number; y: number }> = [];
   let fillStyle = '';
   let font = '';
   let direction: CanvasDirection = 'ltr';
@@ -59,7 +60,7 @@ function mockCtx() {
       actualBoundingBoxAscent: 8,
       actualBoundingBoxDescent: 2,
     }),
-    fillText: () => {},
+    fillText: (t: string, x: number, y: number) => texts.push({ text: t, x, y }),
     fillRect: () => {},
     drawImage: (img: unknown, x: number, y: number, w: number, h: number) =>
       draws.push({ img, x, y, w, h }),
@@ -75,7 +76,7 @@ function mockCtx() {
     clip: () => {},
     rect: () => {},
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, draws };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, draws, texts };
 }
 
 function run(text: string, over: Partial<TextRunData> = {}): TextRunData {
@@ -268,5 +269,39 @@ describe('renderTextBody — picture bullet (buBlip) draws the bitmap', () => {
       fetchImage,
     );
     expect(draws).toHaveLength(0);
+  });
+
+  it('first-line text does not overlap the picture bullet (hanging indent)', async () => {
+    // Regression guard for the first-line hanging-indent overlap. A picture
+    // bullet occupies the gutter exactly like a char/autoNum marker, so the
+    // first line's hanging indent MUST be suppressed. Before the fix `hasBullet`
+    // excluded `blip`, so the first line started at the bullet's x and rendered
+    // ON TOP of the image (same class as docx PR #476). The mock records fillText
+    // x, which the other tests don't, so this is the case they couldn't catch.
+    const path = 'ppt/media/bullet-hang.png';
+    await getCachedBitmap(path, 'image/png', fetchImage);
+
+    const { ctx, draws, texts } = mockCtx();
+    renderTextBody(
+      ctx,
+      bodyWithBullet(blipBullet({ imagePath: path }), [run('Item')]),
+      0, 0, 4000, 2000,
+      SCALE,
+      null, 0, false, false, '#000000', 1,
+      { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
+      undefined,
+      false,
+      fetchImage,
+    );
+
+    expect(draws).toHaveLength(1); // the bullet image was drawn
+    const bulletX = draws[0].x;
+    expect(texts.length).toBeGreaterThan(0); // the run text was drawn
+    const firstTextX = texts[0].x;
+    // First-line text starts to the RIGHT of the bullet by the hanging gap
+    // (|indent| = 457200 EMU = 36px at this scale), NOT at the bullet's x.
+    // Pre-fix this difference was 0 (overlap) → this assertion fails without it.
+    expect(firstTextX).toBeGreaterThan(bulletX);
+    expect(firstTextX - bulletX).toBeCloseTo(457200 * SCALE, 4);
   });
 });

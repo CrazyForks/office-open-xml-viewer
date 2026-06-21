@@ -22,7 +22,7 @@ let rawData: ArrayBuffer | null = null;
 let maxZipEntryBytes: bigint | undefined;
 let fontsLoaded: Promise<void> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
-const imageCache = new Map<string, CanvasImageSource>();
+const imageCache = new Map<string, CanvasImageSource | null>();
 // Fetched image *bytes* (as Blobs) keyed by zip path. Twin of the docx render
 // worker's `imageCache`; kept separate from the decoded-source `imageCache`
 // above. Cleared on re-parse so a reused worker never serves a stale file's

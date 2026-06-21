@@ -54,12 +54,14 @@ import {
   isHTMLCanvas,
   defaultDpr,
   classifyCjkFont,
+  classifyFontGeneric,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
   getCachedSvgImageByPath,
+  decodeRasterOrMetafile,
   highlightBox,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
@@ -501,22 +503,12 @@ const CSS_GENERIC_FAMILIES = new Set([
   'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
 ]);
 
-/** Infer a CSS generic fallback from a named font so missing fonts degrade consistently. */
+/** Infer a CSS generic fallback from a named font so missing fonts degrade
+ *  consistently. Delegates the serif/sans/mono decision to the shared core
+ *  classifier (single source of truth); maps it to the CSS generic keyword. */
 function genericFallback(family: string): string {
-  const l = family.toLowerCase();
-  if (/mono|courier|consolas|等幅|gothic_m/.test(l)) return 'monospace';
-  // Serif: mincho (Japanese serif), roman, times, garamond, etc., plus CJK
-  // song/ming/kai (serif) faces — SimSun(宋)/Batang/PMingLiU(細明)/KaiTi(楷)/
-  // FangSong(仿宋) — so their Noto CJK fallback picks the serif variant.
-  if (
-    /mincho|明朝|roman|times|garamond|georgia|palatino|century|didot|song|sung|simsun|nsimsun|batang|gungsuh|mingliu|pmingliu|fangsong|kaiti|simkai|simfang|stsong|stkaiti|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝/.test(
-      l,
-    ) ||
-    /新細明體|細明體|宋体|楷体|楷體|仿宋|標楷體|游明朝/.test(family)
-  )
-    return 'serif';
-  // Everything else (gothic, kaku, round, rounded, sans, grotesk, …) → sans-serif
-  return 'sans-serif';
+  const g = classifyFontGeneric(family);
+  return g === 'mono' ? 'monospace' : g === 'serif' ? 'serif' : 'sans-serif';
 }
 
 /**
@@ -1085,7 +1077,18 @@ async function renderBackground(
     // to the white base if either the path or the byte source is missing.
     if (!fill.imagePath || !fill.mimeType || !fetchImage) return;
     try {
-      const bitmap = await getCachedBitmap(fill.imagePath, fill.mimeType, fetchImage);
+      // Size the metafile raster from the fill box (canvasW/H are CSS px;
+      // scale is px-per-EMU, so px/scale = EMU, /PT_TO_EMU = pt).
+      const bitmap = await getCachedBitmap(
+        fill.imagePath,
+        fill.mimeType,
+        fetchImage,
+        canvasW / scale / PT_TO_EMU,
+        canvasH / scale / PT_TO_EMU,
+      );
+      // A null bitmap (unsupported metafile, e.g. true EMF) → keep the white
+      // base painted above as the fallback, exactly like a decode failure.
+      if (!bitmap) return;
       ctx.save();
       // Clip to the slide rectangle so overscan (negative insets) or tile
       // bleed is cropped at the slide edge rather than spilling onto
@@ -2012,8 +2015,13 @@ export function renderTextBody(
     const paraDefaultColor = para.defColor
       ? hexToRgba(para.defColor) : bodyDefaultColor;
 
-    // Bullet resolution
-    const hasBullet = para.bullet.type === 'char' || para.bullet.type === 'autoNum';
+    // Bullet resolution. A picture bullet (`blip`) occupies the gutter exactly
+    // like a char/autoNum marker, so it must suppress the first-line hanging
+    // indent too — otherwise the first line of a hanging-indent list starts at
+    // the bullet's x and renders ON TOP of the picture (cf. the char-bullet em-
+    // dash overlap noted below, and docx PR #476).
+    const hasBullet =
+      para.bullet.type === 'char' || para.bullet.type === 'autoNum' || para.bullet.type === 'blip';
 
     // Per ECMA-376 §21.1.2.4.13: when no buSz* is declared, the bullet takes
     // the first run's font size. Using paraDefaultFontSizePx here (the layout
@@ -2715,7 +2723,11 @@ const IMAGE_BITMAP_CACHE_MAX = 256;
 // the synchronous draw sites (picture bullets, §21.1.2.4.2) a settled value to
 // read via peekCachedBitmap without awaiting — no separate parallel cache to
 // keep in sync, so eviction/teardown only ever drop the whole entry.
-type BitmapCacheEntry = { promise: Promise<ImageBitmap>; bitmap?: ImageBitmap };
+//
+// The decode can resolve to `null` for a metafile we can't rasterize (a true
+// EMF, or a WMF with no drawable geometry); the null is cached (avoiding a
+// re-fetch+re-sniff every frame) and the draw sites skip a null bitmap.
+type BitmapCacheEntry = { promise: Promise<ImageBitmap | null>; bitmap?: ImageBitmap | null };
 const bitmapCacheByFetch = new WeakMap<FetchImage, Map<string, BitmapCacheEntry>>();
 
 function bitmapCacheFor(fetchImage: FetchImage): Map<string, BitmapCacheEntry> {
@@ -2736,7 +2748,7 @@ function bitmapCacheFor(fetchImage: FetchImage): Map<string, BitmapCacheEntry> {
 export function peekCachedBitmap(
   imagePath: string,
   fetchImage: FetchImage,
-): ImageBitmap | undefined {
+): ImageBitmap | null | undefined {
   return bitmapCacheByFetch.get(fetchImage)?.get(imagePath)?.bitmap;
 }
 
@@ -3039,16 +3051,26 @@ function paintBeveledFlat(
 }
 
 /**
- * Decode a raster blip to an ImageBitmap, cached by its zip path. The bytes are
- * fetched lazily via `fetchImage(imagePath, mimeType)` (twin of the audio/video
- * `fetchMedia` path) rather than `fetch`-ing an inlined data URL. LRU(256);
- * evicted bitmaps are `.close()`d to release their GPU backing.
+ * Decode a raster-or-metafile blip to an ImageBitmap, cached by its zip path.
+ * The bytes are fetched lazily via `fetchImage(imagePath, mimeType)` (twin of
+ * the audio/video `fetchMedia` path) rather than `fetch`-ing an inlined data
+ * URL. LRU(256); evicted bitmaps are `.close()`d to release their GPU backing.
+ *
+ * Decoding goes through core's {@link decodeRasterOrMetafile}, which content-
+ * sniffs the bytes: a WMF (which `createImageBitmap` can't decode) is rasterized
+ * by the shared minimal player at a size derived from `widthPt`/`heightPt`; a
+ * true EMF (or a WMF with no geometry) resolves to `null` so the draw site skips
+ * the picture instead of crashing. `widthPt`/`heightPt` are the picture's
+ * intended draw size in points (0 ⇒ a sane fallback square); they only affect
+ * metafile raster sharpness, so the path alone keys the cache.
  */
 export function getCachedBitmap(
   imagePath: string,
   mimeType: string,
   fetchImage: FetchImage,
-): Promise<ImageBitmap> {
+  widthPt = 0,
+  heightPt = 0,
+): Promise<ImageBitmap | null> {
   const cache = bitmapCacheFor(fetchImage);
   const existing = cache.get(imagePath);
   if (existing) {
@@ -3057,10 +3079,13 @@ export function getCachedBitmap(
     cache.set(imagePath, existing);
     return existing.promise;
   }
-  const promise = fetchImage(imagePath, mimeType).then((b) => createImageBitmap(b));
+  const promise = fetchImage(imagePath, mimeType).then((b) =>
+    decodeRasterOrMetafile(b, { widthPt, heightPt }),
+  );
   const entry: BitmapCacheEntry = { promise };
   // Record the resolved bitmap on the entry so the synchronous bullet draw
   // (peekCachedBitmap) can read it after the warm pass awaits this promise.
+  // A `null` (unsupported metafile) is recorded too, so the draw skips it.
   void promise.then((bmp) => {
     entry.bitmap = bmp;
   });
@@ -3071,7 +3096,7 @@ export function getCachedBitmap(
     const oldestKey = cache.keys().next().value as string;
     const oldest = cache.get(oldestKey);
     cache.delete(oldestKey);
-    oldest?.promise.then((b) => b.close()).catch(() => {});
+    oldest?.promise.then((b) => b?.close()).catch(() => {});
   }
   return promise;
 }
@@ -3085,7 +3110,7 @@ export function getCachedBitmap(
 export function dropImageBitmapCache(fetchImage: FetchImage): void {
   const cache = bitmapCacheByFetch.get(fetchImage);
   if (!cache) return;
-  for (const entry of cache.values()) entry.promise.then((b) => b.close()).catch(() => {});
+  for (const entry of cache.values()) entry.promise.then((b) => b?.close()).catch(() => {});
   cache.clear();
   bitmapCacheByFetch.delete(fetchImage);
 }
@@ -3134,7 +3159,13 @@ async function renderPicture(
     // (getCachedBitmap) cannot rasterize SVG in every browser, so such a picture
     // must also go through the <img>-based SVG decoder (keyed by path).
     const dataIsSvg = el.mimeType === 'image/svg+xml';
-    let bitmap: ImageBitmap | HTMLImageElement;
+    // The picture's intended draw size in points sizes any metafile raster
+    // (el.width/height are EMU; /PT_TO_EMU = pt). Unused by the raster/SVG paths.
+    const widthPt = el.width / PT_TO_EMU;
+    const heightPt = el.height / PT_TO_EMU;
+    // `null` is reachable when the raster path resolves to an unsupported
+    // metafile (a true EMF, or a WMF with no geometry); guarded below.
+    let bitmap: ImageBitmap | HTMLImageElement | null;
     if (el.svgImagePath != null && !el.srcRect) {
       // No crop: prefer the vector original. With an a:srcRect crop we skip this
       // branch — the crop math below multiplies fractional srcRect edges by the
@@ -3150,7 +3181,7 @@ async function renderPicture(
       } catch {
         bitmap = dataIsSvg
           ? await getCachedSvgImageByPath(el.imagePath, fetchImage)
-          : await getCachedBitmap(el.imagePath, el.mimeType, fetchImage);
+          : await getCachedBitmap(el.imagePath, el.mimeType, fetchImage, widthPt, heightPt);
       }
     } else if (dataIsSvg) {
       // SVG-only picture (here either because it has a crop, or — defensively —
@@ -3158,8 +3189,12 @@ async function renderPicture(
       // createImageBitmap can't.
       bitmap = await getCachedSvgImageByPath(el.imagePath, fetchImage);
     } else {
-      bitmap = await getCachedBitmap(el.imagePath, el.mimeType, fetchImage);
+      bitmap = await getCachedBitmap(el.imagePath, el.mimeType, fetchImage, widthPt, heightPt);
     }
+    // Skip a picture whose blip is an unsupported metafile (null bitmap), the
+    // same way an SVG-decode failure that also fails its raster fallback would
+    // throw out of this try — here we simply return without painting.
+    if (!bitmap) return;
     ctx.save();
     if (el.alpha != null) ctx.globalAlpha *= el.alpha;
     const x = emuToPx(el.x, scale);
@@ -3998,7 +4033,15 @@ export async function renderSlide(
       } else if (pDataIsSvg) {
         void getCachedSvgImageByPath(p.imagePath, opts.fetchImage).catch(() => undefined);
       } else {
-        void getCachedBitmap(p.imagePath, p.mimeType, opts.fetchImage).catch(() => undefined);
+        // Pass the picture's pt size so a metafile blip warms at the same raster
+        // size the draw loop requests (the cache is path-keyed, first-wins).
+        void getCachedBitmap(
+          p.imagePath,
+          p.mimeType,
+          opts.fetchImage,
+          p.width / PT_TO_EMU,
+          p.height / PT_TO_EMU,
+        ).catch(() => undefined);
       }
     } else if (el.type === 'media') {
       const m = el as MediaElement;

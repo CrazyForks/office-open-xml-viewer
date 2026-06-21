@@ -44,7 +44,7 @@ export class XlsxWorkbook {
   private sheetCache = new Map<number, Worksheet>();
   /** Cache of decoded image sources keyed by their zip `imagePath`. Shared
    *  across sheets. */
-  private imageCache = new Map<string, CanvasImageSource>();
+  private imageCache = new Map<string, CanvasImageSource | null>();
   /** Cache of fetched image *bytes* (as Blobs) keyed by zip path, populated by
    *  {@link XlsxWorkbook.getImage}. Twin of pptx/docx's per-instance
    *  `_imageCache`; kept separate from {@link XlsxWorkbook.imageCache} (decoded
