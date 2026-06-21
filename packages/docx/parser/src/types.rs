@@ -818,6 +818,29 @@ pub struct ShapeText {
     pub italic: bool,
     /// Paragraph alignment ("left" | "center" | "right" | "both").
     pub alignment: String,
+    /// Embedded zip path of an inline image living inside this text-box
+    /// paragraph (`<w:drawing><wp:inline>…<a:blip r:embed>`), e.g.
+    /// `word/media/image1.emf`. `None` for a text-only paragraph. Resolved
+    /// the same way body images are (`resolve_blip_urls`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<String>,
+    /// MIME type of the blip at `image_path` (e.g. `image/x-wmf`,
+    /// `image/png`). `None` when there is no image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Vector original from the Microsoft `asvg:svgBlip` extension (the zip
+    /// path of the `.svg` part), preferred over `image_path` when present.
+    /// `None` for a plain raster/metafile blip or a text-only paragraph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svg_image_path: Option<String>,
+    /// Inline image natural width in pt (from `<wp:extent cx=>` EMU→pt). 0
+    /// when there is no image.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub image_width_pt: f64,
+    /// Inline image natural height in pt (from `<wp:extent cy=>` EMU→pt). 0
+    /// when there is no image.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub image_height_pt: f64,
 }
 
 #[derive(Serialize, Debug, Clone)]

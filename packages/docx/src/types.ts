@@ -412,6 +412,19 @@ export interface ShapeText {
   bold?: boolean;
   italic?: boolean;
   alignment: string;
+  /** Zip path of an inline image inside this text-box paragraph
+   *  (`<w:drawing><wp:inline><a:blip r:embed>`), e.g. `word/media/image1.emf`.
+   *  Absent for a text-only paragraph. */
+  imagePath?: string;
+  /** MIME type of the blip at {@link ShapeText.imagePath}. */
+  mimeType?: string;
+  /** Zip path of the vector original (`asvg:svgBlip` extension), preferred over
+   *  `imagePath` when present. */
+  svgImagePath?: string;
+  /** Inline image natural width in pt (from `<wp:extent cx>`). */
+  imageWidthPt?: number;
+  /** Inline image natural height in pt (from `<wp:extent cy>`). */
+  imageHeightPt?: number;
 }
 
 export type ShapeFill =

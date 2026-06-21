@@ -323,27 +323,46 @@ function authorColor(author?: string): string {
 
 function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
   const seen = new Map<string, ImagePair>();
+  // Record one image reference (collapsing duplicate keys, tracking the max
+  // intended draw size so a vector metafile is rasterized sharply enough for its
+  // largest occurrence — only meaningful for WMF/EMF).
+  const record = (pair: ImagePair) => {
+    const key = imageKey(pair.imagePath, pair.colorReplaceFrom);
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, pair);
+    } else {
+      existing.widthPt = Math.max(existing.widthPt, pair.widthPt);
+      existing.heightPt = Math.max(existing.heightPt, pair.heightPt);
+    }
+  };
   const walk = (runs: DocRun[]) => {
     for (const run of runs) {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
-        const key = imageKey(img.imagePath, img.colorReplaceFrom);
-        const existing = seen.get(key);
-        if (!existing) {
-          seen.set(key, {
-            imagePath: img.imagePath,
-            mimeType: img.mimeType,
-            svgImagePath: img.svgImagePath,
-            colorReplaceFrom: img.colorReplaceFrom,
-            widthPt: img.widthPt ?? 0,
-            heightPt: img.heightPt ?? 0,
-          });
-        } else {
-          // Same key reused (possibly at a larger size). Track the max intended
-          // draw size so a vector metafile is rasterized sharply enough for its
-          // largest occurrence.
-          existing.widthPt = Math.max(existing.widthPt, img.widthPt ?? 0);
-          existing.heightPt = Math.max(existing.heightPt, img.heightPt ?? 0);
+        record({
+          imagePath: img.imagePath,
+          mimeType: img.mimeType,
+          svgImagePath: img.svgImagePath,
+          colorReplaceFrom: img.colorReplaceFrom,
+          widthPt: img.widthPt ?? 0,
+          heightPt: img.heightPt ?? 0,
+        });
+      } else if (run.type === 'shape') {
+        // Inline images living inside a text box (<wps:txbx>) ride on the
+        // shape's text blocks. Feed them into the same decode pipeline so the
+        // WMF/EMF/raster/SVG decoders see their bytes (no colorReplace here).
+        const shp = run as unknown as ShapeRun;
+        for (const block of shp.textBlocks ?? []) {
+          if (block.imagePath) {
+            record({
+              imagePath: block.imagePath,
+              mimeType: block.mimeType ?? '',
+              svgImagePath: block.svgImagePath,
+              widthPt: block.imageWidthPt ?? 0,
+              heightPt: block.imageHeightPt ?? 0,
+            });
+          }
         }
       }
     }
@@ -4257,19 +4276,50 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   // sits on top of the panel. Rotation is intentionally not applied to body
   // text — the cover-template usage we care about uses anchor-only text.
   if (shape.textBlocks && shape.textBlocks.length > 0) {
-    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale, state.fontFamilyClasses);
+    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale, state.fontFamilyClasses, state.images);
   }
+}
+
+/** Fit an image block to the text-box inner width, preserving aspect from its
+ *  natural pt size. If the natural width already fits, draw at natural size ×
+ *  scale; otherwise scale down to innerW. Falls back to a square innerW box when
+ *  the natural size is unknown (0). Returns px dimensions. */
+function fitShapeImage(
+  widthPt: number,
+  heightPt: number,
+  innerW: number,
+  scale: number,
+): { w: number; h: number } {
+  const natW = (widthPt ?? 0) * scale;
+  const natH = (heightPt ?? 0) * scale;
+  if (natW <= 0 || natH <= 0) {
+    // No intrinsic size surfaced — reserve a square innerW box.
+    return { w: innerW, h: innerW };
+  }
+  if (natW <= innerW) return { w: natW, h: natH };
+  const s = innerW / natW;
+  return { w: innerW, h: natH * s };
 }
 
 /** Render a shape's body text inside its bounding box, honoring lIns/tIns/
  *  rIns/bIns and the wps:bodyPr @anchor (t / ctr / b). Alignment within each
- *  line is read from the per-block paragraph alignment. */
-function renderShapeText(
+ *  line is read from the per-block paragraph alignment.
+ *
+ *  Blocks carrying an `imagePath` (an inline image inside the text box, e.g. a
+ *  WMF chart wrapped as the sole content of a paragraph) draw the decoded
+ *  bitmap from `images` instead of text, fitted to the inner width. The
+ *  reserved height is the SAME value used by the first-pass measurement and the
+ *  draw advance, so vertical anchoring (t/ctr/b) stays consistent. A missing
+ *  bitmap reserves its height but draws nothing (no crash).
+ *
+ *  Exported for unit testing the inline-image fit/draw + missing-bitmap paths. */
+export function renderShapeText(
   shape: ShapeRun,
   x: number, y: number, w: number, h: number,
   ctx: CanvasRenderingContext2D,
   scale: number,
   fontFamilyClasses: Record<string, string> = {},
+  images: Map<string, DecodedImage> = new Map(),
 ): void {
   const blocks = shape.textBlocks ?? [];
   const lIns = (shape.textInsetL ?? 0) * scale;
@@ -4281,8 +4331,14 @@ function renderShapeText(
   const innerY = y + tIns;
   const innerH = Math.max(0, h - tIns - bIns);
 
-  // First pass: measure each block's natural height (one line at fontSize px)
-  const lineHeights = blocks.map((b) => b.fontSizePt * scale * 1.2);
+  // First pass: measure each block's reserved height. Image blocks reserve their
+  // fitted height; text blocks reserve one line at fontSize px. The same array
+  // drives both vertical anchoring (totalH) and the per-block draw advance.
+  const lineHeights = blocks.map((b) =>
+    b.imagePath
+      ? fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, innerW, scale).h
+      : b.fontSizePt * scale * 1.2,
+  );
   const totalH = lineHeights.reduce((s, lh) => s + lh, 0);
 
   const anchor = shape.textAnchor ?? 't';
@@ -4297,6 +4353,27 @@ function renderShapeText(
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
+
+    if (block.imagePath) {
+      // Inline image inside the text box. Fit to inner width, place
+      // horizontally per the paragraph alignment (figures default to centered),
+      // and advance by the reserved height regardless of whether a bitmap is
+      // present (a missing decode must not shift the rest of the layout).
+      const { w: fitW, h: fitH } = fitShapeImage(block.imageWidthPt ?? 0, block.imageHeightPt ?? 0, innerW, scale);
+      const bmp = images.get(imageKey(block.imagePath));
+      if (bmp) {
+        let drawX = innerX + Math.max(0, (innerW - fitW) / 2); // default: centered
+        if (block.alignment === 'left' || block.alignment === 'both') {
+          drawX = innerX;
+        } else if (block.alignment === 'right') {
+          drawX = innerX + Math.max(0, innerW - fitW);
+        }
+        ctx.drawImage(bmp, drawX, cursorY, fitW, fitH);
+      }
+      cursorY += lineHeights[i];
+      continue;
+    }
+
     const fontPx = block.fontSizePt * scale;
     ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null, fontFamilyClasses);
     ctx.fillStyle = block.color ? `#${block.color}` : '#000000';

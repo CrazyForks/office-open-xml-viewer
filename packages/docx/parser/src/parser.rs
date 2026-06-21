@@ -1991,7 +1991,7 @@ fn parse_run_inner(
                 // Word still emits these for simple text boxes. We surface the
                 // shape's fill/stroke/size and its txbxContent as a ShapeRun so
                 // the existing shape renderer draws the panel + RTL body text.
-                if let Some(shp) = parse_vml_pict(child, theme) {
+                if let Some(shp) = parse_vml_pict(child, theme, media_map) {
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
@@ -2162,6 +2162,7 @@ fn parse_inline_drawing(
         for mut shp in parse_wgp_shapes(
             wgp,
             theme,
+            media_map,
             pos_x,
             x_from_margin,
             pos_y,
@@ -2183,6 +2184,7 @@ fn parse_inline_drawing(
         if let Some(mut shp) = parse_wsp_shape(
             wsp,
             theme,
+            media_map,
             pos_x,
             x_from_margin,
             pos_y,
@@ -2757,9 +2759,11 @@ fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<
 /// Each grpSp scales and offsets its children relative to its parent group, so
 /// the cumulative child→page transform must be the product of every group on
 /// the path from the wgp down to the wsp — not just the outermost grpSpPr.
+#[allow(clippy::too_many_arguments)]
 fn parse_wgp_shapes(
     wgp: roxmltree::Node,
     theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -2794,6 +2798,7 @@ fn parse_wgp_shapes(
         wgp,
         base,
         theme,
+        media_map,
         anchor_pos_x,
         x_from_margin,
         anchor_pos_y,
@@ -2817,6 +2822,7 @@ fn walk_group_children(
     group: roxmltree::Node,
     xform: GroupTransform,
     theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -2835,6 +2841,7 @@ fn walk_group_children(
                 if let Some(mut shape) = parse_wsp_shape(
                     child,
                     theme,
+                    media_map,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -2861,6 +2868,7 @@ fn walk_group_children(
                     child,
                     child_xform,
                     theme,
+                    media_map,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -2888,6 +2896,7 @@ fn walk_group_children(
 fn parse_wsp_shape(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -3066,7 +3075,7 @@ fn parse_wsp_shape(
     // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
     // and the bodyPr (insets / vertical anchor).
     let (text_blocks, text_anchor, text_inset_l, text_inset_t, text_inset_r, text_inset_b) =
-        parse_shape_text_body(wsp, theme);
+        parse_shape_text_body(wsp, theme, media_map);
 
     Some(ShapeRun {
         width_pt,
@@ -3113,6 +3122,7 @@ fn parse_wsp_shape(
 fn parse_shape_text_body(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
 ) -> (Vec<ShapeText>, Option<String>, f64, f64, f64, f64) {
     let txbx = wsp
         .children()
@@ -3151,7 +3161,7 @@ fn parse_shape_text_body(
         .map(|content| {
             children_w_flat(content, "p")
                 .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(p, theme))
+                .filter_map(|p| extract_simple_paragraph_text(p, theme, media_map))
                 .collect()
         })
         .unwrap_or_default();
@@ -3161,7 +3171,21 @@ fn parse_shape_text_body(
 
 /// Reduce a <w:p> inside <w:txbxContent> to a single ShapeText. Pulls
 /// formatting from the FIRST run encountered; ignores mixed-format runs.
-fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeText> {
+///
+/// In addition to run text, the paragraph is scanned for an inline image
+/// (`<w:drawing><wp:inline>…<a:blip r:embed>`). Word legitimately wraps a
+/// chart/picture as the sole content of a text-box paragraph (e.g. a figure
+/// with its caption in the following paragraph). When such an image is found,
+/// the block carries `image_path`/`mime_type`/`svg_image_path` and the
+/// `<wp:extent cx= cy=>` size (EMU→pt) so the renderer can draw it.
+///
+/// A paragraph with neither text nor an image yields `None`; an image-only
+/// paragraph (empty text) still yields a block so the picture is not dropped.
+fn extract_simple_paragraph_text(
+    p: roxmltree::Node,
+    theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
+) -> Option<ShapeText> {
     let mut text = String::new();
     let mut first_rpr: Option<roxmltree::Node> = None;
     for r in p
@@ -3180,7 +3204,40 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
             }
         }
     }
-    if text.is_empty() {
+
+    // Inline image inside the text-box paragraph. Use the SAME blip resolution
+    // body images use. The `<wp:extent>` is a child of the `<wp:inline>`
+    // container (ECMA-376 §20.4.2.8); read it for the natural draw size.
+    let (image_path, mime_type, svg_image_path, image_width_pt, image_height_pt) = {
+        let blip = p
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "drawing")
+            .and_then(|drawing| {
+                drawing
+                    .descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "blip")
+            });
+        match blip.and_then(|b| resolve_blip_urls(b, media_map)) {
+            Some((ip, mime, svg)) => {
+                let extent = p
+                    .descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "extent");
+                let cx = extent
+                    .and_then(|e| e.attribute("cx"))
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let cy = extent
+                    .and_then(|e| e.attribute("cy"))
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                (Some(ip), Some(mime), svg, cx / 12700.0, cy / 12700.0)
+            }
+            None => (None, None, None, 0.0, 0.0),
+        }
+    };
+
+    // Drop a paragraph that is neither text nor image; keep image-only ones.
+    if text.is_empty() && image_path.is_none() {
         return None;
     }
 
@@ -3212,6 +3269,11 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
         bold,
         italic,
         alignment: normalize_align(&alignment).to_string(),
+        image_path,
+        mime_type,
+        svg_image_path,
+        image_width_pt,
+        image_height_pt,
     })
 }
 
@@ -3227,7 +3289,11 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
 /// paragraph's leading (top-left) corner — VML `position:relative` text boxes
 /// flow with their anchor paragraph, which Word places at the left margin just
 /// below the preceding content.
-fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun> {
+fn parse_vml_pict(
+    pict: roxmltree::Node,
+    theme: &ThemeColors,
+    media_map: &HashMap<String, String>,
+) -> Option<ShapeRun> {
     // v:shape / v:rect / v:roundrect — any VML shape element with geometry.
     let shape = pict.descendants().find(|n| {
         n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
@@ -3294,7 +3360,7 @@ fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun
         .map(|content| {
             children_w_flat(content, "p")
                 .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(p, theme))
+                .filter_map(|p| extract_simple_paragraph_text(p, theme, media_map))
                 .collect()
         })
         .unwrap_or_default();
@@ -5876,5 +5942,132 @@ mod column_tests {
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
         assert!(matches!(body[3], BodyElement::ColumnBreak));
         assert!(matches!(body[4], BodyElement::Paragraph(_)));
+    }
+}
+
+// Inline images living INSIDE a DrawingML text box (`<wps:txbx>`): Word wraps a
+// chart/picture as a `<w:drawing><wp:inline>…<a:blip r:embed>` paragraph,
+// usually followed by a caption paragraph ("Fig. 1: …"). The parser must
+// surface the image on the ShapeText block (image_path + extent→pt size) and
+// must NOT drop an image-only paragraph (the prior behaviour reduced each
+// paragraph to text only and dropped empty-text ones).
+#[cfg(test)]
+mod txbx_inline_image_tests {
+    use super::*;
+
+    /// A `<wps:wsp>` whose `<w:txbx><w:txbxContent>` holds (a) a paragraph that
+    /// is just an inline `<w:drawing>` (a WMF chart) and (b) a caption
+    /// paragraph. `parse_shape_text_body` must return 2 blocks: block0 carries
+    /// the resolved image path + the `<wp:extent>` size in pt and no caption
+    /// text; block1 carries the caption text and no image.
+    #[test]
+    fn parse_shape_text_body_surfaces_inline_image_and_caption() {
+        // extent cx=2540000 EMU = 200pt, cy=1270000 EMU = 100pt.
+        let xml = r#"<wps:wsp
+              xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+              xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="1905000"/></a:xfrm>
+                <a:prstGeom prst="rect"/></wps:spPr>
+              <wps:txbx><w:txbxContent>
+                <w:p>
+                  <w:r><w:drawing>
+                    <wp:inline>
+                      <wp:extent cx="2540000" cy="1270000"/>
+                      <a:graphic><a:graphicData>
+                        <a:blip r:embed="rIdImg"/>
+                      </a:graphicData></a:graphic>
+                    </wp:inline>
+                  </w:drawing></w:r>
+                </w:p>
+                <w:p><w:pPr><w:jc w:val="center"/></w:pPr>
+                  <w:r><w:t>Fig. 1: A sample figure.</w:t></w:r>
+                </w:p>
+              </w:txbxContent></wps:txbx>
+            </wps:wsp>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
+
+        let (blocks, _anchor, _l, _t, _r, _b) =
+            parse_shape_text_body(doc.root_element(), &ThemeColors::default(), &media);
+
+        assert_eq!(blocks.len(), 2, "image paragraph + caption paragraph");
+
+        // block0 = the inline image (no caption text on it).
+        assert_eq!(
+            blocks[0].image_path.as_deref(),
+            Some("word/media/image1.emf"),
+            "image_path resolved through the media map"
+        );
+        assert!(blocks[0].text.is_empty(), "image paragraph carries no text");
+        assert!(
+            (blocks[0].image_width_pt - 200.0).abs() < 1e-6,
+            "extent cx 2540000 EMU → 200pt, got {}",
+            blocks[0].image_width_pt
+        );
+        assert!(
+            (blocks[0].image_height_pt - 100.0).abs() < 1e-6,
+            "extent cy 1270000 EMU → 100pt, got {}",
+            blocks[0].image_height_pt
+        );
+        assert!(
+            blocks[0].svg_image_path.is_none(),
+            "no svgBlip extension ⇒ svg_image_path None"
+        );
+
+        // block1 = the caption (no image).
+        assert_eq!(blocks[1].text, "Fig. 1: A sample figure.");
+        assert!(
+            blocks[1].image_path.is_none(),
+            "caption paragraph carries no image"
+        );
+        assert_eq!(blocks[1].alignment, "center");
+    }
+
+    /// An image-only paragraph (empty text) must NOT be dropped — the prior
+    /// `extract_simple_paragraph_text` returned None for empty text, which is
+    /// exactly why the chart never reached the image pipeline.
+    #[test]
+    fn extract_simple_paragraph_text_keeps_image_only_paragraph() {
+        let xml = r#"<w:p
+              xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <w:r><w:drawing><wp:inline>
+                <wp:extent cx="1270000" cy="635000"/>
+                <a:graphic><a:graphicData><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic>
+              </wp:inline></w:drawing></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
+
+        let block =
+            extract_simple_paragraph_text(doc.root_element(), &ThemeColors::default(), &media)
+                .expect("image-only paragraph must still yield a block");
+        assert_eq!(block.image_path.as_deref(), Some("word/media/image1.emf"));
+        assert!(block.text.is_empty());
+    }
+
+    /// A paragraph with neither text nor an image still yields None (unchanged).
+    #[test]
+    fn extract_simple_paragraph_text_drops_empty_paragraph() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr/>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        assert!(
+            extract_simple_paragraph_text(
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .is_none(),
+            "empty paragraph (no text, no image) is dropped"
+        );
     }
 }
