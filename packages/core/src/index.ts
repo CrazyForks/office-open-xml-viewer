@@ -43,6 +43,7 @@ export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
 export {
   classifyCjkFont,
   classifyFontGeneric,
+  isComplexScriptCodePoint,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,

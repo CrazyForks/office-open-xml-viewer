@@ -152,6 +152,39 @@ export function classifyFontGeneric(family: string | null | undefined): FontGene
 }
 
 /**
+ * True when a code point belongs to a complex-script (RTL/`cs`) Unicode block —
+ * Hebrew, Arabic (incl. supplements / extended / presentation forms), Syriac,
+ * Thaana, NKo, Samaritan, Mandaic, and the Plane-1 RTL / Arabic-math blocks.
+ * Single source of truth for ECMA-376 §17.3.2.26's per-character complex-script
+ * (`cs`) font-axis split: Word routes such characters to the run's cs formatting
+ * (`w:szCs`/`w:rFonts w:cs`/`w:bCs`/`w:iCs`) instead of the Latin (`ascii`/
+ * `hAnsi`) formatting. Latin, European digits, punctuation and CJK are NOT cs.
+ *
+ * Distinct from {@link scriptPreloadNamesForText}'s ranges, which decide WHICH
+ * Noto web font to load (Arabic vs Hebrew separately, only the scripts we ship)
+ * — a narrower, different-purpose set. This is the broad "is this a cs-axis
+ * glyph" predicate, exported so any renderer can apply the same split.
+ */
+export function isComplexScriptCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x0590 && cp <= 0x05ff) || // Hebrew
+    (cp >= 0x0600 && cp <= 0x06ff) || // Arabic
+    (cp >= 0x0700 && cp <= 0x074f) || // Syriac
+    (cp >= 0x0750 && cp <= 0x077f) || // Arabic Supplement
+    (cp >= 0x0780 && cp <= 0x07bf) || // Thaana
+    (cp >= 0x07c0 && cp <= 0x07ff) || // NKo
+    (cp >= 0x0800 && cp <= 0x083f) || // Samaritan
+    (cp >= 0x0840 && cp <= 0x085f) || // Mandaic
+    (cp >= 0x0860 && cp <= 0x08ff) || // Syriac Supp. / Arabic Extended-A/B
+    (cp >= 0xfb1d && cp <= 0xfb4f) || // Hebrew presentation forms
+    (cp >= 0xfb50 && cp <= 0xfdff) || // Arabic Presentation Forms-A
+    (cp >= 0xfe70 && cp <= 0xfeff) || // Arabic Presentation Forms-B
+    (cp >= 0x10800 && cp <= 0x10fff) || // Plane-1 RTL blocks
+    (cp >= 0x1e800 && cp <= 0x1efff)    // Mende/Adlam/Arabic Math
+  );
+}
+
+/**
  * Ordered Noto CJK family names for a given language, primary face first so the
  * browser resolves shared Han glyphs to that language's shapes. The other three
  * follow as a last-resort so a codepoint absent from the primary face does not

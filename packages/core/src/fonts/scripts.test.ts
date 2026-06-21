@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   classifyCjkFont,
   classifyFontGeneric,
+  isComplexScriptCodePoint,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
@@ -309,7 +310,28 @@ describe('scriptPreloadNamesForText — script-aware preload set from document t
   });
 
   it('every returned name is resolvable in SCRIPT_GOOGLE_FONTS (CJK + Cyrillic + scripts)', () => {
-    const out = scriptPreloadNamesForText(['漢字 Привет สวัสดี नमस्ते שלום'], null);
+    const out = scriptPreloadNamesForText(['漢字 Привет สวัสดी नमस्ते שלום'], null);
     assertResolvable(out);
+  });
+});
+
+describe('isComplexScriptCodePoint — §17.3.2.26 cs-axis blocks', () => {
+  const cp = (s: string) => s.codePointAt(0) as number;
+  it('classifies RTL/complex scripts as complex', () => {
+    expect(isComplexScriptCodePoint(cp('א'))).toBe(true); // Hebrew U+05D0
+    expect(isComplexScriptCodePoint(cp('ع'))).toBe(true); // Arabic U+0639
+    expect(isComplexScriptCodePoint(cp('ܐ'))).toBe(true); // Syriac U+0710
+    expect(isComplexScriptCodePoint(cp('ޱ'))).toBe(true); // Thaana U+07B1
+    expect(isComplexScriptCodePoint(0xfdf2)).toBe(true); // Arabic Presentation Forms-A
+    expect(isComplexScriptCodePoint(0xfe8e)).toBe(true); // Arabic Presentation Forms-B
+    expect(isComplexScriptCodePoint(0x1ee00)).toBe(true); // Arabic Math (Plane-1)
+  });
+  it('classifies Latin / digits / punctuation / CJK as NOT complex', () => {
+    expect(isComplexScriptCodePoint(cp('A'))).toBe(false);
+    expect(isComplexScriptCodePoint(cp('5'))).toBe(false);
+    expect(isComplexScriptCodePoint(cp('.'))).toBe(false);
+    expect(isComplexScriptCodePoint(cp('あ'))).toBe(false); // Hiragana
+    expect(isComplexScriptCodePoint(cp('漢'))).toBe(false); // Han
+    expect(isComplexScriptCodePoint(cp('가'))).toBe(false); // Hangul
   });
 });

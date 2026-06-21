@@ -32,6 +32,7 @@ import {
   crossRunKinsokuRetract,
   isCjkBreakChar,
   classifyFontGeneric,
+  isComplexScriptCodePoint,
   decodeRasterOrMetafile,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
@@ -3316,35 +3317,6 @@ function isRtlBidiLang(langBidi: string | undefined, runIsRtl: boolean): boolean
     if (RTL_PRIMARY_SUBTAGS.has(primary)) return true;
   }
   return runIsRtl;
-}
-
-/**
- * ECMA-376 §17.3.2.26 (rFonts) content classification — does this code point
- * belong to the COMPLEX-SCRIPT (`cs`) category? Word routes such characters to
- * the run's complex-script formatting (`w:szCs` / `w:rFonts w:cs` / `w:bCs` /
- * `w:iCs`) instead of the Latin (`ascii`/`hAnsi`) formatting. The ranges are
- * the Unicode blocks Word treats as complex script: Hebrew, Arabic (incl.
- * supplements / extended / presentation forms), Syriac, Thaana, NKo,
- * Samaritan, Mandaic, and the Arabic-math / extended Plane-1 blocks. Latin,
- * digits (EN), punctuation and CJK are NOT cs.
- */
-function isComplexScriptCodePoint(cp: number): boolean {
-  return (
-    (cp >= 0x0590 && cp <= 0x05ff) || // Hebrew
-    (cp >= 0x0600 && cp <= 0x06ff) || // Arabic
-    (cp >= 0x0700 && cp <= 0x074f) || // Syriac
-    (cp >= 0x0750 && cp <= 0x077f) || // Arabic Supplement
-    (cp >= 0x0780 && cp <= 0x07bf) || // Thaana
-    (cp >= 0x07c0 && cp <= 0x07ff) || // NKo
-    (cp >= 0x0800 && cp <= 0x083f) || // Samaritan
-    (cp >= 0x0840 && cp <= 0x085f) || // Mandaic
-    (cp >= 0x0860 && cp <= 0x08ff) || // Syriac Supp. / Arabic Extended-A/B
-    (cp >= 0xfb1d && cp <= 0xfb4f) || // Hebrew presentation forms
-    (cp >= 0xfb50 && cp <= 0xfdff) || // Arabic Presentation Forms-A
-    (cp >= 0xfe70 && cp <= 0xfeff) || // Arabic Presentation Forms-B
-    (cp >= 0x10800 && cp <= 0x10fff) || // Plane-1 RTL blocks
-    (cp >= 0x1e800 && cp <= 0x1efff)    // Mende/Adlam/Arabic Math
-  );
 }
 
 /**
