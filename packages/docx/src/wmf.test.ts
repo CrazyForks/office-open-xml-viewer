@@ -346,6 +346,103 @@ describe('playWmf — polygon / polypolygon fill', () => {
   });
 });
 
+// ── playWmf: GDI half-open device-surface clip (frame-rectangle suppression) ──
+
+describe('playWmf — half-open device clip (boundary-coincident edges)', () => {
+  // GDI clips metafile playback to the output surface, whose region is half-open
+  // [0,W)×[0,H). An outline edge that lies exactly on a surface-boundary line
+  // (x∈{0,W} or y∈{0,H}) is on the clip boundary and paints nothing. This is the
+  // standard reason a full-window "frame rectangle" drawn with a 1px cosmetic pen
+  // (image1.emf in sample-10: a META_RECTANGLE at the window bounds with a
+  // width-0 solid black pen) shows NO visible border in GDI / Word.
+
+  it('a RECTANGLE coincident with the device bounds paints NO outline (frame suppressed)', () => {
+    // window org (0,0) ext (100,100), device 100×100 ⇒ logical==device. The rect
+    // spans the full window, so all four edges land on the surface boundary.
+    const file = concat(
+      wmfHeader(),
+      record(FN.SETWINDOWORG, (w) => w.i16(0).i16(0)),
+      record(FN.SETWINDOWEXT, (w) => w.i16(100).i16(100)),
+      // cosmetic (width 0) PS_SOLID black pen — exactly sample-10's frame pen.
+      record(FN.CREATEPENINDIRECT, (w) => w.u16(0).i16(0).i16(0).u32(0x00000000)),
+      record(FN.SELECTOBJECT, (w) => w.u16(0)),
+      // RECTANGLE params: bottom, right, top, left (full window).
+      record(FN.RECTANGLE, (w) => w.i16(100).i16(100).i16(0).i16(0)),
+      record(FN.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playWmf(file, m.ctx, 100, 100);
+    // No brush selected ⇒ no fill; and the boundary-coincident outline is not
+    // stroked ⇒ the rectangle contributes nothing.
+    expect(m.calls.some((c) => c.op === 'stroke')).toBe(false);
+    expect(m.calls.some((c) => c.op === 'fill')).toBe(false);
+  });
+
+  it('a RECTANGLE one pixel INSIDE the bounds still strokes all four edges (not a size rule)', () => {
+    // Same pen/window, but the rect is inset by 1 unit on every side, so no edge
+    // lies on the surface boundary — the outline must paint normally.
+    const file = concat(
+      wmfHeader(),
+      record(FN.SETWINDOWORG, (w) => w.i16(0).i16(0)),
+      record(FN.SETWINDOWEXT, (w) => w.i16(100).i16(100)),
+      record(FN.CREATEPENINDIRECT, (w) => w.u16(0).i16(0).i16(0).u32(0x00000000)),
+      record(FN.SELECTOBJECT, (w) => w.u16(0)),
+      record(FN.RECTANGLE, (w) => w.i16(99).i16(99).i16(1).i16(1)),
+      record(FN.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playWmf(file, m.ctx, 100, 100);
+    expect(m.calls.some((c) => c.op === 'stroke')).toBe(true);
+    // All four interior edges drawn: a single continuous sub-path (1 moveTo) with
+    // four lineTo's (closed rectangle).
+    expect(m.calls.filter((c) => c.op === 'moveTo').length).toBe(1);
+    expect(m.calls.filter((c) => c.op === 'lineTo').length).toBe(4);
+  });
+
+  it('a boundary RECTANGLE WITH a brush still FILLS (only the cosmetic outline is suppressed)', () => {
+    const file = concat(
+      wmfHeader(),
+      record(FN.SETWINDOWORG, (w) => w.i16(0).i16(0)),
+      record(FN.SETWINDOWEXT, (w) => w.i16(100).i16(100)),
+      // green solid brush + cosmetic black pen.
+      record(FN.CREATEBRUSHINDIRECT, (w) => w.u16(0).u32(0x0000ff00).u16(0)),
+      record(FN.SELECTOBJECT, (w) => w.u16(0)),
+      record(FN.CREATEPENINDIRECT, (w) => w.u16(0).i16(0).i16(0).u32(0x00000000)),
+      record(FN.SELECTOBJECT, (w) => w.u16(1)),
+      record(FN.RECTANGLE, (w) => w.i16(100).i16(100).i16(0).i16(0)),
+      record(FN.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playWmf(file, m.ctx, 100, 100);
+    expect(m.calls.some((c) => c.op === 'fill')).toBe(true);
+    expect(m.styles.fill.at(-1)?.toLowerCase()).toBe('#00ff00');
+    // Outline still suppressed (all edges on the boundary).
+    expect(m.calls.some((c) => c.op === 'stroke')).toBe(false);
+  });
+
+  it('only the boundary edges of a partially-coincident polygon are dropped', () => {
+    // A right triangle whose bottom edge runs along y=0 (on the boundary) but
+    // whose other two edges are interior: the bottom edge is dropped, the other
+    // two still stroke.
+    const file = concat(
+      wmfHeader(),
+      record(FN.SETWINDOWORG, (w) => w.i16(0).i16(0)),
+      record(FN.SETWINDOWEXT, (w) => w.i16(100).i16(100)),
+      record(FN.CREATEPENINDIRECT, (w) => w.u16(0).i16(0).i16(0).u32(0x000000ff)),
+      record(FN.SELECTOBJECT, (w) => w.u16(0)),
+      // vertices (0,0)-(100,0)-(50,50): edge (0,0)->(100,0) is on y=0.
+      record(FN.POLYGON, (w) => w.i16(3).i16(0).i16(0).i16(100).i16(0).i16(50).i16(50)),
+      record(FN.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playWmf(file, m.ctx, 100, 100);
+    expect(m.calls.some((c) => c.op === 'stroke')).toBe(true);
+    // Two surviving edges, contiguous: (100,0)->(50,50)->(0,0). One sub-path.
+    expect(m.calls.filter((c) => c.op === 'moveTo').length).toBe(1);
+    expect(m.calls.filter((c) => c.op === 'lineTo').length).toBe(2);
+  });
+});
+
 // ── playWmf: object table create/select/delete/reuse ────────────────────────
 
 describe('playWmf — object table create / delete / slot reuse', () => {

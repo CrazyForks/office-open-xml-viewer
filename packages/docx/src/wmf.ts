@@ -187,6 +187,86 @@ function deviceLineWidth(s: PlayState, logicalWidth: number): number {
   return w >= 1 ? w : 1;
 }
 
+// Tolerance (device px) for treating a mapped coordinate as lying ON a device
+// boundary line. The window→device mapping is a float multiply, so an edge that
+// is logically on the window frame can land at e.g. 0.0000001 or W-0.0000002.
+const BOUNDARY_EPS = 1e-3;
+
+/** Whether a device coordinate lies on either of the two boundary lines `lo`/`hi`
+ *  (within BOUNDARY_EPS). Used to detect polygon edges that coincide with the
+ *  device surface boundary. */
+function onBoundaryLine(v: number, lo: number, hi: number): boolean {
+  return Math.abs(v - lo) <= BOUNDARY_EPS || Math.abs(v - hi) <= BOUNDARY_EPS;
+}
+
+/**
+ * GDI clips metafile playback to the output surface, whose region is half-open
+ * `[0,W) × [0,H)` — the boundary lines x∈{0,W} and y∈{0,H} belong to the
+ * EXCLUDED side. An outline edge that lies exactly on such a boundary line is on
+ * the clip boundary and paints nothing (most visibly: a 1-device-pixel cosmetic
+ * pen whose `Rectangle` coincides with the metafile window/frame — the standard
+ * "frame rectangle" many authoring tools emit at the full window bounds, which
+ * GDI / Word do NOT render as a visible border).
+ *
+ * Returns the list of stroke segments to draw — every polygon edge EXCEPT those
+ * whose two endpoints both lie on one device-boundary line (a vertical edge on
+ * x=0 or x=W, or a horizontal edge on y=0 or y=H). This is a geometric clip
+ * rule, NOT a size heuristic: a rectangle one pixel inside the surface keeps all
+ * four edges; only edges literally on the surface boundary are dropped.
+ */
+function deviceInteriorEdges(
+  s: PlayState,
+  pts: Array<[number, number]>,
+  closed: boolean,
+): Array<[[number, number], [number, number]]> {
+  const segs: Array<[[number, number], [number, number]]> = [];
+  const last = closed ? pts.length : pts.length - 1;
+  for (let i = 0; i < last; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    // A vertical edge sitting on x=0 or x=W, or a horizontal edge on y=0 or y=H,
+    // lies on the half-open clip boundary → not painted.
+    const verticalOnBoundary =
+      Math.abs(a[0] - b[0]) <= BOUNDARY_EPS &&
+      onBoundaryLine(a[0], 0, s.W) &&
+      onBoundaryLine(b[0], 0, s.W);
+    const horizontalOnBoundary =
+      Math.abs(a[1] - b[1]) <= BOUNDARY_EPS &&
+      onBoundaryLine(a[1], 0, s.H) &&
+      onBoundaryLine(b[1], 0, s.H);
+    if (verticalOnBoundary || horizontalOnBoundary) continue;
+    segs.push([a, b]);
+  }
+  return segs;
+}
+
+/** Stroke a polygon/polyline's edges with the current pen, honoring GDI's
+ *  half-open device-surface clip (see deviceInteriorEdges): edges coincident with
+ *  the surface boundary are dropped. Consecutive KEPT edges are emitted as one
+ *  continuous sub-path (so a polyline with no dropped edges strokes as a single
+ *  path, unchanged); a dropped edge breaks the chain. */
+function strokeInteriorEdges(s: PlayState, pts: Array<[number, number]>, closed: boolean): void {
+  if (!s.curPen || s.curPen.stroke == null) return;
+  const segs = deviceInteriorEdges(s, pts, closed);
+  if (segs.length === 0) return;
+  const { ctx } = s;
+  ctx.strokeStyle = s.curPen.stroke;
+  ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+  ctx.beginPath();
+  // Chain consecutive edges that share an endpoint into one sub-path; restart
+  // when the previous edge was dropped (endpoints no longer contiguous).
+  let prevEnd: [number, number] | null = null;
+  for (const [a, b] of segs) {
+    if (!prevEnd || prevEnd[0] !== a[0] || prevEnd[1] !== a[1]) {
+      ctx.moveTo(a[0], a[1]);
+    }
+    ctx.lineTo(b[0], b[1]);
+    prevEnd = b;
+  }
+  ctx.stroke();
+  s.drew = true;
+}
+
 // ── per-record handlers ─────────────────────────────────────────────────────
 
 function readPoints(s: PlayState, c: Cursor, count: number): Array<[number, number]> {
@@ -202,35 +282,29 @@ function readPoints(s: PlayState, c: Cursor, count: number): Array<[number, numb
 
 function strokePolyline(s: PlayState, pts: Array<[number, number]>): void {
   if (pts.length < 2 || !s.curPen || s.curPen.stroke == null) return;
-  const { ctx } = s;
-  ctx.beginPath();
-  ctx.moveTo(pts[0][0], pts[0][1]);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-  ctx.strokeStyle = s.curPen.stroke;
-  ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
-  ctx.stroke();
-  s.drew = true;
+  // Open polyline: honor the same half-open device clip as polygons so an edge
+  // running along the surface boundary is not painted (GDI clips to the surface).
+  strokeInteriorEdges(s, pts, false);
 }
 
-/** Fill (current brush) + stroke (current pen) a single closed polygon. */
+/** Fill (current brush) + stroke (current pen) a single closed polygon. The
+ *  stroke honors GDI's half-open device clip: edges lying on the surface
+ *  boundary are not painted (see strokeInteriorEdges). The FILL is unaffected —
+ *  a brush-filled rectangle at the window bounds still fills the surface; only
+ *  the cosmetic outline on the boundary is suppressed. */
 function fillStrokePolygon(s: PlayState, pts: Array<[number, number]>): void {
   if (pts.length < 2) return;
   const { ctx } = s;
-  ctx.beginPath();
-  ctx.moveTo(pts[0][0], pts[0][1]);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-  ctx.closePath();
   if (s.curBrush && s.curBrush.fill != null) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
     ctx.fillStyle = s.curBrush.fill;
     ctx.fill(s.fillRule);
     s.drew = true;
   }
-  if (s.curPen && s.curPen.stroke != null) {
-    ctx.strokeStyle = s.curPen.stroke;
-    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
-    ctx.stroke();
-    s.drew = true;
-  }
+  strokeInteriorEdges(s, pts, true);
 }
 
 /** POLYPOLYGON: one path spanning every sub-polygon so the fill rule applies
