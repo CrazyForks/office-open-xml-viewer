@@ -441,7 +441,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Ruby annotations / furigana (`w:ruby`) | ✅ |
 | **Formatting** | Paragraph alignment (left / center / right / justify / distribute — CJK `both`/`distribute` spread by inter-character pitch, §17.18.44) | ✅ |
 | | Line spacing (auto / atLeast / exact) | ✅ |
-| | Line grid (`w:docGrid`, §17.6.5) | ✅ |
+| | Document grid (`w:docGrid`, §17.6.5 — line pitch + East Asian character grid / 字詰め) | ✅ |
 | | Margin collapsing between paragraphs | ✅ |
 | | Indents and tab stops | ✅ |
 | | Multi-column section layout (`w:cols`, §17.6.4 — newspaper-flow columns; full-width floats span all columns) | ✅ |
