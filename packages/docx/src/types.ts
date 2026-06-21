@@ -168,6 +168,14 @@ export interface ColSpec {
   spacePt: number;
 }
 
+/** ECMA-376 §17.6.4 — a single newspaper column resolved to its page-absolute
+ *  left edge (`xPt`) and text width (`wPt`), in pt. Produced by `computeColumns`
+ *  (in the renderer) from a section's {@link ColumnsSpec} + the page geometry. */
+export interface ColumnGeom {
+  xPt: number;
+  wPt: number;
+}
+
 export type BodyElement =
   | { type: 'paragraph' } & DocParagraph
   | { type: 'table' } & DocTable
@@ -175,7 +183,18 @@ export type BodyElement =
   /** ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following content
    *  into the next newspaper column (or the next page's first column when
    *  already in the last column). Hoisted to the body level by the parser. */
-  | { type: 'columnBreak' };
+  | { type: 'columnBreak' }
+  /** ECMA-376 §17.6.x — a section boundary in the body. A `<w:sectPr>` carried in
+   *  a paragraph's `pPr` (or a loose mid-body one) defines the section that ENDS
+   *  here; the FINAL section's settings live on {@link DocxDocumentModel.section}.
+   *  `columns` is the ENDING section's `<w:cols>` (§17.6.4; absent ⇒ single
+   *  full-width column — the spec default for `@w:num` 1). `kind` is the
+   *  ST_SectionMark (§17.18.79) controlling how the NEXT section starts:
+   *  "continuous" (same page), "nextPage" (default; page break), "oddPage" /
+   *  "evenPage" (page break + parity padding). The paginator switches its active
+   *  newspaper-column geometry per section at each marker — fixing the regression
+   *  where every section inherited the body-level section's columns. */
+  | { type: 'sectionBreak'; kind: 'continuous' | 'nextPage' | 'oddPage' | 'evenPage' | string; columns?: ColumnsSpec | null };
 
 /** A BodyElement annotated with a line range to render. Set when the
  *  paginator splits a paragraph that doesn't fit on a single page —
@@ -187,6 +206,14 @@ export type BodyElement =
 export type PaginatedBodyElement = BodyElement & {
   lineSlice?: { start: number; end: number };
   colIndex?: number;
+  /** ECMA-376 §17.6.4 — the column geometry of the SECTION this element belongs
+   *  to (per-section newspaper columns). Stamped by the paginator so the renderer
+   *  resolves `colIndex` against the right section's columns even when two
+   *  sections share a page (a "continuous" section break). Absent ⇒ the renderer
+   *  uses the page-level `columns` it was given (single-section / header / footer
+   *  paths), so single-section documents are unaffected. Runtime-only — never
+   *  emitted by the parser. */
+  colGeom?: ColumnGeom[];
 };
 
 export interface DocParagraph {
