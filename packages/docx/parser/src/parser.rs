@@ -6,7 +6,8 @@ use zip::ZipArchive;
 
 use crate::numbering::NumberingMap;
 use crate::styles::{
-    parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, ParaFmt, RawTblBorders, RunFmt, StyleMap,
+    merge_cond_layers, parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, ParaFmt, RawTblBorders,
+    RunFmt, StyleMap,
 };
 use crate::types::*;
 use crate::xml_util::*;
@@ -4125,10 +4126,31 @@ fn parse_table(
         .as_deref()
         .map(|id| style_map.resolve_table_style(id))
         .unwrap_or_default();
+    // ECMA-376 §17.4.49 (w:tblLook). Word writes this either with the modern
+    // named on/off attributes (`w:firstRow="1"` …) or the legacy combined
+    // hex bitmask in `w:val` (e.g. "05A0"). Support both: a named attribute,
+    // when present, wins; otherwise fall back to the corresponding hex bit.
+    // Legacy bit values (§17.4.49 / the older w:tblLook hex form):
+    //   0x0020 firstRow   0x0040 lastRow   0x0080 firstColumn
+    //   0x0100 lastColumn 0x0200 noHBand   0x0400 noVBand
     let look = tbl_pr.and_then(|p| child_w(p, "tblLook"));
-    let look_flag = |name: &str| look.and_then(|l| attr_w(l, name)).as_deref() == Some("1");
-    let first_row = look_flag("firstRow");
-    let h_band = look.and_then(|l| attr_w(l, "noHBand")).as_deref() != Some("1");
+    let look_val: Option<u32> = look
+        .and_then(|l| attr_w(l, "val"))
+        .and_then(|v| u32::from_str_radix(v.trim(), 16).ok());
+    let look_flag = |name: &str, bit: u32| {
+        match look.and_then(|l| attr_w(l, name)).as_deref() {
+            Some("1") | Some("true") | Some("on") => true,
+            Some(_) => false, // explicit "0"/"false" disables regardless of hex
+            None => look_val.map(|v| v & bit != 0).unwrap_or(false),
+        }
+    };
+    let first_row = look_flag("firstRow", 0x0020);
+    let last_row = look_flag("lastRow", 0x0040);
+    let first_col = look_flag("firstColumn", 0x0080);
+    let last_col = look_flag("lastColumn", 0x0100);
+    // noHBand/noVBand SUPPRESS banding ⇒ banding active = NOT no*Band.
+    let h_band = !look_flag("noHBand", 0x0200);
+    let v_band = !look_flag("noVBand", 0x0400);
 
     // Table borders: inline tblBorders win; otherwise the table style's borders
     // (so styles like "Table Grid" show their gridlines).
@@ -4163,10 +4185,12 @@ fn parse_table(
         })
         .unwrap_or((0.0, 0.0, 3.6, 3.6));
 
-    // §17.4.7 conditional-format bitmask on each row (firstRow/band1Horz/…),
-    // captured up front so we can both (a) thread the resolved conditional
-    // rPr/pPr into the cell content as a base layer (§17.7.2), and (b) apply the
-    // conditional cell shading post-hoc below.
+    // §17.4.7/§17.4.8 conditional-format bitmasks. Captured up front so we can
+    // both (a) thread each cell's resolved conditional rPr/pPr into its content
+    // as a base layer (§17.7.2) and (b) apply the conditional cell shading
+    // post-hoc below. The bitmask may sit on the ROW (trPr/cnfStyle) and/or each
+    // CELL (tcPr/cnfStyle); when present it is authoritative for that scope and
+    // overrides the tblLook-derived geometry.
     let tr_nodes: Vec<roxmltree::Node> = children_w_flat(node, "tr");
     let row_cnf: Vec<Option<String>> = tr_nodes
         .iter()
@@ -4199,20 +4223,28 @@ fn parse_table(
             .get("firstRow")
             .map(|c| c.run.is_some() || c.para.is_some())
             .unwrap_or(false);
+    let row_count = tr_nodes.len();
 
-    // Resolve the conditional-format KEY for row `r`. The row's explicit
-    // cnfStyle wins (§17.4.7); otherwise fall back to tblLook firstRow +
-    // horizontal banding by row parity. Used both for content threading (below)
-    // and post-hoc cell shading. Scope note: `cnf_to_cond` only decodes the four
-    // row-level bits (firstRow/lastRow/band1Horz/band2Horz); column-band and
-    // corner conditions (firstCol/lastCol/band*Vert/neCell/…) are NOT resolved
-    // here, so their conditional rPr/pPr (e.g. Calendar 3's firstCol color) is
-    // intentionally unsupported.
-    let cond_name_for = |r: usize| -> Option<String> {
+    // Resolve the ROW-LEVEL conditional keys for row `r` (firstRow/lastRow/
+    // band*Horz), LOW→HIGH precedence per §17.7.6. The row's explicit
+    // trPr/cnfStyle wins (§17.4.8); otherwise derive from tblLook firstRow/
+    // lastRow + horizontal banding by row parity. Column/corner conditions are
+    // layered on per-cell below.
+    let row_conds = |r: usize| -> Vec<&'static str> {
         if let Some(cnf) = &row_cnf[r] {
-            cnf_to_cond(cnf)
-        } else if r == 0 && (first_row_styled || first_row_has_fmt) {
-            Some("firstRow".to_string())
+            // An explicit row cnfStyle authoritatively states the row-scope
+            // conditions; keep only the row-relevant keys (column/corner keys,
+            // if any, are resolved at cell scope where the column is known).
+            return cnf_to_conds(cnf)
+                .into_iter()
+                .filter(|k| matches!(*k, "firstRow" | "lastRow" | "band1Horz" | "band2Horz"))
+                .collect();
+        }
+        let mut out: Vec<&'static str> = Vec::new();
+        if r == 0 && (first_row_styled || first_row_has_fmt || first_row) {
+            out.push("firstRow");
+        } else if last_row && r + 1 == row_count {
+            out.push("lastRow");
         } else if h_band {
             // The banding parity offset only shifts when row 0 was consumed as a
             // SHADED first row; a first row that only carries rPr/pPr (no shd)
@@ -4222,26 +4254,109 @@ fn parse_table(
             } else {
                 r as i64
             };
-            Some(
-                if bi % 2 == 0 {
-                    "band1Horz"
-                } else {
-                    "band2Horz"
-                }
-                .to_string(),
-            )
-        } else {
-            None
+            out.push(if bi % 2 == 0 {
+                "band1Horz"
+            } else {
+                "band2Horz"
+            });
         }
+        out
+    };
+
+    // Resolve the COLUMN-LEVEL conditional keys for grid column `c` (0-based),
+    // LOW→HIGH per §17.7.6: band*Vert < firstCol/lastCol. `grid_cols` is the
+    // total number of grid columns. Vertical banding parity starts after the
+    // first column when firstColumn is active (Word bands the body columns).
+    let grid_cols = col_widths.len();
+    let col_conds = |c: usize| -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = Vec::new();
+        let is_first = first_col && c == 0;
+        let is_last = last_col && grid_cols > 0 && c + 1 == grid_cols;
+        if !is_first && !is_last && v_band {
+            // Parity offset by 1 when a first column is carved out, mirroring the
+            // horizontal-banding offset logic.
+            let bi = if first_col { c as i64 - 1 } else { c as i64 };
+            out.push(if bi % 2 == 0 {
+                "band1Vert"
+            } else {
+                "band2Vert"
+            });
+        }
+        if is_first {
+            out.push("firstCol");
+        }
+        if is_last {
+            out.push("lastCol");
+        }
+        out
+    };
+
+    // Build the effective merged `CondFmt` for a cell. `cell_cnf` is the cell's
+    // own tcPr/cnfStyle val (authoritative for the cell when present, §17.4.7).
+    // `r`/`c` are the row index and the 0-based GRID column of the cell's left
+    // edge. Conditions are assembled LOW→HIGH per §17.7.6 and folded with
+    // `merge_cond_layers`; corner cells (row∩column) sit on top.
+    let cell_cond = |r: usize, c: usize, cell_cnf: Option<&str>| -> CondFmt {
+        // Keys in §17.7.6 precedence order (low→high).
+        let keys: Vec<&'static str> = if let Some(cnf) = cell_cnf {
+            // The cell's explicit cnfStyle fully specifies its conditions.
+            cnf_to_conds(cnf)
+        } else {
+            let rc = row_conds(r);
+            let cc = col_conds(c);
+            let mut keys: Vec<&'static str> = Vec::new();
+            // Bands first (vertical then horizontal), then row, then column.
+            keys.extend(cc.iter().filter(|k| k.ends_with("Vert")).copied());
+            keys.extend(rc.iter().filter(|k| k.ends_with("Horz")).copied());
+            keys.extend(rc.iter().filter(|k| !k.ends_with("Horz")).copied());
+            keys.extend(cc.iter().filter(|k| !k.ends_with("Vert")).copied());
+            // Corner = row-edge ∩ column-edge (highest precedence).
+            let is_first_row = rc.contains(&"firstRow");
+            let is_last_row = rc.contains(&"lastRow");
+            let is_first_col = cc.contains(&"firstCol");
+            let is_last_col = cc.contains(&"lastCol");
+            if is_first_row && is_first_col {
+                keys.push("nwCell");
+            }
+            if is_first_row && is_last_col {
+                keys.push("neCell");
+            }
+            if is_last_row && is_first_col {
+                keys.push("swCell");
+            }
+            if is_last_row && is_last_col {
+                keys.push("seCell");
+            }
+            keys
+        };
+        let layers: Vec<&CondFmt> = keys.iter().filter_map(|k| tstyle.cond.get(*k)).collect();
+        merge_cond_layers(&layers)
     };
 
     let mut rows = vec![];
     for (r, tr_node) in tr_nodes.iter().enumerate() {
-        // §17.7.2: thread the row's resolved conditional rPr/pPr into the cell
-        // content as a BASE layer (below paragraph/character styles + direct
-        // formatting). A first-row band condition gives the calendar header its
-        // 365F91 blue; band rows pick up their banded run color, etc.
-        let cond: Option<&CondFmt> = cond_name_for(r).as_deref().and_then(|n| tstyle.cond.get(n));
+        // Pre-compute the per-cell effective conditional formatting for this
+        // row, walking the grid so each cell knows its starting grid column
+        // (gridSpan-aware for lastCol/banding). §17.7.2: this merged rPr/pPr is
+        // threaded into the cell content as a BASE layer (below paragraph/char
+        // styles + direct formatting): firstRow → the calendar header blue,
+        // firstCol/lastCol → the Sun/Sat column blue, band rows their banded
+        // color, etc.
+        let tc_nodes = children_w_flat(*tr_node, "tc");
+        let mut grid_col = 0usize;
+        let mut cell_conds: Vec<CondFmt> = Vec::with_capacity(tc_nodes.len());
+        for tc in &tc_nodes {
+            let span: usize = child_w(*tc, "tcPr")
+                .and_then(|p| child_w(p, "gridSpan"))
+                .and_then(|g| attr_w(g, "val"))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            let cell_cnf = child_w(*tc, "tcPr")
+                .and_then(|p| child_w(p, "cnfStyle"))
+                .and_then(|c| attr_w(c, "val"));
+            cell_conds.push(cell_cond(r, grid_col, cell_cnf.as_deref()));
+            grid_col += span.max(1);
+        }
         let row = parse_table_row(
             *tr_node,
             style_map,
@@ -4250,20 +4365,32 @@ fn parse_table(
             rel_map,
             theme,
             table_style_id.as_deref(),
-            cond,
+            &cell_conds,
         );
         rows.push(row);
     }
 
-    // Apply table-style cell shading + vAlign where the cell didn't set them inline.
-    for (r, row) in rows.iter_mut().enumerate() {
-        let cond: Option<&CondFmt> = cond_name_for(r).as_deref().and_then(|n| tstyle.cond.get(n));
-        let row_shd = cond
-            .and_then(|c| c.shd.clone())
-            .or_else(|| tstyle.cell_shd.clone());
-        for cell in row.cells.iter_mut() {
+    // Apply table-style cell shading + vAlign where the cell didn't set them
+    // inline. Each cell's effective conditional shading (firstRow/firstCol/band/
+    // corner, §17.7.6) wins over the whole-table cell shading. Re-resolve the
+    // per-cell condition with the same grid walk used for content threading.
+    for (r, (row, tr_node)) in rows.iter_mut().zip(tr_nodes.iter()).enumerate() {
+        let tc_nodes = children_w_flat(*tr_node, "tc");
+        let mut grid_col = 0usize;
+        for (cell, tc) in row.cells.iter_mut().zip(tc_nodes.iter()) {
+            let span: usize = child_w(*tc, "tcPr")
+                .and_then(|p| child_w(p, "gridSpan"))
+                .and_then(|g| attr_w(g, "val"))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            let cell_cnf = child_w(*tc, "tcPr")
+                .and_then(|p| child_w(p, "cnfStyle"))
+                .and_then(|c| attr_w(c, "val"));
+            let eff = cell_cond(r, grid_col, cell_cnf.as_deref());
+            grid_col += span.max(1);
+            let cell_shd = eff.shd.clone().or_else(|| tstyle.cell_shd.clone());
             if cell.background.is_none() {
-                cell.background = row_shd.clone();
+                cell.background = cell_shd;
             }
             if cell.v_align.is_empty() {
                 cell.v_align = tstyle
@@ -4370,9 +4497,10 @@ fn parse_table_row(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     table_style_id: Option<&str>,
-    // §17.7.6 resolved conditional formatting for this row (firstRow/band*Horz),
-    // threaded into cell content as a base layer below paragraph/char styles.
-    cond: Option<&CondFmt>,
+    // §17.7.6 resolved conditional formatting per cell (row∩column, merged in
+    // precedence order), threaded into each cell's content as a base layer below
+    // paragraph/char styles. Indexed positionally against the row's `tc` nodes.
+    cell_conds: &[CondFmt],
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
     let tr_height_node = tr_pr.and_then(|p| child_w(p, "trHeight"));
@@ -4386,7 +4514,8 @@ fn parse_table_row(
     let is_header = tr_pr.and_then(|p| child_w(p, "tblHeader")).is_some();
 
     let mut cells = vec![];
-    for tc_node in children_w_flat(node, "tc") {
+    for (i, tc_node) in children_w_flat(node, "tc").into_iter().enumerate() {
+        let cond = cell_conds.get(i);
         let cell = parse_table_cell(
             tc_node,
             style_map,
@@ -4566,22 +4695,67 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
     }
 }
 
-/// Decode a `w:cnfStyle` bitmask (12 chars) to the conditional-format key it selects.
-/// Bit order (§17.4.7): firstRow,lastRow,firstCol,lastCol,band1Vert,band2Vert,
-/// band1Horz,band2Horz,neCell,nwCell,seCell,swCell.
-fn cnf_to_cond(cnf: &str) -> Option<String> {
-    let bit = |i: usize| cnf.as_bytes().get(i).copied() == Some(b'1');
-    if bit(0) {
-        Some("firstRow".to_string())
-    } else if bit(1) {
-        Some("lastRow".to_string())
-    } else if bit(6) {
-        Some("band1Horz".to_string())
-    } else if bit(7) {
-        Some("band2Horz".to_string())
-    } else {
-        None
+/// Decode a `w:cnfStyle` bitmask (12 chars) into the set of `w:tblStylePr`
+/// condition keys it selects, ordered LOW→HIGH precedence per ECMA-376 §17.7.6
+/// (wholeTable < band*Vert < band*Horz < firstRow/lastRow < firstCol/lastCol <
+/// corner cells). The caller folds the matching `CondFmt`s in this order.
+///
+/// Bit positions follow ECMA-376 Part 4 §14.11.9 ST_Cnf (12-char string, char 1
+/// = leftmost = most significant). Verified against the spec's own example
+/// `w:val="101000000100"` = {firstRow, firstColumn, NW Cell}:
+///   0 firstRow      1 lastRow       2 firstColumn   3 lastColumn
+///   4 band1Vert     5 band2Vert     6 band1Horz     7 band2Horz
+///   8 neCell        9 nwCell       10 seCell       11 swCell
+/// (Note the corner order in the bitmask is NE,NW,SE,SW — NOT the §17.7.6
+/// precedence order; we re-order to precedence below.)
+fn cnf_to_conds(cnf: &str) -> Vec<&'static str> {
+    let bytes = cnf.as_bytes();
+    let bit = |i: usize| bytes.get(i).copied() == Some(b'1');
+    let mut out: Vec<&'static str> = Vec::new();
+    // Vertical column bands (lowest of the conditional layers above wholeTable).
+    if bit(4) {
+        out.push("band1Vert");
     }
+    if bit(5) {
+        out.push("band2Vert");
+    }
+    // Horizontal row bands.
+    if bit(6) {
+        out.push("band1Horz");
+    }
+    if bit(7) {
+        out.push("band2Horz");
+    }
+    // First/last row.
+    if bit(0) {
+        out.push("firstRow");
+    }
+    if bit(1) {
+        out.push("lastRow");
+    }
+    // First/last column (override row conditions).
+    if bit(2) {
+        out.push("firstCol");
+    }
+    if bit(3) {
+        out.push("lastCol");
+    }
+    // Corner cells (highest precedence). Bitmask order is NE,NW,SE,SW; emit in
+    // the §17.7.6 corner order (NW,NE,SW,SE) — within corners only one applies
+    // per cell so the relative order is immaterial, but keep it spec-aligned.
+    if bit(9) {
+        out.push("nwCell");
+    }
+    if bit(8) {
+        out.push("neCell");
+    }
+    if bit(11) {
+        out.push("swCell");
+    }
+    if bit(10) {
+        out.push("seCell");
+    }
+    out
 }
 
 /// Fill table-border edges from a table style where the inline table didn't set them.
@@ -7464,5 +7638,282 @@ mod numbering_marker_font_tests {
             .unwrap();
         assert_eq!(run.font_family.as_deref(), Some("Times New Roman"));
         assert_eq!(run.font_family_east_asia.as_deref(), Some("ＭＳ 明朝"));
+    }
+
+    // ---- Table conditional formatting: ST_Cnf bit decode (§14.11.9) ----
+
+    // ECMA-376 Part 4 §14.11.9: the spec's own example `101000000100` denotes
+    // {firstRow, firstColumn, NW Cell}. This pins char1=leftmost=firstRow and the
+    // corner bit positions (9=neCell, 10=nwCell, 11=seCell, 12=swCell, 1-based).
+    #[test]
+    fn cnf_decode_matches_spec_example() {
+        // "101000000100": pos1 firstRow, pos3 firstColumn, pos10 nwCell.
+        let conds = cnf_to_conds("101000000100");
+        assert!(conds.contains(&"firstRow"));
+        assert!(conds.contains(&"firstCol"));
+        assert!(conds.contains(&"nwCell"));
+        // No other conditions leaked in.
+        assert_eq!(conds.len(), 3);
+    }
+
+    #[test]
+    fn cnf_decode_individual_bits() {
+        assert_eq!(cnf_to_conds("100000000000"), vec!["firstRow"]);
+        assert_eq!(cnf_to_conds("010000000000"), vec!["lastRow"]);
+        assert_eq!(cnf_to_conds("001000000000"), vec!["firstCol"]);
+        assert_eq!(cnf_to_conds("000100000000"), vec!["lastCol"]);
+        assert_eq!(cnf_to_conds("000010000000"), vec!["band1Vert"]);
+        assert_eq!(cnf_to_conds("000001000000"), vec!["band2Vert"]);
+        assert_eq!(cnf_to_conds("000000100000"), vec!["band1Horz"]);
+        assert_eq!(cnf_to_conds("000000010000"), vec!["band2Horz"]);
+        assert_eq!(cnf_to_conds("000000001000"), vec!["neCell"]);
+        assert_eq!(cnf_to_conds("000000000100"), vec!["nwCell"]);
+        assert_eq!(cnf_to_conds("000000000010"), vec!["seCell"]);
+        assert_eq!(cnf_to_conds("000000000001"), vec!["swCell"]);
+        assert!(cnf_to_conds("000000000000").is_empty());
+    }
+
+    // Keys come back in §17.7.6 precedence order (low→high): bands < firstRow/
+    // lastRow < firstCol/lastCol < corners.
+    #[test]
+    fn cnf_decode_precedence_order() {
+        // firstRow + firstCol + band1Horz + band1Vert + nwCell all set.
+        let conds = cnf_to_conds("101010100100");
+        // band* before firstRow/firstCol before nwCell.
+        let idx = |k: &str| conds.iter().position(|x| *x == k).unwrap();
+        assert!(idx("band1Vert") < idx("firstRow"));
+        assert!(idx("band1Horz") < idx("firstRow"));
+        assert!(idx("firstRow") < idx("nwCell"));
+        assert!(idx("firstCol") < idx("nwCell"));
+    }
+
+    // ---- Table conditional formatting: cell-level threading (§17.7.6) ----
+
+    // A Calendar 3-like table style: whole-table gray run color; firstRow/
+    // firstCol/lastCol conditional run color blue (365F91).
+    fn calendar_like_styles() -> StyleMap {
+        StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                    <w:pPr/><w:rPr/>
+                </w:style>
+                <w:style w:type="table" w:styleId="Cal3">
+                    <w:rPr><w:color w:val="7F7F7F"/></w:rPr>
+                    <w:tblStylePr w:type="firstRow">
+                        <w:rPr><w:color w:val="365F91"/></w:rPr>
+                    </w:tblStylePr>
+                    <w:tblStylePr w:type="firstCol">
+                        <w:rPr><w:color w:val="365F91"/></w:rPr>
+                    </w:tblStylePr>
+                    <w:tblStylePr w:type="lastCol">
+                        <w:rPr><w:color w:val="365F91"/></w:rPr>
+                    </w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ))
+    }
+
+    fn parse_tbl_styled(body: &str, styles: &StyleMap) -> DocTable {
+        let xml = format!(r#"<w:tbl xmlns:w="{ns}">{body}</w:tbl>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_table(
+            doc.root_element(),
+            styles,
+            &mut num_map,
+            &media,
+            &rels,
+            &theme,
+        )
+    }
+
+    fn cell_text_color(cell: &DocTableCell) -> Option<String> {
+        cell.content.iter().find_map(|el| match el {
+            CellElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                DocRun::Text(t) => Some(t.color.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })?
+    }
+
+    // A cell carrying an explicit firstCol cnfStyle (`001000000000`) on its tcPr
+    // inherits the firstCol conditional run color (blue), while a plain body cell
+    // keeps the whole-table gray. This is the calibre sample-11 Calendar3 Sun
+    // column case: Word writes the column condition on each cell, not via tblLook.
+    #[test]
+    fn cell_cnfstyle_firstcol_inherits_blue() {
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="Cal3"/>
+                 <w:tblLook w:val="05A0"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:tcPr><w:cnfStyle w:val="001000000000"/></w:tcPr>
+                   <w:p><w:r><w:t>Sun</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:tcPr><w:cnfStyle w:val="000000000000"/></w:tcPr>
+                   <w:p><w:r><w:t>Mon</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &calendar_like_styles(),
+        );
+        // Sun = firstCol → blue.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("365f91")
+        );
+        // Mon = no condition → whole-table gray.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[1]).as_deref(),
+            Some("7f7f7f")
+        );
+    }
+
+    // lastCol via explicit cell cnfStyle (`000100000000`) likewise gets blue.
+    #[test]
+    fn cell_cnfstyle_lastcol_inherits_blue() {
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="Cal3"/>
+                 <w:tblLook w:val="05A0"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:tcPr><w:cnfStyle w:val="000000000000"/></w:tcPr>
+                   <w:p><w:r><w:t>Fri</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:tcPr><w:cnfStyle w:val="000100000000"/></w:tcPr>
+                   <w:p><w:r><w:t>Sat</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &calendar_like_styles(),
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[1]).as_deref(),
+            Some("365f91")
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("7f7f7f")
+        );
+    }
+
+    // Without per-cell cnfStyle, tblLook firstColumn/lastColumn (legacy hex
+    // 05A0 = firstRow|firstColumn|lastColumn|noVBand) drives the first/last grid
+    // column to blue. This exercises the geometry-derived column conditions.
+    #[test]
+    fn tbllook_firstlast_column_geometry_blue() {
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="Cal3"/>
+                 <w:tblLook w:val="05A0"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc>
+               </w:tr>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>D</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>E</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>F</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &calendar_like_styles(),
+        );
+        // Row 1 (non-first row): firstCol D and lastCol F blue, middle E gray.
+        assert_eq!(
+            cell_text_color(&t.rows[1].cells[0]).as_deref(),
+            Some("365f91"),
+            "firstCol cell"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[1].cells[2]).as_deref(),
+            Some("365f91"),
+            "lastCol cell"
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[1].cells[1]).as_deref(),
+            Some("7f7f7f"),
+            "middle cell gray"
+        );
+    }
+
+    // Corner = firstRow ∩ firstCol: when the style defines an nwCell condition it
+    // overrides both firstRow and firstCol (highest precedence). Here nwCell sets
+    // a distinct color so we can see it win.
+    #[test]
+    fn corner_nwcell_overrides_row_and_col() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="Cnr">
+                    <w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="111111"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="firstCol"><w:rPr><w:color w:val="222222"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="nwCell"><w:rPr><w:color w:val="333333"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="Cnr"/>
+                 <w:tblLook w:firstRow="1" w:firstColumn="1"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>NW</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>NE</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &styles,
+        );
+        // NW corner: nwCell color wins over firstRow/firstCol.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("333333")
+        );
+        // NE (firstRow only here, lastColumn not enabled): firstRow color.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[1]).as_deref(),
+            Some("111111")
+        );
+    }
+
+    // Regression: a table whose style defines ONLY a firstRow condition (no
+    // column/corner conditions) and whose tblLook enables only firstRow must be
+    // unchanged by the new per-cell column logic — body cells stay uncolored,
+    // the header keeps its firstRow color. Guards the #518 row-only behavior.
+    #[test]
+    fn row_only_table_unchanged_by_column_logic() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="RowOnly">
+                    <w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="abcdef"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="RowOnly"/>
+                 <w:tblLook w:val="0020"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>H1</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>H2</w:t></w:r></w:p></w:tc>
+               </w:tr>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &styles,
+        );
+        // Header row: firstRow color.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("abcdef")
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[1]).as_deref(),
+            Some("abcdef")
+        );
+        // Body cells: no condition matches (no firstCol/band/lastCol defined or
+        // enabled) → no conditional color.
+        assert_eq!(cell_text_color(&t.rows[1].cells[0]), None);
+        assert_eq!(cell_text_color(&t.rows[1].cells[1]), None);
     }
 }

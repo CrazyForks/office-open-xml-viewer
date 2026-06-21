@@ -185,6 +185,34 @@ pub struct CondFmt {
     pub para: Option<ParaFmt>,
 }
 
+/// Fold an ordered list of conditional-format layers into one effective
+/// [`CondFmt`]. `layers` must be supplied **lowest precedence first**; later
+/// layers override earlier ones, matching ECMA-376 §17.7.6 ("these conditional
+/// formats shall be applied in the following order […] therefore subsequent
+/// formats override properties on previous formats"). The §17.7.6 order is
+/// wholeTable < band*Vert < band*Horz < firstRow/lastRow < firstCol/lastCol <
+/// corner cells; the caller is responsible for assembling `layers` in that
+/// order. Within each layer the same set-overrides-unset merge semantics used
+/// elsewhere apply (shd, borders, rPr, pPr), so a cell covered by both a band
+/// and firstCol picks up firstCol's run color while keeping band borders the
+/// firstCol layer left unset.
+pub fn merge_cond_layers(layers: &[&CondFmt]) -> CondFmt {
+    let mut out = CondFmt::default();
+    for layer in layers {
+        if layer.shd.is_some() {
+            out.shd = layer.shd.clone();
+        }
+        merge_raw_borders(&mut out.borders, &layer.borders);
+        if let Some(r) = &layer.run {
+            apply_run(out.run.get_or_insert_with(RunFmt::default), r);
+        }
+        if let Some(p) = &layer.para {
+            apply_para(out.para.get_or_insert_with(ParaFmt::default), p);
+        }
+    }
+    out
+}
+
 /// Table style (`w:style w:type="table"`) cell/border formatting.
 #[derive(Debug, Default, Clone)]
 pub struct TableStyleDef {
