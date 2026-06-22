@@ -4476,6 +4476,12 @@ fn parse_table(
             .map(|v| twips_to_pt(&v))
             .unwrap_or(0.0),
         horz_anchor: attr_w(n, "horzAnchor").unwrap_or_else(|| "page".to_string()),
+        // §17.4.57: did the source give ANY horizontal positioning hint? If not,
+        // the spec-literal default (page edge) and Word's actual placement (text/
+        // column left) diverge; the renderer resolves that via this flag.
+        horz_specified: attr_w(n, "horzAnchor").is_some()
+            || attr_w(n, "tblpX").is_some()
+            || attr_w(n, "tblpXSpec").is_some(),
         vert_anchor: attr_w(n, "vertAnchor").unwrap_or_else(|| "page".to_string()),
         tblp_x: attr_w(n, "tblpX").map(|v| twips_to_pt(&v)).unwrap_or(0.0),
         tblp_y: attr_w(n, "tblpY").map(|v| twips_to_pt(&v)).unwrap_or(0.0),
@@ -4583,10 +4589,19 @@ fn parse_table_cell(
         .and_then(|p| child_w(p, "vMerge"))
         .map(|m| attr_w(m, "val").map(|v| v == "restart").unwrap_or(false));
 
-    let borders = tc_pr
+    // ECMA-376 §17.4.34 (tcBorders) + §17.7.6 (conditional formatting): a cell's
+    // effective borders are its inline `w:tcBorders` layered OVER the resolved
+    // conditional table-style borders (firstRow/lastRow/band*/corner). Without
+    // this the header underline and the `insideH/insideV w:val="nil"` that styles
+    // like Medium List 2 / Medium Shading 2 use to suppress data-row gridlines
+    // are silently dropped. Inline edges win per-edge; conditional fills the rest.
+    let mut borders = tc_pr
         .and_then(|p| child_w(p, "tcBorders"))
         .map(|b| parse_cell_borders(b))
         .unwrap_or_default();
+    if let Some(c) = cond {
+        apply_cond_cell_borders(&mut borders, &c.borders);
+    }
 
     let background = tc_pr
         .and_then(|p| child_w(p, "shd"))
@@ -4702,6 +4717,8 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
     // ECMA-376 §17.4.* tcBorders: same logical/physical edge aliasing as
     // tblBorders. w:start/w:end (§17.4.66-67) are the logical vertical edges;
     // w:left/w:right the physical names. Prefer physical, fall back to logical.
+    // insideH/insideV (§17.4.34) are kept so a conditional tcBorders with
+    // `insideH w:val="nil"` (banded data rows) reaches the renderer.
     CellBorders {
         top: child_w(node, "top").map(parse_border_spec),
         bottom: child_w(node, "bottom").map(parse_border_spec),
@@ -4711,6 +4728,49 @@ fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
         right: child_w(node, "right")
             .or_else(|| child_w(node, "end"))
             .map(parse_border_spec),
+        inside_h: child_w(node, "insideH").map(parse_border_spec),
+        inside_v: child_w(node, "insideV").map(parse_border_spec),
+    }
+}
+
+/// Convert one table-style border edge ([`EdgeBorder`]) into the serialized
+/// [`BorderSpec`] used by cell/table borders. `nil`/`none` styles are preserved
+/// verbatim (the renderer treats both as "no border") so a conditional
+/// `insideH w:val="nil"` can suppress the table-level interior gridline.
+fn edge_to_border_spec(e: &EdgeBorder) -> BorderSpec {
+    BorderSpec {
+        width: e.width,
+        color: e.color.clone(),
+        style: e.style.clone(),
+    }
+}
+
+/// Fold a conditional table-style block's borders (§17.7.6 `w:tblStylePr` →
+/// `w:tcBorders`, already merged across the matching condition layers) UNDER a
+/// cell's inline `w:tcBorders`. Inline edges win per-edge (§17.4 direct cell
+/// formatting beats the style); an edge the cell did not set inline is taken
+/// from the conditional block. This is how a Medium List 2 data cell picks up
+/// `insideH w:val="nil"` (suppressing the banded gridline) while still letting an
+/// inline tcBorders override on a specific cell. Edges absent from both stay
+/// `None` so the renderer falls back to the table-level inside/outside spec.
+fn apply_cond_cell_borders(dst: &mut CellBorders, src: &RawTblBorders) {
+    if dst.top.is_none() {
+        dst.top = src.top.as_ref().map(edge_to_border_spec);
+    }
+    if dst.bottom.is_none() {
+        dst.bottom = src.bottom.as_ref().map(edge_to_border_spec);
+    }
+    if dst.left.is_none() {
+        dst.left = src.left.as_ref().map(edge_to_border_spec);
+    }
+    if dst.right.is_none() {
+        dst.right = src.right.as_ref().map(edge_to_border_spec);
+    }
+    if dst.inside_h.is_none() {
+        dst.inside_h = src.inside_h.as_ref().map(edge_to_border_spec);
+    }
+    if dst.inside_v.is_none() {
+        dst.inside_v = src.inside_v.as_ref().map(edge_to_border_spec);
     }
 }
 
@@ -8004,5 +8064,134 @@ mod numbering_marker_font_tests {
             cell_text_color(&t.rows[0].cells[1]).as_deref(),
             Some("bbb222")
         );
+    }
+
+    // ---- Conditional cell borders fold into cell.borders (§17.4.34 + §17.7.6) ----
+
+    /// A Medium List 2-like table style: whole-table outer borders only (no
+    /// insideH/insideV), a firstRow that underlines the header (bottom=single)
+    /// AND suppresses interior gridlines (insideH/insideV=nil), and a band1Horz
+    /// data condition that suppresses interior gridlines (insideH=nil). This is
+    /// exactly the structure that made calibre sample-11's blue/teal data rows
+    /// show phantom horizontal rules before the conditional borders were folded.
+    fn banded_border_styles() -> StyleMap {
+        StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="ML2">
+                    <w:tblPr>
+                        <w:tblBorders>
+                            <w:top w:val="single" w:sz="8" w:color="4F81BD"/>
+                            <w:left w:val="single" w:sz="8" w:color="4F81BD"/>
+                            <w:bottom w:val="single" w:sz="8" w:color="4F81BD"/>
+                            <w:right w:val="single" w:sz="8" w:color="4F81BD"/>
+                        </w:tblBorders>
+                    </w:tblPr>
+                    <w:tblStylePr w:type="firstRow">
+                        <w:tcPr><w:tcBorders>
+                            <w:top w:val="nil"/>
+                            <w:left w:val="nil"/>
+                            <w:bottom w:val="single" w:sz="24" w:color="4F81BD"/>
+                            <w:right w:val="nil"/>
+                            <w:insideH w:val="nil"/>
+                            <w:insideV w:val="nil"/>
+                        </w:tcBorders></w:tcPr>
+                    </w:tblStylePr>
+                    <w:tblStylePr w:type="band1Horz">
+                        <w:tcPr><w:tcBorders>
+                            <w:top w:val="nil"/>
+                            <w:bottom w:val="nil"/>
+                            <w:insideH w:val="nil"/>
+                            <w:insideV w:val="nil"/>
+                        </w:tcBorders></w:tcPr>
+                    </w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ))
+    }
+
+    #[test]
+    fn cond_firstrow_underline_folds_into_cell_bottom() {
+        // tblLook 0020 = firstRow on (0x0020). Row 0 = header.
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="ML2"/>
+                 <w:tblLook w:val="0020"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr><w:tc><w:p><w:r><w:t>Head</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>Data</w:t></w:r></w:p></w:tc></w:tr>"#,
+            &banded_border_styles(),
+        );
+        // Header cell: firstRow conditional bottom=single sz24 must reach cell.bottom.
+        let head = &t.rows[0].cells[0].borders;
+        let bottom = head.bottom.as_ref().expect("firstRow bottom folded in");
+        assert_eq!(bottom.style, "single");
+        assert!((bottom.width - 3.0).abs() < 1e-9, "sz=24 eighths → 3 pt");
+        assert_eq!(bottom.color.as_deref(), Some("4f81bd"));
+        // firstRow also sets top/left/right = nil ⇒ explicit "no border" on the cell
+        // (so the renderer suppresses them rather than falling back to table.top).
+        assert_eq!(head.top.as_ref().map(|b| b.style.as_str()), Some("nil"));
+        // …and insideH=nil so an interior gridline inside the header span is off.
+        assert_eq!(
+            head.inside_h.as_ref().map(|b| b.style.as_str()),
+            Some("nil")
+        );
+    }
+
+    #[test]
+    fn cond_band_insideh_nil_folds_into_cell_inside_h() {
+        // firstRow + horizontal banding on (0x0020 firstRow, banding default-on).
+        // The style's firstRow carries NO shd ⇒ first_row_styled is false ⇒ the
+        // banding parity is bi=r: even body rows (r=2,4,…) are band1Horz, odd
+        // body rows band2Horz. Row 2 (D2) therefore lands on band1Horz, the only
+        // banded condition this style defines (mirroring Medium List 2, which
+        // styles band1 rows and leaves band2 rows unbanded white).
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="ML2"/>
+                 <w:tblLook w:val="0020"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr><w:tc><w:p><w:r><w:t>Head</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>D1</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>D2</w:t></w:r></w:p></w:tc></w:tr>"#,
+            &banded_border_styles(),
+        );
+        // The band1Horz data row must carry insideH=nil so the renderer draws NO
+        // interior horizontal gridline between data rows.
+        let data = &t.rows[2].cells[0].borders;
+        assert_eq!(
+            data.inside_h.as_ref().map(|b| b.style.as_str()),
+            Some("nil"),
+            "band1Horz insideH=nil must fold into the data cell"
+        );
+        // top/bottom on the data cell are nil too (band1Horz top/bottom=nil).
+        assert_eq!(data.top.as_ref().map(|b| b.style.as_str()), Some("nil"));
+        assert_eq!(data.bottom.as_ref().map(|b| b.style.as_str()), Some("nil"));
+    }
+
+    #[test]
+    fn inline_tcborders_win_over_conditional() {
+        // A cell whose inline tcBorders set bottom=double must keep double even
+        // though the firstRow conditional would set bottom=single (inline wins,
+        // §17.4 direct cell formatting beats the style). Edges the cell did NOT
+        // set inline still come from the conditional (insideH=nil here).
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="ML2"/>
+                 <w:tblLook w:val="0020"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr><w:tc>
+                 <w:tcPr><w:tcBorders><w:bottom w:val="double" w:sz="6" w:color="FF0000"/></w:tcBorders></w:tcPr>
+                 <w:p><w:r><w:t>Head</w:t></w:r></w:p>
+               </w:tc></w:tr>"#,
+            &banded_border_styles(),
+        );
+        let b = &t.rows[0].cells[0].borders;
+        let bottom = b.bottom.as_ref().expect("inline bottom kept");
+        assert_eq!(
+            bottom.style, "double",
+            "inline tcBorders override conditional"
+        );
+        assert_eq!(bottom.color.as_deref(), Some("ff0000"));
+        // The cell left no insideH inline ⇒ it comes from the firstRow condition (nil).
+        assert_eq!(b.inside_h.as_ref().map(|x| x.style.as_str()), Some("nil"));
     }
 }

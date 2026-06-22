@@ -2981,7 +2981,18 @@ export function computeFloatTableBox(
   tableH: number,
 ): FloatTableBox {
   const sc = state.scale;
-  const hx = frameXContainer(tp.horzAnchor, state);
+  // §17.4.57 + §17.18.35: horzAnchor's literal default is "page", which would
+  // pin a floating table to the physical page edge (left margin). But when the
+  // source `<w:tblpPr>` gave NO horizontal positioning at all (no horzAnchor, no
+  // tblpX, no tblpXSpec), Word anchors the table at the anchor paragraph's text/
+  // column left — the in-flow position it was converted from — NOT the page edge.
+  // (Word runtime behavior; the spec-literal page default does not match Word
+  // here. See calibre sample-11 p.3 "ITEM/NEEDED" float.) We force the text band
+  // for that case so the table aligns with the body column, then let tblpX=0
+  // place it at that band's left.
+  const hx = tp.horzSpecified
+    ? frameXContainer(tp.horzAnchor, state)
+    : frameXContainer('text', state);
   const vy = frameYContainer(tp.vertAnchor, paraTop, state);
 
   // Horizontal: tblpXSpec (ST_XAlign) supersedes the absolute tblpX offset
@@ -5980,18 +5991,31 @@ function drawTableRows(
         // ECMA-376 §17.4.85: a vMerge=restart cell visually occupies the full
         // merged span; use the sum of row heights for its render box.
         let drawH = rowH;
+        let lastRowOfCell = ri;
         if (cell.vMerge === true) {
           const endRi = findMergeEndRow(table, ri, ci);
+          lastRowOfCell = endRi;
           drawH = 0;
           for (let rj = ri; rj <= endRi; rj++) drawH += rowHeights[rj];
         }
+        // ECMA-376 §17.4.34/§17.4.39: classify which physical edges of this cell
+        // are the table's OUTER edges (vs. interior gridlines) from its grid
+        // position so drawCellBorders can pick table.top/bottom/left/right vs.
+        // table.insideH/insideV. `leftCol`/`rightCol` are the LOGICAL columns
+        // (gridSpan-aware); the renderer flips them for bidiVisual via `mirror`.
+        const edges: CellEdgeFlags = {
+          topRow: ri === 0,
+          bottomRow: lastRowOfCell === table.rows.length - 1,
+          leftCol: ci === 0,
+          rightCol: ci + span === colWidths.length,
+        };
         // ECMA-376 §17.4.81: an exact row height is honored verbatim and
         // content taller than the row is clipped to the row box (Word clips;
         // we would otherwise overflow into neighboring rows). A vMerge=restart
         // cell spans multiple rows, so it is never governed by a single row's
         // exact height — only single-row cells clip.
         const clipExact = row.rowHeightRule === 'exact' && cell.vMerge !== true;
-        if (!dryRun) renderCell(cell, table, leadX, y, cellW, drawH, state, mirror, clipExact);
+        if (!dryRun) renderCell(cell, table, leadX, y, cellW, drawH, state, edges, mirror, clipExact);
         else measureCellContent(cell, table, cellW, scale, state);
       }
 
@@ -6226,6 +6250,7 @@ function renderCell(
   w: number,
   h: number,
   state: RenderState,
+  edges: CellEdgeFlags,
   mirror = false,
   clipExact = false,
 ): void {
@@ -6236,7 +6261,7 @@ function renderCell(
     ctx.fillRect(x, y, w, h);
   }
 
-  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale, mirror, state.dpr);
+  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale, edges, mirror, state.dpr);
 
   const cm = effCellMargins(cell, table);
   const mt = cm.top * scale;
@@ -6341,27 +6366,107 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
   }
 }
 
+/** Which grid edges of the table this cell touches, so {@link drawCellBorders}
+ *  can pick the OUTER (table.top/bottom/left/right) vs the INNER
+ *  (table.insideH/insideV) spec per physical edge (ECMA-376 §17.4.34/§17.4.39). */
+interface CellEdgeFlags {
+  topRow: boolean;     // cell sits in the table's first row → its top is the table outer top
+  bottomRow: boolean;  // cell's bottom edge is the table outer bottom (vMerge-span aware)
+  leftCol: boolean;    // cell's left edge is the table outer left
+  rightCol: boolean;   // cell's right edge is the table outer right
+}
+
+/** Resolve a `nil`/`none` border to "no ink". A `null` means "not set" — the
+ *  caller already substituted a fallback before reaching here. */
+function paintable(b: BorderSpec | null): BorderSpec | null {
+  if (!b) return null;
+  if (b.style === 'none' || b.style === 'nil') return null;
+  return b;
+}
+
 function drawCellBorders(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
   cell: CellBorders,
   table: TableBorders,
   scale: number,
+  edges: CellEdgeFlags,
   mirror = false,
   dpr = 1,
 ): void {
-  const top = cell.top ?? table.top;
-  const bottom = cell.bottom ?? table.bottom;
+  // ECMA-376 §17.4.34/§17.4.39: a cell's TOP/BOTTOM use the table OUTER border
+  // (top/bottom) only on the table's outermost rows; an interior horizontal
+  // gridline uses table.insideH. Likewise LEFT/RIGHT use the outer left/right
+  // only on the outermost columns, interior verticals use table.insideV.
+  // Per-edge precedence (§17.4 + §17.7.6): the cell's own explicit edge (which
+  // already folds the conditional firstRow/lastRow/band tcBorders at parse time)
+  // wins; for an interior edge the cell's insideH/insideV is consulted before the
+  // table inside spec; the table outer spec is the last resort on outer edges.
+  //
+  // TODO(border-conflict §17.4.39): true adjacent-cell border conflict
+  // resolution (larger width / style-rank wins, ties broken by color, then by
+  // top-then-left ownership) is NOT implemented. Each cell paints its own four
+  // edges, so an interior gridline is drawn once by each of the two adjacent
+  // cells; for matching specs this is visually identical, and `nil` on either
+  // side still suppresses that side's stroke. When the two sides disagree the
+  // later-painted cell currently wins rather than the spec's max-width rule.
+  const horiz = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
+    paintable(own ?? (outer ? table.top : (cell.insideH ?? table.insideH)));
+  const horizB = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
+    paintable(own ?? (outer ? table.bottom : (cell.insideH ?? table.insideH)));
+  const vert = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
+    paintable(own ?? (outer ? table.left : (cell.insideV ?? table.insideV)));
+  const vertR = (own: BorderSpec | null, outer: boolean): BorderSpec | null =>
+    paintable(own ?? (outer ? table.right : (cell.insideV ?? table.insideV)));
+
+  const top = horiz(cell.top, edges.topRow);
+  const bottom = horizB(cell.bottom, edges.bottomRow);
   // ECMA-376 §17.4.1: under bidiVisual the columns are visually reversed, so a
   // cell's logical left (start) border is drawn on its physical right edge and
-  // vice versa. Borders are owned by the cell, so swap which spec each side uses.
-  const left = mirror ? (cell.right ?? table.right) : (cell.left ?? table.left);
-  const right = mirror ? (cell.left ?? table.left) : (cell.right ?? table.right);
+  // vice versa. Borders are owned by the cell, so swap which spec each side uses,
+  // AND swap which outer edge / inside-fallback applies (the start column's outer
+  // edge is the physical right under bidiVisual).
+  const left = mirror
+    ? vertR(cell.right, edges.rightCol)
+    : vert(cell.left, edges.leftCol);
+  const right = mirror
+    ? vert(cell.left, edges.leftCol)
+    : vertR(cell.right, edges.rightCol);
 
-  if (top && top.style !== 'none') drawBorderLine(ctx, x, y, x + w, y, top, scale, dpr);
-  if (bottom && bottom.style !== 'none') drawBorderLine(ctx, x, y + h, x + w, y + h, bottom, scale, dpr);
-  if (left && left.style !== 'none') drawBorderLine(ctx, x, y, x, y + h, left, scale, dpr);
-  if (right && right.style !== 'none') drawBorderLine(ctx, x + w, y, x + w, y + h, right, scale, dpr);
+  if (top) drawBorderLine(ctx, x, y, x + w, y, top, scale, dpr);
+  if (bottom) drawBorderLine(ctx, x, y + h, x + w, y + h, bottom, scale, dpr);
+  if (left) drawBorderLine(ctx, x, y, x, y + h, left, scale, dpr);
+  if (right) drawBorderLine(ctx, x + w, y, x + w, y + h, right, scale, dpr);
+}
+
+/** Stroke one crisp axis-aligned segment. `perp` shifts the whole line
+ *  perpendicular to its direction (px, pre-crisp-snap) — used to place the two
+ *  rails of a `double` border on either side of the nominal edge. */
+function strokeCrispSegment(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  x1: number, y1: number, x2: number, y2: number,
+  lw: number,
+  dpr: number,
+  perp: number,
+): void {
+  ctx.lineWidth = lw;
+  // Crispness nudge (see crispOffset): a thin (odd device-width) axis-aligned
+  // stroke straddles two device rows and blurs; nudging it perpendicular to the
+  // line snaps it onto the nearest crisp device position. Cell / paragraph
+  // borders are always horizontal (y1===y2) or vertical (x1===x2) — never
+  // diagonal — so the orientation is read directly from the endpoints, and the
+  // snap delta is derived from the line's own coordinate (fractional-safe).
+  const horizontal = y1 === y2;
+  const vertical = x1 === x2;
+  // `perp` runs along x for a horizontal line, along y for a vertical line.
+  const ox = (horizontal ? 0 : perp);
+  const oy = (horizontal ? perp : 0);
+  const dpx = vertical ? crispOffset(x1 + ox, lw, dpr) : 0;
+  const dpy = horizontal ? crispOffset(y1 + oy, lw, dpr) : 0;
+  ctx.beginPath();
+  ctx.moveTo(x1 + ox + dpx, y1 + oy + dpy);
+  ctx.lineTo(x2 + ox + dpx, y2 + oy + dpy);
+  ctx.stroke();
 }
 
 function drawBorderLine(
@@ -6374,21 +6479,22 @@ function drawBorderLine(
   ctx.save();
   ctx.strokeStyle = spec.color ? `#${spec.color}` : '#000000';
   const lw = Math.max(0.5, spec.width * scale);
-  ctx.lineWidth = lw;
-  // Crispness nudge (see crispOffset): a thin (odd device-width) axis-aligned
-  // stroke straddles two device rows and blurs; nudging it perpendicular to the
-  // line snaps it onto the nearest crisp device position. Cell / paragraph
-  // borders are always horizontal (y1===y2) or vertical (x1===x2) — never
-  // diagonal — so the orientation is read directly from the endpoints, and the
-  // snap delta is derived from the line's own coordinate (fractional-safe).
-  const horizontal = y1 === y2;
-  const vertical = x1 === x2;
-  const dpx = vertical ? crispOffset(x1, lw, dpr) : 0;
-  const dpy = horizontal ? crispOffset(y1, lw, dpr) : 0;
-  ctx.beginPath();
-  ctx.moveTo(x1 + dpx, y1 + dpy);
-  ctx.lineTo(x2 + dpx, y2 + dpy);
-  ctx.stroke();
+
+  if (spec.style === 'double') {
+    // ECMA-376 §17.18.2 ST_Border "double": a double line around the object.
+    // The standard does not normatively define the rail/gap geometry, so this
+    // matches Word's rendering — three equal bands across the nominal width
+    // (line / gap / line), each rail = sz/3, gap = sz/3, the pair centered on
+    // the edge. (Word's own UI labels `sz` as the total double-border width.)
+    const railW = Math.max(0.5, lw / 3);
+    const offset = (lw - railW) / 2; // rail centers sit ±offset from the edge
+    strokeCrispSegment(ctx, x1, y1, x2, y2, railW, dpr, -offset);
+    strokeCrispSegment(ctx, x1, y1, x2, y2, railW, dpr, offset);
+    ctx.restore();
+    return;
+  }
+
+  strokeCrispSegment(ctx, x1, y1, x2, y2, lw, dpr, 0);
   ctx.restore();
 }
 

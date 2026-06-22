@@ -23,7 +23,7 @@ function emptyCell(): DocTableCell {
     content: [],
     colSpan: 1,
     vMerge: null,
-    borders: { top: null, bottom: null, left: null, right: null },
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
     background: null,
     vAlign: 'top',
     widthPt: null,
