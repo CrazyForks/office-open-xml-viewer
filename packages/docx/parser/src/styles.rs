@@ -244,6 +244,21 @@ pub struct TableStyleDef {
     pub col_band_size: Option<usize>,
     /// keyed by w:tblStylePr w:type (firstRow, band1Horz, band2Horz, …).
     pub cond: HashMap<String, CondFmt>,
+    /// ECMA-376 §17.4.42 `<w:tblPr><w:tblCellMar>`: per-edge default cell
+    /// margins (in points). `None` means the style omitted that edge, in
+    /// which case the value inherits from the basedOn chain via
+    /// `resolve_table_style`. The default table style (`<w:style
+    /// w:type="table" w:default="1">`, typically "TableNormal") carries the
+    /// values Word/Office apply when a table omits `<w:tblCellMar>`
+    /// entirely; the parser falls back to these values through
+    /// `default_table_style_id`. If a margin is never specified in the
+    /// style hierarchy, §17.4.34 / §17.4.11 / §17.4.5 / §17.4.75 define the
+    /// spec defaults (115 twips for left/right, 0 for top/bottom) which the
+    /// caller applies.
+    pub cell_margin_top: Option<f64>,
+    pub cell_margin_bottom: Option<f64>,
+    pub cell_margin_left: Option<f64>,
+    pub cell_margin_right: Option<f64>,
 }
 
 pub struct StyleMap {
@@ -254,6 +269,14 @@ pub struct StyleMap {
     /// styleId of the style with w:default="1" and w:type="paragraph".
     /// Applied to paragraphs that have no explicit pStyle.
     default_para_style_id: Option<String>,
+    /// styleId of the style with `w:default="1"` and `w:type="table"`
+    /// (typically "TableNormal" / "Normal Table"). ECMA-376 §17.7.4 makes
+    /// this the implicit table style for tables that omit `<w:tblStyle>`,
+    /// so its `<w:tblCellMar>` (and any other tblPr defaults) apply when a
+    /// table inherits silently. Stored separately from
+    /// `default_para_style_id` since the paragraph default and table default
+    /// are independent.
+    default_table_style_id: Option<String>,
 }
 
 impl StyleMap {
@@ -261,6 +284,17 @@ impl StyleMap {
     /// International templates may use non-English IDs (e.g. "a", "標準").
     pub fn default_para_style_id(&self) -> Option<&str> {
         self.default_para_style_id.as_deref()
+    }
+
+    /// Style ID of the `w:type="table" w:default="1"` style (typically
+    /// "TableNormal" / "Normal Table"). ECMA-376 §17.4.42 + §17.7.4: a
+    /// table that omits `<w:tblCellMar>` inherits from its associated table
+    /// style, and a table that omits `<w:tblStyle>` is associated with the
+    /// default table style. Callers in `parser.rs` use this to resolve cell
+    /// margin defaults when the document never names a table style on the
+    /// table itself.
+    pub fn default_table_style_id(&self) -> Option<&str> {
+        self.default_table_style_id.as_deref()
     }
 
     pub fn parse(xml: &str) -> Self {
@@ -297,6 +331,7 @@ impl StyleMap {
         // index them in the same StyleMap so cell resolution can look
         // them up by ID.
         let mut default_para_style_id: Option<String> = None;
+        let mut default_table_style_id: Option<String> = None;
         let mut table_styles: HashMap<String, TableStyleDef> = HashMap::new();
         for style_node in children_w(root, "style") {
             let Some(style_id) = attr_w(style_node, "styleId") else {
@@ -309,6 +344,11 @@ impl StyleMap {
 
             if style_type == "paragraph" && attr_w(style_node, "default").as_deref() == Some("1") {
                 default_para_style_id = Some(style_id.clone());
+            }
+            // §17.7.4: track `<w:style w:type="table" w:default="1">` so
+            // tables that omit `<w:tblStyle>` can inherit its tblCellMar etc.
+            if style_type == "table" && attr_w(style_node, "default").as_deref() == Some("1") {
+                default_table_style_id = Some(style_id.clone());
             }
 
             let based_on = child_w(style_node, "basedOn").and_then(|n| attr_w(n, "val"));
@@ -348,6 +388,7 @@ impl StyleMap {
             defaults_para,
             defaults_run,
             default_para_style_id,
+            default_table_style_id,
         }
     }
 
@@ -358,6 +399,7 @@ impl StyleMap {
             defaults_para: ParaFmt::default(),
             defaults_run: RunFmt::default(),
             default_para_style_id: None,
+            default_table_style_id: None,
         }
     }
 
@@ -395,6 +437,24 @@ impl StyleMap {
             }
             if def.col_band_size.is_some() {
                 out.col_band_size = def.col_band_size;
+            }
+            // §17.4.42: per-edge tblCellMar inherits through basedOn — a
+            // derived style that omits an edge keeps the base value, and
+            // an explicit edge value overrides. Each edge is independent
+            // (Word writes `<w:left w:w="108"/>` without writing `<w:top>`
+            // in TableNormal, and a derived style may override only
+            // `<w:bottom>` without resetting the others).
+            if def.cell_margin_top.is_some() {
+                out.cell_margin_top = def.cell_margin_top;
+            }
+            if def.cell_margin_bottom.is_some() {
+                out.cell_margin_bottom = def.cell_margin_bottom;
+            }
+            if def.cell_margin_left.is_some() {
+                out.cell_margin_left = def.cell_margin_left;
+            }
+            if def.cell_margin_right.is_some() {
+                out.cell_margin_right = def.cell_margin_right;
             }
             // §17.7.6: a derived table style's whole-table rPr/pPr layers ON TOP
             // of the base style's. We fold each level into a single accumulated
@@ -1192,6 +1252,25 @@ fn parse_tbl_style_def(style_node: roxmltree::Node, based_on: Option<String>) ->
             .and_then(|n| attr_w(n, "val"))
             .and_then(|v| v.parse::<usize>().ok())
             .map(|n| n.max(1));
+        // ECMA-376 §17.4.42 `<w:tblCellMar>`: per-edge default cell margins
+        // for tables that inherit this style. Each edge is stored as
+        // Option<f64> (points) so a derived style omitting an edge inherits
+        // the base via `resolve_table_style`. §17.18.90 ST_TblWidth says
+        // dxa = 1/20 pt; w:type other than dxa is ignored for margins.
+        if let Some(m) = child_w(tbl_pr, "tblCellMar") {
+            let edge = |name: &str| -> Option<f64> {
+                child_w(m, name)
+                    .filter(|n| attr_w(*n, "type").map(|t| t == "dxa").unwrap_or(true))
+                    .and_then(|n| attr_w(n, "w"))
+                    .map(|v| twips_to_pt(&v))
+            };
+            def.cell_margin_top = edge("top");
+            def.cell_margin_bottom = edge("bottom");
+            // §17.4.34 / §17.4.35 use `start`/`end` in the schema; Word also
+            // writes the legacy `left`/`right` aliases. Accept either.
+            def.cell_margin_left = edge("left").or_else(|| edge("start"));
+            def.cell_margin_right = edge("right").or_else(|| edge("end"));
+        }
     }
     if let Some(tc_pr) = child_w(style_node, "tcPr") {
         def.cell_shd = shd_fill(tc_pr);
@@ -1497,6 +1576,96 @@ mod tests {
             Some("ff0000"),
             "direct run color must override the conditional base"
         );
+    }
+
+    // ===== Table-style tblCellMar inheritance (§17.4.42 / §17.7.6) =====
+
+    /// styles.xml mirroring sample-3: the default table style "TableNormal"
+    /// (`w:default="1"`) carries `<w:tblPr><w:tblCellMar>` with left/right=108
+    /// twips. ECMA-376 §17.4.42 says a table whose `<w:tblPr>` omits
+    /// `<w:tblCellMar>` inherits the margins from its associated table style;
+    /// when no style is set, the spec maps the table to the default table
+    /// style. The parser must therefore (a) capture per-edge margins on
+    /// `TableStyleDef`, (b) flatten them through the basedOn chain, and (c)
+    /// expose the default table style so `parser.rs` can fall back to it when
+    /// no `<w:tblStyle>` is present on the table.
+    fn default_table_style_map() -> StyleMap {
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="TableNormal">
+                <w:name w:val="Normal Table"/>
+                <w:tblPr>
+                  <w:tblCellMar>
+                    <w:top w:w="0" w:type="dxa"/>
+                    <w:left w:w="108" w:type="dxa"/>
+                    <w:bottom w:w="0" w:type="dxa"/>
+                    <w:right w:w="108" w:type="dxa"/>
+                  </w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        StyleMap::parse(&xml)
+    }
+
+    #[test]
+    fn table_style_captures_tbl_cell_mar_per_edge() {
+        // §17.4.42: a table style's `<w:tblPr><w:tblCellMar>` defines defaults
+        // for tables that inherit from it. The parser must surface each edge
+        // on TableStyleDef so a table that omits `<w:tblCellMar>` can fall
+        // back to these values (sample-3 root cause). 108 twips = 5.4 pt.
+        let sm = default_table_style_map();
+        let def = sm.resolve_table_style("TableNormal");
+        assert_eq!(def.cell_margin_top, Some(0.0));
+        assert_eq!(def.cell_margin_bottom, Some(0.0));
+        assert_eq!(def.cell_margin_left, Some(5.4));
+        assert_eq!(def.cell_margin_right, Some(5.4));
+    }
+
+    #[test]
+    fn default_table_style_id_is_exposed() {
+        // §17.7.4: a `<w:style w:type="table" w:default="1">` is the implicit
+        // style for tables that omit `<w:tblStyle>`. The parser must expose
+        // the styleId so callers can resolve the default style chain
+        // (sample-3's TableNormal carries the 108-twips cell margins that
+        // make tcMar-absent cells line up).
+        let sm = default_table_style_map();
+        assert_eq!(sm.default_table_style_id(), Some("TableNormal"));
+    }
+
+    #[test]
+    fn tbl_cell_mar_inherits_through_based_on_chain() {
+        // §17.7.6 + §17.4.42: a derived table style that omits `<w:tblCellMar>`
+        // inherits the per-edge values from its base. A derived style that
+        // sets ONLY one edge keeps the base values for the rest.
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="TableNormal">
+                <w:tblPr>
+                  <w:tblCellMar>
+                    <w:left w:w="108" w:type="dxa"/>
+                    <w:right w:w="108" w:type="dxa"/>
+                  </w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+              <w:style w:type="table" w:styleId="Derived">
+                <w:basedOn w:val="TableNormal"/>
+                <w:tblPr>
+                  <w:tblCellMar>
+                    <w:left w:w="200" w:type="dxa"/>
+                  </w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let sm = StyleMap::parse(&xml);
+        let def = sm.resolve_table_style("Derived");
+        // Derived overrides left (200 twips = 10pt) …
+        assert_eq!(def.cell_margin_left, Some(10.0));
+        // … but right inherits TableNormal (108 twips = 5.4pt).
+        assert_eq!(def.cell_margin_right, Some(5.4));
     }
 
     #[test]

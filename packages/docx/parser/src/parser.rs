@@ -4204,8 +4204,17 @@ fn parse_table(
     // Resolve the table style's cell/border formatting (shading, banding, borders,
     // vAlign) — these live in styles.xml, not inline (§17.7.6). tblLook selects which
     // conditional formats are active.
-    let tstyle = table_style_id
+    //
+    // ECMA-376 §17.7.4 + §17.4.42: when the table omits `<w:tblStyle>`, the
+    // implicit association is the `<w:style w:type="table" w:default="1">`
+    // (typically "TableNormal" / "Normal Table"). That style's
+    // `<w:tblCellMar>` (and other tblPr defaults) MUST apply, otherwise a
+    // table whose cells rely on TableNormal's 108-twip left/right padding
+    // (the Word convention) renders with the wrong column geometry.
+    let effective_table_style_id = table_style_id
         .as_deref()
+        .or_else(|| style_map.default_table_style_id());
+    let tstyle = effective_table_style_id
         .map(|id| style_map.resolve_table_style(id))
         .unwrap_or_default();
     // ECMA-376 §17.4.49 (w:tblLook). Word writes this either with the modern
@@ -4247,30 +4256,46 @@ fn parse_table(
         .unwrap_or_default();
     apply_style_borders(&mut borders, &tstyle.borders);
 
-    // Cell margins
-    let (cm_top, cm_bot, cm_left, cm_right) = tbl_pr
-        .and_then(|p| child_w(p, "tblCellMar"))
-        .map(|m| {
-            (
-                child_w(m, "top")
-                    .and_then(|n| attr_w(n, "w"))
-                    .map(|v| twips_to_pt(&v))
-                    .unwrap_or(0.0),
-                child_w(m, "bottom")
-                    .and_then(|n| attr_w(n, "w"))
-                    .map(|v| twips_to_pt(&v))
-                    .unwrap_or(0.0),
-                child_w(m, "left")
-                    .and_then(|n| attr_w(n, "w"))
-                    .map(|v| twips_to_pt(&v))
-                    .unwrap_or(3.6),
-                child_w(m, "right")
-                    .and_then(|n| attr_w(n, "w"))
-                    .map(|v| twips_to_pt(&v))
-                    .unwrap_or(3.6),
-            )
-        })
-        .unwrap_or((0.0, 0.0, 3.6, 3.6));
+    // Cell margins. ECMA-376 §17.4.42 (Table Cell Margin Defaults) defines a
+    // strict three-tier inheritance:
+    //   1. Inline `<w:tblPr><w:tblCellMar>` per-edge value wins.
+    //   2. Any edge omitted inline inherits from the associated table style's
+    //      `<w:tblCellMar>` (flattened through basedOn in `resolve_table_style`).
+    //      Per §17.7.4 a table that omits `<w:tblStyle>` is implicitly
+    //      associated with the `w:default="1"` table style (e.g.
+    //      "TableNormal"); we already resolved that into `tstyle` above.
+    //   3. If the style hierarchy never specifies an edge, fall back to the
+    //      spec-mandated default for that edge:
+    //        - §17.4.34 (start) / §17.4.11 (end): 115 twips = 5.75 pt
+    //        - §17.4.5  (bottom) / §17.4.75 (top): 0
+    //
+    // The previous implementation used a magic 3.6 pt fallback for left/right
+    // with no spec basis (a value that also silently overrode TableNormal's
+    // 108-twip inheritance because the code never consulted the style chain).
+    // sample-3's table relies on TableNormal's 5.4 pt left/right padding; the
+    // 3.6 pt default offset every tcMar-absent cell by 1.8 pt per edge.
+    let inline_mar = tbl_pr.and_then(|p| child_w(p, "tblCellMar"));
+    let inline_edge = |name: &str| -> Option<f64> {
+        inline_mar
+            .and_then(|m| child_w(m, name))
+            .filter(|n| attr_w(*n, "type").map(|t| t == "dxa").unwrap_or(true))
+            .and_then(|n| attr_w(n, "w"))
+            .map(|v| twips_to_pt(&v))
+    };
+    // §17.4.34 / §17.4.35: the modern schema uses `start`/`end`; Word also
+    // writes the legacy `left`/`right` aliases. Accept either at every layer.
+    let cm_top = inline_edge("top").or(tstyle.cell_margin_top).unwrap_or(0.0);
+    let cm_bot = inline_edge("bottom")
+        .or(tstyle.cell_margin_bottom)
+        .unwrap_or(0.0);
+    let cm_left = inline_edge("left")
+        .or_else(|| inline_edge("start"))
+        .or(tstyle.cell_margin_left)
+        .unwrap_or(5.75); // §17.4.34: 115 twips when never specified
+    let cm_right = inline_edge("right")
+        .or_else(|| inline_edge("end"))
+        .or(tstyle.cell_margin_right)
+        .unwrap_or(5.75); // §17.4.11: 115 twips when never specified
 
     // §17.4.7/§17.4.8 conditional-format bitmasks. Captured up front so we can
     // both (a) thread each cell's resolved conditional rPr/pPr into its content
@@ -4479,7 +4504,15 @@ fn parse_table(
             media_map,
             rel_map,
             theme,
-            table_style_id.as_deref(),
+            // §17.7.4: the effective style id includes the
+            // `w:default="1"` table style when the document omits
+            // `<w:tblStyle>`. Threading the effective id (rather than the
+            // raw `table_style_id`) ensures cell paragraphs resolve their
+            // pPr/rPr defaults from the same style chain we already used
+            // for tstyle's borders, banding and cell margins. This keeps
+            // the inheritance consistent across all tstyle-derived
+            // attributes.
+            effective_table_style_id,
             &cell_conds,
         );
         rows.push(row);
@@ -5553,6 +5586,119 @@ mod tests {
         // Paragraph-style bold/italic preserved (PR #524).
         assert!(first.bold, "TOC1 bold kept");
         assert!(second.italic, "TOC2 italic kept");
+    }
+
+    // ===== §17.4.42 tblCellMar inheritance =====
+
+    fn parse_tbl_with_styles(body: &str, styles_xml: &str) -> DocTable {
+        let xml = format!(r#"<w:tbl xmlns:w="{ns}">{body}</w:tbl>"#, ns = W_NS);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse(styles_xml);
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        parse_table(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &media,
+            &rels,
+            &theme,
+        )
+    }
+
+    /// sample-3 root cause: a table whose `<w:tblPr>` carries NO
+    /// `<w:tblCellMar>` must inherit per-edge margins from the default table
+    /// style `<w:style w:type="table" w:default="1">` (typically
+    /// "TableNormal"). ECMA-376 §17.4.42 explicitly says an omitted
+    /// `<w:tblCellMar>` inherits from the associated table style; §17.7.4
+    /// makes a `default="1"` table style the implicit association when the
+    /// table omits `<w:tblStyle>`. Word/Office honor this; the previous
+    /// `unwrap_or(3.6)` magic constant ignored the inheritance entirely,
+    /// shifting left/right by 1.8pt per edge.
+    #[test]
+    fn table_inherits_cell_margins_from_default_table_style() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="TableNormal">
+                <w:tblPr>
+                  <w:tblCellMar>
+                    <w:top w:w="0" w:type="dxa"/>
+                    <w:left w:w="108" w:type="dxa"/>
+                    <w:bottom w:w="0" w:type="dxa"/>
+                    <w:right w:w="108" w:type="dxa"/>
+                  </w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        // The table itself omits `<w:tblCellMar>` and `<w:tblStyle>`.
+        let t = parse_tbl_with_styles(
+            r#"<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        // 108 twips = 5.4 pt — TableNormal's left/right cell padding.
+        assert_eq!(t.cell_margin_top, 0.0);
+        assert_eq!(t.cell_margin_bottom, 0.0);
+        assert_eq!(t.cell_margin_left, 5.4);
+        assert_eq!(t.cell_margin_right, 5.4);
+    }
+
+    /// Regression guard: an inline `<w:tblCellMar>` still wins over the
+    /// inherited style values (§17.4.42 explicit-overrides-default).
+    #[test]
+    fn inline_tbl_cell_mar_overrides_style_default() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="table" w:default="1" w:styleId="TableNormal">
+                <w:tblPr>
+                  <w:tblCellMar>
+                    <w:left w:w="108" w:type="dxa"/>
+                    <w:right w:w="108" w:type="dxa"/>
+                  </w:tblCellMar>
+                </w:tblPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        // Inline tblCellMar with ONLY left set (200 twips = 10pt). The other
+        // edges should inherit from the style chain (right=5.4pt; top/bottom
+        // unset on both → 0).
+        let t = parse_tbl_with_styles(
+            r#"<w:tblPr>
+                 <w:tblCellMar><w:left w:w="200" w:type="dxa"/></w:tblCellMar>
+               </w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            &styles,
+        );
+        assert_eq!(t.cell_margin_left, 10.0, "inline left wins");
+        assert_eq!(t.cell_margin_right, 5.4, "right inherits TableNormal");
+        assert_eq!(t.cell_margin_top, 0.0);
+        assert_eq!(t.cell_margin_bottom, 0.0);
+    }
+
+    /// When no table style exists at all and the table omits
+    /// `<w:tblCellMar>`, §17.4.34 / §17.4.11 declare the spec default:
+    /// 115 twips (= 5.75pt) for left/right; §17.4.5 / §17.4.75 declare 0 for
+    /// top/bottom. The previous code used 3.6pt — a magic constant with no
+    /// spec basis. After this fix the fallback is the documented 115/0.
+    #[test]
+    fn no_style_no_inline_uses_spec_default_115_twips_left_right() {
+        let t = parse_tbl_with_styles(
+            r#"<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            "", // no styles
+        );
+        assert_eq!(t.cell_margin_top, 0.0);
+        assert_eq!(t.cell_margin_bottom, 0.0);
+        assert_eq!(t.cell_margin_left, 5.75);
+        assert_eq!(t.cell_margin_right, 5.75);
     }
 
     // Regression guard for PR #516: a STANDALONE internal hyperlink OUTSIDE any
