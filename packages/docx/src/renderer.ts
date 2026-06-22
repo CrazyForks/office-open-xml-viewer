@@ -240,6 +240,19 @@ export interface RenderState {
    *  `<w:footnoteRef>` placeholder (which carries no id) renders the note's
    *  number. Undefined for body text. */
   currentNoteNumber?: number;
+  /** ECMA-376 §20.4.3.2/§20.4.3.5: a DrawingML anchor whose `<wp:positionV>`
+   *  uses a page-level `relativeFrom` (page / margin / topMargin / bottomMargin
+   *  / leftMargin / rightMargin / insideMargin / outsideMargin / column) is
+   *  positioned independently of its source-order anchoring paragraph — Word
+   *  lays it out as soon as the page is opened, so paragraphs that come BEFORE
+   *  the anchor's paragraph in source order still wrap around it. To match,
+   *  we pre-scan upcoming body paragraphs at every page-start and register
+   *  these floats up front. This set records which paragraphs have had their
+   *  page-level floats pre-registered on the current page, so
+   *  {@link registerAnchorFloats} skips re-registering them when the main
+   *  flow reaches that paragraph. Reset whenever floats are reset (page flip
+   *  or column relocation that rolls back this paragraph's own floats). */
+  pageAnchorPrescanned?: Set<DocParagraph>;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -1096,6 +1109,23 @@ export function computePages(
   measureState.y = section.marginTop;
   measureState.floats = [];
   measureState.floatParaSeq = 0;
+  // ECMA-376 §20.4.3.2/§20.4.3.5: a wp:anchor whose positionV relativeFrom is
+  // page-level (page / margin / *Margin / column) is positioned independently
+  // of its source-order anchoring paragraph — Word lays it out at page-open,
+  // so paragraphs PRECEDING the anchor's paragraph on the same page still
+  // wrap around it. We pre-register such floats at every page-start so the
+  // paginator's per-paragraph height estimate matches the renderer (which
+  // does the same pre-scan once per page in renderBodyElements). The
+  // page-start body index is updated at every place that resets `floats`
+  // (initial setup, newPage, pageBreak, sectionBreak/nextPage, +
+  // pageBreakBefore). prescanFloatsFrom() reads it and rescans into the
+  // (already cleared) measureState. See preRegisterPageFloats header.
+  measureState.pageAnchorPrescanned = new Set();
+  const prescanFloatsFrom = (idx: number): void => {
+    measureState.pageAnchorPrescanned = new Set();
+    preRegisterPageFloats(body, idx, measureState);
+  };
+  prescanFloatsFrom(0);
   // Footnote ids already reserved on the current page (so a paragraph that
   // references the same note twice doesn't double-count, and the renderer draws
   // each note once). Reset on every page flip.
@@ -1107,7 +1137,12 @@ export function computePages(
     footnoteReservePt[pages.length - 1] = 0;
     pageNoteIds = new Set<string>();
   };
-  const newPage = () => {
+  /** Open a new page (no-op when the current one is empty). `pageStartIdx`
+   *  is the body index that becomes the new page's first laid-out item — the
+   *  caller's current `i` (a paragraph being split / relocated / a pageBreak
+   *  / a table being split). Used to pre-register page-level wrap floats
+   *  (ECMA-376 §20.4.3.2/§20.4.3.5; see `prescanFloatsFrom`). */
+  const newPage = (pageStartIdx: number) => {
     if (pages[pages.length - 1].length > 0) {
       pages.push([]);
       y = 0;
@@ -1119,6 +1154,7 @@ export function computePages(
       // clean float set. Columns of the SAME page share floats (see nextColumn).
       measureState.floats = [];
       measureState.floatParaSeq = 0;
+      prescanFloatsFrom(pageStartIdx);
       startPageBookkeeping();
     }
   };
@@ -1136,9 +1172,12 @@ export function computePages(
   };
   // Overflow handler shared by element placement and paragraph/table splitting:
   // move to the next column if one remains on this page, otherwise to a new page.
-  const nextColumnOrPage = () => {
+  // `pageStartIdx` is forwarded to `newPage` so a fresh page pre-registers
+  // page-level floats from the right body index (the element that triggered the
+  // overflow); ignored for the same-page next-column path (floats are page-scoped).
+  const nextColumnOrPage = (pageStartIdx: number) => {
     if (colIndex < columns.length - 1) nextColumn();
-    else newPage();
+    else newPage(pageStartIdx);
   };
 
   // A paragraph-anchored floating object (wp:anchor with positionV
@@ -1226,8 +1265,9 @@ export function computePages(
       // ECMA-376 §17.3.1.20 <w:br w:type="column"/>: force the next column (or a
       // new page's first column when already in the last column — newPage() no-ops
       // on an empty page, so a column break in the last column of an as-yet-empty
-      // page simply stays put).
-      nextColumnOrPage();
+      // page simply stays put). Page-start index = the body element AFTER the
+      // break (i + 1) since the break itself emits no content on the new page.
+      nextColumnOrPage(i + 1);
       continue;
     }
     if (el.type === 'pageBreak') {
@@ -1238,6 +1278,9 @@ export function computePages(
       measureState.y = section.marginTop;
       measureState.floats = [];
       measureState.floatParaSeq = 0;
+      // Pre-register page-level wrap floats from the next body element onward
+      // (the pageBreak itself emits nothing on the new page).
+      prescanFloatsFrom(i + 1);
       startPageBookkeeping();
       // ECMA-376 §17.18.79 ST_SectionMark: oddPage / evenPage breaks pad
       // with a blank page when the new section would otherwise start on the
@@ -1282,6 +1325,9 @@ export function computePages(
         measureState.y = section.marginTop;
         measureState.floats = [];
         measureState.floatParaSeq = 0;
+        // Pre-register page-level wrap floats from the next body element onward
+        // (the sectionBreak itself emits nothing on the new page).
+        prescanFloatsFrom(i + 1);
         startPageBookkeeping();
         if (el.kind === 'oddPage' && pages.length % 2 === 0) {
           pages.push([]);
@@ -1295,7 +1341,11 @@ export function computePages(
     }
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
-      if (para.pageBreakBefore) newPage();
+      // `pageBreakBefore` opens a fresh page whose first item is THIS paragraph,
+      // so the pre-scan should start at `i` (not i+1) to include its own
+      // page-level floats. (registerAnchorFloats below will then skip the
+      // pre-registered page-level ones via state.pageAnchorPrescanned.)
+      if (para.pageBreakBefore) newPage(i);
 
       // A frame paragraph (ECMA-376 §17.3.1.11) is positioned out of flow: it
       // does not advance the page cursor and is not split. Register its wrap
@@ -1415,7 +1465,9 @@ export function computePages(
       const keepIntact = para.keepLines || needNext > 0 || addReservePt > 0;
       if (breakForFloat || (overflowsHere && keepIntact && needed <= effContentH())) {
         const pagesBeforeRelocate = pages.length;
-        nextColumnOrPage();
+        // Relocating THIS paragraph to a fresh page: pre-scan from `i` so the
+        // new page starts with THIS paragraph's own page-level floats counted.
+        nextColumnOrPage(i);
         const movedToNewPage = pages.length > pagesBeforeRelocate;
         if (movedToNewPage) {
           // newPage() cleared measureState.floats AND reset floatParaSeq to 0, so
@@ -1458,8 +1510,10 @@ export function computePages(
           // Overflow during the split advances to the next column first, then a
           // new page (newspaper fill). Each slice is tagged with the column it
           // landed in via the colIndex thunk, plus this section's column geometry
-          // (constant — a paragraph never spans a section boundary).
-          () => { nextColumnOrPage(); },
+          // (constant — a paragraph never spans a section boundary). The
+          // continuation slice belongs to THIS paragraph, so the new page's
+          // pre-scan starts at `i` (this paragraph index).
+          () => { nextColumnOrPage(i); },
           () => colIndex,
           columns,
         );
@@ -1543,14 +1597,16 @@ export function computePages(
         // pagination). Tables that fit keep the simple place-whole path below.
         const endY = splitTableAcrossPages(
           tbl, rowHs, y, tableContentH, pages,
-          () => { nextColumnOrPage(); },
+          // Table slices belong to THIS table element, so the new page's
+          // pre-scan starts at `i` (this table's body index).
+          () => { nextColumnOrPage(i); },
           () => colIndex,
           columns,
         );
         y = endY;
         measureState.y = section.marginTop + endY;
       } else {
-        if (y + h > tableContentH) nextColumnOrPage();
+        if (y + h > tableContentH) nextColumnOrPage(i);
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
@@ -2426,6 +2482,20 @@ function renderBodyElements(
 ): void {
   let prevPara: DocParagraph | null = null;
   let prevSpaceAfter = 0;
+  // ECMA-376 §20.4.3.2/§20.4.3.5: a wp:anchor whose positionV relativeFrom is
+  // page-level (page / margin / *Margin / column — anything but
+  // paragraph/line/character) is positioned independently of its source-order
+  // anchoring paragraph. Word lays such floats out as soon as the page is
+  // opened, so paragraphs PRECEDING the anchor's paragraph on the same page
+  // still wrap around it. Mirror that by pre-registering them at every
+  // page-start — `state` is fresh per page (renderDocumentToCanvas builds a
+  // new bodyState with floats=[] for each render call), so this single call
+  // covers the page. `elements` is already the paginated body for THIS page,
+  // so scanning from index 0 stays within the page (preRegisterPageFloats
+  // additionally stops at the first explicit page/non-continuous section
+  // break, which is a no-op here but matches the paginator's call sites).
+  state.pageAnchorPrescanned = new Set();
+  preRegisterPageFloats(elements, 0, state);
   // The (geometry, column index) the flow `state` is currently set to. `activeCol`
   // starts at -1 so the first element always seeds the column. `activeGeom` tracks
   // the SECTION whose columns are in effect (per-section newspaper columns,
@@ -5265,6 +5335,24 @@ export const __test_resolveAnchorBox = (
 ): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } =>
   resolveAnchorBox(img, state, paraBaseY);
 
+/** Exported for the page-anchor pre-scan test (ECMA-376 §20.4.3.2/§20.4.3.5):
+ *  drives {@link preRegisterPageFloats} from a unit test against a stub
+ *  RenderState so we can pin which paragraphs get pre-registered and that
+ *  duplicate calls are idempotent. */
+export const __test_preRegisterPageFloats = (
+  body: readonly (BodyElement | PaginatedBodyElement)[],
+  startIdx: number,
+  state: RenderState,
+): void => preRegisterPageFloats(body, startIdx, state);
+
+/** Exported for the page-anchor pre-scan test — pins the
+ *  {paragraph,line,character} ⇒ paragraph-local vs everything-else ⇒ page-level
+ *  classification (ECMA-376 §20.4.3.5 ST_RelFromV). */
+export const __test_isPageLevelAnchorY = (
+  rf: string | null | undefined,
+  fromPara: boolean,
+): boolean => isPageLevelAnchorY(rf, fromPara);
+
 function resolveAnchorBox(
   img: ImageRun,
   state: RenderState,
@@ -5307,21 +5395,136 @@ function resolveAnchorBox(
   };
 }
 
+/** ECMA-376 §20.4.3.2 / §20.4.3.5 — a `<wp:positionV>` `relativeFrom` value
+ *  that resolves the float's Y INDEPENDENTLY of its anchoring paragraph (vs.
+ *  `paragraph` / `line` / `character` which resolve against the paragraph's
+ *  top). When Y is page-level, Word treats the float as page-positioned: it
+ *  is laid out as soon as the page is opened and earlier paragraphs on the
+ *  same page wrap around it. {@link preRegisterPageFloats} uses this to
+ *  hoist such floats to page-start; paragraph-local Y still flows the legacy
+ *  per-paragraph path.
+ *
+ *  An anchor with NO explicit `<wp:positionV>` (anchorYRelativeFrom absent)
+ *  still resolves against the page top via the legacy hint
+ *  (`anchorYFromPara=false` ⇒ page-absolute offset), so it qualifies as
+ *  page-level too. */
+function isPageLevelAnchorY(rf: string | null | undefined, fromPara: boolean): boolean {
+  if (rf == null) return !fromPara;
+  switch (rf) {
+    case 'paragraph':
+    case 'line':
+    case 'character':
+      return false;
+    default:
+      return true;
+  }
+}
+
+/** True when this run is a wrap float whose vertical placement is page-level
+ *  (independent of source-order paragraph position) — see
+ *  {@link isPageLevelAnchorY}. `isWrapFloat` already filters inline images
+ *  (their `wrapMode` is undefined) and non-wrapping anchors, so an extra
+ *  `anchor` check is redundant here. */
+function isPageLevelWrapFloat(run: ImageRun | ShapeRun): boolean {
+  if (!isWrapFloat(run.wrapMode)) return false;
+  return isPageLevelAnchorY(run.anchorYRelativeFrom ?? null, run.anchorYFromPara ?? false);
+}
+
 /** Register floats from a paragraph's anchor images and shapes. Anchor images
  *  are drawn immediately; anchor shapes are NOT drawn here (renderAnchorShape
  *  paints them separately) — we only reserve their float-exclusion band so body
- *  text wraps around them (ECMA-376 §20.4.2.16/.17), exactly like images. */
+ *  text wraps around them (ECMA-376 §20.4.2.16/.17), exactly like images.
+ *
+ *  Page-level floats (positionV relativeFrom ∈ {page, margin, *Margin, column},
+ *  ECMA-376 §20.4.3.2/§20.4.3.5) are skipped when this paragraph was already
+ *  pre-registered at the current page's start by {@link preRegisterPageFloats}
+ *  — re-registering would double-stamp the FloatRect (and re-draw the image).
+ *  Paragraph-local floats (`paragraph`/`line`/`character`) keep the per-
+ *  paragraph path so their Y stays anchored at this paragraph's top. */
 function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphAnchorY: number): void {
   // One id per registerAnchorFloats call ⇒ one id per paragraph. Floats sharing
   // a paraId (e.g. two side-by-side photos in one paragraph) never displace each
   // other; floats from different paragraphs do (de-facto overlap avoidance).
   const paraId = state.floatParaSeq++;
+  const prescanned = state.pageAnchorPrescanned?.has(para) ?? false;
   for (const run of para.runs) {
     if (run.type === 'image') {
-      registerImageFloat(run as unknown as ImageRun, state, paragraphAnchorY, paraId);
+      const img = run as unknown as ImageRun;
+      if (prescanned && isPageLevelWrapFloat(img)) continue;
+      registerImageFloat(img, state, paragraphAnchorY, paraId);
     } else if (run.type === 'shape') {
-      registerShapeFloat(run as unknown as ShapeRun, state, paragraphAnchorY, paraId);
+      const shp = run as unknown as ShapeRun;
+      if (prescanned && isPageLevelWrapFloat(shp)) continue;
+      registerShapeFloat(shp, state, paragraphAnchorY, paraId);
     }
+  }
+}
+
+/** Pre-scan upcoming body elements at a page-start moment and register any
+ *  page-level (positionV relativeFrom ∈ {page, margin, *Margin, column})
+ *  wrap floats they carry. Mirrors Word's layout order: page-level floats are
+ *  positioned as soon as the page is opened, so paragraphs that PRECEDE the
+ *  anchoring paragraph in source order on the same page wrap around them
+ *  (ECMA-376 §20.4.3.2/§20.4.3.5 + §20.4.2.16/.17). Each pre-registered
+ *  paragraph is recorded in `state.pageAnchorPrescanned` so the main flow's
+ *  {@link registerAnchorFloats} skips its page-level runs (avoiding a
+ *  duplicate FloatRect / re-drawn image) while still registering its
+ *  paragraph-local floats normally.
+ *
+ *  Bounds: the scan stops at the next forced page boundary that the
+ *  paginator/renderer is guaranteed to honor — an explicit `pageBreak`
+ *  (§17.18.79 / §17.3.1.20) or a non-continuous `sectionBreak`. Content
+ *  overflow may still push paragraphs to later pages mid-scan; the
+ *  paginator's `newPage()` resets the float set wholesale, so those
+ *  paragraphs get re-pre-scanned on the next page. (Same idempotent flow as
+ *  the existing `registerAnchorFloats` post-newPage re-call at the split-
+ *  relocation site.) */
+function preRegisterPageFloats(
+  body: readonly (BodyElement | PaginatedBodyElement)[],
+  startIdx: number,
+  state: RenderState,
+): void {
+  if (!state.pageAnchorPrescanned) state.pageAnchorPrescanned = new Set();
+  for (let j = startIdx; j < body.length; j++) {
+    const el = body[j];
+    if (!el) continue;
+    if (el.type === 'pageBreak') break;
+    if (el.type === 'sectionBreak') {
+      const sb = el as unknown as { kind?: string };
+      if (sb.kind && sb.kind !== 'continuous') break;
+      continue;
+    }
+    if (el.type !== 'paragraph') continue;
+    const para = el as unknown as DocParagraph;
+    // Skip if already pre-registered (renderer may call this once per page;
+    // paginator may re-call after newPage(), but newPage clears the set).
+    if (state.pageAnchorPrescanned.has(para)) continue;
+    let hasPageLevel = false;
+    for (const run of para.runs) {
+      if (run.type === 'image') {
+        if (isPageLevelWrapFloat(run as unknown as ImageRun)) { hasPageLevel = true; break; }
+      } else if (run.type === 'shape') {
+        if (isPageLevelWrapFloat(run as unknown as ShapeRun)) { hasPageLevel = true; break; }
+      }
+    }
+    if (!hasPageLevel) continue;
+    // Register only the page-level floats from this paragraph. paraY=0 is safe
+    // because resolveAnchorY ignores it for page-level relativeFrom containers
+    // (anchor-geometry.ts §20.4.3.x). Allocate a fresh paraId so overlap
+    // avoidance treats these like any other anchor-paragraph float.
+    const paraId = state.floatParaSeq++;
+    for (const run of para.runs) {
+      if (run.type === 'image') {
+        const img = run as unknown as ImageRun;
+        if (!isPageLevelWrapFloat(img)) continue;
+        registerImageFloat(img, state, 0, paraId);
+      } else if (run.type === 'shape') {
+        const shp = run as unknown as ShapeRun;
+        if (!isPageLevelWrapFloat(shp)) continue;
+        registerShapeFloat(shp, state, 0, paraId);
+      }
+    }
+    state.pageAnchorPrescanned.add(para);
   }
 }
 
