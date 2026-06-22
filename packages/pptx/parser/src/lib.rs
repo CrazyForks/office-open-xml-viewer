@@ -5510,16 +5510,31 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
                 })
                 .and_then(|fill| parse_color_node(fill, theme));
 
-            // Per-data-point colors from <c:dPt> (important for pie charts)
+            // Per-data-point colors from <c:dPt> (§21.2.2.52; important for
+            // pie charts). The point index is the CHILD element `<c:idx val>`
+            // (ECMA-376 §21.2.2.84, CT_UnsignedInt), not an attribute on
+            // `<c:dPt>` — the old `attr(dpt, "idx")` always returned None, so
+            // every slice fell
+            // back to the series colour. The fill is `<c:spPr><a:solidFill>`;
+            // restrict to spPr's direct child so a border `<a:ln><a:solidFill>`
+            // can't be mistaken for the slice fill.
             let data_point_colors: Vec<Option<String>> = (0..series_pt_count)
                 .map(|i| {
                     ser.children()
                         .filter(|n| n.is_element() && n.tag_name().name() == "dPt")
                         .find(|dpt| {
-                            attr(dpt, "idx").and_then(|v| v.parse::<usize>().ok()) == Some(i)
+                            dpt.children()
+                                .find(|n| n.is_element() && n.tag_name().name() == "idx")
+                                .and_then(|n| attr(&n, "val"))
+                                .and_then(|v| v.parse::<usize>().ok())
+                                == Some(i)
                         })
                         .and_then(|dpt| {
-                            dpt.descendants()
+                            dpt.children()
+                                .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+                        })
+                        .and_then(|sp| {
+                            sp.children()
                                 .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
                         })
                         .and_then(|fill| parse_color_node(fill, theme))
@@ -9182,6 +9197,40 @@ mod tests {
             chart.series[0].values,
             vec![Some(10.0), Some(20.0), Some(30.0)],
             "all three points must survive — a multi-level cat must not truncate the series"
+        );
+    }
+
+    #[test]
+    fn legacy_chart_parses_per_point_dpt_colors_for_pie() {
+        // `<c:dPt>` (§21.2.2.52) carries its point index in a CHILD `<c:idx val>`
+        // element (ECMA-376 §21.2.2.84, CT_UnsignedInt), NOT an attribute on it.
+        // Reading it as an attribute always missed, so every pie/doughnut slice
+        // fell back to the series colour (a `<a:schemeClr>` that resolved to the
+        // default accent) — issue #556 follow-up: slide-7 fills were wrong. The
+        // dPt fill must come from `<c:spPr><a:solidFill>`, never the border
+        // `<a:ln><a:solidFill>`.
+        let xml = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <c:chart><c:plotArea><c:pieChart>
+  <c:ser>
+   <c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln></c:spPr>
+   <c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:srgbClr val="0D9488"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="F9F9F9"/></a:solidFill></a:ln></c:spPr></c:dPt>
+   <c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:srgbClr val="14B8A6"/></a:solidFill></c:spPr></c:dPt>
+   <c:cat><c:strRef><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strCache></c:strRef></c:cat>
+   <c:val><c:numRef><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>60</c:v></c:pt><c:pt idx="1"><c:v>40</c:v></c:pt></c:numCache></c:numRef></c:val>
+  </c:ser>
+ </c:pieChart></c:plotArea></c:chart>
+</c:chartSpace>"#;
+        let chart = parse_legacy_chart(xml, &HashMap::new()).expect("pie should parse");
+        assert_eq!(chart.chart_type, "pie");
+        let dpc = chart.series[0]
+            .data_point_colors
+            .as_ref()
+            .expect("per-slice dPt colours must be captured");
+        assert_eq!(
+            dpc,
+            &vec![Some("0D9488".to_string()), Some("14B8A6".to_string())],
+            "each slice takes its own <c:dPt><c:spPr> fill, not the series colour or the border"
         );
     }
 

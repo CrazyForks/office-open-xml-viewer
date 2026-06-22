@@ -648,6 +648,39 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     if (drawValLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, valLineColor, valLineW); // bottom
   }
 
+  // Axis major tick marks (`<c:*Ax><c:majorTickMark>` — ECMA-376 §21.2.2.101).
+  // PowerPoint draws short ruler ticks even when the axis rule itself is light,
+  // so the bar renderer must emit them too (the line renderer already does).
+  // `drawAxisTick`'s `axis` arg selects GEOMETRY: 'val' = vertical rule with
+  // horizontal ticks, 'cat' = horizontal rule with vertical ticks. For a
+  // column chart the value axis is vertical (left) and the category axis
+  // horizontal (bottom); a horizontal bar chart swaps the two.
+  if (!chart.valAxisHidden && chart.valAxisMajorTickMark && chart.valAxisMajorTickMark !== 'none') {
+    for (let si = 0; si <= steps; si++) {
+      const val = si * step;
+      if (!isH) {
+        drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, py0 + ph - (val / axMax) * ph, valLineColor, valLineW);
+      } else {
+        drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, px0 + (val / axMax) * pw, valLineColor, valLineW);
+      }
+    }
+  }
+  // Category ticks sit at band BOUNDARIES with crossBetween="between" (the
+  // bar/column default) — the dividers between Q1|Q2|Q3|Q4 (n+1 ticks) — and
+  // at category centers under "midCat".
+  if (!chart.catAxisHidden && chart.catAxisMajorTickMark && chart.catAxisMajorTickMark !== 'none') {
+    const onBoundary = chart.catAxisCrossBetween !== 'midCat';
+    const last = onBoundary ? n : n - 1;
+    for (let ci = 0; ci <= last; ci++) {
+      const frac = onBoundary ? ci / n : (n === 1 ? 0.5 : ci / (n - 1));
+      if (!isH) {
+        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + frac * pw, catLineColor, catLineW);
+      } else {
+        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'val', px0, py0 + frac * ph, catLineColor, catLineW);
+      }
+    }
+  }
+
   // Bar cluster geometry — ECMA-376 §21.2.2.13 (gapWidth = % of bar width
   // between categories, default 150) and §21.2.2.25 (overlap = signed % of
   // bar width within a cluster, default 0). Within a cluster the pitch
@@ -1026,31 +1059,28 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // Area anchors the value axis at 0; ignore the returned min.
   const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
 
-  const toX = (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
+  // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
+  // default application-defined) gives each category a band of width pw/n and
+  // plots its point at the band CENTER, leaving a half-band margin before the
+  // first and after the last category — matching PowerPoint's Jan…Dec inset.
+  // "midCat" anchors points on the category dividers (flush to the axes).
+  const between = chart.catAxisCrossBetween !== 'midCat';
+  const toX = between
+    ? (i: number) => px0 + ((i + 0.5) / n) * pw
+    : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
   const toY = (v: number) => py0 + ph - (v / axMax) * ph;
 
-  if (!chart.valAxisHidden) {
-    ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
-    ctx.textBaseline = 'middle';
-    const steps = Math.round(axMax / step);
-    for (let si = 0; si <= steps; si++) {
-      const v = si * step; const gy = toY(v);
-      ctx.strokeStyle = si === 0 ? '#aaa' : '#e0e0e0';
-      ctx.lineWidth = si === 0 ? 1 : 0.5;
-      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
-      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
-      ctx.textAlign = 'right';
-      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
-    }
-  }
-  // Category-axis baseline. `<c:catAx><c:spPr><a:ln><a:noFill>` suppresses
-  // the rule (labels stay). Same line-only hide semantics as the line/bar
-  // renderers — see those for the spec reference.
-  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
-    ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
-  }
+  // Axis line colour/weight from `<c:*Ax><c:spPr><a:ln>` (EMU → px at scale),
+  // mirroring the bar/line renderers. Office leaves the value-axis rule off by
+  // default (gridlines stand in), so only draw it when the file specifies one.
+  const catLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#aaa';
+  const valLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#aaa';
+  const catLineW = chart.catAxisLineWidthEmu ? Math.max(0.5, chart.catAxisLineWidthEmu / EMU_PER_PT) * ptToPx : 1;
+  const valLineW = chart.valAxisLineWidthEmu ? Math.max(0.5, chart.valAxisLineWidthEmu / EMU_PER_PT) * ptToPx : 1;
 
+  // Draw the translucent series fills FIRST, then lay gridlines, axis rules,
+  // tick marks and labels on top so they stay visible across the filled
+  // region (PowerPoint keeps the gridlines legible under the 55%-alpha area).
   const stackBase = stacked ? new Array(n).fill(0) as number[] : null;
   for (let si = chart.series.length - 1; si >= 0; si--) {
     const s = chart.series[si];
@@ -1080,11 +1110,58 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.stroke();
   }
 
+  if (!chart.valAxisHidden) {
+    ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+    ctx.textBaseline = 'middle';
+    const steps = Math.round(axMax / step);
+    for (let si = 0; si <= steps; si++) {
+      const v = si * step; const gy = toY(v);
+      ctx.strokeStyle = si === 0 ? '#aaa' : '#e0e0e0';
+      ctx.lineWidth = si === 0 ? 1 : 0.5;
+      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW);
+      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+      ctx.textAlign = 'right';
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 6, gy);
+    }
+  }
+  // Category-axis baseline + value-axis rule. `<c:*Ax><c:spPr><a:ln><a:noFill>`
+  // suppresses just the rule (labels/ticks stay) → `*AxisLineHidden`. The value
+  // rule is drawn only when the file gives it a colour, matching the bar/line
+  // renderers (Office's default value axis is line-less, gridlines stand in).
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.strokeStyle = catLineColor; ctx.lineWidth = catLineW;
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  }
+  if (!chart.valAxisHidden && !chart.valAxisLineHidden && chart.valAxisLineColor != null) {
+    ctx.strokeStyle = valLineColor; ctx.lineWidth = valLineW;
+    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+  }
+  // Category-axis major tick marks. With crossBetween="between" PowerPoint
+  // draws them at the band BOUNDARIES (n+1 dividers); "midCat" ticks centers.
+  if (!chart.catAxisHidden && chart.catAxisMajorTickMark && chart.catAxisMajorTickMark !== 'none') {
+    if (between) {
+      for (let ci = 0; ci <= n; ci++) {
+        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + (ci / n) * pw, catLineColor, catLineW);
+      }
+    } else {
+      for (let ci = 0; ci < n; ci++) {
+        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), catLineColor, catLineW);
+      }
+    }
+  }
+
   if (!chart.catAxisHidden) {
-    const labelInterval = Math.max(1, Math.ceil(n / 8));
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.font = `${Math.max(8, Math.min(11, pw / n * 0.8))}px sans-serif`;
+    // Show every category label that fits; thin out only when adjacent labels
+    // would collide (so 12 months all render, unlike a fixed n/8 cap).
+    let maxLabelW = 0;
+    for (let ci = 0; ci < n; ci++) {
+      maxLabelW = Math.max(maxLabelW, ctx.measureText((cats[ci] ?? '').toString().slice(0, 10)).width);
+    }
+    const labelInterval = Math.max(1, Math.ceil((maxLabelW + 6) / (pw / n)));
     for (let ci = 0; ci < n; ci += labelInterval) {
       ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), toX(ci), py0 + ph + 3);
     }
