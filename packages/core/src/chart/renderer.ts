@@ -351,6 +351,10 @@ function drawAxisTick(
   perpendicular: number,
   color?: string,
   lineWidth?: number,
+  // For a vertical value axis "outside" is to the LEFT (the axis sits on the
+  // left). A secondary value axis sits on the RIGHT, where "outside" points
+  // right — pass `opposite` to flip the out/in direction.
+  opposite = false,
 ): void {
   if (mode === 'none' || !mode) return;
   // Tick length scales mildly with the axis line weight so a thick
@@ -364,11 +368,14 @@ function drawAxisTick(
   ctx.lineWidth = lineWidth ?? 1;
   ctx.beginPath();
   if (axis === 'val') {
-    // val axis is vertical (x = anchor, y varies). Ticks extend horizontally.
+    // val axis is vertical (x = anchor, y varies). Ticks extend horizontally;
+    // `outSign` points away from the plot (left for a left axis, right for a
+    // right/secondary axis).
     const x0 = anchorXOrY;
     const y = perpendicular;
-    const outer = mode === 'out' || mode === 'cross' ? -len : 0;
-    const inner = mode === 'in' || mode === 'cross' ? len : 0;
+    const outSign = opposite ? 1 : -1;
+    const outer = mode === 'out' || mode === 'cross' ? outSign * len : 0;
+    const inner = mode === 'in' || mode === 'cross' ? -outSign * len : 0;
     ctx.moveTo(x0 + outer, y);
     ctx.lineTo(x0 + inner, y);
   } else {
@@ -603,14 +610,18 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
     valLabelBandW = wmax + 16; // ~12px tick+gap to the axis + ~4px to the title
   }
-  // Secondary value-axis label band (right edge), measured the same way.
+  // Secondary value-axis label band (right edge). Measure with the SAME font
+  // and number format the axis is drawn with (`secFontPx` / `sec.formatCode`),
+  // otherwise a `%`/thousands format or an explicit font size makes the
+  // reserved gutter disagree with the painted labels.
+  const secFontPx = sec?.fontSizeHpt ? (sec.fontSizeHpt / 100) * ptToPx : secTickFontPx;
   let secLabelBandW = 0;
   if (sec && !sec.hidden) {
-    ctx.font = `${secTickFontPx}px sans-serif`;
+    ctx.font = `${secFontPx}px sans-serif`;
     let wmax = 0;
     const sSteps = Math.round((sMax - sMin) / sStep);
     for (let si = 0; si <= sSteps; si++) {
-      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(sMin + si * sStep, undefined)).width);
+      wmax = Math.max(wmax, ctx.measureText(formatChartValWithCode(sMin + si * sStep, sec.formatCode ?? null)).width);
     }
     secLabelBandW = wmax + 18;
   }
@@ -949,23 +960,16 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     const secLineW = sec.lineWidthEmu ? Math.max(0.5, sec.lineWidthEmu / EMU_PER_PT) * ptToPx : 1;
     if (!sec.lineHidden) strokeAxis(axX, py0, axX, py0 + ph, secLineColor, secLineW);
     if (!sec.hidden) {
-      const secFontPx = sec.fontSizeHpt ? (sec.fontSizeHpt / 100) * ptToPx : secTickFontPx;
       ctx.font = `${secFontPx}px sans-serif`;
       ctx.fillStyle = sec.fontColor ? `#${sec.fontColor}` : valLabelColor;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      const tick = sec.majorTickMark;
-      const tickLen = Math.max(4, secLineW + 2);
       const secSteps = Math.max(1, Math.round(sRange / sStep));
       for (let si = 0; si <= secSteps; si++) {
         const sval = sMin + si * sStep;
         const gy = toYSecondary(sval);
-        if (tick && tick !== 'none') {
-          const outer = tick === 'out' || tick === 'cross' ? tickLen : 0;
-          const inner = tick === 'in' || tick === 'cross' ? -tickLen : 0;
-          ctx.strokeStyle = secLineColor; ctx.lineWidth = secLineW;
-          ctx.beginPath(); ctx.moveTo(axX + inner, gy); ctx.lineTo(axX + outer, gy); ctx.stroke();
-        }
+        // Same tick geometry as the left axis, mirrored to the right edge.
+        drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true);
         ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null), axX + 14, gy);
       }
     }
@@ -1056,7 +1060,9 @@ function renderLineChart(
   else if (dataMax < 0) dataMax = 0;
   if (dataMax === dataMin) dataMax = dataMin + 1;
 
-  const { min: axMin, max: axMax, step } = valueAxisScale(dataMin, dataMax, chart.valMin, chart.valMax);
+  // Value axis is vertical → its length is the plot height (axis-length-aware
+  // auto major unit, same model as the bar/column renderer).
+  const { min: axMin, max: axMax, step } = valueAxisScale(dataMin, dataMax, chart.valMin, chart.valMax, ph / ptToPx);
   const range = axMax - axMin; if (range === 0) return;
 
   const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
@@ -1202,8 +1208,9 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   }
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
-  // Area anchors the value axis at 0; ignore the returned min.
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
+  // Area anchors the value axis at 0; ignore the returned min. Value axis is
+  // vertical → length = plot height (axis-length-aware auto major unit).
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, ph / ptToPx);
 
   // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
   // default application-defined) gives each category a band of width pw/n and

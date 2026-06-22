@@ -501,8 +501,9 @@ struct ChartSeriesData {
 }
 
 /// A secondary value axis for combo charts — a second `<c:valAx>` with
-/// `axPos="r"` and `<c:crosses val="max">` (ECMA-376 §21.2.2.40 scaling,
-/// §21.2.2.18 crosses). Series whose chart group references this axis are
+/// `axPos="r"` and `<c:crosses val="max">` (ECMA-376 §21.2.2.160 scaling,
+/// §21.2.2.33 crosses / ST_Crosses §21.2.3.8). Series whose chart group
+/// references this axis are
 /// plotted against its independent scale and the axis is drawn on the right
 /// edge of the plot. Fields mirror the primary value axis but live in a nested
 /// struct so the flat primary-axis fields stay untouched (and the whole block
@@ -5312,8 +5313,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     });
 
     // val axis max / min and visibility — shared helpers in ooxml-common
-    // so xlsx & pptx stay in sync (`<c:scaling><c:min|max val>` and
-    // `<c:delete val>` ECMA-376 §21.2.2.40 / §21.2.2.43).
+    // so xlsx & pptx stay in sync (`<c:scaling><c:min|max val>` §21.2.2.160
+    // scaling and `<c:delete val>` ECMA-376 §21.2.2.40 delete).
     // Combo charts (bar + line) declare TWO `<c:valAx>`: a PRIMARY (axPos="l",
     // `<c:crosses val="autoZero">`) and a SECONDARY (axPos="r",
     // `<c:crosses val="max">`). Collect both so series can be mapped to the
@@ -5743,9 +5744,11 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         .unwrap_or_else(|| "between".to_string());
 
     // Major tick marks (ECMA-376 §21.2.2.49 ST_TickMark, default "cross").
+    // Schema default is `out` (ST_TickMark §21.2.3.48), shared with xlsx via
+    // the ooxml-common helper so the two parsers don't diverge on the default.
     let read_major_tick_mark = |ax: Option<roxmltree::Node>| -> String {
-        ax.and_then(|n| ooxml_common::chart::extract_axis_tick_mark(n, "majorTickMark"))
-            .unwrap_or_else(|| "cross".to_string())
+        ax.map(|n| ooxml_common::chart::extract_axis_tick_mark_or_default(n, "majorTickMark"))
+            .unwrap_or_else(|| "out".to_string())
     };
     let val_axis_major_tick_mark = read_major_tick_mark(val_ax);
     let cat_axis_major_tick_mark = read_major_tick_mark(cat_ax);
@@ -5809,8 +5812,10 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             line_color,
             line_width_emu,
             line_hidden,
-            major_tick_mark: ooxml_common::chart::extract_axis_tick_mark(ax, "majorTickMark")
-                .unwrap_or_else(|| "cross".to_string()),
+            major_tick_mark: ooxml_common::chart::extract_axis_tick_mark_or_default(
+                ax,
+                "majorTickMark",
+            ),
             title_font_size_hpt: title_size,
             title_font_bold: title_bold,
             title_font_color: title_color,

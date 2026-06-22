@@ -67,8 +67,8 @@ describe('valueAxisScale (one niceStep drives min, max and gridline step)', () =
     // Excel's auto major unit targets ~1 gridline per GRIDLINE_SPACING_PT (40),
     // so the SAME data range yields more, finer gridlines on a longer axis.
     // range 44: default target (5) → step 10 (0–50, 5 intervals); a 380pt axis
-    // (target ≈ 9) → step 5 (0–50, 10 intervals) — matching the horizontal-bar
-    // value axis (sample-14 slide-9) vs PowerPoint.
+    // (target round(380/40)=10) → step 5 (0–50, 10 intervals) — matching the
+    // horizontal-bar value axis (sample-14 slide-9) vs PowerPoint.
     expect(valueAxisScale(0, 44)).toEqual({ min: 0, max: 50, step: 10 });
     expect(valueAxisScale(0, 44, undefined, undefined, 380)).toEqual({ min: 0, max: 50, step: 5 });
   });
