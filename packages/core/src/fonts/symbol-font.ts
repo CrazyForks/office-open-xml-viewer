@@ -97,6 +97,16 @@ export const SYMBOL_MAP: Record<number, string> = {
  * U+1F55x) are OMITTED — passthrough, since the bare PUA point is no worse.
  */
 export const WINGDINGS_MAP: Record<number, string> = {
+  // 0x21 "pencil" → U+270F PENCIL; 0x22 "scissors" → U+2702 BLACK SCISSORS. Both
+  // are faithful BMP dingbats that render in any ordinary fallback font (unlike
+  // the Unicode-7.0 canonical unifications U+1F589 / U+2702, where the pencil is
+  // an astral PUA-adjacent glyph). The Dingbats ✏/✂ are the semantically exact
+  // glyphs, so this is a faithful substitution, not a guess.
+  // 0x23 is the SECOND Wingdings scissors variant ("scissorscutting"); its only
+  // distinct faithful target (U+2701/U+2703) is an obscure half-blade scissors
+  // that tofus in most fonts and is easily confused with 0x22, so it is left as
+  // passthrough rather than mapped to a near-duplicate ✂.
+  0x21: '✏', 0x22: '✂',
   // 0x24 "readingglasses" → U+1F453 EYEGLASSES. Astral with no BMP equivalent;
   // unlike the omitted clock/hand dingbats we DO map it because U+1F453 is the
   // semantically exact glyph — it renders in an emoji-capable fallback and is
@@ -125,16 +135,6 @@ export const WINGDINGS_MAP: Record<number, string> = {
   0xe3: '↖', 0xe4: '↗', 0xe5: '↙', 0xe6: '↘',
 };
 
-/**
- * Backwards-compatible alias. Historically a single `SYMBOL_FONT_MAP` was
- * exported; it leaned toward the Wingdings repertoire. New code should select
- * {@link SYMBOL_MAP} / {@link WINGDINGS_MAP} explicitly via
- * {@link symbolFontToUnicode}.
- *
- * @deprecated Use {@link symbolFontToUnicode} (it picks the right font table).
- */
-export const SYMBOL_FONT_MAP: Record<number, string> = WINGDINGS_MAP;
-
 /** Add the PUA-shifted (0xF000 + code) variant for every entry in `base`. */
 function withPua(base: Record<number, string>): Record<number, string> {
   const out: Record<number, string> = {};
@@ -152,14 +152,23 @@ const WINGDINGS_LOOKUP = withPua(WINGDINGS_MAP);
 /**
  * Normalize a single Symbol/Wingdings code point to its Unicode equivalent.
  *
- * The lookup table is chosen by `fontFamily`: an exact "symbol" selects the
- * Adobe Symbol encoding ({@link SYMBOL_MAP}); any family containing "wingdings"
- * selects the Wingdings cmap ({@link WINGDINGS_MAP}). Both the bare code point
- * (0xA7, 0xB7, …) and its PUA-shifted form (0xF0A7, 0xF0B7, …) resolve.
+ * The lookup table is chosen by `fontFamily` via a TRIMMED EXACT match (case-
+ * insensitive): exactly "symbol" selects the Adobe Symbol encoding
+ * ({@link SYMBOL_MAP}); exactly "wingdings" selects the Wingdings 1 cmap
+ * ({@link WINGDINGS_MAP}). Both the bare code point (0xA7, 0xB7, …) and its
+ * PUA-shifted form (0xF0A7, 0xF0B7, …) resolve.
  *
- * Returns `char` unchanged when `fontFamily` is null/undefined, is not a symbol
- * font, or has no mapping in the selected table (passthrough — better the bare
- * code point than a wrong glyph).
+ * "Wingdings 2", "Wingdings 3" and "Webdings" use DIFFERENT private encodings —
+ * the same code point is a different glyph than in Wingdings 1 — so they are
+ * deliberately NOT matched and pass through unchanged (we have no table for
+ * them). Routing them through the Wingdings 1 table would emit a *wrong* glyph;
+ * passthrough lets the real font draw the intended glyph when installed, and a
+ * bare PUA point is no worse than a wrong substitution. Add a dedicated table if
+ * those repertoires are ever needed.
+ *
+ * Returns `char` unchanged when `fontFamily` is null/undefined, is not one of the
+ * two mapped families, or has no mapping in the selected table (passthrough —
+ * better the bare code point than a wrong glyph).
  *
  * @param char       the marker/run character as stored in the OOXML (often a
  *                   PUA code point such as U+F0B7)
@@ -170,12 +179,13 @@ export function symbolFontToUnicode(
   fontFamily: string | null | undefined,
 ): string {
   if (!fontFamily) return char;
-  const lower = fontFamily.toLowerCase();
-  const table = lower.includes('wingdings')
-    ? WINGDINGS_LOOKUP
-    : lower === 'symbol'
-      ? SYMBOL_LOOKUP
-      : null;
+  const lower = fontFamily.trim().toLowerCase();
+  const table =
+    lower === 'wingdings'
+      ? WINGDINGS_LOOKUP
+      : lower === 'symbol'
+        ? SYMBOL_LOOKUP
+        : null;
   if (!table) return char;
   const code = char.charCodeAt(0);
   return table[code] ?? char;

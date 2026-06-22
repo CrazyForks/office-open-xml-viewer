@@ -55,7 +55,6 @@ export {
   type FontVariant,
 } from './fonts/scripts';
 export {
-  SYMBOL_FONT_MAP,
   SYMBOL_MAP,
   WINGDINGS_MAP,
   symbolFontToUnicode,

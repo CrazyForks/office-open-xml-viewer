@@ -1813,7 +1813,7 @@ export function resolveBulletLabel(
   if (para.bullet.type === 'char') {
     // Reset counters when switching to char bullets.
     autoNumCounters.clear();
-    return hasContent ? symbolFontToUnicode(para.bullet.char, para.bullet.fontFamily ?? '') : '';
+    return hasContent ? symbolFontToUnicode(para.bullet.char, para.bullet.fontFamily ?? null) : '';
   }
   if (para.bullet.type === 'autoNum') {
     if (!hasContent) return '';

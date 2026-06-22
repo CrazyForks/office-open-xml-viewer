@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SYMBOL_FONT_MAP,
   SYMBOL_MAP,
-  WINGDINGS_MAP,
   symbolFontToUnicode,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
@@ -87,24 +85,44 @@ describe('symbolFontToUnicode', () => {
     expect(symbolFontToUnicode(ch(0x21), 'Symbol')).toBe(ch(0x21));
   });
 
-  it('matches "wingdings" case-insensitively and as a substring', () => {
+  it('matches exactly "wingdings" (case-insensitive, trimmed) for the Wingdings table', () => {
     expect(symbolFontToUnicode(ch(0xf0a7), 'WINGDINGS')).toBe('▪');
-    expect(symbolFontToUnicode(ch(0xf0a7), 'Wingdings 2')).toBe('▪');
+    expect(symbolFontToUnicode(ch(0xf0a7), '  Wingdings  ')).toBe('▪');
+  });
+
+  // Wingdings 2 / 3 and Webdings use DIFFERENT private encodings than Wingdings 1,
+  // so they must NOT be looked up in the Wingdings 1 table (WINGDINGS_MAP) — doing
+  // so produces a *wrong* glyph. They are unmapped (passthrough) so the real font
+  // draws the intended glyph if installed; better the bare PUA point than tofu of a
+  // wrong glyph.
+  it('does NOT map Wingdings 2 / Wingdings 3 / Webdings through the Wingdings 1 table', () => {
+    expect(symbolFontToUnicode(ch(0xa7), 'Wingdings 2')).toBe(ch(0xa7));
+    expect(symbolFontToUnicode(ch(0xf0a7), 'Wingdings 2')).toBe(ch(0xf0a7));
+    expect(symbolFontToUnicode(ch(0xa7), 'Wingdings 3')).toBe(ch(0xa7));
+    expect(symbolFontToUnicode(ch(0xa7), 'Webdings')).toBe(ch(0xa7));
+    // Wingdings 1 itself still resolves the same code point to the square bullet.
+    expect(symbolFontToUnicode(ch(0xa7), 'Wingdings')).toBe('▪');
   });
 
   // Pencil/scissors/faces are Wingdings glyphs only. In Symbol, 0x21 is "!" and
   // 0x22 is "∀" — so these dingbats must NOT leak across the font gate.
   it('keeps Wingdings dingbats out of the Symbol table', () => {
     expect(SYMBOL_MAP[0x21]).toBeUndefined();
+    expect(SYMBOL_MAP[0x22]).toBeUndefined();
     expect(SYMBOL_MAP[0x24]).toBeUndefined();
+    expect(symbolFontToUnicode(ch(0x21), 'Symbol')).toBe(ch(0x21));
+    expect(symbolFontToUnicode(ch(0x22), 'Symbol')).toBe(ch(0x22));
     expect(symbolFontToUnicode(ch(0x24), 'Symbol')).toBe(ch(0x24));
   });
 
-  // The deprecated shared alias still resolves Wingdings markers (it aliases the
-  // Wingdings table) so any legacy importer keeps working.
-  it('keeps the deprecated SYMBOL_FONT_MAP alias pointing at Wingdings', () => {
-    expect(SYMBOL_FONT_MAP).toBe(WINGDINGS_MAP);
-    expect(SYMBOL_FONT_MAP[0xa7]).toBe('▪');
+  // Wingdings 0x21 "pencil" → U+270F PENCIL, 0x22 "scissors" → U+2702 BLACK
+  // SCISSORS — both faithful BMP dingbats that render in ordinary fallback fonts.
+  // (bare + PUA-shifted form.)
+  it('maps the Wingdings pencil (0x21) and scissors (0x22) to BMP dingbats', () => {
+    expect(symbolFontToUnicode(ch(0x21), 'Wingdings')).toBe('✏');
+    expect(symbolFontToUnicode(ch(0xf021), 'Wingdings')).toBe('✏');
+    expect(symbolFontToUnicode(ch(0x22), 'Wingdings')).toBe('✂');
+    expect(symbolFontToUnicode(ch(0xf022), 'Wingdings')).toBe('✂');
   });
 });
 
@@ -146,12 +164,12 @@ describe('symbolTextToUnicodeSegments', () => {
   });
 
   it('splits at mapped/unmapped boundaries so each run is single-font', () => {
-    // 0x21 "!" has no Wingdings entry (passthrough), 0xF0A7 maps to ▪.
-    const segs = symbolTextToUnicodeSegments(ch(0x21) + ch(0xf0a7) + ch(0x22), 'Wingdings');
+    // 0x41 'A' / 0x42 'B' have no Wingdings entry (passthrough); 0xF0A7 maps to ▪.
+    const segs = symbolTextToUnicodeSegments(ch(0x41) + ch(0xf0a7) + ch(0x42), 'Wingdings');
     expect(segs).toEqual([
-      { text: ch(0x21), mapped: false },
+      { text: ch(0x41), mapped: false },
       { text: '▪', mapped: true },
-      { text: ch(0x22), mapped: false },
+      { text: ch(0x42), mapped: false },
     ]);
   });
 
