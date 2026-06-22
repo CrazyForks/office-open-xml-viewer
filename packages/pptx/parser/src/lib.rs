@@ -8860,7 +8860,13 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             Some(t) => t.clone(),
             None => continue,
         };
-        let slide_path = format!("ppt/{rel_target}");
+        // Resolve via `resolve_path` (not `format!("ppt/{rel_target}")`) so a
+        // package-root-absolute slide Target — e.g. `/ppt/slides/slide1.xml`
+        // (leading slash, OPC / ECMA-376 Part 2 §9.3) — resolves correctly
+        // instead of producing `ppt//ppt/slides/slide1.xml`. Relative targets
+        // (the common `slides/slide1.xml`) are unaffected. Same fix class as
+        // the chart-rel resolution above.
+        let slide_path = resolve_path("ppt", &rel_target);
         let slide_file = rel_target
             .split('/')
             .next_back()
@@ -9122,6 +9128,23 @@ mod tests {
         assert_eq!(
             resolve_path("ppt/slideLayouts", "../slideMasters/slideMaster1.xml"),
             "ppt/slideMasters/slideMaster1.xml"
+        );
+    }
+
+    #[test]
+    fn resolve_path_resolves_slide_targets_from_package_root() {
+        // Slide parts are resolved from the presentation rels with base "ppt".
+        // The common Target is relative (`slides/slide1.xml`); a generator may
+        // also emit a package-root-absolute Target (`/ppt/slides/slide1.xml`),
+        // which must NOT become `ppt//ppt/slides/slide1.xml`. Guards the
+        // `resolve_path("ppt", rel_target)` slide-loading path.
+        assert_eq!(
+            resolve_path("ppt", "slides/slide1.xml"),
+            "ppt/slides/slide1.xml"
+        );
+        assert_eq!(
+            resolve_path("ppt", "/ppt/slides/slide1.xml"),
+            "ppt/slides/slide1.xml"
         );
     }
 
