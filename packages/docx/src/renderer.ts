@@ -1045,6 +1045,31 @@ export function computePages(
   const colX = () => columns[colIndex].xPt;
   const colW = () => columns[colIndex].wPt;
 
+  // Run `fn` with the measure state's content band temporarily re-pointed at the
+  // CURRENT newspaper column (#513). The paint pass (renderBodyElements) sets
+  // state.contentX/contentW = col.xPt/wPt × scale per element before resolving an
+  // out-of-flow frame or floating table, because their placement math reads
+  // state.contentX/contentW directly (frameXContainer for horzAnchor="text",
+  // floatTableWrapSide for the wrap side). The measure pass must use the SAME band
+  // so the FloatRect it registers (x, wrap side) matches what the renderer paints;
+  // otherwise a horzAnchor="text" frame / table in a multi-column section diverges
+  // between measure and paint. measureState.scale is 1, so colX()/colW() (pt) are
+  // already the px-equivalent values the paint pass derives via col.xPt × scale.
+  // contentX/contentW are saved and restored via try/finally so an early throw
+  // inside `fn` cannot leak the narrowed band into subsequent elements.
+  const withColumnBand = <T>(fn: () => T): T => {
+    const savedX = measureState.contentX;
+    const savedW = measureState.contentW;
+    measureState.contentX = colX() * measureState.scale;
+    measureState.contentW = colW() * measureState.scale;
+    try {
+      return fn();
+    } finally {
+      measureState.contentX = savedX;
+      measureState.contentW = savedW;
+    }
+  };
+
   const pages: PaginatedBodyElement[][] = [[]];
   let y = 0;
   let prevPara: DocParagraph | null = null;
@@ -1279,8 +1304,15 @@ export function computePages(
       // height/keep calc exists, drive an explicit keep-with-anchor here.)
       if (para.framePr) {
         const anchorH = frameAnchorLineHeightPx(body as PaginatedBodyElement[], el, measureState);
-        const box = resolveFrameBox(para, measureState, anchorH);
-        registerFrameFloat(box, para.framePr, measureState);
+        // Resolve and register the frame's wrap float against the CURRENT column
+        // band (#513), mirroring renderBodyElements which re-points
+        // state.contentX/contentW per column before drawing a frame. For
+        // hAnchor="text" the box x and exclusion x-range are column-relative
+        // (frameXContainer reads contentX), so measure and paint agree.
+        withColumnBand(() => {
+          const box = resolveFrameBox(para, measureState, anchorH);
+          registerFrameFloat(box, para.framePr!, measureState);
+        });
         pushTagged(el as PaginatedBodyElement);
         continue;
       }
@@ -1465,23 +1497,25 @@ export function computePages(
       // behavior, not spec-defined. Minimal: keep on current page (no break /
       // relocation across pages here; only the in-page wrap band is modeled).
       if (tbl.tblpPr) {
-        // KNOWN LIMITATION (#513): measureState.contentX/contentW stay at the
-        // full content band here (they are not re-pointed per newspaper column
-        // the way renderBodyElements does for the paint pass). So for a
-        // horzAnchor="text" floating table inside a MULTI-COLUMN section the
-        // paginator estimates its wrap band against the full band while the
-        // renderer paints it in the owning column — measure and paint diverge.
-        // Harmless for single-column / page|margin-anchored tables (the common
-        // case, incl. sample-11). Threading per-column geometry into the measure
-        // pass (shared with the frame branch) is tracked as a follow-up.
+        // #513: re-point measureState.contentX/contentW at the CURRENT newspaper
+        // column for the duration of the placement so the paginator estimates the
+        // wrap band against the SAME column band the paint pass paints into
+        // (renderBodyElements sets state.contentX/contentW = col.xPt/wPt × scale
+        // per element). For a horzAnchor="text" floating table inside a
+        // MULTI-COLUMN section, computeFloatTableBox (frameXContainer) and
+        // floatTableWrapSide both read contentX/contentW, so without this the
+        // measured box x and wrap side would diverge from the rendered ones.
         // measureState.scale is 1, so colW() (pt) equals the px content width
-        // computeTableLayout expects (it re-divides by scale internally).
-        const cW = colW() * measureState.scale;
-        const layout = computeTableLayout(tbl, cW, measureState);
-        const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
-        const box = computeFloatTableBox(tbl.tblpPr, measureState, measureState.y, layout.tableW, tableH);
-        const side = floatTableWrapSide(box, measureState);
-        registerTableFloat(box, tbl.tblpPr, measureState, side, tbl.overlap !== 'never');
+        // computeTableLayout expects (it re-divides by scale internally); colX()
+        // (pt) is likewise the column's page-absolute left edge.
+        withColumnBand(() => {
+          const cW = colW() * measureState.scale;
+          const layout = computeTableLayout(tbl, cW, measureState);
+          const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
+          const box = computeFloatTableBox(tbl.tblpPr!, measureState, measureState.y, layout.tableW, tableH);
+          const side = floatTableWrapSide(box, measureState);
+          registerTableFloat(box, tbl.tblpPr!, measureState, side, tbl.overlap !== 'never');
+        });
         pushTagged(el as PaginatedBodyElement);
         continue;
       }
