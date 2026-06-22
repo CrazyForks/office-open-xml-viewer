@@ -37,6 +37,7 @@ import {
   symbolFontToUnicode,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  docxBorderDashArray,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -6530,34 +6531,14 @@ function strokeCrispSegment(
 
 /**
  * ECMA-376 §17.18.2 ST_Border dash/dot families → a `setLineDash` pattern,
- * expressed in units of the stroked width `lw` (px) so the dashes scale with the
- * border thickness. The standard gives no normative pixel geometry, so these are
- * Word-like approximations: a "dot" is one `lw` square, a "dash" three `lw`, gaps
- * two `lw` (one for the small-gap variant). The ctx is already `scale(dpr,dpr)`d,
- * so `lw`-relative lengths render crisply at any dpr (matching the single/double
- * paths). Returns `[]` for solid styles (single/thick/triple/wave/…), which then
- * stroke as a continuous line.
- *
- * `dashDotStroked` (alternating thin/thick strokes) cannot be expressed with a
- * single `setLineDash`, so it is approximated as `dotDash`; noted, not exact.
+ * expressed in units of the stroked width `lw` (px). Thin wrapper over core's
+ * shared `docxBorderDashArray` (which owns the §17.18.2 relative table); the ctx
+ * is already `scale(dpr,dpr)`d, so `lw`-relative lengths render crisply at any
+ * dpr (matching the single/double paths). Returns `[]` for solid styles.
+ * Re-exported here so the existing `border-dash.test.ts` contract is preserved.
  */
 export function borderDashPattern(style: string, lw: number): number[] {
-  switch (style) {
-    case 'dotted':
-      return [lw, lw * 2];
-    case 'dashed':
-      return [lw * 3, lw * 2];
-    case 'dashSmallGap':
-      return [lw * 3, lw];
-    case 'dotDash':
-      return [lw, lw * 2, lw * 3, lw * 2];
-    case 'dotDotDash':
-      return [lw, lw * 2, lw, lw * 2, lw * 3, lw * 2];
-    case 'dashDotStroked':
-      return [lw, lw * 2, lw * 3, lw * 2];
-    default:
-      return [];
-  }
+  return docxBorderDashArray(style, lw);
 }
 
 function drawBorderLine(

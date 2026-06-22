@@ -64,6 +64,7 @@ import {
   decodeRasterOrMetafile,
   highlightBox,
   symbolFontToUnicode,
+  pptxDashArray,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -222,24 +223,9 @@ function drawUnderline(
   ctx.lineWidth = lineW;
   ctx.setLineDash([]);
 
-  // Dash patterns scaled by lineW so they stay proportional at any font size.
-  // Values mirror prstDash (§20.1.10.49 ST_PresetLineDashVal) where the
-  // underline enum reuses the same shape names.
-  const dashFor = (s: string): number[] => {
-    switch (s) {
-      case 'dotted':
-      case 'dottedHeavy':         return [1.5, 3];
-      case 'dash':
-      case 'dashHeavy':           return [6, 3];
-      case 'dashLong':
-      case 'dashLongHeavy':       return [10, 4];
-      case 'dotDash':
-      case 'dotDashHeavy':        return [6, 3, 1.5, 3];
-      case 'dotDotDash':
-      case 'dotDotDashHeavy':     return [6, 3, 1.5, 3, 1.5, 3];
-      default:                    return [];
-    }
-  };
+  // Dash patterns scaled by lineW so they stay proportional at any font size,
+  // computed via core's shared pptxDashArray (§20.1.10.49 ST_PresetLineDashVal,
+  // whose shape names the underline enum reuses) at the call site below.
 
   if (style && style.startsWith('wavy')) {
     // Sine wave with amplitude ≈ lineW and wavelength ≈ 6×lineW.
@@ -280,7 +266,7 @@ function drawUnderline(
     return;
   }
 
-  ctx.setLineDash(dashFor(style ?? 'sng').map((v) => v * lineW));
+  ctx.setLineDash(pptxDashArray(style ?? 'sng', lineW));
   ctx.beginPath();
   ctx.moveTo(x, y + crispY);
   ctx.lineTo(x + width, y + crispY);

@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, xlsxBorderDashArray, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -3619,20 +3619,15 @@ function borderStyleWidth(style: string): number {
   }
 }
 
+/**
+ * ECMA-376 §18.18.3 ST_BorderStyle dash families → a static-pixel `setLineDash`
+ * pattern. Thin wrapper over core's shared `xlsxBorderDashArray` (which owns the
+ * §18.18.3 relative table); Excel cell borders use a constant pixel cadence
+ * regardless of the (sub-pixel) hairline width, so unlike docx/pptx this does
+ * NOT scale with the stroked width. Returns `[]` for solid styles.
+ */
 function borderStyleDash(style: string): number[] {
-  switch (style) {
-    // ECMA-376 §18.18.3 ST_BorderStyle "hair" — Excel renders this as a very
-    // fine dashed line (the finest dashing in the border style picker). A 1-px
-    // on / 1-px off pattern at the hair lineWidth (0.5) reproduces that look;
-    // without a dash pattern, hair would read as a faint solid line.
-    case 'hair': return [1, 1];
-    case 'dashed': case 'mediumDashed': return [4, 3];
-    case 'dotted': return [2, 2];
-    case 'dashDot': case 'mediumDashDot': return [4, 2, 1, 2];
-    case 'dashDotDot': case 'mediumDashDotDot': return [4, 2, 1, 2, 1, 2];
-    case 'slantDashDot': return [5, 3, 1, 3];
-    default: return [];
-  }
+  return xlsxBorderDashArray(style);
 }
 
 /**
