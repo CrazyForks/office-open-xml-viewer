@@ -101,6 +101,7 @@ function tblp(over: Partial<TblpPr> = {}): TblpPr {
     topFromText: 0,
     bottomFromText: 0,
     horzAnchor: 'text',
+    horzSpecified: true,
     vertAnchor: 'text',
     tblpX: 0,
     tblpY: 0,

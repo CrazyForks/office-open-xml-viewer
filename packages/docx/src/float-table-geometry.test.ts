@@ -48,6 +48,9 @@ function makeState(over: Partial<MinState> = {}): MinState {
 }
 
 // Full TblpPr with the spec defaults; tests override only the axis under test.
+// The factory sets horzAnchor:'page' (an explicit horizontal hint), so
+// horzSpecified defaults to true; the "no horizontal spec at all" case is
+// exercised by overriding horzSpecified:false (see the sample-11 case).
 function tblp(over: Partial<TblpPr> = {}): TblpPr {
   return {
     leftFromText: 0,
@@ -55,6 +58,7 @@ function tblp(over: Partial<TblpPr> = {}): TblpPr {
     topFromText: 0,
     bottomFromText: 0,
     horzAnchor: 'page',
+    horzSpecified: true,
     vertAnchor: 'page',
     tblpX: 0,
     tblpY: 0,
@@ -214,18 +218,22 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
 
 describe('floating table — sample-11 case (§17.4.57)', () => {
   // <w:tblpPr w:rightFromText="187" w:bottomFromText="72" w:vertAnchor="text"
-  //           w:tblpY="1"/> + <w:tblOverlap w:val="never"/>. No horzAnchor ⇒
-  // page; no tblpX ⇒ 0 ⇒ the table sits at the page's left vertical edge.
+  //           w:tblpY="1"/> + <w:tblOverlap w:val="never"/>. NO horzAnchor, NO
+  // tblpX, NO tblpXSpec ⇒ horzSpecified=false. The spec-literal default would be
+  // horzAnchor="page" + tblpX=0 (page edge), but Word anchors such a table at the
+  // anchor paragraph's text/column LEFT (contentX), not the page edge — matching
+  // the calibre PDF where the ITEM/NEEDED table aligns with the body column.
   // rightFromText 187 twip → 9.35 pt; bottomFromText 72 twip → 3.6 pt.
   const RIGHT_FROM_TEXT = 187 / 20; // 9.35 pt
   const BOTTOM_FROM_TEXT = 72 / 20; // 3.6 pt
 
-  it('floats at page-left (x=0), text wraps on the RIGHT, right dist padding present', () => {
-    const st = makeState();
+  it('no horizontal spec ⇒ anchors at the text/column left (NOT the page edge)', () => {
+    const st = makeState(); // column band [100, 500]
     const tp = tblp({
       rightFromText: RIGHT_FROM_TEXT,
       bottomFromText: BOTTOM_FROM_TEXT,
-      horzAnchor: 'page', // default
+      horzAnchor: 'page', // defaulted token, but…
+      horzSpecified: false, // …no horizontal hint was present in the source
       vertAnchor: 'text',
       tblpX: 0,
       tblpY: 1,
@@ -233,19 +241,26 @@ describe('floating table — sample-11 case (§17.4.57)', () => {
     // A small ITEM/NEEDED table, say 120 wide × 50 tall, anchored at paraTop=300.
     const tableW = 120;
     const b = box(tp, st, 300, tableW, 50);
-    expect(b.x).toBe(0); // page left
+    expect(b.x).toBe(100); // text/column left (contentX), NOT page-left 0
     expect(b.y).toBe(300 + 1); // vAnchor=text ⇒ paraTop + tblpY
 
-    // side from the column band [100,500]: the float's right edge (x+w = 120) is
-    // left of the column centre (300) ⇒ float on the LEFT ⇒ text wraps RIGHT.
+    // side from the column band [100,500]: the float's right edge (100+120=220)
+    // is left of the column centre (300) ⇒ float on the LEFT ⇒ text wraps RIGHT.
     const side = wrapSide(b, st);
     expect(side).toBe('right'); // text sits to the RIGHT of the float
 
     registerFloat(b, tp, st, side, /* overlap="never" ⇒ */ false);
     const f = st.floats[0];
     expect(f.side).toBe('right');
-    expect(f.xRight).toBe(0 + tableW + RIGHT_FROM_TEXT); // right edge includes the dist padding
+    expect(f.xRight).toBe(100 + tableW + RIGHT_FROM_TEXT); // right edge includes the dist padding
     expect(f.yBottom).toBe(b.y + 50 + BOTTOM_FROM_TEXT);
+  });
+
+  it('explicit horzAnchor="page" + tblpX=0 still pins to the page edge', () => {
+    const st = makeState();
+    // When the source DOES specify a horizontal anchor, honor the spec literally.
+    const b = box(tblp({ horzAnchor: 'page', horzSpecified: true, tblpX: 0 }), st, 300, 120, 50);
+    expect(b.x).toBe(0); // page left edge
   });
 });
 

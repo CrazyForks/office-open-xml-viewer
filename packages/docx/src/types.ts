@@ -786,6 +786,12 @@ export interface TblpPr {
   bottomFromText: number;
   /** §17.4.57 ST_HAnchor {text,margin,page}. Default 'page'. */
   horzAnchor: 'text' | 'margin' | 'page' | string;
+  /** True iff the source `<w:tblpPr>` carried ANY horizontal positioning hint
+   *  (horzAnchor, tblpX, or tblpXSpec). When false, no horizontal position was
+   *  given: ECMA-376's literal default is the page edge, but Word places such a
+   *  table at the anchor paragraph's text/column left. computeFloatTableBox uses
+   *  this flag to apply that Word-runtime placement. */
+  horzSpecified: boolean;
   /** §17.4.57 ST_VAnchor {text,margin,page}. Default 'page'. */
   vertAnchor: 'text' | 'margin' | 'page' | string;
   /** §17.4.57 absolute signed offset from the horz/vert anchor edge, pt.
@@ -892,6 +898,14 @@ export interface CellBorders {
   bottom: BorderSpec | null;
   left: BorderSpec | null;
   right: BorderSpec | null;
+  /** ECMA-376 §17.4.34 (tcBorders w:insideH/w:insideV): the interior
+   *  horizontal/vertical border this cell contributes. Folded from the cell's
+   *  inline tcBorders OVER the resolved conditional table-style borders (§17.7.6)
+   *  at parse time. `null` = unset (the renderer falls back to the table-level
+   *  insideH/insideV); a spec with style "nil"/"none" = an explicit "no interior
+   *  border" (e.g. banded data rows in Medium List 2 / Medium Shading 2). */
+  insideH: BorderSpec | null;
+  insideV: BorderSpec | null;
 }
 
 // ===== Worker message protocol =====

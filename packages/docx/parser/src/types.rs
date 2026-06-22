@@ -1164,6 +1164,13 @@ pub struct TblpPr {
     pub bottom_from_text: f64,
     /// §17.4.57 horzAnchor (ST_HAnchor {text,margin,page}). Default "page".
     pub horz_anchor: String,
+    /// True iff the source `<w:tblpPr>` carried ANY horizontal positioning hint
+    /// (horzAnchor, tblpX, or tblpXSpec). When false, NO horizontal position was
+    /// given. ECMA-376's literal default would then be horzAnchor="page" +
+    /// tblpX=0 (the page edge), but Word anchors such an auto-converted floating
+    /// table at the anchor paragraph's text/column left instead. The renderer
+    /// uses this flag to apply that Word-runtime placement (documented there).
+    pub horz_specified: bool,
     /// §17.4.57 vertAnchor (ST_VAnchor {text,margin,page}). Default "page".
     pub vert_anchor: String,
     /// §17.4.57 tblpX/tblpY (ST_SignedTwipsMeasure): absolute signed offset from
@@ -1318,4 +1325,14 @@ pub struct CellBorders {
     pub bottom: Option<BorderSpec>,
     pub left: Option<BorderSpec>,
     pub right: Option<BorderSpec>,
+    /// ECMA-376 §17.4.34 (tcBorders w:insideH/w:insideV): the interior
+    /// horizontal/vertical borders a cell contributes. A conditional table-style
+    /// block (`w:tblStylePr`) commonly sets these to `nil` to suppress the
+    /// gridlines on banded data rows (e.g. Medium List 2 / Medium Shading 2). We
+    /// keep them as part of the cell so the conditional formatting (§17.7.6),
+    /// folded in at parse time, can override the table-level insideH/insideV on a
+    /// per-cell basis. `None` = unset (renderer falls back to the table inside
+    /// spec); a `Some` with style "nil"/"none" = an explicit "no interior border".
+    pub inside_h: Option<BorderSpec>,
+    pub inside_v: Option<BorderSpec>,
 }
