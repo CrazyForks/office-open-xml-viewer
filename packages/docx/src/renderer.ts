@@ -3053,6 +3053,32 @@ function renderParagraph(
   const firstLineIndent = hasMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
   const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, scale));
 
+  // Decimal-tab auto-alignment. ECMA-376 (§17.3.1.37 tabs / §17.18.84 ST_TabJc
+  // `decimal`) only positions content at a tab stop when an explicit tab
+  // character advances to it; absent a tab, content starts at the indent. Word,
+  // however, aligns a bare number to a leading DECIMAL tab with NO tab character
+  // — the built-in "Decimal Aligned" paragraph style on table number cells does
+  // exactly this. sample-11's College table proves it: 110 / 103 / +7 etc. each
+  // right-align on the decimal tab at 18 pt (Word PDF bbox: per-column right
+  // edges coincide), where we previously left-aligned them. This is a deliberate
+  // Word-runtime deviation (user-approved); it is gated to NUMERIC content whose
+  // first tab stop is `decimal` and which carries no explicit tab, so ordinary
+  // paragraphs are untouched. We right-edge align the number at the stop — the
+  // same approximation the explicit-tab decimal path uses (frac=1; it does not
+  // split on the '.'), exact for the integers in scope. Applied at DRAW time as
+  // a pure horizontal offset, so the measured row height (and the paginate/paint
+  // height contract) is unaffected.
+  const decimalAutoTabPx: number | null = (() => {
+    if (segments.some((s) => 'isTab' in s)) return null; // explicit tab wins
+    const stops = para.tabStops ?? [];
+    if (stops.length === 0) return null;
+    const firstStop = stops.reduce((a, b) => (b.pos < a.pos ? b : a));
+    if (firstStop.alignment !== 'decimal') return null;
+    const txt = para.runs.map((r) => (r as { text?: string }).text ?? '').join('').trim();
+    if (txt === '' || !/^[+\-(]?[\d., ]+\)?%?$/.test(txt)) return null; // numbers only
+    return firstStop.pos * scale - indLeft; // px, relative to paraX (mirrors layoutLines' stopXof)
+  })();
+
   // A paragraph whose only segments are wrap-float anchors (wp:anchor) places no
   // inline content on any line, so layoutLines returns zero lines. Per ECMA-376
   // §17.3.1.29 the paragraph mark still produces one line box; §20.4.2.x removes
@@ -3212,6 +3238,15 @@ function renderParagraph(
       alignOffset = lineSlack;
     }
     // 'left' and stretched 'justify' keep alignOffset 0.
+    // Decimal-tab auto-alignment (see decimalAutoTabPx above): override the
+    // paragraph alignment so the number's right edge (its decimal point, for an
+    // integer) lands on the decimal tab. `paraX + decimalAutoTabPx` is the stop
+    // in device space; subtracting the line width and the current `x` yields the
+    // left-shift, clamped ≥ 0 so a number wider than the stop simply overflows
+    // right (never pulled left of its natural start).
+    if (decimalAutoTabPx != null && lineWidth > 0) {
+      alignOffset = Math.max(0, paraX + decimalAutoTabPx - lineWidth - x);
+    }
     x += alignOffset;
 
     if (firstLine && hasMarker && !dryRun) {
