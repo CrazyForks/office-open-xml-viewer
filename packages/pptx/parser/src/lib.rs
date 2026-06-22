@@ -5510,10 +5510,11 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
                 })
                 .and_then(|fill| parse_color_node(fill, theme));
 
-            // Per-data-point colors from <c:dPt> (important for pie charts).
-            // The point index is the CHILD element `<c:idx val>` (ECMA-376
-            // §21.2.2.27, CT_UnsignedInt), not an attribute on `<c:dPt>` — the
-            // old `attr(dpt, "idx")` always returned None, so every slice fell
+            // Per-data-point colors from <c:dPt> (§21.2.2.52; important for
+            // pie charts). The point index is the CHILD element `<c:idx val>`
+            // (ECMA-376 §21.2.2.84, CT_UnsignedInt), not an attribute on
+            // `<c:dPt>` — the old `attr(dpt, "idx")` always returned None, so
+            // every slice fell
             // back to the series colour. The fill is `<c:spPr><a:solidFill>`;
             // restrict to spPr's direct child so a border `<a:ln><a:solidFill>`
             // can't be mistaken for the slice fill.
@@ -9178,8 +9179,8 @@ mod tests {
 
     #[test]
     fn legacy_chart_parses_per_point_dpt_colors_for_pie() {
-        // `<c:dPt>` carries its point index in a CHILD `<c:idx val>` element
-        // (ECMA-376 §21.2.2.27, CT_UnsignedInt), NOT an attribute on `<c:dPt>`.
+        // `<c:dPt>` (§21.2.2.52) carries its point index in a CHILD `<c:idx val>`
+        // element (ECMA-376 §21.2.2.84, CT_UnsignedInt), NOT an attribute on it.
         // Reading it as an attribute always missed, so every pie/doughnut slice
         // fell back to the series colour (a `<a:schemeClr>` that resolved to the
         // default accent) — issue #556 follow-up: slide-7 fills were wrong. The

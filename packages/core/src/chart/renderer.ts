@@ -648,7 +648,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     if (drawValLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, valLineColor, valLineW); // bottom
   }
 
-  // Axis major tick marks (`<c:*Ax><c:majorTickMark>` — ECMA-376 §21.2.2.45).
+  // Axis major tick marks (`<c:*Ax><c:majorTickMark>` — ECMA-376 §21.2.2.101).
   // PowerPoint draws short ruler ticks even when the axis rule itself is light,
   // so the bar renderer must emit them too (the line renderer already does).
   // `drawAxisTick`'s `axis` arg selects GEOMETRY: 'val' = vertical rule with
@@ -1059,11 +1059,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // Area anchors the value axis at 0; ignore the returned min.
   const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
 
-  // crossBetween="between" (the area/category default) gives each category a
-  // band of width pw/n and plots its point at the band CENTER, leaving a
-  // half-band margin before the first and after the last category — matching
-  // PowerPoint's Jan…Dec inset. "midCat" anchors points on the category
-  // dividers (flush to the axes). ECMA-376 §21.2.2.10.
+  // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
+  // default application-defined) gives each category a band of width pw/n and
+  // plots its point at the band CENTER, leaving a half-band margin before the
+  // first and after the last category — matching PowerPoint's Jan…Dec inset.
+  // "midCat" anchors points on the category dividers (flush to the axes).
   const between = chart.catAxisCrossBetween !== 'midCat';
   const toX = between
     ? (i: number) => px0 + ((i + 0.5) / n) * pw
