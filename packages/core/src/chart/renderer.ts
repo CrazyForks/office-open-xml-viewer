@@ -536,6 +536,23 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // the chart width — short numeric labels otherwise leave a big empty gap
   // between the axis title and the labels (PowerPoint sizes the gutter to fit
   // the labels). The scales depend only on the series data, not on `pad`.
+  // Vertical pads first (independent of the side gutters) so the plot height —
+  // and the value-axis length — are known before the scale + label measuring.
+  // The value-axis LENGTH drives the auto major unit (Excel targets a roughly
+  // constant gridline spacing, so a longer axis gets finer ticks).
+  const padT = titleH + legTopH + h * 0.02;
+  const padB = isH
+    ? (chart.valAxisHidden ? h * 0.02 : h * 0.08) + catTitleH + legBottomH
+    : h * 0.14 + catTitleH + legBottomH;
+  const phEst = h - padT - padB;
+  // Horizontal bars run the value axis along the (wide) bottom, so its length is
+  // the plot WIDTH. Estimate it from the fixed isH side pads (those don't depend
+  // on the value-label measurement).
+  const pwEst = isH
+    ? w - ((chart.catAxisHidden ? w * 0.03 : w * 0.22) + valTitleW + legLeftW) - (legRightW + w * 0.03)
+    : 0;
+  const valAxisLenPt = (isH ? pwEst : phEst) / ptToPx;
+
   let dataMax = 0;
   for (let ci = 0; ci < n; ci++) {
     let stackSum = 0;
@@ -550,11 +567,11 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
   // Bar/column anchors the value axis at 0; ignore the returned min.
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, valAxisLenPt);
 
   // Secondary value-axis scale (combo charts). INDEPENDENT of the primary: its
-  // own "nice" major unit / gridline count (the auto unit is Excel-proprietary,
-  // so it can differ from PowerPoint by one step). Explicit `<c:scaling>` wins.
+  // own "nice" major unit / gridline count. Its axis is the vertical right edge,
+  // so its length is the plot height. Explicit `<c:scaling>` wins.
   let sMin = 0, sMax = 1, sStep = 1;
   if (sec) {
     const lineVals: number[] = [];
@@ -564,17 +581,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
     const dMin = lineVals.length ? Math.min(...lineVals) : 0;
     const dMax = lineVals.length ? Math.max(...lineVals) : 1;
-    const scl = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max);
+    const scl = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, phEst / ptToPx);
     sMin = scl.min; sMax = scl.max; sStep = scl.step;
   }
-
-  // Vertical pads first (independent of the side gutters) so the plot height —
-  // and thus the tick-label font — is known before measuring the labels.
-  const padT = titleH + legTopH + h * 0.02;
-  const padB = isH
-    ? (chart.valAxisHidden ? h * 0.02 : h * 0.08) + catTitleH + legBottomH
-    : h * 0.14 + catTitleH + legBottomH;
-  const phEst = h - padT - padB;
 
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
   const tickFontPx = Math.max(8, Math.min(11, phEst / 20));

@@ -43,11 +43,28 @@ export function niceAxisMin(dataMin: number, step: number): number {
  *  range) drives the rounded min, max AND the gridline step, so they can never
  *  desync. Explicit `<c:valAx><c:scaling><c:min/max>` wins. The auto major unit
  *  is Excel-proprietary (not in ECMA-376); niceStep approximates it. */
+/** Target gridline spacing in POINTS. Excel's auto major unit is not a fixed
+ *  gridline count — it targets a roughly constant on-screen spacing, so a long
+ *  axis (e.g. a horizontal bar chart's wide value axis) gets MORE, finer
+ *  gridlines than a short one of the same data range. Empirically ~one major
+ *  gridline per this many points reproduces PowerPoint across sample-14's
+ *  column / area / horizontal-bar / secondary-axis charts. This is a runtime
+ *  Excel behavior (not in ECMA-376); the constant is the one tunable. */
+const GRIDLINE_SPACING_PT = 40;
+
+/** Pick the `niceStep` target-gridline count for an axis of `axisLenPt` points.
+ *  Falls back to 5 (the legacy fixed target) when the length is unknown. */
+function targetStepsForAxis(axisLenPt?: number): number {
+  if (axisLenPt == null || !isFinite(axisLenPt) || axisLenPt <= 0) return 5;
+  return Math.min(15, Math.max(3, Math.round(axisLenPt / GRIDLINE_SPACING_PT)));
+}
+
 export function valueAxisScale(
   dataMin: number, dataMax: number,
   explicitMin?: number | null, explicitMax?: number | null,
+  axisLenPt?: number,
 ): { min: number; max: number; step: number } {
-  const step = niceStep(dataMax - dataMin);
+  const step = niceStep(dataMax - dataMin, targetStepsForAxis(axisLenPt));
   const min = explicitMin ?? niceAxisMin(dataMin, step);
   const max = explicitMax ?? niceAxisMax(dataMax, step, min);
   return { min, max, step };
