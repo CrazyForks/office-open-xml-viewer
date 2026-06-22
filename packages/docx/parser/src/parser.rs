@@ -4241,14 +4241,13 @@ fn parse_table(
                 .collect();
         }
         let mut out: Vec<&'static str> = Vec::new();
-        if r == 0 && (first_row_styled || first_row_has_fmt || first_row) {
-            out.push("firstRow");
-        } else if last_row && r + 1 == row_count {
-            out.push("lastRow");
-        } else if h_band {
-            // The banding parity offset only shifts when row 0 was consumed as a
-            // SHADED first row; a first row that only carries rPr/pPr (no shd)
-            // still bands from row 0 like Word.
+        let is_first_row = r == 0 && (first_row_styled || first_row_has_fmt || first_row);
+        let is_last_row = last_row && r + 1 == row_count;
+        // Horizontal banding applies to BODY rows — neither the (styled) first row
+        // nor the last row. The banding parity offset only shifts when row 0 was
+        // consumed as a SHADED first row; a first row that only carries rPr/pPr
+        // (no shd) still bands from row 0 like Word.
+        if !is_first_row && !is_last_row && h_band {
             let bi = if first_row_styled {
                 r as i64 - 1
             } else {
@@ -4259,6 +4258,16 @@ fn parse_table(
             } else {
                 "band2Horz"
             });
+        }
+        // firstRow and lastRow are INDEPENDENT conditions (§17.4.8 ST_Cnf /
+        // §17.7.6) — a single-row table is BOTH, so push each on its own `if`
+        // (mirroring col_conds' firstCol/lastCol). Using else-if here previously
+        // dropped lastRow (and the swCell/seCell corners) on a one-row table.
+        if is_first_row {
+            out.push("firstRow");
+        }
+        if is_last_row {
+            out.push("lastRow");
         }
         out
     };
@@ -4275,6 +4284,16 @@ fn parse_table(
         if !is_first && !is_last && v_band {
             // Parity offset by 1 when a first column is carved out, mirroring the
             // horizontal-banding offset logic.
+            //
+            // ASYMMETRY (intentional, documented): the row offset above gates on
+            // `first_row_styled` (the firstRow conditional carries SHADING) — an
+            // empty firstRow must not shift row banding (Word's EHC behavior). The
+            // column offset here gates on `first_col` (the tblLook firstColumn
+            // FLAG / geometry) instead, because no analogous "empty firstColumn"
+            // style has been observed and gating it on first-col shading is
+            // untested. If such a style surfaces (a firstColumn flag whose
+            // conditional paints nothing yet still shifts vertical banding), gate
+            // this on a `first_col_styled` (shd) predicate to match the row side.
             let bi = if first_col { c as i64 - 1 } else { c as i64 };
             out.push(if bi % 2 == 0 {
                 "band1Vert"
@@ -7915,5 +7934,75 @@ mod numbering_marker_font_tests {
         // enabled) → no conditional color.
         assert_eq!(cell_text_color(&t.rows[1].cells[0]), None);
         assert_eq!(cell_text_color(&t.rows[1].cells[1]), None);
+    }
+
+    // A single-row table is BOTH the first and last row (§17.4.8 / §17.7.6:
+    // firstRow/lastRow are independent bits). The old else-if dropped lastRow
+    // here; now both apply, and lastRow (higher precedence) wins the color.
+    #[test]
+    fn single_row_table_gets_both_first_and_last_row() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="FL">
+                    <w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="111111"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="lastRow"><w:rPr><w:color w:val="222222"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="FL"/>
+                 <w:tblLook w:firstRow="1" w:lastRow="1"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>Only</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &styles,
+        );
+        // lastRow layers over firstRow (§17.7.6 order) → 222222, NOT the old
+        // firstRow-only 111111.
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("222222")
+        );
+    }
+
+    // §17.4.55: vertical banding is ON by default (noVBand absent). A style that
+    // defines band1Vert/band2Vert must engage them on body columns even when the
+    // tblLook does not explicitly request it. (noHBand is set here to isolate the
+    // vertical axis.)
+    #[test]
+    fn vertical_banding_on_by_default() {
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr/></w:style>
+                <w:style w:type="table" w:styleId="VB">
+                    <w:tblStylePr w:type="band1Vert"><w:rPr><w:color w:val="aaa111"/></w:rPr></w:tblStylePr>
+                    <w:tblStylePr w:type="band2Vert"><w:rPr><w:color w:val="bbb222"/></w:rPr></w:tblStylePr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        ));
+        // tblLook 0200 = noHBand only; noVBand (0x0400) absent ⇒ v_band defaults on.
+        let t = parse_tbl_styled(
+            r#"<w:tblPr><w:tblStyle w:val="VB"/>
+                 <w:tblLook w:val="0200"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+               <w:tr>
+                 <w:tc><w:p><w:r><w:t>C0</w:t></w:r></w:p></w:tc>
+                 <w:tc><w:p><w:r><w:t>C1</w:t></w:r></w:p></w:tc>
+               </w:tr>"#,
+            &styles,
+        );
+        // Column 0 → band1Vert, column 1 → band2Vert (default-on vertical banding).
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[0]).as_deref(),
+            Some("aaa111")
+        );
+        assert_eq!(
+            cell_text_color(&t.rows[0].cells[1]).as_deref(),
+            Some("bbb222")
+        );
     }
 }
