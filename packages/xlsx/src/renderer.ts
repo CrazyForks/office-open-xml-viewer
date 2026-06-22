@@ -1311,6 +1311,16 @@ function renderQuadrant(
   // before text, which stays on top — same z-order as the per-cell path).
   const mergeBorderTasks: Array<() => void> = [];
 
+  // Deferred NON-merged cell borders + table-style overlays. Two-pass painting:
+  // every cell fill (and the gray sheet gridlines) is laid down in the main
+  // loop (pass 1); all styled cell borders run here (pass 2), AFTER every fill.
+  // This removes the latent "a neighbour's fill over-paints a shared border"
+  // bug structurally — once borders are deferred past all fills, no fill can
+  // erase them — so the old `invertedTop`/`invertedLeft` inherit-and-repair
+  // mechanism is gone (only genuine conflict resolution via `pickStrongerEdge`
+  // remains). Mirrors docx PR #545 and the pptx renderer's two-pass order.
+  const borderTasks: Array<() => void> = [];
+
   // Pre-pass: merge cells whose anchor lies outside this viewport quadrant but whose
   // span overlaps it (e.g. scrolled past the anchor row/col, or the anchor is in a
   // frozen quadrant while we are rendering the scrollable quadrant).
@@ -1374,7 +1384,7 @@ function renderQuadrant(
     // a follow-up; the current order is visually inert.
     const mergedBorder = resolveMergeBorder(border, aRow, aCol, info.right, info.bottom, rc.cellMap, styles);
     const preBorder = mergeBorders(mergedBorder, cf.border);
-    mergeBorderTasks.push(() => renderBorder(ctx, preBorder, aCx, aCy, cW, cH, false, false, dpr));
+    mergeBorderTasks.push(() => renderBorder(ctx, preBorder, aCx, aCy, cW, cH, dpr));
 
     if (!cell) continue;
     const text = formatCellValue(cell, styles, cf.numFmt);
@@ -1573,31 +1583,18 @@ function renderQuadrant(
       // - directional hatches (dark/light Horizontal/Vertical/Down/Up/Grid/
       //   Trellis): render via a small repeating tile using createPattern so
       //   the hatch actually shows, rather than approximating as a blend.
-      // Whether this cell painted an opaque fill over its rect. The
-      // neighbour-edge inherit below (which redraws the shared boundary line
-      // the left/above cell already drew) is only needed to repair a line
-      // that *this* cell's fill over-painted. An empty, fill-less cell paints
-      // nothing over the boundary, so inheriting the neighbour's edge there is
-      // a pure double-draw — invisible in LTR (it lands on the same pixel the
-      // neighbour drew) but in an RTL mirror (ECMA-376 §18.3.1.87) the cell's
-      // own "left" maps to its *screen-left* edge, away from the neighbour,
-      // producing a spurious vertical line Excel never draws (sample-29 E1).
-      let paintedFill = false;
       if (paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH)) {
         // own fill painted; tableStyle fallbacks intentionally skipped
-        paintedFill = true;
       } else if (tableStyle && tableFillDxf?.fill?.fgColor) {
         // Custom or built-in: a resolved table-element dxf fill wins.
         ctx.fillStyle = hexToRgba(tableFillDxf.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
-        paintedFill = true;
       } else if (tableStyle && !tableStyle.isCustom && tableStyle.isBanded) {
         // Accent-tint banding is an approximation for built-in style names
         // only. Custom styles with no stripe dxf get no banding fill (Excel
         // draws none — §18.5.1.2).
         ctx.fillStyle = stripeColorFor(tableStyle.accent);
         ctx.fillRect(cx, cy, cellW, cellH);
-        paintedFill = true;
       }
 
       // Comment indicator triangle — drawn above fill but below borders so
@@ -1670,99 +1667,108 @@ function renderQuadrant(
           right: suppressRightGridCol.has(ci) ? null : mergedBorder.right,
         };
       }
-      // Inherit the cell-above's bottom edge as our top, and the cell-left's
-      // right edge as our left. Two adjacent cells share an edge along the row
-      // / column boundary; the upper cell drew its bottom during its own
-      // iteration, but our cell's fill (drawn just above) over-paints the
-      // half of that line lying inside our cell. Re-drawing it as our top
-      // (after our fill) restores the boundary line.
+      // Shared-edge conflict resolution (ECMA-376 §18.18.3). Two adjacent cells
+      // share the boundary along their common row / column edge. In the two-pass
+      // order each cell's border closure runs after every fill, so the upper
+      // cell's `bottom` (and the left cell's `right`) is never erased — it is
+      // always drawn by that neighbour. So for an INTERIOR cell we only touch our
+      // own top / left when *we* also define an edge there that conflicts, and
+      // render the stronger of the two. Adopting a neighbour's edge we don't
+      // define would double-stroke it (two strokes compounding to an over-dark
+      // rule — sample-27) or paint a spurious line over a fill-less cell
+      // (sample-6). This replaces the old fill-repair (`paintedFill` gate +
+      // `invertedTop` / `invertedLeft`), which is gone.
       //
-      // When *both* cells define an edge, Excel renders the stronger style at
-      // a conflict (e.g. a medium bottom is not erased by a thin top below
-      // it). `pickStrongerEdge` returns the higher-precedence edge so the
-      // inherit picks the visually dominant style instead of always favouring
-      // the lower cell's own.
+      // EXCEPTION — the quadrant's first rendered row/column (`ri`/`ci` === 0):
+      // the upper / left neighbour lies OUTSIDE this quadrant (the viewport has
+      // no top/left overscan — viewer.ts walks forward from startRow/startCol
+      // with a +2 buffer only at the bottom/right), so when scrolled it is never
+      // iterated and never strokes its own facing edge. There we adopt the
+      // neighbour's edge even when our own side is unset, so a boundary authored
+      // only as the neighbour's bottom/right still shows at the viewport edge.
       const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
-      const aboveBottom = paintedFill && aboveCell
+      const aboveBottom = aboveCell
         ? resolveXf(styles, aboveCell.styleIndex).border.bottom
         : null;
-      let invertedTop = false;
-      if (aboveBottom?.style) {
-        const before = mergedBorder.top;
-        const picked = pickStrongerEdge(before, aboveBottom);
-        mergedBorder = { ...mergedBorder, top: picked };
-        // We only invert the double-border drawing when the top edge ends up
-        // being a *redraw* of the upper cell's bottom (rather than a fresh
-        // line for our own xf.top). That is true when the picked edge came
-        // from the neighbour — i.e. our own top was unset or weaker.
-        invertedTop = picked === aboveBottom && before !== aboveBottom;
+      if (aboveBottom?.style && (ri === 0 || mergedBorder.top?.style)) {
+        mergedBorder = { ...mergedBorder, top: pickStrongerEdge(mergedBorder.top, aboveBottom) };
       }
-      let invertedLeft = false;
-      if (paintedFill && !suppressLeftGridCol.has(ci)) {
-        // Skip the inherit when the left edge was deliberately suppressed for
-        // a centerContinuous run (ECMA-376 §18.18.40) — otherwise the
-        // neighbour's xf.right re-introduces the internal vertical that we
-        // just hid.
+      if (!suppressLeftGridCol.has(ci)) {
+        // Skip when the left edge was deliberately suppressed for a
+        // centerContinuous run (ECMA-376 §18.18.40) — otherwise the
+        // neighbour's xf.right re-introduces the internal vertical we just hid.
         const leftCell = cellMap.get(`${rowIndex}:${colIndex - 1}`);
         const leftRight = leftCell
           ? resolveXf(styles, leftCell.styleIndex).border.right
           : null;
-        if (leftRight?.style) {
-          const before = mergedBorder.left;
-          const picked = pickStrongerEdge(before, leftRight);
-          mergedBorder = { ...mergedBorder, left: picked };
-          invertedLeft = picked === leftRight && before !== leftRight;
+        if (leftRight?.style && (ci === 0 || mergedBorder.left?.style)) {
+          mergedBorder = { ...mergedBorder, left: pickStrongerEdge(mergedBorder.left, leftRight) };
         }
       }
-      if (mergeInfo) {
-        // Merged anchors draw their (full-span) border above all gridlines —
-        // see `mergeBorderTasks`. A 1×1 cell keeps the inline per-cell ordering.
-        // Snapshot the per-iteration `let` bindings (mergedBorder/invertedTop/
-        // invertedLeft are reassigned by the inherit logic above) so the
-        // deferred closure draws the values as of *this* anchor; cx/cy/cellW/
-        // cellH are already block `const` and safe to capture directly.
-        const mb = mergedBorder, mit = invertedTop, mil = invertedLeft;
-        mergeBorderTasks.push(() => renderBorder(ctx, mb, cx, cy, cellW, cellH, mit, mil, dpr));
-      } else {
-        renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft, dpr);
-      }
-
       // Excel Table style overlay (ECMA-376 §18.8.83). Custom styles draw only
       // their dxf-defined borders; built-in style names fall back to a
-      // synthesized accent rule. Drawn on top of cell borders so an
-      // empty-border data cell still shows the table structure that the style
-      // actually defines. None-style tables produce no entry in
-      // `tableStyleMap` (see `buildTableStyleMap`), so this block is skipped.
-      // NB: for a merged anchor the base cell border is deferred (see
-      // `mergeBorderTasks`) and so paints *above* this overlay rather than
-      // below it. That ordering is unreachable in valid input — Excel forbids
-      // merging cells inside a structured Table range — so `mergeInfo &&
-      // tableStyle` never co-occur on one cell.
-      if (tableStyle) {
-        const overlay = tableOverlayBorder(tableStyle, tsDxfWhole, tsDxfHeader, colIndex);
-        if (overlay.kind === 'dxf') {
-          renderBorder(ctx, overlay.border, cx, cy, cellW, cellH, false, false, dpr);
-        } else if (overlay.kind === 'accent') {
-          const hp = 0.5 / dpr;
-          ctx.strokeStyle = overlay.color;
-          ctx.lineWidth = overlay.lineWidth;
-          ctx.beginPath();
-          // perimeter inset (-hp) kept literal: snapping could push it outside
-          // the cell's bottom edge; dpr>=3 edge accepted
-          ctx.moveTo(cx, cy + cellH - hp);
-          ctx.lineTo(cx + cellW, cy + cellH - hp);
-          if (overlay.topEdge) {
-            const ty = cy + crispOffset(cy, overlay.lineWidth, dpr);
-            ctx.moveTo(cx, ty);
-            ctx.lineTo(cx + cellW, ty);
+      // synthesized accent rule. Drawn on top of the cell border so an
+      // empty-border data cell still shows the table structure the style
+      // defines. None-style tables produce no `tableStyleMap` entry, so this is
+      // skipped. (Excel forbids merging cells inside a structured Table, so a
+      // merged anchor never carries a `tableStyle`; for the merged branch only
+      // the AutoFilter arrow can apply.)
+      const overlay = tableStyle
+        ? tableOverlayBorder(tableStyle, tsDxfWhole, tsDxfHeader, colIndex)
+        : null;
+      const drawArrow = rc.autoFilterCells.has(key);
+      // Paint the base cell border, then the table overlay on top of it, then
+      // the AutoFilter arrow — the original inline order, kept intact whether
+      // this runs deferred (non-merged) or inline (merged anchor).
+      const paintOverlayAndArrow = () => {
+        if (overlay) {
+          if (overlay.kind === 'dxf') {
+            renderBorder(ctx, overlay.border, cx, cy, cellW, cellH, dpr);
+          } else if (overlay.kind === 'accent') {
+            const hp = 0.5 / dpr;
+            ctx.strokeStyle = overlay.color;
+            ctx.lineWidth = overlay.lineWidth;
+            ctx.beginPath();
+            // perimeter inset (-hp) kept literal: snapping could push it
+            // outside the cell's bottom edge; dpr>=3 edge accepted
+            ctx.moveTo(cx, cy + cellH - hp);
+            ctx.lineTo(cx + cellW, cy + cellH - hp);
+            if (overlay.topEdge) {
+              const ty = cy + crispOffset(cy, overlay.lineWidth, dpr);
+              ctx.moveTo(cx, ty);
+              ctx.lineTo(cx + cellW, ty);
+            }
+            ctx.stroke();
           }
-          ctx.stroke();
         }
-      }
+        // AutoFilter dropdown indicator
+        if (drawArrow) {
+          drawAutoFilterArrow(ctx, cx, cy, cw, cellH);
+        }
+      };
 
-      // AutoFilter dropdown indicator
-      if (rc.autoFilterCells.has(key)) {
-        drawAutoFilterArrow(ctx, cx, cy, cw, cellH);
+      if (mergeInfo) {
+        // Merged anchors draw their (full-span) border above all gridlines —
+        // see `mergeBorderTasks`. Snapshot the per-iteration `let` binding
+        // (`mergedBorder` is reassigned by the conflict-resolution above) so
+        // the deferred closure draws the value as of *this* anchor; cx/cy/cellW/
+        // cellH are already block `const` and safe to capture directly. The
+        // overlay/arrow paint inline (pass 1) here, matching the prior order
+        // where the deferred merge border sat above them.
+        const mb = mergedBorder;
+        mergeBorderTasks.push(() => renderBorder(ctx, mb, cx, cy, cellW, cellH, dpr));
+        paintOverlayAndArrow();
+      } else {
+        // Non-merged borders are deferred to pass 2 (after every fill) so a
+        // later neighbour's fill can never over-paint this cell's edges. The
+        // overlay + arrow ride in the SAME closure, after the base border, so
+        // their mutual base-border < overlay < arrow order is preserved exactly
+        // — only the whole trio shifts above every cell's gray gridline.
+        const mb = mergedBorder;
+        borderTasks.push(() => {
+          renderBorder(ctx, mb, cx, cy, cellW, cellH, dpr);
+          paintOverlayAndArrow();
+        });
       }
 
       if (!cell) continue;
@@ -2277,11 +2283,15 @@ function renderQuadrant(
     }
   }
 
-  // Merge borders sit above every gridline (the bug this fixes) and below the
-  // deferred text, preserving the per-cell path's gridline < border < text
-  // order. (The only layer this reorders relative to a merged anchor is the
-  // table-style overlay, which now paints below the base border — unreachable
-  // for merged cells; see the overlay block above.)
+  // Two-pass flush. Pass 1 (the grid loop above) laid down every cell fill and
+  // the gray sheet gridlines; pass 2 paints all styled borders on top, so no
+  // fill can ever over-paint a neighbour's shared edge (the bug this removes).
+  // Order within pass 2: non-merged borders first (they were inline = earlier
+  // in the old per-cell path), then merged-anchor borders (always deferred =
+  // later), then text last (stays on top of every border). This preserves the
+  // prior gridline < non-merged border < merged border < text z-order.
+  for (const task of borderTasks) task();
+
   for (const task of mergeBorderTasks) task();
 
   for (const task of textTasks) task();
@@ -3495,16 +3505,6 @@ function renderBorder(
   ctx: CanvasRenderingContext2D,
   border: Border,
   x: number, y: number, w: number, h: number,
-  /** When set, the cell's top edge was inherited from the cell above's bottom
-   *  to redraw the part over-painted by this cell's fill. Double-border
-   *  rendering uses inverted "outer / inner" extensions in that case so the
-   *  line that the upper cell drew as its bottom *outer* (extended past the
-   *  corner, at y + 1 from this cell's perspective) is the one we extend
-   *  here too — otherwise the inherited redraw shortens that line and
-   *  leaves a 1-px gap at every outer corner of the upper cell's double box.
-   *  Same idea for `invertedLeft` (inherited from the left cell's right). */
-  invertedTop = false,
-  invertedLeft = false,
   dpr = 1,
 ): void {
   type EdgeRef = {
@@ -3561,21 +3561,19 @@ function renderBorder(
       ctx.beginPath();
       if (kind === 'h') {
         const isTop = y1 === y;
-        // For an inherited top, the line at y - off is the upper cell's
-        // bottom *inner* (which survives our fill, sitting above the fill
-        // band) and the line at y + off is the upper cell's bottom *outer*
-        // (which our fill erased and which we are restoring). Swap which
-        // side gets the extension so the restored line is the extended one.
-        const swap = isTop && invertedTop;
-        const outerY = isTop ? (swap ? y + off : y - off) : y + h + off;
-        const innerY = isTop ? (swap ? y - off : y + off) : y + h - off;
+        // Outer line extends past the corners by `off` so adjacent doubled
+        // edges close; the inner line is shortened by `off` on each end so
+        // perpendicular inner lines meet exactly at the inner corner. In the
+        // two-pass order each side draws its own double fully (no fill erases
+        // it), so no inherited-redraw "swap" is needed.
+        const outerY = isTop ? y - off : y + h + off;
+        const innerY = isTop ? y + off : y + h - off;
         ctx.moveTo(x - off, outerY);   ctx.lineTo(x + w + off, outerY);
         ctx.moveTo(x + off, innerY);   ctx.lineTo(x + w - off, innerY);
       } else {
         const isLeft = x1 === x;
-        const swap = isLeft && invertedLeft;
-        const outerX = isLeft ? (swap ? x + off : x - off) : x + w + off;
-        const innerX = isLeft ? (swap ? x - off : x + off) : x + w - off;
+        const outerX = isLeft ? x - off : x + w + off;
+        const innerX = isLeft ? x + off : x + w - off;
         ctx.moveTo(outerX, y - off);   ctx.lineTo(outerX, y + h + off);
         ctx.moveTo(innerX, y + off);   ctx.lineTo(innerX, y + h - off);
       }
