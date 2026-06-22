@@ -5910,6 +5910,25 @@ export function borderDashPattern(style: string, lw: number): number[] {
   return docxBorderDashArray(style, lw);
 }
 
+/**
+ * Device-pixel band layout for an ECMA-376 §17.18.2 `double` border of stroked
+ * width `lw` (px) on a `ctx.scale(dpr,dpr)`-d canvas: three bands — rail / gap /
+ * rail, each ≈ lw/3 — but each FLOORED at one device pixel. The floor is what
+ * stops a thin double (e.g. sz6 ≈ 0.75px) collapsing into a single line: with
+ * `gapDev ≥ 1` the two rails are always separated by at least one device pixel,
+ * and with `railDev ≥ 1` each rail always paints. For thick borders it reduces
+ * to equal thirds. Exported for unit tests only — not part of the package API.
+ */
+export function doubleRailGeometry(lw: number, dpr: number): {
+  railDev: number;
+  gapDev: number;
+  spanDev: number;
+} {
+  const railDev = Math.max(1, Math.round((lw * dpr) / 3));
+  const gapDev = Math.max(1, Math.round((lw * dpr) / 3));
+  return { railDev, gapDev, spanDev: 2 * railDev + gapDev };
+}
+
 function drawBorderLine(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x1: number, y1: number, x2: number, y2: number,
@@ -5936,9 +5955,7 @@ function drawBorderLine(
     // top of each other and re-collapse the gap. Computing both rails from a
     // single rounded band origin in device space keeps the rail/gap/rail bands
     // whole device pixels, so the gap survives at any sz/scale/dpr.
-    const railDev = Math.max(1, Math.round((lw * dpr) / 3));
-    const gapDev = Math.max(1, Math.round((lw * dpr) / 3));
-    const spanDev = 2 * railDev + gapDev;
+    const { railDev, gapDev, spanDev } = doubleRailGeometry(lw, dpr);
     ctx.fillStyle = ctx.strokeStyle;
     const horizontal = y1 === y2;
     if (horizontal) {
