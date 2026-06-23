@@ -30,7 +30,8 @@ const rendererMod = skia ? await import(RENDERER_PATH).catch(() => null) : null;
 
 const samplePath = (n: number) =>
   resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
-const haveSamples = existsSync(samplePath(12)) && existsSync(samplePath(13));
+const haveSamples =
+  existsSync(samplePath(5)) && existsSync(samplePath(12)) && existsSync(samplePath(13));
 
 // ECMA-376 §17.6.4 newspaper columns + §17.18.79 "continuous" section marks.
 // Both journal templates flow their body through `continuous` section breaks
@@ -65,13 +66,25 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
       expect(paginate(12).length).toBe(3);
     });
 
-    // 5 pages, matching Word, once non-final continuous multi-column sections are
-    // balanced (§17.6.4): a short 2-col section's content is split across both
-    // columns instead of packing column 0, which frees vertical space for the
-    // following full-width element on the same page and densifies the whole flow.
-    // The final (references) section stays greedy, as Word leaves it.
-    it.fails('sample-13 paginates to 5 pages — off-by-one reverted for the sample-5 hotfix (now 6)', () => {
+    // 5 pages, matching Word. The intro 2-col section opens with a "continuous"
+    // section break, so it stays on the title page (§17.6.22: the break is
+    // governed by the upcoming section's start type, not the title section's
+    // nextPage). Restored after the sample-5 cover overprint was fixed at its
+    // real root — a PageBreak after the "Cover Pages" building block (§17.5.2) —
+    // instead of forcing every nextPage→continuous boundary to break a page.
+    it('sample-13 paginates to 5 pages (Word ground truth)', () => {
       expect(paginate(13).length).toBe(5);
+    });
+
+    // sample-5 (夢十夜): the cover is a "Cover Pages" building block (§17.5.2)
+    // whose text flow is empty — the page is filled by page-anchored cover
+    // graphics. Word places it on its own page and starts the novel body on
+    // page 2, even though the body section opens with a "continuous" break. The
+    // parser emits a PageBreak after the cover content so the cover stands alone:
+    // 7 pages. Were the cover detection to fail, the continuous body would flow
+    // up onto page 1 and the document would collapse to 6 pages.
+    it('sample-5 cover page stands alone — 7 pages (Word ground truth)', () => {
+      expect(paginate(5).length).toBe(7);
     });
   },
 );

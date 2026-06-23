@@ -751,6 +751,47 @@ fn parse_font_table(xml: &str) -> HashMap<String, String> {
     map
 }
 
+/// Body children with `<w:sdt>` wrappers unwrapped (identical node sequence to
+/// `element_children_flat`), each paired with a flag marking the LAST flattened
+/// child of a **"Cover Pages" building block** (ECMA-376 §17.5.2:
+/// `<w:sdt>/<w:sdtPr>/<w:docPartObj>/<w:docPartGallery w:val="Cover Pages"/>`).
+///
+/// Word treats a Cover Page building block as a standalone page at the document
+/// start: the following content begins on the NEXT page, even across a
+/// "continuous" section break. The cover's own text flow is typically empty —
+/// the visible page is filled by page-/margin-anchored cover graphics that do
+/// not advance the text cursor — so the paginator cannot infer the page-fill
+/// from content height. `parse_body_elements` models Word's behavior by emitting
+/// a `PageBreak` after the cover's content (where the flag is `true`). Without
+/// this, a `continuous` body section after the cover (governed by the upcoming
+/// section's start type, §17.6.22) would flow up onto the cover page.
+fn body_children_with_cover_breaks<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+) -> Vec<(roxmltree::Node<'a, 'input>, bool)> {
+    let mut out: Vec<(roxmltree::Node, bool)> = Vec::new();
+    for child in node.children().filter(|n| n.is_element()) {
+        let tn = child.tag_name();
+        if tn.namespace() == Some(W_NS) && tn.name() == "sdt" {
+            let is_cover = child_w(child, "sdtPr")
+                .and_then(|pr| child_w(pr, "docPartObj"))
+                .and_then(|obj| child_w(obj, "docPartGallery"))
+                .and_then(|g| attr_w(g, "val"))
+                .as_deref()
+                == Some("Cover Pages");
+            if let Some(content) = child_w(child, "sdtContent") {
+                let inner = element_children_flat(content);
+                let last = inner.len();
+                for (idx, c) in inner.into_iter().enumerate() {
+                    out.push((c, is_cover && idx + 1 == last));
+                }
+            }
+        } else {
+            out.push((child, false));
+        }
+    }
+    out
+}
+
 fn parse_body_elements(
     body_node: roxmltree::Node,
     style_map: &StyleMap,
@@ -762,11 +803,13 @@ fn parse_body_elements(
     let mut body: Vec<BodyElement> = Vec::new();
     // The body-level sectPr (the last element) defines the final section and
     // is not a page break. Mid-body sectPrs (nested in pPr) DO imply a page break.
-    let body_children = element_children_flat(body_node);
+    // The walk also flags the end of any "Cover Pages" building block so the
+    // cover gets its own page (see body_children_with_cover_breaks).
+    let body_children = body_children_with_cover_breaks(body_node);
     let body_level_sect_pr = body_children
         .iter()
         .last()
-        .copied()
+        .map(|(n, _)| *n)
         .filter(|n| n.tag_name().name() == "sectPr");
     let body_level_sect_id = body_level_sect_pr.map(|n| n.id());
 
@@ -775,7 +818,12 @@ fn parse_body_elements(
     // persists across the body's paragraph walk rather than resetting per `<w:p>`.
     let mut field = FieldState::default();
 
-    for child in body_children {
+    // Positions in `body` of the synthetic page breaks emitted for Cover Pages
+    // building blocks (§17.5.2), so a redundant one can be dropped post-pass (see
+    // below) when the cover is already followed by a page-advancing construct.
+    let mut cover_break_positions: Vec<usize> = Vec::new();
+
+    for (child, cover_break_after) in body_children {
         match child.tag_name().name() {
             "p" => {
                 let result = parse_paragraph(
@@ -794,43 +842,46 @@ fn parse_body_elements(
                 } else {
                     None
                 };
+                // A lone page/column break paragraph collapses to the break marker.
+                // (Use a fall-through `match` rather than an early `continue` so the
+                // `cover_break_after` push at the loop tail is still reached when a
+                // cover's last child is itself a lone break — rare, but it must not
+                // silently drop the cover's standalone-page break.)
                 match lone_break {
-                    Some(BreakType::Page) => {
-                        body.push(BodyElement::PageBreak { parity: None });
-                        continue;
+                    Some(BreakType::Page) => body.push(BodyElement::PageBreak { parity: None }),
+                    Some(BreakType::Column) => body.push(BodyElement::ColumnBreak),
+                    _ => {
+                        // Mid-paragraph page / column breaks come from
+                        // `<w:br w:type="page"/>` / `<w:br w:type="column"/>` (and the
+                        // ignored `<w:lastRenderedPageBreak/>`). Split the paragraph
+                        // around them and emit BodyElement::PageBreak / ColumnBreak
+                        // between the pieces — each piece keeps the same pPr so layout
+                        // continues correctly after the break.
+                        for piece in split_para_on_page_breaks(result) {
+                            match piece {
+                                ParaPiece::Para(p) => body.push(BodyElement::Paragraph(p)),
+                                ParaPiece::PageBreak => {
+                                    body.push(BodyElement::PageBreak { parity: None })
+                                }
+                                ParaPiece::ColumnBreak => body.push(BodyElement::ColumnBreak),
+                            }
+                        }
+                        // ECMA-376 §17.6.1: a section break inside pPr defines the
+                        // section that ENDS at this paragraph. Emit a SectionBreak
+                        // marker carrying that section's <w:cols> (§17.6.4) AND its
+                        // break kind (ST_SectionMark, §17.18.79) so the renderer can
+                        // switch the active column geometry per section — even for a
+                        // "continuous" break, which produces no page break but may
+                        // still change the column count. (Previously a "continuous"
+                        // break emitted nothing and the others emitted a column-less
+                        // PageBreak, so every section inherited the body-level
+                        // section's columns — the bug this fixes.)
+                        if let Some(sect_pr) =
+                            child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
+                        {
+                            body.push(section_break_element(sect_pr));
+                        }
                     }
-                    Some(BreakType::Column) => {
-                        body.push(BodyElement::ColumnBreak);
-                        continue;
-                    }
-                    _ => {}
-                }
-                // Mid-paragraph page / column breaks come from
-                // `<w:br w:type="page"/>` / `<w:br w:type="column"/>` (and the
-                // ignored `<w:lastRenderedPageBreak/>`). Split the paragraph
-                // around them and emit BodyElement::PageBreak / ColumnBreak
-                // between the pieces — each piece keeps the same pPr so layout
-                // continues correctly after the break.
-                for piece in split_para_on_page_breaks(result) {
-                    match piece {
-                        ParaPiece::Para(p) => body.push(BodyElement::Paragraph(p)),
-                        ParaPiece::PageBreak => body.push(BodyElement::PageBreak { parity: None }),
-                        ParaPiece::ColumnBreak => body.push(BodyElement::ColumnBreak),
-                    }
-                }
-                // ECMA-376 §17.6.1: a section break inside pPr defines the
-                // section that ENDS at this paragraph. Emit a SectionBreak marker
-                // carrying that section's <w:cols> (§17.6.4) AND its break kind
-                // (ST_SectionMark, §17.18.79) so the renderer can switch the
-                // active column geometry per section — even for a "continuous"
-                // break, which produces no page break but may still change the
-                // column count. (Previously a "continuous" break emitted nothing
-                // and the others emitted a column-less PageBreak, so every
-                // section inherited the body-level section's columns — the bug
-                // this fixes.)
-                if let Some(sect_pr) = child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
-                {
-                    body.push(section_break_element(sect_pr));
                 }
             }
             "tbl" => {
@@ -845,6 +896,51 @@ fn parse_body_elements(
                 body.push(section_break_element(child));
             }
             _ => {}
+        }
+        // ECMA-376 §17.5.2: a "Cover Pages" building block occupies its own page
+        // in Word — the following content (even a "continuous" section) starts on
+        // the next page. Emit the page break after the cover's content.
+        if cover_break_after {
+            cover_break_positions.push(body.len());
+            body.push(BodyElement::PageBreak { parity: None });
+        }
+    }
+
+    // Drop a cover's synthetic page break when the cover's content is ALREADY
+    // followed by a construct that starts a new page — a hard `<w:br w:type="page"/>`
+    // (PageBreak) or a section boundary (SectionBreak). In that case the cover
+    // stands alone via that construct, and the extra page break would leave a
+    // spurious BLANK page between the cover and the body (the renderer's pageBreak /
+    // page-advancing sectionBreak handlers push a page unconditionally — only
+    // `newPage()` coalesces an empty page). The common case (cover followed by a
+    // content paragraph, e.g. sample-5) keeps its break. Real consecutive hard page
+    // breaks are untouched: only the synthetic cover breaks are candidates here.
+    //
+    // Dropping before a SectionBreak assumes that boundary is page-advancing. Under
+    // the §17.6.22 upcoming-section reading a `continuous` next section would NOT
+    // advance, so in the (Word-never-emits) shape `cover sdt → loose body-level
+    // <w:sectPr> → continuous section` the cover would lose its standalone page.
+    // Word always carries a section-ending sectPr inside the last paragraph's pPr,
+    // which puts a Paragraph between the cover and the SectionBreak (the sample-5
+    // shape) — so `pos + 1` is that paragraph and the break is kept. Unreachable
+    // from Word output; accepted for hand-authored input.
+    if !cover_break_positions.is_empty() {
+        let drop: Vec<usize> = cover_break_positions
+            .into_iter()
+            .filter(|&pos| {
+                matches!(
+                    body.get(pos + 1),
+                    Some(BodyElement::PageBreak { .. }) | Some(BodyElement::SectionBreak { .. })
+                )
+            })
+            .collect();
+        if !drop.is_empty() {
+            body = body
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !drop.contains(i))
+                .map(|(_, e)| e)
+                .collect();
         }
     }
     body
@@ -7950,6 +8046,131 @@ mod column_tests {
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
         assert!(matches!(body[3], BodyElement::ColumnBreak));
         assert!(matches!(body[4], BodyElement::Paragraph(_)));
+    }
+
+    /// ECMA-376 §17.5.2 — a "Cover Pages" building block (sdt with
+    /// `<w:docPartObj>/<w:docPartGallery w:val="Cover Pages"/>`) occupies its own
+    /// page in Word: the following content starts on the next page. The parser
+    /// unwraps the sdt (its content flows inline) AND emits a `PageBreak` after
+    /// the cover's LAST content child so the paginator reproduces the page-fill.
+    /// Without this a "continuous" body section after the cover (sample-5) flows
+    /// up onto the cover page.
+    #[test]
+    fn cover_pages_building_block_emits_pagebreak_after_its_content() {
+        let body = body_from(
+            r#"<w:sdt>
+                 <w:sdtPr>
+                   <w:docPartObj>
+                     <w:docPartGallery w:val="Cover Pages"/>
+                     <w:docPartUnique/>
+                   </w:docPartObj>
+                 </w:sdtPr>
+                 <w:sdtContent>
+                   <w:p><w:r><w:t>cover-1</w:t></w:r></w:p>
+                   <w:p><w:r><w:t>cover-2</w:t></w:r></w:p>
+                 </w:sdtContent>
+               </w:sdt>
+               <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
+        );
+        // Para(cover-1), Para(cover-2), PageBreak, Para(body) — the break lands
+        // AFTER the cover's last child, not between the two cover paragraphs.
+        assert_eq!(body.len(), 4);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::Paragraph(_)));
+        assert!(matches!(body[2], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[3], BodyElement::Paragraph(_)));
+    }
+
+    /// A non-cover sdt (no docPartObj, or a different gallery) is still unwrapped
+    /// transparently but must NOT inject a page break — only the "Cover Pages"
+    /// gallery gets the standalone-page treatment.
+    #[test]
+    fn non_cover_sdt_is_unwrapped_without_pagebreak() {
+        let body = body_from(
+            r#"<w:sdt>
+                 <w:sdtPr>
+                   <w:docPartObj>
+                     <w:docPartGallery w:val="Quick Parts"/>
+                   </w:docPartObj>
+                 </w:sdtPr>
+                 <w:sdtContent>
+                   <w:p><w:r><w:t>inside</w:t></w:r></w:p>
+                 </w:sdtContent>
+               </w:sdt>
+               <w:p><w:r><w:t>after</w:t></w:r></w:p>"#,
+        );
+        // Para(inside), Para(after) — no synthetic break.
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::Paragraph(_)));
+    }
+
+    /// The synthetic cover break must NOT add a second page advance when the cover
+    /// is already followed by a hard `<w:br w:type="page"/>`: that would leave a
+    /// spurious blank page (the renderer pushes both pages unconditionally). The
+    /// cover stands alone via the explicit break; the synthetic one is dropped.
+    #[test]
+    fn cover_followed_by_hard_pagebreak_does_not_double_break() {
+        let body = body_from(
+            r#"<w:sdt>
+                 <w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr>
+                 <w:sdtContent><w:p><w:r><w:t>cover</w:t></w:r></w:p></w:sdtContent>
+               </w:sdt>
+               <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+               <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
+        );
+        // Para(cover), PageBreak (the explicit one only), Para(body) — exactly ONE
+        // page break, not two.
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
+    /// Likewise when the cover is immediately followed by a section boundary: the
+    /// section break advances the page, so the synthetic cover break is dropped to
+    /// avoid a blank page between the cover and the next section.
+    #[test]
+    fn cover_followed_by_section_break_does_not_double_break() {
+        let body = body_from(
+            r#"<w:sdt>
+                 <w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr>
+                 <w:sdtContent><w:p><w:r><w:t>cover</w:t></w:r></w:p></w:sdtContent>
+               </w:sdt>
+               <w:sectPr><w:type w:val="nextPage"/></w:sectPr>
+               <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
+        );
+        // Para(cover), SectionBreak (the loose sectPr), Para(body) — no synthetic
+        // page break between the cover and the section boundary.
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::SectionBreak { .. }));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
+    /// Even when the cover's LAST content child is itself a lone break, the
+    /// standalone-page break is still emitted (the fall-through `match` reaches the
+    /// `cover_break_after` push). Here the cover ends with a column break; the
+    /// synthetic page break still follows, and is kept because real body content
+    /// (not another page/section break) comes next.
+    #[test]
+    fn cover_ending_in_lone_break_still_emits_standalone_pagebreak() {
+        let body = body_from(
+            r#"<w:sdt>
+                 <w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr>
+                 <w:sdtContent>
+                   <w:p><w:r><w:t>cover</w:t></w:r></w:p>
+                   <w:p><w:r><w:br w:type="column"/></w:r></w:p>
+                 </w:sdtContent>
+               </w:sdt>
+               <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
+        );
+        // Para(cover), ColumnBreak, PageBreak (synthetic, kept), Para(body).
+        assert_eq!(body.len(), 4);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(matches!(body[2], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[3], BodyElement::Paragraph(_)));
     }
 
     /// ECMA-376 §17.6.x — a `<w:sectPr>` carried in a paragraph's `pPr` defines
