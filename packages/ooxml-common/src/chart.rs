@@ -156,12 +156,21 @@ pub fn axis_is_deleted(axis_node: Node) -> bool {
 }
 
 /// `<c:catAx|valAx><c:majorTickMark val>` / `<c:minorTickMark val>`. Values
-/// are the ECMA-376 §21.2.2.49 ST_TickMark enum: `none` | `out` | `in` |
-/// `cross`. Returns the raw string.
+/// are the ECMA-376 §21.2.3.48 ST_TickMark enum: `none` | `out` | `in` |
+/// `cross`. Returns the raw string (None when the element is absent).
 pub fn extract_axis_tick_mark(axis_node: Node, name: &str) -> Option<String> {
     child(axis_node, name)
         .and_then(|n| n.attribute("val"))
         .map(|s| s.to_string())
+}
+
+/// Like [`extract_axis_tick_mark`] but applies the schema default `"out"` when
+/// the element is absent (CT_TickMark `val` defaults to `out` — ECMA-376
+/// §21.2.3.48 ST_TickMark). Keeps pptx/xlsx in agreement: the xlsx renderer
+/// already defaults to `"out"`; the legacy pptx `"cross"` default was a bug
+/// (it drew crossing ticks on charts that omit `<c:majorTickMark>`).
+pub fn extract_axis_tick_mark_or_default(axis_node: Node, name: &str) -> String {
+    extract_axis_tick_mark(axis_node, name).unwrap_or_else(|| "out".to_string())
 }
 
 /// First `<a:defRPr@sz>` or `<a:rPr@sz>` found inside the axis's `<c:txPr>`.

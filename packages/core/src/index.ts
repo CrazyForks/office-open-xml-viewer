@@ -37,6 +37,7 @@ export type {
   ChartSeriesDataLabels,
   ChartType,
   LegendManualLayout,
+  SecondaryValueAxis,
 } from './types/chart';
 export type { LoadOptions } from './types/load-options';
 export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';

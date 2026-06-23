@@ -485,6 +485,53 @@ struct ChartSeriesData {
     /// so a single chart-level colour cannot represent both series.
     #[serde(skip_serializing_if = "Option::is_none")]
     label_color: Option<String>,
+    /// Renderer series-type override derived from the series' chart group
+    /// (ECMA-376 §21.2.2.* `<c:barChart>`/`<c:lineChart>`). "line" when the
+    /// series sits in a `<c:lineChart>` group of a combo chart whose primary
+    /// type is bar, so the renderer draws it as a line over the columns. None =
+    /// render with the chart's primary type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series_type: Option<String>,
+    /// True when this series' chart group references the SECONDARY value axis
+    /// (the `<c:valAx>` with `axPos="r"` / `<c:crosses val="max">`). The
+    /// renderer plots it against `ChartElement::secondary_val_axis`'s
+    /// independent scale, drawn on the right edge of the plot.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    use_secondary_axis: bool,
+}
+
+/// A secondary value axis for combo charts — a second `<c:valAx>` with
+/// `axPos="r"` and `<c:crosses val="max">` (ECMA-376 §21.2.2.160 scaling,
+/// §21.2.2.33 crosses / ST_Crosses §21.2.3.8). Series whose chart group
+/// references this axis are
+/// plotted against its independent scale and the axis is drawn on the right
+/// edge of the plot. Fields mirror the primary value axis but live in a nested
+/// struct so the flat primary-axis fields stay untouched (and the whole block
+/// is absent on the wire for the common single-axis case).
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct SecondaryValueAxis {
+    min: Option<f64>,
+    max: Option<f64>,
+    title: Option<String>,
+    hidden: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    font_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    font_size_hpt: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_width_emu: Option<u32>,
+    line_hidden: bool,
+    major_tick_mark: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title_font_size_hpt: Option<i32>,
+    title_font_bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title_font_color: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -648,6 +695,11 @@ struct ChartElement {
     /// None = unset (renderer uses a 1px hairline when a color is present).
     #[serde(skip_serializing_if = "Option::is_none")]
     chart_border_width_emu: Option<u32>,
+    /// Secondary value axis for combo charts (bar + line with a right-hand
+    /// axis). None for the common single value-axis case. See
+    /// `SecondaryValueAxis`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secondary_val_axis: Option<SecondaryValueAxis>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -5261,11 +5313,43 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     });
 
     // val axis max / min and visibility — shared helpers in ooxml-common
-    // so xlsx & pptx stay in sync (`<c:scaling><c:min|max val>` and
-    // `<c:delete val>` ECMA-376 §21.2.2.40 / §21.2.2.43).
-    let val_ax = root
+    // so xlsx & pptx stay in sync (`<c:scaling><c:min|max val>` §21.2.2.160
+    // scaling and `<c:delete val>` ECMA-376 §21.2.2.40 delete).
+    // Combo charts (bar + line) declare TWO `<c:valAx>`: a PRIMARY (axPos="l",
+    // `<c:crosses val="autoZero">`) and a SECONDARY (axPos="r",
+    // `<c:crosses val="max">`). Collect both so series can be mapped to the
+    // right scale and the right-hand axis drawn. The primary axis keeps driving
+    // every existing axis read below; only the secondary is new.
+    let val_ax_nodes: Vec<roxmltree::Node> = root
         .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "valAx");
+        .filter(|n| n.is_element() && n.tag_name().name() == "valAx")
+        .collect();
+    let ax_pos = |n: &roxmltree::Node| -> Option<String> {
+        n.children()
+            .find(|c| c.is_element() && c.tag_name().name() == "axPos")
+            .and_then(|c| attr(&c, "val"))
+    };
+    let ax_id_of = |n: &roxmltree::Node| -> Option<String> {
+        n.children()
+            .find(|c| c.is_element() && c.tag_name().name() == "axId")
+            .and_then(|c| attr(&c, "val"))
+    };
+    // Primary = first value axis that isn't on the right; secondary (only when a
+    // second value axis exists) = a value axis on the right edge.
+    let val_ax = val_ax_nodes
+        .iter()
+        .find(|n| ax_pos(n).as_deref() != Some("r"))
+        .or_else(|| val_ax_nodes.first())
+        .copied();
+    let secondary_val_ax = if val_ax_nodes.len() >= 2 {
+        val_ax_nodes
+            .iter()
+            .find(|n| ax_pos(n).as_deref() == Some("r"))
+            .copied()
+    } else {
+        None
+    };
+    let secondary_ax_id = secondary_val_ax.as_ref().and_then(ax_id_of);
     let cat_ax = root
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "catAx");
@@ -5353,9 +5437,34 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
 
     let is_scatter_like = chart_type == "scatter" || chart_type == "bubble";
 
+    // A combo chart's primary type is the first recognized group (bar wins);
+    // line series only need the "line" override when the chart isn't ALREADY a
+    // line chart (otherwise every series in a pure line chart would carry a
+    // redundant override).
+    let primary_is_line =
+        chart_type == "line" || chart_type == "stackedLine" || chart_type == "stackedLinePct";
+
     let series: Vec<ChartSeriesData> = ser_nodes
         .iter()
         .map(|ser| {
+            // Each `<c:ser>` is a direct child of its chart-group element
+            // (`<c:barChart>`/`<c:lineChart>`/…). Tag line-group series of a
+            // combo chart so the renderer draws them as a line over the columns
+            // (ECMA-376 §21.2.2.97), and flag series whose group references the
+            // secondary value axis so they plot against the right-hand scale.
+            let group = ser.parent();
+            let series_type = match group.map(|p| p.tag_name().name()) {
+                Some("lineChart") if !primary_is_line => Some("line".to_string()),
+                _ => None,
+            };
+            let use_secondary_axis = match (group, secondary_ax_id.as_deref()) {
+                (Some(g), Some(sec)) => g
+                    .children()
+                    .filter(|c| c.is_element() && c.tag_name().name() == "axId")
+                    .any(|c| attr(&c, "val").as_deref() == Some(sec)),
+                _ => false,
+            };
+
             // Series name from <c:tx>  (can be strRef/strCache, strLit, or a bare <c:v>)
             let name = ser
                 .children()
@@ -5590,6 +5699,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
                 bubble_sizes,
                 val_format_code,
                 label_color,
+                series_type,
+                use_secondary_axis,
             }
         })
         .collect();
@@ -5633,9 +5744,11 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         .unwrap_or_else(|| "between".to_string());
 
     // Major tick marks (ECMA-376 §21.2.2.49 ST_TickMark, default "cross").
+    // Schema default is `out` (ST_TickMark §21.2.3.48), shared with xlsx via
+    // the ooxml-common helper so the two parsers don't diverge on the default.
     let read_major_tick_mark = |ax: Option<roxmltree::Node>| -> String {
-        ax.and_then(|n| ooxml_common::chart::extract_axis_tick_mark(n, "majorTickMark"))
-            .unwrap_or_else(|| "cross".to_string())
+        ax.map(|n| ooxml_common::chart::extract_axis_tick_mark_or_default(n, "majorTickMark"))
+            .unwrap_or_else(|| "out".to_string())
     };
     let val_axis_major_tick_mark = read_major_tick_mark(val_ax);
     let cat_axis_major_tick_mark = read_major_tick_mark(cat_ax);
@@ -5678,6 +5791,36 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
 
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(ooxml_common::chart::extract_axis_format_code);
+
+    // Secondary value axis (combo charts) — parse the right-hand `<c:valAx>`
+    // into a self-contained spec using the same shared helpers as the primary
+    // axis. None for the common single value-axis case.
+    let secondary_val_axis = secondary_val_ax.map(|ax| {
+        let (min, max) = ooxml_common::chart::extract_axis_min_max(ax);
+        let (t, title_size, title_bold, title_color) =
+            ooxml_common::chart::extract_axis_title_with_props(ax);
+        let (line_color, line_width_emu, line_hidden) =
+            ooxml_common::chart::extract_axis_line_style(ax, &resolver);
+        SecondaryValueAxis {
+            min,
+            max,
+            title: t,
+            hidden: ooxml_common::chart::axis_is_deleted(ax),
+            format_code: ooxml_common::chart::extract_axis_format_code(ax),
+            font_color: ooxml_common::chart::extract_axis_tick_label_color(ax, &resolver),
+            font_size_hpt: ooxml_common::chart::extract_axis_tick_label_size(ax),
+            line_color,
+            line_width_emu,
+            line_hidden,
+            major_tick_mark: ooxml_common::chart::extract_axis_tick_mark_or_default(
+                ax,
+                "majorTickMark",
+            ),
+            title_font_size_hpt: title_size,
+            title_font_bold: title_bold,
+            title_font_color: title_color,
+        }
+    });
 
     // `<c:plotArea><c:layout><c:manualLayout>` — explicit plot-area rectangle
     // (fractions of chart space). ECMA-376 §21.2.2.32. Sample-2 slide-16 uses
@@ -5883,6 +6026,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         val_axis_font_bold,
         chart_border_color,
         chart_border_width_emu,
+        secondary_val_axis,
     })
 }
 
@@ -6026,6 +6170,8 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         bubble_sizes: None,
         val_format_code: None,
         label_color: None,
+        series_type: None,
+        use_secondary_axis: false,
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
@@ -6103,6 +6249,7 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         val_axis_font_bold: None,
         chart_border_color: None,
         chart_border_width_emu: None,
+        secondary_val_axis: None,
     })
 }
 
@@ -12825,6 +12972,116 @@ mod tests {
         assert_eq!(c.val_axis_title, None);
         assert_eq!(c.chart_border_color, None);
         assert_eq!(c.chart_border_width_emu, None);
+    }
+
+    /// A combo chart: `<c:barChart>` (Revenue, primary left axis) +
+    /// `<c:lineChart>` (Gross margin, SECONDARY right axis). Mirrors sample-14
+    /// slide-8. The line series must be tagged `series_type = "line"` and bound
+    /// to the secondary axis, and the secondary `<c:valAx>` (axPos="r",
+    /// crosses="max", min=0 max=100, title "Gross margin (%)") parsed into
+    /// `secondary_val_axis` — while the primary axis fields stay the Revenue
+    /// axis.
+    fn combo_bar_line_secondary_axis_xml() -> &'static str {
+        r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:plotArea>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:grouping val="clustered"/>
+        <c:ser>
+          <c:idx val="0"/>
+          <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Revenue ($M)</c:v></c:pt></c:strCache></c:strRef></c:tx>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>FY22</c:v></c:pt>
+            <c:pt idx="1"><c:v>FY23</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>18.9</c:v></c:pt>
+            <c:pt idx="1"><c:v>26.5</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+        <c:axId val="100"/>
+        <c:axId val="200"/>
+      </c:barChart>
+      <c:lineChart>
+        <c:ser>
+          <c:idx val="1"/>
+          <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Gross margin (%)</c:v></c:pt></c:strCache></c:strRef></c:tx>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>FY22</c:v></c:pt>
+            <c:pt idx="1"><c:v>FY23</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>68</c:v></c:pt>
+            <c:pt idx="1"><c:v>71</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+        <c:axId val="300"/>
+        <c:axId val="400"/>
+      </c:lineChart>
+      <c:catAx><c:axId val="100"/><c:axPos val="b"/></c:catAx>
+      <c:valAx>
+        <c:axId val="200"/>
+        <c:axPos val="l"/>
+        <c:crosses val="autoZero"/>
+        <c:title><c:tx><c:rich><a:p><a:r><a:t>Revenue ($M)</a:t></a:r></a:p></c:rich></c:tx></c:title>
+      </c:valAx>
+      <c:valAx>
+        <c:axId val="400"/>
+        <c:scaling><c:max val="100"/><c:min val="0"/></c:scaling>
+        <c:axPos val="r"/>
+        <c:crosses val="max"/>
+        <c:title><c:tx><c:rich><a:p><a:r><a:t>Gross margin (%)</a:t></a:r></a:p></c:rich></c:tx></c:title>
+      </c:valAx>
+      <c:catAx><c:axId val="300"/><c:delete val="1"/><c:axPos val="b"/></c:catAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#
+    }
+
+    #[test]
+    fn combo_chart_tags_line_series_and_secondary_axis() {
+        let theme = HashMap::new();
+        let c = parse_legacy_chart(combo_bar_line_secondary_axis_xml(), &theme)
+            .expect("combo chart should parse");
+
+        // Primary type is bar (bar group wins).
+        assert_eq!(c.chart_type, "clusteredBar");
+        assert_eq!(c.series.len(), 2, "both bar and line series parsed");
+
+        // Bar series: primary axis, no line override.
+        assert_eq!(c.series[0].name, "Revenue ($M)");
+        assert_eq!(c.series[0].series_type, None);
+        assert!(!c.series[0].use_secondary_axis);
+
+        // Line series: tagged "line" + bound to the secondary axis.
+        assert_eq!(c.series[1].name, "Gross margin (%)");
+        assert_eq!(c.series[1].series_type.as_deref(), Some("line"));
+        assert!(c.series[1].use_secondary_axis);
+
+        // Primary value-axis fields stay the Revenue (left) axis.
+        assert_eq!(c.val_axis_title.as_deref(), Some("Revenue ($M)"));
+
+        // Secondary axis parsed from the right-hand valAx.
+        let sec = c
+            .secondary_val_axis
+            .as_ref()
+            .expect("secondary value axis present");
+        assert_eq!(sec.min, Some(0.0));
+        assert_eq!(sec.max, Some(100.0));
+        assert_eq!(sec.title.as_deref(), Some("Gross margin (%)"));
+    }
+
+    #[test]
+    fn single_axis_chart_has_no_secondary() {
+        let theme = HashMap::new();
+        let c = parse_legacy_chart(bar_chart_with_axis_titles_xml(), &theme)
+            .expect("legacy chart should parse");
+        assert!(c.secondary_val_axis.is_none());
+        assert_eq!(c.series[0].series_type, None);
+        assert!(!c.series[0].use_secondary_axis);
     }
 
     #[test]

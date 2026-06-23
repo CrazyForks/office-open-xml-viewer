@@ -11,14 +11,14 @@ export type {
   TabStop,
   TextRun, TextRunData, LineBreak,
   RenderOptions,
-  ChartModel, ChartSeries,
+  ChartModel, ChartSeries, SecondaryValueAxis,
 } from '@silurus/ooxml-core';
 
 // ===== Presentation data model =====
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries } from '@silurus/ooxml-core';
+import type { Bullet as CoreBullet, Fill, Stroke, TextBody as CoreTextBody, Paragraph as CoreParagraph, Shadow, Glow, SoftEdge, Reflection, PathCmd, ChartSeries, SecondaryValueAxis } from '@silurus/ooxml-core';
 
 /**
  * Picture bullet — ECMA-376 §21.1.2.4.2 `<a:buBlip><a:blip r:embed>`. The
@@ -494,6 +494,9 @@ export interface ChartElement {
   /** `<c:chartSpace><c:spPr><a:ln@w>` border width in EMU. null = 1px hairline
    * when a color is present. */
   chartBorderWidthEmu?: number | null;
+  /** Secondary value axis for combo charts (bar + line with a right-hand
+   * axis). null/absent for the common single value-axis case. */
+  secondaryValAxis?: SecondaryValueAxis | null;
 }
 
 export interface PictureElement {

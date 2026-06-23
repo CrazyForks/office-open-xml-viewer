@@ -4128,6 +4128,7 @@ export async function renderSlide(
           radarStyle: el.radarStyle ?? null,
           chartBorderColor: el.chartBorderColor ?? null,
           chartBorderWidthEmu: el.chartBorderWidthEmu ?? null,
+          secondaryValAxis: el.secondaryValAxis ?? null,
         },
         {
           x: emuToPx(el.x, scale),

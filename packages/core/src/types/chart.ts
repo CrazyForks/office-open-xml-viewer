@@ -33,10 +33,19 @@ export interface ChartSeries {
    */
   labelColor?: string | null;
   /**
-   * Mixed chart: per-series chart type override. Currently only "line" (XLSX)
-   * is honoured; other values are treated as the chart's primary type.
+   * Mixed chart: per-series chart type override. Currently only "line" (XLSX
+   * and PPTX combo charts) is honoured; other values are treated as the
+   * chart's primary type.
    */
   seriesType?: string | null;
+  /**
+   * Combo chart: this series is plotted against the SECONDARY value axis
+   * (`ChartModel.secondaryValAxis`) — the `<c:valAx>` with `axPos="r"` /
+   * `<c:crosses val="max">`. When false/absent the series uses the primary
+   * (left) value-axis scale. PowerPoint's "Revenue vs. gross margin" combo
+   * (sample-14 slide-8) puts the margin line on a 0–100% secondary axis.
+   */
+  useSecondaryAxis?: boolean | null;
   /**
    * Scatter-only X values (as strings). When null the series uses
    * `ChartModel.categories` as X.
@@ -354,6 +363,50 @@ export interface ChartModel {
    * ("standard" — line, no fill). Only consulted for `chartType === "radar"`.
    */
   radarStyle?: string | null;
+  /**
+   * Secondary value axis for combo charts (bar + line). When present, series
+   * with `useSecondaryAxis` are plotted against this axis's independent scale
+   * and the axis is drawn on the right edge of the plot. null/absent = single
+   * value axis (the common case). See {@link SecondaryValueAxis}.
+   */
+  secondaryValAxis?: SecondaryValueAxis | null;
+}
+
+/**
+ * A secondary value axis (combo charts). Mirrors the primary value-axis
+ * properties but lives in its own object so the flat primary-axis fields stay
+ * untouched. Parsed from the right-hand `<c:valAx>` (`axPos="r"`,
+ * `<c:crosses val="max">`).
+ */
+export interface SecondaryValueAxis {
+  /** `<c:scaling><c:min val>`. null = derive from the series data. */
+  min: number | null;
+  /** `<c:scaling><c:max val>`. null = derive from the series data. */
+  max: number | null;
+  /** `<c:title>` plain text. null = no title. */
+  title: string | null;
+  /** `<c:delete val="1"/>` — hide labels/ticks entirely. */
+  hidden: boolean;
+  /** `<c:numFmt formatCode>` for tick labels. */
+  formatCode?: string | null;
+  /** `<c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
+  fontColor?: string | null;
+  /** `<c:txPr>` tick-label font size (hpt). */
+  fontSizeHpt?: number | null;
+  /** `<c:spPr><a:ln><a:solidFill>` axis-line color (hex without '#'). */
+  lineColor?: string | null;
+  /** `<c:spPr><a:ln w>` axis-line width in EMU. */
+  lineWidthEmu?: number | null;
+  /** `<c:spPr><a:ln><a:noFill>` — hide just the axis rule. */
+  lineHidden: boolean;
+  /** `<c:majorTickMark>` — "cross" (default) | "out" | "in" | "none". */
+  majorTickMark: string;
+  /** `<c:title>` run-prop font size (hpt). */
+  titleFontSizeHpt?: number | null;
+  /** `<c:title>` run-prop bold flag. */
+  titleFontBold?: boolean | null;
+  /** `<c:title>` run-prop color (hex without '#'). */
+  titleFontColor?: string | null;
 }
 
 /**
