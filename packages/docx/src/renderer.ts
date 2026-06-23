@@ -403,13 +403,24 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
     for (const run of runs) {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
+        // ECMA-376 §20.1.8.55 srcRect: a metafile (WMF/EMF) is rasterized to a
+        // bitmap whose SIZE is derived from the requested display extent. When
+        // only a sub-rectangle is shown, request the FULL image's display
+        // footprint (display extent ÷ visible fraction) so the rasterized bitmap
+        // keeps the full image's proportions; drawImageCropped then maps the
+        // sub-rect into the display box without distortion. (Raster blips ignore
+        // the requested size — their bitmap is the natural image — so this is a
+        // no-op for them.)
+        const sr = img.srcRect;
+        const visW = sr ? Math.max(0.01, 1 - sr.l - sr.r) : 1;
+        const visH = sr ? Math.max(0.01, 1 - sr.t - sr.b) : 1;
         record({
           imagePath: img.imagePath,
           mimeType: img.mimeType,
           svgImagePath: img.svgImagePath,
           colorReplaceFrom: img.colorReplaceFrom,
-          widthPt: img.widthPt ?? 0,
-          heightPt: img.heightPt ?? 0,
+          widthPt: (img.widthPt ?? 0) / visW,
+          heightPt: (img.heightPt ?? 0) / visH,
         });
       } else if (run.type === 'shape') {
         // Inline images living inside a text box (<wps:txbx>) ride on the
@@ -555,8 +566,10 @@ export async function preloadImages(
         let img: DecodedImage;
         if (pair.svgImagePath != null) {
           // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
-          // fall back to the raster on any SVG decode failure. docx images have
-          // no srcRect crop, so the vector is always preferred when present.
+          // fall back to the raster on any SVG decode failure. A `<a:srcRect>`
+          // crop (§20.1.8.55), when present, is applied at draw time in bitmap
+          // pixels of whichever source we decoded here, so the vector is still
+          // always preferred when present.
           try {
             img = await getCachedSvgImageByPath(pair.svgImagePath, fetch);
           } catch {
@@ -2740,7 +2753,29 @@ function renderBodyElements(
   // against the right widths.
   let activeCol = -1;
   let activeGeom: ColumnGeom[] | undefined;
-  for (const el of elements) {
+  // ECMA-376 §17.3.1.7 — the next IN-FLOW paragraph that is adjacent to `elements[i]`
+  // in the SAME newspaper column (same colGeom + colIndex), with no intervening
+  // non-paragraph element (a table/floating-table boundary closes the border box).
+  // A `framePr` paragraph is out of flow (§17.3.1.11) and is skipped/blocks the run.
+  // Returns null when the run is broken (column change, table between, end of page).
+  // A page break never appears mid-`elements` (the paginator splits pages), so the
+  // box correctly closes at the column/page bottom without a special case here.
+  const sameColumn = (a: PaginatedBodyElement, b: PaginatedBodyElement): boolean =>
+    (a.colGeom ?? columns) === (b.colGeom ?? columns) && (a.colIndex ?? 0) === (b.colIndex ?? 0);
+  const flowParaInColumn = (cur: PaginatedBodyElement, sibling: PaginatedBodyElement | undefined): DocParagraph | null => {
+    if (!sibling) return null;
+    if (sibling.type !== 'paragraph') return null; // table/other ends the run
+    if (!sameColumn(cur, sibling)) return null; // column change ends the run
+    const p = sibling as unknown as DocParagraph;
+    if (p.framePr) return null; // out-of-flow frame paragraph is not in the run
+    return p;
+  };
+  const prevFlowParaInColumn = (i: number): DocParagraph | null =>
+    flowParaInColumn(elements[i], elements[i - 1]);
+  const nextFlowParaInColumn = (i: number): DocParagraph | null =>
+    flowParaInColumn(elements[i], elements[i + 1]);
+  for (let elIdx = 0; elIdx < elements.length; elIdx++) {
+    const el = elements[elIdx];
     // Per-section column geometry: prefer the element's own (stamped by the
     // paginator), else the page-level columns. A single full-width column (or no
     // geometry) is the unchanged single-column path.
@@ -2812,7 +2847,20 @@ function renderBodyElements(
       // mid-paragraph slices (slice.end < total) suppress spaceAfter — only
       // the slice covering the FINAL line of the paragraph emits it.
       const isContinuation = !!slice && slice.start > 0;
-      renderParagraph(para, state, suppress || isContinuation, slice);
+      // ECMA-376 §17.3.1.7 paragraph-border merge: suppress this paragraph's TOP
+      // edge when the previous IN-FLOW paragraph (already null on column/section
+      // change, table/frame boundary — exactly the run-breaking cases) shares its
+      // border box, and its BOTTOM edge when the next adjacent same-column
+      // paragraph does. The run is thus drawn as one box: top on the first member,
+      // bottom on the last, `between` (if any) at the inner joins.
+      const borderMerge: ParaBorderMerge | undefined =
+        hasAnyBorderEdge(para.borders)
+          ? {
+              suppressTop: parasShareBorderBox(prevFlowParaInColumn(elIdx), para),
+              suppressBottom: parasShareBorderBox(para, nextFlowParaInColumn(elIdx)),
+            }
+          : undefined;
+      renderParagraph(para, state, suppress || isContinuation, slice, false, borderMerge);
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
@@ -2834,12 +2882,26 @@ function renderBodyElements(
 function renderParaList(paras: DocParagraph[], state: RenderState): void {
   let prevPara: DocParagraph | null = null;
   let prevSpaceAfter = 0;
-  for (const para of paras) {
+  for (let i = 0; i < paras.length; i++) {
+    const para = paras[i];
     const suppress = contextualSuppressed(prevPara, para);
     const effBefore = suppress ? 0 : para.spaceBefore;
     const overlap = Math.min(prevSpaceAfter, effBefore);
     state.y -= overlap * state.scale;
-    renderParagraph(para, state, suppress);
+    // ECMA-376 §17.3.1.7 paragraph-border merge. This list is a single flow (a
+    // note or a table cell), so adjacency is just consecutive list members; a
+    // frame paragraph (§17.3.1.11) is out of flow and breaks the run. `framePr`
+    // siblings are filtered by parasShareBorderBox, so compare with the literal
+    // neighbors here.
+    const prevSibling = (paras[i - 1] ?? null) as DocParagraph | null;
+    const nextSibling = (paras[i + 1] ?? null) as DocParagraph | null;
+    const borderMerge: ParaBorderMerge | undefined = hasAnyBorderEdge(para.borders)
+      ? {
+          suppressTop: parasShareBorderBox(prevSibling, para),
+          suppressBottom: parasShareBorderBox(para, nextSibling),
+        }
+      : undefined;
+    renderParagraph(para, state, suppress, undefined, false, borderMerge);
     prevPara = para;
     prevSpaceAfter = para.spaceAfter;
   }
@@ -2899,11 +2961,13 @@ function renderEmptyMarkParagraph(
     /** Total laid-out line count (0 here); used by the slice guards. */
     totalLines: number;
     lineSlice?: { start: number; end: number };
+    /** §17.3.1.7 paragraph-border merge (suppress top/bottom edges). */
+    borderMerge?: ParaBorderMerge;
   },
 ): void {
   const { ctx, scale, dryRun } = state;
   const { grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY,
-    paragraphStartY, markTop, totalLines, lineSlice } = markCtx;
+    paragraphStartY, markTop, totalLines, lineSlice, borderMerge } = markCtx;
   // Displacement applied by the float-flow (0 when the mark fits where it is).
   const flowShift = Math.max(0, markTop - textAreaTopY);
   if (markTop > state.y) state.y = markTop;
@@ -2915,7 +2979,7 @@ function renderEmptyMarkParagraph(
   }
   state.y += emptyH;
   if (para.borders && !dryRun) {
-    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale, state.dpr);
+    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale, state.dpr, borderMerge);
   }
   // Only the slice covering the FINAL line emits spaceAfter. With no inline
   // lines there is a single slice, so this is the whole paragraph.
@@ -3114,6 +3178,12 @@ function renderParagraph(
    *  the frame box). Frame dispatch for a non-frame call lives in
    *  renderBodyElements so it can pass the anchor paragraph's line height. */
   inFrame = false,
+  /** ECMA-376 §17.3.1.7 paragraph-border merge: suppress the top edge when a
+   *  same-border paragraph precedes this one in the same column, and the bottom
+   *  edge when one follows. Computed by the paint loop (renderBodyElements /
+   *  renderParaList), which knows in-flow adjacency. Absent ⇒ draw the full box
+   *  (a standalone bordered paragraph). */
+  borderMerge?: ParaBorderMerge,
 ): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
@@ -3277,7 +3347,7 @@ function renderParagraph(
     // and (by construction in the paginator) never sliced.
     renderEmptyMarkParagraph(para, state, {
       grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
-      markTop: resolveEmptyMarkTop(), totalLines: 0, lineSlice: undefined,
+      markTop: resolveEmptyMarkTop(), totalLines: 0, lineSlice: undefined, borderMerge,
     });
     return;
   }
@@ -3346,7 +3416,7 @@ function renderParagraph(
     // images on the first).
     renderEmptyMarkParagraph(para, state, {
       grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
-      markTop: resolveEmptyMarkTop(), totalLines: lines.length, lineSlice,
+      markTop: resolveEmptyMarkTop(), totalLines: lines.length, lineSlice, borderMerge,
     });
     return;
   }
@@ -3901,7 +3971,7 @@ function renderParagraph(
 
   if (para.borders && !dryRun) {
     const textH = state.y - textAreaTopY;
-    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr);
+    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr, borderMerge);
   }
 
   // spaceAfter is paragraph-level; only emit it on the slice that covers
@@ -3991,6 +4061,11 @@ interface LayoutImageSeg {
   anchorYFromPara: boolean;
   /** When set, pixels matching this hex color are replaced with alpha=0 before drawing. */
   colorReplaceFrom?: string;
+  /** ECMA-376 §20.1.8.55 `<a:srcRect>` source-rectangle crop (fractions 0..1 of
+   *  the decoded bitmap). When present the draw paths use the 9-arg
+   *  `drawImage` to blit only `[l, t, 1−r, 1−b]` of the bitmap into the display
+   *  box. `undefined` ⇒ draw the full bitmap. */
+  srcRect?: { l: number; t: number; r: number; b: number };
   measuredWidth: number;
 }
 
@@ -4245,6 +4320,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         anchorXFromMargin: img.anchorXFromMargin ?? false,
         anchorYFromPara: img.anchorYFromPara ?? false,
         colorReplaceFrom: img.colorReplaceFrom,
+        srcRect: img.srcRect ?? undefined,
         measuredWidth: 0,
       });
     } else if (run.type === 'break') {
@@ -5041,6 +5117,45 @@ function drawTabLeader(
   ctx.restore();
 }
 
+/**
+ * Draw a decoded image bitmap into the destination box `[dx, dy, dw, dh]`,
+ * honoring an optional ECMA-376 §20.1.8.55 `<a:srcRect>` source-rectangle crop.
+ *
+ * `srcRect` insets are fractions 0..1 of the bitmap measured inward from each
+ * edge, so the visible source region is `[l, t, 1−r, 1−b]` in bitmap pixels:
+ *   `sx = l·W`, `sy = t·H`, `sw = (1−l−r)·W`, `sh = (1−t−b)·H` (clamped ≥ 1).
+ * The destination box is unchanged — the same display size the document asked
+ * for, now filled by just the cropped slice (the renderer never scales the crop
+ * back up; Word stretches the visible source to fill the display box, which is
+ * exactly the 9-arg `drawImage` behavior). Applies identically to raster and
+ * metafile (WMF/EMF) bitmaps since the crop is in decoded-bitmap pixels.
+ */
+function drawImageCropped(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  bmp: DecodedImage,
+  srcRect: { l: number; t: number; r: number; b: number } | undefined,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+): void {
+  if (!srcRect) {
+    ctx.drawImage(bmp, dx, dy, dw, dh);
+    return;
+  }
+  // Use the intrinsic bitmap size. For an HTMLImageElement `width`/`height`
+  // can reflect a CSS/attribute size; `naturalWidth`/`naturalHeight` give the
+  // decoded pixel dimensions. ImageBitmap exposes only `width`/`height` (already
+  // intrinsic). Fall back to `width`/`height` if the natural size is 0.
+  const bw = ('naturalWidth' in bmp && bmp.naturalWidth > 0) ? bmp.naturalWidth : bmp.width;
+  const bh = ('naturalHeight' in bmp && bmp.naturalHeight > 0) ? bmp.naturalHeight : bmp.height;
+  const sx = srcRect.l * bw;
+  const sy = srcRect.t * bh;
+  const sw = Math.max(1, (1 - srcRect.l - srcRect.r) * bw);
+  const sh = Math.max(1, (1 - srcRect.t - srcRect.b) * bh);
+  ctx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
 function renderInlineImage(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   seg: LayoutImageSeg,
@@ -5056,7 +5171,7 @@ function renderInlineImage(
   if (!bmp) return;
   const w = seg.widthPt * scale;
   const h = seg.heightPt * scale;
-  ctx.drawImage(bmp, x, baseline - h, w, h);
+  drawImageCropped(ctx, bmp, seg.srcRect, x, baseline - h, w, h);
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
@@ -5104,7 +5219,7 @@ function renderAnchorImages(
     // does not displace text and is not displaced by other floats), so dist* is
     // unused here.
     const { x: pageX, y: pageY, w, h } = resolveAnchorBox(img, state, paragraphTopPx);
-    state.ctx.drawImage(bmp, pageX, pageY, w, h);
+    drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, pageX, pageY, w, h);
   }
 }
 
@@ -5921,7 +6036,7 @@ function registerImageFloat(
 
   if (!state.dryRun) {
     const bmp = state.images.get(key);
-    if (bmp) state.ctx.drawImage(bmp, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+    if (bmp) drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
     rect.drawn = true;
   }
 }
@@ -6641,12 +6756,33 @@ function drawBorderLine(
   ctx.restore();
 }
 
+/**
+ * ECMA-376 §17.3.1.7 — paragraph-border merge context for a run of consecutive
+ * identically-bordered paragraphs. Word draws ONE box around such a run:
+ *   - the `top` edge only on the FIRST paragraph,
+ *   - the `bottom` edge only on the LAST paragraph,
+ *   - the `<w:between>` edge (if any) at every INNER join,
+ *   - `left`/`right` always (they form the box sides).
+ * The paint loops (renderBodyElements / renderParaList) detect adjacency and
+ * pass `suppressTop` when a same-border paragraph precedes this one, and
+ * `suppressBottom` when one follows. When `suppressTop` is set the `between`
+ * edge (if defined) is drawn at the top join instead of the `top` edge.
+ */
+interface ParaBorderMerge {
+  /** A same-border paragraph is adjacent above ⇒ don't draw this `top` edge
+   *  (draw `between` at the top join instead, when defined). */
+  suppressTop?: boolean;
+  /** A same-border paragraph is adjacent below ⇒ don't draw this `bottom` edge. */
+  suppressBottom?: boolean;
+}
+
 function drawParaBorders(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
   borders: ParagraphBorders,
   scale: number,
   dpr = 1,
+  merge?: ParaBorderMerge,
 ): void {
   const drawEdge = (edge: ParaBorderEdge | null, x1: number, y1: number, x2: number, y2: number) => {
     if (!edge || edge.style === 'none') return;
@@ -6654,13 +6790,75 @@ function drawParaBorders(
     drawBorderLine(ctx, x1, y1, x2, y2, spec, scale, dpr);
   };
   const sp = (edge: ParaBorderEdge | null) => (edge?.space ?? 0) * scale;
-  drawEdge(borders.top,    x, y - sp(borders.top),         x + w, y - sp(borders.top));
-  drawEdge(borders.bottom, x, y + h + sp(borders.bottom),  x + w, y + h + sp(borders.bottom));
+  // §17.3.1.7 top edge: on a non-first paragraph of a shared run, the `top` edge
+  // gives way to the `between` edge drawn at the join (nothing when `between` is
+  // absent — the box has no internal rules).
+  const topEdge = merge?.suppressTop ? borders.between : borders.top;
+  drawEdge(topEdge, x, y - sp(topEdge), x + w, y - sp(topEdge));
+  // The `bottom` edge is skipped entirely when a same-border paragraph follows
+  // (the box continues into it; its own join is handled by that paragraph's
+  // suppressed-top `between`).
+  if (!merge?.suppressBottom) {
+    drawEdge(borders.bottom, x, y + h + sp(borders.bottom), x + w, y + h + sp(borders.bottom));
+  }
   drawEdge(borders.left,   x - sp(borders.left), y,        x - sp(borders.left), y + h);
   drawEdge(borders.right,  x + w + sp(borders.right), y,   x + w + sp(borders.right), y + h);
 }
 
 // ===== Utilities =====
+
+/** ECMA-376 §17.3.1.7 — two paragraph-border definitions "match" (and so
+ *  consecutive paragraphs carrying them merge into a single bordered box) iff
+ *  ALL FIVE edges (top/bottom/left/right/between) are pairwise identical in
+ *  style, color, size, and space. A `null`/absent edge equals another absent
+ *  edge but differs from any present edge. Two paragraphs with NO borders are
+ *  not a bordered run (we never merge unbordered paragraphs), so the caller
+ *  gates on "both have a non-empty borders object" before calling this. */
+function sameParaEdge(a: ParaBorderEdge | null, b: ParaBorderEdge | null): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  return (
+    a.style === b.style &&
+    a.width === b.width &&
+    (a.space ?? 0) === (b.space ?? 0) &&
+    (a.color ?? null) === (b.color ?? null)
+  );
+}
+
+function sameParaBorders(
+  a: ParagraphBorders | null | undefined,
+  b: ParagraphBorders | null | undefined,
+): boolean {
+  if (a == null || b == null) return false; // unbordered paragraphs never merge
+  return (
+    sameParaEdge(a.top, b.top) &&
+    sameParaEdge(a.bottom, b.bottom) &&
+    sameParaEdge(a.left, b.left) &&
+    sameParaEdge(a.right, b.right) &&
+    sameParaEdge(a.between, b.between)
+  );
+}
+
+/** True when `borders` defines at least one visible edge (so a paragraph
+ *  carrying it actually paints a box). A borders object whose every edge is
+ *  null/`none` is treated as "no border" for merge purposes. */
+function hasAnyBorderEdge(b: ParagraphBorders | null | undefined): boolean {
+  if (!b) return false;
+  const live = (e: ParaBorderEdge | null) => e != null && e.style !== 'none';
+  return live(b.top) || live(b.bottom) || live(b.left) || live(b.right) || live(b.between);
+}
+
+/** ECMA-376 §17.3.1.7 — two paragraphs form (part of) the same bordered box iff
+ *  both carry a visible paragraph border AND their five border edges match
+ *  exactly. The caller is responsible for the ADJACENCY half of the rule (same
+ *  column/flow, no page/column break or non-paragraph element between); this
+ *  helper covers only the "identical border definition" half. A `framePr`
+ *  (out-of-flow §17.3.1.11) paragraph can never share a run. */
+function parasShareBorderBox(a: DocParagraph | null, b: DocParagraph | null): boolean {
+  if (!a || !b) return false;
+  if (a.framePr || b.framePr) return false;
+  if (!hasAnyBorderEdge(a.borders) || !hasAnyBorderEdge(b.borders)) return false;
+  return sameParaBorders(a.borders, b.borders);
+}
 
 /** ECMA-376 §17.3.2.4 — two `<w:bdr>` borders belong to the same run-border
  *  group iff their attribute sets are identical. We compare the attributes the

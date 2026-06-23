@@ -2430,12 +2430,46 @@ fn resolve_blip_urls(
     Some((image_path, mime, svg_image_path))
 }
 
+/// ECMA-376 §20.1.8.55 — parse the optional `<a:srcRect>` that sits next to the
+/// `<a:blip>` inside a `<pic:blipFill>`. `blip` is the resolved `<a:blip>` node;
+/// its parent is the `blipFill`, whose `<a:srcRect>` child (if any) carries the
+/// crop. The raw `l/t/r/b` attributes are ST_Percentage in 1000ths of a percent
+/// (e.g. `l="8827"` ⇒ 8.827%); we convert to fractions 0..1 (÷100000) so the
+/// renderer can crop in bitmap pixels without unit knowledge. Returns `None`
+/// when the element is absent OR all four insets are zero (an explicit
+/// `<a:srcRect/>` with no attributes ⇒ no crop).
+fn parse_src_rect(blip: roxmltree::Node) -> Option<SrcRect> {
+    let blip_fill = blip.parent()?;
+    let sr = blip_fill
+        .children()
+        .find(|n| n.tag_name().name() == "srcRect")?;
+    let pct = |name: &str| -> f64 {
+        sr.attribute(name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 100000.0
+    };
+    let rect = SrcRect {
+        l: pct("l"),
+        t: pct("t"),
+        r: pct("r"),
+        b: pct("b"),
+    };
+    if rect.l == 0.0 && rect.t == 0.0 && rect.r == 0.0 && rect.b == 0.0 {
+        None
+    } else {
+        Some(rect)
+    }
+}
+
 /// A resolved inline/anchored picture: the drawable source(s) plus the natural
 /// draw size read from `<wp:extent>` (ECMA-376 §20.4.2.7), in points.
 struct InlineBlip {
     image_path: String,
     mime_type: String,
     svg_image_path: Option<String>,
+    /// ECMA-376 §20.1.8.55 `<a:srcRect>` crop (fractions 0..1), or `None`.
+    src_rect: Option<SrcRect>,
     width_pt: f64,
     height_pt: f64,
 }
@@ -2462,6 +2496,7 @@ fn resolve_inline_blip(
 ) -> Option<InlineBlip> {
     let blip = node.descendants().find(|n| n.tag_name().name() == "blip")?;
     let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
+    let src_rect = parse_src_rect(blip);
     let extent = node
         .descendants()
         .find(|n| n.tag_name().name() == "extent")?;
@@ -2471,6 +2506,7 @@ fn resolve_inline_blip(
         image_path,
         mime_type,
         svg_image_path,
+        src_rect,
         width_pt: cx / 12700.0,
         height_pt: cy / 12700.0,
     })
@@ -2498,6 +2534,7 @@ fn parse_inline_drawing(
             image_path,
             mime_type,
             svg_image_path,
+            src_rect,
             width_pt,
             height_pt,
         } = match resolve_inline_blip(container, media_map) {
@@ -2508,6 +2545,7 @@ fn parse_inline_drawing(
             image_path,
             mime_type,
             svg_image_path,
+            src_rect,
             width_pt,
             height_pt,
             anchor: false,
@@ -2646,6 +2684,7 @@ fn parse_inline_drawing(
         image_path,
         mime_type,
         svg_image_path,
+        src_rect,
         width_pt,
         height_pt,
     } = match resolve_inline_blip(container, media_map) {
@@ -2656,6 +2695,7 @@ fn parse_inline_drawing(
         image_path,
         mime_type,
         svg_image_path,
+        src_rect,
         width_pt,
         height_pt,
         anchor: true,
@@ -3063,6 +3103,9 @@ fn parse_group_pic(
     // original, keep the raster as the `image_path` fallback, and never drop an
     // svg-only picture.
     let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
+    // ECMA-376 §20.1.8.55 — source-rectangle crop (sibling of <a:blip> under
+    // <pic:blipFill>), shared with the inline/anchor paths.
+    let src_rect = parse_src_rect(blip);
 
     // Parse a:clrChange if present — used to make a specific color transparent.
     // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
@@ -3077,6 +3120,7 @@ fn parse_group_pic(
         image_path,
         mime_type,
         svg_image_path,
+        src_rect,
         width_pt: cx * xform.scale_x / 12700.0,
         height_pt: cy * xform.scale_y / 12700.0,
         anchor: true,
@@ -3738,6 +3782,10 @@ fn extract_simple_paragraph_text(
             ),
             None => (None, None, None, 0.0, 0.0),
         };
+    // NOTE: ShapeText (VML/txbx inline image) does not yet carry a srcRect crop;
+    // `resolve_inline_blip` parses one but it is unused on this path. Word's
+    // text-box pictures in practice do not use <a:srcRect>, so this is a known
+    // gap rather than a regression (the field exists on ImageRun only).
 
     // Drop a paragraph that is neither text nor image; keep image-only ones.
     if text.is_empty() && image_path.is_none() {
@@ -7110,6 +7158,7 @@ mod svg_blip_tests {
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: Some("word/media/image2.svg".to_string()),
+            src_rect: None,
             width_pt: 24.0,
             height_pt: 24.0,
             anchor: false,
@@ -7276,6 +7325,92 @@ mod svg_blip_tests {
             Some("word/media/image2.svg"),
             "svg_image_path must carry the vector original"
         );
+    }
+
+    /// Find the single `ImageRun` produced by parsing a body built with
+    /// `build_docx_with_media` (scoped to this test module).
+    fn only_image(doc: &Document) -> &ImageRun {
+        doc.body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::Image(im) => Some(im),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("expected one inline image")
+    }
+
+    /// ECMA-376 §20.1.8.55 — an inline picture whose `<pic:blipFill>` carries a
+    /// non-zero `<a:srcRect>` populates `ImageRun.src_rect` with the four insets
+    /// converted from ST_Percentage (1000ths of a percent) to fractions 0..1.
+    /// Mirrors sample-13 Fig.2's left-slice crop `l="8827" t="5949" r="64210"
+    /// b="65916"` ⇒ 0.08827 / 0.05949 / 0.64210 / 0.65916.
+    #[test]
+    fn inline_drawing_src_rect_populates_fractions() {
+        let body = r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill>
+          <a:blip r:embed="rIdPng"/>
+          <a:srcRect l="8827" t="5949" r="64210" b="65916"/>
+          <a:stretch><a:fillRect/></a:stretch>
+        </pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let data = build_docx_with_media(body);
+        let doc = parse(&data).expect("parse must succeed");
+        let img = only_image(&doc);
+        let sr = img
+            .src_rect
+            .as_ref()
+            .expect("a non-zero <a:srcRect> must populate src_rect");
+        assert!((sr.l - 0.08827).abs() < 1e-9, "l={}", sr.l);
+        assert!((sr.t - 0.05949).abs() < 1e-9, "t={}", sr.t);
+        assert!((sr.r - 0.64210).abs() < 1e-9, "r={}", sr.r);
+        assert!((sr.b - 0.65916).abs() < 1e-9, "b={}", sr.b);
+    }
+
+    /// An absent `<a:srcRect>` (and the explicit all-zero `<a:srcRect/>` Word
+    /// emits for an uncropped picture) both leave `src_rect` as `None` — the
+    /// renderer then draws the full bitmap.
+    #[test]
+    fn inline_drawing_no_or_zero_src_rect_is_none() {
+        for srcrect in [
+            "",
+            "<a:srcRect/>",
+            r#"<a:srcRect l="0" t="0" r="0" b="0"/>"#,
+        ] {
+            let body = format!(
+                r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/>{srcrect}<a:stretch/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#
+            );
+            let data = build_docx_with_media(&body);
+            let doc = parse(&data).expect("parse must succeed");
+            let img = only_image(&doc);
+            assert!(
+                img.src_rect.is_none(),
+                "srcRect={srcrect:?} must yield None, got {:?}",
+                img.src_rect
+            );
+        }
     }
 
     /// Regression for the `PathCmd::ArcTo` serde naming bug (mirrors pptx #489).
