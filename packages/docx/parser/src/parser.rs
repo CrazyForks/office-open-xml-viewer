@@ -143,7 +143,23 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         .rfind(|n| n.is_element())
         .filter(|n| n.tag_name().name() == "sectPr");
 
-    let (section, refs) = parse_section(sect_pr, &rel_map);
+    let (section, _body_refs) = parse_section(sect_pr, &rel_map);
+
+    // ECMA-376 §17.10.1 — header/footer references inherit across sections: a
+    // section that omits a reference of a given type uses the previous section's.
+    // The single-section render model (#513) drives one effective header/footer
+    // set, so accumulate references from EVERY sectPr in document order (the body
+    // sectPr last ⇒ it wins for types it specifies, earlier sections fill the
+    // rest). Without this, a header declared only on the first section's sectPr
+    // (e.g. sample-12's running "Journal of …" header) is dropped because the
+    // body-level sectPr carries no reference.
+    let mut refs = SectionRefs::default();
+    for sp in body_node
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "sectPr")
+    {
+        merge_section_refs(sp, &rel_map, &mut refs);
+    }
 
     let body = parse_body_elements(
         body_node,
@@ -1189,6 +1205,7 @@ fn parse_section(
         footer_distance: 36.0,
         title_page: false,
         even_and_odd_headers: false,
+        section_start: None,
         doc_grid_type: None,
         doc_grid_line_pitch: None,
         doc_grid_char_space: None,
@@ -1229,6 +1246,10 @@ fn parse_section(
         }
     }
     props.title_page = child_w(sp, "titlePg").is_some();
+    // ECMA-376 §17.6.22 — the body (final) section's start type. Non-final
+    // sections carry their start type on their own SectionBreak marker; the
+    // paginator needs the final section's here to resolve the boundary INTO it.
+    props.section_start = read_section_break_type(sp);
 
     // ECMA-376 §17.6.5 w:docGrid. When @type=lines|linesAndChars with a
     // linePitch, Word renders each line of text at intervals of linePitch
@@ -1265,8 +1286,26 @@ fn parse_section(
     // (unchanged behavior).
     props.columns = parse_columns(sp);
 
-    // Collect header/footer references
+    // Collect header/footer references from THIS sectPr.
     let mut refs = SectionRefs::default();
+    merge_section_refs(sp, rel_map, &mut refs);
+
+    (props, refs)
+}
+
+/// Merge the `<w:headerReference>` / `<w:footerReference>` entries of one sectPr
+/// into `refs`, per ECMA-376 §17.10.1. Each type ("default" | "first" | "even")
+/// overwrites any prior value — so calling this over every sectPr in document
+/// order accumulates the inheritance (a section that omits a reference of a type
+/// keeps the previous section's), and the body (final) section wins for the
+/// types it specifies. This is why a header declared only on the FIRST section's
+/// sectPr (the common journal-template layout) still applies to the whole
+/// document even though the body-level sectPr carries no reference.
+fn merge_section_refs(
+    sp: roxmltree::Node,
+    rel_map: &HashMap<String, String>,
+    refs: &mut SectionRefs,
+) {
     for child in sp.children().filter(|n| n.is_element()) {
         let local = child.tag_name().name();
         if local != "headerReference" && local != "footerReference" {
@@ -1288,8 +1327,6 @@ fn parse_section(
             refs.footers.insert(kind, target);
         }
     }
-
-    (props, refs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2393,12 +2430,46 @@ fn resolve_blip_urls(
     Some((image_path, mime, svg_image_path))
 }
 
+/// ECMA-376 §20.1.8.55 — parse the optional `<a:srcRect>` that sits next to the
+/// `<a:blip>` inside a `<pic:blipFill>`. `blip` is the resolved `<a:blip>` node;
+/// its parent is the `blipFill`, whose `<a:srcRect>` child (if any) carries the
+/// crop. The raw `l/t/r/b` attributes are ST_Percentage in 1000ths of a percent
+/// (e.g. `l="8827"` ⇒ 8.827%); we convert to fractions 0..1 (÷100000) so the
+/// renderer can crop in bitmap pixels without unit knowledge. Returns `None`
+/// when the element is absent OR all four insets are zero (an explicit
+/// `<a:srcRect/>` with no attributes ⇒ no crop).
+fn parse_src_rect(blip: roxmltree::Node) -> Option<SrcRect> {
+    let blip_fill = blip.parent()?;
+    let sr = blip_fill
+        .children()
+        .find(|n| n.tag_name().name() == "srcRect")?;
+    let pct = |name: &str| -> f64 {
+        sr.attribute(name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 100000.0
+    };
+    let rect = SrcRect {
+        l: pct("l"),
+        t: pct("t"),
+        r: pct("r"),
+        b: pct("b"),
+    };
+    if rect.l == 0.0 && rect.t == 0.0 && rect.r == 0.0 && rect.b == 0.0 {
+        None
+    } else {
+        Some(rect)
+    }
+}
+
 /// A resolved inline/anchored picture: the drawable source(s) plus the natural
 /// draw size read from `<wp:extent>` (ECMA-376 §20.4.2.7), in points.
 struct InlineBlip {
     image_path: String,
     mime_type: String,
     svg_image_path: Option<String>,
+    /// ECMA-376 §20.1.8.55 `<a:srcRect>` crop (fractions 0..1), or `None`.
+    src_rect: Option<SrcRect>,
     width_pt: f64,
     height_pt: f64,
 }
@@ -2425,6 +2496,7 @@ fn resolve_inline_blip(
 ) -> Option<InlineBlip> {
     let blip = node.descendants().find(|n| n.tag_name().name() == "blip")?;
     let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
+    let src_rect = parse_src_rect(blip);
     let extent = node
         .descendants()
         .find(|n| n.tag_name().name() == "extent")?;
@@ -2434,6 +2506,7 @@ fn resolve_inline_blip(
         image_path,
         mime_type,
         svg_image_path,
+        src_rect,
         width_pt: cx / 12700.0,
         height_pt: cy / 12700.0,
     })
@@ -2461,6 +2534,7 @@ fn parse_inline_drawing(
             image_path,
             mime_type,
             svg_image_path,
+            src_rect,
             width_pt,
             height_pt,
         } = match resolve_inline_blip(container, media_map) {
@@ -2471,6 +2545,7 @@ fn parse_inline_drawing(
             image_path,
             mime_type,
             svg_image_path,
+            src_rect,
             width_pt,
             height_pt,
             anchor: false,
@@ -2609,6 +2684,7 @@ fn parse_inline_drawing(
         image_path,
         mime_type,
         svg_image_path,
+        src_rect,
         width_pt,
         height_pt,
     } = match resolve_inline_blip(container, media_map) {
@@ -2619,6 +2695,7 @@ fn parse_inline_drawing(
         image_path,
         mime_type,
         svg_image_path,
+        src_rect,
         width_pt,
         height_pt,
         anchor: true,
@@ -3026,6 +3103,9 @@ fn parse_group_pic(
     // original, keep the raster as the `image_path` fallback, and never drop an
     // svg-only picture.
     let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
+    // ECMA-376 §20.1.8.55 — source-rectangle crop (sibling of <a:blip> under
+    // <pic:blipFill>), shared with the inline/anchor paths.
+    let src_rect = parse_src_rect(blip);
 
     // Parse a:clrChange if present — used to make a specific color transparent.
     // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
@@ -3040,6 +3120,7 @@ fn parse_group_pic(
         image_path,
         mime_type,
         svg_image_path,
+        src_rect,
         width_pt: cx * xform.scale_x / 12700.0,
         height_pt: cy * xform.scale_y / 12700.0,
         anchor: true,
@@ -3701,6 +3782,10 @@ fn extract_simple_paragraph_text(
             ),
             None => (None, None, None, 0.0, 0.0),
         };
+    // NOTE: ShapeText (VML/txbx inline image) does not yet carry a srcRect crop;
+    // `resolve_inline_blip` parses one but it is unused on this path. Word's
+    // text-box pictures in practice do not use <a:srcRect>, so this is a known
+    // gap rather than a regression (the field exists on ImageRun only).
 
     // Drop a paragraph that is neither text nor image; keep image-only ones.
     if text.is_empty() && image_path.is_none() {
@@ -7073,6 +7158,7 @@ mod svg_blip_tests {
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: Some("word/media/image2.svg".to_string()),
+            src_rect: None,
             width_pt: 24.0,
             height_pt: 24.0,
             anchor: false,
@@ -7239,6 +7325,92 @@ mod svg_blip_tests {
             Some("word/media/image2.svg"),
             "svg_image_path must carry the vector original"
         );
+    }
+
+    /// Find the single `ImageRun` produced by parsing a body built with
+    /// `build_docx_with_media` (scoped to this test module).
+    fn only_image(doc: &Document) -> &ImageRun {
+        doc.body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::Image(im) => Some(im),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("expected one inline image")
+    }
+
+    /// ECMA-376 §20.1.8.55 — an inline picture whose `<pic:blipFill>` carries a
+    /// non-zero `<a:srcRect>` populates `ImageRun.src_rect` with the four insets
+    /// converted from ST_Percentage (1000ths of a percent) to fractions 0..1.
+    /// Mirrors sample-13 Fig.2's left-slice crop `l="8827" t="5949" r="64210"
+    /// b="65916"` ⇒ 0.08827 / 0.05949 / 0.64210 / 0.65916.
+    #[test]
+    fn inline_drawing_src_rect_populates_fractions() {
+        let body = r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill>
+          <a:blip r:embed="rIdPng"/>
+          <a:srcRect l="8827" t="5949" r="64210" b="65916"/>
+          <a:stretch><a:fillRect/></a:stretch>
+        </pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let data = build_docx_with_media(body);
+        let doc = parse(&data).expect("parse must succeed");
+        let img = only_image(&doc);
+        let sr = img
+            .src_rect
+            .as_ref()
+            .expect("a non-zero <a:srcRect> must populate src_rect");
+        assert!((sr.l - 0.08827).abs() < 1e-9, "l={}", sr.l);
+        assert!((sr.t - 0.05949).abs() < 1e-9, "t={}", sr.t);
+        assert!((sr.r - 0.64210).abs() < 1e-9, "r={}", sr.r);
+        assert!((sr.b - 0.65916).abs() < 1e-9, "b={}", sr.b);
+    }
+
+    /// An absent `<a:srcRect>` (and the explicit all-zero `<a:srcRect/>` Word
+    /// emits for an uncropped picture) both leave `src_rect` as `None` — the
+    /// renderer then draws the full bitmap.
+    #[test]
+    fn inline_drawing_no_or_zero_src_rect_is_none() {
+        for srcrect in [
+            "",
+            "<a:srcRect/>",
+            r#"<a:srcRect l="0" t="0" r="0" b="0"/>"#,
+        ] {
+            let body = format!(
+                r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/>{srcrect}<a:stretch/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#
+            );
+            let data = build_docx_with_media(&body);
+            let doc = parse(&data).expect("parse must succeed");
+            let img = only_image(&doc);
+            assert!(
+                img.src_rect.is_none(),
+                "srcRect={srcrect:?} must yield None, got {:?}",
+                img.src_rect
+            );
+        }
     }
 
     /// Regression for the `PathCmd::ArcTo` serde naming bug (mirrors pptx #489).
@@ -7642,6 +7814,64 @@ mod column_tests {
         let (props, _) = parse_section(Some(doc.root_element()), &rel_map);
         let cols = props.columns.expect("columns surfaced on SectionProps");
         assert_eq!(cols.count, 2);
+    }
+
+    /// ECMA-376 §17.6.22 — the body (final) section's `<w:type>` start type is
+    /// surfaced on SectionProps so the paginator can resolve the boundary INTO the
+    /// final section (a "continuous" body section must not page-break). Absent ⇒
+    /// None (the renderer defaults to the spec's "nextPage").
+    #[test]
+    fn section_props_carries_section_start() {
+        let parse = |sect: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#, ns = W_NS);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let rel_map: HashMap<String, String> = HashMap::new();
+            parse_section(Some(doc.root_element()), &rel_map).0
+        };
+        assert_eq!(
+            parse(r#"<w:type w:val="continuous"/><w:cols w:num="2"/>"#).section_start,
+            Some("continuous".to_string())
+        );
+        // Absent <w:type> ⇒ None (paginator falls back to "nextPage").
+        assert_eq!(parse(r#"<w:cols w:num="2"/>"#).section_start, None);
+    }
+
+    /// ECMA-376 §17.10.1 — header/footer references inherit across sections.
+    /// `merge_section_refs` accumulates per type with later sectPrs overriding,
+    /// so a reference declared only on the FIRST section's sectPr survives even
+    /// when a later (body) sectPr carries none. This is sample-12's running
+    /// "Journal of …" header, declared on section 0 but not on the body sectPr.
+    #[test]
+    fn header_refs_inherit_from_an_earlier_section() {
+        let xml = r#"<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <w:first><w:sectPr><w:headerReference w:type="default" r:id="rH"/><w:footerReference w:type="default" r:id="rF"/></w:sectPr></w:first>
+              <w:bodylevel><w:sectPr><w:cols w:num="2"/></w:sectPr></w:bodylevel>
+            </w:root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let rel_map: HashMap<String, String> = [
+            ("rH".to_string(), "header1.xml".to_string()),
+            ("rF".to_string(), "footer1.xml".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let mut refs = SectionRefs::default();
+        for sp in doc
+            .root_element()
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sectPr")
+        {
+            merge_section_refs(sp, &rel_map, &mut refs);
+        }
+        // The first section's default header/footer survive the body sectPr that
+        // declares none.
+        assert_eq!(
+            refs.headers.get("default").map(String::as_str),
+            Some("header1.xml")
+        );
+        assert_eq!(
+            refs.footers.get("default").map(String::as_str),
+            Some("footer1.xml")
+        );
     }
 
     /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` surfaces on SectionProps as a

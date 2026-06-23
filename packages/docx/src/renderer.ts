@@ -403,13 +403,24 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
     for (const run of runs) {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
+        // ECMA-376 §20.1.8.55 srcRect: a metafile (WMF/EMF) is rasterized to a
+        // bitmap whose SIZE is derived from the requested display extent. When
+        // only a sub-rectangle is shown, request the FULL image's display
+        // footprint (display extent ÷ visible fraction) so the rasterized bitmap
+        // keeps the full image's proportions; drawImageCropped then maps the
+        // sub-rect into the display box without distortion. (Raster blips ignore
+        // the requested size — their bitmap is the natural image — so this is a
+        // no-op for them.)
+        const sr = img.srcRect;
+        const visW = sr ? Math.max(0.01, 1 - sr.l - sr.r) : 1;
+        const visH = sr ? Math.max(0.01, 1 - sr.t - sr.b) : 1;
         record({
           imagePath: img.imagePath,
           mimeType: img.mimeType,
           svgImagePath: img.svgImagePath,
           colorReplaceFrom: img.colorReplaceFrom,
-          widthPt: img.widthPt ?? 0,
-          heightPt: img.heightPt ?? 0,
+          widthPt: (img.widthPt ?? 0) / visW,
+          heightPt: (img.heightPt ?? 0) / visH,
         });
       } else if (run.type === 'shape') {
         // Inline images living inside a text box (<wps:txbx>) ride on the
@@ -555,8 +566,10 @@ export async function preloadImages(
         let img: DecodedImage;
         if (pair.svgImagePath != null) {
           // Prefer the vector original (Microsoft `asvg:svgBlip` extension);
-          // fall back to the raster on any SVG decode failure. docx images have
-          // no srcRect crop, so the vector is always preferred when present.
+          // fall back to the raster on any SVG decode failure. A `<a:srcRect>`
+          // crop (§20.1.8.55), when present, is applied at draw time in bitmap
+          // pixels of whichever source we decoded here, so the vector is still
+          // always preferred when present.
           try {
             img = await getCachedSvgImageByPath(pair.svgImagePath, fetch);
           } catch {
@@ -1053,6 +1066,26 @@ export function computePages(
     return computeColumns(section);
   };
 
+  // ECMA-376 §17.6.22 (ST_SectionMark): a section's `<w:type>` specifies how
+  // THAT section begins relative to the previous one (continuous ⇒ same page;
+  // nextPage/odd/even ⇒ a new page). The type lives on the section's OWN sectPr,
+  // which the parser stamps on the SectionBreak marker that ENDS that section.
+  // So the break at a boundary is governed by the UPCOMING section's type — the
+  // kind of the NEXT marker at/after `startIdx`, exactly like sectionColumnsFrom
+  // resolves the upcoming section's columns. (A marker's own kind is the start
+  // type of the section it closes — relevant at the PREVIOUS boundary, not this
+  // one. Using it here is an off-by-one that turns e.g. a title section's
+  // type="nextPage" into a spurious page break before a following
+  // type="continuous" body section.) The last section (no following marker) uses
+  // the body sectPr's start type; absent ⇒ "nextPage" (the spec default).
+  const sectionKindFrom = (startIdx: number): string => {
+    for (let j = startIdx; j < body.length; j++) {
+      const e = body[j];
+      if (e.type === 'sectionBreak') return e.kind ?? 'nextPage';
+    }
+    return section.sectionStart ?? 'nextPage';
+  };
+
   // The active section's column geometry. Reassigned (a) here for the first
   // section and (b) at every `SectionBreak` as the flow enters the next section.
   // `colIndex` tracks which column we are filling; `colX()`/`colW()` give its
@@ -1065,6 +1098,33 @@ export function computePages(
   let colIndex = 0;
   const colX = () => columns[colIndex].xPt;
   const colW = () => columns[colIndex].wPt;
+  // ECMA-376 §17.6.4 / §17.18.79 — the CURRENT multi-column region's vertical
+  // extent on the current page, in content-relative pt (0 = page content top,
+  // i.e. the same frame as `y`). A region tiled into N newspaper columns is a
+  // rectangle [colTopY, …]; every column STARTS at `colTopY`, not the page top.
+  // For a section opened by a "continuous" section break the region begins
+  // partway down the page (below the preceding single-column content), so
+  // `colTopY > 0`. `maxColBottomY` accumulates the deepest column bottom reached
+  // in the region so the NEXT section (after a continuous break) starts below
+  // ALL columns rather than overprinting a taller one. Reset to the page top at
+  // every real page open; re-seeded at each continuous section boundary. For a
+  // single-section / single-column document `colTopY` stays 0 — behaviour-neutral.
+  let colTopY = 0;
+  let maxColBottomY = 0;
+  // ECMA-376 §17.6.4 — newspaper column BALANCING target (content-relative pt per
+  // column) for the CURRENT section, or null when the section fills greedily.
+  // Word balances a continuous multi-column section that does NOT fill its page —
+  // its content is split so all columns end at roughly the same height — but
+  // leaves the FINAL (body) section greedy (it packs column 0 first). `balanceColH`
+  // is the per-column height target; a non-last column breaks to the next column
+  // once it reaches it (see maybeBalanceBreak). null ⇒ greedy fill to the page
+  // bottom (single-column sections, the final section, or a section taller than
+  // one page).
+  let balanceColH: number | null = null;
+  // Page-absolute pt of the current region top, stamped on elements so the paint
+  // pass resets a column's cursor to the region top (front-loaded layout: the
+  // renderer consumes this instead of independently deciding the column top).
+  const colTopAbsPt = () => section.marginTop + colTopY;
 
   // Run `fn` with the measure state's content band temporarily re-pointed at the
   // CURRENT newspaper column (#513). The paint pass (renderBodyElements) sets
@@ -1147,6 +1207,12 @@ export function computePages(
       pages.push([]);
       y = 0;
       colIndex = 0;
+      // A fresh page: the section's columns span it from the content top. A
+      // section that reaches a new page is multi-page ⇒ fill the new page greedily
+      // (balancing only applies to a section that fits within its current page).
+      colTopY = 0;
+      maxColBottomY = 0;
+      balanceColH = null;
       prevPara = null;
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
@@ -1164,11 +1230,15 @@ export function computePages(
   // line, and a square float keeps constraining the columns its x-range covers).
   // No new page is pushed and footnote reserve is untouched (same page).
   const nextColumn = () => {
+    // Record the just-finished column's bottom, then drop the cursor back to the
+    // REGION top (not the page top) — for a continuous mid-page section the next
+    // column begins below the preceding single-column content (ECMA-376 §17.6.4).
+    maxColBottomY = Math.max(maxColBottomY, y);
     colIndex++;
-    y = 0;
+    y = colTopY;
     prevPara = null;
     prevSpaceAfter = 0;
-    measureState.y = section.marginTop;
+    measureState.y = section.marginTop + colTopY;
   };
   // Overflow handler shared by element placement and paragraph/table splitting:
   // move to the next column if one remains on this page, otherwise to a new page.
@@ -1179,6 +1249,75 @@ export function computePages(
     if (colIndex < columns.length - 1) nextColumn();
     else newPage(pageStartIdx);
   };
+
+  // ECMA-376 §17.6.4 newspaper column balancing. Measure the single-column
+  // content height (pt) of the section STARTING at `startIdx` — up to the next
+  // section/page break — and whether a break terminates it. Uses a throwaway
+  // clone of the measure state so the live cursor / floats are untouched. Mirrors
+  // the per-element height the main loop computes (estimateParagraphHeight /
+  // computeTableRowHeights at the column width, with paragraph spacing collapse),
+  // but is an APPROXIMATION: line-level page splitting and floats are ignored,
+  // which is fine for deciding a balance target. Returns `Infinity` when the
+  // section can't be balanced as one block (an inner page break).
+  const measureSectionColumnHeight = (
+    startIdx: number,
+    colWPt: number,
+  ): { height: number; terminated: boolean } => {
+    const ms: RenderState = { ...measureState, y: section.marginTop, floats: [], floatParaSeq: 0 };
+    let total = 0;
+    let prevAfter = 0;
+    let prevP: DocParagraph | null = null;
+    let terminated = false;
+    for (let j = startIdx; j < body.length; j++) {
+      const e = body[j];
+      if (e.type === 'sectionBreak' || e.type === 'pageBreak') { terminated = true; break; }
+      if (e.type === 'columnBreak') continue;
+      if (e.type === 'paragraph') {
+        const p = e as unknown as DocParagraph;
+        if (p.pageBreakBefore) return { height: Infinity, terminated: false };
+        if (p.framePr) continue; // frame is out of flow (adds no column height)
+        const suppress = contextualSuppressed(prevP, p);
+        const before = suppress ? 0 : p.spaceBefore;
+        total += estimateParagraphHeight(ms, p, colWPt, suppress, 0) - Math.min(prevAfter, before);
+        prevAfter = p.spaceAfter;
+        prevP = p;
+      } else if (e.type === 'table') {
+        const t = e as unknown as DocTable;
+        if (t.tblpPr) continue; // floating table: out of flow
+        total += computeTableRowHeights(ms, t, colWPt).reduce((s, x) => s + x, 0);
+        prevAfter = 0;
+        prevP = null;
+      }
+    }
+    return { height: total, terminated };
+  };
+
+  // Configure balancing for the section starting at `startIdx`. Word balances a
+  // continuous multi-column section that does NOT fill its page (its content is
+  // split so the columns end at roughly equal heights), but leaves greedy: a
+  // single-column section, the FINAL (unterminated) section — Word packs column 0
+  // there, matching the journal templates' last page — and any section taller
+  // than the space available across its columns on this page.
+  const setupBalancing = (startIdx: number): void => {
+    balanceColH = null;
+    const ncols = columns.length;
+    if (ncols < 2) return;
+    const { height, terminated } = measureSectionColumnHeight(startIdx, columns[0].wPt);
+    if (!terminated || !Number.isFinite(height)) return; // final / page-breaking ⇒ greedy
+    const avail = effContentH() - colTopY;
+    if (avail <= 0 || height > ncols * avail) return; // spills past one page ⇒ greedy
+    balanceColH = height / ncols;
+  };
+
+  // True when a whole element of height `fitH` should move to the next column to
+  // keep a balanced section's columns even: balancing is active, the current
+  // column is not the last (the last absorbs the remainder), it already holds
+  // content, and the element would push it past the balanced target.
+  const wantsBalanceBreak = (fitH: number): boolean =>
+    balanceColH != null &&
+    colIndex < columns.length - 1 &&
+    y > colTopY &&
+    y + fitH > colTopY + balanceColH;
 
   // A paragraph-anchored floating object (wp:anchor with positionV
   // relativeFrom="paragraph"/"line", ECMA-376 §20.4.3.4) is positioned by its
@@ -1256,8 +1395,15 @@ export function computePages(
   const pushTagged = (el: PaginatedBodyElement) => {
     el.colIndex = colIndex;
     el.colGeom = columns;
+    el.colTopPt = colTopAbsPt();
     pages[pages.length - 1].push(el);
   };
+
+  // Balance the FIRST section's columns if it is a non-final multi-column section
+  // that fits on page 1 (§17.6.4). Single-column / multi-page / final first
+  // sections leave `balanceColH` null (greedy), so this is behaviour-neutral for
+  // the common single-section document.
+  setupBalancing(0);
 
   for (let i = 0; i < body.length; i++) {
     const el = body[i];
@@ -1273,6 +1419,9 @@ export function computePages(
     if (el.type === 'pageBreak') {
       pages.push([]);
       y = 0;
+      colTopY = 0;
+      maxColBottomY = 0;
+      balanceColH = null;
       prevPara = null;
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
@@ -1302,24 +1451,41 @@ export function computePages(
       // columns instead of every section inheriting the body-level section's.
       columns = sectionColumnsFrom(i + 1);
       colIndex = 0;
-      if (el.kind === 'continuous') {
+      // The break is governed by the UPCOMING section's start type (§17.6.22),
+      // not this marker's own kind (the section it closes). See sectionKindFrom.
+      const upcomingKind = sectionKindFrom(i + 1);
+      if (upcomingKind === 'continuous') {
         // ECMA-376 §17.18.79 "continuous": NO page break — the next section's
-        // content continues on the SAME page at the CURRENT vertical position
-        // (y is intentionally NOT reset), just in the new section's column 0.
-        // (sample-5's continuous break is 1-col → 1-col, so the two single-column
-        // sections simply stack; full continuous column-balancing for a column-
-        // count change is out of scope per the task.) prevPara is cleared so the
-        // first paragraph of the new section doesn't collapse spacing against the
-        // last paragraph of the previous one. Floats / footnote reserve stay
-        // (page-scoped). measureState.y already tracks the current y.
+        // content continues on the SAME page. It must start below the BOTTOM of
+        // EVERY column of the section just ended (ECMA-376 §17.6.4), not at the
+        // last-filled column's cursor: a 2-col section whose first column ran to
+        // the page bottom while the second is short would otherwise let the new
+        // (e.g. full-width) section overprint the taller column. `regionBottom`
+        // is the deepest column reached; the new section's region then begins
+        // there. (1-col→1-col, e.g. sample-5: maxColBottomY tracks no extra
+        // column, so regionBottom == y — the sections simply stack, unchanged.)
+        // Full column BALANCING of the ended section is a separate fidelity step;
+        // this clears the overprint and the page-fill error regardless.
+        const regionBottom = Math.max(maxColBottomY, y);
+        y = regionBottom;
+        measureState.y = section.marginTop + regionBottom;
+        colTopY = regionBottom;
+        maxColBottomY = regionBottom;
         prevPara = null;
         prevSpaceAfter = 0;
+        // ECMA-376 §17.6.4: balance this continuous section's columns if it fits
+        // on the current page below `regionBottom` (Word balances non-final
+        // continuous multi-column sections; the final section stays greedy).
+        setupBalancing(i + 1);
       } else {
         // nextPage (default) / oddPage / evenPage: start a new page (mirrors the
         // pageBreak path, including parity padding). A new page already resets
         // colIndex to 0 and clears page-scoped floats.
         pages.push([]);
         y = 0;
+        colTopY = 0;
+        maxColBottomY = 0;
+        balanceColH = null;
         prevPara = null;
         prevSpaceAfter = 0;
         measureState.y = section.marginTop;
@@ -1329,10 +1495,12 @@ export function computePages(
         // (the sectionBreak itself emits nothing on the new page).
         prescanFloatsFrom(i + 1);
         startPageBookkeeping();
-        if (el.kind === 'oddPage' && pages.length % 2 === 0) {
+        // Balance the new section's columns if it fits on its fresh page (§17.6.4).
+        setupBalancing(i + 1);
+        if (upcomingKind === 'oddPage' && pages.length % 2 === 0) {
           pages.push([]);
           startPageBookkeeping();
-        } else if (el.kind === 'evenPage' && pages.length % 2 === 1) {
+        } else if (upcomingKind === 'evenPage' && pages.length % 2 === 1) {
           pages.push([]);
           startPageBookkeeping();
         }
@@ -1463,7 +1631,12 @@ export function computePages(
       // past the bottom; it is split at a line boundary by the path below
       // (Word's default behaviour). A keep-on-page float forces relocation too.
       const keepIntact = para.keepLines || needNext > 0 || addReservePt > 0;
-      if (breakForFloat || (overflowsHere && keepIntact && needed <= effContentH())) {
+      // ECMA-376 §17.6.4 column balancing: move the whole paragraph to the next
+      // column once the current (non-last) column has reached the balanced target
+      // (reuses the relocate machinery below, which rolls back / re-registers this
+      // paragraph's floats against the new column). No-op when balancing is off.
+      const balanceBreak = wantsBalanceBreak(fitHeight);
+      if (breakForFloat || balanceBreak || (overflowsHere && keepIntact && needed <= effContentH())) {
         const pagesBeforeRelocate = pages.length;
         // Relocating THIS paragraph to a fresh page: pre-scan from `i` so the
         // new page starts with THIS paragraph's own page-level floats counted.
@@ -1508,14 +1681,17 @@ export function computePages(
           measureState, para, colW(), suppressBefore, colX(),
           y, pageContentH, pages,
           // Overflow during the split advances to the next column first, then a
-          // new page (newspaper fill). Each slice is tagged with the column it
-          // landed in via the colIndex thunk, plus this section's column geometry
-          // (constant — a paragraph never spans a section boundary). The
+          // new page (newspaper fill). The just-filled column's bottom is folded
+          // into `maxColBottomY` so a following continuous section clears the
+          // deepest column (ECMA-376 §17.6.4). Each slice is tagged with the
+          // column it landed in via the colIndex thunk, plus this section's column
+          // geometry (constant — a paragraph never spans a section boundary). The
           // continuation slice belongs to THIS paragraph, so the new page's
           // pre-scan starts at `i` (this paragraph index).
-          () => { nextColumnOrPage(i); },
+          (filledColBottom: number) => { maxColBottomY = Math.max(maxColBottomY, filledColBottom); nextColumnOrPage(i); },
           () => colIndex,
           columns,
+          () => colTopY,
         );
         // After splitting, `y` is the bottom of the last slice in the
         // current column (continues for the LAST slice; intermediate slices
@@ -1598,15 +1774,21 @@ export function computePages(
         const endY = splitTableAcrossPages(
           tbl, rowHs, y, tableContentH, pages,
           // Table slices belong to THIS table element, so the new page's
-          // pre-scan starts at `i` (this table's body index).
-          () => { nextColumnOrPage(i); },
+          // pre-scan starts at `i` (this table's body index). The just-filled
+          // column bottom folds into `maxColBottomY` so a following continuous
+          // section clears the deepest column (ECMA-376 §17.6.4).
+          (filledColBottom: number) => { maxColBottomY = Math.max(maxColBottomY, filledColBottom); nextColumnOrPage(i); },
           () => colIndex,
           columns,
+          () => colTopY,
+          section.marginTop,
         );
         y = endY;
         measureState.y = section.marginTop + endY;
       } else {
-        if (y + h > tableContentH) nextColumnOrPage(i);
+        // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
+        // the rest of this column ⇒ advance to the next column / page.
+        if (wantsBalanceBreak(h) || y + h > tableContentH) nextColumnOrPage(i);
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
@@ -1856,7 +2038,10 @@ function splitParagraphAcrossPages(
   initialY: number,
   contentH: number,
   pages: PaginatedBodyElement[][],
-  newPage: () => void,
+  /** Advance to the next column / page. Receives the bottom (content-relative pt)
+   *  the just-filled column reached, so the caller can track the deepest column
+   *  of a multi-column region (ECMA-376 §17.6.4) for the following section. */
+  newPage: (filledColBottom: number) => void,
   /** ECMA-376 §17.6.4 — current newspaper column index, read AFTER each
    *  `newPage()` (which may advance the column). When provided, every emitted
    *  slice is tagged with the column it landed in so the renderer flows it in the
@@ -1867,10 +2052,19 @@ function splitParagraphAcrossPages(
    *  stamped so the renderer resolves the slice's column against the right
    *  section. Omitted ⇒ the renderer uses the page-level columns. */
   colGeom?: ColumnGeom[],
+  /** ECMA-376 §17.6.4 — content-relative pt of the current column-region TOP,
+   *  read AFTER each `newPage()`. A continuation column of a continuous mid-page
+   *  section restarts here (below the preceding single-column content), not at
+   *  the page top. Omitted ⇒ the page content top (0). */
+  columnTop?: () => number,
 ): { endY: number } {
+  const colTop = columnTop ?? (() => 0);
   const stamp = (el: PaginatedBodyElement): PaginatedBodyElement => {
     if (tagColIndex) el.colIndex = tagColIndex();
     if (colGeom) el.colGeom = colGeom;
+    // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
+    // pass resets this slice's column cursor to it instead of the page top.
+    if (columnTop) el.colTopPt = measureState.marginTop + colTop();
     return el;
   };
   const indLeft = para.indentLeft;
@@ -1893,8 +2087,8 @@ function splitParagraphAcrossPages(
     let markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
     let top = initialY;
     if (initialY > 0 && initialY + markH - para.spaceAfter > contentH) {
-      newPage();
-      top = 0;
+      newPage(initialY);
+      top = colTop();
       markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
     }
     pages[pages.length - 1].push(stamp(para as PaginatedBodyElement));
@@ -1949,8 +2143,8 @@ function splitParagraphAcrossPages(
       // Guard against infinite loop: if we're already at the start of a
       // fresh page (cursorY ≈ 0) and still don't fit, force-emit one line.
       if (cursorY > 0) {
-        newPage();
-        cursorY = 0;
+        newPage(cursorY);
+        cursorY = colTop();
         isFirstSliceOnPage = true;
         continue;
       }
@@ -1977,8 +2171,8 @@ function splitParagraphAcrossPages(
       // (cursorY > 0); a lone line at a fresh page top cannot be helped. Also
       // catches the case the widow pull above just reduced to a single line.
       if (firstFitting === 0 && lastFitting - firstFitting === 1 && cursorY > 0) {
-        newPage();
-        cursorY = 0;
+        newPage(cursorY);
+        cursorY = colTop();
         isFirstSliceOnPage = true;
         continue;
       }
@@ -1993,8 +2187,8 @@ function splitParagraphAcrossPages(
     lineIdx = lastFitting;
     cursorY += usedH;
     if (!isFinalSlice) {
-      newPage();
-      cursorY = 0;
+      newPage(cursorY);
+      cursorY = colTop();
       isFirstSliceOnPage = true;
     }
   }
@@ -2338,7 +2532,10 @@ export function splitTableAcrossPages(
   startY: number,
   contentH: number,
   pages: PaginatedBodyElement[][],
-  newPage: () => void,
+  /** Advance to the next column / page. Receives the bottom (content-relative pt)
+   *  the just-filled column reached so the caller can track the deepest column of
+   *  a multi-column region (ECMA-376 §17.6.4). */
+  newPage: (filledColBottom: number) => void,
   /** ECMA-376 §17.6.4 — current newspaper column index, read AFTER each
    *  `newPage()`. When provided, each table slice is tagged with its column.
    *  Omitted (single-column / direct unit tests) ⇒ no tag. */
@@ -2347,7 +2544,17 @@ export function splitTableAcrossPages(
    *  the split; a table is never split across a section boundary). Stamped on
    *  each slice so the renderer resolves its column against the right section. */
   colGeom?: ColumnGeom[],
+  /** ECMA-376 §17.6.4 — content-relative pt of the current column-region TOP,
+   *  read AFTER each `newPage()`. A continuation column of a continuous mid-page
+   *  section restarts here, not at the page top. Omitted ⇒ the page top (0). The
+   *  region-top page-absolute pt (`marginTop + columnTop()`) is stamped on each
+   *  slice so the paint pass resets its cursor to the region top. */
+  columnTop?: () => number,
+  /** Page-content top (pt) used to convert `columnTop()` to a page-absolute Y for
+   *  the `colTopPt` stamp. Omitted ⇒ no `colTopPt` stamp (single-column tests). */
+  marginTopPt?: number,
 ): number {
+  const colTop = columnTop ?? (() => 0);
   const n = table.rows.length;
   // Leading tblHeader rows repeat on each continuation page.
   let headerCount = 0;
@@ -2377,14 +2584,17 @@ export function splitTableAcrossPages(
     const sliceEl = { ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement;
     if (tagColIndex) sliceEl.colIndex = tagColIndex();
     if (colGeom) sliceEl.colGeom = colGeom;
+    // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
+    // pass resets this slice's column cursor to it instead of the page top.
+    if (columnTop && marginTopPt != null) sliceEl.colTopPt = marginTopPt + colTop();
     pages[pages.length - 1].push(sliceEl);
 
     y += used;
     start = end;
     firstSlice = false;
     if (start < n) {
-      newPage();
-      y = 0;
+      newPage(y);
+      y = colTop();
     }
   }
   return y;
@@ -2543,7 +2753,29 @@ function renderBodyElements(
   // against the right widths.
   let activeCol = -1;
   let activeGeom: ColumnGeom[] | undefined;
-  for (const el of elements) {
+  // ECMA-376 §17.3.1.7 — the next IN-FLOW paragraph that is adjacent to `elements[i]`
+  // in the SAME newspaper column (same colGeom + colIndex), with no intervening
+  // non-paragraph element (a table/floating-table boundary closes the border box).
+  // A `framePr` paragraph is out of flow (§17.3.1.11) and is skipped/blocks the run.
+  // Returns null when the run is broken (column change, table between, end of page).
+  // A page break never appears mid-`elements` (the paginator splits pages), so the
+  // box correctly closes at the column/page bottom without a special case here.
+  const sameColumn = (a: PaginatedBodyElement, b: PaginatedBodyElement): boolean =>
+    (a.colGeom ?? columns) === (b.colGeom ?? columns) && (a.colIndex ?? 0) === (b.colIndex ?? 0);
+  const flowParaInColumn = (cur: PaginatedBodyElement, sibling: PaginatedBodyElement | undefined): DocParagraph | null => {
+    if (!sibling) return null;
+    if (sibling.type !== 'paragraph') return null; // table/other ends the run
+    if (!sameColumn(cur, sibling)) return null; // column change ends the run
+    const p = sibling as unknown as DocParagraph;
+    if (p.framePr) return null; // out-of-flow frame paragraph is not in the run
+    return p;
+  };
+  const prevFlowParaInColumn = (i: number): DocParagraph | null =>
+    flowParaInColumn(elements[i], elements[i - 1]);
+  const nextFlowParaInColumn = (i: number): DocParagraph | null =>
+    flowParaInColumn(elements[i], elements[i + 1]);
+  for (let elIdx = 0; elIdx < elements.length; elIdx++) {
+    const el = elements[elIdx];
     // Per-section column geometry: prefer the element's own (stamped by the
     // paginator), else the page-level columns. A single full-width column (or no
     // geometry) is the unchanged single-column path.
@@ -2562,7 +2794,13 @@ function renderBodyElements(
       state.contentX = col.xPt * state.scale;
       state.contentW = col.wPt * state.scale;
       if (elCol > activeCol && cols === activeGeom) {
-        state.y = state.marginTop * state.scale;
+        // Region top (front-loaded layout): a continuation column restarts at the
+        // SECTION's region top — for a continuous mid-page section that is BELOW
+        // the preceding single-column content, not the page content top. The
+        // paginator computed and stamped it (`colTopPt`, page-absolute pt); the
+        // paint pass consumes it rather than re-deriving the column top. Absent ⇒
+        // a page-spanning section ⇒ the page content top, unchanged.
+        state.y = (el.colTopPt ?? state.marginTop) * state.scale;
       }
       prevPara = null;
       prevSpaceAfter = 0;
@@ -2571,8 +2809,15 @@ function renderBodyElements(
     } else if (!multiCol && cols && cols.length === 1 && cols !== activeGeom) {
       // A single-column SECTION on a multi-section page (e.g. sample-5 sections
       // 1–4): set the full-width content band for this section. Continue at the
-      // current y (continuous) — only the page-level fresh state / a page break
-      // resets to the top, both handled by the caller.
+      // current y (continuous), BUT when the PRECEDING section was multi-column,
+      // never above its deepest column: `colTopPt` carries that section's region
+      // bottom (ECMA-376 §17.6.4), so a full-width section after a 2-column run
+      // clears BOTH columns instead of overprinting the taller one. Gated on the
+      // previous section being multi-column so a 1-col→1-col continuous break
+      // (sample-5) keeps the exact prior behavior (continue at the current y).
+      if (activeGeom && activeGeom.length > 1 && el.colTopPt != null) {
+        state.y = Math.max(state.y, el.colTopPt * state.scale);
+      }
       const col = cols[0];
       state.contentX = col.xPt * state.scale;
       state.contentW = col.wPt * state.scale;
@@ -2602,7 +2847,20 @@ function renderBodyElements(
       // mid-paragraph slices (slice.end < total) suppress spaceAfter — only
       // the slice covering the FINAL line of the paragraph emits it.
       const isContinuation = !!slice && slice.start > 0;
-      renderParagraph(para, state, suppress || isContinuation, slice);
+      // ECMA-376 §17.3.1.7 paragraph-border merge: suppress this paragraph's TOP
+      // edge when the previous IN-FLOW paragraph (already null on column/section
+      // change, table/frame boundary — exactly the run-breaking cases) shares its
+      // border box, and its BOTTOM edge when the next adjacent same-column
+      // paragraph does. The run is thus drawn as one box: top on the first member,
+      // bottom on the last, `between` (if any) at the inner joins.
+      const borderMerge: ParaBorderMerge | undefined =
+        hasAnyBorderEdge(para.borders)
+          ? {
+              suppressTop: parasShareBorderBox(prevFlowParaInColumn(elIdx), para),
+              suppressBottom: parasShareBorderBox(para, nextFlowParaInColumn(elIdx)),
+            }
+          : undefined;
+      renderParagraph(para, state, suppress || isContinuation, slice, false, borderMerge);
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
@@ -2624,12 +2882,26 @@ function renderBodyElements(
 function renderParaList(paras: DocParagraph[], state: RenderState): void {
   let prevPara: DocParagraph | null = null;
   let prevSpaceAfter = 0;
-  for (const para of paras) {
+  for (let i = 0; i < paras.length; i++) {
+    const para = paras[i];
     const suppress = contextualSuppressed(prevPara, para);
     const effBefore = suppress ? 0 : para.spaceBefore;
     const overlap = Math.min(prevSpaceAfter, effBefore);
     state.y -= overlap * state.scale;
-    renderParagraph(para, state, suppress);
+    // ECMA-376 §17.3.1.7 paragraph-border merge. This list is a single flow (a
+    // note or a table cell), so adjacency is just consecutive list members; a
+    // frame paragraph (§17.3.1.11) is out of flow and breaks the run. `framePr`
+    // siblings are filtered by parasShareBorderBox, so compare with the literal
+    // neighbors here.
+    const prevSibling = (paras[i - 1] ?? null) as DocParagraph | null;
+    const nextSibling = (paras[i + 1] ?? null) as DocParagraph | null;
+    const borderMerge: ParaBorderMerge | undefined = hasAnyBorderEdge(para.borders)
+      ? {
+          suppressTop: parasShareBorderBox(prevSibling, para),
+          suppressBottom: parasShareBorderBox(para, nextSibling),
+        }
+      : undefined;
+    renderParagraph(para, state, suppress, undefined, false, borderMerge);
     prevPara = para;
     prevSpaceAfter = para.spaceAfter;
   }
@@ -2689,11 +2961,13 @@ function renderEmptyMarkParagraph(
     /** Total laid-out line count (0 here); used by the slice guards. */
     totalLines: number;
     lineSlice?: { start: number; end: number };
+    /** §17.3.1.7 paragraph-border merge (suppress top/bottom edges). */
+    borderMerge?: ParaBorderMerge;
   },
 ): void {
   const { ctx, scale, dryRun } = state;
   const { grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY,
-    paragraphStartY, markTop, totalLines, lineSlice } = markCtx;
+    paragraphStartY, markTop, totalLines, lineSlice, borderMerge } = markCtx;
   // Displacement applied by the float-flow (0 when the mark fits where it is).
   const flowShift = Math.max(0, markTop - textAreaTopY);
   if (markTop > state.y) state.y = markTop;
@@ -2705,7 +2979,7 @@ function renderEmptyMarkParagraph(
   }
   state.y += emptyH;
   if (para.borders && !dryRun) {
-    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale, state.dpr);
+    drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale, state.dpr, borderMerge);
   }
   // Only the slice covering the FINAL line emits spaceAfter. With no inline
   // lines there is a single slice, so this is the whole paragraph.
@@ -2904,6 +3178,12 @@ function renderParagraph(
    *  the frame box). Frame dispatch for a non-frame call lives in
    *  renderBodyElements so it can pass the anchor paragraph's line height. */
   inFrame = false,
+  /** ECMA-376 §17.3.1.7 paragraph-border merge: suppress the top edge when a
+   *  same-border paragraph precedes this one in the same column, and the bottom
+   *  edge when one follows. Computed by the paint loop (renderBodyElements /
+   *  renderParaList), which knows in-flow adjacency. Absent ⇒ draw the full box
+   *  (a standalone bordered paragraph). */
+  borderMerge?: ParaBorderMerge,
 ): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
@@ -3067,7 +3347,7 @@ function renderParagraph(
     // and (by construction in the paginator) never sliced.
     renderEmptyMarkParagraph(para, state, {
       grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
-      markTop: resolveEmptyMarkTop(), totalLines: 0, lineSlice: undefined,
+      markTop: resolveEmptyMarkTop(), totalLines: 0, lineSlice: undefined, borderMerge,
     });
     return;
   }
@@ -3136,7 +3416,7 @@ function renderParagraph(
     // images on the first).
     renderEmptyMarkParagraph(para, state, {
       grid, paraHasRuby, contentX, indLeft, paraW, textAreaTopY, paragraphStartY,
-      markTop: resolveEmptyMarkTop(), totalLines: lines.length, lineSlice,
+      markTop: resolveEmptyMarkTop(), totalLines: lines.length, lineSlice, borderMerge,
     });
     return;
   }
@@ -3691,7 +3971,7 @@ function renderParagraph(
 
   if (para.borders && !dryRun) {
     const textH = state.y - textAreaTopY;
-    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr);
+    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr, borderMerge);
   }
 
   // spaceAfter is paragraph-level; only emit it on the slice that covers
@@ -3781,6 +4061,11 @@ interface LayoutImageSeg {
   anchorYFromPara: boolean;
   /** When set, pixels matching this hex color are replaced with alpha=0 before drawing. */
   colorReplaceFrom?: string;
+  /** ECMA-376 §20.1.8.55 `<a:srcRect>` source-rectangle crop (fractions 0..1 of
+   *  the decoded bitmap). When present the draw paths use the 9-arg
+   *  `drawImage` to blit only `[l, t, 1−r, 1−b]` of the bitmap into the display
+   *  box. `undefined` ⇒ draw the full bitmap. */
+  srcRect?: { l: number; t: number; r: number; b: number };
   measuredWidth: number;
 }
 
@@ -4035,6 +4320,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         anchorXFromMargin: img.anchorXFromMargin ?? false,
         anchorYFromPara: img.anchorYFromPara ?? false,
         colorReplaceFrom: img.colorReplaceFrom,
+        srcRect: img.srcRect ?? undefined,
         measuredWidth: 0,
       });
     } else if (run.type === 'break') {
@@ -4748,14 +5034,38 @@ function layoutLines(
         }
       }
     } else if (currentLine.length === 0) {
-      // Nothing on the line yet and no CJK break — force-fit (word wider than column)
-      s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc);
+      // A single non-CJK word wider than the FULL line width — e.g. a long URL in
+      // a narrow newspaper column. ECMA-376 prescribes no line-break algorithm;
+      // Word breaks such an over-long word at the character level (overflow-wrap)
+      // so it stays inside the column instead of bleeding past the right margin /
+      // into the next column. Fit the widest character prefix (≥1 char so the
+      // split always advances), draw it, and re-queue the remainder. Segments are
+      // already one space-delimited word (splitTextForLayout), so this never
+      // breaks where a space could have wrapped.
+      const available = availW();
+      ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
+      const allChars = [...s.text];
+      let split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, gridDeltaPx)].length : 0;
+      if (split < 1) split = 1;
+      if (split >= allChars.length) {
+        // The visible glyphs actually fit (only a trailing space pushed it over the
+        // fit test) — place the word whole.
+        s.measuredWidth = w;
+        addToLine(s, w, h, asc, desc);
+      } else {
+        const prefix = allChars.slice(0, split).join('');
+        const pw = strAdvance(s, prefix);
+        addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
+        queue.unshift({ ...s, text: allChars.slice(split).join(''), measuredWidth: 0 });
+      }
     } else {
-      // Latin word wrap: flush and put this word on the next line
+      // Latin word does not fit on the current (non-empty) line: move it to a fresh
+      // line and re-process. There it either fits, or — when it is wider than the
+      // whole column — the empty-line branch above breaks it at the character level
+      // (overflow-wrap). Re-queueing rather than force-adding is what lets that
+      // over-long-word path run instead of letting the word spill the column.
       flush();
-      s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc);
+      queue.unshift(s);
     }
   }
 
@@ -4807,6 +5117,45 @@ function drawTabLeader(
   ctx.restore();
 }
 
+/**
+ * Draw a decoded image bitmap into the destination box `[dx, dy, dw, dh]`,
+ * honoring an optional ECMA-376 §20.1.8.55 `<a:srcRect>` source-rectangle crop.
+ *
+ * `srcRect` insets are fractions 0..1 of the bitmap measured inward from each
+ * edge, so the visible source region is `[l, t, 1−r, 1−b]` in bitmap pixels:
+ *   `sx = l·W`, `sy = t·H`, `sw = (1−l−r)·W`, `sh = (1−t−b)·H` (clamped ≥ 1).
+ * The destination box is unchanged — the same display size the document asked
+ * for, now filled by just the cropped slice (the renderer never scales the crop
+ * back up; Word stretches the visible source to fill the display box, which is
+ * exactly the 9-arg `drawImage` behavior). Applies identically to raster and
+ * metafile (WMF/EMF) bitmaps since the crop is in decoded-bitmap pixels.
+ */
+function drawImageCropped(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  bmp: DecodedImage,
+  srcRect: { l: number; t: number; r: number; b: number } | undefined,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+): void {
+  if (!srcRect) {
+    ctx.drawImage(bmp, dx, dy, dw, dh);
+    return;
+  }
+  // Use the intrinsic bitmap size. For an HTMLImageElement `width`/`height`
+  // can reflect a CSS/attribute size; `naturalWidth`/`naturalHeight` give the
+  // decoded pixel dimensions. ImageBitmap exposes only `width`/`height` (already
+  // intrinsic). Fall back to `width`/`height` if the natural size is 0.
+  const bw = ('naturalWidth' in bmp && bmp.naturalWidth > 0) ? bmp.naturalWidth : bmp.width;
+  const bh = ('naturalHeight' in bmp && bmp.naturalHeight > 0) ? bmp.naturalHeight : bmp.height;
+  const sx = srcRect.l * bw;
+  const sy = srcRect.t * bh;
+  const sw = Math.max(1, (1 - srcRect.l - srcRect.r) * bw);
+  const sh = Math.max(1, (1 - srcRect.t - srcRect.b) * bh);
+  ctx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
 function renderInlineImage(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   seg: LayoutImageSeg,
@@ -4822,7 +5171,7 @@ function renderInlineImage(
   if (!bmp) return;
   const w = seg.widthPt * scale;
   const h = seg.heightPt * scale;
-  ctx.drawImage(bmp, x, baseline - h, w, h);
+  drawImageCropped(ctx, bmp, seg.srcRect, x, baseline - h, w, h);
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
@@ -4870,7 +5219,7 @@ function renderAnchorImages(
     // does not displace text and is not displaced by other floats), so dist* is
     // unused here.
     const { x: pageX, y: pageY, w, h } = resolveAnchorBox(img, state, paragraphTopPx);
-    state.ctx.drawImage(bmp, pageX, pageY, w, h);
+    drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, pageX, pageY, w, h);
   }
 }
 
@@ -5687,7 +6036,7 @@ function registerImageFloat(
 
   if (!state.dryRun) {
     const bmp = state.images.get(key);
-    if (bmp) state.ctx.drawImage(bmp, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+    if (bmp) drawImageCropped(state.ctx, bmp, img.srcRect ?? undefined, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
     rect.drawn = true;
   }
 }
@@ -6407,12 +6756,33 @@ function drawBorderLine(
   ctx.restore();
 }
 
+/**
+ * ECMA-376 §17.3.1.7 — paragraph-border merge context for a run of consecutive
+ * identically-bordered paragraphs. Word draws ONE box around such a run:
+ *   - the `top` edge only on the FIRST paragraph,
+ *   - the `bottom` edge only on the LAST paragraph,
+ *   - the `<w:between>` edge (if any) at every INNER join,
+ *   - `left`/`right` always (they form the box sides).
+ * The paint loops (renderBodyElements / renderParaList) detect adjacency and
+ * pass `suppressTop` when a same-border paragraph precedes this one, and
+ * `suppressBottom` when one follows. When `suppressTop` is set the `between`
+ * edge (if defined) is drawn at the top join instead of the `top` edge.
+ */
+interface ParaBorderMerge {
+  /** A same-border paragraph is adjacent above ⇒ don't draw this `top` edge
+   *  (draw `between` at the top join instead, when defined). */
+  suppressTop?: boolean;
+  /** A same-border paragraph is adjacent below ⇒ don't draw this `bottom` edge. */
+  suppressBottom?: boolean;
+}
+
 function drawParaBorders(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
   borders: ParagraphBorders,
   scale: number,
   dpr = 1,
+  merge?: ParaBorderMerge,
 ): void {
   const drawEdge = (edge: ParaBorderEdge | null, x1: number, y1: number, x2: number, y2: number) => {
     if (!edge || edge.style === 'none') return;
@@ -6420,13 +6790,75 @@ function drawParaBorders(
     drawBorderLine(ctx, x1, y1, x2, y2, spec, scale, dpr);
   };
   const sp = (edge: ParaBorderEdge | null) => (edge?.space ?? 0) * scale;
-  drawEdge(borders.top,    x, y - sp(borders.top),         x + w, y - sp(borders.top));
-  drawEdge(borders.bottom, x, y + h + sp(borders.bottom),  x + w, y + h + sp(borders.bottom));
+  // §17.3.1.7 top edge: on a non-first paragraph of a shared run, the `top` edge
+  // gives way to the `between` edge drawn at the join (nothing when `between` is
+  // absent — the box has no internal rules).
+  const topEdge = merge?.suppressTop ? borders.between : borders.top;
+  drawEdge(topEdge, x, y - sp(topEdge), x + w, y - sp(topEdge));
+  // The `bottom` edge is skipped entirely when a same-border paragraph follows
+  // (the box continues into it; its own join is handled by that paragraph's
+  // suppressed-top `between`).
+  if (!merge?.suppressBottom) {
+    drawEdge(borders.bottom, x, y + h + sp(borders.bottom), x + w, y + h + sp(borders.bottom));
+  }
   drawEdge(borders.left,   x - sp(borders.left), y,        x - sp(borders.left), y + h);
   drawEdge(borders.right,  x + w + sp(borders.right), y,   x + w + sp(borders.right), y + h);
 }
 
 // ===== Utilities =====
+
+/** ECMA-376 §17.3.1.7 — two paragraph-border definitions "match" (and so
+ *  consecutive paragraphs carrying them merge into a single bordered box) iff
+ *  ALL FIVE edges (top/bottom/left/right/between) are pairwise identical in
+ *  style, color, size, and space. A `null`/absent edge equals another absent
+ *  edge but differs from any present edge. Two paragraphs with NO borders are
+ *  not a bordered run (we never merge unbordered paragraphs), so the caller
+ *  gates on "both have a non-empty borders object" before calling this. */
+function sameParaEdge(a: ParaBorderEdge | null, b: ParaBorderEdge | null): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  return (
+    a.style === b.style &&
+    a.width === b.width &&
+    (a.space ?? 0) === (b.space ?? 0) &&
+    (a.color ?? null) === (b.color ?? null)
+  );
+}
+
+function sameParaBorders(
+  a: ParagraphBorders | null | undefined,
+  b: ParagraphBorders | null | undefined,
+): boolean {
+  if (a == null || b == null) return false; // unbordered paragraphs never merge
+  return (
+    sameParaEdge(a.top, b.top) &&
+    sameParaEdge(a.bottom, b.bottom) &&
+    sameParaEdge(a.left, b.left) &&
+    sameParaEdge(a.right, b.right) &&
+    sameParaEdge(a.between, b.between)
+  );
+}
+
+/** True when `borders` defines at least one visible edge (so a paragraph
+ *  carrying it actually paints a box). A borders object whose every edge is
+ *  null/`none` is treated as "no border" for merge purposes. */
+function hasAnyBorderEdge(b: ParagraphBorders | null | undefined): boolean {
+  if (!b) return false;
+  const live = (e: ParaBorderEdge | null) => e != null && e.style !== 'none';
+  return live(b.top) || live(b.bottom) || live(b.left) || live(b.right) || live(b.between);
+}
+
+/** ECMA-376 §17.3.1.7 — two paragraphs form (part of) the same bordered box iff
+ *  both carry a visible paragraph border AND their five border edges match
+ *  exactly. The caller is responsible for the ADJACENCY half of the rule (same
+ *  column/flow, no page/column break or non-paragraph element between); this
+ *  helper covers only the "identical border definition" half. A `framePr`
+ *  (out-of-flow §17.3.1.11) paragraph can never share a run. */
+function parasShareBorderBox(a: DocParagraph | null, b: DocParagraph | null): boolean {
+  if (!a || !b) return false;
+  if (a.framePr || b.framePr) return false;
+  if (!hasAnyBorderEdge(a.borders) || !hasAnyBorderEdge(b.borders)) return false;
+  return sameParaBorders(a.borders, b.borders);
+}
 
 /** ECMA-376 §17.3.2.4 — two `<w:bdr>` borders belong to the same run-border
  *  group iff their attribute sets are identical. We compare the attributes the

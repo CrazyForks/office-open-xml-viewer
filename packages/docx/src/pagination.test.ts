@@ -460,24 +460,44 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
   });
 
   it('a continuous section break keeps both single-column sections on the SAME page, stacked', () => {
-    // Section A (1 para) — continuous → Section B (1 para) on the same page; final
-    // 2-col section gets a nextPage break. Both A and B are single-column full width
-    // and must NOT reset to the page top (B stacks below A).
+    // ECMA-376 §17.6.22: a section's `<w:type>` describes how THAT section begins
+    // relative to the previous one, and lives on the sectPr that ENDS the section
+    // (the NEXT marker in document order). So the A→B break is governed by section
+    // B's type — the kind of the marker that ENDS B (idx 3) — and the B→final break
+    // by the final (body) section's start type. Here B is continuous (stacks below
+    // A on page 1) and the final 2-col section is nextPage (default) → page 2. Both
+    // A and B are single-column full width and must NOT reset to the page top.
     const body: BodyElement[] = [
       para({ text: 'A', fontSize: 20 }),
-      sectionBreak('continuous', null),
+      sectionBreak('continuous', null), // ends section A (A's own start type)
       para({ text: 'B', fontSize: 20 }),
-      sectionBreak('nextPage', null),
+      sectionBreak('continuous', null), // ends section B ⇒ B begins continuously (A→B same page)
       para({ text: 'final', fontSize: 20 }),
     ];
     const pages = computePages(body, finalTwoCol(), makeCtx());
     expect(pages.length).toBe(2);
-    // A and B share page 1 (continuous), final on page 2.
+    // A and B share page 1 (B continuous), final on page 2 (final section nextPage).
     expect(pages[0].map(textOf)).toEqual(['A', 'B']);
     expect(pages[1].map(textOf)).toEqual(['final']);
     for (const el of pages[0]) {
       expect(colGeomOf(el)).toEqual([{ xPt: 20, wPt: 160 }]);
     }
+  });
+
+  it('the break INTO a section is governed by that section start type, not the prior marker (§17.6.22)', () => {
+    // Regression for the off-by-one: a title section whose own sectPr is nextPage
+    // (the spec default) followed by a continuous body section must NOT page-break —
+    // the boundary is governed by the FOLLOWING (body) section's start type. Mirrors
+    // sample-13, where Word keeps the 2-col body on the title page.
+    const body: BodyElement[] = [
+      para({ text: 'title', fontSize: 20 }),
+      sectionBreak('nextPage', null), // ends the title section (its own start type)
+      para({ text: 'body', fontSize: 20 }),
+    ];
+    const sec = { ...finalTwoCol(), columns: null, sectionStart: 'continuous' };
+    const pages = computePages(body, sec, makeCtx());
+    expect(pages.length).toBe(1);
+    expect(pages[0].map(textOf)).toEqual(['title', 'body']);
   });
 
   it('single-section 2-col docs are UNCHANGED (no SectionBreak markers ⇒ whole body uses section.columns)', () => {
@@ -496,5 +516,41 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
         { xPt: 110, wPt: 70 },
       ]);
     }
+  });
+});
+
+describe('computePages — newspaper column balancing (§17.6.4, non-final continuous sections)', () => {
+  const twoColSpec = { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] };
+
+  it('balances a SHORT non-final 2-col section across both columns (not greedy col0)', () => {
+    // section(): content height 100, content width 160, 2-col ⇒ col width 70.
+    // 6 single-line paras × 20px = 120px total. Balanced = 60px/col = 3 paras each.
+    // Greedy (the bug) would put 5 in col0 (fills to 100px) and 1 in col1.
+    // The 2-col section ENDS with a continuous break ⇒ non-final ⇒ balanced.
+    const body: BodyElement[] = [
+      ...Array.from({ length: 6 }, (_, i) => para({ text: `p${i}`, fontSize: 20 })),
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx()); // final section = 1-col
+    const colByText: Record<string, number | undefined> = {};
+    for (const e of pages[0]) {
+      const t = textOf(e);
+      if (t.startsWith('p')) colByText[t] = colOf(e);
+    }
+    // Balanced: p0–p2 in col0, p3–p5 in col1.
+    expect([colByText.p0, colByText.p1, colByText.p2]).toEqual([0, 0, 0]);
+    expect([colByText.p3, colByText.p4, colByText.p5]).toEqual([1, 1, 1]);
+  });
+
+  it('does NOT balance the FINAL (body) section — it fills col0 greedily', () => {
+    // Same 6 paras, but now the 2-col geometry is the body-level (final) section
+    // with NO terminating break. Word leaves the final section greedy (the user's
+    // observation: the last page packs the left column). Greedy: col0 holds 5
+    // (100px), col1 holds 1.
+    const body: BodyElement[] = Array.from({ length: 6 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
+    const pages = computePages(body, section({ columns: twoColSpec }), makeCtx());
+    const col0 = pages[0].filter((e) => colOf(e) === 0).map(textOf);
+    expect(col0).toEqual(['p0', 'p1', 'p2', 'p3', 'p4']); // greedy fill, NOT balanced
   });
 });

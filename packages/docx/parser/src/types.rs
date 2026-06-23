@@ -158,6 +158,14 @@ pub struct SectionProps {
     pub title_page: bool,
     /// whether even pages have distinct header/footer
     pub even_and_odd_headers: bool,
+    /// ECMA-376 §17.6.22 ST_SectionMark — the body (final) section's `<w:type>`
+    /// start type ("continuous" | "nextPage" | "oddPage" | "evenPage"). Governs
+    /// how the last section begins relative to the previous one; the paginator
+    /// consumes it at the boundary INTO the final section (non-final sections
+    /// carry their start type on their own `SectionBreak` marker). `None` ⇒
+    /// "nextPage" (the spec default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_start: Option<String>,
     /// ECMA-376 §17.6.5 w:docGrid/@w:type ("default" | "lines" |
     /// "linesAndChars" | "snapToChars"). None = default.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1056,6 +1064,22 @@ pub struct ShapeText {
     pub image_height_pt: f64,
 }
 
+/// ECMA-376 §20.1.8.55 `<a:srcRect>` — the source rectangle that selects which
+/// region of the blip's bitmap is drawn (the rest is cropped away). The four
+/// attributes are ST_Percentage insets expressed here as FRACTIONS 0..1 of the
+/// source bitmap, measured inward from each edge: `l`/`t` from the left/top,
+/// `r`/`b` from the right/bottom. The visible source rectangle is therefore
+/// `[l, t, 1−r, 1−b]` of the bitmap. The parser converts the raw 1000ths-of-a-
+/// percent attribute values to fractions (÷100000) so the renderer needs no
+/// unit knowledge. An absent `<a:srcRect>` (or one that is all-zero) ⇒ `None`.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct SrcRect {
+    pub l: f64,
+    pub t: f64,
+    pub r: f64,
+    pub b: f64,
+}
+
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
@@ -1073,6 +1097,10 @@ pub struct ImageRun {
     /// Its MIME is always `image/svg+xml` and is owned by the SVG decoder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub svg_image_path: Option<String>,
+    /// ECMA-376 §20.1.8.55 `<a:srcRect>` source-rectangle crop, as fractions
+    /// 0..1 of the decoded bitmap. `None` when absent or all-zero (no crop).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_rect: Option<SrcRect>,
     /// pt
     pub width_pt: f64,
     /// pt

@@ -1,0 +1,1264 @@
+// ── EMF (Enhanced Metafile) player ───────────────────────────────────────────
+//
+// Browsers cannot decode EMF via `createImageBitmap`, so the renderer falls back
+// to this player for `.emf` blips — the EMF twin of {@link ./wmf.ts}. It is a
+// *minimal but spec-faithful* [MS-EMF] interpreter: enough to rasterize the
+// vector charts/diagrams Office embeds (e.g. sample-13.docx `word/media/
+// image3.emf` / `image4.emf`, which carry their bars/axes as POLYGON16 /
+// POLYLINE16 records and their labels as EXTTEXTOUTW text-out records, all
+// scaled by a long run of MODIFYWORLDTRANSFORM affines).
+//
+// Format reference: ECMA-376 references WMF/EMF; the byte layout below follows
+// the [MS-EMF] Enhanced Metafile Format spec.
+//   - File = a sequence of records, each `u32 iType, u32 nSize`, then nSize−8
+//     data bytes. nSize is 4-byte aligned; walk `offset += nSize`. The first
+//     record is EMR_HEADER (iType=1); the last is EMR_EOF (iType=14).
+//   - All values little-endian. COLORREF = u32 0x00BBGGRR (low byte = R), shared
+//     byte layout with WMF (we reuse {@link colorRefToCss}).
+//   - The world transform (EMR_SETWORLDTRANSFORM / EMR_MODIFYWORLDTRANSFORM,
+//     [MS-EMF] 2.3.12) is a 2×3 affine and does *all* scaling for these files
+//     (no SETWINDOW/VIEWPORT records, MM_TEXT default). Getting the affine
+//     multiply order right ([MS-EMF] 2.3.12: MWT_LEFTMULTIPLY ⇒ the supplied
+//     XFORM is the LEFT operand, `newWT = xform × WT`) is what makes
+//     bars/axes/labels land in the right place.
+//
+// Implemented records: HEADER, SETWORLDTRANSFORM, MODIFYWORLDTRANSFORM,
+// SAVEDC/RESTOREDC, SELECTOBJECT (incl. stock objects), DELETEOBJECT,
+// CREATEPEN, EXTCREATEPEN, CREATEBRUSHINDIRECT, CREATEMONOBRUSH /
+// CREATEDIBPATTERNBRUSHPT (→ average solid color), EXTCREATEFONTINDIRECTW,
+// POLYLINE16/POLYGON16/POLYBEZIER16/POLYLINETO16/POLYBEZIERTO16 (+ their 32-bit
+// twins), POLYPOLYGON16/POLYPOLYLINE16 (+ 32-bit twins), MOVETOEX, LINETO,
+// RECTANGLE, ELLIPSE, SETPOLYFILLMODE, EXTTEXTOUTW, SETTEXTCOLOR, SETTEXTALIGN,
+// SETBKMODE, BITBLT, STRETCHDIBITS (minimal DIB decoder), EOF.
+// Ignored (no-op, skipped by nSize): GDICOMMENT (may hold EMF+, out of scope),
+// SETICMMODE, SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT,
+// BEGINPATH/ENDPATH/SELECTCLIPPATH (clipping is ignored in v1 — [MS-EMF] clip
+// records), and any unrecognized iType.
+//
+// Shared across the docx, pptx and xlsx renderers via
+// {@link ./wmf.ts}#decodeRasterOrMetafile, which sniffs the bytes and routes
+// true EMF here.
+
+import { colorRefToCss, isEmf } from './wmf.js';
+
+// EMF record type codes ([MS-EMF] 2.1.1 EMR enumeration; the subset we act on,
+// others are skipped by nSize).
+const EMR = {
+  HEADER: 1,
+  POLYBEZIER: 2,
+  POLYGON: 3,
+  POLYLINE: 4,
+  POLYBEZIERTO: 5,
+  POLYLINETO: 6,
+  POLYPOLYLINE: 7,
+  POLYPOLYGON: 8,
+  EOF: 14,
+  SETPOLYFILLMODE: 19,
+  SETBKMODE: 18,
+  SETTEXTALIGN: 22,
+  SETTEXTCOLOR: 24,
+  MOVETOEX: 27,
+  SAVEDC: 33,
+  RESTOREDC: 34,
+  SETWORLDTRANSFORM: 35,
+  MODIFYWORLDTRANSFORM: 36,
+  SELECTOBJECT: 37,
+  CREATEPEN: 38,
+  CREATEBRUSHINDIRECT: 39,
+  DELETEOBJECT: 40,
+  ELLIPSE: 42,
+  RECTANGLE: 43,
+  LINETO: 54,
+  EXTCREATEFONTINDIRECTW: 82,
+  EXTTEXTOUTW: 84,
+  POLYBEZIER16: 85,
+  POLYGON16: 86,
+  POLYLINE16: 87,
+  POLYBEZIERTO16: 88,
+  POLYLINETO16: 89,
+  POLYPOLYLINE16: 90,
+  POLYPOLYGON16: 91,
+  CREATEMONOBRUSH: 93,
+  CREATEDIBPATTERNBRUSHPT: 94,
+  EXTCREATEPEN: 95,
+  BITBLT: 76,
+  STRETCHDIBITS: 81,
+} as const;
+
+// Stock object handle ids ([MS-EMF] 2.1.31 StockObject) — high bit 0x80000000
+// set in a SELECTOBJECT handle.
+const STOCK = {
+  WHITE_BRUSH: 0x80000000,
+  LTGRAY_BRUSH: 0x80000001,
+  GRAY_BRUSH: 0x80000002,
+  DKGRAY_BRUSH: 0x80000003,
+  BLACK_BRUSH: 0x80000004,
+  NULL_BRUSH: 0x80000005,
+  WHITE_PEN: 0x80000006,
+  BLACK_PEN: 0x80000007,
+  NULL_PEN: 0x80000008,
+  DC_BRUSH: 0x80000012,
+  DC_PEN: 0x8000000e,
+} as const;
+
+// ── color ─────────────────────────────────────────────────────────────────
+// COLORREF → CSS is shared with WMF (identical 0x00BBGGRR layout); imported as
+// `colorRefToCss`.
+
+// ── object table ─────────────────────────────────────────────────────────
+
+interface Pen {
+  kind: 'pen';
+  stroke: string | null; // null = PS_NULL (no stroke)
+  width: number; // logical width; mapped to device px via world+device scale
+}
+interface Brush {
+  kind: 'brush';
+  fill: string | null; // null = BS_NULL / hollow (no fill)
+}
+interface Font {
+  kind: 'font';
+  height: number; // |lfHeight|, logical units
+  weight: number; // lfWeight (400 normal, 700 bold)
+  italic: boolean;
+  face: string;
+}
+type EmfObject = Pen | Brush | Font;
+
+// ── 2×3 affine world transform ([MS-EMF] 2.2.28 XFORM) ──────────────────────
+
+interface Xform {
+  m11: number;
+  m12: number;
+  m21: number;
+  m22: number;
+  dx: number;
+  dy: number;
+}
+
+const identity = (): Xform => ({ m11: 1, m12: 0, m21: 0, m22: 1, dx: 0, dy: 0 });
+
+/**
+ * Affine product `A × B`, treating each 2×3 as a 3×3 with bottom row [0,0,1]
+ * ([MS-EMF] 2.3.12). For MWT_LEFTMULTIPLY the supplied XFORM is the LEFT
+ * operand (`newWT = xform × WT`); for MWT_RIGHTMULTIPLY it is the RIGHT operand.
+ */
+function mulXform(A: Xform, B: Xform): Xform {
+  return {
+    m11: A.m11 * B.m11 + A.m21 * B.m12,
+    m12: A.m12 * B.m11 + A.m22 * B.m12,
+    m21: A.m11 * B.m21 + A.m21 * B.m22,
+    m22: A.m12 * B.m21 + A.m22 * B.m22,
+    dx: A.m11 * B.dx + A.m21 * B.dy + A.dx,
+    dy: A.m12 * B.dx + A.m22 * B.dy + A.dy,
+  };
+}
+
+// ── little-endian cursor over a record's data region ────────────────────────
+//
+// EMF is 32-bit, so the primitives are i32/u32/f32 (plus i16 for POINTS).
+
+class EmfCursor {
+  private p: number;
+  constructor(
+    private readonly dv: DataView,
+    start: number,
+    private readonly end: number, // exclusive
+  ) {
+    this.p = start;
+  }
+  get pos(): number {
+    return this.p;
+  }
+  set pos(v: number) {
+    this.p = v;
+  }
+  get remaining(): number {
+    return this.end - this.p;
+  }
+  i16(): number {
+    const v = this.dv.getInt16(this.p, true);
+    this.p += 2;
+    return v;
+  }
+  i32(): number {
+    const v = this.dv.getInt32(this.p, true);
+    this.p += 4;
+    return v;
+  }
+  u32(): number {
+    const v = this.dv.getUint32(this.p, true);
+    this.p += 4;
+    return v;
+  }
+  f32(): number {
+    const v = this.dv.getFloat32(this.p, true);
+    this.p += 4;
+    return v;
+  }
+  /** Read a 2×3 XFORM (6×f32). */
+  xform(): Xform {
+    return {
+      m11: this.f32(),
+      m12: this.f32(),
+      m21: this.f32(),
+      m22: this.f32(),
+      dx: this.f32(),
+      dy: this.f32(),
+    };
+  }
+  skip(n: number): void {
+    this.p += n;
+  }
+}
+
+// ── any 2D context we can replay onto (Offscreen or HTMLCanvas) ─────────────
+
+type AnyCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
+interface PlayState {
+  ctx: AnyCtx;
+  W: number; // target raster width (px)
+  H: number; // target raster height (px)
+  // device extent from EMR_HEADER rclBounds ([MS-EMF] 2.2.9)
+  left: number;
+  top: number;
+  boundsW: number;
+  boundsH: number;
+  // GDI state
+  wt: Xform; // current world transform (logical → device)
+  objects: Map<number, EmfObject>; // indexed by ihObject
+  curPen: Pen | null;
+  curBrush: Brush | null;
+  curFont: Font | null;
+  textColor: string;
+  bkMode: number; // 1 = TRANSPARENT
+  textAlign: number;
+  fillRule: CanvasFillRule;
+  curX: number; // current position (logical)
+  curY: number;
+  stack: SavedDc[]; // SAVEDC/RESTOREDC graphics-state stack
+  drew: boolean;
+}
+
+/** Snapshot of the graphics state pushed by EMR_SAVEDC. */
+interface SavedDc {
+  wt: Xform;
+  curPen: Pen | null;
+  curBrush: Brush | null;
+  curFont: Font | null;
+  textColor: string;
+  bkMode: number;
+  textAlign: number;
+  fillRule: CanvasFillRule;
+  curX: number;
+  curY: number;
+}
+
+// ── coordinate pipeline ─────────────────────────────────────────────────────
+
+/** logical → device via world transform ([MS-EMF] 2.2.28):
+ *  `Xd = m11·Xl + m21·Yl + dx`, `Yd = m12·Xl + m22·Yl + dy`. */
+function worldX(s: PlayState, xl: number, yl: number): number {
+  return s.wt.m11 * xl + s.wt.m21 * yl + s.wt.dx;
+}
+function worldY(s: PlayState, xl: number, yl: number): number {
+  return s.wt.m12 * xl + s.wt.m22 * yl + s.wt.dy;
+}
+
+/** logical point → target px: world transform, then device→target
+ *  `px = (Xd − left)·W/boundsW`, `py = (Yd − top)·H/boundsH`. */
+function toPx(s: PlayState, xl: number, yl: number): [number, number] {
+  const Xd = worldX(s, xl, yl);
+  const Yd = worldY(s, xl, yl);
+  const px = ((Xd - s.left) * s.W) / s.boundsW;
+  const py = ((Yd - s.top) * s.H) / s.boundsH;
+  return [px, py];
+}
+
+/** Average world scale magnitude (column-vector lengths) — used to scale pen
+ *  width logically before the device→target scale. */
+function worldScale(s: PlayState): number {
+  const sx = Math.hypot(s.wt.m11, s.wt.m12);
+  const sy = Math.hypot(s.wt.m21, s.wt.m22);
+  return (sx + sy) / 2;
+}
+/** Average device→target scale (px per device unit). */
+function deviceScale(s: PlayState): number {
+  return (s.W / s.boundsW + s.H / s.boundsH) / 2;
+}
+/** Y-only world scale magnitude (Y column length) — for font px sizing. */
+function worldScaleY(s: PlayState): number {
+  return Math.hypot(s.wt.m21, s.wt.m22);
+}
+/** Y-only device→target scale — for font px sizing. */
+function deviceScaleY(s: PlayState): number {
+  return s.H / s.boundsH;
+}
+
+/** Device line width: scale the pen's logical width through world+device and
+ *  clamp to ≥0.75 so hairlines stay visible. */
+function deviceLineWidth(s: PlayState, logicalWidth: number): number {
+  const w = logicalWidth * worldScale(s) * deviceScale(s);
+  return Math.max(0.75, w);
+}
+
+// ── stock objects ([MS-EMF] 2.1.31) ─────────────────────────────────────────
+
+const STOCK_BRUSH: Record<number, Brush> = {
+  [STOCK.WHITE_BRUSH]: { kind: 'brush', fill: '#ffffff' },
+  [STOCK.LTGRAY_BRUSH]: { kind: 'brush', fill: '#c0c0c0' },
+  [STOCK.GRAY_BRUSH]: { kind: 'brush', fill: '#808080' },
+  [STOCK.DKGRAY_BRUSH]: { kind: 'brush', fill: '#404040' },
+  [STOCK.BLACK_BRUSH]: { kind: 'brush', fill: '#000000' },
+  [STOCK.NULL_BRUSH]: { kind: 'brush', fill: null },
+};
+const STOCK_PEN: Record<number, Pen> = {
+  [STOCK.WHITE_PEN]: { kind: 'pen', stroke: '#ffffff', width: 1 },
+  [STOCK.BLACK_PEN]: { kind: 'pen', stroke: '#000000', width: 1 },
+  [STOCK.NULL_PEN]: { kind: 'pen', stroke: null, width: 1 },
+  [STOCK.DC_PEN]: { kind: 'pen', stroke: '#000000', width: 1 },
+};
+
+/** Apply a stock-object handle to the current pen/brush. Unknown stock ids are
+ *  a no-op (leave current). */
+function selectStock(s: PlayState, handle: number): void {
+  const brush = STOCK_BRUSH[handle];
+  if (brush) {
+    s.curBrush = brush;
+    return;
+  }
+  const pen = STOCK_PEN[handle];
+  if (pen) {
+    s.curPen = pen;
+    return;
+  }
+  if (handle === STOCK.DC_BRUSH) {
+    // DC_BRUSH defaults to white; keep current if any, else fall back to black.
+    s.curBrush = s.curBrush ?? { kind: 'brush', fill: '#000000' };
+  }
+  // Anything else: no-op.
+}
+
+// ── DIB decoder ([MS-WMF] 2.2.2.9 DeviceIndependentBitmap, BITMAPINFOHEADER) ──
+
+interface DecodedDib {
+  width: number;
+  height: number;
+  data: Uint8ClampedArray; // RGBA, top-down
+}
+
+/**
+ * Minimal DIB decoder: BITMAPINFOHEADER (40 bytes) + pixel data, supporting
+ * BI_RGB(0) at 32bpp (BGRA), 24bpp (BGR, 4-byte row padding) and 8bpp palette
+ * (RGBQUAD palette after the header). `bmiOff`/`bitsOff` are byte offsets into
+ * `dv`. Returns `null` for unsupported headers/compression.
+ */
+function decodeDib(
+  dv: DataView,
+  bmiOff: number,
+  bmiLen: number,
+  bitsOff: number,
+  bitsLen: number,
+): DecodedDib | null {
+  if (bmiLen < 40 || bmiOff + 40 > dv.byteLength) return null;
+  const biSize = dv.getUint32(bmiOff, true);
+  if (biSize < 40) return null; // only BITMAPINFOHEADER (or larger) supported
+  const biWidth = dv.getInt32(bmiOff + 4, true);
+  const biHeightRaw = dv.getInt32(bmiOff + 8, true);
+  const biBitCount = dv.getUint16(bmiOff + 14, true);
+  const biCompression = dv.getUint32(bmiOff + 16, true);
+  if (biCompression !== 0) return null; // BI_RGB only
+  const topDown = biHeightRaw < 0;
+  const width = Math.abs(biWidth);
+  const height = Math.abs(biHeightRaw);
+  if (width <= 0 || height <= 0 || width > 1 << 16 || height > 1 << 16) return null;
+
+  const out = new Uint8ClampedArray(width * height * 4);
+  const rowStride = (((width * biBitCount + 31) >> 5) << 2) >>> 0; // 4-byte aligned
+  if (bitsOff + rowStride * height > bitsOff + bitsLen + rowStride) {
+    // Tolerate slight over-read; only bail if obviously out of buffer.
+    if (bitsOff + rowStride * height > dv.byteLength) return null;
+  }
+
+  // Palette for ≤8bpp follows the header.
+  let palette: number[] | null = null;
+  if (biBitCount <= 8) {
+    let clrUsed = dv.getUint32(bmiOff + 32, true);
+    if (clrUsed === 0) clrUsed = 1 << biBitCount;
+    const palOff = bmiOff + biSize;
+    palette = [];
+    for (let i = 0; i < clrUsed; i++) {
+      const o = palOff + i * 4;
+      if (o + 4 > dv.byteLength) break;
+      const b = dv.getUint8(o);
+      const g = dv.getUint8(o + 1);
+      const r = dv.getUint8(o + 2);
+      palette.push((r << 16) | (g << 8) | b);
+    }
+  }
+
+  const putPx = (dstRow: number, x: number, r: number, g: number, b: number, a: number) => {
+    const di = (dstRow * width + x) * 4;
+    out[di] = r;
+    out[di + 1] = g;
+    out[di + 2] = b;
+    out[di + 3] = a;
+  };
+
+  let anyAlpha = false;
+  for (let y = 0; y < height; y++) {
+    const srcRow = topDown ? y : height - 1 - y; // bottom-up unless negative
+    const dstRow = y;
+    const rowOff = bitsOff + srcRow * rowStride;
+    if (rowOff + rowStride > dv.byteLength) break;
+    if (biBitCount === 32) {
+      for (let x = 0; x < width; x++) {
+        const o = rowOff + x * 4;
+        const b = dv.getUint8(o);
+        const g = dv.getUint8(o + 1);
+        const r = dv.getUint8(o + 2);
+        const a = dv.getUint8(o + 3);
+        if (a !== 0) anyAlpha = true;
+        putPx(dstRow, x, r, g, b, a);
+      }
+    } else if (biBitCount === 24) {
+      for (let x = 0; x < width; x++) {
+        const o = rowOff + x * 3;
+        putPx(dstRow, x, dv.getUint8(o + 2), dv.getUint8(o + 1), dv.getUint8(o), 255);
+      }
+      anyAlpha = true;
+    } else if (biBitCount === 8 && palette) {
+      for (let x = 0; x < width; x++) {
+        const idx = dv.getUint8(rowOff + x);
+        const c = palette[idx] ?? 0;
+        putPx(dstRow, x, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff, 255);
+      }
+      anyAlpha = true;
+    } else {
+      return null; // unsupported bit depth
+    }
+  }
+
+  // 32bpp DIBs frequently store alpha=0 throughout (the BITBLT raster-op carries
+  // opacity instead). Treat an all-zero alpha plane as fully opaque.
+  if (biBitCount === 32 && !anyAlpha) {
+    for (let i = 3; i < out.length; i += 4) out[i] = 255;
+  }
+  return { width, height, data: out };
+}
+
+/** Average RGB of a decoded DIB (skipping fully transparent pixels) → CSS. */
+function dibAverageColor(dib: DecodedDib): string {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (let i = 0; i < dib.data.length; i += 4) {
+    if (dib.data[i + 3] === 0) continue;
+    r += dib.data[i];
+    g += dib.data[i + 1];
+    b += dib.data[i + 2];
+    n++;
+  }
+  if (n === 0) return '#808080';
+  const hex = (v: number) =>
+    Math.round(v / n)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${hex(r)}${hex(g)}${hex(b)}`;
+}
+
+// ── point readers (16-bit vs 32-bit) ────────────────────────────────────────
+
+type PointReader = (c: EmfCursor) => [number, number];
+const readPoint16: PointReader = (c) => [c.i16(), c.i16()];
+const readPoint32: PointReader = (c) => [c.i32(), c.i32()];
+
+// ── poly drawing ────────────────────────────────────────────────────────────
+
+/** EMR_POLYLINE(16): open path stroked with the current pen. */
+function strokePolyline(s: PlayState, c: EmfCursor, rp: PointReader): void {
+  c.skip(16); // RECTL rclBounds — drawing uses world transform, not bounds
+  const count = c.u32();
+  if (count < 2 || count > 0x100000) return;
+  if (!s.curPen || s.curPen.stroke == null) {
+    // still drop current position to the last point for ...TO continuity callers
+    return;
+  }
+  const { ctx } = s;
+  ctx.beginPath();
+  let lx = 0;
+  let ly = 0;
+  for (let i = 0; i < count; i++) {
+    if (c.remaining < 4) break;
+    const [xl, yl] = rp(c);
+    const [px, py] = toPx(s, xl, yl);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+    lx = xl;
+    ly = yl;
+  }
+  ctx.strokeStyle = s.curPen.stroke;
+  ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+  ctx.stroke();
+  s.drew = true;
+  s.curX = lx;
+  s.curY = ly;
+}
+
+/** EMR_POLYLINETO(16): like POLYLINE but the implicit first point is the
+ *  current position; updates current position. */
+function strokePolylineTo(s: PlayState, c: EmfCursor, rp: PointReader): void {
+  c.skip(16);
+  const count = c.u32();
+  if (count < 1 || count > 0x100000) return;
+  const { ctx } = s;
+  const draw = s.curPen != null && s.curPen.stroke != null;
+  if (draw) {
+    ctx.beginPath();
+    const [px0, py0] = toPx(s, s.curX, s.curY);
+    ctx.moveTo(px0, py0);
+  }
+  for (let i = 0; i < count; i++) {
+    if (c.remaining < 4) break;
+    const [xl, yl] = rp(c);
+    if (draw) {
+      const [px, py] = toPx(s, xl, yl);
+      ctx.lineTo(px, py);
+    }
+    s.curX = xl;
+    s.curY = yl;
+  }
+  if (draw && s.curPen) {
+    ctx.strokeStyle = s.curPen.stroke as string;
+    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    ctx.stroke();
+    s.drew = true;
+  }
+}
+
+/** EMR_POLYGON(16): closed path filled (brush) + stroked (pen). */
+function fillStrokePolygon(s: PlayState, c: EmfCursor, rp: PointReader): void {
+  c.skip(16);
+  const count = c.u32();
+  if (count < 2 || count > 0x100000) return;
+  const { ctx } = s;
+  ctx.beginPath();
+  let started = false;
+  for (let i = 0; i < count; i++) {
+    if (c.remaining < 4) break;
+    const [xl, yl] = rp(c);
+    const [px, py] = toPx(s, xl, yl);
+    if (!started) {
+      ctx.moveTo(px, py);
+      started = true;
+    } else ctx.lineTo(px, py);
+  }
+  if (!started) return;
+  ctx.closePath();
+  if (s.curBrush && s.curBrush.fill != null) {
+    ctx.fillStyle = s.curBrush.fill;
+    ctx.fill(s.fillRule);
+    s.drew = true;
+  }
+  if (s.curPen && s.curPen.stroke != null) {
+    ctx.strokeStyle = s.curPen.stroke;
+    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    ctx.stroke();
+    s.drew = true;
+  }
+}
+
+/** EMR_POLYBEZIER(16) / ...TO: cubic Bézier — start (or current pos for the
+ *  ...TO variant), then triples of (control, control, end). Stroked open. */
+function strokePolyBezier(
+  s: PlayState,
+  c: EmfCursor,
+  rp: PointReader,
+  isTo: boolean,
+): void {
+  c.skip(16);
+  const count = c.u32();
+  if (count < 1 || count > 0x100000) return;
+  const pts: Array<[number, number]> = [];
+  for (let i = 0; i < count; i++) {
+    if (c.remaining < 4) break;
+    pts.push(rp(c));
+  }
+  if (pts.length < (isTo ? 3 : 4)) {
+    if (pts.length) {
+      s.curX = pts[pts.length - 1][0];
+      s.curY = pts[pts.length - 1][1];
+    }
+    return;
+  }
+  const draw = s.curPen != null && s.curPen.stroke != null;
+  const { ctx } = s;
+  if (draw) {
+    ctx.beginPath();
+    const start = isTo ? toPx(s, s.curX, s.curY) : toPx(s, pts[0][0], pts[0][1]);
+    ctx.moveTo(start[0], start[1]);
+  }
+  let i = isTo ? 0 : 1;
+  for (; i + 2 < pts.length + (isTo ? 1 : 0); i += 3) {
+    const c1 = pts[i];
+    const c2 = pts[i + 1];
+    const end = pts[i + 2];
+    if (!c1 || !c2 || !end) break;
+    if (draw) {
+      const p1 = toPx(s, c1[0], c1[1]);
+      const p2 = toPx(s, c2[0], c2[1]);
+      const pe = toPx(s, end[0], end[1]);
+      ctx.bezierCurveTo(p1[0], p1[1], p2[0], p2[1], pe[0], pe[1]);
+    }
+    s.curX = end[0];
+    s.curY = end[1];
+  }
+  if (draw && s.curPen) {
+    ctx.strokeStyle = s.curPen.stroke as string;
+    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    ctx.stroke();
+    s.drew = true;
+  }
+}
+
+/** EMR_POLYPOLYGON(16) / POLYPOLYLINE(16): one path spanning all sub-polys so
+ *  the fill rule resolves holes correctly. Polygon variant fills+strokes;
+ *  polyline variant only strokes. */
+function fillStrokePolyPoly(
+  s: PlayState,
+  c: EmfCursor,
+  rp: PointReader,
+  isPolygon: boolean,
+): void {
+  c.skip(16); // RECTL rclBounds
+  const numPolys = c.u32();
+  const totalPoints = c.u32();
+  if (numPolys <= 0 || numPolys > 0x10000) return;
+  if (totalPoints <= 0 || totalPoints > 0x200000) return;
+  const counts: number[] = [];
+  for (let i = 0; i < numPolys; i++) {
+    if (c.remaining < 4) return;
+    counts.push(c.u32());
+  }
+  const { ctx } = s;
+  ctx.beginPath();
+  let any = false;
+  for (const cnt of counts) {
+    if (cnt < 2) {
+      for (let i = 0; i < cnt && c.remaining >= 4; i++) rp(c);
+      continue;
+    }
+    for (let i = 0; i < cnt; i++) {
+      if (c.remaining < 4) break;
+      const [xl, yl] = rp(c);
+      const [px, py] = toPx(s, xl, yl);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    if (isPolygon) ctx.closePath();
+    any = true;
+  }
+  if (!any) return;
+  if (isPolygon && s.curBrush && s.curBrush.fill != null) {
+    ctx.fillStyle = s.curBrush.fill;
+    ctx.fill(s.fillRule);
+    s.drew = true;
+  }
+  if (s.curPen && s.curPen.stroke != null) {
+    ctx.strokeStyle = s.curPen.stroke;
+    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    ctx.stroke();
+    s.drew = true;
+  }
+}
+
+/** Fill+stroke an axis-aligned rectangle (EMR_RECTANGLE) given logical corners. */
+function fillStrokeRect(s: PlayState, l: number, t: number, r: number, b: number): void {
+  const { ctx } = s;
+  const c0 = toPx(s, l, t);
+  const c1 = toPx(s, r, t);
+  const c2 = toPx(s, r, b);
+  const c3 = toPx(s, l, b);
+  ctx.beginPath();
+  ctx.moveTo(c0[0], c0[1]);
+  ctx.lineTo(c1[0], c1[1]);
+  ctx.lineTo(c2[0], c2[1]);
+  ctx.lineTo(c3[0], c3[1]);
+  ctx.closePath();
+  if (s.curBrush && s.curBrush.fill != null) {
+    ctx.fillStyle = s.curBrush.fill;
+    ctx.fill(s.fillRule);
+    s.drew = true;
+  }
+  if (s.curPen && s.curPen.stroke != null) {
+    ctx.strokeStyle = s.curPen.stroke;
+    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    ctx.stroke();
+    s.drew = true;
+  }
+}
+
+// ── object creators ──────────────────────────────────────────────────────────
+
+/** EMR_CREATEPEN(38): u32 ihObject + LOGPEN{u32 style, POINTL width, COLORREF}. */
+function readCreatePen(c: EmfCursor): [number, Pen] {
+  const ih = c.u32();
+  const style = c.u32();
+  const widthX = c.i32();
+  c.i32(); // POINTL.y (unused)
+  const color = c.u32();
+  const stroke = (style & 0xff) === 5 ? null : colorRefToCss(color); // PS_NULL=5
+  return [ih, { kind: 'pen', stroke, width: Math.abs(widthX) }];
+}
+
+/** EMR_EXTCREATEPEN(95): u32 ihObject, 4×u32 offsets, then ELP {u32 style,
+ *  u32 width, u32 brushStyle, COLORREF color, ...}. */
+function readExtCreatePen(c: EmfCursor): [number, Pen] {
+  const ih = c.u32();
+  c.skip(16); // offBmi, cbBmi, offBits, cbBits
+  const style = c.u32();
+  const width = c.u32();
+  c.u32(); // brushStyle
+  const color = c.u32();
+  const stroke = (style & 0xff) === 5 ? null : colorRefToCss(color); // PS_NULL=5
+  return [ih, { kind: 'pen', stroke, width: Math.abs(width) }];
+}
+
+/** EMR_CREATEBRUSHINDIRECT(39): u32 ihObject + LOGBRUSH{u32 style, COLORREF,
+ *  u32 hatch}. */
+function readCreateBrush(c: EmfCursor): [number, Brush] {
+  const ih = c.u32();
+  const style = c.u32();
+  const color = c.u32();
+  c.u32(); // hatch (HATCHED → solid)
+  const fill = style === 1 ? null : colorRefToCss(color); // BS_NULL=1
+  return [ih, { kind: 'brush', fill }];
+}
+
+/**
+ * EMR_CREATEMONOBRUSH(93) / EMR_CREATEDIBPATTERNBRUSHPT(94): u32 ihObject,
+ * u32 iUsage, u32 offBmi, u32 cbBmi, u32 offBits, u32 cbBits, then a DIB.
+ *
+ * APPROXIMATION: DIB pattern brush ([MS-EMF] 2.3.7) rendered as its average
+ * solid color pending true pattern-brush support. If DIB decode fails, fall
+ * back to mid-gray so bars still show.
+ */
+function readDibPatternBrush(c: EmfCursor, dv: DataView, recStart: number): [number, Brush] {
+  const ih = c.u32();
+  c.u32(); // iUsage
+  const offBmi = c.u32();
+  const cbBmi = c.u32();
+  const offBits = c.u32();
+  const cbBits = c.u32();
+  let fill = '#808080';
+  try {
+    const dib = decodeDib(dv, recStart + offBmi, cbBmi, recStart + offBits, cbBits);
+    if (dib) fill = dibAverageColor(dib);
+  } catch {
+    /* keep mid-gray fallback */
+  }
+  return [ih, { kind: 'brush', fill }];
+}
+
+/** EMR_EXTCREATEFONTINDIRECTW(82): u32 ihObject + LOGFONT (lfHeight,…,lfFaceName
+ *  UTF-16 at LOGFONT offset 28). */
+function readCreateFont(c: EmfCursor, dv: DataView, recStart: number): [number, Font] {
+  const ih = c.u32();
+  const lfBase = recStart + 12; // ihObject (4) after the 8-byte record header
+  const lfHeight = dv.getInt32(lfBase, true);
+  // lfWidth(4), lfEscapement(8), lfOrientation(12)
+  const lfWeight = dv.getInt32(lfBase + 16, true);
+  const lfItalic = dv.getUint8(lfBase + 20);
+  // lfFaceName: UTF-16, up to 32 code units, at LOGFONT offset 28.
+  let face = '';
+  for (let i = 0; i < 32; i++) {
+    const o = lfBase + 28 + i * 2;
+    if (o + 2 > dv.byteLength) break;
+    const cu = dv.getUint16(o, true);
+    if (cu === 0) break;
+    face += String.fromCharCode(cu);
+  }
+  return [
+    ih,
+    {
+      kind: 'font',
+      height: Math.abs(lfHeight),
+      weight: lfWeight,
+      italic: lfItalic !== 0,
+      face,
+    },
+  ];
+}
+
+// ── text — EMR_EXTTEXTOUTW(84) ([MS-EMF] 2.3.5.2) ────────────────────────────
+
+function drawText(s: PlayState, c: EmfCursor, dv: DataView, recStart: number): void {
+  c.skip(16); // RECTL rclBounds (record offset 8..24)
+  c.u32(); // iGraphicsMode
+  c.f32(); // exScale
+  c.f32(); // eyScale
+  // EMRTEXT at record offset 36:
+  const refX = c.i32();
+  const refY = c.i32();
+  const nChars = c.u32();
+  const offString = c.u32(); // BYTE offset from RECORD START to UTF-16 string
+  c.u32(); // fOptions
+  if (nChars <= 0 || nChars > 0x10000) return;
+  // Read nChars UTF-16LE code units at recStart + offString.
+  let str = '';
+  for (let i = 0; i < nChars; i++) {
+    const o = recStart + offString + i * 2;
+    if (o + 2 > dv.byteLength) break;
+    str += String.fromCharCode(dv.getUint16(o, true));
+  }
+  if (str.length === 0) return;
+
+  const font = s.curFont;
+  const px = Math.abs(font?.height ?? 0) * worldScaleY(s) * deviceScaleY(s);
+  if (!Number.isFinite(px) || px < 1) return;
+
+  const { ctx } = s;
+  const [dx, dy] = toPx(s, refX, refY);
+  ctx.fillStyle = s.textColor;
+  const weight = font && font.weight >= 700 ? 'bold ' : '';
+  const italic = font?.italic ? 'italic ' : '';
+  ctx.font = `${italic}${weight}${px}px ${font?.face || 'sans-serif'}`;
+
+  // SETTEXTALIGN: low 2 bits horizontal. TA_LEFT(0), TA_RIGHT(2), TA_CENTER(6).
+  const horiz = s.textAlign & 0x6;
+  ctx.textAlign = horiz === 0x2 ? 'right' : horiz === 0x6 ? 'center' : 'left';
+  // TA_BASELINE(0x18) → alphabetic; else top.
+  ctx.textBaseline = (s.textAlign & 0x18) === 0x18 ? 'alphabetic' : 'top';
+  // bkMode TRANSPARENT(1): never paint a background box (always the case here).
+  try {
+    ctx.fillText(str, dx, dy);
+    s.drew = true;
+  } catch {
+    // Some ctx mocks lack fillText; a missing fillText must not abort the render.
+  }
+}
+
+// ── bitmaps — EMR_BITBLT(76) / EMR_STRETCHDIBITS(81) ([MS-EMF] 2.3.1) ─────────
+
+/** Decode a DIB and blit it into the dest rect (logical corners mapped via
+ *  toPx). Skips gracefully on unsupported DIBs or missing OffscreenCanvas. */
+function blitDib(
+  s: PlayState,
+  dv: DataView,
+  recStart: number,
+  offBmi: number,
+  cbBmi: number,
+  offBits: number,
+  cbBits: number,
+  destL: number,
+  destT: number,
+  destR: number,
+  destB: number,
+): void {
+  if (cbBmi === 0 || cbBits === 0) return; // pattern-only blt → skip
+  try {
+    const dib = decodeDib(dv, recStart + offBmi, cbBmi, recStart + offBits, cbBits);
+    if (!dib) return;
+    if (typeof OffscreenCanvas === 'undefined') return;
+    const tmp = new OffscreenCanvas(dib.width, dib.height);
+    const tctx = tmp.getContext('2d') as OffscreenCanvasRenderingContext2D | null;
+    if (!tctx) return;
+    // Allocate via createImageData (avoids the ImageData-constructor typed-array
+    // overload mismatch) and copy the decoded RGBA in.
+    const imgData = tctx.createImageData(dib.width, dib.height) as ImageData;
+    imgData.data.set(dib.data);
+    tctx.putImageData(imgData, 0, 0);
+    const [x0, y0] = toPx(s, destL, destT);
+    const [x1, y1] = toPx(s, destR, destB);
+    s.ctx.drawImage(tmp, x0, y0, x1 - x0, y1 - y0);
+    s.drew = true;
+  } catch {
+    // Unsupported / missing image API → skip the blit, keep rendering.
+  }
+}
+
+/** EMR_BITBLT(76) ([MS-EMF] 2.3.1.2). */
+function doBitBlt(s: PlayState, c: EmfCursor, dv: DataView, recStart: number): void {
+  c.skip(16); // RECTL rclBounds
+  const xDest = c.i32();
+  const yDest = c.i32();
+  const cxDest = c.i32();
+  const cyDest = c.i32();
+  c.u32(); // bitBltRasterOp
+  c.i32(); // xSrc
+  c.i32(); // ySrc
+  c.skip(24); // XFORM xformSrc (6×f32)
+  c.u32(); // bkColorSrc
+  c.u32(); // usageSrc
+  const offBmi = c.u32();
+  const cbBmi = c.u32();
+  const offBits = c.u32();
+  const cbBits = c.u32();
+  blitDib(
+    s, dv, recStart, offBmi, cbBmi, offBits, cbBits,
+    xDest, yDest, xDest + cxDest, yDest + cyDest,
+  );
+}
+
+/** EMR_STRETCHDIBITS(81) ([MS-EMF] 2.3.1.7). */
+function doStretchDibits(s: PlayState, c: EmfCursor, dv: DataView, recStart: number): void {
+  c.skip(16); // RECTL rclBounds
+  const xDest = c.i32();
+  const yDest = c.i32();
+  c.i32(); // xSrc
+  c.i32(); // ySrc
+  c.i32(); // cxSrc
+  c.i32(); // cySrc
+  const offBmi = c.u32();
+  const cbBmi = c.u32();
+  const offBits = c.u32();
+  const cbBits = c.u32();
+  c.u32(); // usageSrc
+  c.u32(); // bitBltRasterOp
+  const cxDest = c.i32();
+  const cyDest = c.i32();
+  blitDib(
+    s, dv, recStart, offBmi, cbBmi, offBits, cbBits,
+    xDest, yDest, xDest + cxDest, yDest + cyDest,
+  );
+}
+
+// ── core record-replay loop (pure; testable with a mock ctx) ────────────────
+
+/**
+ * Replay an EMF byte buffer onto a 2D context, mapping logical coordinates
+ * through the world transform and then into a `W`×`H` target raster. Returns
+ * `true` if anything was drawn, `false` for a non-EMF buffer or a metafile that
+ * produced no geometry.
+ *
+ * Pure with respect to the injected `ctx`, so it is unit-testable against a
+ * recording mock — no OffscreenCanvas required (the only exception is the
+ * optional BITBLT/STRETCHDIBITS path, which needs a temp OffscreenCanvas and is
+ * skipped gracefully when absent).
+ */
+export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): boolean {
+  if (!isEmf(bytes)) return false;
+  if (W <= 0 || H <= 0) return false;
+
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  const s: PlayState = {
+    ctx,
+    W,
+    H,
+    left: 0,
+    top: 0,
+    boundsW: W,
+    boundsH: H,
+    wt: identity(),
+    objects: new Map(),
+    curPen: null,
+    curBrush: null,
+    curFont: null,
+    textColor: '#000000',
+    bkMode: 1,
+    textAlign: 0,
+    fillRule: 'nonzero',
+    curX: 0,
+    curY: 0,
+    stack: [],
+    drew: false,
+  };
+
+  let pos = 0;
+  while (pos + 8 <= bytes.length) {
+    const iType = dv.getUint32(pos, true);
+    const nSize = dv.getUint32(pos + 4, true);
+    // Validate: nSize ≥ 8 (the iType+nSize header) and 4-aligned and in-bounds.
+    if (nSize < 8 || (nSize & 3) !== 0) break;
+    const recEnd = pos + nSize;
+    if (recEnd > bytes.length) break; // truncated → partial render
+    if (iType === EMR.EOF) break;
+
+    // A cursor over the data region (starts at record offset 8).
+    const c = new EmfCursor(dv, pos + 8, recEnd);
+
+    // Never throw on a malformed record — just advance by nSize.
+    try {
+      switch (iType) {
+        case EMR.HEADER: {
+          // RECTL rclBounds @ data offset 8 (= record offset 16), then rclFrame.
+          const left = dv.getInt32(pos + 8, true);
+          const top = dv.getInt32(pos + 12, true);
+          const right = dv.getInt32(pos + 16, true);
+          const bottom = dv.getInt32(pos + 20, true);
+          s.left = left;
+          s.top = top;
+          s.boundsW = Math.max(1, right - left);
+          s.boundsH = Math.max(1, bottom - top);
+          break;
+        }
+        case EMR.SETWORLDTRANSFORM: {
+          s.wt = c.xform();
+          break;
+        }
+        case EMR.MODIFYWORLDTRANSFORM: {
+          const x = c.xform();
+          const iMode = c.u32();
+          // [MS-EMF] 2.3.12: 1=IDENTITY, 2=LEFTMULTIPLY (xform × WT),
+          // 3=RIGHTMULTIPLY (WT × xform), 4=SET.
+          if (iMode === 1) s.wt = identity();
+          else if (iMode === 2) s.wt = mulXform(x, s.wt);
+          else if (iMode === 3) s.wt = mulXform(s.wt, x);
+          else if (iMode === 4) s.wt = x;
+          break;
+        }
+        case EMR.SAVEDC: {
+          s.stack.push({
+            wt: { ...s.wt },
+            curPen: s.curPen,
+            curBrush: s.curBrush,
+            curFont: s.curFont,
+            textColor: s.textColor,
+            bkMode: s.bkMode,
+            textAlign: s.textAlign,
+            fillRule: s.fillRule,
+            curX: s.curX,
+            curY: s.curY,
+          });
+          break;
+        }
+        case EMR.RESTOREDC: {
+          // data: i32 iRelative (e.g. -1 = pop one). Pop |iRelative| times,
+          // clamped to the stack size.
+          const iRelative = c.i32();
+          const times = Math.min(Math.abs(iRelative) || 1, s.stack.length);
+          let saved: SavedDc | undefined;
+          for (let i = 0; i < times; i++) saved = s.stack.pop();
+          if (saved) {
+            s.wt = saved.wt;
+            s.curPen = saved.curPen;
+            s.curBrush = saved.curBrush;
+            s.curFont = saved.curFont;
+            s.textColor = saved.textColor;
+            s.bkMode = saved.bkMode;
+            s.textAlign = saved.textAlign;
+            s.fillRule = saved.fillRule;
+            s.curX = saved.curX;
+            s.curY = saved.curY;
+          }
+          break;
+        }
+        case EMR.SELECTOBJECT: {
+          const ih = c.u32();
+          if ((ih & 0x80000000) !== 0) {
+            selectStock(s, ih >>> 0);
+          } else {
+            const obj = s.objects.get(ih);
+            if (obj?.kind === 'pen') s.curPen = obj;
+            else if (obj?.kind === 'brush') s.curBrush = obj;
+            else if (obj?.kind === 'font') s.curFont = obj;
+          }
+          break;
+        }
+        case EMR.DELETEOBJECT: {
+          const ih = c.u32();
+          const obj = s.objects.get(ih);
+          if (obj) {
+            if (obj === s.curPen) s.curPen = null;
+            if (obj === s.curBrush) s.curBrush = null;
+            if (obj === s.curFont) s.curFont = null;
+            s.objects.delete(ih);
+          }
+          break;
+        }
+        case EMR.CREATEPEN: {
+          const [ih, pen] = readCreatePen(c);
+          s.objects.set(ih, pen);
+          break;
+        }
+        case EMR.EXTCREATEPEN: {
+          const [ih, pen] = readExtCreatePen(c);
+          s.objects.set(ih, pen);
+          break;
+        }
+        case EMR.CREATEBRUSHINDIRECT: {
+          const [ih, brush] = readCreateBrush(c);
+          s.objects.set(ih, brush);
+          break;
+        }
+        case EMR.CREATEMONOBRUSH:
+        case EMR.CREATEDIBPATTERNBRUSHPT: {
+          const [ih, brush] = readDibPatternBrush(c, dv, pos);
+          s.objects.set(ih, brush);
+          break;
+        }
+        case EMR.EXTCREATEFONTINDIRECTW: {
+          const [ih, font] = readCreateFont(c, dv, pos);
+          s.objects.set(ih, font);
+          break;
+        }
+        case EMR.POLYLINE16:
+          strokePolyline(s, c, readPoint16);
+          break;
+        case EMR.POLYLINE:
+          strokePolyline(s, c, readPoint32);
+          break;
+        case EMR.POLYLINETO16:
+          strokePolylineTo(s, c, readPoint16);
+          break;
+        case EMR.POLYLINETO:
+          strokePolylineTo(s, c, readPoint32);
+          break;
+        case EMR.POLYGON16:
+          fillStrokePolygon(s, c, readPoint16);
+          break;
+        case EMR.POLYGON:
+          fillStrokePolygon(s, c, readPoint32);
+          break;
+        case EMR.POLYBEZIER16:
+          strokePolyBezier(s, c, readPoint16, false);
+          break;
+        case EMR.POLYBEZIER:
+          strokePolyBezier(s, c, readPoint32, false);
+          break;
+        case EMR.POLYBEZIERTO16:
+          strokePolyBezier(s, c, readPoint16, true);
+          break;
+        case EMR.POLYBEZIERTO:
+          strokePolyBezier(s, c, readPoint32, true);
+          break;
+        case EMR.POLYPOLYGON16:
+          fillStrokePolyPoly(s, c, readPoint16, true);
+          break;
+        case EMR.POLYPOLYGON:
+          fillStrokePolyPoly(s, c, readPoint32, true);
+          break;
+        case EMR.POLYPOLYLINE16:
+          fillStrokePolyPoly(s, c, readPoint16, false);
+          break;
+        case EMR.POLYPOLYLINE:
+          fillStrokePolyPoly(s, c, readPoint32, false);
+          break;
+        case EMR.MOVETOEX: {
+          s.curX = c.i32();
+          s.curY = c.i32();
+          break;
+        }
+        case EMR.LINETO: {
+          const xl = c.i32();
+          const yl = c.i32();
+          if (s.curPen && s.curPen.stroke != null) {
+            const [px0, py0] = toPx(s, s.curX, s.curY);
+            const [px1, py1] = toPx(s, xl, yl);
+            ctx.beginPath();
+            ctx.moveTo(px0, py0);
+            ctx.lineTo(px1, py1);
+            ctx.strokeStyle = s.curPen.stroke;
+            ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+            ctx.stroke();
+            s.drew = true;
+          }
+          s.curX = xl;
+          s.curY = yl;
+          break;
+        }
+        case EMR.RECTANGLE: {
+          const left = c.i32();
+          const top = c.i32();
+          const right = c.i32();
+          const bottom = c.i32();
+          fillStrokeRect(s, left, top, right, bottom);
+          break;
+        }
+        case EMR.ELLIPSE: {
+          const left = c.i32();
+          const top = c.i32();
+          const right = c.i32();
+          const bottom = c.i32();
+          const [cxl, cyl] = [(left + right) / 2, (top + bottom) / 2];
+          const [cx, cy] = toPx(s, cxl, cyl);
+          const [ex] = toPx(s, right, cyl);
+          const [, ey] = toPx(s, cxl, bottom);
+          const rx = Math.abs(ex - cx);
+          const ry = Math.abs(ey - cy);
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+          if (s.curBrush && s.curBrush.fill != null) {
+            ctx.fillStyle = s.curBrush.fill;
+            ctx.fill(s.fillRule);
+            s.drew = true;
+          }
+          if (s.curPen && s.curPen.stroke != null) {
+            ctx.strokeStyle = s.curPen.stroke;
+            ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+            ctx.stroke();
+            s.drew = true;
+          }
+          break;
+        }
+        case EMR.SETPOLYFILLMODE: {
+          const mode = c.u32(); // 1=ALTERNATE→evenodd, 2=WINDING→nonzero
+          s.fillRule = mode === 1 ? 'evenodd' : 'nonzero';
+          break;
+        }
+        case EMR.SETTEXTCOLOR: {
+          s.textColor = colorRefToCss(c.u32());
+          break;
+        }
+        case EMR.SETTEXTALIGN: {
+          s.textAlign = c.u32();
+          break;
+        }
+        case EMR.SETBKMODE: {
+          s.bkMode = c.u32(); // 1 = TRANSPARENT
+          break;
+        }
+        case EMR.EXTTEXTOUTW:
+          drawText(s, c, dv, pos);
+          break;
+        case EMR.BITBLT:
+          doBitBlt(s, c, dv, pos);
+          break;
+        case EMR.STRETCHDIBITS:
+          doStretchDibits(s, c, dv, pos);
+          break;
+        default:
+          // GDICOMMENT (may hold EMF+, out of scope), SETICMMODE,
+          // SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT,
+          // BEGINPATH/ENDPATH/SELECTCLIPPATH (clipping ignored in v1 — [MS-EMF]
+          // clip records), and any unrecognized iType: skip by nSize.
+          break;
+      }
+    } catch {
+      // A malformed record must never abort the whole render — just advance.
+    }
+
+    pos = recEnd;
+  }
+
+  return s.drew;
+}
+
+// ── async OffscreenCanvas wrapper ───────────────────────────────────────────
+
+/**
+ * Rasterize an EMF metafile to an `ImageBitmap` of `targetW`×`targetH`, replaying
+ * onto an `OffscreenCanvas` 2D context. Returns `null` if the bytes are not a
+ * parseable EMF or nothing drew (so the caller can fall back to the existing
+ * "missing image" behavior without crashing). Mirrors
+ * {@link ./wmf.ts}#renderWmfToBitmap.
+ */
+export async function renderEmfToBitmap(
+  bytes: Uint8Array,
+  targetW: number,
+  targetH: number,
+): Promise<ImageBitmap | null> {
+  if (!isEmf(bytes)) return null;
+  if (targetW <= 0 || targetH <= 0) return null;
+  const canvas = new OffscreenCanvas(targetW, targetH);
+  const ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D | null;
+  if (!ctx) return null;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  const drew = playEmf(bytes, ctx, targetW, targetH);
+  if (!drew) return null;
+  return createImageBitmap(canvas);
+}

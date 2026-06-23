@@ -125,6 +125,13 @@ export interface SectionProps {
   footerDistance: number;   // pt — bottom of page to footer
   titlePage: boolean;
   evenAndOddHeaders: boolean;
+  /** ECMA-376 §17.6.22 ST_SectionMark — the body (final) section's `<w:type>`
+   *  start type ("continuous" | "nextPage" | "oddPage" | "evenPage"). Governs
+   *  how the last section begins relative to the previous one; consumed by the
+   *  paginator at the boundary INTO the final section. Absent ⇒ "nextPage" (the
+   *  spec default). Non-final sections carry their start type on their own
+   *  SectionBreak marker. */
+  sectionStart?: string | null;
   /** ECMA-376 §17.6.5 w:docGrid/@w:type — "default" | "lines" | "linesAndChars" | "snapToChars". */
   docGridType?: string | null;
   /** ECMA-376 §17.6.5 w:docGrid/@w:linePitch in pt. When docGridType is "lines" or
@@ -214,6 +221,17 @@ export type PaginatedBodyElement = BodyElement & {
    *  paths), so single-section documents are unaffected. Runtime-only — never
    *  emitted by the parser. */
   colGeom?: ColumnGeom[];
+  /** ECMA-376 §17.6.4 — page-absolute Y (pt) of the TOP of the multi-column
+   *  region this element belongs to on its page. For a section started by a
+   *  "continuous" section break (§17.18.79) the columns begin partway down the
+   *  page (below the preceding single-column content), not at the page content
+   *  top; the paginator computes that origin once (front-loaded layout) and
+   *  stamps it so the renderer resets a column's vertical cursor to the REGION
+   *  top — never the page top. Also carries the region's bottom (max column
+   *  depth) onto the FIRST element of the following section so it clears all
+   *  columns. Absent ⇒ the renderer uses the page content top (single-column /
+   *  page-spanning section). Runtime-only — never emitted by the parser. */
+  colTopPt?: number;
 };
 
 export interface DocParagraph {
@@ -720,6 +738,17 @@ export interface ImageRun {
    * image. Its MIME is always `image/svg+xml` and is owned by the SVG decoder.
    */
   svgImagePath?: string;
+  /**
+   * ECMA-376 §20.1.8.55 `<a:srcRect>` — the source-rectangle crop applied to
+   * the decoded bitmap before it is drawn into the display box. The four values
+   * are inset FRACTIONS 0..1 of the source bitmap measured inward from each
+   * edge (`l`/`t` from left/top, `r`/`b` from right/bottom); the visible source
+   * region is `[l, t, 1−r, 1−b]`. The parser converts the raw ST_Percentage
+   * (1000ths of a percent) to fractions, so the renderer crops in bitmap pixels
+   * (`sx = l*w`, `sy = t*h`, `sw = (1−l−r)*w`, `sh = (1−t−b)*h`) without unit
+   * knowledge. Absent / null when there is no crop (the full bitmap is drawn).
+   */
+  srcRect?: { l: number; t: number; r: number; b: number } | null;
   widthPt: number;
   heightPt: number;
   /** true = wp:anchor (absolute positioned), false/undefined = wp:inline (flows with text) */

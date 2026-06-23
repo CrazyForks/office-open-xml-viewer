@@ -28,6 +28,12 @@
 // `suppressBoundaryFrame` option (default OFF = spec-clean, draws every edge).
 // docx will opt IN (`suppressBoundaryFrame: true`) when it re-points to core
 // (deferred), to preserve its current behavior.
+//
+// True EMF (a separate, larger 32-bit format — see {@link isEmf}) is rasterized
+// by the sibling player {@link ./emf.ts}#renderEmfToBitmap, routed from
+// {@link decodeRasterOrMetafile}.
+
+import { renderEmfToBitmap } from './emf.js';
 
 // WMF record function codes (the subset we act on; others are skipped by size).
 const META = {
@@ -76,8 +82,8 @@ export function isWmf(bytes: Uint8Array): boolean {
 }
 
 /** True for a true EMF (ENHMETAHEADER): u32@0 == 1 (EMR_HEADER) AND u32@40 ==
- *  0x464D4520 (" EMF"). True EMF is a different, larger format than WMF.
- *  TODO: EMF (ECMA-376 references it too) is a separate format — follow-up. */
+ *  0x464D4520 (" EMF"). True EMF is a different, larger 32-bit format than WMF;
+ *  it is rasterized by the sibling player {@link ./emf.ts}#renderEmfToBitmap. */
 export function isEmf(bytes: Uint8Array): boolean {
   if (bytes.length < 44) return false;
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -86,8 +92,9 @@ export function isEmf(bytes: Uint8Array): boolean {
 
 // ── color ─────────────────────────────────────────────────────────────────
 
-/** COLORREF (u32 0x00BBGGRR) → CSS `#rrggbb`. */
-function colorRefToCss(c: number): string {
+/** COLORREF (u32 0x00BBGGRR) → CSS `#rrggbb`. Shared with the EMF player
+ *  ({@link ./emf.ts}); COLORREF has the same byte layout in [MS-EMF]. */
+export function colorRefToCss(c: number): string {
   const r = c & 0xff;
   const g = (c >>> 8) & 0xff;
   const b = (c >>> 16) & 0xff;
@@ -630,8 +637,9 @@ export interface DecodeRasterOptions {
  *   - {@link isWmf} → rasterize via {@link renderWmfToBitmap} at
  *     {@link wmfRasterTarget}(widthPt, heightPt). A WMF that produces no geometry
  *     returns `null`.
- *   - {@link isEmf} → return `null` (true EMF is a separate, larger format than
- *     WMF; a follow-up). The caller skips the image, as for any null bitmap.
+ *   - {@link isEmf} → rasterize via {@link ./emf.ts}#renderEmfToBitmap at
+ *     {@link wmfRasterTarget}(widthPt, heightPt). An EMF that produces no
+ *     geometry returns `null`.
  *   - otherwise → `createImageBitmap(blob)` (PNG/JPEG/GIF/BMP/WEBP…).
  *
  * Returns `null` (never throws on an unsupported metafile) so every caller can
@@ -653,9 +661,8 @@ export async function decodeRasterOrMetafile(
     return renderWmfToBitmap(bytes, w, h, suppressBoundaryFrame);
   }
   if (isEmf(bytes)) {
-    // EMF is a separate, larger format than WMF — follow-up. Skip gracefully
-    // (drop → caller's "missing image" / null-bitmap behavior, no crash).
-    return null;
+    const { w, h } = wmfRasterTarget(widthPt, heightPt);
+    return renderEmfToBitmap(bytes, w, h);
   }
   return createImageBitmap(data);
 }
