@@ -1065,6 +1065,23 @@ export function computePages(
   let colIndex = 0;
   const colX = () => columns[colIndex].xPt;
   const colW = () => columns[colIndex].wPt;
+  // ECMA-376 §17.6.4 / §17.18.79 — the CURRENT multi-column region's vertical
+  // extent on the current page, in content-relative pt (0 = page content top,
+  // i.e. the same frame as `y`). A region tiled into N newspaper columns is a
+  // rectangle [colTopY, …]; every column STARTS at `colTopY`, not the page top.
+  // For a section opened by a "continuous" section break the region begins
+  // partway down the page (below the preceding single-column content), so
+  // `colTopY > 0`. `maxColBottomY` accumulates the deepest column bottom reached
+  // in the region so the NEXT section (after a continuous break) starts below
+  // ALL columns rather than overprinting a taller one. Reset to the page top at
+  // every real page open; re-seeded at each continuous section boundary. For a
+  // single-section / single-column document `colTopY` stays 0 — behaviour-neutral.
+  let colTopY = 0;
+  let maxColBottomY = 0;
+  // Page-absolute pt of the current region top, stamped on elements so the paint
+  // pass resets a column's cursor to the region top (front-loaded layout: the
+  // renderer consumes this instead of independently deciding the column top).
+  const colTopAbsPt = () => section.marginTop + colTopY;
 
   // Run `fn` with the measure state's content band temporarily re-pointed at the
   // CURRENT newspaper column (#513). The paint pass (renderBodyElements) sets
@@ -1147,6 +1164,9 @@ export function computePages(
       pages.push([]);
       y = 0;
       colIndex = 0;
+      // A fresh page: the section's columns span it from the content top.
+      colTopY = 0;
+      maxColBottomY = 0;
       prevPara = null;
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
@@ -1164,11 +1184,15 @@ export function computePages(
   // line, and a square float keeps constraining the columns its x-range covers).
   // No new page is pushed and footnote reserve is untouched (same page).
   const nextColumn = () => {
+    // Record the just-finished column's bottom, then drop the cursor back to the
+    // REGION top (not the page top) — for a continuous mid-page section the next
+    // column begins below the preceding single-column content (ECMA-376 §17.6.4).
+    maxColBottomY = Math.max(maxColBottomY, y);
     colIndex++;
-    y = 0;
+    y = colTopY;
     prevPara = null;
     prevSpaceAfter = 0;
-    measureState.y = section.marginTop;
+    measureState.y = section.marginTop + colTopY;
   };
   // Overflow handler shared by element placement and paragraph/table splitting:
   // move to the next column if one remains on this page, otherwise to a new page.
@@ -1256,6 +1280,7 @@ export function computePages(
   const pushTagged = (el: PaginatedBodyElement) => {
     el.colIndex = colIndex;
     el.colGeom = columns;
+    el.colTopPt = colTopAbsPt();
     pages[pages.length - 1].push(el);
   };
 
@@ -1273,6 +1298,8 @@ export function computePages(
     if (el.type === 'pageBreak') {
       pages.push([]);
       y = 0;
+      colTopY = 0;
+      maxColBottomY = 0;
       prevPara = null;
       prevSpaceAfter = 0;
       measureState.y = section.marginTop;
@@ -1304,14 +1331,21 @@ export function computePages(
       colIndex = 0;
       if (el.kind === 'continuous') {
         // ECMA-376 §17.18.79 "continuous": NO page break — the next section's
-        // content continues on the SAME page at the CURRENT vertical position
-        // (y is intentionally NOT reset), just in the new section's column 0.
-        // (sample-5's continuous break is 1-col → 1-col, so the two single-column
-        // sections simply stack; full continuous column-balancing for a column-
-        // count change is out of scope per the task.) prevPara is cleared so the
-        // first paragraph of the new section doesn't collapse spacing against the
-        // last paragraph of the previous one. Floats / footnote reserve stay
-        // (page-scoped). measureState.y already tracks the current y.
+        // content continues on the SAME page. It must start below the BOTTOM of
+        // EVERY column of the section just ended (ECMA-376 §17.6.4), not at the
+        // last-filled column's cursor: a 2-col section whose first column ran to
+        // the page bottom while the second is short would otherwise let the new
+        // (e.g. full-width) section overprint the taller column. `regionBottom`
+        // is the deepest column reached; the new section's region then begins
+        // there. (1-col→1-col, e.g. sample-5: maxColBottomY tracks no extra
+        // column, so regionBottom == y — the sections simply stack, unchanged.)
+        // Full column BALANCING of the ended section is a separate fidelity step;
+        // this clears the overprint and the page-fill error regardless.
+        const regionBottom = Math.max(maxColBottomY, y);
+        y = regionBottom;
+        measureState.y = section.marginTop + regionBottom;
+        colTopY = regionBottom;
+        maxColBottomY = regionBottom;
         prevPara = null;
         prevSpaceAfter = 0;
       } else {
@@ -1320,6 +1354,8 @@ export function computePages(
         // colIndex to 0 and clears page-scoped floats.
         pages.push([]);
         y = 0;
+        colTopY = 0;
+        maxColBottomY = 0;
         prevPara = null;
         prevSpaceAfter = 0;
         measureState.y = section.marginTop;
@@ -1508,14 +1544,17 @@ export function computePages(
           measureState, para, colW(), suppressBefore, colX(),
           y, pageContentH, pages,
           // Overflow during the split advances to the next column first, then a
-          // new page (newspaper fill). Each slice is tagged with the column it
-          // landed in via the colIndex thunk, plus this section's column geometry
-          // (constant — a paragraph never spans a section boundary). The
+          // new page (newspaper fill). The just-filled column's bottom is folded
+          // into `maxColBottomY` so a following continuous section clears the
+          // deepest column (ECMA-376 §17.6.4). Each slice is tagged with the
+          // column it landed in via the colIndex thunk, plus this section's column
+          // geometry (constant — a paragraph never spans a section boundary). The
           // continuation slice belongs to THIS paragraph, so the new page's
           // pre-scan starts at `i` (this paragraph index).
-          () => { nextColumnOrPage(i); },
+          (filledColBottom: number) => { maxColBottomY = Math.max(maxColBottomY, filledColBottom); nextColumnOrPage(i); },
           () => colIndex,
           columns,
+          () => colTopY,
         );
         // After splitting, `y` is the bottom of the last slice in the
         // current column (continues for the LAST slice; intermediate slices
@@ -1598,10 +1637,14 @@ export function computePages(
         const endY = splitTableAcrossPages(
           tbl, rowHs, y, tableContentH, pages,
           // Table slices belong to THIS table element, so the new page's
-          // pre-scan starts at `i` (this table's body index).
-          () => { nextColumnOrPage(i); },
+          // pre-scan starts at `i` (this table's body index). The just-filled
+          // column bottom folds into `maxColBottomY` so a following continuous
+          // section clears the deepest column (ECMA-376 §17.6.4).
+          (filledColBottom: number) => { maxColBottomY = Math.max(maxColBottomY, filledColBottom); nextColumnOrPage(i); },
           () => colIndex,
           columns,
+          () => colTopY,
+          section.marginTop,
         );
         y = endY;
         measureState.y = section.marginTop + endY;
@@ -1856,7 +1899,10 @@ function splitParagraphAcrossPages(
   initialY: number,
   contentH: number,
   pages: PaginatedBodyElement[][],
-  newPage: () => void,
+  /** Advance to the next column / page. Receives the bottom (content-relative pt)
+   *  the just-filled column reached, so the caller can track the deepest column
+   *  of a multi-column region (ECMA-376 §17.6.4) for the following section. */
+  newPage: (filledColBottom: number) => void,
   /** ECMA-376 §17.6.4 — current newspaper column index, read AFTER each
    *  `newPage()` (which may advance the column). When provided, every emitted
    *  slice is tagged with the column it landed in so the renderer flows it in the
@@ -1867,10 +1913,19 @@ function splitParagraphAcrossPages(
    *  stamped so the renderer resolves the slice's column against the right
    *  section. Omitted ⇒ the renderer uses the page-level columns. */
   colGeom?: ColumnGeom[],
+  /** ECMA-376 §17.6.4 — content-relative pt of the current column-region TOP,
+   *  read AFTER each `newPage()`. A continuation column of a continuous mid-page
+   *  section restarts here (below the preceding single-column content), not at
+   *  the page top. Omitted ⇒ the page content top (0). */
+  columnTop?: () => number,
 ): { endY: number } {
+  const colTop = columnTop ?? (() => 0);
   const stamp = (el: PaginatedBodyElement): PaginatedBodyElement => {
     if (tagColIndex) el.colIndex = tagColIndex();
     if (colGeom) el.colGeom = colGeom;
+    // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
+    // pass resets this slice's column cursor to it instead of the page top.
+    if (columnTop) el.colTopPt = measureState.marginTop + colTop();
     return el;
   };
   const indLeft = para.indentLeft;
@@ -1893,8 +1948,8 @@ function splitParagraphAcrossPages(
     let markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
     let top = initialY;
     if (initialY > 0 && initialY + markH - para.spaceAfter > contentH) {
-      newPage();
-      top = 0;
+      newPage(initialY);
+      top = colTop();
       markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
     }
     pages[pages.length - 1].push(stamp(para as PaginatedBodyElement));
@@ -1949,8 +2004,8 @@ function splitParagraphAcrossPages(
       // Guard against infinite loop: if we're already at the start of a
       // fresh page (cursorY ≈ 0) and still don't fit, force-emit one line.
       if (cursorY > 0) {
-        newPage();
-        cursorY = 0;
+        newPage(cursorY);
+        cursorY = colTop();
         isFirstSliceOnPage = true;
         continue;
       }
@@ -1977,8 +2032,8 @@ function splitParagraphAcrossPages(
       // (cursorY > 0); a lone line at a fresh page top cannot be helped. Also
       // catches the case the widow pull above just reduced to a single line.
       if (firstFitting === 0 && lastFitting - firstFitting === 1 && cursorY > 0) {
-        newPage();
-        cursorY = 0;
+        newPage(cursorY);
+        cursorY = colTop();
         isFirstSliceOnPage = true;
         continue;
       }
@@ -1993,8 +2048,8 @@ function splitParagraphAcrossPages(
     lineIdx = lastFitting;
     cursorY += usedH;
     if (!isFinalSlice) {
-      newPage();
-      cursorY = 0;
+      newPage(cursorY);
+      cursorY = colTop();
       isFirstSliceOnPage = true;
     }
   }
@@ -2338,7 +2393,10 @@ export function splitTableAcrossPages(
   startY: number,
   contentH: number,
   pages: PaginatedBodyElement[][],
-  newPage: () => void,
+  /** Advance to the next column / page. Receives the bottom (content-relative pt)
+   *  the just-filled column reached so the caller can track the deepest column of
+   *  a multi-column region (ECMA-376 §17.6.4). */
+  newPage: (filledColBottom: number) => void,
   /** ECMA-376 §17.6.4 — current newspaper column index, read AFTER each
    *  `newPage()`. When provided, each table slice is tagged with its column.
    *  Omitted (single-column / direct unit tests) ⇒ no tag. */
@@ -2347,7 +2405,17 @@ export function splitTableAcrossPages(
    *  the split; a table is never split across a section boundary). Stamped on
    *  each slice so the renderer resolves its column against the right section. */
   colGeom?: ColumnGeom[],
+  /** ECMA-376 §17.6.4 — content-relative pt of the current column-region TOP,
+   *  read AFTER each `newPage()`. A continuation column of a continuous mid-page
+   *  section restarts here, not at the page top. Omitted ⇒ the page top (0). The
+   *  region-top page-absolute pt (`marginTop + columnTop()`) is stamped on each
+   *  slice so the paint pass resets its cursor to the region top. */
+  columnTop?: () => number,
+  /** Page-content top (pt) used to convert `columnTop()` to a page-absolute Y for
+   *  the `colTopPt` stamp. Omitted ⇒ no `colTopPt` stamp (single-column tests). */
+  marginTopPt?: number,
 ): number {
+  const colTop = columnTop ?? (() => 0);
   const n = table.rows.length;
   // Leading tblHeader rows repeat on each continuation page.
   let headerCount = 0;
@@ -2377,14 +2445,17 @@ export function splitTableAcrossPages(
     const sliceEl = { ...table, type: 'table', rows: sliceRows } as PaginatedBodyElement;
     if (tagColIndex) sliceEl.colIndex = tagColIndex();
     if (colGeom) sliceEl.colGeom = colGeom;
+    // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
+    // pass resets this slice's column cursor to it instead of the page top.
+    if (columnTop && marginTopPt != null) sliceEl.colTopPt = marginTopPt + colTop();
     pages[pages.length - 1].push(sliceEl);
 
     y += used;
     start = end;
     firstSlice = false;
     if (start < n) {
-      newPage();
-      y = 0;
+      newPage(y);
+      y = colTop();
     }
   }
   return y;
@@ -2562,7 +2633,13 @@ function renderBodyElements(
       state.contentX = col.xPt * state.scale;
       state.contentW = col.wPt * state.scale;
       if (elCol > activeCol && cols === activeGeom) {
-        state.y = state.marginTop * state.scale;
+        // Region top (front-loaded layout): a continuation column restarts at the
+        // SECTION's region top — for a continuous mid-page section that is BELOW
+        // the preceding single-column content, not the page content top. The
+        // paginator computed and stamped it (`colTopPt`, page-absolute pt); the
+        // paint pass consumes it rather than re-deriving the column top. Absent ⇒
+        // a page-spanning section ⇒ the page content top, unchanged.
+        state.y = (el.colTopPt ?? state.marginTop) * state.scale;
       }
       prevPara = null;
       prevSpaceAfter = 0;
@@ -2571,8 +2648,15 @@ function renderBodyElements(
     } else if (!multiCol && cols && cols.length === 1 && cols !== activeGeom) {
       // A single-column SECTION on a multi-section page (e.g. sample-5 sections
       // 1–4): set the full-width content band for this section. Continue at the
-      // current y (continuous) — only the page-level fresh state / a page break
-      // resets to the top, both handled by the caller.
+      // current y (continuous), BUT when the PRECEDING section was multi-column,
+      // never above its deepest column: `colTopPt` carries that section's region
+      // bottom (ECMA-376 §17.6.4), so a full-width section after a 2-column run
+      // clears BOTH columns instead of overprinting the taller one. Gated on the
+      // previous section being multi-column so a 1-col→1-col continuous break
+      // (sample-5) keeps the exact prior behavior (continue at the current y).
+      if (activeGeom && activeGeom.length > 1 && el.colTopPt != null) {
+        state.y = Math.max(state.y, el.colTopPt * state.scale);
+      }
       const col = cols[0];
       state.contentX = col.xPt * state.scale;
       state.contentW = col.wPt * state.scale;

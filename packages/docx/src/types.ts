@@ -214,6 +214,17 @@ export type PaginatedBodyElement = BodyElement & {
    *  paths), so single-section documents are unaffected. Runtime-only — never
    *  emitted by the parser. */
   colGeom?: ColumnGeom[];
+  /** ECMA-376 §17.6.4 — page-absolute Y (pt) of the TOP of the multi-column
+   *  region this element belongs to on its page. For a section started by a
+   *  "continuous" section break (§17.18.79) the columns begin partway down the
+   *  page (below the preceding single-column content), not at the page content
+   *  top; the paginator computes that origin once (front-loaded layout) and
+   *  stamps it so the renderer resets a column's vertical cursor to the REGION
+   *  top — never the page top. Also carries the region's bottom (max column
+   *  depth) onto the FIRST element of the following section so it clears all
+   *  columns. Absent ⇒ the renderer uses the page content top (single-column /
+   *  page-spanning section). Runtime-only — never emitted by the parser. */
+  colTopPt?: number;
 };
 
 export interface DocParagraph {
