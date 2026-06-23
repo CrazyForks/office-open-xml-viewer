@@ -4,6 +4,28 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.66.0 — 2026-06-23
+
+Minor. A DOCX continuous-section newspaper-column overhaul plus EMF figure
+support — dense, multi-page journal templates (sample-12/13) now match Word.
+
+- **docx (multi-column sections):** continuation columns start at the section's
+  region top, not the page top (§17.6.4); a section break is governed by the
+  upcoming section's start type, so a `nextPage` title section before a
+  `continuous` body no longer page-breaks (§17.6.22); header/footer references
+  inherit across sections so a running header declared on the first section
+  shows on every page (§17.10.1); non-final continuous multi-column sections are
+  balanced across their columns, matching Word's page fill (§17.6.4).
+- **docx (text & images):** an over-long unbreakable token (e.g. a long URL in a
+  narrow column) breaks at the character level instead of bleeding past the
+  column (overflow-wrap); `<a:srcRect>` image crops are honored, including the
+  rasterization size for cropped metafiles (§20.1.8.55); consecutive paragraphs
+  with identical `<w:pBdr>` borders merge into one box instead of ruling every
+  line (§17.3.1.7).
+- **core (images):** Enhanced Metafile (EMF) parts now rasterize via a new
+  [MS-EMF] player (world transform, polylines/polygons, text, DIBs), so EMF
+  charts/figures render instead of dropping to blank.
+
 ## 0.65.0 — 2026-06-23
 
 Minor. A large PowerPoint chart-fidelity push — blank charts now render, combo
