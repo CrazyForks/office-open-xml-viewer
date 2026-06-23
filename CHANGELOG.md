@@ -4,6 +4,25 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.66.2 — 2026-06-23
+
+Patch. DOCX RTL / table fidelity fixes.
+
+- **docx (table auto-fit):** an `AutoFit to Contents` table (`tblW=auto`) was sized
+  from its saved `<w:tblGrid>` (often the full text column), so it spanned the page
+  and overrode its own `w:tblPr/w:jc` placement — sample-7's cover page lost the
+  right-aligned and left-aligned tables. `tblW=auto` now sizes from per-cell `tcW`
+  /content (ECMA-376 §17.4.63 / §17.18.87); a preferred-width table (`tblW=dxa/pct`)
+  still trusts the grid Word baked its layout into (sample-3 unchanged).
+- **docx (RTL numbers):** a decimal inside an Arabic run drew reversed
+  (`1234.56` → `56.1234`). A single common separator between two numbers now joins
+  them into one left-to-right number (UAX#9 W4), so `1234.56` / `1,234.56` / `12:34`
+  stay intact while hyphen-separated dates still reorder.
+- **docx (RTL text boxes):** a rich (multi-format) text box drew its words in
+  logical order, scrambling RTL/mixed text. It now runs the same UAX#9 visual
+  reorder (rule L2) body paragraphs use, so RTL words read right-to-left while
+  Latin/number islands stay left-to-right (sample-8).
+
 ## 0.66.1 — 2026-06-23
 
 Patch. Hotfix for a 0.66.0 regression.
