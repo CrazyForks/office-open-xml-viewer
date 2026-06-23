@@ -4,6 +4,23 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.66.3 — 2026-06-24
+
+Patch. DOCX cover-page fix — resolves the 0.66.1 hotfix trade-off (sample-5 and
+sample-13 are now both correct).
+
+- **docx (cover page):** sample-5's novel body overprinted the 夢十夜 title page,
+  and the 0.66.1 hotfix that fixed it pushed sample-13's intro off the title page.
+  The cover is a Word "Cover Pages" building block (ECMA-376 §17.5.2
+  `docPartGallery="Cover Pages"`) whose text flow is empty — the page is filled by
+  page-anchored cover graphics that don't advance the text cursor — so Word places
+  it on its own page via an implicit break. The parser now emits a page break after
+  a Cover Pages block, and the section-break reading is restored to the upcoming
+  section's start type (§17.6.22). The cover stands alone (sample-5: 7 pages) while
+  a `continuous` body after a title section stays on the title page (sample-13: 5
+  pages); sample-12 unchanged (3 pages). A redundant cover break adjacent to an
+  explicit page/section break is dropped to avoid a spurious blank page.
+
 ## 0.66.2 — 2026-06-23
 
 Patch. DOCX RTL / table fidelity fixes.
