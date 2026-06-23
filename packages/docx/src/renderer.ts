@@ -403,24 +403,13 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
     for (const run of runs) {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
-        // ECMA-376 §20.1.8.55 srcRect: a metafile (WMF/EMF) is rasterized to a
-        // bitmap whose SIZE is derived from the requested display extent. When
-        // only a sub-rectangle is shown, request the FULL image's display
-        // footprint (display extent ÷ visible fraction) so the rasterized bitmap
-        // keeps the full image's proportions; drawImageCropped then maps the
-        // sub-rect into the display box without distortion. (Raster blips ignore
-        // the requested size — their bitmap is the natural image — so this is a
-        // no-op for them.)
-        const sr = img.srcRect;
-        const visW = sr ? Math.max(0.01, 1 - sr.l - sr.r) : 1;
-        const visH = sr ? Math.max(0.01, 1 - sr.t - sr.b) : 1;
         record({
           imagePath: img.imagePath,
           mimeType: img.mimeType,
           svgImagePath: img.svgImagePath,
           colorReplaceFrom: img.colorReplaceFrom,
-          widthPt: (img.widthPt ?? 0) / visW,
-          heightPt: (img.heightPt ?? 0) / visH,
+          widthPt: img.widthPt ?? 0,
+          heightPt: img.heightPt ?? 0,
         });
       } else if (run.type === 'shape') {
         // Inline images living inside a text box (<wps:txbx>) ride on the
@@ -1551,7 +1540,10 @@ export function computePages(
       // Collapse with the previous paragraph's spaceAfter — Word takes
       // max(prev.after, this.before) between paragraphs, not the sum.
       const effectiveBefore = suppressBefore ? 0 : para.spaceBefore;
-      const overlap = Math.min(prevSpaceAfter, effectiveBefore);
+      // §17.3.1.9 contextualSpacing: same-style adjacent paragraphs drop BOTH the
+      // previous after and this before (gap = 0), keeping the paginator's fill in
+      // lockstep with the paint pass.
+      const overlap = suppressBefore ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
       y -= overlap;
       measureState.y -= overlap;
 
@@ -2682,7 +2674,10 @@ export function sumCellContentHeight(
       const para = ce as unknown as DocParagraph;
       const suppress = contextualSuppressed(prevPara, para);
       const effBefore = suppress ? 0 : para.spaceBefore;
-      const overlap = Math.min(prevSpaceAfter, effBefore);
+      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
+      // set it, BOTH the previous after and this before are dropped (gap = 0), not
+      // just collapsed — so e.g. a code listing's lines sit tight.
+      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       h += perElementHeight(ce)
         - (suppress ? para.spaceBefore : 0) * spaceScale
         - overlap * spaceScale;
@@ -2844,7 +2839,10 @@ function renderBodyElements(
       const suppress = contextualSuppressed(prevPara, para);
       // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
       const effBefore = suppress ? 0 : para.spaceBefore;
-      const overlap = Math.min(prevSpaceAfter, effBefore);
+      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
+      // set it, BOTH the previous after and this before are dropped (gap = 0), not
+      // just collapsed — so e.g. a code listing's lines sit tight.
+      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
       // Continuation slices (slice.start > 0) suppress spaceBefore: the
       // earlier slice already consumed it on the previous page. Likewise
@@ -5143,21 +5141,17 @@ function drawImageCropped(
   dw: number,
   dh: number,
 ): void {
-  if (!srcRect) {
-    ctx.drawImage(bmp, dx, dy, dw, dh);
-    return;
-  }
-  // Use the intrinsic bitmap size. For an HTMLImageElement `width`/`height`
-  // can reflect a CSS/attribute size; `naturalWidth`/`naturalHeight` give the
-  // decoded pixel dimensions. ImageBitmap exposes only `width`/`height` (already
-  // intrinsic). Fall back to `width`/`height` if the natural size is 0.
-  const bw = ('naturalWidth' in bmp && bmp.naturalWidth > 0) ? bmp.naturalWidth : bmp.width;
-  const bh = ('naturalHeight' in bmp && bmp.naturalHeight > 0) ? bmp.naturalHeight : bmp.height;
-  const sx = srcRect.l * bw;
-  const sy = srcRect.t * bh;
-  const sw = Math.max(1, (1 - srcRect.l - srcRect.r) * bw);
-  const sh = Math.max(1, (1 - srcRect.t - srcRect.b) * bh);
-  ctx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
+  // ECMA-376 §20.1.8.55 srcRect crop is intentionally DISABLED for now. Cropping
+  // works for a raster blip (the bitmap is the true full image), but a metafile
+  // (WMF/EMF) is rasterized into a bitmap sized to the CROPPED display box, so
+  // the whole metafile is squished to the sub-rect's aspect and the crop no
+  // longer aligns with the source — the figure stretches / spills out of its
+  // frame (sample-13 Fig.2 / Fig.3). Until the decoder can rasterize a metafile
+  // at its native aspect and crop from that, draw the full image (the clean,
+  // pre-crop behavior). `srcRect` stays plumbed through (parser → ImageRun) so
+  // re-enabling it is a one-line change here.
+  void srcRect;
+  ctx.drawImage(bmp, dx, dy, dw, dh);
 }
 
 function renderInlineImage(
@@ -6590,7 +6584,10 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
       const para = ce as unknown as DocParagraph;
       const suppress = contextualSuppressed(prevPara, para);
       const effBefore = suppress ? 0 : para.spaceBefore;
-      const overlap = Math.min(prevSpaceAfter, effBefore);
+      // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
+      // set it, BOTH the previous after and this before are dropped (gap = 0), not
+      // just collapsed — so e.g. a code listing's lines sit tight.
+      const overlap = suppress ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
       renderParagraph(para, state, suppress);
       prevPara = para;

@@ -18,13 +18,14 @@ support — dense, multi-page journal templates (sample-12/13) now match Word.
   balanced across their columns, matching Word's page fill (§17.6.4).
 - **docx (text & images):** an over-long unbreakable token (e.g. a long URL in a
   narrow column) breaks at the character level instead of bleeding past the
-  column (overflow-wrap); `<a:srcRect>` image crops are honored, including the
-  rasterization size for cropped metafiles (§20.1.8.55); consecutive paragraphs
-  with identical `<w:pBdr>` borders merge into one box instead of ruling every
-  line (§17.3.1.7).
+  column (overflow-wrap); consecutive paragraphs with identical `<w:pBdr>` borders
+  merge into one box instead of ruling every line (§17.3.1.7); contextualSpacing
+  collapses the gap between same-style paragraphs to zero, so a code listing's
+  lines sit tight (§17.3.1.9).
 - **core (images):** Enhanced Metafile (EMF) parts now rasterize via a new
   [MS-EMF] player (world transform, polylines/polygons, text, DIBs), so EMF
-  charts/figures render instead of dropping to blank.
+  charts/figures render instead of dropping to blank. (Sub-rectangle cropping of
+  metafiles — `<a:srcRect>` — is deferred: the figure is shown in full for now.)
 
 ## 0.65.0 — 2026-06-23
 
