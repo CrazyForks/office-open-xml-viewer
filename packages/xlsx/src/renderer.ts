@@ -2,7 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
+  Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem, ImageAnchor,
 } from './types.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, xlsxBorderDashArray, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
@@ -2838,6 +2838,60 @@ function sheetYForRow(
   return y;
 }
 
+/** Source pixel dimensions of a decoded image. `ImageBitmap` / `OffscreenCanvas`
+ *  expose native `width`/`height`; an `HTMLImageElement` exposes `naturalWidth`/
+ *  `naturalHeight` (its `width`/`height` may be a CSS layout size). */
+function imageNaturalSize(img: CanvasImageSource): { w: number; h: number } {
+  const el = img as {
+    naturalWidth?: number;
+    naturalHeight?: number;
+    width?: number;
+    height?: number;
+  };
+  return { w: el.naturalWidth || el.width || 0, h: el.naturalHeight || el.height || 0 };
+}
+
+/** Draw an anchored picture into the destination rect `(dx,dy,dw,dh)`, honoring
+ *  an optional ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop.
+ *
+ *  `srcRect` insets are fractions `0..1` of the source bitmap measured inward
+ *  from each edge, so the visible region is `[l, t, 1-r, 1-b]` in source pixels:
+ *  `sx = l·W`, `sy = t·H`, `sw = (1−l−r)·W`, `sh = (1−t−b)·H` (clamped ≥ 1). The
+ *  destination box is unchanged — Word/Excel stretch the visible slice to fill
+ *  the anchor rect, which is exactly the 9-arg `drawImage` behavior.
+ *
+ *  The crop is applied only for raster blips, whose decoded `ImageBitmap` IS the
+ *  full source at native resolution. A metafile (WMF/EMF) is rasterized to the
+ *  CROPPED *display* box (see core `decodeRasterOrMetafile`), so cropping it in
+ *  bitmap pixels would squish the whole picture to the sub-rect's aspect; until
+ *  the decoder can rasterize a metafile at native size we draw it whole (the
+ *  same documented limitation as the docx renderer). */
+export function drawAnchorImage(
+  ctx: CanvasRenderingContext2D,
+  img: CanvasImageSource,
+  anchor: ImageAnchor,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+): void {
+  const sr = anchor.srcRect;
+  const isMetafile = anchor.mimeType === 'image/wmf' || anchor.mimeType === 'image/emf';
+  if (sr && !isMetafile && (sr.l || sr.t || sr.r || sr.b)) {
+    const { w: bw, h: bh } = imageNaturalSize(img);
+    if (bw > 0 && bh > 0) {
+      const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
+      const sx = clamp01(sr.l) * bw;
+      const sy = clamp01(sr.t) * bh;
+      const sw = Math.max(1, bw - sx - clamp01(sr.r) * bw);
+      const sh = Math.max(1, bh - sy - clamp01(sr.b) * bh);
+      ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+      return;
+    }
+  }
+  ctx.drawImage(img, dx, dy, dw, dh);
+}
+
 function renderImages(
   ctx: CanvasRenderingContext2D,
   ws: Worksheet,
@@ -2907,7 +2961,7 @@ function renderImages(
     if (canvasX + imgW < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
     if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
 
-    ctx.drawImage(img, canvasX, canvasY, imgW, imgH);
+    drawAnchorImage(ctx, img, anchor, canvasX, canvasY, imgW, imgH);
   }
 
   ctx.restore();

@@ -19,15 +19,20 @@ interface ImageRef {
   svgImagePath?: string;
   widthPt?: number;
   heightPt?: number;
+  /** True when the picture carries an `<a:srcRect>` crop, so the decoder forces
+   *  the raster (the crop math needs native bitmap pixels). */
+  hasCrop?: boolean;
 }
 
 /** Fetch one image's bytes by zip path and decode them to a drawable
  *  `CanvasImageSource`, preferring the Microsoft svgBlip vector original
  *  (MS-ODRAWXML). Unified across the top-level twoCellAnchor picture
  *  (`ImageAnchor`) and the `<xdr:grpSp>` leaf (`ShapeGeom` image) — both carry a
- *  raster `imagePath` fallback plus an optional `svgImagePath`. xlsx images have
- *  no `a:srcRect` crop, so the vector branch always applies when an svgBlip is
- *  present (cf. the contract's `!srcRect` gate).
+ *  raster `imagePath` fallback plus an optional `svgImagePath`. The svgBlip
+ *  vector branch applies only when the picture is NOT cropped: with an
+ *  `<a:srcRect>` crop (`hasCrop`) we force the raster, because the renderer's
+ *  crop math needs the decoded bitmap's native pixel grid (an SVG element has
+ *  none). Mirrors the pptx renderer's `!srcRect` vector gate.
  *
  *  Raster decodes to an `ImageBitmap` through core's
  *  {@link decodeRasterOrMetafile} (which content-sniffs the bytes: a WMF, which
@@ -49,13 +54,16 @@ export async function decodeImageSource(
   fetchImage: (path: string, mime: string) => Promise<Blob>,
   widthPt = 0,
   heightPt = 0,
+  hasCrop = false,
 ): Promise<CanvasImageSource | null> {
   const decodeRaster = async (path: string, mime: string): Promise<CanvasImageSource | null> =>
     decodeRasterOrMetafile(await fetchImage(path, mime), { widthPt, heightPt });
   const dataIsSvg = mimeType === 'image/svg+xml';
-  if (svgImagePath != null) {
-    // Prefer the vector original; fall back to the raster fallback on decode
+  if (svgImagePath != null && !hasCrop) {
+    // No crop: prefer the vector original; fall back to the raster on decode
     // failure (or, when `imagePath` is itself the SVG, the SVG decoder again).
+    // A cropped picture skips this branch so the crop math (below, in the
+    // renderer) runs on the raster bitmap's native pixel dimensions.
     try {
       return await getCachedSvgImageByPath(svgImagePath, fetchImage);
     } catch {
@@ -99,6 +107,8 @@ export async function prefetchImages(
           // Saved EMU extent → pt sizes a metafile raster (0 ⇒ decoder fallback).
           widthPt: img.nativeExtCx > 0 ? img.nativeExtCx / EMU_PER_PT : 0,
           heightPt: img.nativeExtCy > 0 ? img.nativeExtCy / EMU_PER_PT : 0,
+          // An `<a:srcRect>` crop forces the raster decode (native pixel grid).
+          hasCrop: img.srcRect != null,
         });
       }
     }
@@ -130,6 +140,7 @@ export async function prefetchImages(
           fetch,
           ref.widthPt,
           ref.heightPt,
+          ref.hasCrop,
         );
         // Cache the decode result keyed by path — INCLUDING a null for an
         // unsupported metafile (true EMF / geometry-less WMF). Storing the null

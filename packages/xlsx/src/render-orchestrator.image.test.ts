@@ -168,6 +168,33 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(createImageBitmap).toHaveBeenCalledTimes(1);
   });
 
+  it('decodeImageSource forces the raster (not the SVG vector) when the picture is cropped', async () => {
+    // A cropped picture (`hasCrop=true`) with an svgBlip vector original must
+    // decode the RASTER fallback: the renderer's `<a:srcRect>` crop math needs
+    // the bitmap's native pixel grid, which an SVG element lacks. So even with
+    // svgImagePath present, createImageBitmap (raster) is the path taken.
+    const bmp = new FakeBitmap('image/png');
+    const createImageBitmap = vi.fn(async () => bmp);
+    vi.stubGlobal('createImageBitmap', createImageBitmap);
+    const fetchImage = vi.fn(async (_p: string, mime: string) => new Blob(['X'], { type: mime }));
+
+    const src = await decodeImageSource(
+      'xl/media/image1.png',
+      'image/png',
+      'xl/media/image1.svg', // svgBlip present …
+      fetchImage,
+      0,
+      0,
+      true, // … but the picture is cropped → raster wins
+    );
+
+    expect(src).toBe(bmp);
+    expect(createImageBitmap).toHaveBeenCalledTimes(1);
+    expect(fetchImage).toHaveBeenCalledWith('xl/media/image1.png', 'image/png');
+    // The SVG part is never fetched when a crop forces the raster path.
+    expect(fetchImage).not.toHaveBeenCalledWith('xl/media/image1.svg', expect.anything());
+  });
+
   it('decodeImageSource rasterizes a WMF blip (no throw) instead of vanishing', async () => {
     // A WMF blob used to throw in createImageBitmap; now decodeImageSource routes
     // through core's decodeRasterOrMetafile, which sniffs + rasterizes it.

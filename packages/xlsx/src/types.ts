@@ -665,6 +665,13 @@ export interface ImageAnchor {
    *  svgBlip extension. Its MIME is always `image/svg+xml` and is owned by the
    *  SVG decoder. */
   svgImagePath?: string;
+  /** ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop. Each edge inset is a
+   *  fraction `0..1` of the source bitmap, measured inward, so the visible
+   *  source region is `[l, t, 1-r, 1-b]`. Absent (the common case) ⇒ the whole
+   *  blip fills the anchor rect; when present, the renderer draws only the
+   *  cropped sub-rectangle (raster only — a metafile is rasterized to the
+   *  display box, so its crop can't be honored faithfully and is skipped). */
+  srcRect?: { l: number; t: number; r: number; b: number };
 }
 
 export interface CellRange {
