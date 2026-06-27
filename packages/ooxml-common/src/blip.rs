@@ -10,6 +10,7 @@
 //! the three formats' blip handling identical.
 
 use roxmltree::Node;
+use serde::{Deserialize, Serialize};
 
 /// Relationships namespace (`r:`) — where a blip's `embed` / `link` rIds live.
 pub const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -89,6 +90,51 @@ pub fn mime_from_ext(path: &str) -> &'static str {
     }
 }
 
+/// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop (DrawingML
+/// `CT_RelativeRect`). Each edge inset is a fraction `0..1` of the *source*
+/// bitmap, measured inward from that edge, so the visible source region is
+/// `[l, t, 1−r, 1−b]`. The raw attributes are `ST_Percentage` in 1000ths of a
+/// percent; the parser divides by 100000 to a fraction so renderers need no unit
+/// knowledge. Absent edges default to `0`. Shared by the docx, pptx and xlsx
+/// parsers so the three formats crop identically.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SrcRect {
+    pub l: f64,
+    pub t: f64,
+    pub r: f64,
+    pub b: f64,
+}
+
+/// Parse `<a:srcRect l t r b>` from a `<*:blipFill>` node (the parent of the
+/// `<a:blip>`), matched by namespace-local name so a `p:`, `a:` or `xdr:`
+/// blipFill all work. Each edge is divided by 100000 to a fraction; an absent
+/// edge defaults to `0`. Returns `None` when there is no `srcRect` or all four
+/// edges are zero (no crop), so an uncropped picture never forces a renderer
+/// onto the sub-rectangle draw path.
+pub fn parse_src_rect(blip_fill: Node<'_, '_>) -> Option<SrcRect> {
+    let sr = blip_fill
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "srcRect")?;
+    let read = |name: &str| -> f64 {
+        sr.attribute(name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v / 100_000.0)
+            .unwrap_or(0.0)
+    };
+    let rect = SrcRect {
+        l: read("l"),
+        t: read("t"),
+        r: read("r"),
+        b: read("b"),
+    };
+    if rect.l.abs() < 1e-9 && rect.t.abs() < 1e-9 && rect.r.abs() < 1e-9 && rect.b.abs() < 1e-9 {
+        None
+    } else {
+        Some(rect)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +158,30 @@ mod tests {
         let blip = doc.root_element();
         assert_eq!(blip_embed_rid(&blip).as_deref(), Some("rIdPng"));
         assert_eq!(svg_blip_rid(blip).as_deref(), Some("rIdSvg"));
+    }
+
+    #[test]
+    fn parse_src_rect_reads_fractions_and_defaults_absent_edges() {
+        // l/r given, t/b absent → fractions = raw/100000, absent ⇒ 0.
+        let xml = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:blip/><a:srcRect l="32560" r="3829"/></a:blipFill>"#
+        );
+        let doc = Document::parse(&xml).unwrap();
+        let sr = parse_src_rect(doc.root_element()).expect("srcRect present");
+        assert!((sr.l - 0.3256).abs() < 1e-9);
+        assert!((sr.r - 0.03829).abs() < 1e-9);
+        assert_eq!(sr.t, 0.0);
+        assert_eq!(sr.b, 0.0);
+    }
+
+    #[test]
+    fn parse_src_rect_none_when_absent_or_all_zero() {
+        let none = format!(r#"<a:blipFill xmlns:a="{A_NS}"><a:blip/></a:blipFill>"#);
+        assert!(parse_src_rect(Document::parse(&none).unwrap().root_element()).is_none());
+        let zero = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:srcRect l="0" t="0" r="0" b="0"/></a:blipFill>"#
+        );
+        assert!(parse_src_rect(Document::parse(&zero).unwrap().root_element()).is_none());
     }
 
     #[test]
