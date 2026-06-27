@@ -8,7 +8,7 @@ import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAux
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
-import { computeLineVisualOrder, cellBaseRtl, segmentsHaveRtl } from './bidi-line.js';
+import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { parseA1 } from './a1.js';
 
 // Default font stack. Calibri is the workbook default font in Excel; on
@@ -1070,8 +1070,7 @@ function drawRichLine(
   if (alignH === 'right') startX = cx + cellW - paddingX - totalWidth;
   else if (alignH === 'center') startX = cx + cellW / 2 - totalWidth / 2;
   else startX = cx + leftPad;
-  const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(segs);
-  const baseRtl = needBidi && cellBaseRtl(opts.readingOrder, segs.map((s) => s.text).join(''));
+  const { needBidi, baseRtl } = resolveCellBidi(opts.readingOrder, segs.map((s) => s.text).join(''));
   drawResolvedRichLine(ctx, segs, startX, textY, baseline, cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl });
 }
 
@@ -1226,13 +1225,10 @@ export function drawWrappedRichText(
   // Resolve the bidi base direction for each LF-delimited paragraph from its own
   // text (Context = first-strong; explicit 1/2 = cell-wide). `line.para` indexes
   // this, so soft-wrapped lines share their paragraph's direction while a hard
-  // break gets its own. Each entry is gated so pure-LTR paragraphs keep the exact
-  // pre-bidi path.
+  // break gets its own. `resolveCellBidi` gates each so pure-LTR paragraphs keep
+  // the exact pre-bidi path — the same gate the non-wrap path uses per line.
   const paraTexts = runs.map((r) => r.text).join('').split('\n');
-  const paraBidi = paraTexts.map((t) => {
-    const needBidi = opts.readingOrder === 2 || segmentsHaveRtl([{ text: t }]);
-    return { needBidi, baseRtl: needBidi && cellBaseRtl(opts.readingOrder, t) };
-  });
+  const paraBidi = paraTexts.map((t) => resolveCellBidi(opts.readingOrder, t));
   for (const line of rLines) {
     const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
     let xx: number;
