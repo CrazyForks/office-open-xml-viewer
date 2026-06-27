@@ -917,6 +917,153 @@ export function layoutRichTextLines(
   return lines;
 }
 
+/** Cell geometry + alignment for {@link drawNonWrapRichText}. `alignH`/`alignV`
+ *  accept the raw `xf` strings; any value other than `right`/`center` anchors
+ *  left, and other than `top`/`center` anchors bottom (matching the legacy
+ *  single-line path's handling of `justify` / `centerContinuous` / etc.). */
+export interface NonWrapRichGeom {
+  alignH: string;
+  alignV: string;
+  /** Cell top-left in canvas px (merge span included). */
+  cx: number;
+  cy: number;
+  cellW: number;
+  cellH: number;
+  /** Left text inset (paddingX + indent) and the symmetric paddings. */
+  leftPad: number;
+  paddingX: number;
+  paddingY: number;
+}
+
+/**
+ * Draw rich text (mixed-font runs) in a NON-wrapped cell, honoring hard line
+ * breaks (LF / Alt+Enter). ECMA-376 §18.8.1 (CT_CellAlignment @wrapText): with
+ * wrapText off the cell is not soft-wrapped, but Excel still renders each LF
+ * (§18.4.4 r / §18.4.12 t, xml:space="preserve") as a separate line — exactly
+ * as the plain-text non-wrap path and the wrap rich-text path already do. Runs
+ * are split at every LF into lines; a blank line from consecutive / leading /
+ * trailing breaks reserves one single-line height (the cell analog of PR #585 /
+ * docx #582), sized from the nearest preceding text run.
+ *
+ * Each line is drawn at a `'top'` baseline (matching the wrap rich path), with
+ * per-run super/subscript baseline shifts (§18.4.6 ST_VerticalAlignRun, ~65%
+ * size), underline / strike decoration, and the bidi visual-order pass (UAX#9
+ * rule L2) applied per line. The whole multi-line block is anchored vertically
+ * by `alignV` over its summed height. A single line with no break renders the
+ * same as one drawn line of the legacy single-line path.
+ */
+export function drawNonWrapRichText(
+  ctx: CanvasRenderingContext2D,
+  runs: Run[],
+  baseFont: CellFont,
+  geom: NonWrapRichGeom,
+  cs: number,
+  dpr: number,
+  opts: { fontColor?: string | null; readingOrder?: number } = {},
+): void {
+  const { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY } = geom;
+
+  // Split runs into lines at LF. A run "A\nB" yields "A" on the current line and
+  // "B" on a new one; an empty piece (consecutive / leading / trailing LF) adds
+  // no segment but the line still exists, so a blank line is preserved.
+  const lineRuns: Run[][] = [[]];
+  for (const run of runs) {
+    const parts = run.text.split('\n');
+    for (let p = 0; p < parts.length; p++) {
+      if (p > 0) lineRuns.push([]);
+      if (parts[p] !== '') lineRuns[lineRuns.length - 1].push({ ...run, text: parts[p] });
+    }
+  }
+
+  // Per-line height source (pt). A text line uses the max run size on it; a
+  // blank line inherits the nearest preceding text run's size — the same seed
+  // `layoutRichTextLines` / `drawShapeText` use for blank lines (PR #585).
+  let lastTextPt = baseFont.size;
+  const lineSizes = lineRuns.map((lr) => {
+    if (lr.length === 0) return lastTextPt || DEFAULT_FONT_SIZE;
+    let m = 0;
+    for (const r of lr) {
+      const sz = applyRunFont(baseFont, r).size;
+      if (sz > m) m = sz;
+      lastTextPt = sz; // nearest preceding text size, for a following blank line
+    }
+    return m;
+  });
+  const lineHeights = lineSizes.map((s) => vMetricPx(s, cs, 1.2));
+  const totalH = lineHeights.reduce((a, b) => a + b, 0);
+
+  let yy: number;
+  if (alignV === 'top') yy = cy + paddingY;
+  else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
+  else yy = cy + cellH - totalH - paddingY;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
+  let usedBidi = false;
+
+  for (let li = 0; li < lineRuns.length; li++) {
+    const lr = lineRuns[li];
+    const lineH = lineHeights[li];
+    if (lr.length === 0) { yy += lineH; continue; } // blank line: reserve height only
+
+    // Per-run draw fonts: super/subscript runs render at ~65% size with a
+    // baseline shift; the x-budget uses the run's base size (§18.4.6).
+    const baseRunFonts = lr.map((r) => applyRunFont(baseFont, r));
+    const runVAlign = lr.map((r) => r.font?.vertAlign);
+    const drawRunFonts = baseRunFonts.map((f, i) =>
+      (runVAlign[i] === 'superscript' || runVAlign[i] === 'subscript') ? { ...f, size: f.size * 0.65 } : f);
+    const runWidths = lr.map((r, i) => {
+      ctx.font = buildFont(drawRunFonts[i], cs);
+      return ctx.measureText(r.text).width;
+    });
+    const totalW = runWidths.reduce((a, b) => a + b, 0);
+    let xx: number;
+    if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
+    else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
+    else xx = cx + leftPad;
+
+    // Bidi: draw the line's runs in visual order (UAX#9 rule L2) under the
+    // cell's base direction. Gated so pure-LTR lines keep the non-bidi path.
+    const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(lr);
+    const vis = needBidi ? computeLineVisualOrder(lr, cellBaseRtl(opts.readingOrder, lr.map((r) => r.text).join(''))) : null;
+    if (needBidi) usedBidi = true;
+
+    for (let vi = 0; vi < lr.length; vi++) {
+      const i = vis ? vis.order[vi] : vi;
+      if (vis) { try { dctx.direction = vis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
+      const rf = drawRunFonts[i];
+      const baseRf = baseRunFonts[i];
+      ctx.font = buildFont(rf, cs);
+      const runColor = opts.fontColor ?? rf.color;
+      ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
+      const baseSizePx = vMetricPx(baseRf.size, cs);
+      let yShift = 0;
+      if (runVAlign[i] === 'superscript') yShift = -Math.round(baseSizePx * 0.35);
+      else if (runVAlign[i] === 'subscript') yShift = Math.round(baseSizePx * 0.10);
+      ctx.fillText(lr[i].text, xx, yy + yShift);
+      const rSizePx = vMetricPx(rf.size, cs);
+      if (rf.underline) {
+        const stroke = runColor ? hexToRgba(runColor) : '#000000';
+        const dbl = rf.underlineStyle === 'double' || rf.underlineStyle === 'doubleAccounting';
+        drawTextDecoLine(ctx, xx, xx + runWidths[i], yy + rSizePx + 1 + yShift, stroke, dbl, dpr);
+      }
+      if (rf.strike) {
+        const syBase = yy + Math.round(rSizePx * 0.5) + yShift;
+        const sy = syBase + crispOffset(syBase, 0.5, dpr);
+        ctx.save();
+        ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(xx, sy); ctx.lineTo(xx + runWidths[i], sy); ctx.stroke();
+        ctx.restore();
+      }
+      xx += runWidths[i];
+    }
+    yy += lineH;
+  }
+  // Defensive reset (the per-cell ctx.restore() also restores direction).
+  if (usedBidi) { try { dctx.direction = 'ltr'; } catch { /* ignore */ } }
+}
+
 function colToLetter(col: number): string {
   let result = '';
   while (col > 0) {
@@ -1497,6 +1644,14 @@ function renderQuadrant(
       for (let li = 0; li < lines.length; li++) {
         ctx.fillText(lines[li], textX, startY + li * lineH);
       }
+    } else if (hasRichText && runs.some((r) => r.text.includes('\n'))) {
+      // Non-wrap rich text with hard breaks — same helper as the in-viewport
+      // path so an off-screen-anchored merge renders identical multi-line text.
+      drawNonWrapRichText(
+        ctx, runs, fontForDraw,
+        { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
+        cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
+      );
     } else {
       let textY: number;
       if (alignV === 'top') { ctx.textBaseline = 'top'; textY = aCy + paddingY; }
@@ -2138,6 +2293,18 @@ function renderQuadrant(
         for (let li = 0; li < lines.length; li++) {
           ctx.fillText(lines[li], textX, startY + li * lineH);
         }
+      } else if (hasRichText && runs.some((r) => r.text.includes('\n'))) {
+        // Rich text with hard line breaks (Alt+Enter) but wrapText off: split
+        // runs at each LF and lay out multiple lines. ECMA-376 §18.8.1 — Excel
+        // honors Alt+Enter breaks even when wrapText is off, exactly as the
+        // plain-text `\n` split below and the wrap blank-line fix (#585) do. The
+        // shared helper keeps this in-viewport path and the off-screen-anchor
+        // pre-pass identical.
+        drawNonWrapRichText(
+          ctx, runs, fontForDraw,
+          { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
+          cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
+        );
       } else if (hasRichText) {
         // Per-run drawing: compute font for each run, measure widths, draw LTR.
         // Layout uses the run's *base* font size (line height & x-position
