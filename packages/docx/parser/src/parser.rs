@@ -906,44 +906,52 @@ fn parse_body_elements(
         }
     }
 
-    // Drop a cover's synthetic page break when the cover's content is ALREADY
-    // followed by a construct that starts a new page — a hard `<w:br w:type="page"/>`
-    // (PageBreak) or a section boundary (SectionBreak). In that case the cover
-    // stands alone via that construct, and the extra page break would leave a
-    // spurious BLANK page between the cover and the body (the renderer's pageBreak /
-    // page-advancing sectionBreak handlers push a page unconditionally — only
-    // `newPage()` coalesces an empty page). The common case (cover followed by a
-    // content paragraph, e.g. sample-5) keeps its break. Real consecutive hard page
-    // breaks are untouched: only the synthetic cover breaks are candidates here.
-    //
-    // Dropping before a SectionBreak assumes that boundary is page-advancing. Under
-    // the §17.6.22 upcoming-section reading a `continuous` next section would NOT
-    // advance, so in the (Word-never-emits) shape `cover sdt → loose body-level
-    // <w:sectPr> → continuous section` the cover would lose its standalone page.
-    // Word always carries a section-ending sectPr inside the last paragraph's pPr,
-    // which puts a Paragraph between the cover and the SectionBreak (the sample-5
-    // shape) — so `pos + 1` is that paragraph and the break is kept. Unreachable
-    // from Word output; accepted for hand-authored input.
-    if !cover_break_positions.is_empty() {
-        let drop: Vec<usize> = cover_break_positions
-            .into_iter()
-            .filter(|&pos| {
-                matches!(
-                    body.get(pos + 1),
-                    Some(BodyElement::PageBreak { .. }) | Some(BodyElement::SectionBreak { .. })
-                )
-            })
-            .collect();
-        if !drop.is_empty() {
-            body = body
-                .into_iter()
-                .enumerate()
-                .filter(|(i, _)| !drop.contains(i))
-                .map(|(_, e)| e)
-                .collect();
-        }
+    apply_cover_page_breaks(body, cover_break_positions)
+}
+
+/// Drop a cover's synthetic page break (emitted at `cover_break_positions` by the
+/// `parse_body_elements` walk) when the cover's content is ALREADY followed by a
+/// construct that starts a new page — a hard `<w:br w:type="page"/>` (PageBreak)
+/// or a section boundary (SectionBreak). In that case the cover stands alone via
+/// that construct, and the extra page break would leave a spurious BLANK page
+/// between the cover and the body (the renderer's pageBreak / page-advancing
+/// sectionBreak handlers push a page unconditionally — only `newPage()` coalesces
+/// an empty page). The common case (cover followed by a content paragraph, e.g.
+/// sample-5) keeps its break. Real consecutive hard page breaks are untouched:
+/// only the synthetic cover breaks are candidates here.
+///
+/// Dropping before a SectionBreak assumes that boundary is page-advancing. Under
+/// the §17.6.22 upcoming-section reading a `continuous` next section would NOT
+/// advance, so in the (Word-never-emits) shape `cover sdt → loose body-level
+/// <w:sectPr> → continuous section` the cover would lose its standalone page.
+/// Word always carries a section-ending sectPr inside the last paragraph's pPr,
+/// which puts a Paragraph between the cover and the SectionBreak (the sample-5
+/// shape) — so `pos + 1` is that paragraph and the break is kept. Unreachable
+/// from Word output; accepted for hand-authored input.
+fn apply_cover_page_breaks(
+    body: Vec<BodyElement>,
+    cover_break_positions: Vec<usize>,
+) -> Vec<BodyElement> {
+    if cover_break_positions.is_empty() {
+        return body;
     }
-    body
+    let drop: Vec<usize> = cover_break_positions
+        .into_iter()
+        .filter(|&pos| {
+            matches!(
+                body.get(pos + 1),
+                Some(BodyElement::PageBreak { .. }) | Some(BodyElement::SectionBreak { .. })
+            )
+        })
+        .collect();
+    if drop.is_empty() {
+        return body;
+    }
+    body.into_iter()
+        .enumerate()
+        .filter(|(i, _)| !drop.contains(i))
+        .map(|(_, e)| e)
+        .collect()
 }
 
 // Short-lived intermediate consumed immediately by the caller into BodyElement;
