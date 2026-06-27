@@ -935,16 +935,112 @@ export interface NonWrapRichGeom {
   paddingY: number;
 }
 
+/** Underline / strike decoration y for a run on a line, given the line's text
+ *  baseline and its `textY`. With a `'top'` baseline `textY` is the line top, so
+ *  the underline sits a full text height below it and the strike near mid-height;
+ *  `'middle'` / `'bottom'` shift relative to the centre / bottom baseline. The
+ *  caller adds any super/subscript `yShift`. One function so the single-line and
+ *  multi-line paths place decorations identically. */
+function decoYForBaseline(baseline: CanvasTextBaseline, textY: number, rSizePx: number): { underline: number; strike: number } {
+  if (baseline === 'middle') return { underline: textY + Math.round(rSizePx * 0.55), strike: textY };
+  if (baseline === 'bottom') return { underline: textY + 1, strike: textY - Math.round(rSizePx * 0.35) };
+  return { underline: textY + rSizePx + 1, strike: textY + Math.round(rSizePx * 0.5) };
+}
+
 /**
- * Draw a single line of rich text (no hard break) with per-run fonts. The line
- * is anchored with the cell's alignV-dependent baseline — `'top'` at the top
- * padding, `'middle'` at the cell centre, `'bottom'` at the bottom padding —
- * which is exactly how Excel paints a one-line rich cell. Each run draws with
- * its own font/color, ~65%-size super/subscript baseline shift (§18.4.6
- * ST_VerticalAlignRun), underline / strike decoration, and the bidi visual-order
- * pass (UAX#9 rule L2). Shared by the in-viewport draw path and the off-screen-
- * anchor merge pre-pass so a merged rich cell renders identically whether or not
- * its anchor is scrolled out of view.
+ * Draw one already-grouped line of rich-text runs at `textY` under `baseline`,
+ * each run with its own font/color, ~65%-size super/subscript baseline shift
+ * (ECMA-376 §18.4.14 vertAlign / ST_VerticalAlignRun §22.9.2.17 — the size ratio
+ * and offset are implementation-defined), underline / strike decoration, and the
+ * per-line bidi visual-order pass (UAX#9 rule L2). The line is positioned
+ * horizontally by `geom.alignH` over its measured width. The single shared
+ * per-run drawer for every non-wrap rich path, so they paint runs identically.
+ */
+function drawRichLine(
+  ctx: CanvasRenderingContext2D,
+  lineRuns: Run[],
+  baseFont: CellFont,
+  geom: NonWrapRichGeom,
+  cs: number,
+  dpr: number,
+  opts: { fontColor?: string | null; readingOrder?: number },
+  textY: number,
+  baseline: CanvasTextBaseline,
+): void {
+  const { alignH, cx, cellW, leftPad, paddingX } = geom;
+  // Per-run draw fonts: super/subscript runs render at ~65% size with a baseline
+  // shift; the x-budget uses the run's *base* size.
+  const baseRunFonts = lineRuns.map((r) => applyRunFont(baseFont, r));
+  const runVAlign = lineRuns.map((r) => r.font?.vertAlign);
+  const drawRunFonts = baseRunFonts.map((f, i) =>
+    (runVAlign[i] === 'superscript' || runVAlign[i] === 'subscript') ? { ...f, size: f.size * 0.65 } : f);
+  const runWidths = lineRuns.map((r, i) => {
+    ctx.font = buildFont(drawRunFonts[i], cs);
+    return ctx.measureText(r.text).width;
+  });
+  const totalWidth = runWidths.reduce((a, b) => a + b, 0);
+  let runX: number;
+  if (alignH === 'right') runX = cx + cellW - paddingX - totalWidth;
+  else if (alignH === 'center') runX = cx + cellW / 2 - totalWidth / 2;
+  else runX = cx + leftPad;
+  // We position each run ourselves, so draw left-aligned at the run's baseline.
+  ctx.textAlign = 'left';
+  ctx.textBaseline = baseline;
+  // Bidi: draw the runs in visual order (UAX#9 rule L2) under the cell's base
+  // direction (@readingOrder, or first-strong for Context), each with
+  // ctx.direction set so Canvas shapes/orders it internally. The x-budget is
+  // order-independent. Gated so pure-LTR lines keep the exact pre-bidi path.
+  const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(lineRuns);
+  const vis = needBidi
+    ? computeLineVisualOrder(lineRuns, cellBaseRtl(opts.readingOrder, lineRuns.map((r) => r.text).join('')))
+    : null;
+  const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
+  for (let vi = 0; vi < lineRuns.length; vi++) {
+    const i = vis ? vis.order[vi] : vi;
+    if (vis) { try { dctx.direction = vis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
+    const rf = drawRunFonts[i];
+    const baseRf = baseRunFonts[i];
+    ctx.font = buildFont(rf, cs);
+    const runColor = opts.fontColor ?? rf.color;
+    ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
+    // Baseline shift for super/subscript: up for super, slightly down for sub so
+    // each run sits at the right vertical band relative to the line.
+    const baseSizePx = vMetricPx(baseRf.size, cs);
+    let yShift = 0;
+    if (runVAlign[i] === 'superscript') yShift = -Math.round(baseSizePx * 0.35);
+    else if (runVAlign[i] === 'subscript') yShift = Math.round(baseSizePx * 0.10);
+    ctx.fillText(lineRuns[i].text, runX, textY + yShift);
+    const rSizePx = vMetricPx(rf.size, cs);
+    if (rf.underline || rf.strike) {
+      const deco = decoYForBaseline(baseline, textY, rSizePx);
+      if (rf.underline) {
+        const stroke = runColor ? hexToRgba(runColor) : '#000000';
+        const dbl = rf.underlineStyle === 'double' || rf.underlineStyle === 'doubleAccounting';
+        drawTextDecoLine(ctx, runX, runX + runWidths[i], deco.underline + yShift, stroke, dbl, dpr);
+      }
+      if (rf.strike) {
+        const syBase = deco.strike + yShift;
+        const sy = syBase + crispOffset(syBase, 0.5, dpr);
+        ctx.save();
+        ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(runX, sy); ctx.lineTo(runX + runWidths[i], sy); ctx.stroke();
+        ctx.restore();
+      }
+    }
+    runX += runWidths[i];
+  }
+  // Defensive reset (the per-cell ctx.restore() also restores direction).
+  if (vis) { try { dctx.direction = 'ltr'; } catch { /* ignore */ } }
+}
+
+/**
+ * Draw a single line of rich text (no hard break) with per-run fonts, anchored
+ * by the cell's alignV-dependent baseline — `'top'` at the top padding,
+ * `'middle'` at the cell centre, `'bottom'` at the bottom padding — exactly how
+ * Excel paints a one-line rich cell. Shared by the in-viewport draw path and the
+ * off-screen-anchor merge pre-pass so a merged rich cell renders identically
+ * whether or not its anchor is scrolled out of view.
  */
 function drawSingleLineRichText(
   ctx: CanvasRenderingContext2D,
@@ -955,110 +1051,24 @@ function drawSingleLineRichText(
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
 ): void {
-  const { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY } = geom;
-  // Per-run drawing: compute font for each run, measure widths, draw LTR.
-  // Layout uses the run's *base* font size (line height & x-position budget);
-  // super/subscript runs are rendered at ~65% size with a baseline shift,
-  // matching how Excel paints them. ECMA-376 §18.4.6 (ST_VerticalAlignRun)
-  // leaves the exact ratio implementation-defined.
-  const baseRunFonts = runs.map(r => applyRunFont(baseFont, r));
-  const runVAlign = runs.map(r => r.font?.vertAlign);
-  const drawRunFonts = baseRunFonts.map((f, i) => {
-    if (runVAlign[i] === 'superscript' || runVAlign[i] === 'subscript') {
-      return { ...f, size: f.size * 0.65 };
-    }
-    return f;
-  });
-  const runWidths: number[] = runs.map((r, i) => {
-    ctx.font = buildFont(drawRunFonts[i], cs);
-    return ctx.measureText(r.text).width;
-  });
-  const totalWidth = runWidths.reduce((a, b) => a + b, 0);
-  let startX: number;
-  if (alignH === 'right') startX = cx + cellW - paddingX - totalWidth;
-  else if (alignH === 'center') startX = cx + cellW / 2 - totalWidth / 2;
-  else startX = cx + leftPad;
-  // Use left alignment since we position each run ourselves
-  ctx.textAlign = 'left';
+  const { alignV, cy, cellH, paddingY } = geom;
   let textY: number;
-  if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
-  else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
-  else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
-  // Bidi: draw the runs in visual order (UAX#9 rule L2) under the cell's base
-  // direction (@readingOrder, or first-strong for Context), each with
-  // ctx.direction set so Canvas shapes/orders it internally. The x-budget
-  // (totalWidth/startX) is order-independent. Gated so pure-LTR cells keep the
-  // exact pre-bidi path (no per-repaint UAX#9 cost).
-  const richNeedsBidi = opts.readingOrder === 2 || segmentsHaveRtl(runs);
-  const richVis = richNeedsBidi
-    ? computeLineVisualOrder(runs, cellBaseRtl(opts.readingOrder, runs.map(r => r.text).join('')))
-    : null;
-  const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
-  let runX = startX;
-  for (let vi = 0; vi < runs.length; vi++) {
-    const i = richVis ? richVis.order[vi] : vi;
-    if (richVis) { try { dctx.direction = richVis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
-    const rf = drawRunFonts[i];
-    const baseRf = baseRunFonts[i];
-    ctx.font = buildFont(rf, cs);
-    const runColor = opts.fontColor ?? rf.color;
-    ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
-    // Baseline shift for super/subscript. With textBaseline 'bottom' (the
-    // typical case) shift up for super and slightly down for sub so each run
-    // sits at the right vertical band relative to the line.
-    const baseSizePx = vMetricPx(baseRf.size, cs);
-    let yShift = 0;
-    if (runVAlign[i] === 'superscript') yShift = -Math.round(baseSizePx * 0.35);
-    else if (runVAlign[i] === 'subscript') yShift = Math.round(baseSizePx * 0.10);
-    ctx.fillText(runs[i].text, runX, textY + yShift);
-    const rSizePx = vMetricPx(rf.size, cs);
-    if (rf.underline) {
-      const uyBase = alignV === 'top'
-        ? cy + paddingY + rSizePx + 1
-        : alignV === 'center'
-          ? cy + cellH / 2 + Math.round(rSizePx * 0.55)
-          : cy + cellH - paddingY + 1;
-      const uy = uyBase + yShift;
-      const stroke = runColor ? hexToRgba(runColor) : '#000000';
-      drawTextDecoLine(ctx, runX, runX + runWidths[i], uy, stroke, rf.underlineStyle === 'double' || rf.underlineStyle === 'doubleAccounting', dpr);
-    }
-    if (rf.strike) {
-      const syBase = alignV === 'top'
-        ? cy + paddingY + Math.round(rSizePx * 0.5)
-        : alignV === 'center'
-          ? cy + cellH / 2
-          : cy + cellH - paddingY - Math.round(rSizePx * 0.35);
-      const sy = syBase + yShift + crispOffset(syBase + yShift, 0.5, dpr);
-      ctx.save();
-      ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
-      ctx.lineWidth = 0.5;
-      ctx.beginPath(); ctx.moveTo(runX, sy); ctx.lineTo(runX + runWidths[i], sy); ctx.stroke();
-      ctx.restore();
-    }
-    runX += runWidths[i];
-  }
-  // Defensive reset (the per-cell ctx.restore() also restores direction).
-  if (richVis) { try { dctx.direction = 'ltr'; } catch { /* ignore */ } }
+  let baseline: CanvasTextBaseline;
+  if (alignV === 'top') { baseline = 'top'; textY = cy + paddingY; }
+  else if (alignV === 'center') { baseline = 'middle'; textY = cy + cellH / 2; }
+  else { baseline = 'bottom'; textY = cy + cellH - paddingY; }
+  drawRichLine(ctx, runs, baseFont, geom, cs, dpr, opts, textY, baseline);
 }
 
 /**
- * Draw rich text (mixed-font runs) in a NON-wrapped cell, honoring hard line
- * breaks (LF / Alt+Enter). ECMA-376 §18.8.1 (CT_CellAlignment @wrapText): with
- * wrapText off the cell is not soft-wrapped, but Excel still renders each LF
- * (§18.4.4 r / §18.4.12 t, xml:space="preserve") as a separate line — exactly
- * as the plain-text non-wrap path and the wrap rich-text path already do.
- *
- * A break-free value is one line: it is delegated to {@link drawSingleLineRichText},
- * which anchors with the cell's alignV-dependent baseline (the exact in-viewport
- * rendering). Only a hard break triggers the multi-line layout here: runs are
- * split at every LF; a blank line from consecutive / leading / trailing breaks
- * reserves one single-line height (the cell analog of PR #585 / docx #582), sized
- * from the nearest preceding text run; each line is drawn at a `'top'` baseline
- * (matching the wrap rich path) with the same per-run super/subscript, underline /
- * strike, and per-line bidi handling, and the block is anchored by `alignV` over
- * its summed height.
+ * Lay out and draw rich text with hard line breaks (LF / Alt+Enter) in a
+ * non-wrapped cell. Runs are split at every LF into lines; a blank line from
+ * consecutive / leading / trailing breaks reserves one single-line height (the
+ * cell analog of PR #585 / docx #582), sized from the nearest preceding text
+ * run. Each line is drawn at a `'top'` baseline (matching the wrap rich path)
+ * and the whole block is anchored vertically by `alignV` over its summed height.
  */
-export function drawNonWrapRichText(
+function drawMultiLineRichText(
   ctx: CanvasRenderingContext2D,
   runs: Run[],
   baseFont: CellFont,
@@ -1067,13 +1077,7 @@ export function drawNonWrapRichText(
   dpr: number,
   opts: { fontColor?: string | null; readingOrder?: number } = {},
 ): void {
-  // Break-free value → single line with the alignV-dependent baseline (mirrors
-  // the in-viewport path). Only a hard break needs the multi-line layout below.
-  if (!runs.some((r) => r.text.includes('\n'))) {
-    drawSingleLineRichText(ctx, runs, baseFont, geom, cs, dpr, opts);
-    return;
-  }
-  const { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY } = geom;
+  const { alignV, cy, cellH, paddingY } = geom;
 
   // Split runs into lines at LF. A run "A\nB" yields "A" on the current line and
   // "B" on a new one; an empty piece (consecutive / leading / trailing LF) adds
@@ -1108,72 +1112,41 @@ export function drawNonWrapRichText(
   if (alignV === 'top') yy = cy + paddingY;
   else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
   else yy = cy + cellH - totalH - paddingY;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  const dctx = ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' };
-  let usedBidi = false;
 
   for (let li = 0; li < lineRuns.length; li++) {
     const lr = lineRuns[li];
-    const lineH = lineHeights[li];
-    if (lr.length === 0) { yy += lineH; continue; } // blank line: reserve height only
-
-    // Per-run draw fonts: super/subscript runs render at ~65% size with a
-    // baseline shift; the x-budget uses the run's base size (§18.4.6).
-    const baseRunFonts = lr.map((r) => applyRunFont(baseFont, r));
-    const runVAlign = lr.map((r) => r.font?.vertAlign);
-    const drawRunFonts = baseRunFonts.map((f, i) =>
-      (runVAlign[i] === 'superscript' || runVAlign[i] === 'subscript') ? { ...f, size: f.size * 0.65 } : f);
-    const runWidths = lr.map((r, i) => {
-      ctx.font = buildFont(drawRunFonts[i], cs);
-      return ctx.measureText(r.text).width;
-    });
-    const totalW = runWidths.reduce((a, b) => a + b, 0);
-    let xx: number;
-    if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
-    else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
-    else xx = cx + leftPad;
-
-    // Bidi: draw the line's runs in visual order (UAX#9 rule L2) under the
-    // cell's base direction. Gated so pure-LTR lines keep the non-bidi path.
-    const needBidi = opts.readingOrder === 2 || segmentsHaveRtl(lr);
-    const vis = needBidi ? computeLineVisualOrder(lr, cellBaseRtl(opts.readingOrder, lr.map((r) => r.text).join(''))) : null;
-    if (needBidi) usedBidi = true;
-
-    for (let vi = 0; vi < lr.length; vi++) {
-      const i = vis ? vis.order[vi] : vi;
-      if (vis) { try { dctx.direction = vis.rtl[i] ? 'rtl' : 'ltr'; } catch { /* ignore */ } }
-      const rf = drawRunFonts[i];
-      const baseRf = baseRunFonts[i];
-      ctx.font = buildFont(rf, cs);
-      const runColor = opts.fontColor ?? rf.color;
-      ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
-      const baseSizePx = vMetricPx(baseRf.size, cs);
-      let yShift = 0;
-      if (runVAlign[i] === 'superscript') yShift = -Math.round(baseSizePx * 0.35);
-      else if (runVAlign[i] === 'subscript') yShift = Math.round(baseSizePx * 0.10);
-      ctx.fillText(lr[i].text, xx, yy + yShift);
-      const rSizePx = vMetricPx(rf.size, cs);
-      if (rf.underline) {
-        const stroke = runColor ? hexToRgba(runColor) : '#000000';
-        const dbl = rf.underlineStyle === 'double' || rf.underlineStyle === 'doubleAccounting';
-        drawTextDecoLine(ctx, xx, xx + runWidths[i], yy + rSizePx + 1 + yShift, stroke, dbl, dpr);
-      }
-      if (rf.strike) {
-        const syBase = yy + Math.round(rSizePx * 0.5) + yShift;
-        const sy = syBase + crispOffset(syBase, 0.5, dpr);
-        ctx.save();
-        ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
-        ctx.lineWidth = 0.5;
-        ctx.beginPath(); ctx.moveTo(xx, sy); ctx.lineTo(xx + runWidths[i], sy); ctx.stroke();
-        ctx.restore();
-      }
-      xx += runWidths[i];
-    }
-    yy += lineH;
+    // A blank line draws nothing but still reserves its height.
+    if (lr.length > 0) drawRichLine(ctx, lr, baseFont, geom, cs, dpr, opts, yy, 'top');
+    yy += lineHeights[li];
   }
-  // Defensive reset (the per-cell ctx.restore() also restores direction).
-  if (usedBidi) { try { dctx.direction = 'ltr'; } catch { /* ignore */ } }
+}
+
+/**
+ * Draw rich text (mixed-font runs, ECMA-376 §18.4.4 r) in a NON-wrapped cell.
+ * A break-free value is one alignV-anchored line ({@link drawSingleLineRichText});
+ * a value with a hard break is laid out as multiple lines
+ * ({@link drawMultiLineRichText}).
+ *
+ * §18.8.1 (CT_CellAlignment @wrapText) governs only soft-wrapping; it says
+ * nothing about hard breaks. Rendering a literal LF (Alt+Enter, preserved in the
+ * run text via §18.4.12 t @xml:space) as a line break even when wrapText is off
+ * is undocumented Excel runtime behavior — matched here for parity with the
+ * plain-text non-wrap path and the wrap rich-text path (#585).
+ */
+export function drawNonWrapRichText(
+  ctx: CanvasRenderingContext2D,
+  runs: Run[],
+  baseFont: CellFont,
+  geom: NonWrapRichGeom,
+  cs: number,
+  dpr: number,
+  opts: { fontColor?: string | null; readingOrder?: number } = {},
+): void {
+  if (runs.some((r) => r.text.includes('\n'))) {
+    drawMultiLineRichText(ctx, runs, baseFont, geom, cs, dpr, opts);
+  } else {
+    drawSingleLineRichText(ctx, runs, baseFont, geom, cs, dpr, opts);
+  }
 }
 
 function colToLetter(col: number): string {
@@ -2418,10 +2391,11 @@ function renderQuadrant(
           cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder },
         );
       } else {
-        // ECMA-376 §18.4.6 — cell-level super/subscript: render the glyphs at
-        // ~65% size, shifted off the baseline so the cell still reads at the
-        // right vertical band. Excel uses these defaults (size ratio is
-        // implementation-defined; ratios match Office's visual output).
+        // ECMA-376 §18.4.14 vertAlign / ST_VerticalAlignRun §22.9.2.17 —
+        // cell-level super/subscript: render the glyphs at ~65% size, shifted
+        // off the baseline so the cell still reads at the right vertical band.
+        // §18.4.14 mandates the size reduction; the exact ratio/offset is
+        // implementation-defined (ratios match Office's visual output).
         const cellVertAlign = fontForDraw.vertAlign;
         const baseSizePxOrig = vMetricPx(font.size, cs);
         let vaYShift = 0;

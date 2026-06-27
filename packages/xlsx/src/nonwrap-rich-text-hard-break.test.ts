@@ -2,14 +2,16 @@ import { describe, it, expect } from 'vitest';
 import { drawNonWrapRichText } from './renderer.js';
 import type { CellFont, Run } from './types.js';
 
-// ECMA-376 §18.8.1 (CT_CellAlignment) @wrapText: when wrapText is OFF a cell is
-// NOT soft-wrapped, but Excel still renders a hard line break authored with
-// Alt+Enter (a literal LF, U+000A, inside the run text — §18.4.4 r / §18.4.12 t,
-// xml:space="preserve") as a SEPARATE line. The plain-text non-wrap path already
-// splits on LF ("to match Excel's behavior"); the rich-text (mixed-font runs)
-// non-wrap path used to lay every run on one horizontal line (`runX += width`),
-// silently dropping every hard break. This is the rich-text sibling of that
-// plain-text behavior and of the wrap-path blank-line fix (PR #585).
+// ECMA-376 §18.8.1 (CT_CellAlignment) @wrapText governs only soft-wrapping. It
+// says nothing about hard breaks — but Excel still renders a break authored with
+// Alt+Enter (a literal LF, U+000A, preserved in the run text via §18.4.12 t
+// xml:space="preserve"; the run is §18.4.4 r) as a SEPARATE line even with
+// wrapText off. That is undocumented runtime behavior, matched for parity: the
+// plain-text non-wrap path already splits on LF ("to match Excel's behavior"),
+// while the rich-text (mixed-font runs) non-wrap path used to lay every run on
+// one horizontal line (`runX += width`), silently dropping every hard break.
+// This is the rich-text sibling of that plain-text behavior and of the wrap-path
+// blank-line fix (PR #585).
 //
 // The cell path derives line height analytically (font size × 1.2 via vMetricPx),
 // not from font metrics, so the line spacing is visible without an asymmetric
