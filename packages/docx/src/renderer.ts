@@ -1647,11 +1647,20 @@ export function computePages(
       // past the bottom; it is split at a line boundary by the path below
       // (Word's default behaviour). A keep-on-page float forces relocation too.
       const keepIntact = para.keepLines || needNext > 0 || addReservePt > 0;
-      // ECMA-376 §17.6.4 column balancing: move the whole paragraph to the next
-      // column once the current (non-last) column has reached the balanced target
-      // (reuses the relocate machinery below, which rolls back / re-registers this
-      // paragraph's floats against the new column). No-op when balancing is off.
-      const balanceBreak = wantsBalanceBreak(fitHeight);
+      // A paragraph splits at line boundaries unless keepLines (§17.3.1.14) holds
+      // and it still fits a page (a keepLines paragraph taller than a page must
+      // split anyway). Used both for the balance whole-move below and the
+      // page/balance split path further down.
+      const splittable = !para.keepLines || h > effContentH();
+      // ECMA-376 §17.6.4 column balancing. Move the WHOLE paragraph to the next
+      // column when the current (non-last) column has reached the balanced target —
+      // but ONLY for a paragraph that cannot be split at a line boundary
+      // (keepLines). A splittable paragraph is instead split AT the balance target
+      // by the split path below, so a long paragraph fills column 0 up to the
+      // target and spills the remainder into column 1 (even columns), rather than
+      // being shoved whole into the next column (which left column 0 nearly empty
+      // and column 1 overfull, sample-12 p.2). No-op when balancing is off.
+      const balanceBreak = wantsBalanceBreak(fitHeight) && !splittable;
       if (breakForFloat || balanceBreak || (overflowsHere && keepIntact && needed <= effContentH())) {
         const pagesBeforeRelocate = pages.length;
         // Relocating THIS paragraph to a fresh page: pre-scan from `i` so the
@@ -1690,8 +1699,19 @@ export function computePages(
       // (§17.3.1.14) forbids splitting unless the paragraph cannot fit on any
       // page (taller than the full content height), where it must split anyway.
       const pageContentH = effContentH();
-      const remainingH = pageContentH - y;
-      const splittable = !para.keepLines || h > pageContentH;
+      // ECMA-376 §17.6.4 — in a BALANCED newspaper section every non-last column
+      // fills only to the balance target (the region top + height/ncols); the last
+      // column absorbs the remainder. Cap the split at that target so a paragraph
+      // taller than one balanced column is split AT the balance point instead of
+      // packed whole into column 0 (which left column 0 visibly fuller than column
+      // 1, sample-12 p.2). Unbalanced / greedy sections (balanceColH == null) and
+      // the last column return the page bottom, so this is behaviour-neutral there.
+      // Read live (colIndex / colTopY / balanceColH change as the split advances).
+      const columnBottomLimit = (): number =>
+        balanceColH != null && colIndex < columns.length - 1
+          ? Math.min(effContentH(), colTopY + balanceColH)
+          : effContentH();
+      const remainingH = columnBottomLimit() - y;
       if (fitHeight > remainingH && splittable) {
         const placed = splitParagraphAcrossPages(
           measureState, para, colW(), suppressBefore, colX(),
@@ -1708,6 +1728,7 @@ export function computePages(
           () => colIndex,
           columns,
           () => colTopY,
+          columnBottomLimit,
         );
         // After splitting, `y` is the bottom of the last slice in the
         // current column (continues for the LAST slice; intermediate slices
@@ -2073,8 +2094,17 @@ function splitParagraphAcrossPages(
    *  section restarts here (below the preceding single-column content), not at
    *  the page top. Omitted ⇒ the page content top (0). */
   columnTop?: () => number,
+  /** ECMA-376 §17.6.4 — the content-relative BOTTOM (pt) the current column may
+   *  fill to, read AFTER each `newPage()`. For a balanced newspaper section this
+   *  is the balance target (`colTop + height/ncols`) on every non-last column, so
+   *  a single paragraph taller than one balanced column is split at the balance
+   *  point rather than packed into column 0; the last column (and any unbalanced
+   *  section) is uncapped at the page content bottom. Omitted ⇒ `contentH` (the
+   *  page bottom) — behaviour-neutral for the single-column / greedy paths. */
+  columnBottom?: () => number,
 ): { endY: number } {
   const colTop = columnTop ?? (() => 0);
+  const colBot = columnBottom ?? (() => contentH);
   const stamp = (el: PaginatedBodyElement): PaginatedBodyElement => {
     if (tagColIndex) el.colIndex = tagColIndex();
     if (colGeom) el.colGeom = colGeom;
@@ -2102,7 +2132,7 @@ function splitParagraphAcrossPages(
   const placeMarkOnly = (): { endY: number } => {
     let markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
     let top = initialY;
-    if (initialY > 0 && initialY + markH - para.spaceAfter > contentH) {
+    if (initialY > 0 && initialY + markH - para.spaceAfter > colBot()) {
       newPage(initialY);
       top = colTop();
       markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
@@ -2142,8 +2172,9 @@ function splitParagraphAcrossPages(
   let cursorY = initialY;
   let isFirstSliceOnPage = true; // first slice carries spaceBefore
   while (lineIdx < lines.length) {
-    // Available space on the current page from cursorY downward.
-    const remaining = contentH - cursorY;
+    // Available space in the current column from cursorY downward (balance target
+    // for a non-last balanced column; the page bottom otherwise).
+    const remaining = colBot() - cursorY;
     // First slice on a page reserves spaceBefore; the LAST slice (covering
     // the final line) reserves spaceAfter.
     const sliceLeading = isFirstSliceOnPage ? spaceBefore : 0;

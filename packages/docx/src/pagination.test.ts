@@ -53,7 +53,7 @@ function textRun(text: string, fontSize: number): DocRun {
 
 type DocRun = DocParagraph['runs'][number];
 
-function para(opts: { text?: string; fontSize?: number; widowControl?: boolean } = {}): BodyElement {
+function para(opts: { text?: string; fontSize?: number; widowControl?: boolean; keepLines?: boolean } = {}): BodyElement {
   const fontSize = opts.fontSize ?? 20;
   const p: DocParagraph = {
     alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
@@ -61,6 +61,7 @@ function para(opts: { text?: string; fontSize?: number; widowControl?: boolean }
     runs: opts.text ? [textRun(opts.text, fontSize)] : [],
     defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
     widowControl: opts.widowControl,
+    keepLines: opts.keepLines,
   };
   return { type: 'paragraph', ...p } as BodyElement;
 }
@@ -541,6 +542,50 @@ describe('computePages — newspaper column balancing (§17.6.4, non-final conti
     // Balanced: p0–p2 in col0, p3–p5 in col1.
     expect([colByText.p0, colByText.p1, colByText.p2]).toEqual([0, 0, 0]);
     expect([colByText.p3, colByText.p4, colByText.p5]).toEqual([1, 1, 1]);
+  });
+
+  it('splits a LONG paragraph across balanced columns at the LINE level (not packed whole into col0)', () => {
+    // section(): content height 100, 2-col ⇒ col width 70, ~3 CJK chars/line at
+    // 20px, 20px/line. A 24-char paragraph = 8 lines = 160px. The 2-col section
+    // ends with a continuous break ⇒ balanced ⇒ balanceColH = 160/2 = 80px = 4
+    // lines. The paragraph must SPLIT — ~4 lines in col0, the rest in col1 — not
+    // pack all 8 lines into col0 (the sample-12 p.2 bug: a long first paragraph
+    // left column 0 full and column 1 nearly empty).
+    const body: BodyElement[] = [
+      para({ text: 'あ'.repeat(24), fontSize: 20 }),
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'x', fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx()); // final section = 1-col
+    const slices = pages[0].filter((e) => e.type === 'paragraph' && sliceOf(e));
+    const col0 = slices.filter((e) => (colOf(e) ?? 0) === 0);
+    const col1 = slices.filter((e) => colOf(e) === 1);
+    // One slice per column — the paragraph spans the balance boundary.
+    expect(col0).toHaveLength(1);
+    expect(col1).toHaveLength(1);
+    const s0 = sliceOf(col0[0]) as { start: number; end: number };
+    const s1 = sliceOf(col1[0]) as { start: number; end: number };
+    expect(s0.start).toBe(0);
+    expect(s0.end).toBe(4); // balance target = 4 lines
+    expect(s1).toEqual({ start: 4, end: 8 }); // remainder in col1
+  });
+
+  it('moves a keepLines paragraph WHOLE to balance (does not split it across columns)', () => {
+    // A keepLines paragraph (§17.3.1.14) cannot be split, so balancing falls back
+    // to the whole-paragraph move. Short para (1 line) fills col0; the 3-line
+    // keepLines paragraph exceeds the balance target (4 lines total ⇒ 2-line
+    // target) and moves WHOLE into col1 — intact, no lineSlice.
+    const body: BodyElement[] = [
+      para({ text: 'x', fontSize: 20 }),
+      para({ text: 'あ'.repeat(9), fontSize: 20, keepLines: true }), // 9 / 3 = 3 lines
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    const keep = pages[0].find((e) => textOf(e).startsWith('あ'));
+    expect(keep).toBeDefined();
+    expect(colOf(keep as PaginatedBodyElement) ?? 0).toBe(1); // moved to col1
+    expect(sliceOf(keep as PaginatedBodyElement)).toBeUndefined(); // whole, not split
   });
 
   it('does NOT balance the FINAL (body) section — it fills col0 greedily', () => {
