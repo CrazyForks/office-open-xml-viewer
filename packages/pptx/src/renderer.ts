@@ -3140,7 +3140,11 @@ async function renderPicture(
     // (el.width/height are EMU; /PT_TO_EMU = pt). Unused by the raster/SVG paths.
     // A cropped metafile rasterizes at its FULL picture frame (scaled up by
     // 1/(1−crop)) so the fractional crop below lands correctly; raster blips and
-    // uncropped metafiles pass through unchanged.
+    // uncropped metafiles pass through unchanged. NB: getCachedBitmap is keyed by
+    // imagePath ("first size wins"), so if one path is referenced both cropped
+    // and uncropped on a slide only the first decode's raster size is kept — that
+    // affects raster SHARPNESS only; the crop fraction itself is applied per
+    // element from el.srcRect at draw time, so geometry stays correct either way.
     const { widthPt, heightPt } = metafileRasterSize(
       el.mimeType,
       el.srcRect,
