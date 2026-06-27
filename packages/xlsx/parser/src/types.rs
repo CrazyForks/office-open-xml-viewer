@@ -972,6 +972,12 @@ pub enum ShapeGeom {
         mime_type: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         svg_image_path: Option<String>,
+        /// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop on the leaf pic,
+        /// present only when cropped. Honored by the renderer like the top-level
+        /// `ImageAnchor.src_rect` so a `oneCellAnchor` / `grpSp` leaf pic crops
+        /// the same as a `twoCellAnchor` picture.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        src_rect: Option<SrcRect>,
     },
 }
 
@@ -1108,6 +1114,24 @@ pub struct ImageAnchor {
     /// and is owned by the SVG decoder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub svg_image_path: Option<String>,
+    /// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop, present only when the
+    /// picture is cropped. `None` (the common case) ⇒ the whole blip fills the
+    /// anchor rect. When set, the renderer draws only the visible sub-rectangle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_rect: Option<SrcRect>,
+}
+
+/// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop. Each edge inset is a
+/// fraction `0..1` of the *source* bitmap (the raw 1000ths-of-a-percent
+/// attribute `/ 100000`), measured inward from that edge, so the visible source
+/// region is `[l, t, 1-r, 1-b]`. Absent edges default to `0`.
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SrcRect {
+    pub l: f64,
+    pub t: f64,
+    pub r: f64,
+    pub b: f64,
 }
 
 #[derive(Debug, Serialize)]

@@ -12,6 +12,35 @@ use std::io::Cursor;
 /// Parse `<xdr:twoCellAnchor>` elements from a drawing XML and resolve
 /// embedded pictures into data URLs. `drawing_dir` is the folder that
 /// contains `drawing_path` so relative `Target`s resolve correctly.
+/// Parse `<a:srcRect l t r b>` from a `<xdr:blipFill>` node (ECMA-376 §20.1.8.55).
+/// Each edge attribute is a ST_Percentage in 1000ths of a percent, so the crop
+/// fraction is the raw value `/ 100000`; absent edges default to `0`. Returns
+/// `None` when there is no `srcRect` or all four edges are zero (no crop), so an
+/// uncropped picture never forces the renderer onto the sub-rectangle path.
+pub(crate) fn parse_src_rect(blip_fill: roxmltree::Node<'_, '_>) -> Option<SrcRect> {
+    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    let sr = blip_fill
+        .children()
+        .find(|n| n.tag_name().name() == "srcRect" && n.tag_name().namespace() == Some(a_ns))?;
+    let read = |name: &str| -> f64 {
+        sr.attribute(name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v / 100_000.0)
+            .unwrap_or(0.0)
+    };
+    let rect = SrcRect {
+        l: read("l"),
+        t: read("t"),
+        r: read("r"),
+        b: read("b"),
+    };
+    if rect.l.abs() < 1e-9 && rect.t.abs() < 1e-9 && rect.r.abs() < 1e-9 && rect.b.abs() < 1e-9 {
+        None
+    } else {
+        Some(rect)
+    }
+}
+
 pub(crate) fn parse_drawing_anchors(
     drawing_xml: &str,
     drawing_rels: &HashMap<String, String>,
@@ -41,6 +70,8 @@ pub(crate) fn parse_drawing_anchors(
         let mut svg_rid: Option<String> = None;
         let mut native_ext_cx: i64 = 0;
         let mut native_ext_cy: i64 = 0;
+        // ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop (None ⇒ uncropped).
+        let mut src_rect: Option<SrcRect> = None;
         // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs`. Possible values:
         // "twoCell" (default), "oneCell", "absolute". With "oneCell" Excel
         // preserves the picture's saved size from <xdr:spPr><a:xfrm><a:ext>
@@ -97,6 +128,8 @@ pub(crate) fn parse_drawing_anchors(
                             // blip's `<a:extLst>`), matched by namespace-local name.
                             svg_rid = svg_blip_rid(b);
                         }
+                        // `<a:srcRect>` is a sibling of `<a:blip>` inside blipFill.
+                        src_rect = parse_src_rect(bf);
                     }
                     // <xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>: the picture's
                     // own saved EMU extent. Authoritative when editAs="oneCell".
@@ -161,6 +194,7 @@ pub(crate) fn parse_drawing_anchors(
             image_path,
             mime_type,
             svg_image_path,
+            src_rect,
         });
     }
     anchors
@@ -1004,6 +1038,12 @@ pub(crate) fn collect_shapes(
             let svg_image_path = svg_rid.as_deref().and_then(|r| rid_urls.get(r)).cloned();
             let raster_path = pic_rid.as_deref().and_then(|r| rid_urls.get(r)).cloned();
 
+            // `<a:srcRect>` crop lives in the leaf's `<xdr:blipFill>` (§20.1.8.55).
+            let src_rect = child
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "blipFill")
+                .and_then(parse_src_rect);
+
             // Prefer the raster as `image_path`; fall back to the SVG when no
             // raster is embedded so an svg-only leaf is never dropped. Drop only
             // when neither resolves. ECMA-376 §20.1.8.13 + MS-ODRAWXML svgBlip.
@@ -1042,6 +1082,7 @@ pub(crate) fn collect_shapes(
                     image_path,
                     mime_type,
                     svg_image_path,
+                    src_rect,
                 },
                 text: None,
             });
@@ -1197,7 +1238,20 @@ pub(crate) fn parse_shape_anchors(
                 &mut shapes,
             );
         } else if let Some(sp) = content.children().find(|n| {
-            n.is_element() && (n.tag_name().name() == "sp" || n.tag_name().name() == "pic")
+            if !n.is_element() {
+                return false;
+            }
+            let t = n.tag_name().name();
+            // A standalone `<xdr:sp>` always renders through the shape path. A
+            // standalone `<xdr:pic>` under a `twoCellAnchor`, however, is ALSO a
+            // plain image anchor that `parse_drawing_anchors` already emits into
+            // `ws.images` — WITH its `<a:srcRect>` crop, svgBlip vector original,
+            // and `editAs` size. Capturing it here too would draw the picture a
+            // second time as an uncropped full-image shape, overwriting the
+            // cropped anchor draw (the sample-27 regression). So a `twoCellAnchor`
+            // pic is owned solely by `ws.images`; we only keep a standalone pic
+            // for `oneCellAnchor`, which `parse_drawing_anchors` does not handle.
+            t == "sp" || (t == "pic" && anchor_tag == "oneCellAnchor")
         }) {
             // Stand-alone sp/pic: the shape's own xfrm gives its absolute EMU
             // rect, but for our rendering pipeline the anchor's from/to
@@ -1720,6 +1774,79 @@ mod style_lnref_tests {
         assert_eq!(color.as_deref(), Some("#4472C4"));
         assert_eq!(width, 9_525);
     }
+
+    /// A standalone `<xdr:pic>` directly under a `twoCellAnchor` is a plain image
+    /// anchor owned by `ws.images` (parse_drawing_anchors, WITH its `<a:srcRect>`
+    /// crop). `parse_shape_anchors` must NOT also capture it — otherwise the
+    /// renderer draws the picture twice and the uncropped shape draw overwrites
+    /// the cropped anchor draw (the sample-27 double-draw regression).
+    #[test]
+    fn standalone_twocellanchor_pic_is_not_a_shape_anchor() {
+        let xml = format!(
+            r#"<xdr:wsDr {NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell">
+              <xdr:from><xdr:col>9</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:pic>
+                <xdr:nvPicPr><xdr:cNvPr id="2" name="P"/><xdr:cNvPicPr/></xdr:nvPicPr>
+                <xdr:blipFill><a:blip r:embed="rId1"/><a:srcRect l="32560" r="3829"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+                <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2905125" cy="2181225"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+              </xdr:pic>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#
+        );
+        let anchors = parse_shape_anchors(&xml, &theme(), &[6_350], &HashMap::new());
+        assert!(
+            anchors.is_empty(),
+            "twoCellAnchor pic belongs to ws.images, not ws.shape_groups: {anchors:?}"
+        );
+    }
+
+    /// A standalone `<xdr:sp>` under the same anchor IS a shape anchor — only the
+    /// `pic` is deduped, never a real shape.
+    #[test]
+    fn standalone_sp_is_still_a_shape_anchor() {
+        let (color, _width) = shape_of(
+            r#"<a:ln w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln>"#,
+            "",
+        );
+        assert_eq!(color.as_deref(), Some("#FF0000"), "sp still captured");
+    }
+
+    /// A `oneCellAnchor` pic is NOT handled by `parse_drawing_anchors` (which only
+    /// scans `twoCellAnchor`), so the shape path must keep capturing it — else the
+    /// image is dropped entirely. Its `<a:srcRect>` crop must also be surfaced on
+    /// the `ShapeGeom::Image` so the renderer can crop it like a top-level anchor.
+    #[test]
+    fn standalone_onecellanchor_pic_is_still_captured_with_crop() {
+        let xml = format!(
+            r#"<xdr:wsDr {NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:oneCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:ext cx="914400" cy="914400"/>
+              <xdr:pic>
+                <xdr:nvPicPr><xdr:cNvPr id="2" name="P"/><xdr:cNvPicPr/></xdr:nvPicPr>
+                <xdr:blipFill><a:blip r:embed="rId1"/><a:srcRect l="10000" t="20000"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+                <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+              </xdr:pic>
+              <xdr:clientData/>
+            </xdr:oneCellAnchor></xdr:wsDr>"#
+        );
+        let mut rids = HashMap::new();
+        rids.insert("rId1".to_string(), "xl/media/image1.png".to_string());
+        let anchors = parse_shape_anchors(&xml, &theme(), &[6_350], &rids);
+        assert_eq!(anchors.len(), 1, "oneCellAnchor pic must still be captured");
+        match &anchors[0].shapes[0].geom {
+            ShapeGeom::Image { src_rect, .. } => {
+                let sr = src_rect
+                    .as_ref()
+                    .expect("leaf pic surfaces its srcRect crop");
+                assert!((sr.l - 0.1).abs() < 1e-9);
+                assert!((sr.t - 0.2).abs() < 1e-9);
+            }
+            other => panic!("expected an image-geom shape, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1917,6 +2044,51 @@ mod blip_svg_tests {
         assert_eq!(anchor.native_ext_cy, 300000);
     }
 
+    /// End-to-end wiring guard: a `<xdr:pic>` whose `<xdr:blipFill>` carries an
+    /// `<a:srcRect>` sibling of the blip must surface the crop on the parsed
+    /// `ImageAnchor.src_rect` (sample-27's horizontal crop). Catches a regression
+    /// that drops the `parse_src_rect(bf)` wiring from the pic branch.
+    #[test]
+    fn picture_with_src_rect_surfaces_crop() {
+        let blip = r#"<a:blip r:embed="rIdPng"/><a:srcRect l="32560" r="3829"/>"#;
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+
+        let anchor = parse_one(blip, &rels);
+
+        let sr = anchor
+            .src_rect
+            .as_ref()
+            .expect("srcRect surfaced on the anchor");
+        assert!((sr.l - 0.3256).abs() < 1e-9);
+        assert!((sr.r - 0.03829).abs() < 1e-9);
+        assert_eq!(sr.t, 0.0);
+        assert_eq!(sr.b, 0.0);
+
+        // It serializes as camelCase `srcRect` so the TS renderer can read it.
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert!(json.contains("\"srcRect\""), "emits srcRect: {json}");
+    }
+
+    /// An uncropped `<xdr:pic>` (no `<a:srcRect>`) leaves `src_rect == None`, and
+    /// the serialized JSON omits the key entirely (skip_serializing_if), so the
+    /// common case stays on the cheap full-blip draw path.
+    #[test]
+    fn picture_without_src_rect_omits_crop() {
+        let blip = r#"<a:blip r:embed="rIdPng"/>"#;
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+
+        let anchor = parse_one(blip, &rels);
+
+        assert!(anchor.src_rect.is_none());
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert!(
+            !json.contains("srcRect"),
+            "omits srcRect when absent: {json}"
+        );
+    }
+
     /// A `<xdr:pic>` whose `<a:blip>` carries ONLY the `asvg:svgBlip` extension —
     /// no raster `r:embed` fallback (an icon inserted as a pure SVG) — must still
     /// parse. Previously the media filter excluded `.svg` and the resolution
@@ -1992,6 +2164,7 @@ mod blip_svg_tests {
             image_path: "xl/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: Some("xl/media/image2.svg".to_string()),
+            src_rect: None,
         };
         let json = serde_json::to_string(&anchor).unwrap();
         assert!(json.contains("\"imagePath\":\"xl/media/image1.png\""));
@@ -2011,6 +2184,7 @@ mod blip_svg_tests {
             image_path: "xl/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: None,
+            src_rect: None,
         };
         let json = serde_json::to_string(&geom).unwrap();
         assert!(json.contains("\"type\":\"image\""));
@@ -2103,5 +2277,55 @@ mod custom_path_arc_tests {
             "snake_case angle keys must not appear (regresses the NaN bug)"
         );
         assert_eq!(obj.get("swAng").and_then(|v| v.as_f64()), Some(5_400_000.0));
+    }
+}
+
+#[cfg(test)]
+mod src_rect_tests {
+    use super::*;
+
+    const NS: &str = r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+
+    /// sample-27: `<a:srcRect l="32560" r="3829"/>` ⇒ left 0.3256, right 0.03829,
+    /// top/bottom 0 (absent edges default 0). Edge attrs are ST_Percentage in
+    /// 1000ths of a percent, so the fraction is the raw value / 100000.
+    #[test]
+    fn parses_horizontal_crop_fractions() {
+        let xml = format!(
+            r#"<xdr:blipFill {NS}>
+              <a:blip r:embed="rId1"/>
+              <a:srcRect l="32560" r="3829"/>
+              <a:stretch><a:fillRect/></a:stretch>
+            </xdr:blipFill>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let sr = parse_src_rect(doc.root_element()).expect("srcRect present");
+        assert!((sr.l - 0.3256).abs() < 1e-9, "l = l_attr / 100000");
+        assert!((sr.r - 0.03829).abs() < 1e-9, "r = r_attr / 100000");
+        assert_eq!(sr.t, 0.0, "absent top defaults to 0");
+        assert_eq!(sr.b, 0.0, "absent bottom defaults to 0");
+    }
+
+    /// No `<a:srcRect>` ⇒ None (uncropped picture, the common case).
+    #[test]
+    fn absent_src_rect_is_none() {
+        let xml = format!(
+            r#"<xdr:blipFill {NS}><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        assert!(parse_src_rect(doc.root_element()).is_none());
+    }
+
+    /// An all-zero `<a:srcRect>` ⇒ None: an explicit no-op crop must not push the
+    /// renderer onto the 9-arg sub-rect path (which would be an identity draw).
+    #[test]
+    fn all_zero_src_rect_is_none() {
+        let xml = format!(
+            r#"<xdr:blipFill {NS}><a:blip r:embed="rId1"/><a:srcRect l="0" t="0" r="0" b="0"/></xdr:blipFill>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        assert!(parse_src_rect(doc.root_element()).is_none());
     }
 }
