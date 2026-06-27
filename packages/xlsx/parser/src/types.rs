@@ -1121,18 +1121,9 @@ pub struct ImageAnchor {
     pub src_rect: Option<SrcRect>,
 }
 
-/// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop. Each edge inset is a
-/// fraction `0..1` of the *source* bitmap (the raw 1000ths-of-a-percent
-/// attribute `/ 100000`), measured inward from that edge, so the visible source
-/// region is `[l, t, 1-r, 1-b]`. Absent edges default to `0`.
-#[derive(Debug, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct SrcRect {
-    pub l: f64,
-    pub t: f64,
-    pub r: f64,
-    pub b: f64,
-}
+/// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop, shared across the docx,
+/// pptx and xlsx parsers (see `ooxml_common::blip`).
+pub use ooxml_common::blip::SrcRect;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

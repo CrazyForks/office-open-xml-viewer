@@ -1,4 +1,4 @@
-use ooxml_common::blip::{mime_from_ext, svg_blip_rid};
+use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid, SrcRect};
 use ooxml_common::math::{nodes_to_text, parse_omath_nodes, MathNode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1091,24 +1091,6 @@ struct PictureElement {
     sp3d: Option<Sp3d>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-struct SrcRect {
-    /// Crop from left as fraction (e.g. 25100/100000 = 0.251)
-    #[serde(skip_serializing_if = "is_zero_f64")]
-    #[serde(default)]
-    l: f64,
-    #[serde(skip_serializing_if = "is_zero_f64")]
-    #[serde(default)]
-    t: f64,
-    #[serde(skip_serializing_if = "is_zero_f64")]
-    #[serde(default)]
-    r: f64,
-    #[serde(skip_serializing_if = "is_zero_f64")]
-    #[serde(default)]
-    b: f64,
-}
-
 fn is_zero_f64(v: &f64) -> bool {
     v.abs() < 1e-9
 }
@@ -1151,30 +1133,6 @@ fn parse_blip_alpha(blip_fill: roxmltree::Node<'_, '_>) -> Option<f64> {
         None
     } else {
         Some(frac.max(0.0))
-    }
-}
-
-/// Parse `<a:srcRect l t r b>` from a `<p:blipFill>` (or `<a:blipFill>`) node.
-/// Returns None if no srcRect or all edges are zero.
-fn parse_src_rect(blip_fill: roxmltree::Node<'_, '_>) -> Option<SrcRect> {
-    let sr = child(blip_fill, "srcRect")?;
-    let read = |name: &str| -> f64 {
-        attr(&sr, name)
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v / 100_000.0)
-            .unwrap_or(0.0)
-    };
-    let rect = SrcRect {
-        l: read("l"),
-        t: read("t"),
-        r: read("r"),
-        b: read("b"),
-    };
-    if is_zero_f64(&rect.l) && is_zero_f64(&rect.t) && is_zero_f64(&rect.r) && is_zero_f64(&rect.b)
-    {
-        None
-    } else {
-        Some(rect)
     }
 }
 

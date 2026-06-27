@@ -5,42 +5,13 @@ use crate::{parse_rels_map, read_zip_bytes, read_zip_entry, resolve_zip_path};
 // `.svg ⇒ image/svg+xml`; `svg_blip_rid` resolves the vector original nested in
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
-use ooxml_common::blip::{blip_embed_rid, mime_from_ext, svg_blip_rid};
+use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
 use std::collections::HashMap;
 use std::io::Cursor;
 
 /// Parse `<xdr:twoCellAnchor>` elements from a drawing XML and resolve
 /// embedded pictures into data URLs. `drawing_dir` is the folder that
 /// contains `drawing_path` so relative `Target`s resolve correctly.
-/// Parse `<a:srcRect l t r b>` from a `<xdr:blipFill>` node (ECMA-376 §20.1.8.55).
-/// Each edge attribute is a ST_Percentage in 1000ths of a percent, so the crop
-/// fraction is the raw value `/ 100000`; absent edges default to `0`. Returns
-/// `None` when there is no `srcRect` or all four edges are zero (no crop), so an
-/// uncropped picture never forces the renderer onto the sub-rectangle path.
-pub(crate) fn parse_src_rect(blip_fill: roxmltree::Node<'_, '_>) -> Option<SrcRect> {
-    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
-    let sr = blip_fill
-        .children()
-        .find(|n| n.tag_name().name() == "srcRect" && n.tag_name().namespace() == Some(a_ns))?;
-    let read = |name: &str| -> f64 {
-        sr.attribute(name)
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v / 100_000.0)
-            .unwrap_or(0.0)
-    };
-    let rect = SrcRect {
-        l: read("l"),
-        t: read("t"),
-        r: read("r"),
-        b: read("b"),
-    };
-    if rect.l.abs() < 1e-9 && rect.t.abs() < 1e-9 && rect.r.abs() < 1e-9 && rect.b.abs() < 1e-9 {
-        None
-    } else {
-        Some(rect)
-    }
-}
-
 pub(crate) fn parse_drawing_anchors(
     drawing_xml: &str,
     drawing_rels: &HashMap<String, String>,

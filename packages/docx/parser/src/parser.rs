@@ -1,4 +1,4 @@
-use ooxml_common::blip::{blip_embed_rid, mime_from_ext, svg_blip_rid};
+use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
 use roxmltree::Document as XmlDoc;
 use std::collections::HashMap;
 use std::io::Read;
@@ -2526,38 +2526,6 @@ fn resolve_blip_urls(
     Some((image_path, mime, svg_image_path))
 }
 
-/// ECMA-376 §20.1.8.55 — parse the optional `<a:srcRect>` that sits next to the
-/// `<a:blip>` inside a `<pic:blipFill>`. `blip` is the resolved `<a:blip>` node;
-/// its parent is the `blipFill`, whose `<a:srcRect>` child (if any) carries the
-/// crop. The raw `l/t/r/b` attributes are ST_Percentage in 1000ths of a percent
-/// (e.g. `l="8827"` ⇒ 8.827%); we convert to fractions 0..1 (÷100000) so the
-/// renderer can crop in bitmap pixels without unit knowledge. Returns `None`
-/// when the element is absent OR all four insets are zero (an explicit
-/// `<a:srcRect/>` with no attributes ⇒ no crop).
-fn parse_src_rect(blip: roxmltree::Node) -> Option<SrcRect> {
-    let blip_fill = blip.parent()?;
-    let sr = blip_fill
-        .children()
-        .find(|n| n.tag_name().name() == "srcRect")?;
-    let pct = |name: &str| -> f64 {
-        sr.attribute(name)
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 100000.0
-    };
-    let rect = SrcRect {
-        l: pct("l"),
-        t: pct("t"),
-        r: pct("r"),
-        b: pct("b"),
-    };
-    if rect.l == 0.0 && rect.t == 0.0 && rect.r == 0.0 && rect.b == 0.0 {
-        None
-    } else {
-        Some(rect)
-    }
-}
-
 /// A resolved inline/anchored picture: the drawable source(s) plus the natural
 /// draw size read from `<wp:extent>` (ECMA-376 §20.4.2.7), in points.
 struct InlineBlip {
@@ -2592,7 +2560,8 @@ fn resolve_inline_blip(
 ) -> Option<InlineBlip> {
     let blip = node.descendants().find(|n| n.tag_name().name() == "blip")?;
     let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
-    let src_rect = parse_src_rect(blip);
+    // The shared parser takes the `<*:blipFill>` (the blip's parent).
+    let src_rect = blip.parent().and_then(parse_src_rect);
     let extent = node
         .descendants()
         .find(|n| n.tag_name().name() == "extent")?;
@@ -3201,7 +3170,8 @@ fn parse_group_pic(
     let (image_path, mime_type, svg_image_path) = resolve_blip_urls(blip, media_map)?;
     // ECMA-376 §20.1.8.55 — source-rectangle crop (sibling of <a:blip> under
     // <pic:blipFill>), shared with the inline/anchor paths.
-    let src_rect = parse_src_rect(blip);
+    // The shared parser takes the `<*:blipFill>` (the blip's parent).
+    let src_rect = blip.parent().and_then(parse_src_rect);
 
     // Parse a:clrChange if present — used to make a specific color transparent.
     // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
