@@ -3,7 +3,7 @@ import { layoutRichTextLines } from './renderer.js';
 import type { CellFont, Run } from './types.js';
 
 // ECMA-376 §18.8.1 (CT_CellAlignment) @wrapText: text in a cell is line-wrapped
-// within the cell. Cell rich text is stored as <r>/<t> runs (§18.4.7 / §18.4.12)
+// within the cell. Cell rich text is stored as <r>/<t> runs (§18.4.4 / §18.4.12)
 // with xml:space="preserve", so a hard line break authored with Alt+Enter is a
 // literal LF (U+000A) inside the run text. Each rendered line — INCLUDING a blank
 // line produced by consecutive breaks, or a leading/trailing break — reserves one
@@ -51,7 +51,7 @@ function layout(text: string, font?: Run['font']) {
   return layoutRichTextLines(makeCtx(), [{ text, font }] as Run[], BASE, 1, 100000);
 }
 
-describe('empty line height in cell rich text (§18.8.1 wrapText / §18.4.7 r)', () => {
+describe('empty line height in cell rich text (§18.8.1 wrapText / §18.4.4 r)', () => {
   it('a blank line between two text lines reserves one single-line height', () => {
     // Reference: "A\nB" — two single-line regions, no blank between.
     const ctrl = layout('A\nB');
