@@ -5011,9 +5011,9 @@ function layoutLines(
     // metrics, rescale to the document font's design line box so the line
     // height (and thus baseline centering, row auto-heights, cell vAlign
     // §17.4.84, and pagination) match Word — see font-metrics.ts.
-    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
-    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
-    const corrected = correctLineMetrics(s.fontFamily, effectiveFontPx(s), rawAsc, rawDesc);
+    // Fallback box at the run's full size; correction at the effective size
+    // (smallCaps/vertAlign shrink it). See correctedLineMetrics.
+    const corrected = correctedLineMetrics(m, s.fontFamily, s.fontSize * scale, effectiveFontPx(s));
     let asc = corrected.ascent;
     const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
@@ -5850,11 +5850,13 @@ export function renderShapeText(
  * X: margin-relative offsets add section.marginLeft (ECMA-376 §20.4.3.4
  * relativeFrom="margin"); otherwise anchorXPt is already page-absolute.
  * Y: paragraph-relative offsets add `paraBaseY`; otherwise page-absolute. The
- * caller supplies `paraBaseY` because the two consumers anchor against different
- * paragraph references — wrap floats use the post-spaceBefore textAreaTop, while
- * wrapNone images use the pre-spaceBefore paragraph top (see the
- * anchoredFloatBottomOffset note in the paginator). This is the box origin BEFORE
- * any overlap displacement; resolveFloatOverlap runs on top of it for floats.
+ * caller supplies `paraBaseY` = the paragraph's pre-spaceBefore TOP for ALL
+ * paragraph-relative floats — wrap and wrapNone alike (ECMA-376 §20.4.3.5: a
+ * `positionV relativeFrom="paragraph"` float is positioned relative to the
+ * paragraph that contains the anchor, i.e. its top edge before spaceBefore).
+ * Page-level floats pass 0 (resolveAnchorY ignores paraBaseY for them). This is
+ * the box origin BEFORE any overlap displacement; resolveFloatOverlap runs on
+ * top of it for floats.
  *
  * Exported under a `_test` alias for the anchor-image relativeFrom wiring test
  * (the public renderer entry points consume the box internally; pin the
@@ -6074,7 +6076,8 @@ function registerImageFloat(
   const mode: 'square' | 'topAndBottom' =
     img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
 
-  // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
+  // Paragraph-relative wrap floats anchor at the pre-spaceBefore paragraph top
+  // (paragraphAnchorY), per ECMA-376 §20.4.3.5 — identical to wrapNone images.
   const box = resolveAnchorBox(img, state, paragraphAnchorY);
   const { w, h, dl, dr, dt, db } = box;
 
@@ -6123,8 +6126,8 @@ function registerShapeFloat(
 
   // Match resolveShapeBox's paragraphTopPx convention. resolveAnchorY reads
   // paragraphTopPx only for relativeFrom="paragraph"/"line" (anchorYFromPara);
-  // wrap floats anchor against the post-spaceBefore textAreaTop, identical to
-  // the image path (resolveAnchorBox uses paragraphAnchorY there).
+  // wrap floats anchor at the pre-spaceBefore paragraph top (§20.4.3.5),
+  // identical to the image path (resolveAnchorBox uses paragraphAnchorY there).
   const { x, y, w, h } = resolveShapeBox(shape, state, paragraphAnchorY);
   // A degenerate (zero/negative-area) box — e.g. a wrap-flagged line preset —
   // reserves no band; bail like renderAnchorShape skips drawing it.
@@ -7458,6 +7461,29 @@ function emptyLineNaturalPx(fontSizePt: number, scale: number): { asc: number; d
   return { asc: fontSizePt * scale * 0.8, desc: fontSizePt * scale * 0.2 };
 }
 
+/** Corrected single-line ascent/descent (px) from an ALREADY-measured
+ *  `TextMetrics`: the Canvas `fontBoundingBox` (with the synthetic 0.8/0.2-em
+ *  fallback when the engine reports none), rescaled to the document font's win
+ *  box via {@link correctLineMetrics}. The single source of truth for "how tall
+ *  is one line of `family`", shared by the text-line path (layoutLines) and the
+ *  empty paragraph-mark path (paragraphMarkLineHeight) so the two cannot drift —
+ *  that drift (the empty path skipping `correctLineMetrics`) was the
+ *  empty-paragraph under-measure bug (§17.3.1.29 / §17.3.1.33). `fallbackEmPx`
+ *  sizes the synthetic box (the run's full size); `correctionEmPx` is the design
+ *  size handed to `correctLineMetrics` — they differ only for smallCaps/vertAlign
+ *  runs (where the text path keeps the full-size fallback) and coincide for a
+ *  plain paragraph-mark line. */
+function correctedLineMetrics(
+  m: TextMetrics,
+  family: string | null | undefined,
+  fallbackEmPx: number,
+  correctionEmPx: number,
+): { ascent: number; descent: number } {
+  const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fallbackEmPx * 0.8;
+  const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fallbackEmPx * 0.2;
+  return correctLineMetrics(family, correctionEmPx, rawAsc, rawDesc);
+}
+
 /**
  * Height (px) of the paragraph-mark line box for a paragraph that places no
  * inline content on any line. Per ECMA-376 §17.3.1.29 the paragraph mark always
@@ -7492,17 +7518,18 @@ function paragraphMarkLineHeight(
     // (sample-12: the figure caption wrapped beside the image instead of below
     // it). East Asian documents probe an EA glyph so docGrid cell rounding
     // (lineBoxHeight) reserves whole cells (a 20pt mark on a 20pt pitch → 2
-    // cells); others probe a Latin glyph. fontBoundingBox is font-wide, so the
-    // probe glyph choice does not change the box. correctLineMetrics rescales a
-    // substituted font to the document font's win box, identical to the text
-    // path (a no-op for fonts absent from the win-metric table, e.g. Latin).
+    // cells); others probe a Latin glyph. fontBoundingBox is reported per
+    // resolved face (not per glyph), so the probe choice does not change the box
+    // for a face that contains it — and the probe is script-matched, so the mark
+    // font does. correctLineMetrics rescales a substituted font to the document
+    // font's win box, identical to the text path (a no-op for fonts absent from
+    // the win-metric table, e.g. Latin).
     const prevFont = ctx.font;
     ctx.font = buildFont(false, false, fs * scale, family, fontFamilyClasses);
     const m = ctx.measureText(eastAsian ? 'あ' : 'x');
-    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fs * scale * 0.8;
-    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fs * scale * 0.2;
     ctx.font = prevFont;
-    ({ ascent: asc, descent: desc } = correctLineMetrics(family, fs * scale, rawAsc, rawDesc));
+    // A mark line carries no smallCaps/vertAlign, so fallback == correction size.
+    ({ ascent: asc, descent: desc } = correctedLineMetrics(m, family, fs * scale, fs * scale));
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
