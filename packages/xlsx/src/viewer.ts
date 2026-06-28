@@ -1,7 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet, XlsxComment } from './types.js';
 import type { MathRenderer } from '@silurus/ooxml-core';
-import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
+import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
 import { computeCommentPopupPosition } from './comment-popup.js';
@@ -56,6 +56,16 @@ export interface XlsxViewerOptions {
   onError?: (err: Error) => void;
   /** Called when the selected cell range changes. null means no selection. */
   onSelectionChange?: (selection: CellRange | null) => void;
+  /**
+   * Color of the cell-selection highlight. A single CSS color drives both the
+   * selection rectangle's border (drawn in this color) and its fill (the same
+   * color made translucent — see {@link selectionOverlayStyle}), so callers pick
+   * one accent color instead of a separate border + background. Any CSS color
+   * string works (`#1a73e8`, `rgb(...)`, `tomato`, …). Default `#1a73e8`
+   * (Google blue), matching the historical look. Can also be changed at runtime
+   * via {@link XlsxViewer.setSelectionColor}.
+   */
+  selectionColor?: string;
   /**
    * Opt in to Google-Fonts-hosted, metric-compatible substitutes for the
    * Office default fonts (Carlito for Calibri, Caladea for Cambria) so
@@ -159,6 +169,31 @@ class AxisMetrics {
   }
 }
 
+/** Default cell-selection accent (Google blue), used when no `selectionColor`
+ *  option is supplied. */
+const DEFAULT_SELECTION_COLOR = '#1a73e8';
+
+/** Half-width (CSS px) of the grab zone around a header border for
+ *  drag-to-resize (issue #567), and the minimum size a column/row can be
+ *  dragged to (logical px) so a collapsed band keeps a grabbable border. */
+const RESIZE_GRAB_PX = 4;
+const RESIZE_MIN_PX = 5;
+
+/**
+ * Derive the selection rectangle's `border` and `background` CSS from a single
+ * accent color: the border is the color verbatim and the fill is the same color
+ * at 8% opacity via `color-mix`, so any CSS color string (`#rgb`, `rgb(...)`,
+ * named) yields a matching translucent fill without the caller computing an
+ * rgba. For the default `#1a73e8` this reproduces the historical
+ * `rgba(26,115,232,0.08)` fill.
+ */
+export function selectionOverlayStyle(color: string): { border: string; background: string } {
+  return {
+    border: `2px solid ${color}`,
+    background: `color-mix(in srgb, ${color} 8%, transparent)`,
+  };
+}
+
 interface SheetAxes { col: AxisMetrics; row: AxisMetrics; }
 const sheetAxisCache = new WeakMap<Worksheet, SheetAxes>();
 
@@ -226,6 +261,14 @@ export class XlsxViewer {
   // presses inside the overlay-scrollbar band (a thumb drag must not select
   // the cell underneath).
   private pendingTap: { x: number; y: number; shiftKey: boolean; pointerId: number } | null = null;
+  // In-flight column/row resize drag (issue #567). `originScaled` is the fixed
+  // LTR edge the resized band grows from (left edge for a column, top for a row)
+  // in canvasArea CSS px; `mdw` is captured once so the live px→model-unit
+  // conversion is stable across the drag. A resize is a *view-only* adjustment:
+  // it mutates the in-memory worksheet's colWidths/rowHeights, never the file.
+  private resizeDrag:
+    | { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number; pointerId: number }
+    | null = null;
 
   // ─── Comment hover popup (Excel-style note) ───────────────────────────────
   /** DOM overlay element that shows the hovered cell's comment. Lives in
@@ -831,6 +874,111 @@ export class XlsxViewer {
     return null;
   }
 
+  /**
+   * If the pointer sits on a column/row-header border (within {@link
+   * RESIZE_GRAB_PX}), return the resize target: which index to resize and the
+   * fixed LTR edge it grows from (in canvasArea CSS px). Excel resizes the band
+   * whose *trailing* border you grab — the column to the left of a vertical
+   * border, the row above a horizontal one — so both that band and its
+   * neighbour-to-the-far-side are checked. Geometry comes straight from {@link
+   * getCellRect}, so the grab line always coincides with the drawn border at any
+   * scroll offset / zoom / RTL. Returns null off the header borders.
+   */
+  private getResizeTarget(
+    clientX: number,
+    clientY: number,
+  ): { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number } | null {
+    const ws = this.currentWorksheet;
+    if (!ws) return null;
+    const cs = this.opts.cellScale ?? 1;
+    const rect = this.canvasArea.getBoundingClientRect();
+    // Un-mirror the screen x to the logical-LTR space getCellRect draws in (the
+    // same transform getHeaderHit uses), so the comparison holds for RTL sheets.
+    const ptX = this.screenX(clientX - rect.left, 0);
+    const ptY = clientY - rect.top;
+    const headerW = Math.round(HEADER_W * cs);
+    const headerH = Math.round(HEADER_H * cs);
+    const mdw = getMdwForWorksheet(ws);
+
+    // Column borders live in the column-header strip, right of the corner.
+    if (ptY <= headerH && ptX > headerW) {
+      const hit = this.getHeaderHit(clientX, clientY);
+      if (hit?.kind !== 'col') return null;
+      for (const c of [hit.col - 1, hit.col]) {
+        if (c < 1) continue;
+        const r = this.getCellRect(1, c); // x is independent of the row
+        if (!r) continue;
+        const rightEdge = r.x + r.w;
+        if (rightEdge <= headerW) continue; // scrolled behind the row header
+        if (Math.abs(ptX - rightEdge) <= RESIZE_GRAB_PX) {
+          return { kind: 'col', index: c, originScaled: r.x, mdw };
+        }
+      }
+      return null;
+    }
+
+    // Row borders live in the row-header strip, below the corner.
+    if (ptX <= headerW && ptY > headerH) {
+      const hit = this.getHeaderHit(clientX, clientY);
+      if (hit?.kind !== 'row') return null;
+      for (const rIdx of [hit.row - 1, hit.row]) {
+        if (rIdx < 1) continue;
+        const r = this.getCellRect(rIdx, 1); // y is independent of the column
+        if (!r) continue;
+        const botEdge = r.y + r.h;
+        if (botEdge <= headerH) continue;
+        if (Math.abs(ptY - botEdge) <= RESIZE_GRAB_PX) {
+          return { kind: 'row', index: rIdx, originScaled: r.y, mdw };
+        }
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Apply a live resize drag: size the band from its fixed origin edge to the
+   * current pointer, clamp to {@link RESIZE_MIN_PX}, and write the result back
+   * into the in-memory worksheet model in its native unit (Excel column widths /
+   * points). This is a *view-only* mutation — the file is never written. The
+   * memoized axis cache for this sheet is invalidated so every geometry read
+   * (spacer, hit-test, overlay, renderer) sees the new size on the next frame.
+   */
+  private applyResize(clientX: number, clientY: number): void {
+    const drag = this.resizeDrag;
+    const ws = this.currentWorksheet;
+    if (!drag || !ws) return;
+    const cs = this.opts.cellScale ?? 1;
+    const rect = this.canvasArea.getBoundingClientRect();
+
+    if (drag.kind === 'col') {
+      const ptX = this.screenX(clientX - rect.left, 0);
+      const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptX - drag.originScaled) / cs));
+      ws.colWidths[drag.index] = pxToColWidth(sizePx, drag.mdw);
+    } else {
+      const ptY = clientY - rect.top;
+      const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptY - drag.originScaled) / cs));
+      ws.rowHeights[drag.index] = pxToRowHeight(sizePx);
+    }
+
+    sheetAxisCache.delete(ws); // sizes changed → rebuild the cumulative-offset axes
+    this.updateSpacerSize(ws);
+    this.updateSelectionOverlay();
+    void this.renderCurrentSheet();
+  }
+
+  /**
+   * Change the cell-selection highlight color at runtime (see {@link
+   * XlsxViewerOptions.selectionColor}). The border takes the color as-is and the
+   * fill becomes a translucent shade of it; the current selection repaints
+   * immediately.
+   */
+  setSelectionColor(color: string): void {
+    this.opts.selectionColor = color;
+    this.updateSelectionOverlay();
+  }
+
   /** Copy the selected cell range as tab-separated text to the clipboard. */
   private copySelection(): void {
     const ws = this.currentWorksheet;
@@ -970,12 +1118,15 @@ export class XlsxViewer {
     // cell at every scroll offset (cell→px uses the same map as px→cell above).
     const screenLeft = this.screenX(x, w);
 
+    const { border, background } = selectionOverlayStyle(
+      this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR,
+    );
     const box = document.createElement('div');
     box.style.cssText =
       `position:absolute;` +
       `left:${screenLeft}px;top:${y}px;width:${w}px;height:${h}px;` +
-      `box-sizing:border-box;border:2px solid #1a73e8;` +
-      `background:rgba(26,115,232,0.08);pointer-events:none;`;
+      `box-sizing:border-box;border:${border};` +
+      `background:${background};pointer-events:none;`;
     this.selectionOverlay.appendChild(box);
 
     // List data-validation dropdown arrow (ECMA-376 §18.3.1.33). Excel shows an
@@ -1335,6 +1486,17 @@ export class XlsxViewer {
     this.scrollHost.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) return;
 
+      // Drag-to-resize a column/row from its header border (issue #567). Checked
+      // before selection so grabbing the border never moves the cell selection.
+      const resize = this.getResizeTarget(e.clientX, e.clientY);
+      if (resize) {
+        e.preventDefault();
+        this.resizeDrag = { ...resize, pointerId: e.pointerId };
+        this.scrollHost.setPointerCapture(e.pointerId);
+        this.hideCommentPopup();
+        return;
+      }
+
       // List-validation dropdown arrow: if the press lands on the (display-only)
       // arrow button drawn on the active cell, toggle the value panel instead of
       // re-selecting the cell. The arrow's rect is in canvasArea space, so map
@@ -1388,6 +1550,24 @@ export class XlsxViewer {
     });
 
     this.scrollHost.addEventListener('pointermove', (e: PointerEvent) => {
+      // Live column/row resize takes priority over every other pointer behavior.
+      if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
+        e.preventDefault();
+        this.applyResize(e.clientX, e.clientY);
+        return;
+      }
+
+      // Resize-handle affordance: show the col/row-resize cursor when hovering a
+      // header border (mouse only — touch/pen have no hover). Skipped mid-select.
+      if (e.pointerType === 'mouse' && !this.isSelecting) {
+        const rt = this.getResizeTarget(e.clientX, e.clientY);
+        this.scrollHost.style.cursor = rt ? (rt.kind === 'col' ? 'col-resize' : 'row-resize') : '';
+        if (rt) {
+          this.hideCommentPopup();
+          return;
+        }
+      }
+
       // Cancel a pending tap once the pointer moves beyond the slop — the user is scrolling.
       if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
         const dx = e.clientX - this.pendingTap.x;
@@ -1430,6 +1610,11 @@ export class XlsxViewer {
     });
 
     this.scrollHost.addEventListener('pointerup', (e: PointerEvent) => {
+      if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
+        this.scrollHost.releasePointerCapture(e.pointerId);
+        this.resizeDrag = null;
+        return;
+      }
       if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
         const dx = e.clientX - this.pendingTap.x;
         const dy = e.clientY - this.pendingTap.y;
@@ -1454,11 +1639,29 @@ export class XlsxViewer {
     });
 
     this.scrollHost.addEventListener('pointercancel', (e: PointerEvent) => {
+      if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
+        this.resizeDrag = null;
+      }
       if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
         this.pendingTap = null;
       }
       this.isSelecting = false;
     });
+
+    // Ctrl/⌘ + mouse wheel (and trackpad pinch, which the browser reports as a
+    // ctrl-wheel) zooms the grid, matching Excel. preventDefault stops the
+    // browser's own page zoom. A plain wheel still scrolls the grid natively.
+    this.scrollHost.addEventListener(
+      'wheel',
+      (e: WheelEvent) => {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        e.preventDefault();
+        if (e.deltaY === 0) return;
+        const dir = e.deltaY < 0 ? 1 : -1;
+        this.setScale((this.opts.cellScale ?? 1) + dir * 0.1);
+      },
+      { passive: false },
+    );
 
     // Hide the comment popup when the cursor leaves the grid entirely.
     this.scrollHost.addEventListener('pointerleave', () => this.hideCommentPopup());

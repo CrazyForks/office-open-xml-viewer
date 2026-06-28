@@ -201,6 +201,16 @@ export function colWidthToPx(w: number, mdw: number = MDW_FALLBACK): number {
   return Math.trunc(((256 * w + 128 / mdw) / 256) * mdw);
 }
 
+/** Inverse of {@link colWidthToPx}: the Excel column-width value (in "max digit
+ *  widths") that renders back to exactly `px` logical pixels. Used by the
+ *  drag-to-resize handles (issue #567) to store the dragged size in the
+ *  worksheet model's native unit. Because `colWidthToPx(w) = trunc(w*mdw + 0.5)`,
+ *  picking `w = px / mdw` lands the forward conversion on the requested integer
+ *  pixel exactly (`trunc(px + 0.5) === px`). */
+export function pxToColWidth(px: number, mdw: number = MDW_FALLBACK): number {
+  return px / mdw;
+}
+
 /** Convert a row height value from the parser into CSS pixels.
  *
  * ECMA-376 §18.3.1.73 (`<row ht>`) and §18.3.1.81 (`sheetFormatPr@defaultRowHeight`)
@@ -210,6 +220,13 @@ export function colWidthToPx(w: number, mdw: number = MDW_FALLBACK): number {
  * applies to either source. */
 export function rowHeightToPx(h: number): number {
   return Math.round(h * PT_TO_PX);
+}
+
+/** Inverse of {@link rowHeightToPx}: the row height in points that renders back
+ *  to exactly `px` logical pixels (`round(px/PT_TO_PX * PT_TO_PX) === px`). Used
+ *  by the drag-to-resize handles (issue #567). */
+export function pxToRowHeight(px: number): number {
+  return px / PT_TO_PX;
 }
 
 function hexToRgba(hex: string, alpha = 1): string {
