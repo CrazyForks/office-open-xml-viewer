@@ -147,9 +147,12 @@ function lookupWinMetric(family: string | null | undefined): WinMetric | null {
 }
 
 /**
- * Win line-height ratio (`(usWinAscent+usWinDescent)/unitsPerEm`) for a
- * requested font family, or `null` when the font is not in the table (the
- * caller should then fall back to the substituted font's Canvas metrics).
+ * Word's design single-line-height ratio for a requested font family, or `null`
+ * when the font is not in the table (the caller then falls back to the
+ * substituted font's Canvas metrics). The ratio is the win sum
+ * `(usWinAscent+usWinDescent)/unitsPerEm` for the CJK/Arabic faces and the hhea
+ * sum `(ascent+|descent|+lineGap)/unitsPerEm` for the Latin faces (see
+ * WIN_METRICS). The legacy name is kept to avoid churn at the call sites.
  */
 export function fontWinLineHeightRatio(family: string | null | undefined): number | null {
   const m = lookupWinMetric(family);
@@ -172,18 +175,20 @@ export function intendedSingleLinePx(family: string | null | undefined, emPx: nu
  * against the DOCUMENT font's design line box.
  *
  * Two regimes, decided by comparing the substitute's natural box with the
- * document font's win box (`usWinAscent+usWinDescent / unitsPerEm`):
+ * document font's design box (`asc + desc` from the table — the win sum for the
+ * CJK/Arabic faces, the hhea sum for the Latin faces; see WIN_METRICS):
  *
- * - Substitute box ≤ document box (e.g. Meiryo drawn via Hiragino): return the
- *   substitute's measured metrics UNCHANGED. The {@link intendedSingleLinePx}
- *   floor (applied by layoutLines) raises the LINE BOX to the document font's
- *   win height, and the renderer centers the natural line inside it — keeping
- *   the substitute's glyph ink centered where Word's ink sits. Replacing the
- *   split here instead shifted every line's ink upward and regressed the
- *   Word-reference VRT (private/sample-3).
+ * - Substitute box ≤ document box (e.g. Meiryo drawn via Hiragino, or an
+ *   installed Times New Roman whose win-box Canvas metrics fall short of its hhea
+ *   design height): return the substitute's measured metrics UNCHANGED. The
+ *   {@link intendedSingleLinePx} floor (applied by layoutLines) raises the LINE
+ *   BOX to the document font's design height, and the renderer centers the
+ *   natural line inside it — keeping the glyph ink centered where Word's ink
+ *   sits. Replacing the split here instead shifted every line's ink upward and
+ *   regressed the Word-reference VRT (private/sample-3).
  *
  * - Substitute box > document box (Sakkal Majalla drawn via Noto Naskh Arabic,
- *   win 2.2 em vs 1.3965 em): return the document font's win ascent/descent.
+ *   2.2 em vs 1.3965 em): return the document font's design ascent/descent.
  *   Without the shrink, exact-height rows (§17.4.81) and vAlign-centered cells
  *   (§17.4.84) overflow — the sample-7 page-2 header case.
  *
