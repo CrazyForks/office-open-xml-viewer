@@ -4198,7 +4198,19 @@ function renderParagraph(
         distSegs,
         slack,
         firstContentSi,
-        lastDrawnSi,
+        // The kernel excludes `lastDrawnSi`'s WHOLE segment from opening gaps —
+        // including its interior inter-CJK boundaries, not just the final glyph's.
+        // On an LTR line that over-excludes: §17.18.44 spreads the slack across
+        // EVERY inter-CJK boundary on the line, so a multi-glyph CJK last segment
+        // must still distribute pitch internally (otherwise it renders at the bare
+        // grid pitch while earlier segments absorb all the slack — two different
+        // inter-character pitches on one line). The kernel's content-span trim
+        // already suppresses only the FINAL glyph's gap, keeping that glyph on the
+        // margin, so LTR needs no whole-segment exclusion: pass `segCount` (a
+        // sentinel matching no segment, exactly as the pptx justifier does). Under
+        // bidi the logical-last unit is NOT the visually-last glyph, so the whole-
+        // segment exclusion of the visually-last segment is still required there.
+        paraNeedsBidi ? lastDrawnSi : segCount,
         minPerGap,
         slack > 0,
       );
