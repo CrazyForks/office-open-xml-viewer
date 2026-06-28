@@ -43,11 +43,11 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
   return { canvas: canvas as unknown as HTMLCanvasElement, calls };
 }
 
-function para(text: string, spaceBefore = 0): DocParagraph {
+function para(text: string, spaceBefore = 0, spaceAfter = 0): DocParagraph {
   return {
     type: 'paragraph', alignment: 'left',
     indentLeft: 0, indentRight: 0, indentFirst: 0,
-    spaceBefore, spaceAfter: 0, lineSpacing: null,
+    spaceBefore, spaceAfter, lineSpacing: null,
     numbering: null, tabStops: [],
     runs: text
       ? [{
@@ -161,5 +161,55 @@ describe('section-break spacer suppresses spacing-before (Word/LibreOffice inter
     const xControl = await baselineOf(control, 'X');
     // The non-empty paragraph keeps its before regardless of the following break.
     expect(xWith).toBeCloseTo(xControl, 1);
+  });
+});
+
+describe('collapsed continuous-section spacer — Word section-mark collapse (sample-12)', () => {
+  // NEW-a (isCollapsedContinuousSpacer): a continuous-section spacer with NO
+  // space-before of its own renders NO paragraph-mark line box (sample-12 — Word
+  // shows ONE blank line, not two, and the heading sits ~24pt higher). A spacer
+  // WITH a space-before keeps its box (sample-13). Reconstructed from Word's output.
+  it('a zero-before continuous spacer drops its mark line; a non-zero-before one keeps it', async () => {
+    const collapse: BodyElement[] = [
+      para('A') as unknown as BodyElement,
+      para('') as unknown as BodyElement, // spacer before=0 → collapses (no line box)
+      { type: 'sectionBreak', kind: 'continuous' } as unknown as BodyElement,
+      para('B') as unknown as BodyElement,
+    ];
+    const keepBox: BodyElement[] = [
+      para('A') as unknown as BodyElement,
+      para('', SPACER_BEFORE) as unknown as BodyElement, // spacer before>0 → keeps its line box
+      { type: 'sectionBreak', kind: 'continuous' } as unknown as BodyElement,
+      para('B') as unknown as BodyElement,
+    ];
+    const aCollapse = await baselineOf(collapse, 'A');
+    const bCollapse = await baselineOf(collapse, 'B');
+    const aKeep = await baselineOf(keepBox, 'A');
+    const bKeep = await baselineOf(keepBox, 'B');
+    // 'A' is unchanged in both (nothing above it differs).
+    expect(aCollapse).toBeCloseTo(aKeep, 3);
+    // The kept-box spacer adds one mark line; the collapsed one adds none — so B is
+    // strictly higher when the spacer collapses (by ~one line height). The spacer's
+    // own before is suppressed in BOTH cases, so the difference is purely the box.
+    expect(bKeep - bCollapse).toBeGreaterThan(6);
+  });
+
+  // NEW-b (leadsCollapsedRun): the empty paragraph that begins the section-break
+  // run (immediately before the collapsed spacer) sits FLUSH below the preceding
+  // paragraph — its space-after is dropped (sample-12: "[Format…]"'s 6pt after
+  // vanishes, placing the heading at Word's 446pt). No-op when not collapsing.
+  it('drops the previous paragraph space-after when an empty run leads into a collapsed spacer', async () => {
+    const mk = (aAfter: number): BodyElement[] => [
+      para('A', 0, aAfter) as unknown as BodyElement, // A carries a space-after
+      para('') as unknown as BodyElement, // empty-run start (inkless), leads the spacer
+      para('') as unknown as BodyElement, // spacer before=0 → collapses
+      { type: 'sectionBreak', kind: 'continuous' } as unknown as BodyElement,
+      para('B') as unknown as BodyElement,
+    ];
+    const bNoAfter = await baselineOf(mk(0), 'B');
+    const bBigAfter = await baselineOf(mk(40), 'B');
+    // A's 40pt space-after is dropped at the section-break run, so B does NOT move
+    // down — it stays within rounding of the no-after case.
+    expect(bBigAfter - bNoAfter).toBeCloseTo(0, 1);
   });
 });

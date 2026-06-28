@@ -645,7 +645,7 @@ export async function renderDocumentToCanvas(
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
   const kinsoku = resolveKinsokuRules(doc.settings);
-  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
+  const pages = opts.prebuiltPages ?? paginateWithFooterReserve(doc, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
@@ -715,15 +715,19 @@ export async function renderDocumentToCanvas(
     renderHeaderFooter(header, sec.headerDistance * scale, baseState);
   }
 
-  // Footer: anchored from bottom, rising by its measured height
-  const footer = pickHeaderFooter(
-    pageSection.footers, pageSection.isFirstPageOfSection, isEvenPage,
-    pageSection.titlePage, doc.section.evenAndOddHeaders,
-  );
+  // Footer: anchored from bottom, rising by its measured height. A footer taller
+  // than its bottom-margin allowance (§17.6.11) overflows the content area; the body
+  // was already paginated to clear it (paginateWithFooterReserve), and the same
+  // overflow raises the footnote block below so notes clear it too.
+  const footer = resolvePageFooter(pages, pageIndex, doc);
+  let footerReservePx = 0;
   if (footer) {
     const footerHeight = measureHeaderFooterHeight(footer, baseState);
     const footerTopY = cssHeight - sec.footerDistance * scale - footerHeight;
     renderHeaderFooter(footer, footerTopY, baseState);
+    // §17.6.11 overflow in device px (footerHeight is at canvas scale), via the shared
+    // formula so the footnote clearance matches the pagination reserve exactly.
+    footerReservePx = footerOverflowPt(footerHeight, sec.marginBottom * scale, sec.footerDistance * scale);
   }
 
   // Body. ECMA-376 §17.6.4: lay out body text in EACH section's newspaper columns
@@ -760,7 +764,7 @@ export async function renderDocumentToCanvas(
   // Footnotes referenced on this page (ECMA-376 §17.11): drawn at the bottom of
   // the text column, above a short separator rule. The page area was already
   // reserved during pagination so the body stops short of them.
-  drawPageFootnotes(elements, doc, baseState, scale, cssHeight, sec);
+  drawPageFootnotes(elements, doc, baseState, scale, cssHeight, sec, footerReservePx);
 
   // Endnotes (§17.11 endnotePr default position = document end) on the last
   // page, after the body flow. Minimal impl: a heading-less list at doc end.
@@ -794,6 +798,7 @@ function drawPageFootnotes(
   scale: number,
   cssHeight: number,
   sec: SectionProps,
+  footerReservePx = 0,
 ): void {
   if (!doc.footnotes || doc.footnotes.length === 0) return;
   const noteById = indexNotes(doc.footnotes);
@@ -829,7 +834,9 @@ function drawPageFootnotes(
   }
   const contentPt = Math.max(0, totalPt - lastTrailingPt);
   const gapPx = FOOTNOTE_SEPARATOR_GAP_PT * scale;
-  const blockTopY = cssHeight - sec.marginBottom * scale - contentPt * scale;
+  // Clear a footer taller than the bottom margin (§17.6.11): the footnote block, like
+  // the body, sits above the footer's overflow (footerReservePx), not just the margin.
+  const blockTopY = cssHeight - sec.marginBottom * scale - footerReservePx - contentPt * scale;
 
   // Separator rule: short left-aligned line (Word's default footnote separator,
   // ~1/3 of the text width), centered in the gap above the notes.
@@ -1064,6 +1071,7 @@ export function computePages(
   fontFamilyClasses: Record<string, string> = {},
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
   footnotes: DocNote[] = [],
+  footerReservePt: number[] = [],
 ): PaginatedBodyElement[][] {
   const fullContentH = section.pageHeight - section.marginTop - section.marginBottom;
   const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body));
@@ -1131,6 +1139,30 @@ export function computePages(
   // a page that is ending anyway).
   const isContinuousSectionSpacer = (idx: number): boolean =>
     isSectionBreakSpacerAt(body, idx) && sectionKindFrom(idx + 2) === 'continuous';
+
+  // A continuous-section spacer whose OWN space-before is zero. Word renders NO
+  // paragraph-mark line box for it: the section mark collapses to zero height
+  // instead of occupying a blank line. (A spacer that DOES carry a space-before
+  // keeps its box — the before manifests as the blank line.)
+  //
+  // NOTE — this matches Microsoft WORD's observed layout, NOT a spec rule.
+  // §17.3.1.29 mandates that every paragraph produces one mark line box; no
+  // ECMA-376 clause (nor [MS-DOC] / [MS-OI29500]) documents a section-mark
+  // collapse. The model is reconstructed clean-room from Word's OWN output:
+  //   - sample-12's spacer is Normal with before=0. Word shows exactly ONE blank
+  //     line between "[Format…single line spacing]" and "1. INTRODUCTION" (the
+  //     user verified this by cursor-walk) and paints the heading ~24pt higher
+  //     than our prior two-blank-line layout — i.e. the spacer's own mark line is
+  //     absent (pdftotext -bbox: INTRODUCTION at 446pt, not 470pt).
+  //   - sample-13's spacer is before=440 (22pt). Word keeps its mark line (TWO
+  //     blank lines, heading at 376pt), so the collapse is gated on before=0.
+  // Both gates were pinned against the Word PDFs; we follow Word's measured
+  // behaviour, not any external implementation.
+  const isCollapsedContinuousSpacer = (idx: number): boolean => {
+    if (!isContinuousSectionSpacer(idx)) return false;
+    const p = body[idx] as unknown as DocParagraph;
+    return (p.spaceBefore ?? 0) === 0;
+  };
 
   // ECMA-376 §17.10.1 — the resolved header/footer set + `<w:titlePg>` flag for
   // the section that OWNS the content starting at body index `startIdx`. Mirrors
@@ -1267,7 +1299,7 @@ export function computePages(
   let pageNoteIds = new Set<string>();
   // Effective content height for the current page: the full text column minus
   // the footnote area reserved at the bottom of THIS page.
-  const effContentH = () => fullContentH - (footnoteReservePt[pages.length - 1] ?? 0);
+  const effContentH = () => fullContentH - (footnoteReservePt[pages.length - 1] ?? 0) - (footerReservePt[pages.length - 1] ?? 0);
   const startPageBookkeeping = () => {
     footnoteReservePt[pages.length - 1] = 0;
     pageNoteIds = new Set<string>();
@@ -1634,7 +1666,32 @@ export function computePages(
       // drop.
       const spacer = isContinuousSectionSpacer(i);
       if (spacer) (el as PaginatedBodyElement).sectionBreakSpacer = true;
+      // A zero-before continuous-section spacer renders NO mark line box (Word's
+      // section-mark collapse — see isCollapsedContinuousSpacer). Skip it entirely:
+      // add no height and leave prevPara/prevSpaceAfter as the paragraph BEFORE the
+      // spacer, so the next section's first paragraph spaces against it. The paint
+      // pass mirrors this by skipping the stamped element. (Still pushed so the
+      // per-page element sequence — and any section-geometry stamping keyed off it —
+      // is unchanged.)
+      if (isCollapsedContinuousSpacer(i)) {
+        (el as PaginatedBodyElement).collapsedSpacer = true;
+        pushTagged(el as PaginatedBodyElement);
+        continue;
+      }
       const suppressBefore = contextual || spacer;
+
+      // An empty paragraph that immediately precedes a COLLAPSED continuous spacer
+      // begins the section-break empty run, which Word renders FLUSH below the
+      // preceding content (the section transition collapses upward): the previous
+      // paragraph's spaceAfter is dropped too (sample-12: "[Format…]"'s 6pt after
+      // vanishes, so "1. INTRODUCTION" sits at Word's 446pt rather than ~452pt).
+      // Mirrors contextualSpacing's full drop of the previous after; no-op when the
+      // spacer is NOT collapsed (sample-13, before=22 keeps normal flow).
+      const leadsCollapsedRun = isInklessParagraph(para) && isCollapsedContinuousSpacer(i + 1);
+      // Stamp it so the paint pass reads the decision here rather than re-deriving it
+      // from per-page adjacency: the collapsed spacer this looks ahead to can fall on
+      // the NEXT page's element list, where paint could not see it (lockstep).
+      if (leadsCollapsedRun) (el as PaginatedBodyElement).leadsCollapsedRun = true;
 
       // Collapse with the previous paragraph's spaceAfter — Word takes
       // max(prev.after, this.before) between paragraphs, not the sum.
@@ -1642,7 +1699,7 @@ export function computePages(
       // §17.3.1.9 contextualSpacing: same-style adjacent paragraphs drop BOTH the
       // previous after and this before (gap = 0), keeping the paginator's fill in
       // lockstep with the paint pass.
-      const overlap = contextual ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
+      const overlap = (contextual || leadsCollapsedRun) ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
       y -= overlap;
       measureState.y -= overlap;
 
@@ -1922,17 +1979,103 @@ export function computePages(
   return pages;
 }
 
+/** ECMA-376 §17.6.11 (pgMar/@bottom): the main-document text bottom is placed at the
+ *  GREATER of the bottom margin and the footer's extent — a footer taller than the
+ *  bottom-margin allowance pushes content up. Returns the pt by which a footer of
+ *  height `footerH` overflows the bottom margin and must be reserved (content ends at
+ *  the footer's top, `footerDistance + footerH` from the page bottom). A NEGATIVE
+ *  bottom margin means the text is measured from the page bottom regardless of the
+ *  footer — it overlaps the footer — so nothing is reserved. Unit-agnostic: pass all
+ *  three args in one unit (pt for the pagination reserve, px for paint-time footnote
+ *  clearance). */
+function footerOverflowPt(footerH: number, marginBottom: number, footerDistance: number): number {
+  if (marginBottom < 0) return 0;
+  return Math.max(0, footerDistance + footerH - marginBottom);
+}
+
+/** Resolve the footer that applies to `pageIndex` with the §17.10.1/§17.10.6
+ *  first/even/default precedence (resolvePageSection + pickHeaderFooter), or null if
+ *  none. One selection shared by the reserve pass, the footer paint, and the footnote
+ *  clearance so all three size and place the SAME footer. */
+function resolvePageFooter(
+  pages: PaginatedBodyElement[][],
+  pageIndex: number,
+  doc: DocxDocumentModel,
+): HeaderFooter | null {
+  const ps = resolvePageSection(pages, pageIndex, doc);
+  return pickHeaderFooter(
+    ps.footers, ps.isFirstPageOfSection, pageIndex % 2 === 1, ps.titlePage, doc.section.evenAndOddHeaders,
+  );
+}
+
+/** Below this (pt) a footer's overflow is sub-point noise — skip the second
+ *  pagination pass when no page's footer overflows by at least this much. */
+const MIN_FOOTER_OVERFLOW_PT = 0.5;
+
+/**
+ * ECMA-376 §17.6.11 (pgMar/@bottom) — per-page pt to reserve at the bottom of the
+ * content area for a footer taller than its bottom-margin allowance. The main text
+ * bottom sits at the greater of the bottom margin and the footer extent
+ * (`footerDistance + footerHeight`); when the footer extent wins, content must clear
+ * it (Word never lays body text over a footer). A footer that fits the margin — or a
+ * negative bottom margin (§17.6.11: text then overlaps the footer) — reserves 0. See
+ * footerOverflowPt for the exact rule.
+ */
+function computeFooterReserves(
+  pages: PaginatedBodyElement[][],
+  doc: DocxDocumentModel,
+  measure: RenderState,
+): number[] {
+  const sec = doc.section;
+  return pages.map((_unused, pageIdx) => {
+    const footer = resolvePageFooter(pages, pageIdx, doc);
+    if (!footer) return 0;
+    const footerH = measureHeaderFooterHeight(footer, measure); // pt (measure is scale 1)
+    return footerOverflowPt(footerH, sec.marginBottom, sec.footerDistance);
+  });
+}
+
+/**
+ * Paginate with footer-height awareness (ECMA-376 §17.6.11). Pass 1 paginates without
+ * reservation; a tall footer's overflow into the content area is measured per page
+ * (computeFooterReserves) and fed into a second pass so body content never overlaps
+ * the footer. When no footer overflows — the common case — pass 1 is returned
+ * unchanged. Shared by the main render path and the worker so the two can never
+ * paginate differently.
+ *
+ * One re-pass is used (not iterated to a fixpoint). It is exact when an overflowing
+ * footer is a section's FIRST-page footer beginning a PAGE-STARTING break
+ * (nextPage/odd/even) — e.g. sample-13's masthead DOI block — since such a section
+ * always starts at a fresh page top and its page index is identical in both passes.
+ * The unhandled edge is a CONTINUOUS section whose tall first-page footer's page index
+ * could shift when the reserve repacks content; that combination is exotic and is
+ * left for a fixpoint pass if a real document ever needs it.
+ */
+function paginateWithFooterReserve(
+  doc: DocxDocumentModel,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  fontFamilyClasses: Record<string, string>,
+  kinsoku: KinsokuRules,
+  footnotes: DocNote[],
+): PaginatedBodyElement[][] {
+  const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes);
+  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body));
+  const reserves = computeFooterReserves(pass1, doc, measure);
+  if (!reserves.some((r) => r > MIN_FOOTER_OVERFLOW_PT)) return pass1;
+  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, reserves);
+}
+
 /** Paginate with a throwaway measure context. Pagination must use the same
  *  fontFamilyClasses + kinsoku rules as the render path, otherwise line-break
  *  decisions (and thus page breaks) diverge between measurement and paint
  *  (ECMA-376 §17.15.1.58–.60). Shared by the main-thread DocxDocument and the
  *  render worker so the two modes can never paginate differently. */
+
 export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return [doc.body];
-  return computePages(
-    doc.body,
-    doc.section,
+  return paginateWithFooterReserve(
+    doc,
     ctx,
     doc.fontFamilyClasses ?? {},
     resolveKinsokuRules(doc.settings),
@@ -3093,6 +3236,13 @@ function renderBodyElements(
         renderFrameParagraph(para, state, frameAnchorLineHeightPx(elements, el, state));
         continue;
       }
+      // A zero-before continuous-section spacer renders no mark line box (Word's
+      // section-mark collapse; stamped by the paginator — see
+      // isCollapsedContinuousSpacer). Skip it: paint nothing, advance y by nothing,
+      // and leave prevPara/prevSpaceAfter as the paragraph BEFORE it so the new
+      // section's first paragraph spaces against that paragraph. Mirrors the
+      // paginator's identical skip so fill and paint stay in lockstep.
+      if ((el as PaginatedBodyElement).collapsedSpacer) continue;
       const contextual = contextualSuppressed(prevPara, para);
       // Empty section-break spacer: drop only its own before (see
       // isSectionBreakSpacerAt); contextualSpacing drops the previous after too.
@@ -3100,12 +3250,18 @@ function renderBodyElements(
       // marker is gone from this per-page list), so read the tag here.
       const spacer = !!(el as PaginatedBodyElement).sectionBreakSpacer;
       const suppress = contextual || spacer;
+      // An empty paragraph immediately before a COLLAPSED continuous spacer begins the
+      // section-break empty run; Word renders it FLUSH below the preceding content,
+      // dropping the previous paragraph's spaceAfter too. Read the paginator-stamped
+      // flag rather than looking ahead in this per-page slice: the collapsed spacer can
+      // sit on the next page, where `elements[elIdx + 1]` would be undefined.
+      const leadsCollapsedRun = !!(el as PaginatedBodyElement).leadsCollapsedRun;
       // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
       const effBefore = suppress ? 0 : para.spaceBefore;
       // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
       // set it, BOTH the previous after and this before are dropped (gap = 0), not
       // just collapsed — so e.g. a code listing's lines sit tight.
-      const overlap = contextual ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+      const overlap = (contextual || leadsCollapsedRun) ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
       // Continuation slices (slice.start > 0) suppress spaceBefore: the
       // earlier slice already consumed it on the previous page. Likewise
