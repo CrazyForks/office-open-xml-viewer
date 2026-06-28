@@ -44,7 +44,8 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
   return { canvas: canvas as unknown as HTMLCanvasElement, calls };
 }
 
-function para(text: string, opts: { smallCaps?: boolean; allCaps?: boolean } = {}): DocParagraph {
+function para(text: string, opts: { smallCaps?: boolean; allCaps?: boolean; size?: number } = {}): DocParagraph {
+  const size = opts.size ?? 10;
   return {
     type: 'paragraph', alignment: 'left',
     indentLeft: 0, indentRight: 0, indentFirst: 0,
@@ -52,11 +53,11 @@ function para(text: string, opts: { smallCaps?: boolean; allCaps?: boolean } = {
     numbering: null, tabStops: [],
     runs: [{
       type: 'text', text, bold: false, italic: false, underline: false,
-      strikethrough: false, fontSize: 10, color: null, fontFamily: 'Times New Roman',
+      strikethrough: false, fontSize: size, color: null, fontFamily: 'Times New Roman',
       fontFamilyEastAsia: '', isLink: false, background: null, vertAlign: null, hyperlink: null,
       smallCaps: opts.smallCaps ?? false, allCaps: opts.allCaps ?? false,
     } as DocParagraph['runs'][number]],
-    defaultFontSize: 10, defaultFontFamily: 'Times New Roman', widowControl: false,
+    defaultFontSize: size, defaultFontFamily: 'Times New Roman', widowControl: false,
   } as unknown as DocParagraph;
 }
 
@@ -87,12 +88,26 @@ describe('small caps per-character sizing (§17.3.2.33)', () => {
     const rest = calls.find((c) => c.text === 'NTRODUCTION');
     expect(init, 'full-size initial "I"').toBeDefined();
     expect(rest, 'reduced "NTRODUCTION"').toBeDefined();
-    // Full size = 10pt (scale 1). Reduced = 0.8 × 10 = 8pt.
+    // §17.3.2.33: reduced size is TWO POINTS SMALLER (10 − 2 = 8), not a ratio.
     expect(init!.px).toBeCloseTo(10, 3);
     expect(rest!.px).toBeCloseTo(8, 3);
     // Both on the same line, in reading order.
     expect(init!.y).toBeCloseTo(rest!.y, 3);
     expect(rest!.x).toBeGreaterThan(init!.x);
+  });
+
+  it('reduces by exactly 2 points (subtractive), not a ratio, at larger sizes', async () => {
+    // A 20pt heading: caps stay 20pt, small letters are 18pt (20 − 2), NOT 16 (0.8×).
+    const calls = await render([para('Introduction', { smallCaps: true, size: 20 }) as unknown as BodyElement]);
+    expect(calls.find((c) => c.text === 'I')!.px).toBeCloseTo(20, 3);
+    expect(calls.find((c) => c.text === 'NTRODUCTION')!.px).toBeCloseTo(18, 3);
+  });
+
+  it('does NOT reduce non-alphabetic characters (digits stay full size)', async () => {
+    // §17.3.2.33 affects "small letter characters" only — the "2" of "co2" is full.
+    const calls = await render([para('co2', { smallCaps: true }) as unknown as BodyElement]);
+    expect(calls.find((c) => c.text === 'CO')!.px, '"co" reduced').toBeCloseTo(8, 3);
+    expect(calls.find((c) => c.text === '2')!.px, '"2" full size').toBeCloseTo(10, 3);
   });
 
   it('allCaps uppercases but does NOT reduce any character', async () => {
@@ -103,6 +118,23 @@ describe('small caps per-character sizing (§17.3.2.33)', () => {
     expect(piece!.px).toBeCloseTo(10, 3);
     // No reduced (8pt) glyphs at all.
     expect(calls.some((c) => Math.abs(c.px - 8) < 0.01)).toBe(false);
+  });
+
+  it('sizes the line box from the FULL run size even when a line is all reduced', async () => {
+    // An all-lowercase small-caps word → every piece reduced. Its line box must
+    // still be the full-size line height (§17.3.2.33 reduces glyphs, not leading),
+    // so a following paragraph sits exactly where it does for full-size text.
+    const small = await render([
+      para('abcdef', { smallCaps: true }) as unknown as BodyElement,
+      para('X') as unknown as BodyElement,
+    ]);
+    const full = await render([
+      para('abcdef') as unknown as BodyElement,
+      para('X') as unknown as BodyElement,
+    ]);
+    const xSmall = small.find((c) => c.text === 'X')!;
+    const xFull = full.find((c) => c.text === 'X')!;
+    expect(xSmall.y).toBeCloseTo(xFull.y, 1);
   });
 
   it('does not split a small-caps word between its case pieces when it wraps', async () => {

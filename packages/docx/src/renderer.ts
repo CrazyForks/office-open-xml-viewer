@@ -4363,26 +4363,27 @@ interface WrapLayoutCtx {
  * Word draws them at regular weight; the header carries both and is bold.)
  */
 /**
- * Split a `w:smallCaps` (§17.3.2.33) run into maximal pieces by ORIGINAL case.
- * Word renders small caps per character: an originally-LOWERCASE letter is drawn
- * as a reduced-size capital, while an originally-UPPERCASE letter is drawn at the
- * FULL run size. So "Introduction" → "I" at full size + "NTRODUCTION" reduced
- * (matching the leading "1." of the heading number). `reduced` flags the
- * small-cap pieces; the caller still uppercases every piece for display.
+ * Split a `w:smallCaps` (§17.3.2.33) run into maximal pieces by character class
+ * for sizing. The spec reduces "all SMALL LETTER characters ... two points
+ * smaller", so ONLY lowercase letters are `reduced`; uppercase letters AND every
+ * non-alphabetic character (digits, punctuation) stay at the FULL run size.
+ * So "Introduction" → "I" full + "NTRODUCTION" reduced (matching the heading's
+ * "1."), and "co2" → "CO" reduced + "2" full. `reduced` flags the small-cap
+ * pieces; the caller still uppercases every piece for display.
  *
- * Only cased LETTERS start a new piece; non-cased characters (digits, spaces,
- * punctuation) EXTEND the current piece. That keeps inter-word spaces and
- * hyphens attached to a word instead of fragmenting into their own segments
- * (which would corrupt trailing-space collapse and line breaking). A leading
- * non-cased run opens a full-size piece. A char is lowercase-origin when it has
- * a different uppercase form (`ch.toUpperCase() !== ch`).
+ * Whitespace carries no glyph, so it EXTENDS the current piece rather than
+ * opening a full-size one — otherwise an inter-word space between two small-cap
+ * words would fragment into its own segment and corrupt trailing-space collapse
+ * / line breaking. A leading run with no lowercase letter defaults to full size.
  */
 function splitSmallCapsCase(text: string): { text: string; reduced: boolean }[] {
   const out: { text: string; reduced: boolean }[] = [];
   for (const ch of text) {
-    const isCasedLetter = ch.toUpperCase() !== ch.toLowerCase();
-    // Non-letters stay with the current piece; the first piece defaults to full.
-    const reduced = isCasedLetter ? ch.toUpperCase() !== ch : (out[out.length - 1]?.reduced ?? false);
+    // A lowercase letter: unchanged by toLowerCase AND changed by toUpperCase.
+    const isLowerLetter = ch.toLowerCase() === ch && ch.toUpperCase() !== ch;
+    const reduced = /\s/.test(ch)
+      ? (out[out.length - 1]?.reduced ?? false) // whitespace: keep with current piece
+      : isLowerLetter;
     const last = out[out.length - 1];
     if (last && last.reduced === reduced) last.text += ch;
     else out.push({ text: ch, reduced });
@@ -4397,11 +4398,11 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     base: DocxTextRun | FieldRun,
     vertAlign: 'super' | 'sub' | null,
   ) => {
-    // §17.3.2.33 small caps are sized per character: originally-lowercase letters
-    // are reduced capitals, originally-uppercase / non-cased characters keep the
-    // full run size. `reduced` (set per case-piece in the loop below) carries that
-    // onto each emitted segment; calcEffectiveFontPx shrinks only the reduced
-    // ones. allCaps (§17.3.2.5) and non-caps runs are a single, non-reduced piece.
+    // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
+    // points smaller, uppercase letters and non-alphabetic characters at the full
+    // run size. `reduced` (set per case-piece in the loop below) carries that onto
+    // each emitted segment; calcEffectiveFontPx shrinks only the reduced ones.
+    // allCaps (§17.3.2.5) and non-caps runs are a single, non-reduced piece.
     let reduced = false;
     // Ruby annotation rides with the WHOLE base text (typically 1-2 chars).
     // Splitting on word boundaries would lose the association, so attach
@@ -4992,7 +4993,10 @@ function layoutLines(
       if (ts.ruby) lineHasRuby = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
       // understate Word's line spacing (font-metrics.ts). 0 for untabled fonts.
-      const intended = intendedSingleLinePx(ts.fontFamily, effectiveFontPx(ts));
+      // Small caps (non-super/sub) keep the FULL run size here so the line box
+      // follows the run size, not the 2pt-reduced glyphs (§17.3.2.33).
+      const intendedEm = ts.smallCaps && !ts.vertAlign ? ts.fontSize * scale : effectiveFontPx(ts);
+      const intended = intendedSingleLinePx(ts.fontFamily, intendedEm);
       if (intended > lineIntendedSingle) lineIntendedSingle = intended;
     }
   };
@@ -5215,7 +5219,22 @@ function layoutLines(
     // §17.4.84, and pagination) match Word — see font-metrics.ts.
     // Fallback box at the run's full size; correction at the effective size
     // (smallCaps/vertAlign shrink it). See correctedLineMetrics.
-    const corrected = correctedLineMetrics(m, s.fontFamily, s.fontSize * scale, effectiveFontPx(s));
+    // §17.3.2.33: a small-caps run's LINE BOX follows the FULL run size, not the
+    // 2pt-reduced glyph size — so a wrapped continuation line carrying only reduced
+    // (all-lowercase) small caps is not short. Measure the box metrics at the full
+    // size (the advance `w` above still uses the reduced glyphs). Super/subscript
+    // is excluded: it intentionally shrinks its line contribution.
+    const fullPx = s.fontSize * scale;
+    let metricM = m;
+    let metricEmPx = effectiveFontPx(s);
+    if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
+      const prevFont = ctx.font;
+      ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
+      metricM = ctx.measureText(s.text || 'X');
+      ctx.font = prevFont;
+      metricEmPx = fullPx;
+    }
+    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx);
     let asc = corrected.ascent;
     const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
@@ -7206,8 +7225,13 @@ function runBordersEqual(a: DocxRunBorder, b: DocxRunBorder): boolean {
 }
 
 function calcEffectiveFontPx(s: LayoutTextSeg, scale: number): number {
-  let size = s.fontSize * scale;
-  if (s.smallCaps) size *= 0.8;
+  // ECMA-376 §17.3.2.33: small-caps small letters render "in a font size TWO
+  // POINTS SMALLER than the actual font size" (subtractive, not a ratio), floored
+  // at the smallest renderable size when 2pt smaller is not possible. Applied in
+  // pt before scaling. (At ~10pt this is ≈0.8×, but it diverges at larger sizes —
+  // a 20pt heading's caps are 18pt, not 16pt.)
+  const pt = s.smallCaps ? Math.max(s.fontSize - 2, 1) : s.fontSize;
+  let size = pt * scale;
   if (s.vertAlign) size *= 0.65;
   return size;
 }
