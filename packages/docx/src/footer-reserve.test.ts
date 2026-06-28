@@ -167,17 +167,43 @@ describe('footer reserve — content never overlaps a tall footer (ECMA-376 §17
     expect(Math.max(...noteY)).toBeLessThan(Math.min(...footerY));
   });
 
-  it('does not reserve a footer when the bottom margin is negative (§17.6.11 exception)', async () => {
-    // §17.6.11: a negative bottom margin measures the main text from the page bottom
-    // REGARDLESS of the footer, so the text overlaps the footer and nothing is
-    // reserved. Hence the same body reaches exactly as far down WITH the tall footer
-    // as WITHOUT one. (The earlier max(0, marginBottom − footerDistance) allowance
-    // clamp wrongly reserved the whole footer here, pulling the body up.)
+  it('places the body bottom at |bottom| above the page bottom for a negative bottom margin (§17.6.11)', async () => {
+    // §17.6.11 (pgMar/@bottom), the SYMMETRIC twin of the @top rule: a negative bottom
+    // margin measures the main text from the bottom of the page extent by |bottom|
+    // "regardless of the footer ... and therefore shall overlap the footer text". The
+    // spec's own example (w:bottom="-720") keeps the body ½ inch (|bottom|) ABOVE the
+    // page bottom. So with marginBottom = −10 the body's lowest line must clear the
+    // bottom of the page by 10pt — the SAME extent a +10 bottom margin (no footer to
+    // reserve against) gives it — NOT packed down to the raw −10 offset (which sits
+    // BELOW the page bottom, off-canvas). Pre-fix the content height used the raw signed
+    // marginBottom (pageHeight − marginTop − (−10) ⇒ a TALLER page), so the body packed
+    // past the page bottom and diverged from the +10 placement.
+    // A body long enough that page 0 fills to its content bottom in BOTH cases, so the
+    // page-0 fill genuinely depends on the content height. A negative bottom margin must
+    // NOT enlarge that height (pageHeight − marginTop − |bottom|); pre-fix it did
+    // (… − (−10) ⇒ +10 taller), letting ~2 extra lines pack onto page 0 past the bottom.
+    const longBody = (): BodyElement[] =>
+      Array.from({ length: 70 }, () => para('BODY') as unknown as BodyElement);
     const bodyY = (calls: Call[]) => calls.filter((c) => c.text === 'BODY').map((c) => c.y);
-    const negTall = await renderPage0(docWithFooter(body(), tallFooter, { marginBottom: -10 }));
-    const negNone = await renderPage0(docWithFooter(body(), null, { marginBottom: -10 }));
+    const negTall = await renderPage0(docWithFooter(longBody(), tallFooter, { marginBottom: -10 }));
+    const negNone = await renderPage0(docWithFooter(longBody(), null, { marginBottom: -10 }));
+    const posNone = await renderPage0(docWithFooter(longBody(), null, { marginBottom: 10 }));
 
+    // Sanity: the tall footer is still painted (the negative margin only stops the
+    // RESERVE, it does not suppress the footer).
     expect(negTall.filter((c) => c.text === 'FTR').length).toBeGreaterThan(0);
+
+    // EXCEPTION: nothing is reserved — the body reaches the same depth WITH the tall
+    // footer as WITHOUT one.
     expect(Math.max(...bodyY(negTall))).toBeCloseTo(Math.max(...bodyY(negNone)), 1);
+
+    // MAGNITUDE: |−10| keeps the body bottom exactly where a +10 bottom margin (no
+    // reserve) does. This is the spec's "measured from the page bottom by |bottom|"
+    // rule, and it is what fixes the content-height computation under a negative margin.
+    expect(Math.max(...bodyY(negNone))).toBeCloseTo(Math.max(...bodyY(posNone)), 1);
+
+    // DIRECTION: the body's lowest line on page 0 stays within the page (above the page
+    // bottom), not pushed off-canvas below it as the raw negative offset would.
+    expect(Math.max(...bodyY(negNone))).toBeLessThanOrEqual(600);
   });
 });

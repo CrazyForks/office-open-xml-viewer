@@ -664,13 +664,20 @@ export async function renderDocumentToCanvas(
   for (const [id, n] of endnoteNums) noteNumbers.set(`endnote:${id}`, n);
 
   const docEA = documentHasEastAsian(doc.body);
+  // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
+  // (a negative margin places the body |margin| inside the edge, overlapping the
+  // header/footer — see bodyMarginInsetPt). Identity for the non-negative common case.
+  // The header/footer reserves below still use the SIGNED margin (header/footerOverflowPt
+  // return 0 for a negative one), so a negative margin reserves nothing yet insets |margin|.
+  const bodyTopPt = bodyMarginInsetPt(sec.marginTop);
+  const bodyBottomPt = bodyMarginInsetPt(sec.marginBottom);
   const baseState: RenderState = {
     ctx,
     scale,
     dpr,
     contentX: sec.marginLeft * scale,
     contentW: (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale,
-    y: sec.marginTop * scale,
+    y: bodyTopPt * scale,
     pageH: cssHeight,
     defaultColor: opts.defaultTextColor ?? '#000000',
     pageIndex,
@@ -679,8 +686,10 @@ export async function renderDocumentToCanvas(
     dryRun: false,
     marginLeft: sec.marginLeft,
     marginRight: sec.marginRight,
-    marginTop: sec.marginTop,
-    marginBottom: sec.marginBottom,
+    // §17.6.11: store the body inset (|margin|), the value the paint pass re-adds as a
+    // column's region top (state.marginTop, renderBodyElements); never the raw sign.
+    marginTop: bodyTopPt,
+    marginBottom: bodyBottomPt,
     pageWidth: sec.pageWidth,
     floats: [],
     floatParaSeq: 0,
@@ -744,7 +753,7 @@ export async function renderDocumentToCanvas(
   // and the header's extent, so a tall header (headerReservePx > 0) pushes the first
   // body line down to the header's bottom. The same overflow shrank the paginated
   // content area from the top (computeHeaderReserves), so the body fits within margins.
-  const bodyState: RenderState = { ...baseState, y: sec.marginTop * scale + headerReservePx };
+  const bodyState: RenderState = { ...baseState, y: bodyTopPt * scale + headerReservePx };
   // Optional column separator rules (`<w:cols w:sep="1">`), drawn before the text
   // so glyphs sit on top. A thin rule is centred in each inter-column gap and
   // spans the content height. With per-section columns a page can carry more than
@@ -845,7 +854,7 @@ function drawPageFootnotes(
   const gapPx = FOOTNOTE_SEPARATOR_GAP_PT * scale;
   // Clear a footer taller than the bottom margin (§17.6.11): the footnote block, like
   // the body, sits above the footer's overflow (footerReservePx), not just the margin.
-  const blockTopY = cssHeight - sec.marginBottom * scale - footerReservePx - contentPt * scale;
+  const blockTopY = cssHeight - bodyMarginInsetPt(sec.marginBottom) * scale - footerReservePx - contentPt * scale;
 
   // Separator rule: short left-aligned line (Word's default footnote separator,
   // ~1/3 of the text width), centered in the gap above the notes.
@@ -899,7 +908,7 @@ function drawEndnotes(
   // margin. We do NOT spill endnotes onto a dedicated trailing page yet.
   const ctx = bodyState.ctx;
   let y = bodyState.y + FOOTNOTE_SEPARATOR_GAP_PT * 2 * scale;
-  const maxY = cssHeight - sec.marginBottom * scale;
+  const maxY = cssHeight - bodyMarginInsetPt(sec.marginBottom) * scale;
   if (y >= maxY) return;
 
   // Separator rule above the endnotes.
@@ -1091,7 +1100,12 @@ export function computePages(
    *  (the common case). Computed by paginateWithHeaderFooterReserve's second pass. */
   pageReserves: PageReserve[] = [],
 ): PaginatedBodyElement[][] {
-  const fullContentH = section.pageHeight - section.marginTop - section.marginBottom;
+  // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
+  // (a negative margin measures the body |margin| from the edge and overlaps the
+  // header/footer — see bodyMarginInsetPt). Identity for the non-negative common case.
+  const bodyTopPt = bodyMarginInsetPt(section.marginTop);
+  const bodyBottomPt = bodyMarginInsetPt(section.marginBottom);
+  const fullContentH = section.pageHeight - bodyTopPt - bodyBottomPt;
   const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body));
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
@@ -1249,7 +1263,7 @@ export function computePages(
   // Page-absolute pt of the current region top, stamped on elements so the paint
   // pass resets a column's cursor to the region top (front-loaded layout: the
   // renderer consumes this instead of independently deciding the column top).
-  const colTopAbsPt = () => section.marginTop + colTopY;
+  const colTopAbsPt = () => bodyTopPt + colTopY;
 
   // Run `fn` with the measure state's content band temporarily re-pointed at the
   // CURRENT newspaper column (#513). The paint pass (renderBodyElements) sets
@@ -1291,7 +1305,7 @@ export function computePages(
   // like the real renderer does. floatParaSeq is reset together with floats so
   // the paraId採番 matches the renderer, which starts each page at 0 (a fresh
   // RenderState per page in renderDocumentToCanvas).
-  measureState.y = section.marginTop;
+  measureState.y = bodyTopPt;
   measureState.floats = [];
   measureState.floatParaSeq = 0;
   // ECMA-376 §20.4.3.2/§20.4.3.5: a wp:anchor whose positionV relativeFrom is
@@ -1352,7 +1366,7 @@ export function computePages(
       balanceColH = null;
       prevPara = null;
       prevSpaceAfter = 0;
-      measureState.y = section.marginTop;
+      measureState.y = bodyTopPt;
       // Floats are PAGE-scoped (ECMA-376 §20.4.2.x): a new page starts with a
       // clean float set. Columns of the SAME page share floats (see nextColumn).
       measureState.floats = [];
@@ -1381,7 +1395,7 @@ export function computePages(
     y = colTopY;
     prevPara = null;
     prevSpaceAfter = 0;
-    measureState.y = section.marginTop + colTopY;
+    measureState.y = bodyTopPt + colTopY;
   };
   // Overflow handler shared by element placement and paragraph/table splitting:
   // move to the next column if one remains on this page, otherwise to a new page.
@@ -1406,7 +1420,7 @@ export function computePages(
     startIdx: number,
     colWPt: number,
   ): { height: number; terminated: boolean } => {
-    const ms: RenderState = { ...measureState, y: section.marginTop, floats: [], floatParaSeq: 0 };
+    const ms: RenderState = { ...measureState, y: bodyTopPt, floats: [], floatParaSeq: 0 };
     let total = 0;
     let prevAfter = 0;
     let prevP: DocParagraph | null = null;
@@ -1564,7 +1578,7 @@ export function computePages(
       balanceColH = null;
       prevPara = null;
       prevSpaceAfter = 0;
-      measureState.y = section.marginTop;
+      measureState.y = bodyTopPt;
       measureState.floats = [];
       measureState.floatParaSeq = 0;
       // Pre-register page-level wrap floats from the next body element onward
@@ -1615,7 +1629,7 @@ export function computePages(
         // this clears the overprint and the page-fill error regardless.
         const regionBottom = Math.max(maxColBottomY, y);
         y = regionBottom;
-        measureState.y = section.marginTop + regionBottom;
+        measureState.y = bodyTopPt + regionBottom;
         colTopY = regionBottom;
         maxColBottomY = regionBottom;
         prevPara = null;
@@ -1635,7 +1649,7 @@ export function computePages(
         balanceColH = null;
         prevPara = null;
         prevSpaceAfter = 0;
-        measureState.y = section.marginTop;
+        measureState.y = bodyTopPt;
         measureState.floats = [];
         measureState.floatParaSeq = 0;
         // Pre-register page-level wrap floats from the next body element onward
@@ -1909,7 +1923,7 @@ export function computePages(
         // filled their column/page exactly, so the break callback ran between
         // them).
         y = placed.endY;
-        measureState.y = section.marginTop + placed.endY;
+        measureState.y = bodyTopPt + placed.endY;
         // A split footnote-bearing paragraph reserves on the page where it
         // ends. Rare; the separator region re-applies if that page had none.
         if (haveFootnotes && newRefIds.length > 0) {
@@ -1992,11 +2006,11 @@ export function computePages(
           () => colIndex,
           columns,
           () => colTopY,
-          section.marginTop,
+          bodyTopPt,
           () => currentSectionHF,
         );
         y = endY;
-        measureState.y = section.marginTop + endY;
+        measureState.y = bodyTopPt + endY;
       } else {
         // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
         // the rest of this column ⇒ advance to the next column / page.
@@ -2037,6 +2051,19 @@ function footerOverflowPt(footerH: number, marginBottom: number, footerDistance:
 function headerOverflowPt(headerH: number, marginTop: number, headerDistance: number): number {
   if (marginTop < 0) return 0;
   return Math.max(0, headerDistance + headerH - marginTop);
+}
+
+/** ECMA-376 §17.6.11 (pgMar/@top,@bottom): the body text's distance (pt) from the page
+ *  edge is the margin's MAGNITUDE. A non-negative margin insets the body, and the
+ *  header/footer is reserved against it (header/footerOverflowPt push the body further
+ *  in). A NEGATIVE margin measures the body |margin| from the page edge "regardless of
+ *  the header/footer ... and therefore shall overlap the header/footer text" — the
+ *  spec's w:top="-720"/w:bottom="-720" examples place the body ½ inch (|margin|) inside
+ *  the page edge while overlapping the running head/foot (those functions then reserve
+ *  0). Either way the body's inset from the page edge is |margin|. Math.abs is identity
+ *  for the non-negative common case, so this only changes negative-margin documents. */
+function bodyMarginInsetPt(margin: number): number {
+  return Math.abs(margin);
 }
 
 /** Resolve the footer that applies to `pageIndex` with the §17.10.1/§17.10.6
@@ -2202,8 +2229,11 @@ function buildMeasureState(
     dryRun: true,
     marginLeft: section.marginLeft,
     marginRight: section.marginRight,
-    marginTop: section.marginTop,
-    marginBottom: section.marginBottom,
+    // §17.6.11: the measure state's marginTop is the body inset (|margin|) — the base for
+    // the page-absolute region top stamped on slices (splitParagraphAcrossPages' colTopPt),
+    // which must match the paint pass. Never the raw sign. Identity for non-negative.
+    marginTop: bodyMarginInsetPt(section.marginTop),
+    marginBottom: bodyMarginInsetPt(section.marginBottom),
     pageWidth: section.pageWidth,
     floats: [],
     floatParaSeq: 0,
@@ -3194,8 +3224,10 @@ function drawColumnSeparators(
   sec: SectionProps,
   scale: number,
 ): void {
-  const topY = sec.marginTop * scale;
-  const botY = (sec.pageHeight - sec.marginBottom) * scale;
+  // §17.6.11: the separators span the body content band, whose top/bottom are inset from
+  // the page edges by the margins' MAGNITUDE (bodyMarginInsetPt). Identity for non-negative.
+  const topY = bodyMarginInsetPt(sec.marginTop) * scale;
+  const botY = (sec.pageHeight - bodyMarginInsetPt(sec.marginBottom)) * scale;
   ctx.save();
   ctx.strokeStyle = '#000000';
   ctx.lineWidth = Math.max(1, Math.round(0.5 * scale));

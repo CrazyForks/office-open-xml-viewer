@@ -154,17 +154,35 @@ describe('header reserve — content never overlaps a tall header (ECMA-376 §17
     expect(Math.min(...bodyCalls.map((c) => c.y))).toBeGreaterThan(Math.max(...headerY));
   });
 
-  it('does not reserve a header when the top margin is negative (§17.6.11 exception)', async () => {
-    // §17.6.11: a negative top margin measures the main text from the page top
-    // REGARDLESS of the header, so the text overlaps the header and nothing is
-    // reserved. Hence the same body starts at exactly the same y WITH the tall header
-    // as WITHOUT one. (A naive max(0, header extent − top) without the negative-top
-    // guard would wrongly reserve the whole header here, pushing the body down.)
+  it('places the body at |top| below the page top for a negative top margin (§17.6.11)', async () => {
+    // §17.6.11 (pgMar/@top): a negative top margin measures the main text from the top
+    // of the page extent by |top| "regardless of the header ... and therefore shall
+    // overlap the header text". The spec's own example (w:top="-720") puts the body
+    // ½ inch (|top|) BELOW the page top. So with marginTop = −10 the body's first line
+    // must land 10pt below the page top — the SAME place a +10 top margin (no header to
+    // reserve against) puts it — NOT at the raw −10pt offset (which sits ABOVE the page
+    // top, off-canvas). Pre-fix the render path used the raw signed marginTop, so the
+    // body was painted above the page top and diverged from the +10 placement.
     const bodyY = (calls: Call[]) => calls.filter((c) => c.text === 'BODY').map((c) => c.y);
     const negTall = await renderPage0(docWithHeader(body(), tallHeader, { marginTop: -10 }));
     const negNone = await renderPage0(docWithHeader(body(), null, { marginTop: -10 }));
+    const posNone = await renderPage0(docWithHeader(body(), null, { marginTop: 10 }));
 
+    // Sanity: the tall header is still painted (the negative margin only stops the
+    // RESERVE, it does not suppress the header).
     expect(negTall.filter((c) => c.text === 'HDR').length).toBeGreaterThan(0);
+
+    // EXCEPTION: nothing is reserved — the body starts at the same y WITH the tall
+    // header as WITHOUT one (a naive max(0, header extent − top) would wrongly push
+    // it down here).
     expect(Math.min(...bodyY(negTall))).toBeCloseTo(Math.min(...bodyY(negNone)), 1);
+
+    // MAGNITUDE: |−10| places the body exactly where a +10 top margin (no reserve)
+    // does. This is the spec's "measured from the page top by |top|" rule.
+    expect(Math.min(...bodyY(negNone))).toBeCloseTo(Math.min(...bodyY(posNone)), 1);
+
+    // DIRECTION: the body's first line sits BELOW the page top (positive y), not
+    // off-canvas above it as the raw negative offset would place it.
+    expect(Math.min(...bodyY(negNone))).toBeGreaterThan(0);
   });
 });
