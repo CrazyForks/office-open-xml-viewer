@@ -2,7 +2,7 @@ use crate::styles::{parse_run_fmt, RunFmt};
 use crate::xml_util::*;
 use ooxml_common::blip::mime_from_ext;
 use roxmltree::Document as XmlDoc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
 /// into pt. Supports the units Word emits for picture-bullet shapes: `pt`
@@ -115,8 +115,20 @@ pub struct NumberingMap {
     num_to_abstract: HashMap<u32, u32>,
     /// numId → level override starts
     num_overrides: HashMap<u32, HashMap<u32, u32>>,
-    /// per-numId per-level counter
+    /// per-**abstractNumId** per-level counter. ECMA-376 §17.9: the running
+    /// count belongs to the abstract numbering definition, so every `<w:num>`
+    /// (numId) that references the same `<w:abstractNum>` shares one counter —
+    /// that is how Word's "continue previous list" works and how a restart on
+    /// one numId carries into the next (sample-13's masthead: numId=30 with a
+    /// `<w:startOverride>` restarts abstractNumId 20 to 1, then the body's
+    /// numId=6 — same abstract — continues 2, 3, 4 rather than resuming its own
+    /// page-1 tail at 5, 6, 7).
     pub counters: HashMap<u32, HashMap<u32, u32>>,
+    /// (numId, level) pairs already advanced at least once. A numId carrying a
+    /// `<w:lvlOverride><w:startOverride>` restarts the shared abstract counter
+    /// only on its FIRST appearance at that level (§17.9.6 / §17.9.7); afterward
+    /// it increments the shared counter like any other num on the abstract.
+    started: HashSet<(u32, u32)>,
 }
 
 impl NumberingMap {
@@ -303,39 +315,66 @@ impl NumberingMap {
         self.get_level(num_id, level).map(|l| l.start).unwrap_or(1)
     }
 
-    /// Advance counter for (numId, level), resetting deeper levels.
+    /// Advance the counter for (numId, level), resetting deeper levels.
     ///
-    /// `counters` stores each level's CURRENT displayed value (not the next):
-    /// a level's first appearance shows its `start`, each later advance adds
-    /// one, and advancing a level clears all deeper levels (§17.9.25 default
-    /// `lvlRestart`). Shallower levels are seeded to their `start` so an
-    /// ancestor that only prefixes the marker (e.g. `%1.%2`) still resolves
-    /// when it is never advanced on its own. Returns the value to display.
+    /// The counter is keyed by the numId's **abstractNumId**, so all numIds that
+    /// share an abstract definition advance one running count (§17.9 — see the
+    /// `counters` field doc). Each level stores its CURRENT displayed value (not
+    /// the next): a level's first appearance shows its `start`, each later
+    /// advance adds one, and advancing a level clears all deeper levels (§17.9.25
+    /// default `lvlRestart`). Shallower levels are seeded to their `start` so an
+    /// ancestor that only prefixes the marker (e.g. `%1.%2`) still resolves when
+    /// it is never advanced on its own.
+    ///
+    /// A numId whose `<w:lvlOverride>` carries a `<w:startOverride>` for this
+    /// level RESTARTS the shared abstract counter to the override value on its
+    /// first appearance at that level (§17.9.6 / §17.9.7), then increments
+    /// normally. Returns the value to display.
     pub fn advance(&mut self, num_id: u32, level: u32) -> u32 {
-        // Pre-compute start values to avoid borrow conflicts
+        // Pre-compute start values to avoid borrow conflicts. `get_start`
+        // already folds in any per-numId `<w:startOverride>` for the level.
         let starts: Vec<u32> = (0..=level).map(|l| self.get_start(num_id, l)).collect();
+        let abstract_id = self.abstract_of(num_id);
+        let has_override = self
+            .num_overrides
+            .get(&num_id)
+            .is_some_and(|m| m.contains_key(&level));
+        // `insert` returns true when the pair was NOT already present.
+        let first_for_num = self.started.insert((num_id, level));
 
-        let entry = self.counters.entry(num_id).or_default();
+        let entry = self.counters.entry(abstract_id).or_default();
 
-        // Reset deeper levels
+        // Reset deeper levels (§17.9.25 default lvlRestart).
         let keys: Vec<u32> = entry.keys().copied().filter(|&l| l > level).collect();
         for k in keys {
             entry.remove(&k);
         }
 
         // Seed shallower levels to their start (their displayed value when they
-        // are never advanced themselves).
+        // are never advanced themselves) — but never clobber a live ancestor.
         for (lvl, &start) in starts.iter().enumerate().take(level as usize) {
             entry.entry(lvl as u32).or_insert(start);
         }
 
-        // Current level: first appearance shows start, otherwise increment.
-        let val = match entry.get(&level) {
-            Some(&v) => v + 1,
-            None => starts[level as usize],
+        // A startOverride restarts the shared counter on first use of this num;
+        // otherwise the level shows `start` on its first appearance on the
+        // abstract and increments thereafter.
+        let val = if first_for_num && has_override {
+            starts[level as usize]
+        } else {
+            match entry.get(&level) {
+                Some(&v) => v + 1,
+                None => starts[level as usize],
+            }
         };
         entry.insert(level, val);
         val
+    }
+
+    /// The abstractNumId a numId resolves to, falling back to the numId itself
+    /// when the `<w:num>` is unknown (keeps an orphan num self-consistent).
+    fn abstract_of(&self, num_id: u32) -> u32 {
+        self.num_to_abstract.get(&num_id).copied().unwrap_or(num_id)
     }
 
     /// Resolve the display text for a counter value in the given level.
@@ -353,6 +392,7 @@ impl NumberingMap {
         let Some(lvl) = self.get_level(num_id, level) else {
             return format!("{}.", counter);
         };
+        let abstract_id = self.abstract_of(num_id);
 
         let mut text = lvl.text.clone();
         // Replace from the deepest placeholder down so "%1" can never partially
@@ -363,7 +403,7 @@ impl NumberingMap {
                 counter
             } else {
                 self.counters
-                    .get(&num_id)
+                    .get(&abstract_id)
                     .and_then(|m| m.get(&k))
                     .copied()
                     .unwrap_or_else(|| self.get_start(num_id, k))
@@ -641,5 +681,52 @@ mod tests {
         m.advance(2, 0);
         let c = m.advance(2, 1);
         assert_eq!(m.resolve_text(2, 1, c), "A.1");
+    }
+
+    /// §17.9 — two numIds that reference the SAME abstractNum share one running
+    /// counter. sample-13's masthead: the article body numbers headings with
+    /// numId=6 (1..4), then a section restarts via numId=30 (same abstract 20,
+    /// a `<w:startOverride w:val="1"/>`) and the body resumes with numId=6. Word
+    /// shows 1, 2, 3, 4 across the restart — NOT 5, 6, 7 — because the count is
+    /// owned by abstract 20, not by each numId.
+    #[test]
+    fn shared_abstract_counter_restarts_on_start_override() {
+        let mut m = map(r#"<w:abstractNum w:abstractNumId="20">
+                 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+               </w:abstractNum>
+               <w:num w:numId="6"><w:abstractNumId w:val="20"/></w:num>
+               <w:num w:numId="30"><w:abstractNumId w:val="20"/>
+                 <w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>
+               </w:num>"#);
+        // Article body (numId=6): 1, 2, 3, 4.
+        for expected in ["1.", "2.", "3.", "4."] {
+            let c = m.advance(6, 0);
+            assert_eq!(m.resolve_text(6, 0, c), expected);
+        }
+        // Masthead heading restarts the shared abstract counter to 1 (numId=30).
+        let c = m.advance(30, 0);
+        assert_eq!(m.resolve_text(30, 0, c), "1.");
+        // Body resumes with numId=6 — continues the restarted count: 2, 3, 4.
+        for expected in ["2.", "3.", "4."] {
+            let c = m.advance(6, 0);
+            assert_eq!(m.resolve_text(6, 0, c), expected);
+        }
+    }
+
+    /// A bare `<w:num>` with no override but sharing an abstract with another
+    /// num continues the shared count (no accidental per-numId restart).
+    #[test]
+    fn shared_abstract_counter_continues_across_numids() {
+        let mut m = map(r#"<w:abstractNum w:abstractNumId="7">
+                 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+               </w:abstractNum>
+               <w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num>
+               <w:num w:numId="2"><w:abstractNumId w:val="7"/></w:num>"#);
+        let a = m.advance(1, 0);
+        assert_eq!(m.resolve_text(1, 0, a), "1.");
+        let b = m.advance(2, 0); // different numId, same abstract ⇒ continues
+        assert_eq!(m.resolve_text(2, 0, b), "2.");
+        let c = m.advance(1, 0);
+        assert_eq!(m.resolve_text(1, 0, c), "3.");
     }
 }
