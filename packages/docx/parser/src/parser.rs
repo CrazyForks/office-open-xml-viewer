@@ -21,10 +21,53 @@ type Zip<'a> = ZipArchive<std::io::Cursor<&'a [u8]>>;
 
 /// Section-level header/footer references collected from sectPr.
 /// Maps reference type ("default" | "first" | "even") to the target xml path (e.g. "header1.xml").
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct SectionRefs {
     headers: HashMap<String, String>,
     footers: HashMap<String, String>,
+}
+
+/// A section's effective header/footer set + its own `<w:titlePg>` flag, ready to
+/// stamp on the `SectionBreak` marker that ends that section. Loaded from the
+/// package zip after `resolve_section_refs` computes each section's inherited
+/// reference snapshot (ECMA-376 §17.10.1).
+#[derive(Default, Clone)]
+struct ResolvedSectionHf {
+    headers: HeadersFooters,
+    footers: HeadersFooters,
+    title_page: bool,
+}
+
+/// ECMA-376 §17.10.1 — resolve each section's EFFECTIVE header/footer references
+/// with inheritance preserved. Walks every `<w:sectPr>` in `body_node` in
+/// document order (mid-body sectPrs in pPr / loose, then the body-level one last),
+/// maintaining a running `SectionRefs`: for each section it merges THAT section's
+/// own references onto the running state (so a section that omits a reference of a
+/// given type inherits the previous section's — e.g. sample-12's running header
+/// declared only on the first section), then SNAPSHOTS the running state as that
+/// section's effective set.
+///
+/// `<w:titlePg>` is NOT inherited: each snapshot carries its own sectPr's flag.
+///
+/// Returns one `(NodeId, SectionRefs, title_page)` per sectPr, keyed by the sectPr
+/// node id so `parse_body_elements` can attach the resolved set to the matching
+/// `SectionBreak` marker (and `parse()` resolve the body-level one for
+/// `Document.headers/footers`).
+fn resolve_section_refs(
+    body_node: roxmltree::Node,
+    rel_map: &HashMap<String, String>,
+) -> Vec<(roxmltree::NodeId, SectionRefs, bool)> {
+    let mut running = SectionRefs::default();
+    let mut out = Vec::new();
+    for sp in body_node
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "sectPr")
+    {
+        merge_section_refs(sp, rel_map, &mut running);
+        let title_page = child_w(sp, "titlePg").is_some();
+        out.push((sp.id(), running.clone(), title_page));
+    }
+    out
 }
 
 pub fn parse(data: &[u8]) -> Result<Document, String> {
@@ -145,20 +188,54 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
 
     let (section, _body_refs) = parse_section(sect_pr, &rel_map);
 
-    // ECMA-376 §17.10.1 — header/footer references inherit across sections: a
-    // section that omits a reference of a given type uses the previous section's.
-    // The single-section render model (#513) drives one effective header/footer
-    // set, so accumulate references from EVERY sectPr in document order (the body
-    // sectPr last ⇒ it wins for types it specifies, earlier sections fill the
-    // rest). Without this, a header declared only on the first section's sectPr
-    // (e.g. sample-12's running "Journal of …" header) is dropped because the
-    // body-level sectPr carries no reference.
-    let mut refs = SectionRefs::default();
-    for sp in body_node
-        .descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "sectPr")
-    {
-        merge_section_refs(sp, &rel_map, &mut refs);
+    // ECMA-376 §17.10.1 — header/footer references inherit across sections, but
+    // each section keeps its OWN effective set (a "first" footer declared on the
+    // title section must not be overwritten by a later section's "first" footer).
+    // Resolve every section's inherited reference snapshot in document order, then
+    // load each from the package. The body-level (last) sectPr's snapshot drives
+    // `Document.headers/footers`; every non-final section's snapshot is stamped on
+    // its `SectionBreak` marker (in `parse_body_elements`) so the renderer can pick
+    // the active section's header/footer per page. (The previous single global
+    // accumulation collapsed all sections into one set, dropping section 0's
+    // first-page footer — e.g. sample-13's "DOI: …" line — and its titlePg flag.)
+    let section_snapshots = resolve_section_refs(body_node, &rel_map);
+    let body_level_sect_id = sect_pr.map(|n| n.id());
+
+    // Load each section's snapshot into a per-node resolved set. The body-level
+    // sectPr's resolved set is held out for Document.headers/footers.
+    let mut section_hf: HashMap<roxmltree::NodeId, ResolvedSectionHf> = HashMap::new();
+    let mut body_headers = HeadersFooters::default();
+    let mut body_footers = HeadersFooters::default();
+    for (node_id, refs, title_page) in &section_snapshots {
+        let headers = load_header_footer_set(
+            &mut zip,
+            &refs.headers,
+            "hdr",
+            &style_map,
+            &mut num_map,
+            &theme,
+        );
+        let footers = load_header_footer_set(
+            &mut zip,
+            &refs.footers,
+            "ftr",
+            &style_map,
+            &mut num_map,
+            &theme,
+        );
+        if Some(*node_id) == body_level_sect_id {
+            body_headers = headers;
+            body_footers = footers;
+        } else {
+            section_hf.insert(
+                *node_id,
+                ResolvedSectionHf {
+                    headers,
+                    footers,
+                    title_page: *title_page,
+                },
+            );
+        }
     }
 
     let body = parse_body_elements(
@@ -168,24 +245,11 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         &media_map,
         &rel_map,
         &theme,
+        &section_hf,
     );
 
-    let headers = load_header_footer_set(
-        &mut zip,
-        &refs.headers,
-        "hdr",
-        &style_map,
-        &mut num_map,
-        &theme,
-    );
-    let footers = load_header_footer_set(
-        &mut zip,
-        &refs.footers,
-        "ftr",
-        &style_map,
-        &mut num_map,
-        &theme,
-    );
+    let headers = body_headers;
+    let footers = body_footers;
 
     let major_font = theme.theme_font("major", "latin");
     let minor_font = theme.theme_font("minor", "latin");
@@ -413,6 +477,7 @@ fn parse_notes(
         if id.is_empty() || id == "-1" || id == "0" || is_special {
             continue;
         }
+        // Footnote/endnote bodies carry no nested sections; pass an empty map.
         let content = parse_body_elements(
             n,
             style_map,
@@ -420,6 +485,7 @@ fn parse_notes(
             &local_media_map,
             &local_rel_map,
             theme,
+            &HashMap::new(),
         );
         out.push(crate::types::DocxNote { id, content });
     }
@@ -792,6 +858,7 @@ fn body_children_with_cover_breaks<'a, 'input>(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_body_elements(
     body_node: roxmltree::Node,
     style_map: &StyleMap,
@@ -799,6 +866,7 @@ fn parse_body_elements(
     media_map: &HashMap<String, String>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
+    section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
 ) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
     // The body-level sectPr (the last element) defines the final section and
@@ -879,7 +947,7 @@ fn parse_body_elements(
                         if let Some(sect_pr) =
                             child_w(child, "pPr").and_then(|ppr| child_w(ppr, "sectPr"))
                         {
-                            body.push(section_break_element(sect_pr));
+                            body.push(section_break_element(sect_pr, section_hf));
                         }
                     }
                 }
@@ -893,7 +961,7 @@ fn parse_body_elements(
             // pPr-nested case above). The final body-level sectPr only defines
             // section settings (surfaced on Document.section) — skip it.
             "sectPr" if Some(child.id()) != body_level_sect_id => {
-                body.push(section_break_element(child));
+                body.push(section_break_element(child, section_hf));
             }
             _ => {}
         }
@@ -1120,7 +1188,10 @@ fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
 /// come from `<w:br w:type="column"/>` ⇒ `ColumnBreak`); the renderer would
 /// otherwise have no defined column geometry to advance into across a section
 /// boundary.
-fn section_break_element(sect_pr: roxmltree::Node) -> BodyElement {
+fn section_break_element(
+    sect_pr: roxmltree::Node,
+    section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
+) -> BodyElement {
     let kind = match read_section_break_type(sect_pr).as_deref() {
         Some("continuous") => "continuous",
         Some("oddPage") => "oddPage",
@@ -1128,9 +1199,16 @@ fn section_break_element(sect_pr: roxmltree::Node) -> BodyElement {
         _ => "nextPage",
     }
     .to_string();
+    // ECMA-376 §17.10.1 — the resolved (inherited) header/footer set for this
+    // ending section + its own titlePg flag, pre-loaded in `parse()`. Empty when
+    // unavailable (e.g. the `body_from` test harness has no package to load from).
+    let resolved = section_hf.get(&sect_pr.id()).cloned().unwrap_or_default();
     BodyElement::SectionBreak {
         kind,
         columns: parse_columns(sect_pr),
+        headers: resolved.headers,
+        footers: resolved.footers,
+        title_page: resolved.title_page,
     }
 }
 
@@ -1199,6 +1277,9 @@ fn load_header_footer_set(
             continue;
         };
 
+        // Header/footer bodies carry no nested sections, so pass an empty
+        // section-resolution map (any stray sectPr would only produce an empty
+        // resolved set, never recursing into header loading).
         let body = parse_body_elements(
             root,
             style_map,
@@ -1206,6 +1287,7 @@ fn load_header_footer_set(
             &local_media_map,
             &local_rel_map,
             theme,
+            &HashMap::new(),
         );
         let hf = HeaderFooter { body };
         match kind.as_str() {
@@ -5725,6 +5807,7 @@ mod tests {
             &media,
             &rels,
             &theme,
+            &HashMap::new(),
         );
         let texts: Vec<&TextRun> = elems
             .iter()
@@ -6350,6 +6433,7 @@ mod cs_toggle_tests {
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
+            &HashMap::new(),
         );
         for e in elems {
             if let BodyElement::Paragraph(p) = e {
@@ -6403,6 +6487,7 @@ mod cs_toggle_tests {
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
+            &HashMap::new(),
         );
         for e in elems {
             if let BodyElement::Paragraph(p) = e {
@@ -6590,6 +6675,7 @@ mod rtl_tests {
             &media_map,
             &rel_map,
             &theme,
+            &HashMap::new(),
         )
     }
 
@@ -7009,6 +7095,7 @@ mod footnote_tests {
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
+            &HashMap::new(),
         );
         for e in elems {
             if let BodyElement::Paragraph(p) = e {
@@ -7781,6 +7868,7 @@ mod column_tests {
             &media_map,
             &rel_map,
             &theme,
+            &HashMap::new(),
         )
     }
 
@@ -8174,7 +8262,7 @@ mod column_tests {
         assert_eq!(body.len(), 2);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         match &body[1] {
-            BodyElement::SectionBreak { kind, columns } => {
+            BodyElement::SectionBreak { kind, columns, .. } => {
                 assert_eq!(kind, "continuous");
                 let c = columns.as_ref().expect("num=3 ⇒ multi-column");
                 assert_eq!(c.count, 3);
@@ -8203,7 +8291,7 @@ mod column_tests {
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         match &body[1] {
-            BodyElement::SectionBreak { kind, columns } => {
+            BodyElement::SectionBreak { kind, columns, .. } => {
                 assert_eq!(kind, "nextPage");
                 assert!(columns.is_none(), "single-column ⇒ None");
             }
@@ -8226,12 +8314,91 @@ mod column_tests {
         // sectPr skipped.
         assert_eq!(body.len(), 3);
         match &body[1] {
-            BodyElement::SectionBreak { kind, columns } => {
+            BodyElement::SectionBreak { kind, columns, .. } => {
                 assert_eq!(kind, "oddPage");
                 assert!(columns.is_none());
             }
             other => panic!("expected SectionBreak, got {other:?}"),
         }
+    }
+
+    /// ECMA-376 §17.10.1 — per-section header/footer references resolve with
+    /// INHERITANCE preserved: a section that omits a reference of a given type
+    /// keeps the previous section's, but a section that DECLARES its own value
+    /// overwrites only that type (and must not leak into the earlier section's
+    /// snapshot). `<w:titlePg>` is NOT inherited — each snapshot carries its own
+    /// sectPr's flag. This is the model that lets sample-13's title section keep
+    /// its `first` footer (the DOI line) while a later masthead section declares a
+    /// different `first` footer.
+    #[test]
+    fn resolve_section_refs_preserves_per_section_inheritance() {
+        // Section 0: first=footerA, default=footerD, titlePg.
+        // Section 1: first=footerB only (default inherits footerD; no titlePg).
+        let xml = format!(
+            r#"<w:document xmlns:w="{w}" xmlns:r="{r}"><w:body>
+                 <w:p><w:pPr><w:sectPr>
+                   <w:footerReference w:type="first" r:id="ridA"/>
+                   <w:footerReference w:type="default" r:id="ridD"/>
+                   <w:titlePg/>
+                 </w:sectPr></w:pPr></w:p>
+                 <w:p><w:r><w:t>body</w:t></w:r></w:p>
+                 <w:sectPr>
+                   <w:footerReference w:type="first" r:id="ridB"/>
+                 </w:sectPr>
+               </w:body></w:document>"#,
+            w = W_NS,
+            r = R_NS,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body_node = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let rel_map: HashMap<String, String> = [
+            ("ridA".to_string(), "footerA.xml".to_string()),
+            ("ridB".to_string(), "footerB.xml".to_string()),
+            ("ridD".to_string(), "footerD.xml".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let snaps = resolve_section_refs(body_node, &rel_map);
+        assert_eq!(snaps.len(), 2, "two sections");
+
+        // Section 0 snapshot: first=footerA, default=footerD, titlePg=true.
+        let (_id0, refs0, tp0) = &snaps[0];
+        assert!(tp0, "section 0 declares <w:titlePg>");
+        assert_eq!(
+            refs0.footers.get("first").map(String::as_str),
+            Some("footerA.xml")
+        );
+        assert_eq!(
+            refs0.footers.get("default").map(String::as_str),
+            Some("footerD.xml")
+        );
+
+        // Section 1 (body-level) snapshot: first OVERWRITTEN to footerB; default
+        // INHERITED from section 0 (footerD); titlePg NOT inherited (false).
+        let (_id1, refs1, tp1) = &snaps[1];
+        assert!(!tp1, "section 1 has no <w:titlePg> — not inherited");
+        assert_eq!(
+            refs1.footers.get("first").map(String::as_str),
+            Some("footerB.xml"),
+            "section 1's own first reference wins"
+        );
+        assert_eq!(
+            refs1.footers.get("default").map(String::as_str),
+            Some("footerD.xml"),
+            "section 1 inherits section 0's default footer (§17.10.1)"
+        );
+
+        // Inheritance must not retroactively mutate section 0's snapshot.
+        assert_eq!(
+            refs0.footers.get("first").map(String::as_str),
+            Some("footerA.xml"),
+            "section 0 keeps its own first footer (snapshot is independent)"
+        );
     }
 }
 
@@ -8611,6 +8778,7 @@ mod numbering_marker_font_tests {
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
+            &HashMap::new(),
         );
         elems
             .into_iter()
@@ -8699,6 +8867,7 @@ mod numbering_marker_font_tests {
             &HashMap::new(),
             &HashMap::new(),
             &ThemeColors::default(),
+            &HashMap::new(),
         );
         let para = elems
             .into_iter()

@@ -270,6 +270,24 @@ pub enum BodyElement {
         /// full-width column.
         #[serde(skip_serializing_if = "Option::is_none")]
         columns: Option<ColumnsSpec>,
+        /// ECMA-376 §17.10.1 — the resolved header set for the section that ENDS
+        /// at this marker (its own `<w:headerReference>`s layered onto the
+        /// inherited running state, then loaded from the package). Lets the
+        /// renderer pick the active section's header per page, exactly as
+        /// `columns` lets it pick the section's column geometry. Empty when no
+        /// section in the inheritance chain declared a header.
+        #[serde(default)]
+        headers: HeadersFooters,
+        /// ECMA-376 §17.10.1 — the resolved footer set for the section that ENDS
+        /// at this marker (see `headers`). sample-13's first section declares a
+        /// `first` footer (the DOI line) here; the renderer renders it on that
+        /// section's first page.
+        #[serde(default)]
+        footers: HeadersFooters,
+        /// ECMA-376 §17.10.1 `<w:titlePg>` — whether THIS ending section has a
+        /// distinct first-page header/footer. NOT inherited (each sectPr's flag
+        /// stands alone, like the body-level `Document.section.title_page`).
+        title_page: bool,
     },
 }
 
