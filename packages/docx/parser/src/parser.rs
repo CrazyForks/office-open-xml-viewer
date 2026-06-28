@@ -47,7 +47,8 @@ struct ResolvedSectionHf {
 /// declared only on the first section), then SNAPSHOTS the running state as that
 /// section's effective set.
 ///
-/// `<w:titlePg>` is NOT inherited: each snapshot carries its own sectPr's flag.
+/// `<w:titlePg>` (§17.10.6) is NOT inherited: each snapshot carries its own
+/// sectPr's flag (only the header/footer references inherit, §17.10.1).
 ///
 /// Returns one `(NodeId, SectionRefs, title_page)` per sectPr, keyed by the sectPr
 /// node id so `parse_body_elements` can attach the resolved set to the matching
