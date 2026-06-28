@@ -5691,14 +5691,29 @@ function layoutLines(
     const wForFit = w - trailingSpaceW;
     const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
 
-    // Small-caps glued group: when THIS segment starts a glued group (its
-    // followers in the queue are `joinPrev` case-pieces of the SAME word — e.g.
-    // "I" then "NTRODUCTION"), the whole group must stay on one line. The
-    // per-segment wrap below would let the reduced remainder spill to the next
-    // line. Pre-measure the group and, if it does not fit on the current
-    // (non-empty) line, flush so it starts fresh. (If the group is wider than a
-    // full line it still char-breaks via the over-long-word path below.)
-    if (!s.joinPrev && currentLine.length > 0 && (queue[0] as LayoutTextSeg | undefined)?.joinPrev) {
+    // Atomic glued group: when THIS segment starts a glued group (its followers
+    // in the queue are `joinPrev` pieces — small-caps case-pieces of the SAME
+    // word like "I" then "NTRODUCTION", or a UAX#14 LB13 non-starter authored in
+    // its own run like a trailing "," / "。"), the per-segment wrap below would
+    // let the group split across lines. Pre-measure it and, if it does not fit on
+    // the current (non-empty) line, flush so it starts fresh.
+    //
+    // ONLY when the lead segment is NOT itself CJK-breakable. A glued group whose
+    // lead is a CJK run (e.g. "…通過する" + "。") is NOT atomic: the run splits at
+    // an inter-CJK boundary and the trailing non-starter stays on its LAST piece
+    // (§17.3.1.16 kinsoku keeps it off the next line's head when enabled — the
+    // default; with kinsoku off it may lead the line, as it did before PR #602).
+    // Pre-flushing the whole run instead leaves the prior line far short, which a
+    // `both` line then stretches wide (sample-9). `joinPrev` stays a pure "this is
+    // a non-starter" marker; the atomic-vs-breakable decision lives HERE. A
+    // non-breakable Latin / small-caps lead is genuinely atomic, so the pre-flush
+    // (and the over-long-word char-break path below) still applies there.
+    if (
+      !s.joinPrev &&
+      currentLine.length > 0 &&
+      (queue[0] as LayoutTextSeg | undefined)?.joinPrev &&
+      !hasCJKBreakOpportunity(s.text)
+    ) {
       let groupW = w;
       let groupTrail = trailingSpaceW;
       for (let k = 0; k < queue.length && (queue[k] as LayoutTextSeg).joinPrev; k++) {
