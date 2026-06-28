@@ -5659,14 +5659,27 @@ function layoutLines(
     const wForFit = w - trailingSpaceW;
     const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
 
-    // Small-caps glued group: when THIS segment starts a glued group (its
-    // followers in the queue are `joinPrev` case-pieces of the SAME word — e.g.
-    // "I" then "NTRODUCTION"), the whole group must stay on one line. The
-    // per-segment wrap below would let the reduced remainder spill to the next
-    // line. Pre-measure the group and, if it does not fit on the current
-    // (non-empty) line, flush so it starts fresh. (If the group is wider than a
-    // full line it still char-breaks via the over-long-word path below.)
-    if (!s.joinPrev && currentLine.length > 0 && (queue[0] as LayoutTextSeg | undefined)?.joinPrev) {
+    // Atomic glued group: when THIS segment starts a glued group (its followers
+    // in the queue are `joinPrev` pieces — small-caps case-pieces of the SAME
+    // word like "I" then "NTRODUCTION", or a UAX#14 LB13 non-starter authored in
+    // its own run like a trailing "," / "。"), the per-segment wrap below would
+    // let the group split across lines. Pre-measure it and, if it does not fit on
+    // the current (non-empty) line, flush so it starts fresh.
+    //
+    // ONLY when the lead segment is NOT itself CJK-breakable, though. A glued
+    // group whose lead is a CJK run (e.g. "…通過する" + "。") is NOT atomic — the
+    // run can split at any inter-CJK boundary, with the trailing non-starter
+    // staying on the run's LAST piece (kinsoku keeps it off the next line's
+    // head). Pre-flushing it instead pushes the whole run down and leaves the
+    // prior line far short, which a `both` line then stretches wide (sample-9).
+    // For a non-breakable Latin/small-caps lead the group truly is atomic, so the
+    // pre-flush (and the over-long-word char-break path below) still applies.
+    if (
+      !s.joinPrev &&
+      currentLine.length > 0 &&
+      (queue[0] as LayoutTextSeg | undefined)?.joinPrev &&
+      !hasCJKBreakOpportunity(s.text)
+    ) {
       let groupW = w;
       let groupTrail = trailingSpaceW;
       for (let k = 0; k < queue.length && (queue[k] as LayoutTextSeg).joinPrev; k++) {
