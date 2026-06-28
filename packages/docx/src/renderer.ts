@@ -5888,10 +5888,16 @@ export function renderShapeText(
   // ECMA-376 §17.3.1.33 — each text-box paragraph's own spaceBefore/After is
   // reserved inside the box (px). sample-13's "Journal homepage" line carries
   // spaceBefore = 50 pt, which drops it well below the box top so it clears the
-  // masthead banner instead of hiding behind it.
+  // masthead banner instead of hiding behind it. The gap BETWEEN two paragraphs
+  // is max(prev.after, this.before) — NOT their sum (same collapse the body uses);
+  // the first block reserves only its own before, and a trailing after overflows
+  // the box (it is not part of the laid-out block extent, so it is excluded from
+  // totalH used for ctr/bottom anchoring).
   const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
   const spAfter = blocks.map((b) => (b.spaceAfter ?? 0) * scale);
-  const totalH = layouts.reduce((s, l, i) => s + spBefore[i] + blockHeight(l) + spAfter[i], 0);
+  const gapBefore = (i: number): number =>
+    i > 0 ? Math.max(spBefore[i], spAfter[i - 1]) : spBefore[i];
+  const totalH = layouts.reduce((s, l, i) => s + gapBefore(i) + blockHeight(l), 0);
 
   const anchor = shape.textAnchor ?? 't';
   let cursorY: number;
@@ -5907,9 +5913,9 @@ export function renderShapeText(
     const block = blocks[i];
     const layout = layouts[i];
 
-    // Reserve this paragraph's spaceBefore (and the previous paragraph's
-    // spaceAfter) above it, mirroring the body's inter-paragraph advance.
-    cursorY += spBefore[i] + (i > 0 ? spAfter[i - 1] : 0);
+    // Reserve the gap above this paragraph: its own spaceBefore collapsed with
+    // the previous paragraph's spaceAfter (max, not sum — §17.3.1.33).
+    cursorY += gapBefore(i);
 
     if (layout.kind === 'image') {
       // Inline image inside the text box. Fit to inner width, place
