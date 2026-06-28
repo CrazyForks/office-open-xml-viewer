@@ -715,15 +715,19 @@ export async function renderDocumentToCanvas(
     renderHeaderFooter(header, sec.headerDistance * scale, baseState);
   }
 
-  // Footer: anchored from bottom, rising by its measured height
-  const footer = pickHeaderFooter(
-    pageSection.footers, pageSection.isFirstPageOfSection, isEvenPage,
-    pageSection.titlePage, doc.section.evenAndOddHeaders,
-  );
+  // Footer: anchored from bottom, rising by its measured height. A footer taller
+  // than its bottom-margin allowance (§17.6.11) overflows the content area; the body
+  // was already paginated to clear it (paginateWithFooterReserve), and the same
+  // overflow raises the footnote block below so notes clear it too.
+  const footer = resolvePageFooter(pages, pageIndex, doc);
+  let footerReservePx = 0;
   if (footer) {
     const footerHeight = measureHeaderFooterHeight(footer, baseState);
     const footerTopY = cssHeight - sec.footerDistance * scale - footerHeight;
     renderHeaderFooter(footer, footerTopY, baseState);
+    // §17.6.11 overflow in device px (footerHeight is at canvas scale), via the shared
+    // formula so the footnote clearance matches the pagination reserve exactly.
+    footerReservePx = footerOverflowPt(footerHeight, sec.marginBottom * scale, sec.footerDistance * scale);
   }
 
   // Body. ECMA-376 §17.6.4: lay out body text in EACH section's newspaper columns
@@ -760,7 +764,7 @@ export async function renderDocumentToCanvas(
   // Footnotes referenced on this page (ECMA-376 §17.11): drawn at the bottom of
   // the text column, above a short separator rule. The page area was already
   // reserved during pagination so the body stops short of them.
-  drawPageFootnotes(elements, doc, baseState, scale, cssHeight, sec);
+  drawPageFootnotes(elements, doc, baseState, scale, cssHeight, sec, footerReservePx);
 
   // Endnotes (§17.11 endnotePr default position = document end) on the last
   // page, after the body flow. Minimal impl: a heading-less list at doc end.
@@ -794,6 +798,7 @@ function drawPageFootnotes(
   scale: number,
   cssHeight: number,
   sec: SectionProps,
+  footerReservePx = 0,
 ): void {
   if (!doc.footnotes || doc.footnotes.length === 0) return;
   const noteById = indexNotes(doc.footnotes);
@@ -829,7 +834,9 @@ function drawPageFootnotes(
   }
   const contentPt = Math.max(0, totalPt - lastTrailingPt);
   const gapPx = FOOTNOTE_SEPARATOR_GAP_PT * scale;
-  const blockTopY = cssHeight - sec.marginBottom * scale - contentPt * scale;
+  // Clear a footer taller than the bottom margin (§17.6.11): the footnote block, like
+  // the body, sits above the footer's overflow (footerReservePx), not just the margin.
+  const blockTopY = cssHeight - sec.marginBottom * scale - footerReservePx - contentPt * scale;
 
   // Separator rule: short left-aligned line (Word's default footnote separator,
   // ~1/3 of the text width), centered in the gap above the notes.
@@ -1968,19 +1975,47 @@ export function computePages(
   return pages;
 }
 
-/** Paginate with a throwaway measure context. Pagination must use the same
- *  fontFamilyClasses + kinsoku rules as the render path, otherwise line-break
- *  decisions (and thus page breaks) diverge between measurement and paint
- *  (ECMA-376 §17.15.1.58–.60). Shared by the main-thread DocxDocument and the
- *  render worker so the two modes can never paginate differently. */
+/** ECMA-376 §17.6.11 (pgMar/@bottom): the main-document text bottom is placed at the
+ *  GREATER of the bottom margin and the footer's extent — a footer taller than the
+ *  bottom-margin allowance pushes content up. Returns the pt by which a footer of
+ *  height `footerH` overflows the bottom margin and must be reserved (content ends at
+ *  the footer's top, `footerDistance + footerH` from the page bottom). A NEGATIVE
+ *  bottom margin means the text is measured from the page bottom regardless of the
+ *  footer — it overlaps the footer — so nothing is reserved. Unit-agnostic: pass all
+ *  three args in one unit (pt for the pagination reserve, px for paint-time footnote
+ *  clearance). */
+function footerOverflowPt(footerH: number, marginBottom: number, footerDistance: number): number {
+  if (marginBottom < 0) return 0;
+  return Math.max(0, footerDistance + footerH - marginBottom);
+}
+
+/** Resolve the footer that applies to `pageIndex` with the §17.10.1/§17.10.6
+ *  first/even/default precedence (resolvePageSection + pickHeaderFooter), or null if
+ *  none. One selection shared by the reserve pass, the footer paint, and the footnote
+ *  clearance so all three size and place the SAME footer. */
+function resolvePageFooter(
+  pages: PaginatedBodyElement[][],
+  pageIndex: number,
+  doc: DocxDocumentModel,
+): HeaderFooter | null {
+  const ps = resolvePageSection(pages, pageIndex, doc);
+  return pickHeaderFooter(
+    ps.footers, ps.isFirstPageOfSection, pageIndex % 2 === 1, ps.titlePage, doc.section.evenAndOddHeaders,
+  );
+}
+
+/** Below this (pt) a footer's overflow is sub-point noise — skip the second
+ *  pagination pass when no page's footer overflows by at least this much. */
+const MIN_FOOTER_OVERFLOW_PT = 0.5;
+
 /**
- * ECMA-376 §17.10.1 — per-page pt to reserve at the bottom of the content area for
- * a footer taller than the bottom-margin allowance. A footer sits at
- * `footerTopY = pageHeight − footerDistance − footerHeight`; when
- * `footerHeight > marginBottom − footerDistance` its top rises ABOVE the content
- * bottom (pageHeight − marginBottom) and overlaps body text. Reserve that overflow
- * so the paginator keeps content clear of the footer (matches Word, which never
- * lays body text over a footer). A footer that fits the margin reserves 0.
+ * ECMA-376 §17.6.11 (pgMar/@bottom) — per-page pt to reserve at the bottom of the
+ * content area for a footer taller than its bottom-margin allowance. The main text
+ * bottom sits at the greater of the bottom margin and the footer extent
+ * (`footerDistance + footerHeight`); when the footer extent wins, content must clear
+ * it (Word never lays body text over a footer). A footer that fits the margin — or a
+ * negative bottom margin (§17.6.11: text then overlaps the footer) — reserves 0. See
+ * footerOverflowPt for the exact rule.
  */
 function computeFooterReserves(
   pages: PaginatedBodyElement[][],
@@ -1988,27 +2023,29 @@ function computeFooterReserves(
   measure: RenderState,
 ): number[] {
   const sec = doc.section;
-  const allowance = Math.max(0, sec.marginBottom - sec.footerDistance);
   return pages.map((_unused, pageIdx) => {
-    const ps = resolvePageSection(pages, pageIdx, doc);
-    const footer = pickHeaderFooter(
-      ps.footers, ps.isFirstPageOfSection, pageIdx % 2 === 1, ps.titlePage, sec.evenAndOddHeaders,
-    );
+    const footer = resolvePageFooter(pages, pageIdx, doc);
     if (!footer) return 0;
     const footerH = measureHeaderFooterHeight(footer, measure); // pt (measure is scale 1)
-    return Math.max(0, footerH - allowance);
+    return footerOverflowPt(footerH, sec.marginBottom, sec.footerDistance);
   });
 }
 
 /**
- * Paginate with footer-height awareness (ECMA-376 §17.10.1). Pass 1 paginates
- * without reservation; a tall footer's overflow into the content area is measured
- * per page (computeFooterReserves) and fed into a second pass so body content
- * never overlaps the footer. A single re-pass suffices: the only footer that
- * overflows in practice is a section's FIRST-page footer (e.g. a masthead DOI
- * block), whose page assignment is stable across the two passes. When no footer
- * overflows (the common case) pass 1 is returned unchanged. Shared by the main
- * render path and the worker so the two never paginate differently.
+ * Paginate with footer-height awareness (ECMA-376 §17.6.11). Pass 1 paginates without
+ * reservation; a tall footer's overflow into the content area is measured per page
+ * (computeFooterReserves) and fed into a second pass so body content never overlaps
+ * the footer. When no footer overflows — the common case — pass 1 is returned
+ * unchanged. Shared by the main render path and the worker so the two can never
+ * paginate differently.
+ *
+ * One re-pass is used (not iterated to a fixpoint). It is exact when an overflowing
+ * footer is a section's FIRST-page footer beginning a PAGE-STARTING break
+ * (nextPage/odd/even) — e.g. sample-13's masthead DOI block — since such a section
+ * always starts at a fresh page top and its page index is identical in both passes.
+ * The unhandled edge is a CONTINUOUS section whose tall first-page footer's page index
+ * could shift when the reserve repacks content; that combination is exotic and is
+ * left for a fixpoint pass if a real document ever needs it.
  */
 function paginateWithFooterReserve(
   doc: DocxDocumentModel,
@@ -2020,9 +2057,15 @@ function paginateWithFooterReserve(
   const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes);
   const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body));
   const reserves = computeFooterReserves(pass1, doc, measure);
-  if (!reserves.some((r) => r > 0.5)) return pass1;
+  if (!reserves.some((r) => r > MIN_FOOTER_OVERFLOW_PT)) return pass1;
   return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, reserves);
 }
+
+/** Paginate with a throwaway measure context. Pagination must use the same
+ *  fontFamilyClasses + kinsoku rules as the render path, otherwise line-break
+ *  decisions (and thus page breaks) diverge between measurement and paint
+ *  (ECMA-376 §17.15.1.58–.60). Shared by the main-thread DocxDocument and the
+ *  render worker so the two modes can never paginate differently. */
 
 export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');

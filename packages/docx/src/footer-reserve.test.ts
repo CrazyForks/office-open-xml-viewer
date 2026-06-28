@@ -1,15 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { renderDocumentToCanvas } from './renderer.js';
-import type { BodyElement, DocParagraph, DocxDocumentModel, HeaderFooter, SectionProps } from './types';
+import type { BodyElement, DocNote, DocParagraph, DocxDocumentModel, HeaderFooter, SectionProps } from './types';
 
-// ECMA-376 §17.10.1 — a footer taller than the bottom-margin allowance
-// (marginBottom − footerDistance) rises ABOVE the content area and would overlap
-// body text. Word never lays body text over a footer: it reserves the overflow so
-// content breaks to the next page instead. The paginator measures each page's
-// footer and re-paginates with that reservation (paginateWithFooterReserve). These
-// tests pin that invariant with a synthetic doc whose first-page footer is far
-// taller than its bottom margin. Reconstructed from sample-13's masthead footer
-// behaviour (a DOI / corresponding-author block ~53pt tall over a ~49pt margin).
+// ECMA-376 §17.6.11 (pgMar/@bottom) — the main-document text bottom is placed at the
+// GREATER of the bottom margin and the footer's extent, so a footer taller than the
+// bottom-margin allowance (marginBottom − footerDistance) rises into the content area
+// and content (body AND footnotes) must clear it: Word never lays main text over a
+// footer. The paginator measures each page's footer and re-paginates with that
+// reservation (paginateWithFooterReserve), and the footnote block is raised by the
+// same overflow. A NEGATIVE bottom margin is the spec's explicit exception — text is
+// then measured from the page bottom regardless of the footer and overlaps it, so
+// nothing is reserved. These tests pin those rules with a synthetic doc whose footer
+// is far taller than its bottom margin (reconstructed from sample-13's masthead
+// footer: a DOI / corresponding-author block ~53pt tall over a ~49pt margin).
 
 interface Call { text: string; y: number; }
 
@@ -61,12 +64,29 @@ function para(text: string): DocParagraph {
   } as unknown as DocParagraph;
 }
 
+// A footnote reference run (kind 'footnote') appended to a body paragraph, so the
+// page that holds it draws the note block (drawPageFootnotes scans for these).
+function paraWithFootnoteRef(text: string, noteId: string): DocParagraph {
+  const p = para(text);
+  (p.runs as DocParagraph['runs']).push({
+    type: 'text', text: '', bold: false, italic: false, underline: false,
+    strikethrough: false, fontSize: 10, color: null, fontFamily: 'Times New Roman',
+    fontFamilyEastAsia: '', isLink: false, background: null, vertAlign: null, hyperlink: null,
+    noteRef: { kind: 'footnote', id: noteId },
+  } as unknown as DocParagraph['runs'][number]);
+  return p;
+}
+
 // pageHeight 600, margins 10, footerDistance 4 → bottom-margin allowance for the
 // footer is marginBottom − footerDistance = 6pt. A footer taller than 6pt overflows.
-function docWithFooter(body: BodyElement[], footer: HeaderFooter | null): DocxDocumentModel {
+function docWithFooter(
+  body: BodyElement[],
+  footer: HeaderFooter | null,
+  opts: { footnotes?: DocNote[]; marginBottom?: number } = {},
+): DocxDocumentModel {
   const section: SectionProps = {
     pageWidth: 400, pageHeight: 600,
-    marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+    marginTop: 10, marginRight: 10, marginBottom: opts.marginBottom ?? 10, marginLeft: 10,
     headerDistance: 4, footerDistance: 4, titlePage: false, evenAndOddHeaders: false,
     sectionStart: 'nextPage',
   } as SectionProps;
@@ -76,6 +96,7 @@ function docWithFooter(body: BodyElement[], footer: HeaderFooter | null): DocxDo
     headers: { default: null, first: null, even: null },
     footers: { default: footer, first: null, even: null },
     fontFamilyClasses: { 'Times New Roman': 'roman' },
+    footnotes: opts.footnotes ?? [],
   } as unknown as DocxDocumentModel;
 }
 
@@ -85,7 +106,7 @@ async function renderPage0(doc: DocxDocumentModel): Promise<Call[]> {
   return calls;
 }
 
-describe('footer reserve — body content never overlaps a tall footer (ECMA-376 §17.10.1)', () => {
+describe('footer reserve — content never overlaps a tall footer (ECMA-376 §17.6.11)', () => {
   // Enough single-line body paragraphs to overflow page 0 (content area is 580pt;
   // ~50 lines is well over a page) so, absent any reservation, body text packs all
   // the way down to the content bottom (600 − marginBottom = 590pt).
@@ -120,5 +141,43 @@ describe('footer reserve — body content never overlaps a tall footer (ECMA-376
     // satisfied trivially (the body genuinely reaches into that band) and that the
     // reservation, not a short body, is what clears the footer.
     expect(maxBodyNone).toBeGreaterThan(minFooter);
+  });
+
+  it('raises the footnote block above a tall footer so notes do not overlap it', async () => {
+    // A short body (fits page 0) whose paragraph references a footnote, plus the tall
+    // footer. The footnote block is anchored at the bottom margin; the tall footer
+    // overflows above the margin, so without the reserve the note prints over the
+    // footer. The same overflow raises the note block to clear it (§17.6.11).
+    const footnotes: DocNote[] = [{ id: 'fn1', content: [para('NOTE') as unknown as BodyElement] }];
+    const docBody: BodyElement[] = [
+      para('BODY') as unknown as BodyElement,
+      paraWithFootnoteRef('BODY', 'fn1') as unknown as BodyElement,
+    ];
+    const calls = await renderPage0(docWithFooter(docBody, tallFooter, { footnotes }));
+
+    const noteY = calls.filter((c) => c.text === 'NOTE').map((c) => c.y);
+    const footerY = calls.filter((c) => c.text === 'FTR').map((c) => c.y);
+
+    // Sanity: both the footnote and the tall footer are painted on page 0.
+    expect(noteY.length).toBeGreaterThan(0);
+    expect(footerY.length).toBeGreaterThan(0);
+
+    // INVARIANT: the lowest footnote line sits ABOVE the topmost footer line — the
+    // footnote block clears the footer just like the body does.
+    expect(Math.max(...noteY)).toBeLessThan(Math.min(...footerY));
+  });
+
+  it('does not reserve a footer when the bottom margin is negative (§17.6.11 exception)', async () => {
+    // §17.6.11: a negative bottom margin measures the main text from the page bottom
+    // REGARDLESS of the footer, so the text overlaps the footer and nothing is
+    // reserved. Hence the same body reaches exactly as far down WITH the tall footer
+    // as WITHOUT one. (The earlier max(0, marginBottom − footerDistance) allowance
+    // clamp wrongly reserved the whole footer here, pulling the body up.)
+    const bodyY = (calls: Call[]) => calls.filter((c) => c.text === 'BODY').map((c) => c.y);
+    const negTall = await renderPage0(docWithFooter(body(), tallFooter, { marginBottom: -10 }));
+    const negNone = await renderPage0(docWithFooter(body(), null, { marginBottom: -10 }));
+
+    expect(negTall.filter((c) => c.text === 'FTR').length).toBeGreaterThan(0);
+    expect(Math.max(...bodyY(negTall))).toBeCloseTo(Math.max(...bodyY(negNone)), 1);
   });
 });
