@@ -4279,6 +4279,12 @@ interface LayoutTextSeg {
   vertAlign: 'super' | 'sub' | null;
   measuredWidth: number;  // px (set during layout)
   smallCaps?: boolean;
+  /** This segment is GLUED to the preceding one (no inter-segment break): they
+   *  are case-pieces of the same word emitted at different sizes for small caps
+   *  (§17.3.2.33) — e.g. "I"(full)+"NTRODUCTION"(reduced). The line breaker must
+   *  not start a new line before a glued segment; it retracts the whole glued
+   *  group instead, so a small-caps word never splits across lines. */
+  joinPrev?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
   /** ECMA-376 §17.3.2.32 `<w:shd w:fill>` — run shading fill (hex 6). Painted as
@@ -4420,6 +4426,35 @@ interface WrapLayoutCtx {
  * `w:b` renders non-bold. (sample-7's date cells carry `b` without `bCs`, and
  * Word draws them at regular weight; the header carries both and is bold.)
  */
+/**
+ * Split a `w:smallCaps` (§17.3.2.33) run into maximal pieces by character class
+ * for sizing. The spec reduces "all SMALL LETTER characters ... two points
+ * smaller", so ONLY lowercase letters are `reduced`; uppercase letters AND every
+ * non-alphabetic character (digits, punctuation) stay at the FULL run size.
+ * So "Introduction" → "I" full + "NTRODUCTION" reduced (matching the heading's
+ * "1."), and "co2" → "CO" reduced + "2" full. `reduced` flags the small-cap
+ * pieces; the caller still uppercases every piece for display.
+ *
+ * Whitespace carries no glyph, so it EXTENDS the current piece rather than
+ * opening a full-size one — otherwise an inter-word space between two small-cap
+ * words would fragment into its own segment and corrupt trailing-space collapse
+ * / line breaking. A leading run with no lowercase letter defaults to full size.
+ */
+function splitSmallCapsCase(text: string): { text: string; reduced: boolean }[] {
+  const out: { text: string; reduced: boolean }[] = [];
+  for (const ch of text) {
+    // A lowercase letter: unchanged by toLowerCase AND changed by toUpperCase.
+    const isLowerLetter = ch.toLowerCase() === ch && ch.toUpperCase() !== ch;
+    const reduced = /\s/.test(ch)
+      ? (out[out.length - 1]?.reduced ?? false) // whitespace: keep with current piece
+      : isLowerLetter;
+    const last = out[out.length - 1];
+    if (last && last.reduced === reduced) last.text += ch;
+    else out.push({ text: ch, reduced });
+  }
+  return out.length ? out : [{ text, reduced: false }];
+}
+
 function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
   const pushTextPiece = (
@@ -4427,7 +4462,12 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     base: DocxTextRun | FieldRun,
     vertAlign: 'super' | 'sub' | null,
   ) => {
-    const displayText = (base.allCaps || base.smallCaps) ? text.toUpperCase() : text;
+    // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
+    // points smaller, uppercase letters and non-alphabetic characters at the full
+    // run size. `reduced` (set per case-piece in the loop below) carries that onto
+    // each emitted segment; calcEffectiveFontPx shrinks only the reduced ones.
+    // allCaps (§17.3.2.5) and non-caps runs are a single, non-reduced piece.
+    let reduced = false;
     // Ruby annotation rides with the WHOLE base text (typically 1-2 chars).
     // Splitting on word boundaries would lose the association, so attach
     // the annotation only to the first emitted segment.
@@ -4472,6 +4512,10 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       (forceCs || r.rtl === true) && isRtlBidiLang(r.langBidi, r.rtl === true);
 
     let firstSeg = true;
+    // True while the next emitted segment should be GLUED to the previous one
+    // (a small-caps case-piece that continues the same word). Consumed by the
+    // first pushSeg of the piece so only that segment carries joinPrev.
+    let gluePending = false;
     // Script slot for an emitted segment (§17.3.2.26): 'cs' = complex-script
     // (Arabic/Hebrew/...), 'ea' = East-Asian (CJK → eastAsia face), 'latin' =
     // Latin/digits/neutral (ascii face). Each segment stays SINGLE-FONT — one
@@ -4489,7 +4533,8 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         fontFamily,
         vertAlign,
         measuredWidth: 0,
-        smallCaps: base.smallCaps ?? false,
+        smallCaps: reduced,
+        joinPrev: gluePending ? true : undefined,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
         background: base.background ?? null,
@@ -4501,6 +4546,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         digitsAsAN: digitsAsAN ? true : undefined,
       });
       firstSeg = false;
+      gluePending = false; // glue applies only to a piece's FIRST segment
     };
     const emit = (word: string, slot: 'cs' | 'ea' | 'latin') => {
       const cs = slot === 'cs';
@@ -4534,26 +4580,43 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       for (const part of splitByEastAsia(slice)) emit(part.text, part.ea ? 'ea' : 'latin');
     };
 
-    for (const word of splitTextForLayout(displayText)) {
-      if (forceCs) {
-        // When the run's digits are AN-classified, split a token into maximal
-        // digit-groups and the surrounding separators so the per-line bidi pass
-        // (which reorders at SEGMENT granularity) can place the groups in Word's
-        // order — e.g. "28-02-2026" → segments [28][-][02][-][2026] reordered to
-        // 2026-02-28. Canvas only reorders WITHIN a fillText using EN semantics,
-        // so a single-segment date would otherwise stay 28-02-2026.
-        if (digitsAsAN) {
-          for (const slice of splitDigitGroups(word)) emit(slice, 'cs');
+    // Small caps split the run into full-size (uppercase-origin / non-cased) and
+    // reduced (lowercase-origin) case-pieces; everything else is one piece. Each
+    // piece is still UPPERCASED for display (allCaps or smallCaps), and `reduced`
+    // drives its segments' size — see splitSmallCapsCase / calcEffectiveFontPx.
+    const casePieces = base.smallCaps
+      ? splitSmallCapsCase(text)
+      : [{ text, reduced: false }];
+    let prevPieceText = '';
+    for (const piece of casePieces) {
+      reduced = piece.reduced;
+      // Glue this piece's FIRST segment to the previous piece when they continue
+      // the same word (the previous piece did not end at a space) — so a
+      // small-caps word's full-cap initial and reduced remainder stay on one line.
+      gluePending = prevPieceText.length > 0 && !/\s$/.test(prevPieceText);
+      prevPieceText = piece.text;
+      const displayText = (base.allCaps || base.smallCaps) ? piece.text.toUpperCase() : piece.text;
+      for (const word of splitTextForLayout(displayText)) {
+        if (forceCs) {
+          // When the run's digits are AN-classified, split a token into maximal
+          // digit-groups and the surrounding separators so the per-line bidi pass
+          // (which reorders at SEGMENT granularity) can place the groups in Word's
+          // order — e.g. "28-02-2026" → segments [28][-][02][-][2026] reordered to
+          // 2026-02-28. Canvas only reorders WITHIN a fillText using EN semantics,
+          // so a single-segment date would otherwise stay 28-02-2026.
+          if (digitsAsAN) {
+            for (const slice of splitDigitGroups(word)) emit(slice, 'cs');
+          } else {
+            emit(word, 'cs');
+          }
         } else {
-          emit(word, 'cs');
-        }
-      } else {
-        // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
-        // so each side gets its own (cs vs Latin) size and typeface; the non-cs
-        // side then sub-splits at CJK boundaries for the eastAsia face.
-        for (const slice of splitByComplexScript(word)) {
-          if (slice.cs) emit(slice.text, 'cs');
-          else emitNonCs(slice.text);
+          // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
+          // so each side gets its own (cs vs Latin) size and typeface; the non-cs
+          // side then sub-splits at CJK boundaries for the eastAsia face.
+          for (const slice of splitByComplexScript(word)) {
+            if (slice.cs) emit(slice.text, 'cs');
+            else emitNonCs(slice.text);
+          }
         }
       }
     }
@@ -4994,7 +5057,10 @@ function layoutLines(
       if (ts.ruby) lineHasRuby = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
       // understate Word's line spacing (font-metrics.ts). 0 for untabled fonts.
-      const intended = intendedSingleLinePx(ts.fontFamily, effectiveFontPx(ts));
+      // Small caps (non-super/sub) keep the FULL run size here so the line box
+      // follows the run size, not the 2pt-reduced glyphs (§17.3.2.33).
+      const intendedEm = ts.smallCaps && !ts.vertAlign ? ts.fontSize * scale : effectiveFontPx(ts);
+      const intended = intendedSingleLinePx(ts.fontFamily, intendedEm);
       if (intended > lineIntendedSingle) lineIntendedSingle = intended;
     }
   };
@@ -5217,7 +5283,22 @@ function layoutLines(
     // §17.4.84, and pagination) match Word — see font-metrics.ts.
     // Fallback box at the run's full size; correction at the effective size
     // (smallCaps/vertAlign shrink it). See correctedLineMetrics.
-    const corrected = correctedLineMetrics(m, s.fontFamily, s.fontSize * scale, effectiveFontPx(s));
+    // §17.3.2.33: a small-caps run's LINE BOX follows the FULL run size, not the
+    // 2pt-reduced glyph size — so a wrapped continuation line carrying only reduced
+    // (all-lowercase) small caps is not short. Measure the box metrics at the full
+    // size (the advance `w` above still uses the reduced glyphs). Super/subscript
+    // is excluded: it intentionally shrinks its line contribution.
+    const fullPx = s.fontSize * scale;
+    let metricM = m;
+    let metricEmPx = effectiveFontPx(s);
+    if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
+      const prevFont = ctx.font;
+      ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
+      metricM = ctx.measureText(s.text || 'X');
+      ctx.font = prevFont;
+      metricEmPx = fullPx;
+    }
+    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx);
     let asc = corrected.ascent;
     const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
@@ -5254,6 +5335,26 @@ function layoutLines(
       : 0;
     const wForFit = w - trailingSpaceW;
     const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
+
+    // Small-caps glued group: when THIS segment starts a glued group (its
+    // followers in the queue are `joinPrev` case-pieces of the SAME word — e.g.
+    // "I" then "NTRODUCTION"), the whole group must stay on one line. The
+    // per-segment wrap below would let the reduced remainder spill to the next
+    // line. Pre-measure the group and, if it does not fit on the current
+    // (non-empty) line, flush so it starts fresh. (If the group is wider than a
+    // full line it still char-breaks via the over-long-word path below.)
+    if (!s.joinPrev && currentLine.length > 0 && (queue[0] as LayoutTextSeg | undefined)?.joinPrev) {
+      let groupW = w;
+      let groupTrail = trailingSpaceW;
+      for (let k = 0; k < queue.length && (queue[k] as LayoutTextSeg).joinPrev; k++) {
+        const f = queue[k] as LayoutTextSeg;
+        const fw = segAdvance(f);
+        groupW += fw;
+        const ft = f.text.replace(/ +$/, '');
+        groupTrail = f.text.endsWith(' ') ? fw - gridWidth(ctx.measureText(ft).width, ft, gridDeltaPx) : 0;
+      }
+      if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudget) flush();
+    }
 
     if (currentWidth + wForFit <= availW() + shrinkBudget) {
       // Fits on current line as-is
@@ -7188,8 +7289,13 @@ function runBordersEqual(a: DocxRunBorder, b: DocxRunBorder): boolean {
 }
 
 function calcEffectiveFontPx(s: LayoutTextSeg, scale: number): number {
-  let size = s.fontSize * scale;
-  if (s.smallCaps) size *= 0.8;
+  // ECMA-376 §17.3.2.33: small-caps small letters render "in a font size TWO
+  // POINTS SMALLER than the actual font size" (subtractive, not a ratio), floored
+  // at the smallest renderable size when 2pt smaller is not possible. Applied in
+  // pt before scaling. (At ~10pt this is ≈0.8×, but it diverges at larger sizes —
+  // a 20pt heading's caps are 18pt, not 16pt.)
+  const pt = s.smallCaps ? Math.max(s.fontSize - 2, 1) : s.fontSize;
+  let size = pt * scale;
   if (s.vertAlign) size *= 0.65;
   return size;
 }
