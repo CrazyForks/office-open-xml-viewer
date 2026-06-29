@@ -6,8 +6,8 @@ use zip::ZipArchive;
 
 use crate::numbering::NumberingMap;
 use crate::styles::{
-    merge_cond_layers, parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, ParaFmt, RawTblBorders,
-    RunFmt, StyleMap,
+    apply_para, merge_cond_layers, parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder,
+    RawTblBorders, RunFmt, StyleMap,
 };
 use crate::types::*;
 use crate::xml_util::*;
@@ -1614,7 +1614,12 @@ fn parse_paragraph_cond(
         direct_indent_left = direct.indent_left;
         direct_indent_first = direct.indent_first;
         direct_indent_right = direct.indent_right;
-        apply_direct_para(&mut base_para, &direct);
+        // Layer the paragraph's DIRECT pPr over its resolved style. Reuse the
+        // style-cascade merge (`apply_para`) verbatim so the two paths can never
+        // drift: an earlier hand-written copy here omitted para_borders / shading /
+        // pageBreakBefore / contextualSpacing / keepNext / keepLines / widowControl,
+        // dropping every DIRECT pBdr (sample-14's full-width references rule).
+        apply_para(&mut base_para, &direct);
         if let Some(rpr) = child_w(ppr, "rPr") {
             let direct_run = parse_run_fmt(rpr);
             apply_direct_run(&mut mark_run, &direct_run);
@@ -5399,59 +5404,6 @@ fn normalize_align(s: &str) -> &str {
     }
 }
 
-fn apply_direct_para(base: &mut ParaFmt, direct: &ParaFmt) {
-    if direct.alignment.is_some() {
-        base.alignment = direct.alignment.clone();
-    }
-    if direct.indent_left.is_some() {
-        base.indent_left = direct.indent_left;
-    }
-    if direct.indent_right.is_some() {
-        base.indent_right = direct.indent_right;
-    }
-    if direct.indent_first.is_some() {
-        base.indent_first = direct.indent_first;
-    }
-    if direct.space_before.is_some() {
-        base.space_before = direct.space_before;
-    }
-    if direct.space_after.is_some() {
-        base.space_after = direct.space_after;
-    }
-    if direct.line_spacing_val.is_some() {
-        base.line_spacing_val = direct.line_spacing_val;
-    }
-    if direct.line_spacing_rule.is_some() {
-        base.line_spacing_rule = direct.line_spacing_rule.clone();
-    }
-    if direct.line_spacing_explicit.is_some() {
-        base.line_spacing_explicit = direct.line_spacing_explicit;
-    }
-    if direct.outline_level.is_some() {
-        base.outline_level = direct.outline_level;
-    }
-    if direct.num_id.is_some() {
-        base.num_id = direct.num_id;
-    }
-    if direct.num_level.is_some() {
-        base.num_level = direct.num_level;
-    }
-    if direct.tab_stops.is_some() {
-        base.tab_stops = direct.tab_stops.clone();
-    }
-    if direct.bidi.is_some() {
-        base.bidi = direct.bidi;
-    }
-    if direct.snap_to_grid.is_some() {
-        base.snap_to_grid = direct.snap_to_grid;
-    }
-    // §17.3.1.11: a direct framePr replaces any style-inherited frame whole-sale
-    // (grouped element, not attribute-merged).
-    if direct.frame_pr.is_some() {
-        base.frame_pr = direct.frame_pr.clone();
-    }
-}
-
 fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.bold.is_some() {
         base.bold = direct.bold;
@@ -7083,6 +7035,60 @@ mod rtl_tests {
         // top/bottom (literal physical names) still parsed.
         assert!(cell.borders.top.is_some());
         assert!(cell.borders.bottom.is_some());
+    }
+
+    /// ECMA-376 §17.3.1.7 (pBdr), §17.3.1.31 (shd), §17.3.1.26 (pageBreakBefore),
+    /// §17.3.1.15 (keepNext) — a paragraph's DIRECT pPr properties must survive the
+    /// resolved-style → direct merge. Regression guard: `apply_direct_para` was an
+    /// incomplete mirror of the style-cascade `apply_para` and silently dropped
+    /// para_borders, shading, pageBreakBefore, contextualSpacing, keepNext/keepLines
+    /// and widowControl. sample-14's full-width references rule is a directly
+    /// `<w:pBdr>`-bordered EMPTY paragraph; with the border dropped it rendered as a
+    /// blank line. (Style-defined borders survived because they go through
+    /// `apply_para`; only DIRECT ones were lost.)
+    #[test]
+    fn direct_paragraph_ppr_properties_survive_merge() {
+        let body = body_from(
+            r#"
+            <w:p>
+              <w:pPr>
+                <w:pBdr><w:bottom w:val="single" w:sz="12" w:space="1" w:color="000000"/></w:pBdr>
+                <w:shd w:val="clear" w:fill="FFFF00"/>
+                <w:pageBreakBefore/>
+                <w:keepNext/>
+                <w:contextualSpacing/>
+              </w:pPr>
+            </w:p>
+            "#,
+        );
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("paragraph present");
+        let borders = para
+            .borders
+            .as_ref()
+            .expect("direct pBdr must survive the merge");
+        let bottom = borders.bottom.as_ref().expect("bottom edge present");
+        assert_eq!(bottom.style, "single");
+        assert_eq!(bottom.width, 1.5, "sz=12 eighths-of-a-point → 1.5pt");
+        assert_eq!(
+            para.shading.as_deref(),
+            Some("ffff00"),
+            "direct shd fill must survive"
+        );
+        assert!(
+            para.page_break_before,
+            "direct pageBreakBefore must survive"
+        );
+        assert!(para.keep_next, "direct keepNext must survive");
+        assert!(
+            para.contextual_spacing,
+            "direct contextualSpacing must survive"
+        );
     }
 
     /// ECMA-376 §17.4.* w:tblBorders: a table-level w:start/w:end likewise

@@ -585,7 +585,14 @@ impl StyleMap {
     }
 }
 
-fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
+/// Layer the paragraph format `src` OVER `dst`: every property `src` explicitly
+/// sets replaces `dst`'s. Used both for the style cascade (basedOn parent →
+/// child) and — via parser.rs — for a paragraph's DIRECT pPr over its resolved
+/// style. Keep this the single source of truth for "which paragraph properties
+/// override on merge"; the direct-formatting path reuses it so the two can never
+/// drift (a drift previously dropped direct pBdr / shd / pageBreakBefore — see
+/// `direct_paragraph_ppr_properties_survive_merge`).
+pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.alignment.is_some() {
         dst.alignment = src.alignment.clone();
     }
