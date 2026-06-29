@@ -38,7 +38,7 @@ their rendering).
 
 **pptx**
 
-- **CJK justify / @spc / 約物連続:** `@spc` (rPr letter-spacing) justify pieces,
+- **CJK justify / `@spc` / 約物連続:** `@spc` (rPr letter-spacing) justify pieces,
   `@spc` tab-stop segments, and fully-distributed justified runs are drawn
   contiguously with canvas letter-spacing, so 約物連続 opening brackets no longer
   overlap the next glyph (§21.1.2.3.x, §20.1.10.59). (#627, #629, #631)
