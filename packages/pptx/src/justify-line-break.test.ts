@@ -42,9 +42,9 @@ function run(text: string): TextRunData {
 }
 const brk = { type: 'break' } as unknown as TextRunData;
 
-function justBody(runs: TextRunData[]): TextBody {
+function bodyWith(alignment: 'just' | 'dist', runs: TextRunData[]): TextBody {
   const para: Paragraph = {
-    alignment: 'just',
+    alignment,
     marL: 0, marR: 0, indent: 0,
     spaceBefore: null, spaceAfter: null, spaceLine: null, lvl: 0,
     bullet: { type: 'none' }, defFontSize: null, defColor: null, defBold: null, defItalic: null,
@@ -57,6 +57,9 @@ function justBody(runs: TextRunData[]): TextBody {
     wrap: 'square', vert: 'horz', autoFit: 'none',
   };
 }
+
+const justBody = (runs: TextRunData[]): TextBody => bodyWith('just', runs);
+const distBody = (runs: TextRunData[]): TextBody => bodyWith('dist', runs);
 
 describe('pptx justify — a line ended by a manual <a:br> is left-aligned (§20.1.10.59 + §21.1.2.2.1)', () => {
   it('does not stretch the break-terminated first line of a `just` paragraph', () => {
@@ -80,5 +83,38 @@ describe('pptx justify — a line ended by a manual <a:br> is left-aligned (§20
     // NOT stretched toward the ~185px right margin.
     const maxX = Math.max(...line.map((c) => c.x));
     expect(maxX).toBeLessThan(60);
+  });
+
+  // The OPPOSITE policy for `dist`/`thaiDist` (均等割り付け): ECMA-376 §20.1.10.59
+  // says `dist` "distributes the text words across an entire text line", i.e. it
+  // justifies EVERY line — the last line and a manual-break-terminated line
+  // included — whereas `just` leaves those logical-line ends natural. Per
+  // §21.1.2.2.1, an `<a:br>` ends a logical line; the renderer still passes
+  // `endsLogicalLine` to `justifyLine`, but `justifyLine` suppresses ONLY `just`
+  // (`mode === 'just' && isLastLine`). So under `dist` the break-terminated line
+  // MUST stay filled to the right margin. This guards that carve-out, which would
+  // silently regress if the suppression were widened to `if (isLastLine)`.
+  it('still stretches the break-terminated first line of a `dist` paragraph', () => {
+    const { ctx, texts } = mockCtx();
+    // Identical geometry to the `just` case above (box 200px, availW ≈ 185.6px),
+    // only the alignment differs.
+    renderTextBody(ctx, distBody([run('ああああ'), brk, run('いいいいいいいい')]), 0, 0, 200, 200, SCALE);
+    expect(texts.length).toBeGreaterThan(0);
+
+    const byY = new Map<number, { text: string; x: number }[]>();
+    for (const c of texts) {
+      const key = Math.round(c.y);
+      (byY.get(key) ?? byY.set(key, []).get(key)!).push(c);
+    }
+    const firstY = Math.min(...byY.keys());
+    const line = byY.get(firstY)!;
+
+    // Filled: the 4-glyph line ("ああああ", natural extent ~40px) is spread toward
+    // the ~185px margin, so its last glyph sits well to the right. The observed
+    // stretched maxX is ~182.8px (≈ the right margin); 120 is a comfortable floor
+    // below that yet far above both the natural ~40px and the `just` carve-out's
+    // < 60px assertion — it cannot pass unless `dist` actually filled the line.
+    const maxX = Math.max(...line.map((c) => c.x));
+    expect(maxX).toBeGreaterThan(120);
   });
 });
