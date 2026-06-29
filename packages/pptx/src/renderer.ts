@@ -588,6 +588,36 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
  *
  * @param marLPx  Paragraph left margin in canvas px (used for tab stop position calculation)
  */
+/** True when the paragraph carries a leading marker (char / autoNum / picture
+ *  bullet) that occupies the hanging gutter. A picture (`blip`) bullet lives on
+ *  the PPTX-widened {@link Bullet}, so narrow via {@link asBullet} rather than
+ *  comparing the raw union member. */
+function paragraphHasBullet(para: Paragraph): boolean {
+  return (
+    para.bullet.type === 'char' ||
+    para.bullet.type === 'autoNum' ||
+    asBullet(para.bullet).type === 'blip'
+  );
+}
+
+/** First-line indent (ECMA-376 §21.1.2.2.7 `a:pPr@indent`) resolved to the px
+ *  amount the FIRST line's TEXT is shifted right / narrowed by. A positive indent
+ *  on a non-bullet paragraph eats into the first line's width and shifts its
+ *  start right. Two cases resolve to 0:
+ *   - a BULLETED paragraph: `indent` is the marker's hanging gutter, positioned
+ *     separately by the bullet/textX geometry (`bulletX = textX + raw indentPx`),
+ *     so it does not reduce the text's first-line width here;
+ *   - a NEGATIVE indent on a NON-bullet paragraph: clamped to 0. (Known gap:
+ *     §21.1.2.2.7 would place such a first line left of marL; honoring that
+ *     leftward overhang into the marL gutter is unimplemented. Clamping keeps
+ *     the wrap budget and the draw offset in agreement rather than split-brain.)
+ *  Shared by the spAutoFit measurement ({@link naturalWidthExceedsBbox}), the
+ *  wrap budget ({@link layoutParagraph}) and the draw-side `textXOffset`, so the
+ *  three paths can never disagree. */
+function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
+  return hasBullet ? 0 : Math.max(0, indentPx);
+}
+
 /**
  * Decide whether `<a:spAutoFit/>` should let text wrap based on the paragraphs'
  * natural single-line width. Returns true when at least one paragraph would
@@ -601,7 +631,7 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
  * of glyphs" — and avoids over-eager wrap when a paragraph is barely wider
  * than the bbox due to font-measurement drift.
  */
-function naturalWidthExceedsBbox(
+export function naturalWidthExceedsBbox(
   ctx: CanvasRenderingContext2D,
   body: TextBody,
   bw: number,
@@ -615,10 +645,10 @@ function naturalWidthExceedsBbox(
     const marLPx = emuToPx(para.marL, scale);
     const marRPx = emuToPx(para.marR, scale);
     const indentPx = emuToPx(para.indent, scale);
-    // First-line indent eats into the available width when positive; a
-    // negative indent (hanging) is the bullet's gutter and doesn't reduce
-    // the usable text room.
-    const firstLineIndent = Math.max(0, indentPx);
+    // The first-line indent is consumed only by a NON-bullet paragraph and only
+    // when positive (firstLineIndentPxFor) — the SAME amount the wrap and draw
+    // passes use, so the measurement can't disagree with what actually renders.
+    const firstLineIndent = firstLineIndentPxFor(paragraphHasBullet(para), indentPx);
     const textMaxW = bw - lPad - rPad - marLPx - marRPx - firstLineIndent;
     let lineW = 0;
     for (const run of para.runs) {
@@ -2056,12 +2086,7 @@ export function renderTextBody(
     // indent too — otherwise the first line of a hanging-indent list starts at
     // the bullet's x and renders ON TOP of the picture (cf. the char-bullet em-
     // dash overlap noted below, and docx PR #476).
-    const hasBullet =
-      para.bullet.type === 'char' ||
-      para.bullet.type === 'autoNum' ||
-      // `blip` exists only on the PPTX-widened Bullet (the shared core type omits
-      // it), so narrow via asBullet rather than comparing the raw union member.
-      asBullet(para.bullet).type === 'blip';
+    const hasBullet = paragraphHasBullet(para);
 
     // Per ECMA-376 §21.1.2.4.13: when no buSz* is declared, the bullet takes
     // the first run's font size. Using paraDefaultFontSizePx here (the layout
@@ -2150,15 +2175,19 @@ export function renderTextBody(
       ? (bw - lPad - rPad - (numCol - 1) * spcColPx) / numCol
       : bw - lPad - rPad;
     const textX    = bx + lPad + marLPx;
+    // The marker seats at the RAW (signed) indent — a hanging gutter is negative,
+    // so this is deliberately NOT routed through firstLineIndentPxFor (which is
+    // the first-line TEXT shift, clamped ≥ 0). Keep them distinct.
     const bulletX  = bx + lPad + marLPx + indentPx;
     const textMaxW = colWidth - marLPx - marRPx;
 
     const maxW = doWrap ? textMaxW : Infinity;
-    // A positive first-line indent narrows ONLY the first line's wrap budget,
-    // matching the draw-side `textXOffset` (= indentPx for a non-bullet first
-    // line, §below) and willTextOverflow's measurement. A negative (hanging)
-    // indent is the bullet's gutter, not a text-width reduction → max(0, …)=0.
-    const firstLineIndentPx = !hasBullet ? Math.max(0, indentPx) : 0;
+    // A positive first-line indent narrows ONLY the first line's wrap budget
+    // (continuation lines keep the full width). firstLineIndentPxFor keeps this
+    // in lockstep with the draw-side `textXOffset` (§below) and the
+    // naturalWidthExceedsBbox measurement; a bullet's gutter / a negative
+    // (hanging) indent contribute 0.
+    const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
     const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px
@@ -2226,8 +2255,12 @@ export function renderTextBody(
       // layout body lstStyle) get pushed ~10 px below the placeholder top and
       // collide with the chart title sitting just below in the slide.
       const topGap  = isFirst && paraIdx > 0 ? spaceBeforePx : 0;
-      // Non-bullet first-line indent
-      const textXOffset = (!hasBullet && isFirst) ? indentPx : 0;
+      // Non-bullet first-line indent, clamped ≥ 0 via firstLineIndentPxFor so the
+      // draw offset matches the wrap budget and the spAutoFit measurement. A
+      // negative ("hanging") indent is NOT honored at draw time — it would shift
+      // the first line left of marL while the wrap pass keeps full width, so the
+      // two would disagree; we clamp both to 0.
+      const textXOffset = isFirst ? firstLineIndentPxFor(hasBullet, indentPx) : 0;
 
       // Picture bullets, like char/number markers, are drawn only on the
       // paragraph's first line and only when that line carries content (an
