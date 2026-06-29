@@ -2596,23 +2596,23 @@ export function renderTextBody(
       // share it, and so the split-CJK branch below can call it per piece.
       const drawWithFont = (text: string, atX: number, op: 'fill' | 'stroke'): void => {
         const paint = op === 'fill' ? ctx.fillText.bind(ctx) : ctx.strokeText.bind(ctx);
-        if (ls > 0 && text.length > 1 && !segRtl) {
-          // Draw glyph-by-glyph so each character advance is `measure + ls`.
-          // Matches OOXML rPr @spc semantics — extra space added to each
-          // character's advance, including after the last one.
-          let cx = atX;
-          for (const ch of text) {
-            paint(ch, cx, segBaseline);
-            cx += ctx.measureText(ch).width + ls;
-          }
-        } else if (ls > 0 && text.length > 1) {
-          // RTL segment with rPr @spc: per-glyph advance would break Arabic
-          // cursive joining, so distribute the spacing via canvas letterSpacing
-          // and draw the whole shaped text in one paint call.
+        if (ls > 0 && text.length > 1) {
+          // rPr @spc (§21.1.2.3.x): distribute the per-glyph advance via canvas
+          // letterSpacing and draw the whole CONTEXTUALLY-shaped string in ONE
+          // paint. This keeps the drawn advance == the layout's contextual
+          // measure + n·ls (約物半角 contextual half-width collapse honoured, so a
+          // piece's glyphs stay aligned with its contextual `dx` origin and the
+          // next piece/run never overlaps — the pptx analog of docx PR #626), AND
+          // preserves Arabic cursive joining for RTL. (The old LTR branch summed
+          // ISOLATED measure(ch)+ls, which overran the contextual box at 約物
+          // punctuation.) Chromium's measureText adds letterSpacing after every
+          // glyph incl. the trailing one (= natural + n·ls), matching
+          // codePointCount(seg.text)·ls used by the layout's segW.
           const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          const prev = lctx.letterSpacing;
           try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
           paint(text, atX, segBaseline);
-          try { lctx.letterSpacing = '0px'; } catch { /* ignore */ }
+          try { lctx.letterSpacing = prev; } catch { /* ignore */ }
         } else {
           paint(text, atX, segBaseline);
         }
