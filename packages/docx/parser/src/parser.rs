@@ -1729,25 +1729,26 @@ fn parse_paragraph_cond(
         None
     };
 
-    // Indent precedence (ECMA-376 §17.7.2): the numbering level's pPr/ind overrides
-    // the paragraph STYLE's indent, but the paragraph's own DIRECT ind overrides the
-    // numbering level (direct formatting is the most specific). The merge is
-    // per-attribute, so a direct `w:left` that omits `w:hanging`/`w:firstLine` keeps
-    // the level's hanging (e.g. sample-15's REFERENCES list: level ind left=720
-    // hanging=360, direct `w:ind w:left="360"` ⇒ body at 18 pt, marker at the margin).
-    let (indent_left, indent_first) = if let Some(ref num) = numbering {
-        num_map
-            .get_level(num.num_id, num.level)
-            .map(|l| {
-                (
-                    direct_indent_left.unwrap_or(l.indent_left),
-                    direct_indent_first.unwrap_or(-l.tab),
-                )
-            })
-            .unwrap_or((
-                base_para.indent_left.unwrap_or(0.0),
-                base_para.indent_first.unwrap_or(0.0),
-            ))
+    // Resolve the numbering level once; it backs all three indent axes below.
+    let level = numbering
+        .as_ref()
+        .and_then(|num| num_map.get_level(num.num_id, num.level));
+
+    // Indent precedence (ECMA-376 §17.9.22 + §17.7.2): the paragraph's own DIRECT
+    // `w:ind` overrides the numbering level's `pPr/ind` ("paragraph properties
+    // specified on the numbered paragraph itself override the paragraph properties
+    // specified by pPr elements within a numbering lvl element"), which in turn
+    // overrides the paragraph STYLE. The merge is per-attribute (§17.3.1.12), so a
+    // direct `w:left` that omits `w:hanging`/`w:firstLine` keeps the level's
+    // first-line indent — e.g. sample-15's REFERENCES list: level ind left=720
+    // hanging=360, direct `w:ind w:left="360"` ⇒ body at 18 pt, marker at the margin.
+    // When no level resolves, a de-listed paragraph (numId=0) keeps only its direct
+    // ind and a plain paragraph keeps its style/direct (base) ind.
+    let (indent_left, indent_first) = if let Some(l) = level {
+        (
+            direct_indent_left.unwrap_or(l.indent_left),
+            direct_indent_first.unwrap_or(-l.tab),
+        )
     } else if base_para.num_id == Some(0) {
         // `numId=0` explicitly removes numbering (ECMA-376 §17.3.1.19 / §17.9.18). That
         // drops the NUMBERING LEVEL's indent (handled by `numbering` being None here).
@@ -1775,21 +1776,13 @@ fn parse_paragraph_cond(
             base_para.indent_first.unwrap_or(0.0),
         )
     };
-    // Same precedence for the end-side indent (w:ind@right ≡ end): an RTL list
-    // level defines its indent there (e.g. w:right="720" w:hanging="360"), and a
-    // direct end indent overrides it just as on the start side above.
-    let indent_right = if numbering.is_some() {
-        direct_indent_right
-            .or_else(|| {
-                numbering
-                    .as_ref()
-                    .and_then(|num| num_map.get_level(num.num_id, num.level))
-                    .and_then(|l| l.indent_right)
-            })
-            .unwrap_or(indent_right)
-    } else {
-        indent_right
-    };
+    // The end-side axis (w:ind@right ≡ end) follows the same ladder: direct end
+    // indent, else the level's end indent (an RTL list carries its indent there,
+    // e.g. w:right="720" w:hanging="360"), else the style/de-list (base) value
+    // already resolved into `indent_right` above.
+    let indent_right = direct_indent_right
+        .or_else(|| level.and_then(|l| l.indent_right))
+        .unwrap_or(indent_right);
 
     // Parse runs
     let mut runs = vec![];
