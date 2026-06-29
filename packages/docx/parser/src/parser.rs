@@ -1615,7 +1615,7 @@ fn parse_paragraph_cond(
         direct_indent_first = direct.indent_first;
         direct_indent_right = direct.indent_right;
         // Layer the paragraph's DIRECT pPr over its resolved style. Reuse the
-        // style-cascade merge (`apply_para`) verbatim so the two paths can never
+        // canonical style-cascade merge (`apply_para`) so the two paths can never
         // drift: an earlier hand-written copy here omitted para_borders / shading /
         // pageBreakBefore / contextualSpacing / keepNext / keepLines / widowControl,
         // dropping every DIRECT pBdr (sample-14's full-width references rule).
@@ -7056,6 +7056,8 @@ mod rtl_tests {
                 <w:shd w:val="clear" w:fill="FFFF00"/>
                 <w:pageBreakBefore/>
                 <w:keepNext/>
+                <w:keepLines/>
+                <w:widowControl w:val="0"/>
                 <w:contextualSpacing/>
               </w:pPr>
             </w:p>
@@ -7075,6 +7077,9 @@ mod rtl_tests {
         let bottom = borders.bottom.as_ref().expect("bottom edge present");
         assert_eq!(bottom.style, "single");
         assert_eq!(bottom.width, 1.5, "sz=12 eighths-of-a-point → 1.5pt");
+        // A pBdr that names only `bottom` leaves the other edges unset.
+        assert!(borders.top.is_none(), "unspecified top edge stays None");
+        assert!(borders.right.is_none(), "unspecified right edge stays None");
         assert_eq!(
             para.shading.as_deref(),
             Some("ffff00"),
@@ -7085,10 +7090,51 @@ mod rtl_tests {
             "direct pageBreakBefore must survive"
         );
         assert!(para.keep_next, "direct keepNext must survive");
+        assert!(para.keep_lines, "direct keepLines must survive");
+        // §17.3.1.44 widowControl defaults to true; a direct `w:val="0"` must
+        // override that default to false.
+        assert!(
+            !para.widow_control,
+            "direct widowControl=0 must override the spec default-true"
+        );
         assert!(
             para.contextual_spacing,
             "direct contextualSpacing must survive"
         );
+    }
+
+    /// ECMA-376 §17.3.1.7 — a `between` border is a first-class pBdr edge: a
+    /// paragraph that declares ONLY `<w:between>` (internal rules between matching
+    /// adjacent paragraphs, no outer box) must keep its border set. The parser's
+    /// pBdr guard previously required top/bottom/left/right and dropped a
+    /// between-only border, starving the renderer which already consumes it.
+    #[test]
+    fn direct_between_only_paragraph_border_survives() {
+        let body = body_from(
+            r#"
+            <w:p>
+              <w:pPr>
+                <w:pBdr><w:between w:val="single" w:sz="4" w:space="1" w:color="000000"/></w:pBdr>
+              </w:pPr>
+            </w:p>
+            "#,
+        );
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("paragraph present");
+        let borders = para
+            .borders
+            .as_ref()
+            .expect("a between-only pBdr must survive the guard");
+        assert!(
+            borders.between.is_some(),
+            "between edge must be parsed and kept"
+        );
+        assert!(borders.bottom.is_none(), "no other edge was declared");
     }
 
     /// ECMA-376 §17.4.* w:tblBorders: a table-level w:start/w:end likewise
