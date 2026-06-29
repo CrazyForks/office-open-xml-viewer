@@ -5744,6 +5744,30 @@ function layoutLines(
       let groupTrail = trailingSpaceW;
       for (let k = 0; k < queue.length && (queue[k] as LayoutTextSeg).joinPrev; k++) {
         const f = queue[k] as LayoutTextSeg;
+        // A CJK-BREAKABLE follower (e.g. "Roman" + "、あるいは…用いる。") is NOT
+        // atomic: only its LEADING run of line-start-forbidden chars would orphan
+        // at a line head (UAX#14 LB13 / §17.3.1.16); the rest splits at an
+        // inter-CJK boundary and wraps on its own. So glue only that prefix's
+        // advance to the lead and STOP summing here — mirror of the CJK-lead
+        // direction handled by the `!hasCJKBreakOpportunity(s.text)` gate above
+        // (sample-9 fb836d6). Summing the whole breakable run instead would
+        // pre-flush "Roman" down alone, leaving a `both` line stretched sparse
+        // (sample-16). A Latin / small-caps follower (no CJK break opportunity —
+        // the "I" + "NTRODUCTION" case) stays fully atomic: keep full-add.
+        if (hasCJKBreakOpportunity(f.text)) {
+          const chars = [...f.text];
+          let p = 0;
+          while (p < chars.length && DEFAULT_KINSOKU_RULES.lineStartForbidden.has(chars[p].codePointAt(0)!)) p++;
+          if (p < chars.length) {
+            // Breakable rest exists past the leading non-starters: glue only the
+            // prefix (it may be empty — then "Roman" is effectively unglued and
+            // wraps on its own) and end the atomic group here.
+            groupW += strAdvance(f, chars.slice(0, p).join(''));
+            groupTrail = 0;
+            break;
+          }
+          // Entirely non-starters (no breakable rest): fall through to full-add.
+        }
         const fw = segAdvance(f);
         groupW += fw;
         const ft = f.text.replace(/ +$/, '');
