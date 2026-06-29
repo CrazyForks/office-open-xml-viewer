@@ -79,6 +79,12 @@ pub struct DocumentSettings {
     /// back to the spec default `centerGroup`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub math_def_jc: Option<String>,
+    /// §17.15.1.25 `w:defaultTabStop@w:val` — the interval (in points, converted
+    /// from twips) at which automatic tab stops are generated after all custom
+    /// stops. `None` when the element is absent; the spec default is then 720
+    /// twips (0.5" = 36pt), which the renderer applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tab_stop: Option<f64>,
 }
 
 /// Single track-changes event extracted from a body `<w:ins>` / `<w:del>`.

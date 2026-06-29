@@ -56,6 +56,10 @@ export interface DocSettings {
    *  justification (ST_Jc math: left|right|center|centerGroup). `undefined`
    *  ⇒ the renderer uses the spec default `centerGroup`. */
   mathDefJc?: string;
+  /** §17.15.1.25 `w:defaultTabStop@w:val` — interval (points) between automatic
+   *  tab stops generated after all custom stops. `undefined` ⇒ the renderer
+   *  uses the spec default of 720 twips (36pt). */
+  defaultTabStop?: number;
 }
 
 export interface DocRevision {

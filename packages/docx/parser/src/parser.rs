@@ -754,6 +754,16 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     let no_line_breaks_before = collect("noLineBreaksBefore");
     let no_line_breaks_after = collect("noLineBreaksAfter");
 
+    // ECMA-376 §17.15.1.25 `<w:defaultTabStop w:val="…"/>` — the spacing
+    // (twips) between automatic tab stops, a direct child of the settings root.
+    // twips_to_pt converts to points; absence is surfaced as None so the
+    // renderer falls back to the spec default of 720 twips (36pt).
+    let default_tab_stop = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "defaultTabStop")
+        .and_then(|n| attr_w(n, "val"))
+        .map(|s| twips_to_pt(&s));
+
     // ECMA-376 §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
     // justification (math namespace, bare `val` fallback).
     let math_def_jc = root
@@ -773,6 +783,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         && no_line_breaks_before.is_none()
         && no_line_breaks_after.is_none()
         && math_def_jc.is_none()
+        && default_tab_stop.is_none()
     {
         return None;
     }
@@ -781,6 +792,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         no_line_breaks_before,
         no_line_breaks_after,
         math_def_jc,
+        default_tab_stop,
     })
 }
 
@@ -6180,6 +6192,22 @@ mod math_jc_tests {
         );
         let s = parse_document_settings(&xml).expect("settings present (defJc)");
         assert_eq!(s.math_def_jc.as_deref(), Some("centerGroup"));
+
+        let empty = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
+        assert!(parse_document_settings(empty).is_none());
+    }
+
+    // ECMA-376 §17.15.1.25: `<w:defaultTabStop>` (twips) surfaces as points; its
+    // presence alone is enough to materialize DocumentSettings (sample-16 sets 360
+    // twips = 18pt). Absence ⇒ None so the renderer applies the 720-twip default.
+    #[test]
+    fn settings_default_tab_stop_surfaces() {
+        let xml = format!(
+            r#"<w:settings xmlns:w="{w}"><w:defaultTabStop w:val="360"/></w:settings>"#,
+            w = W_NS
+        );
+        let s = parse_document_settings(&xml).expect("settings present (defaultTabStop)");
+        assert_eq!(s.default_tab_stop, Some(18.0));
 
         let empty = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
         assert!(parse_document_settings(empty).is_none());
