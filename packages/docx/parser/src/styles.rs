@@ -585,7 +585,14 @@ impl StyleMap {
     }
 }
 
-fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
+/// Layer the paragraph format `src` OVER `dst`: every property `src` explicitly
+/// sets replaces `dst`'s. Used both for the style cascade (basedOn parent →
+/// child) and — via parser.rs — for a paragraph's DIRECT pPr over its resolved
+/// style. Keep this the single source of truth for "which paragraph properties
+/// override on merge"; the direct-formatting path reuses it so the two can never
+/// drift (a drift previously dropped direct pBdr / shd / pageBreakBefore — see
+/// `direct_paragraph_ppr_properties_survive_merge`).
+pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.alignment.is_some() {
         dst.alignment = src.alignment.clone();
     }
@@ -644,6 +651,13 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
         dst.widow_control = src.widow_control;
     }
     if src.para_borders.is_some() {
+        // KNOWN LIMITATION (§17.3.1.24 vs the per-edge entries §17.3.1.4/.7/.17/…):
+        // we replace the whole pBdr wholesale when `src` sets it, rather than
+        // merging edge-by-edge over the inherited set. For a `src` that specifies
+        // only e.g. `<w:bottom>`, this drops an inherited `<w:left>` that Word would
+        // keep (Word merges pBdr per-edge). Harmless for the common case (a fully
+        // specified pBdr, or no inherited pBdr at all); a per-edge merge is tracked
+        // as a follow-up. NOTE: framePr below is intentionally wholesale (§17.3.1.11).
         dst.para_borders = src.para_borders.clone();
     }
     if src.bidi.is_some() {
@@ -931,6 +945,12 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             if style == "none" || style == "nil" {
                 return None;
             }
+            // §17.3.4 CT_Border: sz is in eighths of a point; space in points.
+            // Neither has a normative default when the attribute is absent (it is
+            // optional with no spec fallback), so the unwrap_or values below are
+            // arbitrary fallbacks for the near-nonexistent "val set, sz/space
+            // omitted" authoring; the renderer compares width/space when matching
+            // adjacent borders, so they only need to be internally consistent.
             let width = attr_w(node, "sz")
                 .and_then(|s| s.parse::<f64>().ok())
                 .map(|v| v / 8.0)
@@ -955,10 +975,17 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             right: parse_edge("right"),
             between: parse_edge("between"),
         };
+        // §17.3.1.7: a `between` border (the rule drawn between two adjacent
+        // paragraphs sharing an identical border set) is a first-class edge — a
+        // paragraph may declare ONLY `between` (internal rules, no outer box), so
+        // it must keep the borders alive on its own. The renderer already consumes
+        // `between` (the suppressed-top join), so omitting it here would starve a
+        // valid border set.
         if borders.top.is_some()
             || borders.bottom.is_some()
             || borders.left.is_some()
             || borders.right.is_some()
+            || borders.between.is_some()
         {
             fmt.para_borders = Some(borders);
         }
