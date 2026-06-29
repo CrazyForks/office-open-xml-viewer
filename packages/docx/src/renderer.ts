@@ -4571,12 +4571,14 @@ function renderParagraph(
           // contextually-shaped `fillText`, with the per-EA-glyph grid delta
           // applied via `ctx.letterSpacing`. The previous per-code-point loop
           // painted each glyph ISOLATED (no contextual shaping) yet positioned
-          // glyph i by the CONTEXTUAL cumulative `measureText(prefix_i)`. An
-          // opening bracket "［" (約物半角 §17.6.5) collapses to half-width only
-          // INSIDE a multi-char string, so an isolated full-width bracket plus a
-          // collapsed cumulative measure pulled every later glyph half-em left,
-          // OVERLAPPING the bracket. Drawing the piece contiguously makes measure
-          // and draw shape the SAME way (約物半角 honoured ⇒ no overlap), and
+          // glyph i by the CONTEXTUAL cumulative `measureText(prefix_i)`. JIS X
+          // 4051 約物連続 packing compresses a closing-class punctuation immediately
+          // followed by an opening bracket ("：［", "、［", "）（") ~half-em in
+          // measureText (a bracket next to a plain kanji/kana does NOT pack), so an
+          // isolated full-width bracket plus that collapsed cumulative measure
+          // pulled the following glyph half-em left, OVERLAPPING the bracket.
+          // Drawing the piece contiguously makes measure and draw shape the SAME
+          // way (the packing honoured ⇒ no overlap), and
           // `letterSpacing = Δ` reproduces the per-cell delta the box was measured
           // with. Build `pieces` BEFORE setting letterSpacing: justifiedPiecePositions
           // is eager and its internal `measure` calls must run at the natural
@@ -4605,14 +4607,36 @@ function renderParagraph(
           // the next run over this segment's tail (most visible at a CJK→Latin
           // boundary). See `@silurus/ooxml-core` → text/justify-positions.ts.
           const cps = [...s.text]; // code points (handles surrogate pairs)
-          const measure = (str: string): number => ctx.measureText(str).width;
-          for (const { text: piece, dx } of justifiedPiecePositions(
-            cps,
-            stretch.splitBefore,
-            distPerGap,
-            measure,
-          )) {
-            ctx.fillText(piece, x + dx, baseline + yOffset);
+          if (stretch.splitBefore.length === cps.length - 1) {
+            // FULLY distributed: a gap was opened at EVERY inter-glyph boundary
+            // (pure-CJK justify), so the pitch is UNIFORM. Drawing one glyph per
+            // piece in isolation (the loop below) loses the browser's contextual
+            // packing — JIS X 4051 約物連続 compresses a closing-class punctuation
+            // immediately followed by an opening bracket ("：［", "、［", "）（")
+            // ~half-em in measureText — so the bracket paints full-width while the
+            // next glyph, positioned by the COLLAPSED cumulative measure, is pulled
+            // left and OVERLAPS it (the justify analog of the docGrid case-1 fix,
+            // PR #626).
+            // Draw the whole CONTEXTUALLY-shaped run in ONE fillText with
+            // ctx.letterSpacing = distPerGap: glyph i lands at measure(prefix_i) +
+            // i·distPerGap (the exact justified position), so the final glyph
+            // reaches measure(whole) + (n-1)·distPerGap = the segment box edge
+            // (= internalStretch). Restore the prior letterSpacing afterwards; no
+            // measureText runs inside the set/restore window.
+            const prevLetterSpacing = ctx.letterSpacing;
+            ctx.letterSpacing = `${distPerGap}px`;
+            ctx.fillText(s.text, x, baseline + yOffset);
+            ctx.letterSpacing = prevLetterSpacing;
+          } else {
+            const measure = (str: string): number => ctx.measureText(str).width;
+            for (const { text: piece, dx } of justifiedPiecePositions(
+              cps,
+              stretch.splitBefore,
+              distPerGap,
+              measure,
+            )) {
+              ctx.fillText(piece, x + dx, baseline + yOffset);
+            }
           }
         } else {
           ctx.fillText(s.text, x, baseline + yOffset);
