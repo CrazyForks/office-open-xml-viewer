@@ -142,6 +142,27 @@ export interface Slide {
    * when the slide has no comments.
    */
   comments?: PptxComment[];
+  /**
+   * `<p:sld show="0">` — the slide is marked hidden in the slide show
+   * (ECMA-376 §19.3.1.38). Absent (`undefined`) ⇒ shown. The renderer ignores
+   * this; it is a fact surfaced for tools and for {@link PptxViewer}'s hidden-
+   * slide modes (read it via `PptxPresentation.isHidden`).
+   */
+  hidden?: boolean;
+}
+
+/**
+ * Translucent overlay drawn over a finished slide so it reads faintly
+ * (PowerPoint's hidden-slide thumbnail look). A pure render mechanism: the
+ * renderer never decides *when* to dim — the caller ({@link PptxViewer}'s
+ * `'dim'` mode) does. Both fields are required at the engine boundary; the
+ * viewer-facing override (`PptxViewerOptions.hiddenSlideDim`) is partial.
+ */
+export interface DimOptions {
+  /** CSS color of the overlay (e.g. `'#ffffff'`). */
+  color: string;
+  /** Overlay opacity 0..1 (e.g. `0.6` ⇒ underlying content shows at 40%). */
+  opacity: number;
 }
 
 /** A single legacy slide comment (`<p:cm>` in `ppt/comments/commentN.xml`). */

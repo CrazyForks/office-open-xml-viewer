@@ -1,7 +1,8 @@
-import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
+import type { DimOptions, MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide, dropImageBitmapCache, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import { selectNotes } from './notes';
+import { selectHidden } from './hidden';
 import {
   preloadGoogleFonts,
   WorkerBridge,
@@ -44,6 +45,8 @@ export interface RenderSlideToBitmapOptions {
    * @internal
    */
   skipMediaControls?: boolean;
+  /** Translucent overlay drawn over the finished slide (hidden-slide dimming). */
+  dim?: DimOptions;
 }
 
 /** Options for rendering a single slide onto a canvas. */
@@ -60,6 +63,8 @@ export interface RenderSlideOptions {
    * its own play/pause chrome without duplication.
    */
   skipMediaControls?: boolean;
+  /** Translucent overlay drawn over the finished slide (hidden-slide dimming). */
+  dim?: DimOptions;
 }
 
 /**
@@ -223,6 +228,20 @@ export class PptxPresentation {
     return selectNotes(this._presentation?.slides ?? [], slideIndex);
   }
 
+  /**
+   * Whether the slide at `slideIndex` (0-based, absolute) is marked hidden
+   * (`<p:sld show="0">`, ECMA-376 §19.3.1.38). Like {@link getNotes} the index
+   * is NOT clamped — out-of-range / non-integer ⇒ `false`. This is a *fact*
+   * about the model; deciding what to do with a hidden slide (skip / dim) is the
+   * caller's policy (see {@link PptxViewer}'s `hiddenSlideMode` modes).
+   */
+  isHidden(slideIndex: number): boolean {
+    if (this._meta) {
+      return Number.isInteger(slideIndex) ? (this._meta.hidden[slideIndex] ?? false) : false;
+    }
+    return selectHidden(this._presentation?.slides ?? [], slideIndex);
+  }
+
   /** Render a slide onto the given canvas. */
   async renderSlide(
     canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -254,6 +273,7 @@ export class PptxPresentation {
         fetchMedia: (path) => this.getMedia(path),
         fetchImage: this._fetchImage,
         skipMediaControls: opts.skipMediaControls,
+        dim: opts.dim,
         math: this._math,
       },
       opts.onTextRun,
@@ -280,12 +300,12 @@ export class PptxPresentation {
         throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
       }
       const res = await this._bridge.request(
-        (id) => ({ kind: 'renderSlide', id, slideIndex, width, dpr, skipMediaControls: opts.skipMediaControls }) satisfies RenderWorkerRequest,
+        (id) => ({ kind: 'renderSlide', id, slideIndex, width, dpr, skipMediaControls: opts.skipMediaControls, dim: opts.dim }) satisfies RenderWorkerRequest,
       );
       return (res as Extract<RenderWorkerResponse, { kind: 'slideRendered' }>).bitmap;
     }
     const off = new OffscreenCanvas(1, 1);
-    await this.renderSlide(off, slideIndex, { width, dpr, skipMediaControls: opts.skipMediaControls });
+    await this.renderSlide(off, slideIndex, { width, dpr, skipMediaControls: opts.skipMediaControls, dim: opts.dim });
     return off.transferToImageBitmap();
   }
 
@@ -371,7 +391,7 @@ export class PptxPresentation {
         ? async () => {
             // Whole slide rendered off-thread; the handle snapshots this paint
             // into its own base copy, so the bitmap can be closed right after.
-            const bmp = await this.renderSlideToBitmap(slideIndex, { width, dpr, skipMediaControls: true });
+            const bmp = await this.renderSlideToBitmap(slideIndex, { width, dpr, skipMediaControls: true, dim: opts.dim });
             canvas.width = bmp.width;
             canvas.height = bmp.height;
             // Set only the CSS width and let height follow the intrinsic aspect
@@ -389,6 +409,7 @@ export class PptxPresentation {
               width,
               dpr,
               skipMediaControls: true,
+              dim: opts.dim,
               onTextRun: opts.onTextRun,
             });
 

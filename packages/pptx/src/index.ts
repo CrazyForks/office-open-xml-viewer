@@ -1,4 +1,4 @@
-export { PptxViewer, type PptxViewerOptions } from './viewer';
+export { PptxViewer, type PptxViewerOptions, type HiddenSlideMode } from './viewer';
 export {
   PptxPresentation,
   type LoadOptions,
@@ -64,4 +64,7 @@ export type {
   // Chart model (reachable via ChartElement.series and renderChart).
   ChartModel,
   ChartSeries,
+  // Hidden-slide dimming options (reachable via RenderSlideOptions.dim /
+  // RenderSlideToBitmapOptions.dim) — the translucent overlay mechanism.
+  DimOptions,
 } from './types';

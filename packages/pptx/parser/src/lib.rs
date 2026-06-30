@@ -416,6 +416,10 @@ struct Slide {
     /// "threaded comments" are not yet parsed.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     comments: Vec<PptxComment>,
+    /// `<p:sld show="0">` — slide is hidden in the slide show (§19.3.1.38).
+    /// Omitted from JSON when false so existing snapshots are unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    hidden: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -7761,6 +7765,15 @@ fn parse_table_cell(
 //  Slide parser
 // ===========================
 
+/// `<p:sld show="0">` / `show="false"` marks a slide hidden in the slide show
+/// (ECMA-376 §19.3.1.38 `sld` / `CT_Slide` — `show`, xsd:boolean, default true).
+/// Absent or any truthy value ⇒ shown. NB: this matches the FALSY literals —
+/// the inverse of the codebase's usual `== "1" || == "true"` truthy check —
+/// because `show` defaults to true, so a slide is hidden only on explicit false.
+fn slide_is_hidden(root: roxmltree::Node) -> bool {
+    matches!(root.attribute("show"), Some("0") | Some("false"))
+}
+
 // Threads the full master+layout inheritance context (per-type font sizes,
 // bullets, anchors, transforms, alignments, spacing, bold/italic/caps/color
 // maps) plus zip/theme into one slide parse; this is the inheritance chain
@@ -7866,6 +7879,7 @@ fn parse_slide(
 
     let doc = roxmltree::Document::parse(xml)?;
     let root = doc.root_element(); // <p:sld>
+    let hidden = slide_is_hidden(root);
     let c_sld = child(root, "cSld");
 
     // Background chain: slide → layout → master. Each level resolves a blip
@@ -8018,6 +8032,7 @@ fn parse_slide(
         elements,
         notes,
         comments,
+        hidden,
     })
 }
 
@@ -9437,6 +9452,24 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    #[test]
+    fn slide_show_attr_marks_hidden() {
+        let ns = r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#;
+        let parse = |attr: &str| {
+            let xml = format!(r#"<p:sld {ns} {attr}><p:cSld/></p:sld>"#);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            slide_is_hidden(doc.root_element())
+        };
+        // Absent `show` ⇒ shown (default true ⇒ not hidden).
+        assert!(!parse(""));
+        // `show="0"` / `show="false"` ⇒ hidden (ECMA-376 §19.3.1.38 CT_Slide).
+        assert!(parse(r#"show="0""#));
+        assert!(parse(r#"show="false""#));
+        // Explicit truthy ⇒ shown.
+        assert!(!parse(r#"show="1""#));
+        assert!(!parse(r#"show="true""#));
     }
 
     #[test]
