@@ -104,6 +104,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         notes: pres.slides.map((_, i) => selectNotes(pres!.slides, i)),
         mediaElements: pres.slides.map((s) =>
           s.elements.filter((el): el is MediaElement => el.type === 'media')),
+        hidden: pres.slides.map((s) => s.hidden ?? false),
       };
       post({ kind: 'parsedMeta', id: req.id, meta });
       return;
@@ -125,6 +126,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         fetchMedia: getMedia,
         fetchImage: getImage,
         skipMediaControls: req.skipMediaControls,
+        dim: req.dim,
         // math intentionally omitted: MathJax needs a DOM <script>; worker
         // mode skips equations (documented in the design spec).
       });

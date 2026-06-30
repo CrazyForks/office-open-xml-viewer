@@ -64,4 +64,7 @@ export type {
   // Chart model (reachable via ChartElement.series and renderChart).
   ChartModel,
   ChartSeries,
+  // Hidden-slide dimming options (reachable via RenderSlideOptions.dim /
+  // RenderSlideToBitmapOptions.dim) — the translucent overlay mechanism.
+  DimOptions,
 } from './types';

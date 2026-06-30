@@ -1,4 +1,4 @@
-import type { MediaElement, WorkerResponse } from './types';
+import type { DimOptions, MediaElement, WorkerResponse } from './types';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -14,6 +14,8 @@ export interface PresentationMeta {
   /** Media elements per slide (geometry + paths), for main-thread playback
    *  overlays. Small: a handful of plain objects per slide. */
   mediaElements: MediaElement[][];
+  /** `Slide.hidden` per slide (`<p:sld show="0">`, §19.3.1.38). */
+  hidden: boolean[];
 }
 
 // The base `parse` arm from types.ts is intentionally NOT reused: the render
@@ -25,7 +27,7 @@ export type RenderWorkerRequest =
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
   | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
-  | { kind: 'renderSlide'; id: number; slideIndex: number; width: number; dpr: number; skipMediaControls?: boolean };
+  | { kind: 'renderSlide'; id: number; slideIndex: number; width: number; dpr: number; skipMediaControls?: boolean; dim?: DimOptions };
 
 export type RenderWorkerResponse =
   | Exclude<WorkerResponse, { kind: 'parsed' }>
