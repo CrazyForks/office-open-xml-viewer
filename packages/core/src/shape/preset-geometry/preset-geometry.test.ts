@@ -375,4 +375,17 @@ describe('renderPresetShape — skipTrailingStroke (callout leader retract hook)
     );
     expect(c.strokes).toBe(0);
   });
+
+  it('suppresses the `line` leader, whose single path has fill=null (not "none")', () => {
+    // The `line` preset is the ONE retractable geom whose leader path carries
+    // fill:null rather than the string "none" (every connector/callout uses
+    // "none"). The skip must treat a missing fill the same, else the common
+    // "Line with arrow" double-strokes and the full-length cap pokes through.
+    const d = strokeCounter();
+    renderPresetShape(
+      d.ctx, 'line', 0, 0, 200, 100, [], null, d.stroke, () => {},
+      { skipTrailingStroke: true },
+    );
+    expect(d.strokes).toBe(0);
+  });
 });

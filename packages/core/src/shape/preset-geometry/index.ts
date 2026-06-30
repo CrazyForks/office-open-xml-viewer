@@ -167,11 +167,15 @@ export function renderPresetShape(
     }
 
     if (path.stroke && applyAndStroke) {
-      // A connector/callout's leader line is the trailing fill="none" stroke
-      // path. When the caller will re-stroke it retracted from its decorated
-      // ends (so the line stops at the arrow base), skip it here. Rect borders
-      // and accent bars (earlier paths, or fill≠"none") always stroke.
-      const isTrailingLeader = i === lastIdx && path.fill === 'none';
+      // A connector/callout's leader line is the geometry's trailing stroke
+      // path with no fill — usually fill="none", but the `line` preset's sole
+      // path uses fill:null, so treat a missing fill the same (else `line`
+      // double-strokes and its cap pokes through the arrow tip). When the
+      // caller re-strokes the leader retracted from its decorated ends (so the
+      // line stops at the arrow base), skip it here. The accent bar is also
+      // fill="none" but is spared because it is NOT the last path; rect borders
+      // (fill≠none) likewise always stroke.
+      const isTrailingLeader = i === lastIdx && (path.fill === 'none' || path.fill == null);
       if (!(opts?.skipTrailingStroke && isTrailingLeader)) {
         applyAndStroke();
       }
