@@ -16,6 +16,7 @@ import type {
   Shadow,
   Glow,
   RenderOptions,
+  DimOptions,
   TabStop,
 } from './types';
 import { asBullet } from './types';
@@ -4082,12 +4083,32 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
 export type { RenderOptions } from './types';
 
 /**
+ * Overlay a translucent rectangle over the whole slide so a hidden slide reads
+ * faintly (PowerPoint's hidden-slide thumbnail look). A pure mechanism — it
+ * never inspects whether the slide is hidden; the caller ({@link PptxViewer}'s
+ * `'dim'` mode) decides when to apply it. `widthPx`/`heightPx` are CSS px; the
+ * ctx is already `scale(dpr, dpr)`d, so a fillRect in CSS px covers the canvas.
+ */
+export function applyDimOverlay(
+  ctx: CanvasRenderingContext2D,
+  dim: DimOptions,
+  widthPx: number,
+  heightPx: number,
+): void {
+  ctx.save();
+  ctx.globalAlpha = dim.opacity;
+  ctx.fillStyle = dim.color;
+  ctx.fillRect(0, 0, widthPx, heightPx);
+  ctx.restore();
+}
+
+/**
  * Internal render options: the shared {@link RenderOptions} plus the opt-in
  * `math` engine. `math` is internal plumbing — the headless {@link
  * PptxPresentation} injects it once at load and threads it here on each draw,
  * so the public `RenderSlideOptions` deliberately does not expose it.
  */
-type SlideRenderOptions = RenderOptions & { math?: MathRenderer };
+type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOptions };
 
 /**
  * Render a single slide onto a <canvas> element.
@@ -4313,6 +4334,11 @@ export async function renderSlide(
       );
     }
   }
+
+  // Hidden-slide dimming (a render mechanism; the caller decides WHEN — see
+  // PptxViewer's 'dim' mode). Overlay AFTER all content so it reads faintly.
+  if (superseded()) return canvas;
+  if (opts.dim) applyDimOverlay(ctx, opts.dim, canvasW, canvasH);
 
   return canvas;
 }
