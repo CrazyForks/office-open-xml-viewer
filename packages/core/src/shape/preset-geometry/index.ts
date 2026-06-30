@@ -106,6 +106,7 @@ export function renderPresetShape(
   baseFill: string | CanvasGradient | CanvasPattern | null,
   applyAndStroke: (() => void) | null,
   clearShadow: () => void,
+  opts?: { skipTrailingStroke?: boolean },
 ): boolean {
   const key = geom.toLowerCase();
   let def = PRESETS[key];
@@ -137,7 +138,9 @@ export function renderPresetShape(
 
   let shadowCleared = false;
 
-  for (const path of def.paths) {
+  const lastIdx = def.paths.length - 1;
+  for (let i = 0; i < def.paths.length; i++) {
+    const path = def.paths[i];
     ctx.beginPath();
     applyPresetPath(ctx, path, evaluator, x, y, w, h);
 
@@ -164,7 +167,18 @@ export function renderPresetShape(
     }
 
     if (path.stroke && applyAndStroke) {
-      applyAndStroke();
+      // A connector/callout's leader line is the geometry's trailing stroke
+      // path with no fill — usually fill="none", but the `line` preset's sole
+      // path uses fill:null, so treat a missing fill the same (else `line`
+      // double-strokes and its cap pokes through the arrow tip). When the
+      // caller re-strokes the leader retracted from its decorated ends (so the
+      // line stops at the arrow base), skip it here. The accent bar is also
+      // fill="none" but is spared because it is NOT the last path; rect borders
+      // (fill≠none) likewise always stroke.
+      const isTrailingLeader = i === lastIdx && (path.fill === 'none' || path.fill == null);
+      if (!(opts?.skipTrailingStroke && isTrailingLeader)) {
+        applyAndStroke();
+      }
     }
   }
 
@@ -172,13 +186,21 @@ export function renderPresetShape(
 }
 
 /**
- * For connector presets (straight / bent / curved), return the canvas-space
- * tip points and outgoing tangent angles at the start and end of the path.
- * Used by the renderer to place arrow heads with the correct orientation.
+ * For connector AND callout presets, return the canvas-space tip points and
+ * outgoing tangent angles at the two ends of the geometry's *leader line*
+ * (its last `<path>`). Used by the renderer to place line-end decorations
+ * (headEnd / tailEnd) with the correct orientation.
  *
- * `start.angle` is the direction **from** the path **toward** the start tip
- * (so arrow heads "headEnd" point outward); `end.angle` is the direction
- * the pen was moving as it reached the end tip.
+ * - Connectors (straight / bent / curved) have a single path, so the leader is
+ *   that path.
+ * - Callouts (callout1/2/3 and their border / accent variants) emit the leader
+ *   as the LAST path — after the text rectangle and any accent bar. callout1's
+ *   leader is a 2-point line; callout2/3 are 3-/4-point polylines whose tip is
+ *   the final vertex.
+ *
+ * `start.angle` is the direction **from** the line **toward** the attach (start)
+ * tip, so a "headEnd" decoration points outward; `end.angle` is the pen's travel
+ * direction as it reaches the tip, so a "tailEnd" decoration points outward.
  */
 export function getConnectorAnchors(
   geom: string,
@@ -187,10 +209,18 @@ export function getConnectorAnchors(
 ): {
   start: { x: number; y: number; angle: number };
   end:   { x: number; y: number; angle: number };
+  /** Every vertex of the leader polyline (m/l/C endpoints), in draw order, so
+   *  callers can retract a decorated end before re-stroking the line. */
+  vertices: Array<{ x: number; y: number }>;
 } | null {
   const def = PRESETS[geom.toLowerCase()];
   if (!def || def.paths.length === 0) return null;
-  const path = def.paths[0];
+  // The decoratable line is the geometry's LAST <path>. For a connector that is
+  // its only path; for a callout it is the leader line, which presets.json
+  // emits after the text rectangle (and, for accent variants, the accent bar).
+  // So paths[last] picks the leader for callout1/2/3 and is a no-op for the
+  // single-path connectors.
+  const path = def.paths[def.paths.length - 1];
   const evaluator = createEvaluator({ w, h, adj }, def.adj, def.gd);
   const sx = path.w != null ? w / path.w : 1;
   const sy = path.h != null ? h / path.h : 1;
@@ -202,6 +232,7 @@ export function getConnectorAnchors(
   let startTanX = 0, startTanY = 0;
   let startTanSet = false;
   let endTanX = 0, endTanY = 0;
+  const vertices: Array<{ x: number; y: number }> = [];
 
   for (const cmd of path.cmds) {
     switch (cmd[0]) {
@@ -209,6 +240,7 @@ export function getConnectorAnchors(
         penX = toAbsX(evaluator.resolve(cmd[1]));
         penY = toAbsY(evaluator.resolve(cmd[2]));
         startX = penX; startY = penY;
+        vertices.push({ x: penX, y: penY });
         break;
       }
       case 'l': {
@@ -217,6 +249,7 @@ export function getConnectorAnchors(
         if (!startTanSet) { startTanX = nx - penX; startTanY = ny - penY; startTanSet = true; }
         endTanX = nx - penX; endTanY = ny - penY;
         penX = nx; penY = ny;
+        vertices.push({ x: penX, y: penY });
         break;
       }
       case 'C': {
@@ -229,6 +262,7 @@ export function getConnectorAnchors(
         if (!startTanSet) { startTanX = c1x - penX; startTanY = c1y - penY; startTanSet = true; }
         endTanX = nx - c2x; endTanY = ny - c2y;
         penX = nx; penY = ny;
+        vertices.push({ x: penX, y: penY });
         break;
       }
     }
@@ -240,6 +274,7 @@ export function getConnectorAnchors(
   return {
     start: { x: startX, y: startY, angle: startAngle },
     end:   { x: penX,   y: penY,   angle: endAngle   },
+    vertices,
   };
 }
 

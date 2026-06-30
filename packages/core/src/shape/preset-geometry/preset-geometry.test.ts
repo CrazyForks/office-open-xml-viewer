@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { renderPresetShape, hasPreset, buildPresetGeometryPath } from './index';
+import {
+  renderPresetShape,
+  hasPreset,
+  buildPresetGeometryPath,
+  getConnectorAnchors,
+} from './index';
 
 /**
  * Records every path vertex the engine emits so we can assert on the resulting
@@ -248,5 +253,139 @@ describe('renderPresetShape (core preset-geometry engine)', () => {
       expect(ops).not.toContain('fill');
       expect(ops.filter((o) => o === 'stroke')).toHaveLength(1);
     });
+  });
+});
+
+describe('getConnectorAnchors — callout leader-line endpoints', () => {
+  // A callout's leader line is the LAST <path> of its presets.json definition
+  // (after the text rect and, for accent variants, the accent bar). The arrow
+  // head must decorate that leader's attach/tip ends, NOT the rectangle.
+  // ECMA-376 §20.1.9: callout1 = 2-point leader, callout2 = 3-point polyline,
+  // callout3 = 4-point polyline; the tip is the final vertex.
+  const W = 200;
+  const H = 100;
+
+  it('callout1: attach + tip come from the 2-point leader (default adj)', () => {
+    const a = getConnectorAnchors('callout1', 0, 0, W, H, []);
+    expect(a).not.toBeNull();
+    // attach = (w·adj2, h·adj1) = (-16.667, 18.75)
+    expect(a!.start.x).toBeCloseTo(-16.6666, 2);
+    expect(a!.start.y).toBeCloseTo(18.75, 2);
+    // tip = (w·adj4, h·adj3) = (-76.667, 112.5)
+    expect(a!.end.x).toBeCloseTo(-76.6666, 2);
+    expect(a!.end.y).toBeCloseTo(112.5, 2);
+    // tip tangent = travel direction of the single segment (attach → tip)
+    expect(a!.end.angle).toBeCloseTo(Math.atan2(93.75, -60), 4);
+  });
+
+  it('callout2: tip is the 3rd polyline vertex (default adj)', () => {
+    const a = getConnectorAnchors('callout2', 0, 0, W, H, []);
+    expect(a).not.toBeNull();
+    expect(a!.start.x).toBeCloseTo(-16.6666, 2);
+    expect(a!.start.y).toBeCloseTo(18.75, 2);
+    expect(a!.end.x).toBeCloseTo(-93.3334, 2);
+    expect(a!.end.y).toBeCloseTo(112.5, 2);
+    // last segment v2 → v3 = (-60, 93.75)
+    expect(a!.end.angle).toBeCloseTo(Math.atan2(93.75, -60), 4);
+  });
+
+  it('callout3: tip is the 4th polyline vertex (default adj)', () => {
+    const a = getConnectorAnchors('callout3', 0, 0, W, H, []);
+    expect(a).not.toBeNull();
+    expect(a!.end.x).toBeCloseTo(-16.6666, 2);
+    expect(a!.end.y).toBeCloseTo(112.963, 2);
+    // last segment v3 → v4 = (16.668, 12.963)
+    expect(a!.end.angle).toBeCloseTo(Math.atan2(12.963, 16.668), 3);
+  });
+
+  it('accentBorderCallout1: leader is the LAST path, not the accent bar', () => {
+    const a = getConnectorAnchors('accentbordercallout1', 0, 0, W, H, []);
+    expect(a).not.toBeNull();
+    // same leader as callout1 (adj defaults identical)
+    expect(a!.start.x).toBeCloseTo(-16.6666, 2);
+    expect(a!.end.x).toBeCloseTo(-76.6666, 2);
+    expect(a!.end.y).toBeCloseTo(112.5, 2);
+  });
+
+  it('straightConnector1: single-path connector endpoints are unchanged', () => {
+    const a = getConnectorAnchors('straightconnector1', 0, 0, W, H, []);
+    expect(a).not.toBeNull();
+    expect(a!.start.x).toBeCloseTo(0, 2);
+    expect(a!.start.y).toBeCloseTo(0, 2);
+    expect(a!.end.x).toBeCloseTo(W, 2);
+    expect(a!.end.y).toBeCloseTo(H, 2);
+  });
+
+  it('exposes the full leader polyline as `vertices` (callout1/2/3)', () => {
+    const round = (a: ReturnType<typeof getConnectorAnchors>) =>
+      a!.vertices.map((v) => [Math.round(v.x * 100) / 100, Math.round(v.y * 100) / 100]);
+    expect(round(getConnectorAnchors('callout1', 0, 0, W, H, []))).toEqual([
+      [-16.67, 18.75], [-76.67, 112.5],
+    ]);
+    expect(round(getConnectorAnchors('callout2', 0, 0, W, H, []))).toEqual([
+      [-16.67, 18.75], [-33.33, 18.75], [-93.33, 112.5],
+    ]);
+    expect(round(getConnectorAnchors('callout3', 0, 0, W, H, []))).toEqual([
+      [-16.67, 18.75], [-33.33, 18.75], [-33.33, 100], [-16.67, 112.96],
+    ]);
+  });
+
+  it('vertices on a single-path connector are just its two endpoints', () => {
+    const a = getConnectorAnchors('straightconnector1', 0, 0, W, H, []);
+    expect(a!.vertices.length).toBe(2);
+    expect(a!.vertices[0].x).toBeCloseTo(0, 2);
+    expect(a!.vertices[1].x).toBeCloseTo(W, 2);
+  });
+});
+
+describe('renderPresetShape — skipTrailingStroke (callout leader retract hook)', () => {
+  // borderCallout2 has two stroked paths: the text rectangle (fill=null) and the
+  // leader line (fill="none"). skipTrailingStroke must suppress ONLY the trailing
+  // leader stroke so the renderer can re-draw it retracted, while the rect border
+  // still paints.
+  function strokeCounter() {
+    const { ctx } = makeRecorder();
+    let strokes = 0;
+    return { ctx, stroke: () => { strokes++; }, get strokes() { return strokes; } };
+  }
+
+  it('without the flag, both the rect border and the leader stroke', () => {
+    const a = strokeCounter();
+    renderPresetShape(a.ctx, 'bordercallout2', 0, 0, 200, 100, [], '#fff', a.stroke, () => {});
+    expect(a.strokes).toBe(2);
+  });
+
+  it('with the flag, the trailing fill=none leader stroke is skipped', () => {
+    const b = strokeCounter();
+    renderPresetShape(
+      b.ctx, 'bordercallout2', 0, 0, 200, 100, [], '#fff', b.stroke, () => {},
+      { skipTrailingStroke: true },
+    );
+    expect(b.strokes).toBe(1);
+  });
+
+  it('the flag is a no-op for a single-path connector (its only path is not fill=none-after-others… it IS the leader)', () => {
+    // straightConnector1 is a single fill=none stroked path → it counts as the
+    // trailing leader, so the flag suppresses it (the connector renderer never
+    // sets the flag, so this only documents the boundary).
+    const c = strokeCounter();
+    renderPresetShape(
+      c.ctx, 'straightconnector1', 0, 0, 200, 100, [], null, c.stroke, () => {},
+      { skipTrailingStroke: true },
+    );
+    expect(c.strokes).toBe(0);
+  });
+
+  it('suppresses the `line` leader, whose single path has fill=null (not "none")', () => {
+    // The `line` preset is the ONE retractable geom whose leader path carries
+    // fill:null rather than the string "none" (every connector/callout uses
+    // "none"). The skip must treat a missing fill the same, else the common
+    // "Line with arrow" double-strokes and the full-length cap pokes through.
+    const d = strokeCounter();
+    renderPresetShape(
+      d.ctx, 'line', 0, 0, 200, 100, [], null, d.stroke, () => {},
+      { skipTrailingStroke: true },
+    );
+    expect(d.strokes).toBe(0);
   });
 });

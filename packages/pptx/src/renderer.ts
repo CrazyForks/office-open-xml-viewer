@@ -42,6 +42,8 @@ import {
   getConnectorAnchors,
   getCustGeomEndpoints,
   drawArrowHead,
+  lineEndRetract,
+  retractLineEndpoint,
   computeScene3dQuad,
   isScene3dNonIdentity,
   drawProjected,
@@ -1527,11 +1529,25 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
   ]);
 
-  // callout1 family — `<a:ln><a:headEnd|tailEnd>` decorate the line path
-  // (path 1 in presets.json), not the surrounding text rectangle (path 0).
-  const CALLOUT1_GEOMS = new Set([
-    'callout1', 'bordercallout1', 'accentcallout1', 'accentbordercallout1',
+  // callout family — `<a:ln><a:headEnd|tailEnd>` decorate the LEADER line
+  // (the geometry's last `<path>` in presets.json), not the text rectangle
+  // (path 0) or the accent bar. callout1 = 2-point leader, callout2/3 =
+  // 3-/4-point polylines; getConnectorAnchors resolves the leader's two ends
+  // for every variant, so all twelve share the connector decoration path.
+  const CALLOUT_GEOMS = new Set([
+    'callout1', 'callout2', 'callout3',
+    'bordercallout1', 'bordercallout2', 'bordercallout3',
+    'accentcallout1', 'accentcallout2', 'accentcallout3',
+    'accentbordercallout1', 'accentbordercallout2', 'accentbordercallout3',
   ]);
+
+  // A leader line we re-stroke retracted from its filled decorations: every
+  // callout plus the straight / bent (polyline) connectors. Curved connectors
+  // are excluded — their leader is a Bézier and getConnectorAnchors.vertices only
+  // captures segment endpoints, so retracting from a vertex would straighten the
+  // curve. Those keep their preset-engine leader (decoration overlap unchanged).
+  const isRetractableLeader = (g: string): boolean =>
+    CALLOUT_GEOMS.has(g) || g === 'line' || g === 'straightconnector1' || g.startsWith('bentconnector');
 
   // ── Dispatch to preset engine when possible ────────────────────────────
   // Preference order: custGeom → generic preset engine → legacy switch.
@@ -1576,6 +1592,11 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         target, geom, x, y, w, h,
         [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
         tFill, tStroke, tClearShadow,
+        // A retractable leader (callout / straight / bent connector) is
+        // re-stroked retracted from its decorated ends in the line-end block
+        // below, so suppress the preset engine's full-length leader stroke to
+        // avoid a double line / a cap poking through the arrow tip.
+        isRetractableLeader(geom) ? { skipTrailingStroke: true } : undefined,
       );
       return;
     }
@@ -1674,16 +1695,45 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     ctx.restore();
   }
 
-  if (el.stroke && CONNECTOR_GEOMS.has(geom)) {
+  if (el.stroke && (CONNECTOR_GEOMS.has(geom) || CALLOUT_GEOMS.has(geom))) {
+    // Connectors and callouts both decorate a *leader line* whose two ends +
+    // outward tangents are resolved by getConnectorAnchors from the geometry's
+    // last `<path>` (presets.json). For a connector that is the line itself;
+    // for a callout it is the attach→tip leader (callout1 straight, callout2/3
+    // polyline). headEnd sits on the attach end, tailEnd on the tip — exactly
+    // as the `m … l …` order of the preset's leader path dictates.
     const anchors = getConnectorAnchors(geom, x, y, w, h, [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8]);
     if (anchors) {
       // ECMA-376 §20.1.8.42 — compound line styles. For straight lines /
       // connectors we re-stroke the segment with multiple parallel lines
-      // along the perpendicular of the line direction. Curved connectors
-      // fall through to the single-stroke fast path (parallel curves are
-      // a non-trivial geometric operation).
+      // along the perpendicular of the line direction. Curved connectors and
+      // callout leaders fall through to the single-stroke fast path (parallel
+      // curves / polylines are a non-trivial geometric operation).
       const cmpd = el.stroke.cmpd;
       const isStraight = geom === 'line' || geom === 'straightconnector1';
+      // Retractable leaders (callout / straight / bent connector): paintShapeBody
+      // suppressed the preset leader stroke, so re-stroke the polyline here with
+      // each decorated end pulled back by the decoration's length, so the line
+      // stops at the arrow base instead of poking through its tip (PowerPoint
+      // behaviour). Filled ends (triangle/stealth/diamond/oval) retract; open
+      // `arrow` / `none` do not (lineEndRetract → 0). A compound straight segment
+      // is drawn by drawCompoundLine below instead, so skip the retract there.
+      if (isRetractableLeader(geom) && anchors.vertices.length >= 2 && !(cmpd && isStraight)) {
+        const pts = anchors.vertices.map((v) => ({ x: v.x, y: v.y }));
+        if (el.stroke.tailEnd) {
+          const r = lineEndRetract(el.stroke.tailEnd, el.stroke, scale);
+          pts[pts.length - 1] = retractLineEndpoint(pts[pts.length - 1], pts[pts.length - 2], r);
+        }
+        if (el.stroke.headEnd) {
+          const r = lineEndRetract(el.stroke.headEnd, el.stroke, scale);
+          pts[0] = retractLineEndpoint(pts[0], pts[1], r);
+        }
+        applyStroke(ctx, el.stroke, scale);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.stroke();
+      }
       if (cmpd && isStraight) {
         drawCompoundLine(ctx, anchors.start, anchors.end, el.stroke, cmpd, scale);
       }
@@ -1693,29 +1743,6 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       if (el.stroke.headEnd) {
         drawArrowHead(ctx, anchors.start.x, anchors.start.y, anchors.start.angle, el.stroke.headEnd, el.stroke, scale);
       }
-    }
-  } else if (el.stroke && CALLOUT1_GEOMS.has(geom)) {
-    // Callout1 family carries an `<a:ln>` whose head/tail decorations belong
-    // on the *line* (path 1: m,x1,y1 → l,x2,y2), not on the rectangle (path 0).
-    // ECMA-376 callout1 gd: y1=h·adj1/100000, x1=w·adj2/100000 (attach point);
-    // y2=h·adj3/100000, x2=w·adj4/100000 (tip). Tip and attach may sit
-    // outside the bbox. Compute both, then orient the head/tail along the
-    // attach→tip direction.
-    const attXf = ((el.adj2 ?? -8333) as number) / 100000;
-    const attYf = ((el.adj  ?? 18750) as number) / 100000;
-    const tipXf = ((el.adj4 ?? -38333) as number) / 100000;
-    const tipYf = ((el.adj3 ?? 112500) as number) / 100000;
-    const attX = x + attXf * w;
-    const attY = y + attYf * h;
-    const tipX = x + tipXf * w;
-    const tipY = y + tipYf * h;
-    const tailAngle = Math.atan2(tipY - attY, tipX - attX);
-    const headAngle = tailAngle + Math.PI;
-    if (el.stroke.tailEnd) {
-      drawArrowHead(ctx, tipX, tipY, tailAngle, el.stroke.tailEnd, el.stroke, scale);
-    }
-    if (el.stroke.headEnd) {
-      drawArrowHead(ctx, attX, attY, headAngle, el.stroke.headEnd, el.stroke, scale);
     }
   } else if (
     el.stroke &&
