@@ -3635,6 +3635,25 @@ export function drawShapeText(
     let lineHeight = 0;
     let lineAscent = 0;
     let hasMath = false;
+    // ECMA-376 §21.1.2.2.5 <a:lnSpc> + §21.1.2.1.3 normAutofit lnSpcReduction,
+    // applied to a natural (design-floored) single-line height. Mirrors the pptx
+    // renderer. `h` is the natural single line, so it is the correct pct base;
+    // pts is an absolute per-line height (cs-scaled, like the cell/run px sizes).
+    const applyLineSpacing = (h: number): number => {
+      let out = h;
+      if (p.spaceLine) {
+        if (p.spaceLine.type === 'pct') out = out * (p.spaceLine.val / 100000);
+        else out = p.spaceLine.val * PT_TO_PX * cs;
+      }
+      // normAutofit lnSpcReduction (§21.1.2.1.3): apply the STORED reduction
+      // only. fontScale font-shrink and spAutoFit shape-grow are runtime layout
+      // behaviors intentionally out of scope (modeled but not applied) — the
+      // repo requires explicit user approval for reverse-engineered autofit.
+      if (txt.autoFit === 'norm' && txt.lnSpcReduction != null) {
+        out *= 1 - txt.lnSpcReduction;
+      }
+      return out;
+    };
     const flushLine = () => {
       // An empty paragraph (no runs) or a blank line produced by a standalone /
       // trailing <a:br> contributes no text or math segment, so lineHeight is
@@ -3650,6 +3669,7 @@ export function drawShapeText(
         lineHeight = Math.max(fallbackPx * 1.2, intendedSingleLinePx(lastTextFace, fallbackPx));
         lineAscent = fallbackPx * 0.85;
       }
+      lineHeight = applyLineSpacing(lineHeight);
       lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath, leftInset: lineLeftInset(), availW: lineAvailW() });
       firstLineDone = true;
       segs = []; lineW = 0; lineHeight = 0; lineAscent = 0; hasMath = false;
@@ -3678,7 +3698,10 @@ export function drawShapeText(
           // indent — `indent` is a run-in indent for the first line of TEXT, not
           // for a block equation — so use marLpx/paraW regardless of line position.
           flushLine();
-          lines.push({ segs: [{ kind: 'math', render, color, w, ascent, descent }], align, height: ascent + descent, ascent, hasMath: true, leftInset: marLpx, availW: paraW });
+          // Apply the paragraph's line spacing to a display equation's own line
+          // too (a block equation in a pct-spaced paragraph). ascent is kept
+          // unchanged; the alphabetic-baseline draw distributes the extra leading.
+          lines.push({ segs: [{ kind: 'math', render, color, w, ascent, descent }], align, height: applyLineSpacing(ascent + descent), ascent, hasMath: true, leftInset: marLpx, availW: paraW });
           firstLineDone = true;
           continue;
         }
