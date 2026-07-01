@@ -14,4 +14,4 @@ export function selectHidden(slides: readonly Slide[], slideIndex: number): bool
 }
 
 // Generic index-navigation helpers live in core (shared with xlsx hidden sheets).
-export { nextVisibleIndex, resolveVisibleIndex } from '@silurus/ooxml-core';
+export { nextVisibleIndex, resolveVisibleIndex, countVisible } from '@silurus/ooxml-core';

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nextVisibleIndex, resolveVisibleIndex } from './visible-index.js';
+import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './visible-index.js';
 
 describe('nextVisibleIndex (skip-mode sequential nav)', () => {
   const isHidden = (i: number) => i === 1 || i === 2; // visible: 0,3,4
@@ -31,5 +31,14 @@ describe('resolveVisibleIndex (initial load / entering skip mode)', () => {
   });
   it('returns current on an empty list', () => {
     expect(resolveVisibleIndex(0, () => true, 0)).toBe(0);
+  });
+});
+
+describe('countVisible', () => {
+  it('counts the non-hidden items', () => {
+    expect(countVisible((i) => i === 1 || i === 2, 5)).toBe(3);
+    expect(countVisible(() => false, 4)).toBe(4);
+    expect(countVisible(() => true, 4)).toBe(0);
+    expect(countVisible(() => false, 0)).toBe(0);
   });
 });

@@ -1,7 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet, XlsxComment } from './types.js';
 import type { LoadOptions } from '@silurus/ooxml-core';
-import { nextVisibleIndex, resolveVisibleIndex } from '@silurus/ooxml-core';
+import { nextVisibleIndex, resolveVisibleIndex, countVisible } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
@@ -35,6 +35,11 @@ const TAB_GAP = 1;
 
 /** How {@link XlsxViewer} presents hidden sheets (`<sheet state>`, §18.2.19). */
 export type HiddenSheetMode = 'show' | 'skip' | 'dim';
+
+/** `'dim'`-mode tab opacity: hidden/veryHidden tabs are greyed but selectable.
+ *  A UI-presentation default (ECMA-376 defines no hidden-tab rendering); mirrors
+ *  the named pptx `DEFAULT_HIDDEN_DIM` constant. */
+const HIDDEN_TAB_DIM_OPACITY = 0.45;
 
 export interface XlsxViewerOptions extends LoadOptions {
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
@@ -1080,9 +1085,8 @@ export class XlsxViewer {
   /** Number of non-hidden sheets (absolute `sheetCount` is unchanged). */
   get visibleSheetCount(): number {
     if (!this.wb) return 0;
-    let n = 0;
-    for (let i = 0; i < this.sheetCount; i++) if (!this.wb.isHidden(i)) n++;
-    return n;
+    const wb = this.wb;
+    return countVisible((i) => wb.isHidden(i), this.sheetCount);
   }
 
   /** Copy the selected cell range as tab-separated text to the clipboard. */
@@ -1881,8 +1885,11 @@ export class XlsxViewer {
     // page vertically — on first load that jumped the whole page down to the
     // tab bar (the active sheet is set during load). Adjust the strip's
     // scrollLeft directly so the page never moves.
+    // `offsetParent === null` for a `display:none` tab (a hidden sheet reached
+    // by an explicit goToSheet in 'skip' mode). Its getBoundingClientRect is all
+    // zeros, which would spuriously scroll the strip — skip the scroll for it.
     const tab = this.tabs[index];
-    if (tab) {
+    if (tab && tab.offsetParent !== null) {
       const strip = this.tabStrip;
       const tabRect = tab.getBoundingClientRect();
       const stripRect = strip.getBoundingClientRect();
@@ -1932,7 +1939,7 @@ export class XlsxViewer {
   private tabCss(i: number, active: boolean): string {
     let css = this.tabStyle(active, this.tabColors[i]);
     if (this._hiddenSheetMode !== 'show' && this.wb?.isHidden(i)) {
-      css += this._hiddenSheetMode === 'skip' ? 'display:none;' : 'opacity:0.45;';
+      css += this._hiddenSheetMode === 'skip' ? 'display:none;' : `opacity:${HIDDEN_TAB_DIM_OPACITY};`;
     }
     return css;
   }

@@ -33,3 +33,14 @@ export function resolveVisibleIndex(
   if (fwd !== current) return fwd;
   return nextVisibleIndex(current, -1, isHidden, count);
 }
+
+/**
+ * Count how many of `count` items are visible (not hidden), per the same
+ * `isHidden` callback the skip-navigation helpers use. Shared by viewers'
+ * `visible*Count` getters (pptx visibleSlideCount, xlsx visibleSheetCount).
+ */
+export function countVisible(isHidden: (i: number) => boolean, count: number): number {
+  let n = 0;
+  for (let i = 0; i < count; i++) if (!isHidden(i)) n++;
+  return n;
+}

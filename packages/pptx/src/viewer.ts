@@ -1,7 +1,7 @@
 import type { RenderOptions, PptxTextRunInfo } from './renderer';
 import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
-import { nextVisibleIndex, resolveVisibleIndex } from './hidden';
+import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './hidden';
 import type { DimOptions } from './types';
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
@@ -199,9 +199,8 @@ export class PptxViewer {
   /** Number of non-hidden slides (absolute `slideCount` is unchanged). */
   get visibleSlideCount(): number {
     if (!this.engine) return 0;
-    let n = 0;
-    for (let i = 0; i < this.slideCount; i++) if (!this.engine.isHidden(i)) n++;
-    return n;
+    const engine = this.engine;
+    return countVisible((i) => engine.isHidden(i), this.slideCount);
   }
 
   get slideIndex(): number { return this.currentSlide; }
