@@ -3,11 +3,12 @@ export type { WireRenderViewportOptions } from './worker-protocol.js';
 export { XlsxViewer } from './viewer.js';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
-export type { XlsxViewerOptions, CellAddress, CellRange, SelectionMode } from './viewer.js';
+export type { XlsxViewerOptions, HiddenSheetMode, CellAddress, CellRange, SelectionMode } from './viewer.js';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export type {
   Workbook,
   SheetMeta,
+  SheetVisibility,
   Worksheet,
   Row,
   Cell,

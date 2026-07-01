@@ -1,6 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet, XlsxComment } from './types.js';
 import type { LoadOptions } from '@silurus/ooxml-core';
+import { nextVisibleIndex, resolveVisibleIndex, countVisible } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
@@ -31,6 +32,14 @@ const TAB_BAR_H = 30;
 // space so it is offset from the row-header boundary by the same margin that
 // separates tabs from each other.
 const TAB_GAP = 1;
+
+/** How {@link XlsxViewer} presents hidden sheets (`<sheet state>`, §18.2.19). */
+export type HiddenSheetMode = 'show' | 'skip' | 'dim';
+
+/** `'dim'`-mode tab opacity: hidden/veryHidden tabs are greyed but selectable.
+ *  A UI-presentation default (ECMA-376 defines no hidden-tab rendering); mirrors
+ *  the named pptx `DEFAULT_HIDDEN_DIM` constant. */
+const HIDDEN_TAB_DIM_OPACITY = 0.45;
 
 export interface XlsxViewerOptions extends LoadOptions {
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
@@ -81,6 +90,19 @@ export interface XlsxViewerOptions extends LoadOptions {
    * require `'main'` (the math engine cannot cross the worker boundary).
    */
   mode?: 'main' | 'worker';
+  /**
+   * How hidden / veryHidden sheets (`<sheet state>`, ECMA-376 §18.2.19) are
+   * presented:
+   * - `'show'` (default): every sheet gets a tab — current behavior.
+   * - `'skip'`: hidden/veryHidden sheets get no tab and are jumped over by
+   *   `nextSheet`/`prevSheet` and initial load; absolute indices are unchanged,
+   *   and an explicit `goToSheet(i)` to a hidden sheet is still honored.
+   * - `'dim'`: hidden/veryHidden tabs are shown greyed but stay selectable.
+   *
+   * Named to match the {@link XlsxViewer.hiddenSheetMode} getter and
+   * {@link XlsxViewer.setHiddenSheetMode} setter. Mirrors pptx `hiddenSlideMode`.
+   */
+  hiddenSheetMode?: HiddenSheetMode;
 }
 
 export interface CellAddress {
@@ -269,6 +291,7 @@ export class XlsxViewer {
   private zoomSlider: HTMLInputElement | null = null;
   private zoomLabel: HTMLSpanElement | null = null;
   private currentSheet = 0;
+  private _hiddenSheetMode: HiddenSheetMode;
   private currentWorksheet: Worksheet | null = null;
   private opts: XlsxViewerOptions;
   /** 'main' renders on this thread; 'worker' paints worker-produced bitmaps. */
@@ -345,6 +368,7 @@ export class XlsxViewer {
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     this.opts = opts;
     this._mode = opts.mode ?? 'main';
+    this._hiddenSheetMode = opts.hiddenSheetMode ?? 'show';
 
     const wrapper = document.createElement('div');
     wrapper.style.cssText =
@@ -523,7 +547,7 @@ export class XlsxViewer {
       });
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
-      await this.showSheet(0);
+      await this.showSheet(this._initialSheet());
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       if (this.opts.onError) {
@@ -647,11 +671,27 @@ export class XlsxViewer {
   }
 
   async nextSheet(): Promise<void> {
-    await this.goToSheet(this.currentSheet + 1);
+    await this.goToSheet(this._stepSheet(1));
   }
 
   async prevSheet(): Promise<void> {
-    await this.goToSheet(this.currentSheet - 1);
+    await this.goToSheet(this._stepSheet(-1));
+  }
+
+  /** Next sheet index for sequential nav: skip mode jumps over hidden sheets. */
+  private _stepSheet(dir: 1 | -1): number {
+    if (this._hiddenSheetMode === 'skip' && this.wb) {
+      return nextVisibleIndex(this.currentSheet, dir, (i) => this.wb!.isHidden(i), this.sheetCount);
+    }
+    return this.currentSheet + dir;
+  }
+
+  /** Initial sheet for load() / entering skip mode: land on a visible sheet. */
+  private _initialSheet(): number {
+    if (this._hiddenSheetMode === 'skip' && this.wb) {
+      return resolveVisibleIndex(0, (i) => this.wb!.isHidden(i), this.sheetCount);
+    }
+    return 0;
   }
 
   /** Returns the cell at canvas-client coordinates, or null if outside the cell grid. */
@@ -1021,6 +1061,32 @@ export class XlsxViewer {
   setSelectionColor(color: string): void {
     this.opts.selectionColor = color;
     this.updateSelectionOverlay();
+  }
+
+  /**
+   * Switch the hidden-sheet mode at runtime: restyle the tabs and re-render.
+   * Entering `'skip'` while on a hidden sheet advances to the nearest visible.
+   */
+  async setHiddenSheetMode(mode: HiddenSheetMode): Promise<void> {
+    this._hiddenSheetMode = mode;
+    this.buildTabs();
+    if (mode === 'skip' && this.wb && this.wb.isHidden(this.currentSheet)) {
+      await this.showSheet(
+        resolveVisibleIndex(this.currentSheet, (i) => this.wb!.isHidden(i), this.sheetCount),
+      );
+    } else {
+      this.updateTabActive(this.currentSheet);
+    }
+  }
+
+  /** The current hidden-sheet mode. */
+  get hiddenSheetMode(): HiddenSheetMode { return this._hiddenSheetMode; }
+
+  /** Number of non-hidden sheets (absolute `sheetCount` is unchanged). */
+  get visibleSheetCount(): number {
+    if (!this.wb) return 0;
+    const wb = this.wb;
+    return countVisible((i) => wb.isHidden(i), this.sheetCount);
   }
 
   /** Copy the selected cell range as tab-separated text to the clipboard. */
@@ -1736,7 +1802,7 @@ export class XlsxViewer {
       const btn = document.createElement('button');
       btn.textContent = name;
       btn.title = name;
-      btn.style.cssText = this.tabStyle(false, this.tabColors[i]);
+      btn.style.cssText = this.tabCss(i, false);
       btn.addEventListener('click', () => this.showSheet(i));
       this.tabStrip.appendChild(btn);
       this.tabs.push(btn);
@@ -1812,15 +1878,18 @@ export class XlsxViewer {
 
   private updateTabActive(index: number): void {
     this.tabs.forEach((btn, i) => {
-      btn.style.cssText = this.tabStyle(i === index, this.tabColors[i]);
+      btn.style.cssText = this.tabCss(i, i === index);
     });
     // Keep the active tab visible by scrolling the tab strip HORIZONTALLY only.
     // `scrollIntoView` walks every scrollable ancestor, so it also scrolls the
     // page vertically — on first load that jumped the whole page down to the
     // tab bar (the active sheet is set during load). Adjust the strip's
     // scrollLeft directly so the page never moves.
+    // `offsetParent === null` for a `display:none` tab (a hidden sheet reached
+    // by an explicit goToSheet in 'skip' mode). Its getBoundingClientRect is all
+    // zeros, which would spuriously scroll the strip — skip the scroll for it.
     const tab = this.tabs[index];
-    if (tab) {
+    if (tab && tab.offsetParent !== null) {
       const strip = this.tabStrip;
       const tabRect = tab.getBoundingClientRect();
       const stripRect = strip.getBoundingClientRect();
@@ -1859,6 +1928,20 @@ export class XlsxViewer {
         `height:${inactiveH}px;font-size:11px;` +
         `background:#e0e0e0;color:#555;` +
         bar;
+  }
+
+  /**
+   * Full inline style for the tab of sheet `i`, honoring the hidden-sheet mode:
+   * `'skip'` hides the tab of a hidden/veryHidden sheet (`display:none`); `'dim'`
+   * greys it but leaves it clickable; `'show'` styles every tab normally. Used
+   * by both buildTabs and updateTabActive so navigation never wipes the styling.
+   */
+  private tabCss(i: number, active: boolean): string {
+    let css = this.tabStyle(active, this.tabColors[i]);
+    if (this._hiddenSheetMode !== 'show' && this.wb?.isHidden(i)) {
+      css += this._hiddenSheetMode === 'skip' ? 'display:none;' : `opacity:${HIDDEN_TAB_DIM_OPACITY};`;
+    }
+    return css;
   }
 
   /** Excel-style zoom control pinned to the right end of the tab bar:

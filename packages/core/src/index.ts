@@ -226,3 +226,6 @@ export {
   type SegStretch,
 } from './text/line-distribute';
 export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-positions';
+// Format-agnostic index navigation for hidden-item "skip" mode (pptx hidden
+// slides, xlsx hidden sheets): pure math over an isHidden(i) callback.
+export { nextVisibleIndex, resolveVisibleIndex, countVisible } from './nav/visible-index';

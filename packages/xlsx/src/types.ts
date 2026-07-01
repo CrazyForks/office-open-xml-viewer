@@ -4,6 +4,9 @@ export interface Workbook {
   sheets: SheetMeta[];
 }
 
+/** Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`). */
+export type SheetVisibility = 'visible' | 'hidden' | 'veryHidden';
+
 export interface SheetMeta {
   name: string;
   sheetId: number;
@@ -12,6 +15,11 @@ export interface SheetMeta {
    *  `#RRGGBB`. Surfaced at workbook-list time so tabs can be painted up front.
    *  Absent when the sheet declares no tab color. */
   tabColor?: string | null;
+  /** Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`).
+   *  Absent ⇒ visible. `'veryHidden'` sheets are revealable only
+   *  programmatically in Excel. Read via `XlsxWorkbook.isHidden` /
+   *  `XlsxWorkbook.sheetVisibility`. */
+  visibility?: 'hidden' | 'veryHidden';
 }
 
 export interface MergeCell {
