@@ -2963,7 +2963,10 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
 // ===========================
 
 /// Keyed first by idx (integer), then by type string.
-#[derive(Default)]
+// `Clone` lets `parse_layout` cache one resolved `LayoutPlaceholders` per layout
+// and hand each slide a copy to layer its per-slide master txStyles fallbacks
+// onto without mutating the cached instance (D4).
+#[derive(Default, Clone)]
 struct LayoutPlaceholders {
     by_idx: HashMap<u32, Transform>,
     by_type: HashMap<String, Transform>,
@@ -4097,9 +4100,13 @@ fn parse_master_transforms(root: roxmltree::Node<'_, '_>) -> HashMap<String, Tra
 // Seeds layout placeholders from the master's per-type defaults (transforms,
 // alignment, spacing) before overlaying the layout's own placeholder props; the
 // many maps are the master inheritance sources, threaded through as-is.
+//
+// Takes the already-parsed layout root (`<p:sldLayout>`) so `parse_layout` can
+// parse the layout XML once and share the `Document` with the background +
+// showMasterSp extractions (D4).
 #[allow(clippy::too_many_arguments)]
 fn parse_layout_placeholders(
-    layout_xml: &str,
+    root: roxmltree::Node<'_, '_>,
     master_font_sizes: &HashMap<String, f64>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
     master_level_indents: &HashMap<String, LevelIndents>,
@@ -4125,11 +4132,6 @@ fn parse_layout_placeholders(
         by_type_master_line_spacing: master_line_spacing.clone(),
         ..Default::default()
     };
-    let doc = match roxmltree::Document::parse(layout_xml) {
-        Ok(d) => d,
-        Err(_) => return lph,
-    };
-    let root = doc.root_element();
 
     let sp_tree = root
         .descendants()
@@ -4408,6 +4410,129 @@ fn parse_layout_placeholders(
         }
     }
     lph
+}
+
+/// The layout XML parsed ONCE into the owned data a slide needs from its layout
+/// (D4). Groups the three former per-slide layout re-parses in `parse_slide`:
+/// placeholder inheritance (§19.3.1.39), the layout-level `<p:bg>` background,
+/// and the layout's `showMasterSp` flag (§19.3.1.39). Holds no `roxmltree` node
+/// (owned only), so it can be cached across slides sharing a layout.
+///
+/// The color-bearing fields (`placeholders` colors/fills/strokes/bullets +
+/// `background`) are resolved against the `theme` passed to `parse_layout`. For
+/// the common no-`clrMapOvr` slide that theme is the master's baked theme, so
+/// the cached instance is reused; a slide with a `<p:clrMapOvr>` builds a fresh
+/// `ParsedLayout` against its override theme (see the `parse_presentation` loop)
+/// so its layout colors flip too. The layout's DECORATIVE spTree shapes are NOT
+/// held here — they are walked per-slide because they resolve against the slide's
+/// own `smartart_drawings` (§19.3.1.39 layout decorations) and are theme+zip
+/// bound; caching them keyed by layout would be unsound.
+struct ParsedLayout {
+    placeholders: LayoutPlaceholders,
+    /// Layout-level `<p:cSld><p:bg>` fill (ECMA-376 §19.3.1.1 / §20.1.8.14),
+    /// resolved against `theme`. Applied by the slide only when its own bg chain
+    /// (slide-level) resolves to nothing.
+    background: Option<Fill>,
+    /// The LAYOUT's own `showMasterSp` (§19.3.1.39). The slide ANDs this with its
+    /// own slide-level flag before compositing master decorations.
+    show_master_sp: bool,
+}
+
+impl Default for ParsedLayout {
+    fn default() -> Self {
+        // Matches the prior "no/unparseable layout" behaviour: no placeholders,
+        // no layout background, and showMasterSp defaulting to true.
+        ParsedLayout {
+            placeholders: LayoutPlaceholders::default(),
+            background: None,
+            show_master_sp: true,
+        }
+    }
+}
+
+/// ECMA-376 §19.3.1.38/§19.3.1.39 showMasterSp: absent / "1" / "true" ⇒ true;
+/// "0" / "false" ⇒ false. Read from a slide or layout root element.
+fn read_show_master_sp(node: roxmltree::Node<'_, '_>) -> bool {
+    match attr(&node, "showMasterSp").as_deref() {
+        Some("0") | Some("false") => false,
+        _ => true, // default true (absent / "1" / "true")
+    }
+}
+
+/// Parse a slide layout's XML EXACTLY ONCE and extract everything a slide
+/// inherits from it (D4). Replaces the four former per-slide layout
+/// `Document::parse` calls in `parse_slide` (placeholders, background,
+/// showMasterSp, decorations) — the decorations still walk per-slide, but from
+/// the SAME `Document` when the caller reuses it, and the other three are cached.
+/// `theme` is the slide's effective theme (master-baked, or override-adjusted);
+/// the master maps are the inheritance fallbacks, threaded through unchanged.
+#[allow(clippy::too_many_arguments)]
+fn parse_layout(
+    layout_xml: &str,
+    master_font_sizes: &HashMap<String, f64>,
+    master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_indents: &HashMap<String, LevelIndents>,
+    master_level_bullets: &HashMap<String, LevelBullets>,
+    master_anchors: &HashMap<String, String>,
+    master_transforms: &HashMap<String, Transform>,
+    master_alignments: &HashMap<String, String>,
+    master_ea_ln_brk: &HashMap<String, bool>,
+    master_space_before: &HashMap<String, i64>,
+    master_space_after: &HashMap<String, i64>,
+    master_line_spacing: &HashMap<String, f64>,
+    theme: &HashMap<String, String>,
+    layout_dir: &str,
+    layout_rels: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
+) -> ParsedLayout {
+    let doc = match roxmltree::Document::parse(layout_xml) {
+        Ok(d) => d,
+        // Unparseable layout → same as no layout: default placeholders/bg and
+        // showMasterSp = true (the slide's own flag still applies downstream).
+        Err(_) => return ParsedLayout::default(),
+    };
+    let root = doc.root_element();
+
+    let placeholders = parse_layout_placeholders(
+        root,
+        master_font_sizes,
+        master_level_font_sizes,
+        master_level_indents,
+        master_level_bullets,
+        master_anchors,
+        master_transforms,
+        master_alignments,
+        master_ea_ln_brk,
+        master_space_before,
+        master_space_after,
+        master_line_spacing,
+        theme,
+        layout_dir,
+        layout_rels,
+        zip,
+    );
+
+    // Layout-level bg (rels = layout rels, part dir = layout_dir). Verbatim from
+    // the former inline layout-bg block in `parse_slide`; the slide decides
+    // whether to use it (only when its own bg chain is empty).
+    let background: Option<Fill> = child(root, "cSld").and_then(|n| {
+        let mut resolve = |rid: &str| -> Option<String> {
+            let target = layout_rels.get(rid)?;
+            let path = resolve_path(layout_dir, target);
+            // Existence check only — central-directory lookup, no inflate.
+            zip.index_for_name(&path)?;
+            Some(path)
+        };
+        parse_background(n, theme, &mut resolve)
+    });
+
+    let show_master_sp = read_show_master_sp(root);
+
+    ParsedLayout {
+        placeholders,
+        background,
+        show_master_sp,
+    }
 }
 
 // ===========================
@@ -7752,6 +7877,12 @@ fn extract_decorative_shapes(
 #[allow(clippy::too_many_arguments)]
 fn parse_slide(
     xml: &str,
+    // The layout's single-pass extraction (placeholders + layout bg + layout
+    // showMasterSp), built/cached by the caller against this slide's effective
+    // theme (D4). `layout_xml` is still passed for the per-slide DECORATIVE walk
+    // only (its shapes bind to the slide's own smartart + theme + zip, so they
+    // can't live in the cached `ParsedLayout`).
+    parsed_layout: &ParsedLayout,
     layout_xml: Option<&str>,
     layout_rels: &HashMap<String, String>,
     layout_dir: &str,
@@ -7766,6 +7897,12 @@ fn parse_slide(
     // this function uses. `theme` here is the slide's effective theme (the
     // master's own theme with its <p:clrMap> baked in), so scheme colors
     // resolve against the right palette per slide.
+    // Only the fields this function still consumes directly are bound; the
+    // master INHERITANCE maps (font sizes, level sizes/indents/bullets, anchors,
+    // transforms, alignments, ea-ln-brk, spacing) now feed `parse_layout` in the
+    // caller, which produced the `ParsedLayout` passed in. `theme` here is the
+    // slide's effective theme (master clrMap baked in) so scheme colors resolve
+    // against the right palette per slide.
     let MasterBundle {
         theme,
         master_xml,
@@ -7774,29 +7911,20 @@ fn parse_slide(
         master_smartart_drawings,
         master_bg,
         master_decorative,
-        master_font_sizes,
-        master_level_font_sizes,
-        master_level_indents,
-        master_level_bullets,
-        master_anchors,
-        master_transforms,
-        master_alignments,
-        master_ea_ln_brk,
-        master_space_before,
-        master_space_after,
-        master_line_spacing,
         master_bold,
         master_italic,
         master_caps,
         master_color,
+        ..
     } = bundle;
     // When the slide/layout carries a `<p:clrMapOvr><a:overrideClrMapping>`
     // (ECMA-376 §19.3.1.7), the caller recomputed the master's theme-dependent
     // fields against the slide's effective mapping (`EffectiveMaster`); use them
     // in place of the master's frozen values so that BOTH the slide's own scheme
     // colors AND master-inherited ones (the master `<p:bg>`, master txStyles
-    // placeholder colors, master bullet colors) resolve against the override
-    // mapping (§20.1.6.8). Otherwise fall back to the master bundle's values.
+    // placeholder colors) resolve against the override mapping (§20.1.6.8).
+    // Otherwise fall back to the master bundle's values. (Master bullet colors
+    // flow through `parsed_layout`, already override-adjusted by the caller.)
     let theme: &HashMap<String, String> = eff.map(|e| &e.theme).unwrap_or(theme);
     let master_xml: Option<&str> = master_xml.as_deref();
     let master_dir: &str = master_dir.as_str();
@@ -7804,33 +7932,15 @@ fn parse_slide(
         Some(e) => e.master_bg.clone(),
         None => master_bg.clone(),
     };
-    let master_level_bullets: &HashMap<String, LevelBullets> = eff
-        .map(|e| &e.master_level_bullets)
-        .unwrap_or(master_level_bullets);
     let master_color: &HashMap<String, String> =
         eff.map(|e| &e.master_color).unwrap_or(master_color);
 
-    let mut lph = match layout_xml {
-        Some(x) => parse_layout_placeholders(
-            x,
-            master_font_sizes,
-            master_level_font_sizes,
-            master_level_indents,
-            master_level_bullets,
-            master_anchors,
-            master_transforms,
-            master_alignments,
-            master_ea_ln_brk,
-            master_space_before,
-            master_space_after,
-            master_line_spacing,
-            theme,
-            layout_dir,
-            layout_rels,
-            zip,
-        ),
-        None => LayoutPlaceholders::default(),
-    };
+    // The layout placeholder inheritance was resolved once in `parse_layout`
+    // (cached across slides sharing this layout, or rebuilt for a clrMapOvr
+    // slide) against this slide's effective theme. Clone it so the per-slide
+    // master txStyles fallbacks below can be layered on without mutating the
+    // shared/cached instance.
+    let mut lph = parsed_layout.placeholders.clone();
     // Fall back to master txStyles defRPr @b/@i when the layout did not specify
     // bold/italic for a placeholder type. Without this, e.g. the master titleStyle's
     // b="1" is not applied to ctrTitle / title placeholders.
@@ -7875,23 +7985,10 @@ fn parse_slide(
         background = parse_background(n, theme, &mut resolve);
     }
 
-    // Layout-level bg (rels = layout rels, part dir = layout_dir).
+    // Layout-level bg: resolved once in `parse_layout` (against this slide's
+    // effective theme) and applied only when the slide's own bg chain is empty.
     if background.is_none() {
-        if let Some(lx) = layout_xml {
-            if let Ok(doc2) = roxmltree::Document::parse(lx) {
-                if let Some(n) = child(doc2.root_element(), "cSld") {
-                    let mut resolve = |rid: &str| -> Option<String> {
-                        let target = layout_rels.get(rid)?;
-                        let path = resolve_path(layout_dir, target);
-                        // Existence check only — central-directory lookup, no
-                        // inflate (former `read_zip_bytes` decompressed to discard).
-                        zip.index_for_name(&path)?;
-                        Some(path)
-                    };
-                    background = parse_background(n, theme, &mut resolve);
-                }
-            }
-        }
+        background = parsed_layout.background.clone();
     }
 
     // Master-level bg (resolved by the caller before parse_slide; already a Fill).
@@ -7909,20 +8006,10 @@ fn parse_slide(
     // Master decorative shapes are composited beneath the slide only when both
     // the slide and its layout permit it. Either one setting showMasterSp="0"
     // suppresses the master's spTree decorations (the slide flag is honored for
-    // the slide itself; the layout flag for shapes inherited through it).
-    // OOXML booleans accept "0"/"false" for false and "1"/"true" for true.
-    fn read_show_master_sp(node: roxmltree::Node<'_, '_>) -> bool {
-        match attr(&node, "showMasterSp").as_deref() {
-            Some("0") | Some("false") => false,
-            _ => true, // default true (absent / "1" / "true")
-        }
-    }
+    // the slide itself; the layout flag — read once in `parse_layout` — for
+    // shapes inherited through it).
     let slide_show_master_sp = read_show_master_sp(root);
-    let layout_show_master_sp = layout_xml
-        .and_then(|lx| roxmltree::Document::parse(lx).ok())
-        .map(|d| read_show_master_sp(d.root_element()))
-        .unwrap_or(true);
-    let show_master_sp = slide_show_master_sp && layout_show_master_sp;
+    let show_master_sp = slide_show_master_sp && parsed_layout.show_master_sp;
 
     // ── Master non-placeholder shapes (rendered BELOW layout & slide) ─────
     // The slide master's spTree may carry decorative pictures/shapes (logos,
@@ -9186,12 +9273,27 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         None => Some(build_master_bundle("", &theme, &mut zip)),
     };
 
+    // Cache of the layout single-pass extraction (`ParsedLayout`) keyed by layout
+    // ZIP path (D4), mirroring `master_cache`. Slides sharing a layout reuse its
+    // resolved placeholders + layout background + showMasterSp instead of
+    // re-parsing the layout XML four times per slide. Only NO-override slides
+    // populate/read the cache: the entry is resolved against the master's baked
+    // theme, and a slide's layout→master chain is 1:1 (a layout names exactly one
+    // master), so every no-override slide on a given layout shares that theme. A
+    // slide with a `<p:clrMapOvr>` builds a fresh `ParsedLayout` against its
+    // override theme instead (kept out of the cache).
+    let mut layout_cache: HashMap<String, ParsedLayout> = HashMap::new();
+
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
         slide_xml: String,
         slide_rels: HashMap<String, String>,
         smartart_drawings: HashMap<String, String>,
+        /// ZIP path of the slide's layout (e.g. `ppt/slideLayouts/slideLayout3.xml`).
+        /// Used as the `layout_cache` key so slides sharing a layout reuse its
+        /// single-pass `ParsedLayout` (D4). `None` when the slide has no layout.
+        layout_path: Option<String>,
         layout_xml: Option<String>,
         layout_rels: HashMap<String, String>,
         layout_dir: String,
@@ -9263,6 +9365,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             slide_xml,
             slide_rels,
             smartart_drawings,
+            layout_path,
             layout_xml,
             layout_rels,
             layout_dir,
@@ -9391,8 +9494,71 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             }
         });
 
+        // Resolve this slide's `ParsedLayout` (placeholders + layout bg +
+        // showMasterSp), parsing the layout XML once. Only the `theme` and the
+        // master bullet colors that `parse_layout` consumes are theme-dependent;
+        // a clrMapOvr slide passes the OVERRIDE-adjusted pair so its layout colors
+        // flip with the override (mirrors the master theme-dependent recompute
+        // above), everything else is the frozen bundle maps.
+        let (layout_theme, layout_master_bullets): (
+            &HashMap<String, String>,
+            &HashMap<String, LevelBullets>,
+        ) = match effective_master.as_ref() {
+            Some(e) => (&e.theme, &e.master_level_bullets),
+            None => (&bundle.theme, &bundle.master_level_bullets),
+        };
+        // Build a `ParsedLayout` from a layout XML string with the resolved
+        // theme/bullets and this bundle's remaining (theme-independent) maps.
+        let build_parsed_layout = |lx: &str, zip: &mut PptxZip<'_>| -> ParsedLayout {
+            parse_layout(
+                lx,
+                &bundle.master_font_sizes,
+                &bundle.master_level_font_sizes,
+                &bundle.master_level_indents,
+                layout_master_bullets,
+                &bundle.master_anchors,
+                &bundle.master_transforms,
+                &bundle.master_alignments,
+                &bundle.master_ea_ln_brk,
+                &bundle.master_space_before,
+                &bundle.master_space_after,
+                &bundle.master_line_spacing,
+                layout_theme,
+                &raw.layout_dir,
+                &raw.layout_rels,
+                zip,
+            )
+        };
+
+        // No-override slide WITH a layout path → cache by layout path (its entry
+        // is resolved against the master-baked theme, which every no-override
+        // slide on this layout shares). Otherwise build a fresh, uncached one
+        // (override slide, or the rare no-layout-path case).
+        let fresh_layout: Option<ParsedLayout> = match (
+            effective_master.is_none(),
+            raw.layout_xml.as_deref(),
+            raw.layout_path.as_deref(),
+        ) {
+            (true, Some(lx), Some(lp)) => {
+                if !layout_cache.contains_key(lp) {
+                    let pl = build_parsed_layout(lx, &mut zip);
+                    layout_cache.insert(lp.to_owned(), pl);
+                }
+                None // borrowed from the cache below
+            }
+            (_, Some(lx), _) => Some(build_parsed_layout(lx, &mut zip)),
+            (_, None, _) => Some(ParsedLayout::default()),
+        };
+        let parsed_layout: &ParsedLayout = match &fresh_layout {
+            Some(pl) => pl,
+            // Cached (no-override) path: `layout_path` is guaranteed present
+            // because that is the only arm that leaves `fresh_layout` as `None`.
+            None => &layout_cache[raw.layout_path.as_deref().unwrap()],
+        };
+
         let slide = parse_slide(
             &raw.slide_xml,
+            parsed_layout,
             raw.layout_xml.as_deref(),
             &raw.layout_rels,
             &raw.layout_dir,
@@ -11043,8 +11209,9 @@ mod tests {
           </p:spTree></p:cSld>
         </p:sldLayout>"#;
 
+        let layout_doc = roxmltree::Document::parse(layout).unwrap();
         let lph = parse_layout_placeholders(
-            layout,
+            layout_doc.root_element(),
             &HashMap::new(),
             &HashMap::new(),
             &master_indents,
@@ -11072,6 +11239,119 @@ mod tests {
             li[0].mar_l,
             Some(1_000_000),
             "marL must fall back to the MASTER per axis (layout left it unset)"
+        );
+    }
+
+    /// D4 guard: `parse_layout` resolves the layout placeholder's color-bearing
+    /// fields, its `<p:bg>`, and its `showMasterSp` against the `theme` argument.
+    /// The color/background must FLIP when the caller passes an override-adjusted
+    /// theme — this is what the `parse_presentation` clrMapOvr branch relies on
+    /// (a cached `ParsedLayout` is only sound because a no-override slide passes
+    /// the same master-baked theme every time). Also asserts a theme-independent
+    /// field (transform) is stable regardless of theme.
+    #[test]
+    fn parse_layout_resolves_color_and_bg_against_theme() {
+        let layout = r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+          showMasterSp="0">
+          <p:cSld>
+            <p:bg><p:bgPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:bgPr></p:bg>
+            <p:spTree>
+              <p:sp>
+                <p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="123456" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr>
+                <p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:defRPr></a:lvl1pPr></a:lstStyle><a:p/></p:txBody>
+              </p:sp>
+            </p:spTree>
+          </p:cSld>
+        </p:sldLayout>"#;
+
+        // Typed-empty master inheritance maps (no master fallbacks in this test).
+        let m_f64: HashMap<String, f64> = HashMap::new();
+        let m_lfs: HashMap<String, LevelFontSizes> = HashMap::new();
+        let m_li: HashMap<String, LevelIndents> = HashMap::new();
+        let m_lb: HashMap<String, LevelBullets> = HashMap::new();
+        let m_str: HashMap<String, String> = HashMap::new();
+        let m_tf: HashMap<String, Transform> = HashMap::new();
+        let m_bool: HashMap<String, bool> = HashMap::new();
+        let m_i64: HashMap<String, i64> = HashMap::new();
+        let empty_rels: HashMap<String, String> = HashMap::new();
+        let build = |accent1_hex: &str| -> ParsedLayout {
+            let mut theme: HashMap<String, String> = HashMap::new();
+            theme.insert("accent1".to_string(), accent1_hex.to_string());
+            let bytes = empty_zip_bytes();
+            let cursor = Cursor::new(bytes.as_slice());
+            let mut zip = zip::ZipArchive::new(cursor).unwrap();
+            parse_layout(
+                layout,
+                &m_f64,
+                &m_lfs,
+                &m_li,
+                &m_lb,
+                &m_str,
+                &m_tf,
+                &m_str,
+                &m_bool,
+                &m_i64,
+                &m_i64,
+                &m_f64,
+                &theme,
+                "ppt/slideLayouts",
+                &empty_rels,
+                &mut zip,
+            )
+        };
+
+        let bg_solid_hex = |pl: &ParsedLayout| -> Option<String> {
+            match pl.background.as_ref()? {
+                Fill::Solid { color } => Some(color.clone()),
+                _ => None,
+            }
+        };
+
+        let base = build("FF0000");
+        assert!(!base.show_master_sp, "layout showMasterSp=0 is read");
+        assert_eq!(
+            bg_solid_hex(&base).as_deref(),
+            Some("FF0000"),
+            "layout bg schemeClr resolves against the passed theme"
+        );
+        assert_eq!(
+            base.placeholders
+                .by_type_color
+                .get("body")
+                .map(String::as_str),
+            Some("FF0000"),
+            "layout placeholder defRPr color resolves against the passed theme"
+        );
+        // Theme-independent geometry is stable.
+        assert_eq!(
+            base.placeholders.by_type.get("body").map(|t| t.x),
+            Some(123456),
+            "placeholder transform is theme-independent"
+        );
+
+        // Same layout XML, DIFFERENT theme (simulating an override remap): the
+        // color-bearing fields must flip; geometry must not.
+        let flipped = build("00FF00");
+        assert_eq!(
+            bg_solid_hex(&flipped).as_deref(),
+            Some("00FF00"),
+            "override theme must flip the layout bg color"
+        );
+        assert_eq!(
+            flipped
+                .placeholders
+                .by_type_color
+                .get("body")
+                .map(String::as_str),
+            Some("00FF00"),
+            "override theme must flip the layout placeholder color"
+        );
+        assert_eq!(
+            flipped.placeholders.by_type.get("body").map(|t| t.x),
+            Some(123456)
         );
     }
 
