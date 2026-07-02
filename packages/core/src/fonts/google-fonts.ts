@@ -16,6 +16,18 @@
  * `useGoogleFonts: true`, and only when a document actually references the key.
  * A key that never appears in a document is inert (no network request).
  *
+ * ## Loading is async — measure timing caveat
+ *
+ * Fonts load through FontFaceSet asynchronously. Text measured BEFORE a
+ * substitute finishes loading uses the system fallback; once loaded, the same
+ * text measures against the substitute — so a first paint racing a slow font
+ * fetch can differ from a repaint (the preload paths await the load before
+ * rendering, which is why this rarely shows in practice). Adding a name to
+ * this registry therefore CHANGES how documents using that name measure: from
+ * "whatever the OS falls back to" to the (better, deterministic) substitute.
+ * Keep the list to faces with a published metric-compatible or well-known
+ * substitute; do not add speculative names.
+ *
  * ## Why these live in ONE table (not per format)
  *
  * A DOCX template requesting Roboto, a PPTX theme requesting Calibri Light and
