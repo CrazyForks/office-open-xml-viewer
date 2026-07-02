@@ -8,6 +8,26 @@ use wasm_bindgen::prelude::*;
 
 mod table_style_presets;
 
+// Test-only counter for `roxmltree::Document::parse` calls on the D4 hot paths
+// (slide master build, layout, slide XML + decorations). It exists ONLY under
+// `cfg(test)` — `note_layout_master_parse()` compiles to nothing in release, so
+// this is zero-cost for shipped builds. A regression test uses it to assert that
+// a deck whose slides share one layout + one master parses each of those parts a
+// bounded number of times (see `parse_count_scales_with_distinct_parts`),
+// guarding against re-introducing the per-slide re-parses this change removed.
+#[cfg(test)]
+thread_local! {
+    static LAYOUT_MASTER_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Increment the D4 parse counter (no-op unless `cfg(test)`). Call immediately
+/// before parsing a slide-master / layout / slide XML on the pagination path.
+#[inline(always)]
+fn note_layout_master_parse() {
+    #[cfg(test)]
+    LAYOUT_MASTER_PARSE_COUNT.with(|c| c.set(c.get() + 1));
+}
+
 // ===========================
 //  Public WASM entry points
 // ===========================
@@ -384,7 +404,7 @@ pub fn extract_image(
 //  Data types  (camelCase JSON → TypeScript)
 // ===========================
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Presentation {
     slide_width: i64,
@@ -407,7 +427,7 @@ struct Presentation {
     fol_hlink_color: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Slide {
     index: usize,
@@ -430,7 +450,7 @@ struct Slide {
     hidden: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PptxComment {
     /// Resolved author name from `ppt/commentAuthors.xml` (`<cmAuthor @id>`
@@ -450,7 +470,11 @@ struct PptxComment {
 // shape only cosmetically while complicating 30+ construction/match sites, for
 // no real benefit on this parse-once-then-serialize type.
 #[allow(clippy::large_enum_variant)]
-#[derive(Serialize, Deserialize, Debug)]
+// `Clone` lets `build_master_bundle` pre-extract the master's decorative shapes
+// once (per cached master) and hand each slide its own owned copy, instead of
+// re-parsing the master XML and re-walking its spTree for every slide (D4). The
+// derive is otherwise inert on this parse-once-then-serialize type.
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum SlideElement {
     Shape(ShapeElement),
@@ -460,7 +484,7 @@ enum SlideElement {
     Media(MediaElement),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ChartSeriesData {
     name: String,
@@ -520,7 +544,7 @@ struct ChartSeriesData {
 /// edge of the plot. Fields mirror the primary value axis but live in a nested
 /// struct so the flat primary-axis fields stay untouched (and the whole block
 /// is absent on the wire for the common single-axis case).
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SecondaryValueAxis {
     min: Option<f64>,
@@ -546,7 +570,7 @@ struct SecondaryValueAxis {
     title_font_color: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ChartElement {
     x: i64,
@@ -714,7 +738,7 @@ struct ChartElement {
     secondary_val_axis: Option<SecondaryValueAxis>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ChartManualLayout {
     /// "edge" = x/y are absolute fractions from top-left of chart space;
@@ -735,7 +759,7 @@ struct ChartManualLayout {
 
 // ===== Table data model =====
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TableElement {
     x: i64,
@@ -751,7 +775,7 @@ struct TableElement {
     rtl: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TableRow {
     /// Row height in EMU
@@ -759,7 +783,7 @@ struct TableRow {
     cells: Vec<TableCell>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TableCell {
     text_body: Option<TextBody>,
@@ -914,7 +938,7 @@ struct Sp3d {
     bevel_b: Option<Bevel3d>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ShapeElement {
     x: i64,
@@ -1002,7 +1026,7 @@ struct ShapeElement {
     sp3d: Option<Sp3d>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PictureElement {
     x: i64,
@@ -1110,7 +1134,7 @@ fn is_zero_f64(v: &f64) -> bool {
 /// ECMA-376 §19.3.1.17/18 a:audioFile / a:videoFile and the
 /// p14:media extension (embed attribute).
 /// Represents a p:pic that acts as an audio/video placeholder.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct MediaElement {
     x: i64,
@@ -1402,7 +1426,7 @@ struct Stroke {
 /// A single path command inside a custGeom pathLst.
 /// Coordinates are normalised to [0.0, 1.0] relative to the path's w/h,
 /// so the renderer can map them directly to shape-local pixel coordinates.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "cmd", rename_all = "camelCase")]
 enum PathCmd {
     MoveTo {
@@ -1442,7 +1466,7 @@ enum PathCmd {
     Close,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TextBody {
     vertical_anchor: String,
@@ -1547,7 +1571,7 @@ enum Bullet {
 }
 
 /// A tab stop defined in a paragraph's pPr > tabLst.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TabStop {
     /// Position in EMU from the left edge of the text area (after lIns)
@@ -1556,7 +1580,7 @@ struct TabStop {
     algn: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Paragraph {
     alignment: String,
@@ -1600,7 +1624,7 @@ struct Paragraph {
 // variant is the common case and boxing it would add an allocation per run with
 // no meaningful gain on this parse-once-then-serialize type.
 #[allow(clippy::large_enum_variant)]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum TextRun {
     Text(TextRunData),
@@ -1622,7 +1646,7 @@ enum TextRun {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TextRunData {
     text: String,
@@ -2959,7 +2983,10 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
 // ===========================
 
 /// Keyed first by idx (integer), then by type string.
-#[derive(Default)]
+// `Clone` lets `parse_layout` cache one resolved `LayoutPlaceholders` per layout
+// and hand each slide a copy to layer its per-slide master txStyles fallbacks
+// onto without mutating the cached instance (D4).
+#[derive(Default, Clone)]
 struct LayoutPlaceholders {
     by_idx: HashMap<u32, Transform>,
     by_type: HashMap<String, Transform>,
@@ -3603,13 +3630,12 @@ fn merge_level_bullets(primary: &LevelBullets, fallback: &LevelBullets) -> Level
 }
 
 /// Parse bodyPr anchor ("t"/"ctr"/"b") from master placeholder shapes.
-fn parse_master_anchors(master_xml: &str) -> HashMap<String, String> {
+///
+/// Takes the already-parsed master root element (`<p:sldMaster>`) so
+/// `build_master_bundle` can parse the master XML once and share the
+/// `Document` across every `parse_master_*` extractor (ECMA-376 §19.3.1.42).
+fn parse_master_anchors(root: roxmltree::Node<'_, '_>) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
         for sp in sp_tree
             .children()
@@ -3641,13 +3667,9 @@ const MASTER_TXSTYLE_PH_TYPES: &[(&str, &[&str])] = &[
 ];
 
 /// Parse paragraph alignment from master placeholder shapes' lstStyle > lvl1pPr algn attribute.
-fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
+/// Takes the shared, already-parsed master root (see `parse_master_anchors`).
+fn parse_master_alignments(root: roxmltree::Node<'_, '_>) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
         for sp in sp_tree
             .children()
@@ -3691,13 +3713,8 @@ fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
 /// Parse master-level default East Asian line-break (eaLnBrk) per placeholder
 /// type from each placeholder shape's lstStyle > lvl1pPr @eaLnBrk
 /// (ECMA-376 §21.1.2.2.7). Mirrors parse_master_alignments. xsd:boolean.
-fn parse_master_ea_ln_brk(master_xml: &str) -> HashMap<String, bool> {
+fn parse_master_ea_ln_brk(root: roxmltree::Node<'_, '_>) -> HashMap<String, bool> {
     let mut map = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
         for sp in sp_tree
             .children()
@@ -3724,13 +3741,8 @@ fn parse_master_ea_ln_brk(master_xml: &str) -> HashMap<String, bool> {
 /// Parse master-level default font sizes from txStyles (titleStyle / bodyStyle / otherStyle)
 /// and from individual placeholder shapes in the master spTree.
 /// Individual shape lstStyle takes priority over txStyles generic defaults.
-fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
+fn parse_master_font_sizes(root: roxmltree::Node<'_, '_>) -> HashMap<String, f64> {
     let mut map = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
 
     // Scan master spTree placeholder shapes first — per-shape lstStyle is more specific
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
@@ -3776,13 +3788,8 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
 /// `parse_master_font_sizes` but captures every list level (lvl1pPr..lvl9pPr) so
 /// nested bullets inherit the correct shrinking sizes (ECMA-376 §21.1.2.4),
 /// not just the level-1 size. Per-shape lstStyle wins over the generic txStyles.
-fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontSizes> {
+fn parse_master_level_font_sizes(root: roxmltree::Node<'_, '_>) -> HashMap<String, LevelFontSizes> {
     let mut map: HashMap<String, LevelFontSizes> = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
 
     // Per-shape lstStyle first (more specific).
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
@@ -3831,13 +3838,8 @@ fn parse_master_level_font_sizes(master_xml: &str) -> HashMap<String, LevelFontS
 /// tier (§19.2.1.8, the lowest authored fallback) — the parser reads it for neither
 /// indents nor font sizes nor bullets, so this stays at parity rather than adding a
 /// tier only here; closing it is a separate cross-cutting change.
-fn parse_master_level_indents(master_xml: &str) -> HashMap<String, LevelIndents> {
+fn parse_master_level_indents(root: roxmltree::Node<'_, '_>) -> HashMap<String, LevelIndents> {
     let mut map: HashMap<String, LevelIndents> = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
 
     // Per-shape lstStyle first (more specific).
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
@@ -3884,18 +3886,13 @@ fn parse_master_level_indents(master_xml: &str) -> HashMap<String, LevelIndents>
 /// explicit bullet inherits (ECMA-376 §19.7.10 / §21.1.2.4). Per-shape lstStyle
 /// wins over the generic txStyles.
 fn parse_master_level_bullets(
-    master_xml: &str,
+    root: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     master_rels: &HashMap<String, String>,
     master_dir: &str,
     zip: &mut PptxZip<'_>,
 ) -> HashMap<String, LevelBullets> {
     let mut map: HashMap<String, LevelBullets> = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
 
     // A master-level `<a:buBlip>` embed resolves against the master's rels +
     // part directory (ECMA-376 §21.1.2.4.2), mirroring the master background.
@@ -3955,7 +3952,7 @@ fn parse_master_level_bullets(
 /// > lvl1pPr > defRPr @b and @i. Keyed by ph_type.
 /// > Only populated when the attribute is explicitly present on the master.
 fn parse_master_txstyle_bold_italic(
-    master_xml: &str,
+    root: roxmltree::Node<'_, '_>,
 ) -> (
     HashMap<String, bool>,
     HashMap<String, bool>,
@@ -3966,11 +3963,6 @@ fn parse_master_txstyle_bold_italic(
     // ECMA-376 §21.1.2.3.13 cap="all"/"small" on the master txStyles defRPr —
     // e.g. a template titleStyle with cap="all" upper-cases every title.
     let mut caps_map: HashMap<String, String> = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return (bold_map, italic_map, caps_map),
-    };
-    let root = doc.root_element();
     let Some(tx_styles) = child(root, "txStyles") else {
         return (bold_map, italic_map, caps_map);
     };
@@ -4012,15 +4004,10 @@ fn parse_master_txstyle_bold_italic(
 /// > txBody > lstStyle > lvl1pPr > defRPr > solidFill. Keyed by ph_type.
 /// > Shape-level lstStyle takes priority over txStyles generic defaults.
 fn parse_master_txstyle_color(
-    master_xml: &str,
+    root: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> HashMap<String, String> {
     let mut map: HashMap<String, String> = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
 
     // Scan master spTree placeholder shapes first — per-shape lstStyle is more specific.
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
@@ -4073,7 +4060,7 @@ fn parse_master_txstyle_color(
 /// scores because our font substitutes (sans-serif) have different em-square metrics than the
 /// original Aptos font, so applying the master's 120% line spacing over-expands text layout.
 fn parse_master_txstyle_spacing(
-    master_xml: &str,
+    root: roxmltree::Node<'_, '_>,
 ) -> (
     HashMap<String, i64>,
     HashMap<String, i64>,
@@ -4082,11 +4069,6 @@ fn parse_master_txstyle_spacing(
     let mut before_map: HashMap<String, i64> = HashMap::new();
     let mut after_map: HashMap<String, i64> = HashMap::new();
     let line_map: HashMap<String, f64> = HashMap::new(); // intentionally not populated
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return (before_map, after_map, line_map),
-    };
-    let root = doc.root_element();
     let tx_styles = match child(root, "txStyles") {
         Some(n) => n,
         None => return (before_map, after_map, line_map),
@@ -4114,13 +4096,8 @@ fn parse_master_txstyle_spacing(
     (before_map, after_map, line_map)
 }
 
-fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
+fn parse_master_transforms(root: roxmltree::Node<'_, '_>) -> HashMap<String, Transform> {
     let mut map = HashMap::new();
-    let doc = match roxmltree::Document::parse(master_xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    let root = doc.root_element();
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
         for sp in sp_tree
             .children()
@@ -4143,9 +4120,13 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
 // Seeds layout placeholders from the master's per-type defaults (transforms,
 // alignment, spacing) before overlaying the layout's own placeholder props; the
 // many maps are the master inheritance sources, threaded through as-is.
+//
+// Takes the already-parsed layout root (`<p:sldLayout>`) so `parse_layout` can
+// parse the layout XML once and share the `Document` with the background +
+// showMasterSp extractions (D4).
 #[allow(clippy::too_many_arguments)]
 fn parse_layout_placeholders(
-    layout_xml: &str,
+    root: roxmltree::Node<'_, '_>,
     master_font_sizes: &HashMap<String, f64>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
     master_level_indents: &HashMap<String, LevelIndents>,
@@ -4171,11 +4152,6 @@ fn parse_layout_placeholders(
         by_type_master_line_spacing: master_line_spacing.clone(),
         ..Default::default()
     };
-    let doc = match roxmltree::Document::parse(layout_xml) {
-        Ok(d) => d,
-        Err(_) => return lph,
-    };
-    let root = doc.root_element();
 
     let sp_tree = root
         .descendants()
@@ -4454,6 +4430,130 @@ fn parse_layout_placeholders(
         }
     }
     lph
+}
+
+/// The layout XML parsed ONCE into the owned data a slide needs from its layout
+/// (D4). Groups the three former per-slide layout re-parses in `parse_slide`:
+/// placeholder inheritance (§19.3.1.39), the layout-level `<p:bg>` background,
+/// and the layout's `showMasterSp` flag (§19.3.1.39). Holds no `roxmltree` node
+/// (owned only), so it can be cached across slides sharing a layout.
+///
+/// The color-bearing fields (`placeholders` colors/fills/strokes/bullets +
+/// `background`) are resolved against the `theme` passed to `parse_layout`. For
+/// the common no-`clrMapOvr` slide that theme is the master's baked theme, so
+/// the cached instance is reused; a slide with a `<p:clrMapOvr>` builds a fresh
+/// `ParsedLayout` against its override theme (see the `parse_presentation` loop)
+/// so its layout colors flip too. The layout's DECORATIVE spTree shapes are NOT
+/// held here — they are walked per-slide because they resolve against the slide's
+/// own `smartart_drawings` (§19.3.1.39 layout decorations) and are theme+zip
+/// bound; caching them keyed by layout would be unsound.
+struct ParsedLayout {
+    placeholders: LayoutPlaceholders,
+    /// Layout-level `<p:cSld><p:bg>` fill (ECMA-376 §19.3.1.1 / §20.1.8.14),
+    /// resolved against `theme`. Applied by the slide only when its own bg chain
+    /// (slide-level) resolves to nothing.
+    background: Option<Fill>,
+    /// The LAYOUT's own `showMasterSp` (§19.3.1.39). The slide ANDs this with its
+    /// own slide-level flag before compositing master decorations.
+    show_master_sp: bool,
+}
+
+impl Default for ParsedLayout {
+    fn default() -> Self {
+        // Matches the prior "no/unparseable layout" behaviour: no placeholders,
+        // no layout background, and showMasterSp defaulting to true.
+        ParsedLayout {
+            placeholders: LayoutPlaceholders::default(),
+            background: None,
+            show_master_sp: true,
+        }
+    }
+}
+
+/// ECMA-376 §19.3.1.38/§19.3.1.39 showMasterSp: absent / "1" / "true" ⇒ true;
+/// "0" / "false" ⇒ false. Read from a slide or layout root element.
+fn read_show_master_sp(node: roxmltree::Node<'_, '_>) -> bool {
+    match attr(&node, "showMasterSp").as_deref() {
+        Some("0") | Some("false") => false,
+        _ => true, // default true (absent / "1" / "true")
+    }
+}
+
+/// Parse a slide layout's XML EXACTLY ONCE and extract everything a slide
+/// inherits from it (D4). Replaces the four former per-slide layout
+/// `Document::parse` calls in `parse_slide` (placeholders, background,
+/// showMasterSp, decorations) — the decorations still walk per-slide, but from
+/// the SAME `Document` when the caller reuses it, and the other three are cached.
+/// `theme` is the slide's effective theme (master-baked, or override-adjusted);
+/// the master maps are the inheritance fallbacks, threaded through unchanged.
+#[allow(clippy::too_many_arguments)]
+fn parse_layout(
+    layout_xml: &str,
+    master_font_sizes: &HashMap<String, f64>,
+    master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_indents: &HashMap<String, LevelIndents>,
+    master_level_bullets: &HashMap<String, LevelBullets>,
+    master_anchors: &HashMap<String, String>,
+    master_transforms: &HashMap<String, Transform>,
+    master_alignments: &HashMap<String, String>,
+    master_ea_ln_brk: &HashMap<String, bool>,
+    master_space_before: &HashMap<String, i64>,
+    master_space_after: &HashMap<String, i64>,
+    master_line_spacing: &HashMap<String, f64>,
+    theme: &HashMap<String, String>,
+    layout_dir: &str,
+    layout_rels: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
+) -> ParsedLayout {
+    note_layout_master_parse();
+    let doc = match roxmltree::Document::parse(layout_xml) {
+        Ok(d) => d,
+        // Unparseable layout → same as no layout: default placeholders/bg and
+        // showMasterSp = true (the slide's own flag still applies downstream).
+        Err(_) => return ParsedLayout::default(),
+    };
+    let root = doc.root_element();
+
+    let placeholders = parse_layout_placeholders(
+        root,
+        master_font_sizes,
+        master_level_font_sizes,
+        master_level_indents,
+        master_level_bullets,
+        master_anchors,
+        master_transforms,
+        master_alignments,
+        master_ea_ln_brk,
+        master_space_before,
+        master_space_after,
+        master_line_spacing,
+        theme,
+        layout_dir,
+        layout_rels,
+        zip,
+    );
+
+    // Layout-level bg (rels = layout rels, part dir = layout_dir). Verbatim from
+    // the former inline layout-bg block in `parse_slide`; the slide decides
+    // whether to use it (only when its own bg chain is empty).
+    let background: Option<Fill> = child(root, "cSld").and_then(|n| {
+        let mut resolve = |rid: &str| -> Option<String> {
+            let target = layout_rels.get(rid)?;
+            let path = resolve_path(layout_dir, target);
+            // Existence check only — central-directory lookup, no inflate.
+            zip.index_for_name(&path)?;
+            Some(path)
+        };
+        parse_background(n, theme, &mut resolve)
+    });
+
+    let show_master_sp = read_show_master_sp(root);
+
+    ParsedLayout {
+        placeholders,
+        background,
+        show_master_sp,
+    }
 }
 
 // ===========================
@@ -7756,6 +7856,41 @@ fn slide_is_hidden(root: roxmltree::Node) -> bool {
     matches!(root.attribute("show"), Some("0") | Some("false"))
 }
 
+/// Walk a master/layout `<p:cSld><p:spTree>` and collect its NON-placeholder
+/// (decorative) shapes as `SlideElement`s (ECMA-376 §19.3.1.38 showMasterSp /
+/// layout decorations). Placeholders are skipped (`skip_placeholders = true`).
+/// Extracted verbatim from the two inline spTree walks in `parse_slide` so the
+/// master decorations can be pre-computed once per cached master; `theme`,
+/// `rels`, `smartart_drawings`, and `part_dir` are the resolution context of the
+/// tree being walked. Appends to `out` (callers control ordering/gating).
+fn extract_decorative_shapes(
+    root: roxmltree::Node<'_, '_>,
+    part_dir: &str,
+    rels: &HashMap<String, String>,
+    smartart_drawings: &HashMap<String, String>,
+    theme: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
+    out: &mut Vec<SlideElement>,
+) {
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        let empty_lph = LayoutPlaceholders::default();
+        for node in sp_tree.children().filter(|n| n.is_element()) {
+            parse_sp_tree_node(
+                node,
+                &empty_lph,
+                part_dir,
+                rels,
+                smartart_drawings,
+                zip,
+                theme,
+                out,
+                true, // skip placeholder shapes
+                None, // no inherited group fill at top level
+            );
+        }
+    }
+}
+
 // Threads the full master+layout inheritance context (per-type font sizes,
 // bullets, anchors, transforms, alignments, spacing, bold/italic/caps/color
 // maps) plus zip/theme into one slide parse; this is the inheritance chain
@@ -7763,6 +7898,12 @@ fn slide_is_hidden(root: roxmltree::Node) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn parse_slide(
     xml: &str,
+    // The layout's single-pass extraction (placeholders + layout bg + layout
+    // showMasterSp), built/cached by the caller against this slide's effective
+    // theme (D4). `layout_xml` is still passed for the per-slide DECORATIVE walk
+    // only (its shapes bind to the slide's own smartart + theme + zip, so they
+    // can't live in the cached `ParsedLayout`).
+    parsed_layout: &ParsedLayout,
     layout_xml: Option<&str>,
     layout_rels: &HashMap<String, String>,
     layout_dir: &str,
@@ -7777,6 +7918,12 @@ fn parse_slide(
     // this function uses. `theme` here is the slide's effective theme (the
     // master's own theme with its <p:clrMap> baked in), so scheme colors
     // resolve against the right palette per slide.
+    // Only the fields this function still consumes directly are bound; the
+    // master INHERITANCE maps (font sizes, level sizes/indents/bullets, anchors,
+    // transforms, alignments, ea-ln-brk, spacing) now feed `parse_layout` in the
+    // caller, which produced the `ParsedLayout` passed in. `theme` here is the
+    // slide's effective theme (master clrMap baked in) so scheme colors resolve
+    // against the right palette per slide.
     let MasterBundle {
         theme,
         master_xml,
@@ -7784,29 +7931,21 @@ fn parse_slide(
         master_dir,
         master_smartart_drawings,
         master_bg,
-        master_font_sizes,
-        master_level_font_sizes,
-        master_level_indents,
-        master_level_bullets,
-        master_anchors,
-        master_transforms,
-        master_alignments,
-        master_ea_ln_brk,
-        master_space_before,
-        master_space_after,
-        master_line_spacing,
+        master_decorative,
         master_bold,
         master_italic,
         master_caps,
         master_color,
+        ..
     } = bundle;
     // When the slide/layout carries a `<p:clrMapOvr><a:overrideClrMapping>`
     // (ECMA-376 §19.3.1.7), the caller recomputed the master's theme-dependent
     // fields against the slide's effective mapping (`EffectiveMaster`); use them
     // in place of the master's frozen values so that BOTH the slide's own scheme
     // colors AND master-inherited ones (the master `<p:bg>`, master txStyles
-    // placeholder colors, master bullet colors) resolve against the override
-    // mapping (§20.1.6.8). Otherwise fall back to the master bundle's values.
+    // placeholder colors) resolve against the override mapping (§20.1.6.8).
+    // Otherwise fall back to the master bundle's values. (Master bullet colors
+    // flow through `parsed_layout`, already override-adjusted by the caller.)
     let theme: &HashMap<String, String> = eff.map(|e| &e.theme).unwrap_or(theme);
     let master_xml: Option<&str> = master_xml.as_deref();
     let master_dir: &str = master_dir.as_str();
@@ -7814,33 +7953,15 @@ fn parse_slide(
         Some(e) => e.master_bg.clone(),
         None => master_bg.clone(),
     };
-    let master_level_bullets: &HashMap<String, LevelBullets> = eff
-        .map(|e| &e.master_level_bullets)
-        .unwrap_or(master_level_bullets);
     let master_color: &HashMap<String, String> =
         eff.map(|e| &e.master_color).unwrap_or(master_color);
 
-    let mut lph = match layout_xml {
-        Some(x) => parse_layout_placeholders(
-            x,
-            master_font_sizes,
-            master_level_font_sizes,
-            master_level_indents,
-            master_level_bullets,
-            master_anchors,
-            master_transforms,
-            master_alignments,
-            master_ea_ln_brk,
-            master_space_before,
-            master_space_after,
-            master_line_spacing,
-            theme,
-            layout_dir,
-            layout_rels,
-            zip,
-        ),
-        None => LayoutPlaceholders::default(),
-    };
+    // The layout placeholder inheritance was resolved once in `parse_layout`
+    // (cached across slides sharing this layout, or rebuilt for a clrMapOvr
+    // slide) against this slide's effective theme. Clone it so the per-slide
+    // master txStyles fallbacks below can be layered on without mutating the
+    // shared/cached instance.
+    let mut lph = parsed_layout.placeholders.clone();
     // Fall back to master txStyles defRPr @b/@i when the layout did not specify
     // bold/italic for a placeholder type. Without this, e.g. the master titleStyle's
     // b="1" is not applied to ctrTitle / title placeholders.
@@ -7859,6 +7980,7 @@ fn parse_slide(
             .or_insert(c.clone());
     }
 
+    note_layout_master_parse();
     let doc = roxmltree::Document::parse(xml)?;
     let root = doc.root_element(); // <p:sld>
     let hidden = slide_is_hidden(root);
@@ -7885,23 +8007,10 @@ fn parse_slide(
         background = parse_background(n, theme, &mut resolve);
     }
 
-    // Layout-level bg (rels = layout rels, part dir = layout_dir).
+    // Layout-level bg: resolved once in `parse_layout` (against this slide's
+    // effective theme) and applied only when the slide's own bg chain is empty.
     if background.is_none() {
-        if let Some(lx) = layout_xml {
-            if let Ok(doc2) = roxmltree::Document::parse(lx) {
-                if let Some(n) = child(doc2.root_element(), "cSld") {
-                    let mut resolve = |rid: &str| -> Option<String> {
-                        let target = layout_rels.get(rid)?;
-                        let path = resolve_path(layout_dir, target);
-                        // Existence check only — central-directory lookup, no
-                        // inflate (former `read_zip_bytes` decompressed to discard).
-                        zip.index_for_name(&path)?;
-                        Some(path)
-                    };
-                    background = parse_background(n, theme, &mut resolve);
-                }
-            }
-        }
+        background = parsed_layout.background.clone();
     }
 
     // Master-level bg (resolved by the caller before parse_slide; already a Fill).
@@ -7919,20 +8028,10 @@ fn parse_slide(
     // Master decorative shapes are composited beneath the slide only when both
     // the slide and its layout permit it. Either one setting showMasterSp="0"
     // suppresses the master's spTree decorations (the slide flag is honored for
-    // the slide itself; the layout flag for shapes inherited through it).
-    // OOXML booleans accept "0"/"false" for false and "1"/"true" for true.
-    fn read_show_master_sp(node: roxmltree::Node<'_, '_>) -> bool {
-        match attr(&node, "showMasterSp").as_deref() {
-            Some("0") | Some("false") => false,
-            _ => true, // default true (absent / "1" / "true")
-        }
-    }
+    // the slide itself; the layout flag — read once in `parse_layout` — for
+    // shapes inherited through it).
     let slide_show_master_sp = read_show_master_sp(root);
-    let layout_show_master_sp = layout_xml
-        .and_then(|lx| roxmltree::Document::parse(lx).ok())
-        .map(|d| read_show_master_sp(d.root_element()))
-        .unwrap_or(true);
-    let show_master_sp = slide_show_master_sp && layout_show_master_sp;
+    let show_master_sp = slide_show_master_sp && parsed_layout.show_master_sp;
 
     // ── Master non-placeholder shapes (rendered BELOW layout & slide) ─────
     // The slide master's spTree may carry decorative pictures/shapes (logos,
@@ -7940,28 +8039,33 @@ fn parse_slide(
     // the very bottom, beneath the layout's decorations and the slide content.
     // Gated by showMasterSp (above). Placeholders are skipped — only the
     // master's decorative content is drawn here.
+    //
+    // These were pre-extracted once per cached master in `build_master_bundle`
+    // (resolved against the master's baked theme), so the common no-override
+    // slide clones them instead of re-parsing the master XML + re-walking its
+    // spTree. A slide with a `<p:clrMapOvr>` (`eff.is_some()`) must re-resolve
+    // them against its override theme, so it re-extracts from the master XML —
+    // exactly what the old unconditional inline walk did, now only on the rare
+    // override path. `elements` is still empty here, so ordering (master
+    // decorations first) is unchanged either way.
     if show_master_sp {
-        if let Some(mxml) = master_xml {
-            if let Ok(mdoc) = roxmltree::Document::parse(mxml) {
-                let mroot = mdoc.root_element();
-                if let Some(msp_tree) = child(mroot, "cSld").and_then(|n| child(n, "spTree")) {
-                    let empty_lph = LayoutPlaceholders::default();
-                    for node in msp_tree.children().filter(|n| n.is_element()) {
-                        parse_sp_tree_node(
-                            node,
-                            &empty_lph,
-                            master_dir,
-                            master_rels,
-                            master_smartart_drawings,
-                            zip,
-                            theme,
-                            &mut elements,
-                            true, // skip placeholder shapes
-                            None, // no inherited group fill at top level
-                        );
-                    }
+        if eff.is_some() {
+            if let Some(mxml) = master_xml {
+                note_layout_master_parse();
+                if let Ok(mdoc) = roxmltree::Document::parse(mxml) {
+                    extract_decorative_shapes(
+                        mdoc.root_element(),
+                        master_dir,
+                        master_rels,
+                        master_smartart_drawings,
+                        theme,
+                        zip,
+                        &mut elements,
+                    );
                 }
             }
+        } else {
+            elements.extend(master_decorative.iter().cloned());
         }
     }
 
@@ -7969,6 +8073,7 @@ fn parse_slide(
     // These are decorative background elements defined in the slide layout
     // (e.g. coloured bands, logos) that are not placeholder anchors.
     if let Some(lxml) = layout_xml {
+        note_layout_master_parse();
         if let Ok(ldoc) = roxmltree::Document::parse(lxml) {
             let lroot = ldoc.root_element();
             if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
@@ -8940,6 +9045,14 @@ struct MasterBundle {
     master_dir: String,
     master_smartart_drawings: HashMap<String, String>,
     master_bg: Option<Fill>,
+    /// The master's own decorative (non-placeholder) spTree shapes, resolved ONCE
+    /// against the master's baked `theme` (§19.3.1.38 showMasterSp). Each slide
+    /// composites these beneath its content; pre-extracting here (per cached
+    /// master) removes the per-slide master-XML re-parse + spTree re-walk (D4).
+    /// A slide with a `<p:clrMapOvr>` re-resolves them against its override theme
+    /// (see `parse_slide`), so these frozen-against-master-theme elements are used
+    /// only by the common no-override slides.
+    master_decorative: Vec<SlideElement>,
     master_font_sizes: HashMap<String, f64>,
     master_level_font_sizes: HashMap<String, LevelFontSizes>,
     master_level_indents: HashMap<String, LevelIndents>,
@@ -9028,9 +9141,22 @@ fn build_master_bundle(
     let master_smartart_drawings: HashMap<String, String> =
         build_smartart_drawings(&master_rels_xml, zip);
 
-    let master_bg: Option<Fill> = master_xml_opt.as_deref().and_then(|master_xml| {
-        let doc = roxmltree::Document::parse(master_xml).ok()?;
-        let c_sld = child(doc.root_element(), "cSld")?;
+    // Parse the master XML EXACTLY ONCE and share the resulting `Document` across
+    // every master-derived extractor below (D4: previously each `parse_master_*`
+    // re-ran `Document::parse` on the same string, so a single master cost 12
+    // parses — 11 extractors + the background). The `Document` borrows
+    // `master_xml_opt`, so it lives only for the extraction scope; all owned maps
+    // are computed before it is dropped. When the master has no XML (missing part)
+    // every map defaults to empty, exactly as the prior `Option::map` chain did.
+    let master_doc: Option<roxmltree::Document<'_>> = master_xml_opt.as_deref().and_then(|xml| {
+        note_layout_master_parse();
+        roxmltree::Document::parse(xml).ok()
+    });
+    let master_root: Option<roxmltree::Node<'_, '_>> =
+        master_doc.as_ref().map(|d| d.root_element());
+
+    let master_bg: Option<Fill> = master_root.and_then(|root| {
+        let c_sld = child(root, "cSld")?;
         let mut resolve = |rid: &str| -> Option<String> {
             let target = master_rels.get(rid)?;
             let path = resolve_path(&master_dir, target);
@@ -9042,50 +9168,47 @@ fn build_master_bundle(
         parse_background(c_sld, &theme, &mut resolve)
     });
 
-    let master_font_sizes = master_xml_opt
-        .as_deref()
-        .map(parse_master_font_sizes)
-        .unwrap_or_default();
-    let master_level_font_sizes = master_xml_opt
-        .as_deref()
+    let master_font_sizes = master_root.map(parse_master_font_sizes).unwrap_or_default();
+    let master_level_font_sizes = master_root
         .map(parse_master_level_font_sizes)
         .unwrap_or_default();
-    let master_level_indents = master_xml_opt
-        .as_deref()
+    let master_level_indents = master_root
         .map(parse_master_level_indents)
         .unwrap_or_default();
-    let master_level_bullets = master_xml_opt
-        .as_deref()
-        .map(|xml| parse_master_level_bullets(xml, &theme, &master_rels, &master_dir, zip))
+    let master_level_bullets = master_root
+        .map(|root| parse_master_level_bullets(root, &theme, &master_rels, &master_dir, zip))
         .unwrap_or_default();
-    let master_anchors = master_xml_opt
-        .as_deref()
-        .map(parse_master_anchors)
-        .unwrap_or_default();
-    let master_transforms = master_xml_opt
-        .as_deref()
-        .map(parse_master_transforms)
-        .unwrap_or_default();
-    let master_alignments = master_xml_opt
-        .as_deref()
-        .map(parse_master_alignments)
-        .unwrap_or_default();
-    let master_ea_ln_brk = master_xml_opt
-        .as_deref()
-        .map(parse_master_ea_ln_brk)
-        .unwrap_or_default();
-    let (master_space_before, master_space_after, master_line_spacing) = master_xml_opt
-        .as_deref()
+    let master_anchors = master_root.map(parse_master_anchors).unwrap_or_default();
+    let master_transforms = master_root.map(parse_master_transforms).unwrap_or_default();
+    let master_alignments = master_root.map(parse_master_alignments).unwrap_or_default();
+    let master_ea_ln_brk = master_root.map(parse_master_ea_ln_brk).unwrap_or_default();
+    let (master_space_before, master_space_after, master_line_spacing) = master_root
         .map(parse_master_txstyle_spacing)
         .unwrap_or_default();
-    let (master_bold, master_italic, master_caps) = master_xml_opt
-        .as_deref()
+    let (master_bold, master_italic, master_caps) = master_root
         .map(parse_master_txstyle_bold_italic)
         .unwrap_or_default();
-    let master_color = master_xml_opt
-        .as_deref()
-        .map(|xml| parse_master_txstyle_color(xml, &theme))
+    let master_color = master_root
+        .map(|root| parse_master_txstyle_color(root, &theme))
         .unwrap_or_default();
+
+    // Pre-extract the master's decorative (non-placeholder) spTree shapes ONCE,
+    // resolved against the master's baked `theme`. Each slide clones these instead
+    // of re-parsing the master XML and re-walking its spTree (D4; former
+    // per-slide `parse_slide` inline walk). Uses the same shared `master_root` and
+    // the master's own rels + smartart drawings, exactly as the old inline walk did.
+    let mut master_decorative: Vec<SlideElement> = Vec::new();
+    if let Some(root) = master_root {
+        extract_decorative_shapes(
+            root,
+            &master_dir,
+            &master_rels,
+            &master_smartart_drawings,
+            &theme,
+            zip,
+            &mut master_decorative,
+        );
+    }
 
     MasterBundle {
         theme,
@@ -9094,6 +9217,7 @@ fn build_master_bundle(
         master_dir,
         master_smartart_drawings,
         master_bg,
+        master_decorative,
         master_font_sizes,
         master_level_font_sizes,
         master_level_indents,
@@ -9174,12 +9298,27 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         None => Some(build_master_bundle("", &theme, &mut zip)),
     };
 
+    // Cache of the layout single-pass extraction (`ParsedLayout`) keyed by layout
+    // ZIP path (D4), mirroring `master_cache`. Slides sharing a layout reuse its
+    // resolved placeholders + layout background + showMasterSp instead of
+    // re-parsing the layout XML four times per slide. Only NO-override slides
+    // populate/read the cache: the entry is resolved against the master's baked
+    // theme, and a slide's layout→master chain is 1:1 (a layout names exactly one
+    // master), so every no-override slide on a given layout shares that theme. A
+    // slide with a `<p:clrMapOvr>` builds a fresh `ParsedLayout` against its
+    // override theme instead (kept out of the cache).
+    let mut layout_cache: HashMap<String, ParsedLayout> = HashMap::new();
+
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
         slide_xml: String,
         slide_rels: HashMap<String, String>,
         smartart_drawings: HashMap<String, String>,
+        /// ZIP path of the slide's layout (e.g. `ppt/slideLayouts/slideLayout3.xml`).
+        /// Used as the `layout_cache` key so slides sharing a layout reuse its
+        /// single-pass `ParsedLayout` (D4). `None` when the slide has no layout.
+        layout_path: Option<String>,
         layout_xml: Option<String>,
         layout_rels: HashMap<String, String>,
         layout_dir: String,
@@ -9251,6 +9390,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             slide_xml,
             slide_rels,
             smartart_drawings,
+            layout_path,
             layout_xml,
             layout_rels,
             layout_dir,
@@ -9334,11 +9474,19 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let effective_master: Option<EffectiveMaster> = clr_map_ovr.map(|ovr| {
             let mut theme = bundle.theme.clone();
             apply_clr_map(&mut theme, Some(&ovr));
-            // Re-run the master background resolution (mirrors build_master_bundle)
-            // with the effective theme so a master `<p:bg>` schemeClr honors the override.
-            let master_bg: Option<Fill> = bundle.master_xml.as_deref().and_then(|master_xml| {
-                let doc = roxmltree::Document::parse(master_xml).ok()?;
-                let c_sld = child(doc.root_element(), "cSld")?;
+            // Re-run the master's theme-dependent extractions (mirrors
+            // build_master_bundle) against the effective override theme so master-
+            // INHERITED scheme colors (the `<p:bg>` schemeClr, txStyles placeholder
+            // colors, per-level bullet colors) flip with the override. Parse the
+            // master XML ONCE here and share the root across all three re-resolutions
+            // (previously each re-parsed the same string — 3 parses per override slide).
+            let master_doc = bundle.master_xml.as_deref().and_then(|xml| {
+                note_layout_master_parse();
+                roxmltree::Document::parse(xml).ok()
+            });
+            let master_root = master_doc.as_ref().map(|d| d.root_element());
+            let master_bg: Option<Fill> = master_root.and_then(|root| {
+                let c_sld = child(root, "cSld")?;
                 let mut resolve = |rid: &str| -> Option<String> {
                     let target = bundle.master_rels.get(rid)?;
                     let path = resolve_path(&bundle.master_dir, target);
@@ -9349,17 +9497,13 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                 };
                 parse_background(c_sld, &theme, &mut resolve)
             });
-            let master_color = bundle
-                .master_xml
-                .as_deref()
-                .map(|x| parse_master_txstyle_color(x, &theme))
+            let master_color = master_root
+                .map(|root| parse_master_txstyle_color(root, &theme))
                 .unwrap_or_default();
-            let master_level_bullets = bundle
-                .master_xml
-                .as_deref()
-                .map(|x| {
+            let master_level_bullets = master_root
+                .map(|root| {
                     parse_master_level_bullets(
-                        x,
+                        root,
                         &theme,
                         &bundle.master_rels,
                         &bundle.master_dir,
@@ -9375,8 +9519,71 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             }
         });
 
+        // Resolve this slide's `ParsedLayout` (placeholders + layout bg +
+        // showMasterSp), parsing the layout XML once. Only the `theme` and the
+        // master bullet colors that `parse_layout` consumes are theme-dependent;
+        // a clrMapOvr slide passes the OVERRIDE-adjusted pair so its layout colors
+        // flip with the override (mirrors the master theme-dependent recompute
+        // above), everything else is the frozen bundle maps.
+        let (layout_theme, layout_master_bullets): (
+            &HashMap<String, String>,
+            &HashMap<String, LevelBullets>,
+        ) = match effective_master.as_ref() {
+            Some(e) => (&e.theme, &e.master_level_bullets),
+            None => (&bundle.theme, &bundle.master_level_bullets),
+        };
+        // Build a `ParsedLayout` from a layout XML string with the resolved
+        // theme/bullets and this bundle's remaining (theme-independent) maps.
+        let build_parsed_layout = |lx: &str, zip: &mut PptxZip<'_>| -> ParsedLayout {
+            parse_layout(
+                lx,
+                &bundle.master_font_sizes,
+                &bundle.master_level_font_sizes,
+                &bundle.master_level_indents,
+                layout_master_bullets,
+                &bundle.master_anchors,
+                &bundle.master_transforms,
+                &bundle.master_alignments,
+                &bundle.master_ea_ln_brk,
+                &bundle.master_space_before,
+                &bundle.master_space_after,
+                &bundle.master_line_spacing,
+                layout_theme,
+                &raw.layout_dir,
+                &raw.layout_rels,
+                zip,
+            )
+        };
+
+        // No-override slide WITH a layout path → cache by layout path (its entry
+        // is resolved against the master-baked theme, which every no-override
+        // slide on this layout shares). Otherwise build a fresh, uncached one
+        // (override slide, or the rare no-layout-path case).
+        let fresh_layout: Option<ParsedLayout> = match (
+            effective_master.is_none(),
+            raw.layout_xml.as_deref(),
+            raw.layout_path.as_deref(),
+        ) {
+            (true, Some(lx), Some(lp)) => {
+                if !layout_cache.contains_key(lp) {
+                    let pl = build_parsed_layout(lx, &mut zip);
+                    layout_cache.insert(lp.to_owned(), pl);
+                }
+                None // borrowed from the cache below
+            }
+            (_, Some(lx), _) => Some(build_parsed_layout(lx, &mut zip)),
+            (_, None, _) => Some(ParsedLayout::default()),
+        };
+        let parsed_layout: &ParsedLayout = match &fresh_layout {
+            Some(pl) => pl,
+            // Cached (no-override) path: `layout_path` is guaranteed present
+            // because that is the only arm that leaves `fresh_layout` as `None`.
+            None => &layout_cache[raw.layout_path.as_deref().unwrap()],
+        };
+
         let slide = parse_slide(
             &raw.slide_xml,
+            parsed_layout,
             raw.layout_xml.as_deref(),
             &raw.layout_rels,
             &raw.layout_dir,
@@ -10380,8 +10587,15 @@ mod tests {
         let cursor = Cursor::new(bytes.as_slice());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
 
-        let m =
-            parse_master_level_bullets(master, &theme, &master_rels, "ppt/slideMasters", &mut zip);
+        let master_doc = roxmltree::Document::parse(master).unwrap();
+        let master_root = master_doc.root_element();
+        let m = parse_master_level_bullets(
+            master_root,
+            &theme,
+            &master_rels,
+            "ppt/slideMasters",
+            &mut zip,
+        );
         // The listed-but-missing part must not produce a Blip anywhere. With only
         // a buBlip (no char/auto) at lvl1 and the part absent, the level resolves
         // to Inherit (None) and the bodyStyle contributes no usable bullet, so the
@@ -10405,7 +10619,7 @@ mod tests {
         let cursor_ok = Cursor::new(bytes_ok.as_slice());
         let mut zip_ok = zip::ZipArchive::new(cursor_ok).unwrap();
         let m_ok = parse_master_level_bullets(
-            master,
+            master_root,
             &theme,
             &master_rels,
             "ppt/slideMasters",
@@ -10772,7 +10986,8 @@ mod tests {
             <p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
           </p:txStyles>
         </p:sldMaster>"#;
-        let m = parse_master_level_font_sizes(master);
+        let master_doc = roxmltree::Document::parse(master).unwrap();
+        let m = parse_master_level_font_sizes(master_doc.root_element());
         let body = m.get("body").expect("body level sizes");
         assert_eq!(body[0], Some(28.0)); // lvl1 → level 0
         assert_eq!(body[1], Some(24.0)); // lvl2 → level 1
@@ -10806,8 +11021,14 @@ mod tests {
         let bytes = empty_zip_bytes();
         let cursor = Cursor::new(bytes.as_slice());
         let mut zip = zip::ZipArchive::new(cursor).unwrap();
-        let m =
-            parse_master_level_bullets(master, &theme, &master_rels, "ppt/slideMasters", &mut zip);
+        let master_doc = roxmltree::Document::parse(master).unwrap();
+        let m = parse_master_level_bullets(
+            master_doc.root_element(),
+            &theme,
+            &master_rels,
+            "ppt/slideMasters",
+            &mut zip,
+        );
         let body = m.get("body").expect("body bullets");
         match &body[0] {
             Some(Bullet::Char { ch, .. }) => assert_eq!(ch, "•", "lvl1 bullet char"),
@@ -10871,7 +11092,8 @@ mod tests {
             <p:titleStyle><a:lvl1pPr marR="123456"><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
           </p:txStyles>
         </p:sldMaster>"#;
-        let m = parse_master_level_indents(master);
+        let master_doc = roxmltree::Document::parse(master).unwrap();
+        let m = parse_master_level_indents(master_doc.root_element());
         let body = m.get("body").expect("body level indents");
         assert_eq!(body[0].mar_l, Some(1_000_000));
         assert_eq!(body[0].indent, Some(-500_000));
@@ -11012,8 +11234,9 @@ mod tests {
           </p:spTree></p:cSld>
         </p:sldLayout>"#;
 
+        let layout_doc = roxmltree::Document::parse(layout).unwrap();
         let lph = parse_layout_placeholders(
-            layout,
+            layout_doc.root_element(),
             &HashMap::new(),
             &HashMap::new(),
             &master_indents,
@@ -11041,6 +11264,231 @@ mod tests {
             li[0].mar_l,
             Some(1_000_000),
             "marL must fall back to the MASTER per axis (layout left it unset)"
+        );
+    }
+
+    /// D4 guard: `parse_layout` resolves the layout placeholder's color-bearing
+    /// fields, its `<p:bg>`, and its `showMasterSp` against the `theme` argument.
+    /// The color/background must FLIP when the caller passes an override-adjusted
+    /// theme — this is what the `parse_presentation` clrMapOvr branch relies on
+    /// (a cached `ParsedLayout` is only sound because a no-override slide passes
+    /// the same master-baked theme every time). Also asserts a theme-independent
+    /// field (transform) is stable regardless of theme.
+    #[test]
+    fn parse_layout_resolves_color_and_bg_against_theme() {
+        let layout = r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+          showMasterSp="0">
+          <p:cSld>
+            <p:bg><p:bgPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:bgPr></p:bg>
+            <p:spTree>
+              <p:sp>
+                <p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="123456" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr>
+                <p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:defRPr></a:lvl1pPr></a:lstStyle><a:p/></p:txBody>
+              </p:sp>
+            </p:spTree>
+          </p:cSld>
+        </p:sldLayout>"#;
+
+        // Typed-empty master inheritance maps (no master fallbacks in this test).
+        let m_f64: HashMap<String, f64> = HashMap::new();
+        let m_lfs: HashMap<String, LevelFontSizes> = HashMap::new();
+        let m_li: HashMap<String, LevelIndents> = HashMap::new();
+        let m_lb: HashMap<String, LevelBullets> = HashMap::new();
+        let m_str: HashMap<String, String> = HashMap::new();
+        let m_tf: HashMap<String, Transform> = HashMap::new();
+        let m_bool: HashMap<String, bool> = HashMap::new();
+        let m_i64: HashMap<String, i64> = HashMap::new();
+        let empty_rels: HashMap<String, String> = HashMap::new();
+        let build = |accent1_hex: &str| -> ParsedLayout {
+            let mut theme: HashMap<String, String> = HashMap::new();
+            theme.insert("accent1".to_string(), accent1_hex.to_string());
+            let bytes = empty_zip_bytes();
+            let cursor = Cursor::new(bytes.as_slice());
+            let mut zip = zip::ZipArchive::new(cursor).unwrap();
+            parse_layout(
+                layout,
+                &m_f64,
+                &m_lfs,
+                &m_li,
+                &m_lb,
+                &m_str,
+                &m_tf,
+                &m_str,
+                &m_bool,
+                &m_i64,
+                &m_i64,
+                &m_f64,
+                &theme,
+                "ppt/slideLayouts",
+                &empty_rels,
+                &mut zip,
+            )
+        };
+
+        let bg_solid_hex = |pl: &ParsedLayout| -> Option<String> {
+            match pl.background.as_ref()? {
+                Fill::Solid { color } => Some(color.clone()),
+                _ => None,
+            }
+        };
+
+        let base = build("FF0000");
+        assert!(!base.show_master_sp, "layout showMasterSp=0 is read");
+        assert_eq!(
+            bg_solid_hex(&base).as_deref(),
+            Some("FF0000"),
+            "layout bg schemeClr resolves against the passed theme"
+        );
+        assert_eq!(
+            base.placeholders
+                .by_type_color
+                .get("body")
+                .map(String::as_str),
+            Some("FF0000"),
+            "layout placeholder defRPr color resolves against the passed theme"
+        );
+        // Theme-independent geometry is stable.
+        assert_eq!(
+            base.placeholders.by_type.get("body").map(|t| t.x),
+            Some(123456),
+            "placeholder transform is theme-independent"
+        );
+
+        // Same layout XML, DIFFERENT theme (simulating an override remap): the
+        // color-bearing fields must flip; geometry must not.
+        let flipped = build("00FF00");
+        assert_eq!(
+            bg_solid_hex(&flipped).as_deref(),
+            Some("00FF00"),
+            "override theme must flip the layout bg color"
+        );
+        assert_eq!(
+            flipped
+                .placeholders
+                .by_type_color
+                .get("body")
+                .map(String::as_str),
+            Some("00FF00"),
+            "override theme must flip the layout placeholder color"
+        );
+        assert_eq!(
+            flipped.placeholders.by_type.get("body").map(|t| t.x),
+            Some(123456)
+        );
+    }
+
+    /// Build a deck with `n_slides` slides that ALL reference the same single
+    /// layout + single master (no clrMapOvr, no master/layout decorative shapes).
+    /// Used to assert the D4 slide-master/layout parse count stays bounded.
+    fn build_shared_layout_deck(n_slides: usize) -> Vec<u8> {
+        let sld_ids: String = (0..n_slides)
+            .map(|i| format!("<p:sldId id=\"{}\" r:id=\"rIdSlide{}\"/>", 256 + i, i))
+            .collect();
+        let presentation_xml = format!(
+            r#"<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMaster"/></p:sldMasterIdLst>
+  <p:sldIdLst>{sld_ids}</p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>"#
+        );
+        let mut pres_rel_entries = String::from(
+            r#"<Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>"#,
+        );
+        for i in 0..n_slides {
+            pres_rel_entries.push_str(&format!(
+                "\n  <Relationship Id=\"rIdSlide{i}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{i}.xml\"/>"
+            ));
+        }
+        let pres_rels =
+            format!("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{pres_rel_entries}</Relationships>");
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2><a:accent1><a:srgbClr val="FF0000"/></a:accent1><a:accent2><a:srgbClr val="00FF00"/></a:accent2><a:accent3><a:srgbClr val="0000FF"/></a:accent3><a:accent4><a:srgbClr val="FFFF00"/></a:accent4><a:accent5><a:srgbClr val="FF00FF"/></a:accent5><a:accent6><a:srgbClr val="00FFFF"/></a:accent6><a:hlink><a:srgbClr val="0000EE"/></a:hlink><a:folHlink><a:srgbClr val="551A8B"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#;
+        // Master + layout carry ONLY placeholder shapes (no decorative), so the
+        // master-decorative pre-extraction stores an empty vec and the layout
+        // decorative walk finds nothing — the parse count reflects the pagination
+        // path alone.
+        let master_xml = r#"<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rIdLayout"/></p:sldLayoutIdLst></p:sldMaster>"#;
+        let master_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+        let layout_xml = r#"<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sldLayout>"#;
+        let layout_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
+        let slide_xml = r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sld>"#;
+        let slide_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+
+        let mut parts: Vec<(String, Vec<u8>)> = vec![
+            ("ppt/presentation.xml".into(), presentation_xml.into_bytes()),
+            (
+                "ppt/_rels/presentation.xml.rels".into(),
+                pres_rels.into_bytes(),
+            ),
+            ("ppt/theme/theme1.xml".into(), theme_xml.as_bytes().to_vec()),
+            (
+                "ppt/slideMasters/slideMaster1.xml".into(),
+                master_xml.as_bytes().to_vec(),
+            ),
+            (
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels".into(),
+                master_rels.as_bytes().to_vec(),
+            ),
+            (
+                "ppt/slideLayouts/slideLayout1.xml".into(),
+                layout_xml.as_bytes().to_vec(),
+            ),
+            (
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels".into(),
+                layout_rels.as_bytes().to_vec(),
+            ),
+        ];
+        for i in 0..n_slides {
+            parts.push((
+                format!("ppt/slides/slide{i}.xml"),
+                slide_xml.as_bytes().to_vec(),
+            ));
+            parts.push((
+                format!("ppt/slides/_rels/slide{i}.xml.rels"),
+                slide_rels.as_bytes().to_vec(),
+            ));
+        }
+        let borrowed: Vec<(&str, &[u8])> = parts
+            .iter()
+            .map(|(p, b)| (p.as_str(), b.as_slice()))
+            .collect();
+        zip_with_parts(&borrowed)
+    }
+
+    /// D4 regression guard: the slide-master + layout `Document::parse` count on
+    /// the pagination path must be BOUNDED — not `k · slides`. With every slide
+    /// sharing one layout + one master (no clrMapOvr, no decorations), the master
+    /// is built once (1 parse) and the layout is parsed once for the cache, so
+    /// the total is `2 + 2·slides` (per slide: its own XML + the layout decorative
+    /// walk). Crucially the master/layout parse count does NOT grow by the 12+
+    /// (master) or 4 (layout) per-slide factor this change removed. Asserting the
+    /// slope across two slide counts pins the optimization: master build and the
+    /// layout cache each fire exactly once regardless of N.
+    #[test]
+    fn parse_count_scales_with_distinct_parts() {
+        let count_for = |n: usize| -> usize {
+            let data = build_shared_layout_deck(n);
+            LAYOUT_MASTER_PARSE_COUNT.with(|c| c.set(0));
+            let pres = parse_presentation(&data).expect("parse");
+            assert_eq!(pres.slides.len(), n);
+            LAYOUT_MASTER_PARSE_COUNT.with(|c| c.get())
+        };
+        let c3 = count_for(3);
+        let c7 = count_for(7);
+        // Exact model: 1 (master build) + 1 (layout cache build) + 2·N
+        // (per-slide: slide XML + layout decorative walk).
+        assert_eq!(c3, 2 + 2 * 3, "3-slide deck D4 parse count");
+        assert_eq!(c7, 2 + 2 * 7, "7-slide deck D4 parse count");
+        // Slope check: exactly 2 extra parses per added slide (NOT 12+ or 4·k),
+        // i.e. the master build + layout parse are amortized to O(1), not O(N).
+        assert_eq!(
+            (c7 - c3) / (7 - 3),
+            2,
+            "per-slide D4 parse slope must be 2 (slide + layout-decorative), \
+             proving master/layout parses are cached, not per-slide"
         );
     }
 
@@ -12019,6 +12467,179 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, SlideElement::Picture(_))),
             "showMasterSp=\"1\" must keep master decorations"
+        );
+    }
+
+    /// Build a minimal in-memory .pptx whose master carries a decorative
+    /// (non-placeholder) rectangle filled with a `schemeClr` (accent1). When
+    /// `slide_clr_map_ovr` is set, the slide gets a `<p:clrMapOvr>` remapping
+    /// accent1→accent2. Exercises the master-decorative pre-extraction (D4): the
+    /// no-override slide must reuse the pre-extracted element (accent1's hex),
+    /// while an override slide must RE-RESOLVE the decorative fill against its
+    /// override theme (accent2's hex) rather than serving the frozen bundle copy.
+    fn build_master_scheme_decoration_pptx(remap_accent1_to_accent2: bool) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+
+        let presentation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMaster"/></p:sldMasterIdLst>
+  <p:sldIdLst><p:sldId id="256" r:id="rIdSlide"/></p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>"#;
+        let pres_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+  <Relationship Id="rIdSlide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+</Relationships>"#;
+        let theme_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+  <a:themeElements><a:clrScheme name="C">
+    <a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+    <a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2>
+    <a:accent1><a:srgbClr val="FF0000"/></a:accent1><a:accent2><a:srgbClr val="00FF00"/></a:accent2>
+    <a:accent3><a:srgbClr val="0000FF"/></a:accent3><a:accent4><a:srgbClr val="FFFF00"/></a:accent4>
+    <a:accent5><a:srgbClr val="FF00FF"/></a:accent5><a:accent6><a:srgbClr val="00FFFF"/></a:accent6>
+    <a:hlink><a:srgbClr val="0000EE"/></a:hlink><a:folHlink><a:srgbClr val="551A8B"/></a:folHlink>
+  </a:clrScheme>
+  <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont>
+    <a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+  <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+  </a:themeElements>
+</a:theme>"#;
+        // Master decorative rectangle filled with schemeClr accent1 (no placeholder).
+        let master_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="11" name="MasterBand"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+      <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="200000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+        <a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr>
+    </p:sp>
+  </p:spTree></p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2"
+    accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rIdLayout"/></p:sldLayoutIdLst>
+</p:sldMaster>"#;
+        let master_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>"#;
+        let layout_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sldLayout>"#;
+        let layout_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"#;
+        // Optional slide-level clrMapOvr that remaps accent1 → accent2.
+        let clr_map_ovr = if remap_accent1_to_accent2 {
+            r#"<p:clrMapOvr><a:overrideClrMapping bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"
+      accent1="accent2" accent2="accent2" accent3="accent3" accent4="accent4"
+      accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"
+      xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/></p:clrMapOvr>"#
+        } else {
+            ""
+        };
+        let slide_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  {clr_map_ovr}
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sld>"#
+        );
+        let slide_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>"#;
+
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            let mut put = |path: &str, bytes: &[u8]| {
+                zw.start_file(path, opts).unwrap();
+                use std::io::Write;
+                zw.write_all(bytes).unwrap();
+            };
+            put("ppt/presentation.xml", presentation_xml.as_bytes());
+            put("ppt/_rels/presentation.xml.rels", pres_rels.as_bytes());
+            put("ppt/theme/theme1.xml", theme_xml.as_bytes());
+            put("ppt/slideMasters/slideMaster1.xml", master_xml.as_bytes());
+            put(
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                master_rels.as_bytes(),
+            );
+            put("ppt/slideLayouts/slideLayout1.xml", layout_xml.as_bytes());
+            put(
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                layout_rels.as_bytes(),
+            );
+            put("ppt/slides/slide1.xml", slide_xml.as_bytes());
+            put("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes());
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn master_band_fill_hex(data: &[u8]) -> String {
+        let pres = parse_presentation(data).expect("parse");
+        let slide = &pres.slides[0];
+        let shape = slide
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                SlideElement::Shape(s) => Some(s),
+                _ => None,
+            })
+            .expect("master decorative shape present on slide");
+        match shape.fill.as_ref().expect("shape has fill") {
+            Fill::Solid { color } => color.clone(),
+            other => panic!("expected solid fill, got {other:?}"),
+        }
+    }
+
+    /// D4 guard: the pre-extracted master decorative shape (no override) resolves
+    /// its `schemeClr accent1` against the master's own theme — accent1 = FF0000.
+    #[test]
+    fn master_decoration_scheme_fill_no_override_uses_master_theme() {
+        let hex = master_band_fill_hex(&build_master_scheme_decoration_pptx(false));
+        assert_eq!(
+            hex.to_uppercase(),
+            "FF0000",
+            "no-override slide must resolve accent1 to its master-theme hex"
+        );
+    }
+
+    /// D4 guard: a slide with `<p:clrMapOvr>` remapping accent1→accent2 must
+    /// RE-RESOLVE the master decorative shape against its override theme
+    /// (accent2 = 00FF00), NOT serve the frozen pre-extracted copy (FF0000).
+    /// This is the `eff.is_some()` re-extraction branch in `parse_slide`.
+    #[test]
+    fn master_decoration_scheme_fill_override_reresolves_against_override_theme() {
+        let hex = master_band_fill_hex(&build_master_scheme_decoration_pptx(true));
+        assert_eq!(
+            hex.to_uppercase(),
+            "00FF00",
+            "override slide must flip the master decorative accent1→accent2 hex"
         );
     }
 
