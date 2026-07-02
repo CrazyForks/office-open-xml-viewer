@@ -281,8 +281,18 @@ export class DocxScrollViewer {
     return w / (firstWpt * PT_TO_PX);
   }
 
-  /** Recompute heights + spacer, then mount the visible window. Called after
-   *  load, resize, and zoom. Idempotent. */
+  /**
+   * Recompute per-page heights + the spacer and re-mount the visible window.
+   *
+   * The viewer already calls this automatically after `load()`, an injected
+   * engine, a container resize, and a zoom, so most integrations never need it.
+   * It is public as a deliberate escape hatch: if the host mutates the layout in
+   * a way the `ResizeObserver` cannot observe (e.g. a CSS change on an ancestor
+   * that resizes the container without a box-size event, or a font that finishes
+   * loading after first paint), call `relayout()` to force a re-fit. Idempotent —
+   * safe to call repeatedly, and a no-op while the container has zero width (the
+   * fit is deferred until width appears, design §11).
+   */
   relayout(): void {
     if (!this._doc) return;
     // Establish the base fit scale on the first layout that has a positive

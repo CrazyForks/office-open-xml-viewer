@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
 import { DocxDocument } from './document.js';
 import { installDom, makeContainer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import * as docxIndex from './index.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -1273,5 +1274,11 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     const v = new DocxScrollViewer(container as unknown as HTMLElement, { document: engine.asDoc() });
     v.destroy();
     expect(disconnected).toBe(1);
+  });
+});
+
+describe('DocxScrollViewer — barrel export (T7)', () => {
+  it('is exported from the package entry', () => {
+    expect(typeof docxIndex.DocxScrollViewer).toBe('function');
   });
 });
