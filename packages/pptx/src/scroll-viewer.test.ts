@@ -218,3 +218,437 @@ describe('PptxScrollViewer — layout + virtualization (T2)', () => {
     expect(Math.max(...mountedSlides) - Math.min(...mountedSlides)).toBeLessThanOrEqual(6);
   });
 });
+
+describe('PptxScrollViewer — rendering (T3)', () => {
+  it("main mode: calls renderSlide once per mounted slot with that slide's px width", () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(10, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    // Every mounted slide got exactly one renderSlide call, no more no less.
+    const mounted = v.mountedSlideIndicesForTest().sort((a, b) => a - b);
+    const rendered = engine.renderCalls.map((c) => c.slide).sort((a, b) => a - b);
+    expect(rendered).toEqual(mounted);
+    // Each renderSlide call carried the per-call px width. pptx slides are uniform,
+    // so every width equals the same fit-width (base scale = 200/1000 = 0.2 px/EMU;
+    // slide width px = 1000 * 0.2 = 200), but the per-call width contract still
+    // passes a width per slide (mirrors docx's per-page width assertion, §7).
+    const widths = engine.renderSlideWidths();
+    expect(widths.length).toBe(mounted.length);
+    for (const w of widths) expect(w).toBeCloseTo(200, 3);
+    v.destroy();
+  });
+
+  it('main mode: passes the uniform px width per slide (per-call width contract, §7)', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // pptx slide size is UNIFORM deck-wide, so unlike docx (mixed page sizes) every
+    // slide renders at the SAME px width. The per-call width contract still holds:
+    // each mounted slide receives its own width argument, equal to the uniform px.
+    const engine = new FakePptxEngine(2, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    // Both slides mount (slide 0 height px = 600*0.2 = 120; slide 1 top 130 within
+    // the 400px viewport), so both get exactly one render.
+    const mounted = v.mountedSlideIndicesForTest().sort((a, b) => a - b);
+    expect(mounted).toEqual([0, 1]);
+    // Per-slide px widths in call order: uniform 200 each.
+    const widths = engine.renderCalls
+      .slice()
+      .sort((a, b) => a.slide - b.slide)
+      .map((c) => c.width ?? NaN);
+    expect(widths[0]).toBeCloseTo(200, 3);
+    expect(widths[1]).toBeCloseTo(200, 3);
+    v.destroy();
+  });
+
+  it('does not re-render a mounted slot for the same slide on a no-op scroll', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(10, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    const before = engine.renderCalls.length;
+    scrollHost.scrollTop = 0; // unchanged window
+    scrollHost.dispatch('scroll');
+    expect(engine.renderCalls.length).toBe(before); // no duplicate renders
+    v.destroy();
+  });
+
+  it('worker mode: never calls renderSlide — routes every slot through renderSlideToBitmap', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // mode:'worker' — the real PptxPresentation.renderSlide THROWS synchronously in
+    // worker mode; a viewer that mis-routed would blow up (and renderCalls would
+    // record the attempt). The direct _mode routing must never touch renderSlide.
+    const engine = new FakePptxEngine(10, 1000, 600, 'worker');
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.renderCalls).toHaveLength(0); // renderSlide never touched
+    // Every mounted slide dispatched exactly one bitmap render.
+    const mounted = v.mountedSlideIndicesForTest().sort((a, b) => a - b);
+    const bitmapSlides = [...new Set(engine.bitmapCalls.map((c) => c.slide))].sort((a, b) => a - b);
+    expect(bitmapSlides).toEqual(mounted);
+    v.destroy();
+  });
+
+  it('worker mode: paints a resolved bitmap into the slot canvas (transfer)', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(10, 1000, 600, 'worker');
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    // A bitmap was produced and transferred into the mounted slot's canvas.
+    expect(engine.createdBitmaps.length).toBeGreaterThan(0);
+    const slotWrapper = scrollHost.children.find((c) => c.children.some((k) => k.tag === 'canvas')) as FakeEl;
+    const canvas = slotWrapper.children.find((k) => k.tag === 'canvas') as FakeEl;
+    // The bitmaprenderer ctx received the bitmap (fake records lastBitmap).
+    expect(canvas._bitmapCtx?.lastBitmap).toBe(engine.createdBitmaps[0]);
+    v.destroy();
+  });
+
+  it('worker mode: closes the ImageBitmap on recycle (deferred — render in flight when the slot recycles)', async () => {
+    // Bitmap-close observability path: the primary path (deterministic slot.bitmap
+    // hold under synchronous resolve) does NOT hold — in non-deferred mode
+    // transferFromImageBitmap consumes the bitmap and nulls slot.bitmap
+    // synchronously BEFORE any scroll-away, so a later recycle has nothing to
+    // close. We use the DOCUMENTED FALLBACK: a deferred fake so the render is
+    // genuinely in flight when the slot recycles, and the on-resolution
+    // stale-check closes the orphan (design §11).
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(50, 1000, 600, 'worker', true);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    const firstBatch = engine.bitmapCalls.length;
+    expect(firstBatch).toBeGreaterThan(0);
+    // Scroll far away so the first slides' slots recycle while their renders are
+    // still in flight (deferred → not yet resolved).
+    scrollHost.scrollTop = 6000;
+    scrollHost.dispatch('scroll');
+    // Now resolve the early (now-stale) renders — the viewer must close them.
+    for (const call of engine.bitmapCalls.slice(0, firstBatch)) call.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.createdBitmaps.some((b) => b.close.mock.calls.length > 0)).toBe(true);
+    v.destroy();
+  });
+
+  it('worker mode: drops a stale in-flight render — no paint + bitmap closed when the slot moved on', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Deferred: renderSlideToBitmap resolves only when the test calls resolve(),
+    // so we can scroll a slot's slide out of the window BEFORE the bitmap arrives.
+    const engine = new FakePptxEngine(50, 1000, 600, 'worker', true);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    // Slide 0's bitmap is dispatched but NOT yet resolved.
+    const slide0 = engine.bitmapCalls.find((c) => c.slide === 0);
+    expect(slide0).toBeDefined();
+    // Scroll far away so slide 0's slot recycles while its render is in flight.
+    scrollHost.scrollTop = 6000;
+    scrollHost.dispatch('scroll');
+    expect(v.mountedSlideIndicesForTest()).not.toContain(0);
+    // Now the stale render for slide 0 resolves — the viewer must NOT paint it and
+    // must close the orphaned bitmap.
+    const bmp0 = engine.createdBitmaps[engine.bitmapCalls.indexOf(slide0!)];
+    slide0!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bmp0.close.mock.calls.length).toBeGreaterThan(0); // orphan closed
+    v.destroy();
+  });
+
+  it('worker mode: a slide that recycles then re-mounts while in flight still gets a fresh render', async () => {
+    // Coalescing keys on slide index; a naive Set<number> would swallow the
+    // re-mounted slot's render (the stale resolve clears in-flight AFTER the
+    // remount coalesced away → the new slot never paints). The viewer must
+    // re-dispatch the live slot's render so the slide never stays blank.
+    installDom();
+    const container = makeContainer(200, 400);
+    // Tall slides (1000×2000 EMU ⇒ 200×400px at base scale 0.2, stride 410) so the
+    // visible window is exactly one slide + overscan = [0,1], mirroring the docx
+    // recycle/re-mount pool dynamics: the re-mounted slide-0 slot is a DIFFERENT
+    // pooled object than the in-flight one, so `live !== slot` triggers the
+    // re-dispatch. (A short-slide window packs several slots, whose LIFO reuse can
+    // hand slide 0 back its own in-flight slot — an epoch-only case not under test.)
+    const engine = new FakePptxEngine(50, 1000, 2000, 'worker', true);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    const slide0Initial = engine.bitmapCalls.find((c) => c.slide === 0);
+    expect(slide0Initial).toBeDefined();
+    const dispatchesForSlide0 = () => engine.bitmapCalls.filter((c) => c.slide === 0).length;
+    expect(dispatchesForSlide0()).toBe(1);
+    // Scroll away (slide 0 recycles, render still in flight) then back to the top
+    // (slide 0 re-mounts on a fresh slot) — all while the initial render is deferred.
+    scrollHost.scrollTop = 12000;
+    scrollHost.dispatch('scroll');
+    expect(v.mountedSlideIndicesForTest()).not.toContain(0);
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatch('scroll');
+    expect(v.mountedSlideIndicesForTest()).toContain(0);
+    // Coalescing pin: slide 0's render is STILL in flight (initial deferred call not
+    // yet resolved), so the re-mount must NOT dispatch a second render for slide 0
+    // — the in-flight guard swallows it. Exactly one dispatch so far.
+    expect(dispatchesForSlide0()).toBe(1);
+    // The initial (now stale) render resolves — the orphan is dropped and the
+    // re-mounted slot's render is (re-)dispatched.
+    slide0Initial!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(dispatchesForSlide0()).toBeGreaterThanOrEqual(2); // fresh render issued
+    // Resolve the fresh render and confirm it paints into the live slot.
+    for (const c of engine.bitmapCalls.filter((c) => c.slide === 0)) c.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const slot0 = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === '0px',
+    ) as FakeEl | undefined;
+    expect(slot0).toBeDefined();
+    const canvas0 = slot0!.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(canvas0._bitmapCtx?.lastBitmap).toBeTruthy(); // painted, not blank
+    v.destroy();
+  });
+
+  it('worker mode: a PLAIN render rejection (slot still live, epoch unchanged) does NOT re-dispatch — no retry storm', async () => {
+    // B1 regression: the finally re-dispatch must gate on STALENESS, not merely
+    // `!painted`. When `renderSlideToBitmap` rejects while the slot is still live
+    // and the epoch is unchanged, `painted` is false and `live === slot`, but
+    // NEITHER staleness test fires, so we must NOT re-dispatch. A `!painted`-only
+    // gate would loop reject → re-dispatch → reject … unbounded (empirically 1→2
+    // →3→4 with onError every round). The onError contract leaves the slide blank.
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(50, 1000, 600, 'worker', true);
+    const onError = vi.fn();
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      overscan: 1,
+      onError,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+
+    const slide0 = engine.bitmapCalls.find((c) => c.slide === 0);
+    expect(slide0).toBeDefined();
+    expect(v.mountedSlideIndicesForTest()).toContain(0); // slot still live
+    const dispatchesForSlide0 = () => engine.bitmapCalls.filter((c) => c.slide === 0).length;
+    expect(dispatchesForSlide0()).toBe(1);
+
+    // Reject the render with the slot STILL LIVE and no scale change (epoch fixed).
+    slide0!.reject(new Error('worker render failed'));
+    // Flush microtasks generously — a retry storm would keep queuing dispatches.
+    for (let k = 0; k < 8; k++) await Promise.resolve();
+
+    // Dispatch count for slide 0 stayed at 1 — the storm is gone.
+    expect(dispatchesForSlide0()).toBe(1);
+    // onError fired exactly once (the single failure), never again.
+    expect(onError).toHaveBeenCalledTimes(1);
+    // Still no further dispatches after more microtask flushing.
+    for (let k = 0; k < 8; k++) await Promise.resolve();
+    expect(dispatchesForSlide0()).toBe(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+    v.destroy();
+  });
+
+  it('worker mode: destroy() mid-flight closes the resolving bitmap and does not fire onError post-destroy', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Deferred so a render is genuinely in flight when we destroy the viewer.
+    const engine = new FakePptxEngine(50, 1000, 600, 'worker', true);
+    const onError = vi.fn();
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      onError,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    const slide0 = engine.bitmapCalls.find((c) => c.slide === 0);
+    expect(slide0).toBeDefined();
+    // Tear down while slide 0's render is still in flight. destroy() recycles the
+    // slot (no bitmap held yet — none received), so the on-resolution stale-check
+    // must close the orphan; the identity guard fails (slot no longer live).
+    v.destroy();
+    const bmp0 = engine.createdBitmaps[engine.bitmapCalls.indexOf(slide0!)];
+    slide0!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bmp0.close.mock.calls.length).toBeGreaterThan(0); // orphan closed, no leak
+    expect(onError).not.toHaveBeenCalled(); // no error surfaced after teardown
+  });
+
+  // ⚠ MANDATORY render-epoch test (T3 review finding I-3). Worker path, deferred:
+  // dispatch at scale A, setScale(B) mid-flight, resolve — the old-scale bitmap is
+  // closed, NOT painted, and a fresh dispatch at scale B repaints the slot.
+  it('render epoch: a bitmap dispatched at the old scale is dropped (closed, not painted) after setScale, and re-dispatched at the new scale', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(20, 1000, 600, 'worker', true);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      overscan: 1,
+      zoomMin: 0.05,
+      zoomMax: 3,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+
+    // Slide 0's bitmap is dispatched at the base (old) scale but NOT yet resolved.
+    const slide0Old = engine.bitmapCalls.find((c) => c.slide === 0);
+    expect(slide0Old).toBeDefined();
+    const oldDispatchCount = engine.bitmapCalls.filter((c) => c.slide === 0).length;
+    expect(oldDispatchCount).toBe(1);
+    const oldWidth = slide0Old!.width;
+
+    // Zoom mid-flight: bumps the render epoch and re-mounts. Slide 0's re-mount is
+    // coalesced away by the in-flight guard (same index still in flight).
+    v.setScale(v.scaleForTest() * 2);
+    expect(v.mountedSlideIndicesForTest()).toContain(0); // slide 0 still visible at top
+    expect(engine.bitmapCalls.filter((c) => c.slide === 0).length).toBe(1); // no double-dispatch yet
+
+    // The OLD-scale render resolves. Epoch moved ⇒ STALE: close, do not paint,
+    // then re-dispatch slide 0 at the NEW scale.
+    const bmpOld = engine.createdBitmaps[engine.bitmapCalls.indexOf(slide0Old!)];
+    slide0Old!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bmpOld.close.mock.calls.length).toBeGreaterThan(0); // old bitmap closed
+    // A fresh dispatch for slide 0 was issued at the new scale.
+    const slide0Calls = engine.bitmapCalls.filter((c) => c.slide === 0);
+    expect(slide0Calls.length).toBeGreaterThanOrEqual(2);
+    const freshCall = slide0Calls[slide0Calls.length - 1];
+    // The fresh dispatch's width reflects the NEW scale (double the old width).
+    expect(freshCall.width).toBeGreaterThan(oldWidth ?? 0);
+
+    // The stale old bitmap was NOT transferred; only the fresh one paints.
+    freshCall.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const slot0 = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === '0px',
+    ) as FakeEl | undefined;
+    expect(slot0).toBeDefined();
+    const canvas0 = slot0!.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(canvas0._bitmapCtx?.lastBitmap).not.toBe(bmpOld); // never painted the stale bitmap
+    expect(canvas0._bitmapCtx?.lastBitmap).toBeTruthy(); // painted the fresh one
+    v.destroy();
+  });
+
+  // B1: epoch-then-reject must stay BOUNDED. setScale bumps the epoch mid-flight,
+  // so the OLD dispatch is stale on resolution; whether it resolves or REJECTS,
+  // the finally must issue exactly ONE fresh dispatch at the new epoch. The fresh
+  // dispatch captures the new epoch, so if IT later rejects (same epoch, still
+  // live) nothing re-dispatches — the retry is bounded to a single fresh attempt.
+  it('render epoch: rejecting the OLD-scale dispatch after setScale still yields exactly ONE fresh dispatch at the new scale (bounded)', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(20, 1000, 600, 'worker', true);
+    const onError = vi.fn();
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      overscan: 1,
+      zoomMin: 0.05,
+      zoomMax: 3,
+      onError,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+
+    const slide0Old = engine.bitmapCalls.find((c) => c.slide === 0);
+    expect(slide0Old).toBeDefined();
+    const dispatchesForSlide0 = () => engine.bitmapCalls.filter((c) => c.slide === 0).length;
+    expect(dispatchesForSlide0()).toBe(1);
+    const oldWidth = slide0Old!.width;
+
+    // Zoom mid-flight: bumps the epoch. Slide 0's re-mount is coalesced away.
+    v.setScale(v.scaleForTest() * 2);
+    expect(v.mountedSlideIndicesForTest()).toContain(0);
+    expect(dispatchesForSlide0()).toBe(1);
+
+    // REJECT the old-scale dispatch. Epoch moved ⇒ stale ⇒ re-dispatch (not a plain
+    // failure retry). Exactly ONE fresh dispatch at the new epoch.
+    slide0Old!.reject(new Error('old-scale render failed'));
+    for (let k = 0; k < 8; k++) await Promise.resolve();
+    const afterReject = engine.bitmapCalls.filter((c) => c.slide === 0);
+    expect(afterReject.length).toBe(2); // one fresh dispatch, no storm
+    const freshCall = afterReject[afterReject.length - 1];
+    expect(freshCall.width).toBeGreaterThan(oldWidth ?? 0); // at the NEW (larger) scale
+
+    // The fresh dispatch then SUCCEEDS and paints — the slide is not left blank.
+    freshCall.resolve();
+    for (let k = 0; k < 8; k++) await Promise.resolve();
+    expect(dispatchesForSlide0()).toBe(2); // still exactly two; success does not re-dispatch
+    const slot0 = scrollHost.children.find(
+      (c) => c.tag === 'div' && c.children.some((k) => k.tag === 'canvas') && c.style.top === '0px',
+    ) as FakeEl | undefined;
+    expect(slot0).toBeDefined();
+    const canvas0 = slot0!.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(canvas0._bitmapCtx?.lastBitmap).toBeTruthy(); // painted the fresh bitmap
+    v.destroy();
+  });
+});
