@@ -34,6 +34,15 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
   /** Enable `Ctrl`/`Cmd`+wheel zoom. Default true. */
   enableZoom?: boolean;
   /**
+   * CSS `background` shorthand for the scroll surface (the "desk") visible
+   * behind and between pages — the gray a PDF reader paints around the sheet.
+   * Applied to the viewer-owned scroll host. The pages themselves are always
+   * drawn on the document's own white canvas and are unaffected. Default
+   * `undefined`: the scroll surface stays transparent so the host container's
+   * background shows through (non-breaking).
+   */
+  background?: string;
+  /**
    * Inject an already-loaded engine to share one parse across panes (design §14).
    * When set: `load()` is unsupported (throws), the engine's own `mode` wins (an
    * explicitly conflicting `opts.mode` throws at construction, design §11), and
@@ -174,6 +183,9 @@ export class DocxScrollViewer {
     this._wrapper.style.cssText = 'position:relative;width:100%;height:100%;overflow:hidden;';
     this._scrollHost = document.createElement('div');
     this._scrollHost.style.cssText = 'position:absolute;inset:0;overflow:auto;';
+    // The "desk" behind/between pages. Undefined ⇒ transparent (container shows
+    // through); pages keep their own white canvas regardless.
+    if (opts.background) this._scrollHost.style.background = opts.background;
     this._spacer = document.createElement('div');
     this._spacer.style.cssText = 'position:absolute;top:0;left:0;width:1px;height:0;pointer-events:none;';
     this._scrollHost.appendChild(this._spacer);

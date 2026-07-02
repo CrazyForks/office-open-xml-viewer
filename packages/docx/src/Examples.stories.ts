@@ -138,6 +138,7 @@ export const ScrollViewer: LayoutStory = {
       gap: 16,
       overscan: 1,
       enableTextSelection: true,
+      background: '#525659', // desk gray behind/between pages (like a PDF reader)
       onVisiblePageChange: (top, total) => {
         status.textContent = `Page ${top + 1} / ${total}`;
       },

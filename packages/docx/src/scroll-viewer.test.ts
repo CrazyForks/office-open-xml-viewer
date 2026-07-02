@@ -103,6 +103,33 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     // Injected engine is caller-owned: destroy() must not tear it down.
     expect(engine.destroyed).toBe(false);
   });
+
+  // `background` paints the scroll surface (the "desk") visible behind/between
+  // pages. It applies to the viewer-owned scrollHost; pages keep their own white.
+  it('applies opts.background to the scrollHost element', () => {
+    installDom();
+    const container = makeContainer();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      background: '#525659',
+    });
+    const scrollHost = container.children[0].children[0]; // wrapper → scrollHost
+    expect(scrollHost.style.background).toBe('#525659');
+    v.destroy();
+  });
+
+  it('sets no background on the scrollHost by default (transparent — container shows through)', () => {
+    installDom();
+    const container = makeContainer();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+    });
+    const scrollHost = container.children[0].children[0];
+    expect(scrollHost.style.background).toBe('');
+    v.destroy();
+  });
 });
 
 describe('DocxScrollViewer — layout + virtualization (T2)', () => {
