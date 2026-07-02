@@ -56,7 +56,7 @@
 
 import { writeFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
-import { buildShapePath } from './preset';
+import { buildShapePath, SPEC_MIGRATED_PRESETS } from './preset';
 import { buildPresetGeometryPath } from './preset-geometry';
 import presetsJson from './preset-geometry/presets.json';
 
@@ -585,12 +585,15 @@ function fillEquivalent(
 }
 
 // ── The legacy switch inventory ──────────────────────────────────────────────
-// Every LIVE label of the legacy switch (the camelCase labels `pieWedge`,
-// `snipRoundRect`, `irregularSeal1`, `irregularSeal2` are unreachable — the
-// switch lower-cases its input — and are not audited). `spec` is the
-// presets.json geometry each label must be equivalent to before its case can
-// be deleted; for non-ECMA alias labels that is the canonical preset whose
-// body the label shares (or duplicates) in the switch.
+// Every label the legacy switch carried LIVE at audit time (step 0 of the
+// unification; camelCase labels `pieWedge`, `snipRoundRect`, `irregularSeal1`,
+// `irregularSeal2` were unreachable — the switch lower-cases its input — and
+// are not audited). `spec` is the presets.json geometry each label must be
+// equivalent to before its case can be deleted; for non-ECMA alias labels
+// that is the canonical preset whose body the label shared (or duplicated).
+// Labels whose spec target is in SPEC_MIGRATED_PRESETS have had their case
+// deleted — buildShapePath now routes them through the engine, so their audit
+// rows double as delegation/alias-mapping checks.
 const LEGACY_SWITCH: ReadonlyArray<{ label: string; spec: string }> = [
   { label: 'ellipse', spec: 'ellipse' },
   { label: 'oval', spec: 'ellipse' }, // alias
@@ -961,6 +964,31 @@ describe('preset parity harness', () => {
     // No duplicates.
     const labels = LEGACY_SWITCH.map((e) => e.label);
     expect(new Set(labels).size).toBe(labels.length);
+  });
+
+  it('keeps every migrated preset pinned to spec-engine parity', () => {
+    // For migrated presets buildShapePath must emit exactly the spec engine's
+    // geometry — via the delegation route AND for every alias label that
+    // historically resolved to the same shape. Checked at default and
+    // perturbed adjusts so the adj plumbing (adj1..adj4 array) stays sound.
+    const entries = LEGACY_SWITCH.filter((e) => SPEC_MIGRATED_PRESETS.has(e.spec));
+    // Every migrated name must appear in the inventory (no orphan set entry).
+    for (const name of SPEC_MIGRATED_PRESETS) {
+      expect(
+        entries.some((e) => e.spec === name),
+        `SPEC_MIGRATED_PRESETS entry "${name}" missing from the audit inventory`,
+      ).toBe(true);
+      expect(PRESET_DEFS[name], `migrated "${name}" must exist in presets.json`).toBeDefined();
+    }
+    for (const e of entries) {
+      for (const box of BOXES) {
+        const dflt = compareOnce(e.label, e.spec, box, []);
+        expect(dflt.ok, `${e.label} (default adj, ${box.w}×${box.h}): ${dflt.reason}`).toBe(true);
+        const adj = perturbedAdj(e.spec);
+        const pert = compareOnce(e.label, e.spec, box, adj);
+        expect(pert.ok, `${e.label} (perturbed adj, ${box.w}×${box.h}): ${pert.reason}`).toBe(true);
+      }
+    }
   });
 
   it('writes the audit table when PRESET_PARITY_REPORT is a path', () => {

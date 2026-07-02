@@ -9,8 +9,21 @@
 // Functions are pure path-builders: they assume the caller has already
 // called `ctx.beginPath()` and will call `ctx.fill()` / `ctx.stroke()`
 // after this returns.
+//
+// UNIFICATION IN PROGRESS (Phase 4 A2): body rendering is already driven by
+// the spec engine (shape/preset-geometry, presets.json) everywhere; this
+// legacy switch remains reachable only as (a) the silhouette tracer for pptx
+// effect masks and (b) the fallback for names the spec engine doesn't carry
+// (`rect`). Presets whose hand-written case was proven coordinate-identical
+// to the spec engine (see preset-parity.test.ts) have had their case DELETED
+// and are routed through the engine via SPEC_MIGRATED_PRESETS below. The
+// remaining cases differ from the spec engine's output and are kept verbatim
+// so rendering does not move by a pixel; see the parity table in
+// preset-parity.test.ts for the nature of each difference.
 
 /* eslint-disable */
+
+import { buildPresetGeometryPath } from './preset-geometry';
 
 // ── Star helper ──────────────────────────────────────────────────────────────
 export function drawStar(
@@ -85,6 +98,41 @@ export function ooxmlArcTo(
   ctx.ellipse(cx, cy, Math.abs(wR), Math.abs(hR), 0, stP, endP, swAng < 0);
   return { x: cx + wR * Math.cos(endP), y: cy + hR * Math.sin(endP) };
 }
+/**
+ * Non-spec alias labels the legacy switch historically accepted, mapped to
+ * the canonical ECMA-376 preset whose case body they shared (or duplicated).
+ * Only aliases whose canonical target has MIGRATED to the spec engine live
+ * here — aliases of still-legacy presets keep their `case` labels below.
+ */
+const LEGACY_SPEC_ALIASES: Record<string, string> = {
+  oval: 'ellipse',
+  rtriangle: 'rttriangle',
+  roundrectangle: 'roundrect',
+};
+
+/**
+ * Presets whose hand-written case was verified coordinate-identical to the
+ * spec-driven engine (preset-parity.test.ts: subpath structure, closed flags,
+ * winding, and ≤5e-3 px symmetric deviation on square/wide/tall boxes at
+ * default AND perturbed adjust values) and therefore deleted from the switch.
+ * `buildShapePath` routes them through `buildPresetGeometryPath`, so the
+ * silhouette/fallback callers keep emitting bit-identical geometry while the
+ * spec engine becomes the single source of truth for these shapes.
+ */
+export const SPEC_MIGRATED_PRESETS: ReadonlySet<string> = new Set([
+  // batch 1 — basic solids & rectangles
+  'ellipse',
+  'rttriangle',
+  'triangle',
+  'diamond',
+  'trapezoid',
+  'roundrect',
+  'snip1rect',
+  'frame',
+  'irregularseal1',
+  'irregularseal2',
+]);
+
 /** Build the canvas path for a given OOXML preset geometry (`<a:prstGeom>`).
  *
  * The caller is responsible for `ctx.beginPath()` / `ctx.fill()` /
@@ -110,6 +158,17 @@ export function buildShapePath(
   const cx = x + w / 2;
   const cy = y + h / 2;
 
+  // Migrated presets: the spec-driven engine is the single implementation.
+  // (Guarded by SPEC_MIGRATED_PRESETS so unmigrated engine-known presets keep
+  // their legacy output — including the plain-rect default — untouched.)
+  {
+    const raw = geom.toLowerCase();
+    const key = LEGACY_SPEC_ALIASES[raw] ?? raw;
+    if (SPEC_MIGRATED_PRESETS.has(key)) {
+      if (buildPresetGeometryPath(ctx, key, x, y, w, h, [adj, adj2, adj3, adj4])) return;
+    }
+  }
+
   // OOXML preset names are camelCase (e.g. `straightConnector1`, `roundRect`,
   // `rtTriangle`), but every `case` below is lowercase. Normalize here so the
   // catalog is matched case-insensitively — otherwise camelCase presets fall
@@ -117,38 +176,7 @@ export function buildShapePath(
   // lower-cases at its call site; this makes the function correct for every
   // caller, e.g. the docx renderer which passes the raw `prst` value.)
   switch (geom.toLowerCase()) {
-    // ── Ellipses ──────────────────────────────────────────────────────────────
-    case 'ellipse':
-    case 'oval':
-      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
-      break;
-
-    // ── Triangles ─────────────────────────────────────────────────────────────
-    case 'rtriangle':
-      ctx.moveTo(x, y + h);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y);
-      ctx.closePath();
-      break;
-
-    case 'triangle': {
-      const apexX = x + (adj ?? 50000) / 100000 * w;
-      ctx.moveTo(apexX, y);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
-
     // ── Quadrilaterals ────────────────────────────────────────────────────────
-    case 'diamond':
-      ctx.moveTo(cx, y);
-      ctx.lineTo(x + w, cy);
-      ctx.lineTo(cx, y + h);
-      ctx.lineTo(x, cy);
-      ctx.closePath();
-      break;
-
     case 'parallelogram': {
       // adj controls horizontal slant; default 25000 = 25% of width
       const offset = w * Math.min(0.5, (adj ?? 25000) / 100000);
@@ -157,27 +185,6 @@ export function buildShapePath(
       ctx.lineTo(x + w - offset, y + h);
       ctx.lineTo(x, y + h);
       ctx.closePath();
-      break;
-    }
-
-    case 'trapezoid': {
-      const ss = Math.min(w, h);
-      const inset = Math.min(w / 2, (adj ?? 25000) / 100000 * ss);
-      ctx.moveTo(x + inset, y);
-      ctx.lineTo(x + w - inset, y);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
-
-    case 'roundrect':
-    case 'roundrectangle': {
-      // OOXML: circular corners — r = min(w,h) * adj / 100000
-      // adj range 0–50000 (default 16667); at adj=50000 r=min(w,h)/2 (stadium)
-      const a = Math.min(50000, Math.max(0, adj ?? 16667));
-      const r = Math.min(w, h) * a / 100000;
-      ctx.roundRect(x, y, w, h, r);
       break;
     }
 
@@ -642,18 +649,6 @@ export function buildShapePath(
     }
 
     // ── Snipped-corner rectangles ─────────────────────────────────────────────
-    case 'snip1rect': {
-      // One snipped top-right corner; adj = snip size (default 16667)
-      const a = Math.min(50000, Math.max(0, adj ?? 16667));
-      const s = Math.min(w, h) * a / 100000;
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + w - s, y);
-      ctx.lineTo(x + w, y + s);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
     case 'snip2samerect': {
       // Two snipped corners (top-right + bottom-left); adj = snip size
       const a = Math.min(50000, Math.max(0, adj ?? 16667));
@@ -820,47 +815,6 @@ export function buildShapePath(
       ctx.lineTo(x + th, y + th);
       ctx.lineTo(x + th, y + h);
       ctx.lineTo(x, y + h);
-      ctx.closePath();
-      break;
-    }
-    case 'irregularSeal1':
-    case 'irregularseal1': {
-      // ECMA-376 preset geometry – exact polygon vertices in 21600×21600 space.
-      // 爆発1: 24-point irregular explosion / jagged starburst.
-      const s1: [number, number][] = [
-        [10800,  5800], [14522,     0], [14155,  5325], [18380,  4457],
-        [16702,  7315], [21097,  8137], [17607, 10475], [21600, 13290],
-        [16837, 12942], [18145, 18095], [14020, 14457], [13247, 19737],
-        [10532, 14935], [ 8485, 21600], [ 7715, 15627], [ 4762, 17617],
-        [ 5667, 13937], [  135, 14587], [ 3722, 11775], [    0,  8615],
-        [ 4627,  7617], [  370,  2295], [ 7312,  6320], [ 8352,  2295],
-      ];
-      s1.forEach(([px, py], i) => {
-        const sx = x + w * px / 21600;
-        const sy = y + h * py / 21600;
-        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      });
-      ctx.closePath();
-      break;
-    }
-    case 'irregularSeal2':
-    case 'irregularseal2': {
-      // ECMA-376 preset geometry – exact polygon vertices in 21600×21600 space.
-      // 爆発2: 28-point irregular explosion / jagged starburst (more spikes than seal1).
-      const s2: [number, number][] = [
-        [11462,  4342], [14790,     0], [14525,  5777], [18007,  3172],
-        [16380,  6532], [21600,  6645], [16985,  9402], [18270, 11290],
-        [16380, 12310], [18877, 15632], [14640, 14350], [14942, 17370],
-        [12180, 15935], [11612, 18842], [ 9872, 17370], [ 8700, 19712],
-        [ 7527, 18125], [ 4917, 21600], [ 4805, 18240], [ 1285, 17825],
-        [ 3330, 15370], [    0, 12877], [ 3935, 11592], [ 1172,  8270],
-        [ 5372,  7817], [ 4502,  3625], [ 8550,  6382], [ 9722,  1887],
-      ];
-      s2.forEach(([px, py], i) => {
-        const sx = x + w * px / 21600;
-        const sy = y + h * py / 21600;
-        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      });
       ctx.closePath();
       break;
     }
@@ -1205,14 +1159,6 @@ export function buildShapePath(
       ctx.lineTo(x + w, cy + h * 0.05);
       ctx.lineTo(cx - w * 0.05, cy + h * 0.05);
       ctx.closePath();
-      break;
-    }
-
-    // ── Frame (hollow rectangle) ──────────────────────────────────────────────
-    case 'frame': {
-      const th = Math.min(w, h) * (adj ?? 12500) / 100000;
-      ctx.rect(x, y, w, h);
-      ctx.rect(x + th, y + th, w - 2 * th, h - 2 * th);
       break;
     }
 
