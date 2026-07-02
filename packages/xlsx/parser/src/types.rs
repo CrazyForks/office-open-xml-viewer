@@ -919,6 +919,17 @@ pub struct ShapeText {
     /// (e.g. 0.20 for `lnSpcReduction="20000"`). `None` when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ln_spc_reduction: Option<f64>,
+    /// `<a:bodyPr@lIns>` — left text inset in EMU (ECMA-376 §21.1.2.1.1
+    /// `CT_TextBodyProperties`). Emitted even at the default so the renderer uses
+    /// the spec inset (91440 EMU = 7.2 pt) instead of an empirical constant.
+    /// Same EMU convention as `ShapeParagraph.marL`.
+    pub l_ins: i64,
+    /// `<a:bodyPr@tIns>` — top text inset in EMU. Default 45720 (3.6 pt).
+    pub t_ins: i64,
+    /// `<a:bodyPr@rIns>` — right text inset in EMU. Default 91440 (7.2 pt).
+    pub r_ins: i64,
+    /// `<a:bodyPr@bIns>` — bottom text inset in EMU. Default 45720 (3.6 pt).
+    pub b_ins: i64,
     pub paragraphs: Vec<ShapeParagraph>,
 }
 

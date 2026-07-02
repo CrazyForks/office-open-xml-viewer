@@ -65,7 +65,16 @@ function paraCs(text: string, fontFaceCs: string): ShapeParagraph {
  *  (textBaseline='middle': drawY = lineTop + height/2, so gap = h0/2 + h1/2). */
 function gap(paragraphs: ShapeParagraph[], overrides: Partial<ShapeText> = {}): number {
   const { ctx, calls } = makeRecordingCtx();
-  const txt: ShapeText = { anchor: 't', wrap: 'none', paragraphs, ...overrides };
+  const txt: ShapeText = {
+    anchor: 't',
+    wrap: 'none',
+    lIns: 91440,
+    tIns: 45720,
+    rIns: 91440,
+    bIns: 45720,
+    paragraphs,
+    ...overrides,
+  };
   drawShapeText(ctx, txt, 400, 400, 1);
   const a = calls.find((c) => c.text === 'A');
   const b = calls.find((c) => c.text === 'B');

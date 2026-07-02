@@ -57,8 +57,10 @@ function para(text: string | null): ShapeParagraph {
 function shapeOf(paragraphs: ShapeParagraph[]): ShapeText {
   // Top-anchored + wrap:none isolates the line-height contribution: each line's
   // baseline is the cumulative sum of the heights of the lines above it, so the
-  // A→B gap reports exactly how much the middle paragraph reserved.
-  return { anchor: 't', wrap: 'none', paragraphs };
+  // A→B gap reports exactly how much the middle paragraph reserved. Insets are
+  // the ECMA-376 §21.1.2.1.1 spec defaults (the parser always emits them); the
+  // gap assertion below is independent of the constant top inset anyway.
+  return { anchor: 't', wrap: 'none', lIns: 91440, tIns: 45720, rIns: 91440, bIns: 45720, paragraphs };
 }
 
 function baselines(paragraphs: ShapeParagraph[]): FillTextCall[] {

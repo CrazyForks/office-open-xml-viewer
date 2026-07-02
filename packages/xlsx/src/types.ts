@@ -563,6 +563,16 @@ export interface ShapeText {
   /** `<a:normAutofit@lnSpcReduction>` — stored line-spacing reduction fraction
    *  (e.g. 0.20 for `lnSpcReduction="20000"`). Null/absent when unset. */
   lnSpcReduction?: number | null;
+  /** `<a:bodyPr@lIns>` — left text inset in EMU (ECMA-376 §21.1.2.1.1). Always
+   *  present; the spec default 91440 EMU (7.2 pt) when the attribute is absent.
+   *  Same EMU convention as `ShapeParagraph.marL`. */
+  lIns: number;
+  /** `<a:bodyPr@tIns>` — top text inset in EMU. Default 45720 (3.6 pt). */
+  tIns: number;
+  /** `<a:bodyPr@rIns>` — right text inset in EMU. Default 91440 (7.2 pt). */
+  rIns: number;
+  /** `<a:bodyPr@bIns>` — bottom text inset in EMU. Default 45720 (3.6 pt). */
+  bIns: number;
   paragraphs: ShapeParagraph[];
 }
 

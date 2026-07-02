@@ -1,6 +1,6 @@
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid, SrcRect};
 use ooxml_common::math::{nodes_to_text, parse_omath_nodes, MathNode};
-use ooxml_common::text::{parse_autofit, parse_lnspc, SpaceLine};
+use ooxml_common::text::{parse_lnspc, SpaceLine};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -1321,14 +1321,11 @@ struct TileInfo {
     algn: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-struct GradStop {
-    /// 0.0–1.0
-    position: f64,
-    /// hex color (6 chars = opaque, 8 chars = RRGGBBAA with alpha)
-    color: String,
-}
+/// A gradient color stop. The owned type + `<a:gs>` parse now live in
+/// `ooxml_common::fill` (shared DrawingML fill grammar); re-exported here under
+/// the former name so `Fill::Gradient { stops: Vec<GradStop> }` and its
+/// byte-identical `{"position":..,"color":".."}` JSON are unchanged.
+use ooxml_common::fill::GradStop;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -2263,68 +2260,56 @@ fn parse_color_node(
     parse_color_node_tint(node, theme, ooxml_common::color::TintMode::PowerPointLinear)
 }
 
+/// Resolves a `<a:schemeClr val>` name to its base theme hex the PowerPoint
+/// way, for the shared [`ooxml_common::color::parse_color_node`]. The color
+/// grammar (srgbClr/sysClr/prstClr/schemeClr + transforms) is shared; only this
+/// theme-slot lookup is pptx-specific.
+struct PptxSchemeResolver<'a> {
+    theme: &'a HashMap<String, String>,
+}
+
+impl ooxml_common::color::ThemeResolver for PptxSchemeResolver<'_> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        // Per ECMA-376 §19.3.1.6 the master's <p:clrMap> remaps logical
+        // names (bg1/tx1/bg2/tx2/accentN/hlink/folHlink) to theme slots.
+        // `bake_clr_map` pre-bakes those logical names into the theme
+        // map, so try a direct lookup FIRST — this honors clrMap (e.g.
+        // tx1="lt1"). Fall back to the canonical alias only when the
+        // logical name was not baked (no master / unmapped name), so a
+        // missing clrMap still resolves tx1→dk1, bg1→lt1, etc.
+        if let Some(hex) = self.theme.get(name) {
+            return Some(hex.clone());
+        }
+        // Canonical logical→slot fallback, per the default §19.3.1.6
+        // clrMap (shared table: ooxml_common::color::SCHEME_DEFAULT_SLOTS).
+        // The helper also passes raw slot names (dk1/lt1/…) and accents
+        // through unchanged.
+        let canonical: &str = match name {
+            // phClr = "placeholder color" (inherits from layout).
+            // Approximate as the primary dark text color. Not part of
+            // §19.3.1.6, so it stays a local special case.
+            "phClr" => "dk1",
+            other => ooxml_common::color::default_scheme_slot(other),
+        };
+        self.theme.get(canonical).cloned()
+    }
+}
+
 /// Like `parse_color_node`, but lets the caller pick how `<a:tint>` is interpreted.
 /// Table styles (`<a:tcStyle>` band fills) use `TintMode::WordLiteral` — the literal
 /// ECMA-376 §20.1.2.3.34 definition (`val·input + (1-val)·white`, so a 20% tint is a
 /// near-white wash) — which is how PowerPoint renders table band tints. The SmartArt
 /// accent-recolor path keeps `PowerPointLinear` (see `apply_color_transforms`).
+///
+/// Thin wrapper over the shared [`ooxml_common::color::parse_color_node`]: the
+/// grammar + transforms live there; [`PptxSchemeResolver`] supplies the
+/// pptx-specific theme-slot lookup. Output is unchanged (uppercase hex, no `#`).
 fn parse_color_node_tint(
     node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     tint_mode: ooxml_common::color::TintMode,
 ) -> Option<String> {
-    let xform = |hex: &str, c: roxmltree::Node<'_, '_>| {
-        ooxml_common::color::apply_color_transforms(hex, c, tint_mode)
-    };
-    for c in node.children().filter(|n| n.is_element()) {
-        match c.tag_name().name() {
-            "srgbClr" => {
-                let hex = attr(&c, "val")?;
-                return Some(xform(&hex, c));
-            }
-            "sysClr" => {
-                let hex = attr(&c, "lastClr")?;
-                return Some(xform(&hex, c));
-            }
-            "prstClr" => return preset_color(attr(&c, "val")?.as_str()),
-            "schemeClr" => {
-                let scheme_name = attr(&c, "val")?;
-                // Per ECMA-376 §19.3.1.6 the master's <p:clrMap> remaps logical
-                // names (bg1/tx1/bg2/tx2/accentN/hlink/folHlink) to theme slots.
-                // `bake_clr_map` pre-bakes those logical names into the theme
-                // map, so try a direct lookup FIRST — this honors clrMap (e.g.
-                // tx1="lt1"). Fall back to the canonical alias only when the
-                // logical name was not baked (no master / unmapped name), so a
-                // missing clrMap still resolves tx1→dk1, bg1→lt1, etc.
-                if let Some(hex) = theme.get(scheme_name.as_str()) {
-                    let hex = hex.clone();
-                    return Some(xform(&hex, c));
-                }
-                // Canonical logical→slot fallback, per the default §19.3.1.6
-                // clrMap (shared table: ooxml_common::color::SCHEME_DEFAULT_SLOTS).
-                // The helper also passes raw slot names (dk1/lt1/…) and accents
-                // through unchanged.
-                let canonical: &str = match scheme_name.as_str() {
-                    // phClr = "placeholder color" (inherits from layout).
-                    // Approximate as the primary dark text color. Not part of
-                    // §19.3.1.6, so it stays a local special case.
-                    "phClr" => "dk1",
-                    other => ooxml_common::color::default_scheme_slot(other),
-                };
-                let base_hex = theme.get(canonical)?.clone();
-                return Some(xform(&base_hex, c));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Resolve a DrawingML `<a:prstClr>` preset name to hex. Thin alias for the
-/// shared [`ooxml_common::theme::preset_color`] (the single source of truth),
-/// kept as a local name so the `prstClr` call sites read unchanged.
-fn preset_color(name: &str) -> Option<String> {
-    ooxml_common::theme::preset_color(name)
+    ooxml_common::color::parse_color_node(node, &PptxSchemeResolver { theme }, tint_mode)
 }
 
 // ===========================
@@ -2345,51 +2330,28 @@ fn parse_fill(node: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) ->
             "noFill" => return Some(Fill::None),
             "pattFill" => {
                 // ECMA-376 §20.1.8.40 — preset pattern with fg/bg colours.
-                let preset = attr(&c, "prst").unwrap_or_else(|| "pct50".to_owned());
-                let fg = child(c, "fgClr")
-                    .and_then(|n| parse_color_node(n, theme))
-                    .unwrap_or_else(|| "000000".to_owned());
-                let bg = child(c, "bgClr")
-                    .and_then(|n| parse_color_node(n, theme))
-                    .unwrap_or_else(|| "ffffff".to_owned());
+                // Shared parse (ooxml_common::fill); colors resolve with pptx's
+                // PowerPointLinear tint via PptxSchemeResolver.
+                let ooxml_common::fill::PatternFill { fg, bg, preset } =
+                    ooxml_common::fill::parse_patt_fill(
+                        c,
+                        &PptxSchemeResolver { theme },
+                        ooxml_common::color::TintMode::PowerPointLinear,
+                    );
                 return Some(Fill::Pattern { fg, bg, preset });
             }
             "gradFill" => {
-                let mut stops: Vec<GradStop> = child(c, "gsLst")
-                    .map(|gs_lst| {
-                        gs_lst
-                            .children()
-                            .filter(|n| n.is_element() && n.tag_name().name() == "gs")
-                            .filter_map(|gs| {
-                                let position = attr_f64(&gs, "pos").unwrap_or(0.0) / 100_000.0;
-                                let color = parse_color_node(gs, theme)?;
-                                Some(GradStop { position, color })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                if stops.is_empty() {
-                    // No valid stops — continue scanning other fill elements
-                } else {
-                    stops.sort_by(|a, b| {
-                        a.position
-                            .partial_cmp(&b.position)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    let (grad_type, angle) = if let Some(lin) = child(c, "lin") {
-                        // OOXML ang: 60000ths of degree, 0 = left→right, 5400000 = top→bottom
-                        let ang = attr_f64(&lin, "ang").unwrap_or(0.0) / 60_000.0;
-                        ("linear".to_owned(), ang)
-                    } else if child(c, "path").is_some() {
-                        ("radial".to_owned(), 0.0)
-                    } else {
-                        ("linear".to_owned(), 0.0)
-                    };
+                // Shared parse (ooxml_common::fill). Returns None when there are
+                // no resolvable stops, so we keep scanning sibling fill elements.
+                if let Some(g) = ooxml_common::fill::parse_grad_fill(
+                    c,
+                    &PptxSchemeResolver { theme },
+                    ooxml_common::color::TintMode::PowerPointLinear,
+                ) {
                     return Some(Fill::Gradient {
-                        stops,
-                        angle,
-                        grad_type,
+                        stops: g.stops,
+                        angle: g.angle,
+                        grad_type: g.grad_type,
                     });
                 }
             }
@@ -4651,53 +4613,58 @@ fn parse_text_body(
     let theme_auto_fit =
         || -> Option<String> { theme.get(&format!("{def_prefix}-autoFit")).cloned() };
 
-    let vertical_anchor = body_pr
-        .and_then(|n| attr(&n, "anchor"))
-        .map(|a| a.to_string())
-        .or(inherited_anchor)
-        .or_else(|| theme_default_str("anchor"))
-        .unwrap_or_else(|| "t".into());
-    // Text insets (EMU). OOXML defaults: lIns=rIns=91440, tIns=bIns=45720.
-    // Shape attribute → theme objectDefaults → spec default.
-    let l_ins = body_pr
-        .and_then(|n| attr_i64(&n, "lIns"))
-        .or_else(|| theme_default_i64("lIns"))
-        .unwrap_or(91_440);
-    let r_ins = body_pr
-        .and_then(|n| attr_i64(&n, "rIns"))
-        .or_else(|| theme_default_i64("rIns"))
-        .unwrap_or(91_440);
-    let t_ins = body_pr
-        .and_then(|n| attr_i64(&n, "tIns"))
-        .or_else(|| theme_default_i64("tIns"))
-        .unwrap_or(45_720);
-    let b_ins = body_pr
-        .and_then(|n| attr_i64(&n, "bIns"))
-        .or_else(|| theme_default_i64("bIns"))
-        .unwrap_or(45_720);
-    let wrap = body_pr
-        .and_then(|n| attr(&n, "wrap"))
-        .or_else(|| theme_default_str("wrap"))
-        .unwrap_or_else(|| "square".into());
-    let vert = body_pr
-        .and_then(|n| attr(&n, "vert"))
-        .or_else(|| theme_default_str("vert"))
-        .unwrap_or_else(|| "horz".into());
-    // Auto-fit child element (spAutoFit / normAutofit). When the shape's own
-    // bodyPr is absent or contains no autofit child, defer to theme txDef.
-    // For normAutofit, also capture PowerPoint's stored fontScale /
-    // lnSpcReduction (ECMA-376 §21.1.2.1.3) — ST_Percentage in 1000ths of a
-    // percent, so 62500 → 0.625. The renderer applies these directly.
-    // parse_autofit returns None when there is no bodyPr, or a bodyPr with no
-    // autofit child, so both fall through to the theme txDef default.
-    let (auto_fit, font_scale, ln_spc_reduction) =
-        body_pr.and_then(parse_autofit).unwrap_or_else(|| {
-            (
-                theme_auto_fit().unwrap_or_else(|| "none".to_owned()),
-                None,
-                None,
-            )
-        });
+    // Shared `<a:bodyPr>` grammar (anchor / wrap / vert / insets / autofit) via
+    // ooxml_common::text::parse_body_pr. pptx's inheritance + theme
+    // objectDefaults resolution is pre-baked into the defaults: each field is
+    // `inherited?.or(theme objectDefault)?.or(spec default)`, and parse_body_pr
+    // then applies the shape's own bodyPr attribute over it — so the effective
+    // precedence (shape attr → inherited → theme → spec) is unchanged. When the
+    // shape has no `<a:bodyPr>` at all, the resolved defaults ARE the result.
+    //
+    // Insets: OOXML defaults lIns=rIns=91440, tIns=bIns=45720 (the shared
+    // ooxml_common::text::DEFAULT_INS_* constants, via BodyPrDefaults::spec()).
+    // Autofit child (spAutoFit / normAutofit): when absent, defer to theme txDef
+    // (auto_fit default below); a normAutofit also captures PowerPoint's stored
+    // fontScale / lnSpcReduction (ECMA-376 §21.1.2.1.3, 62500 → 0.625).
+    let spec = ooxml_common::text::BodyPrDefaults::spec();
+    let body_pr_defaults = ooxml_common::text::BodyPrDefaults {
+        anchor: inherited_anchor
+            .or_else(|| theme_default_str("anchor"))
+            .unwrap_or(spec.anchor),
+        wrap: theme_default_str("wrap").unwrap_or(spec.wrap),
+        vert: theme_default_str("vert").unwrap_or(spec.vert),
+        l_ins: theme_default_i64("lIns").unwrap_or(spec.l_ins),
+        t_ins: theme_default_i64("tIns").unwrap_or(spec.t_ins),
+        r_ins: theme_default_i64("rIns").unwrap_or(spec.r_ins),
+        b_ins: theme_default_i64("bIns").unwrap_or(spec.b_ins),
+        auto_fit: theme_auto_fit().unwrap_or(spec.auto_fit),
+    };
+    let body = match body_pr {
+        Some(n) => ooxml_common::text::parse_body_pr(n, &body_pr_defaults),
+        // No <a:bodyPr>: every field resolves to its default.
+        None => ooxml_common::text::BodyPr {
+            anchor: body_pr_defaults.anchor.clone(),
+            wrap: body_pr_defaults.wrap.clone(),
+            vert: body_pr_defaults.vert.clone(),
+            l_ins: body_pr_defaults.l_ins,
+            t_ins: body_pr_defaults.t_ins,
+            r_ins: body_pr_defaults.r_ins,
+            b_ins: body_pr_defaults.b_ins,
+            auto_fit: body_pr_defaults.auto_fit.clone(),
+            font_scale: None,
+            ln_spc_reduction: None,
+        },
+    };
+    let vertical_anchor = body.anchor;
+    let l_ins = body.l_ins;
+    let r_ins = body.r_ins;
+    let t_ins = body.t_ins;
+    let b_ins = body.b_ins;
+    let wrap = body.wrap;
+    let vert = body.vert;
+    let auto_fit = body.auto_fit;
+    let font_scale = body.font_scale;
+    let ln_spc_reduction = body.ln_spc_reduction;
     // ECMA-376 §20.1.10.34: numCol on <a:bodyPr> tells the renderer to
     // distribute paragraphs across N columns within the shape. Default 1.
     // spcCol is the inter-column gutter in EMU (default 0). Both fall back
