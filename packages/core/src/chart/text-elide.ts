@@ -55,5 +55,12 @@ export function elideToWidth(
       hi = mid - 1;
     }
   }
+  // Never split a surrogate pair: if the cut lands right after a high
+  // surrogate (the low half at `best` would be orphaned), back up one code
+  // unit so the whole astral character (emoji etc.) is dropped instead of
+  // rendering U+FFFD. Measuring with the lone surrogate during the search is
+  // harmless — this final clamp only ever shortens, so the result still fits.
+  const lastUnit = best > 0 ? text.charCodeAt(best - 1) : 0;
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) best--;
   return text.slice(0, best) + ELLIPSIS;
 }

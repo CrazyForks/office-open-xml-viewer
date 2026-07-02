@@ -87,4 +87,26 @@ describe('elideToWidth', () => {
     // 5 wide chars = 50px; in 25px → prefix p with 10·len(p)+10 ≤ 25 → len ≤ 1.
     expect(elideToWidth(ctx, '一二三四五', 25)).toBe('一…');
   });
+
+  it('never splits a surrogate pair (emoji labels)', () => {
+    // 'ab' + emoji (2 code units) + 'cd'. Widths: 8px per code unit under the
+    // mock, so budgets are chosen to force cuts at every position around the
+    // pair; the result must never contain a lone surrogate.
+    const ctx = makeCtx((t) => t.length * 8);
+    const text = 'ab\u{1F389}cd';
+    for (let budget = 8; budget <= 8 * (text.length + 1); budget += 4) {
+      const out = elideToWidth(ctx, text, budget);
+      for (let i = 0; i < out.length; i++) {
+        const cu = out.charCodeAt(i);
+        if (cu >= 0xd800 && cu <= 0xdbff) {
+          // a high surrogate must be followed by its low half
+          const next = out.charCodeAt(i + 1);
+          expect(next >= 0xdc00 && next <= 0xdfff, `lone high surrogate at ${i} in ${JSON.stringify(out)} (budget ${budget})`).toBe(true);
+        } else if (cu >= 0xdc00 && cu <= 0xdfff) {
+          const prev = out.charCodeAt(i - 1);
+          expect(prev >= 0xd800 && prev <= 0xdbff, `lone low surrogate at ${i} in ${JSON.stringify(out)} (budget ${budget})`).toBe(true);
+        }
+      }
+    }
+  });
 });
