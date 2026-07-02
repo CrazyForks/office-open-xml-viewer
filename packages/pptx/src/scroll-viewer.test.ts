@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { PptxScrollViewer } from './scroll-viewer.js';
+import { PptxPresentation } from './presentation.js';
 import { installDom, makeContainer, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import * as pptxIndex from './index.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -817,6 +819,31 @@ describe('PptxScrollViewer — zoom (T4)', () => {
   });
 });
 
+describe('PptxScrollViewer — self-load path (T7 story)', () => {
+  it('load(url) lays out and mounts the first window (relayout wired into load)', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Mock the static loader so load() resolves to a fake engine WITHOUT touching
+    // a real Worker / WASM. The viewer must call relayout() after assignment so a
+    // self-loaded (non-injected) viewer is not left blank (I-2).
+    const engine = new FakePptxEngine(10, 1000, 600);
+    const loadSpy = vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    await v.load('sample.pptx');
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+    // Layout happened: slots mounted and the spacer was sized.
+    expect(v.mountedSlideIndicesForTest().length).toBeGreaterThan(0);
+    const spacer = scrollHost.children[0] as FakeEl;
+    expect(parseFloat(spacer.style.height)).toBeGreaterThan(0);
+    // The mounted slides were actually rendered (main mode → renderSlide).
+    expect(engine.renderCalls.length).toBeGreaterThan(0);
+    v.destroy();
+  });
+});
+
 describe('PptxScrollViewer — text selection (T5)', () => {
   // A minimal PptxTextRunInfo: richer than docx's flat run — it carries per-shape
   // frame geometry (shapeX/Y/W/H, rotation) so buildPptxTextLayer can group runs
@@ -1274,5 +1301,11 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     const v = new PptxScrollViewer(container as unknown as HTMLElement, { presentation: engine.asPres() });
     v.destroy();
     expect(disconnected).toBe(1);
+  });
+});
+
+describe('PptxScrollViewer — barrel export (T7)', () => {
+  it('is exported from the package entry', () => {
+    expect(typeof pptxIndex.PptxScrollViewer).toBe('function');
   });
 });
