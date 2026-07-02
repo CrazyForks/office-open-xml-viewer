@@ -3,7 +3,7 @@ import {
   dashArray,
   docxBorderDashArray,
   xlsxBorderDashArray,
-  pptxDashArray,
+  pptxUnderlineDashArray,
   pptxPresetDashArray,
 } from './dash.js';
 
@@ -66,26 +66,26 @@ describe('xlsxBorderDashArray (§18.18.3 ST_BorderStyle, static px)', () => {
   });
 });
 
-// Byte-for-byte equivalence with the former inline pptx implementation
-// (§20.1.10.49 ST_PresetLineDashVal, lineW-relative — the *Heavy variants share
+// Byte-for-byte equivalence with the former inline pptx underline implementation
+// (§20.1.10.82 ST_TextUnderlineType, lineW-relative — the *Heavy variants share
 // the base cadence). The old call site did `dashFor(s).map(v => v*lineW)`.
-describe('pptxDashArray (§20.1.10.49 ST_PresetLineDashVal)', () => {
+describe('pptxUnderlineDashArray (§20.1.10.82 ST_TextUnderlineType)', () => {
   const lineW = 2;
-  it('maps the preset dash names to lineW-scaled patterns', () => {
-    expect(pptxDashArray('dotted', lineW)).toEqual([3, 6]);
-    expect(pptxDashArray('dottedHeavy', lineW)).toEqual([3, 6]);
-    expect(pptxDashArray('dash', lineW)).toEqual([12, 6]);
-    expect(pptxDashArray('dashHeavy', lineW)).toEqual([12, 6]);
-    expect(pptxDashArray('dashLong', lineW)).toEqual([20, 8]);
-    expect(pptxDashArray('dashLongHeavy', lineW)).toEqual([20, 8]);
-    expect(pptxDashArray('dotDash', lineW)).toEqual([12, 6, 3, 6]);
-    expect(pptxDashArray('dotDashHeavy', lineW)).toEqual([12, 6, 3, 6]);
-    expect(pptxDashArray('dotDotDash', lineW)).toEqual([12, 6, 3, 6, 3, 6]);
-    expect(pptxDashArray('dotDotDashHeavy', lineW)).toEqual([12, 6, 3, 6, 3, 6]);
+  it('maps the underline dash names to lineW-scaled patterns', () => {
+    expect(pptxUnderlineDashArray('dotted', lineW)).toEqual([3, 6]);
+    expect(pptxUnderlineDashArray('dottedHeavy', lineW)).toEqual([3, 6]);
+    expect(pptxUnderlineDashArray('dash', lineW)).toEqual([12, 6]);
+    expect(pptxUnderlineDashArray('dashHeavy', lineW)).toEqual([12, 6]);
+    expect(pptxUnderlineDashArray('dashLong', lineW)).toEqual([20, 8]);
+    expect(pptxUnderlineDashArray('dashLongHeavy', lineW)).toEqual([20, 8]);
+    expect(pptxUnderlineDashArray('dotDash', lineW)).toEqual([12, 6, 3, 6]);
+    expect(pptxUnderlineDashArray('dotDashHeavy', lineW)).toEqual([12, 6, 3, 6]);
+    expect(pptxUnderlineDashArray('dotDotDash', lineW)).toEqual([12, 6, 3, 6, 3, 6]);
+    expect(pptxUnderlineDashArray('dotDotDashHeavy', lineW)).toEqual([12, 6, 3, 6, 3, 6]);
   });
-  it('returns [] for solid styles (sng / unknown)', () => {
-    expect(pptxDashArray('sng', lineW)).toEqual([]);
-    expect(pptxDashArray('solid', lineW)).toEqual([]);
+  it('returns [] for solid underline types (sng / unknown)', () => {
+    expect(pptxUnderlineDashArray('sng', lineW)).toEqual([]);
+    expect(pptxUnderlineDashArray('solid', lineW)).toEqual([]);
   });
 });
 

@@ -164,16 +164,21 @@ export function pptxPresetDashArray(style: string, lineW: number): number[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// pptx — ECMA-376 §20.1.10.49 ST_PresetLineDashVal (lineW-relative)
+// pptx — ECMA-376 §20.1.10.82 ST_TextUnderlineType (run underlines, lineW-relative)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * §20.1.10.49 ST_PresetLineDashVal (and the underline enum which reuses the same
- * shape names) → relative `[on, off, …]` pattern in units of the stroked width
- * `lineW`, so the dashes stay proportional at any font size. The *Heavy variants
- * share the cadence of their base name (the heaviness is in the stroke width).
+ * §20.1.10.82 ST_TextUnderlineType → relative `[on, off, …]` pattern in units of
+ * the underline stroke width `lineW`, so the dashes stay proportional at any font
+ * size. This is the run-underline enum (`<a:rPr u="…">`), NOT the shape/line
+ * preset dash of §20.1.10.49: it shares a few shape names (dash / dotDash / …)
+ * but is a distinct enumeration with its own members (e.g. `dashLong`,
+ * `dottedHeavy`, and the `*Heavy` variants, which share the cadence of their base
+ * name — the heaviness is in the stroke width, not the dash rhythm). Underline
+ * types handled elsewhere in the renderer (sng / dbl / wavy*) are absent here and
+ * map to `[]` (a continuous rule).
  */
-const PPTX_DASH_RELATIVE: Record<string, RelativeDashPattern> = {
+const PPTX_UNDERLINE_RELATIVE: Record<string, RelativeDashPattern> = {
   dotted: [1.5, 3],
   dottedHeavy: [1.5, 3],
   dash: [6, 3],
@@ -187,10 +192,11 @@ const PPTX_DASH_RELATIVE: Record<string, RelativeDashPattern> = {
 };
 
 /**
- * pptx ST_PresetLineDashVal style → `setLineDash` pattern scaled by the stroked
- * width `lineW`. Returns `[]` for solid / continuous styles.
+ * pptx ST_TextUnderlineType (§20.1.10.82) style → `setLineDash` pattern scaled by
+ * the underline stroke width `lineW`. Returns `[]` for solid / continuous
+ * underline types (sng / dbl / wavy* / unknown).
  */
-export function pptxDashArray(style: string, lineW: number): number[] {
-  const relative = PPTX_DASH_RELATIVE[style];
+export function pptxUnderlineDashArray(style: string, lineW: number): number[] {
+  const relative = PPTX_UNDERLINE_RELATIVE[style];
   return relative ? dashArray(relative, lineW) : [];
 }
