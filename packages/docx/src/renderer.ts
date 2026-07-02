@@ -2825,7 +2825,24 @@ function splitParagraphAcrossPages(
       ...(para as object),
       type: 'paragraph',
       lineSlice: { start: firstFitting, end: lastFitting },
-    } as PaginatedBodyElement));
+      // Phase 4-1 B2 Stage 1 — hand the paint pass the scale-1 lines this split
+      // already computed so it can skip re-running layoutLines (compute-once).
+      // The FULL array is stamped on every slice (not `lines.slice(...)`) because
+      // the paint loop indexes by absolute line number; `lineSlice` still selects
+      // the sub-range to paint. The same immutable array is shared across slices
+      // and across repeated renderPage calls — the draw path only reads it. The
+      // recorded inputs let the paint pass verify its own layout would be
+      // identical before reusing (see renderParagraph's reuse gate).
+      layoutLines: lines,
+      layoutLinesInputs: {
+        scale: 1,
+        paraW,
+        firstIndent: para.indentFirst,
+        tabOriginPx: indLeft,
+        gridDeltaPx: gridCharDeltaPx(paraGrid(para, measureState), 1),
+        hasFloats: wrapCtx !== undefined,
+      },
+    } as PaginatedElementWithLines));
     lineIdx = lastFitting;
     cursorY += usedH;
     if (!isFinalSlice) {
@@ -4281,7 +4298,37 @@ function renderParagraph(
   // indent (positive firstLine, or a bare negative hanging without a marker) to
   // the body as usual. RTL lists keep their existing start-edge handling.
   const firstLineIndent = hasMarker && !baseRtl ? numBodyOffset : firstLineX - paraX;
-  const lines = layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt);
+  const paintGridDeltaPx = gridCharDeltaPx(grid, scale);
+  // Phase 4-1 B2 Stage 1 — compute-once reuse. When the paginator split this
+  // paragraph it stamped the scale-1 lines it laid out (splitParagraphAcrossPages).
+  // Reuse them VERBATIM — skipping this scale's layoutLines entirely — but ONLY
+  // when the paint pass would produce a byte-identical array: its scale is 1 (so
+  // no px field needs rescaling; the scale-1 lines ARE the paint lines) AND every
+  // layout input matches the value the paginator used. The input check is what
+  // keeps this pixel-exact across the cases where measure and paint legitimately
+  // differ — most importantly the numbering firstLineIndent (measure uses
+  // para.indentFirst, paint uses numBodyOffset for a marker), which then fails the
+  // firstIndent equality and recomputes. A float context is excluded outright:
+  // float wrap depends on the page-absolute Y of THIS slice, which the stamped
+  // (whole-paragraph, first-page) lines do not carry. Rescaling to scale ≠ 1 is
+  // deferred to Stage 2 (it changes the line PARTITION under real font hinting —
+  // see layout-lines-scale-invariance.test.ts — i.e. a behaviour change).
+  const stamped = para as unknown as PaginatedElementWithLines;
+  const reuse =
+    lineReuseEnabled &&
+    stamped.layoutLines !== undefined &&
+    stamped.layoutLinesInputs !== undefined &&
+    scale === 1 &&
+    stamped.layoutLinesInputs.scale === 1 &&
+    !wrapCtx &&
+    !stamped.layoutLinesInputs.hasFloats &&
+    stamped.layoutLinesInputs.paraW === paraW &&
+    stamped.layoutLinesInputs.firstIndent === firstLineIndent &&
+    stamped.layoutLinesInputs.tabOriginPx === indLeft &&
+    stamped.layoutLinesInputs.gridDeltaPx === paintGridDeltaPx;
+  const lines = reuse
+    ? (stamped.layoutLines as LayoutLine[])
+    : layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt);
 
   // Decimal-tab auto-alignment. ECMA-376 (§17.3.1.37 tabs / §17.18.84 ST_TabJc
   // `decimal`) only positions content at a tab stop when an explicit tab
@@ -5190,6 +5237,43 @@ interface LayoutLine {
    *  like the paragraph's final line (§17.18.44). */
   endsWithBreak?: boolean;
 }
+
+/** Phase 4-1 B2 Stage 1 — a paginated element carrying the paginator's scale-1
+ *  laid-out lines (compute-once). `splitParagraphAcrossPages` stamps the FULL
+ *  paragraph line array (not the per-slice sub-range) onto every slice so the
+ *  paint pass can index it by ABSOLUTE line number exactly like a freshly
+ *  computed array (drawParagraphLine reads `lines[li]` / `lines.length`). Kept as
+ *  a renderer-internal intersection — `LayoutLine` is private to renderer.ts, so
+ *  this deliberately does NOT touch the public `PaginatedBodyElement` in types.ts
+ *  (which would need a renderer↔types import for the payload type; see the
+ *  ColumnGeom note above). `layoutLinesInputs` records the scale-1 inputs the
+ *  paginator laid the lines out with; the paint pass reuses them ONLY when its
+ *  own scale is 1 and every input matches, so no px field is ever rescaled. */
+type PaginatedElementWithLines = PaginatedBodyElement & {
+  layoutLines?: LayoutLine[];
+  /** The line-layout inputs the paginator used (all in the paginator's scale-1 pt
+   *  space). The paint pass reuses the stamped lines ONLY when its own scale is 1
+   *  AND every one of these inputs equals the value it would pass to layoutLines
+   *  itself — a self-verifying gate that stays correct across single/multi-column,
+   *  float wrap, and the numbering firstLineIndent derivation (which differs
+   *  between measure and paint for numbered lists, so those simply fail the
+   *  `firstIndent` check and recompute). No px field is ever rescaled. */
+  layoutLinesInputs?: {
+    scale: number;      // always 1 (paginator space)
+    paraW: number;      // pt
+    firstIndent: number; // pt
+    tabOriginPx: number; // pt (== indLeft at scale 1)
+    gridDeltaPx: number; // pt
+    hasFloats: boolean;  // a float context changes wrap → never reuse across it
+  };
+};
+
+/** Phase 4-1 B2 Stage 1 — master switch for the compute-once line reuse. Always
+ *  ON in production; the pixel-identity characterization test flips it OFF to
+ *  capture a fresh-recompute reference and assert the reuse path paints an
+ *  IDENTICAL stream (see layout-lines-reuse-identity.test.ts). Module-local so it
+ *  never leaks onto the public surface. */
+let lineReuseEnabled = true;
 
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
 interface WrapLayoutCtx {
@@ -7378,6 +7462,16 @@ export const __test_isPageLevelAnchorY = (
  *  pt `height`) — and surfaces any field/branch that is NOT a clean ×scale. */
 export const __test_layoutLines = layoutLines;
 export type { LayoutSeg as __test_LayoutSeg, LayoutLine as __test_LayoutLine, LayoutTextSeg as __test_LayoutTextSeg, WrapLayoutCtx as __test_WrapLayoutCtx };
+
+/** Exported for the compute-once pixel-identity test (Phase 4-1 B2 Stage 1).
+ *  Toggles the stamped-line reuse in renderParagraph so the test can render the
+ *  SAME page with reuse ON and OFF and assert the paint call streams are
+ *  byte-identical. Returns the previous value so the test can restore it. */
+export const __test_setLineReuseEnabled = (v: boolean): boolean => {
+  const prev = lineReuseEnabled;
+  lineReuseEnabled = v;
+  return prev;
+};
 
 function resolveAnchorBox(
   img: ImageRun,
