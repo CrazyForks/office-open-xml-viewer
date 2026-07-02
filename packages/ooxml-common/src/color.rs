@@ -221,6 +221,142 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
     }
 }
 
+/// A DrawingML color element (`<a:srgbClr>` / `<a:sysClr>` / `<a:prstClr>` /
+/// `<a:schemeClr>`), extracted from a color container's first color child but
+/// **not yet resolved to a hex string**. This is the format-agnostic middle
+/// layer between [`extract_color_source`] (which finds the element) and
+/// [`parse_color_node`] (which resolves + transforms it). The three parsers
+/// share the *grammar* here; theme-slot resolution (which differs per host —
+/// pptx bakes a `clrMap`, xlsx indexes a positional palette, docx keys a slot
+/// map) stays behind the [`ThemeResolver`] trait.
+///
+/// The wrapped `Node` is retained so the caller can apply the color-transform
+/// children (lumMod/tint/…) via [`apply_color_transforms`] on the resolved base.
+#[derive(Debug, Clone)]
+pub enum ColorSource<'a, 'input> {
+    /// `<a:srgbClr val="RRGGBB">` — an explicit hex (ECMA-376 §20.1.2.3.32).
+    /// `val` is the raw authored string (case as-authored).
+    SrgbClr { val: String, node: Node<'a, 'input> },
+    /// `<a:sysClr val="windowText" lastClr="RRGGBB">` — a system color
+    /// (§20.1.2.3.33). `last_clr` is the cached resolved hex; `val` is the
+    /// system-color enum name, retained only as a last-ditch fallback (matches
+    /// docx's historical behavior — pptx/xlsx never authored a val-only sysClr).
+    SysClr {
+        last_clr: Option<String>,
+        val: Option<String>,
+        node: Node<'a, 'input>,
+    },
+    /// `<a:prstClr val="black">` — a named preset color (§20.1.2.3.22 /
+    /// §20.1.10.48). Resolved through [`preset_color`](crate::theme::preset_color).
+    PrstClr { val: String },
+    /// `<a:schemeClr val="accent1">` — a theme-slot reference (§20.1.2.3.29).
+    /// `val` is the logical/slot name; the [`ThemeResolver`] maps it to a base
+    /// hex. The node is retained for the transform children.
+    SchemeClr { val: String, node: Node<'a, 'input> },
+}
+
+/// Locate the first DrawingML color element among a container's element
+/// children and return it as a [`ColorSource`]. Covers the four color-choice
+/// members a `<a:solidFill>` / `<a:gs>` / run `<a:rPr>` / shadow etc. carry:
+/// `srgbClr`, `sysClr`, `prstClr`, `schemeClr`. Returns `None` when no such
+/// child exists (e.g. a `<a:noFill>` sibling, or a `<a:solidFill>` with no
+/// color child). The caller supplies the *container* node (the same node its
+/// prior inline `for child` loop walked).
+pub fn extract_color_source<'a, 'input>(
+    container: Node<'a, 'input>,
+) -> Option<ColorSource<'a, 'input>> {
+    for c in container.children().filter(|n| n.is_element()) {
+        match c.tag_name().name() {
+            "srgbClr" => {
+                return Some(ColorSource::SrgbClr {
+                    val: c.attribute("val")?.to_owned(),
+                    node: c,
+                });
+            }
+            "sysClr" => {
+                return Some(ColorSource::SysClr {
+                    last_clr: c.attribute("lastClr").map(str::to_owned),
+                    val: c.attribute("val").map(str::to_owned),
+                    node: c,
+                });
+            }
+            "prstClr" => {
+                return Some(ColorSource::PrstClr {
+                    val: c.attribute("val")?.to_owned(),
+                });
+            }
+            "schemeClr" => {
+                return Some(ColorSource::SchemeClr {
+                    val: c.attribute("val")?.to_owned(),
+                    node: c,
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Host-specific resolution of a `<a:schemeClr val>` name to its **base hex**
+/// (6-char, no `#`, ready for [`apply_color_transforms`]). Each parser keeps
+/// its own theme storage and logical-name handling:
+///
+/// - pptx bakes the master's `<p:clrMap>` into its theme map and falls back to
+///   the default §19.3.1.6 slot table (plus a `phClr`→dk1 approximation);
+/// - xlsx indexes a positional `dk1,lt1,dk2,lt2,accent1..6,hlink,folHlink`
+///   palette (with the well-known dk/lt index swap);
+/// - docx keys a slot map and substitutes a caller-provided name for `phClr`.
+///
+/// Returning `None` leaves the color unresolved (the caller then falls back —
+/// e.g. to a shape's style color). Implementations must return the base
+/// **without** a leading `#` so the shared transform sees clean input.
+pub trait ThemeResolver {
+    /// Resolve a scheme/logical color name to its base hex (no `#`). `name` is
+    /// the raw `<a:schemeClr val>` string.
+    fn resolve_scheme_color(&self, name: &str) -> Option<String>;
+}
+
+/// Resolve a located color container to a hex string, sharing the DrawingML
+/// color grammar across the docx/pptx/xlsx parsers. Finds the first color child
+/// ([`extract_color_source`]), resolves it, and applies any color-transform
+/// children (lumMod/lumOff/shade/tint/… via [`apply_color_transforms`]):
+///
+/// - `srgbClr` / `sysClr` → their hex + transforms;
+/// - `prstClr` → [`preset_color`](crate::theme::preset_color) (no transforms,
+///   matching the parsers' prior behavior — a transformed preset is a latent
+///   gap shared by all three);
+/// - `schemeClr` → `resolver.resolve_scheme_color(val)` + transforms.
+///
+/// The returned hex is uppercase and has **no** `#` prefix (that is what
+/// [`apply_color_transforms`] emits: `{:02X}`); each caller re-applies its own
+/// casing / `#` convention in a thin adapter. `tint_mode` selects the Word vs
+/// PowerPoint `<a:tint>` interpretation ([`TintMode`]). Returns `None` when no
+/// color child is present or a `schemeClr` fails to resolve.
+pub fn parse_color_node<R: ThemeResolver + ?Sized>(
+    container: Node<'_, '_>,
+    resolver: &R,
+    tint_mode: TintMode,
+) -> Option<String> {
+    match extract_color_source(container)? {
+        ColorSource::SrgbClr { val, node } => Some(apply_color_transforms(&val, node, tint_mode)),
+        ColorSource::SysClr {
+            last_clr,
+            val,
+            node,
+        } => {
+            // Prefer the cached lastClr; fall back to the enum name only when
+            // lastClr is absent (docx's historical behavior — see ColorSource).
+            let hex = last_clr.or(val)?;
+            Some(apply_color_transforms(&hex, node, tint_mode))
+        }
+        ColorSource::PrstClr { val } => crate::theme::preset_color(&val),
+        ColorSource::SchemeClr { val, node } => {
+            let base = resolver.resolve_scheme_color(&val)?;
+            Some(apply_color_transforms(&base, node, tint_mode))
+        }
+    }
+}
+
 /// sRGB → linear light. IEC 61966-2-1 transfer function.
 pub fn srgb_to_linear(c: f64) -> f64 {
     if c <= 0.04045 {
@@ -327,6 +463,153 @@ mod tests {
                 ("folHlink", "folHlink"),
             ]
         );
+    }
+
+    // ── parse_color_node / extract_color_source ─────────────────────────────
+
+    use roxmltree::Document;
+
+    /// A minimal ThemeResolver mapping a couple of slot names to base hex,
+    /// letting the scheme-color path be exercised without a full parser.
+    struct MapResolver;
+    impl ThemeResolver for MapResolver {
+        fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+            match name {
+                "accent1" => Some("4472C4".to_owned()),
+                "dk1" => Some("000000".to_owned()),
+                _ => None,
+            }
+        }
+    }
+
+    fn parse(xml: &str, mode: TintMode) -> Option<String> {
+        // Every fixture wraps the color element in a `<a:solidFill>` container,
+        // matching how the parsers pass the located fill node.
+        let doc = Document::parse(xml).unwrap();
+        parse_color_node(doc.root_element(), &MapResolver, mode)
+    }
+
+    const NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    /// srgbClr resolves to its (uppercased) hex, no `#`, under either TintMode.
+    #[test]
+    fn parse_color_node_srgb_plain() {
+        let xml = format!(r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="ff8000"/></a:solidFill>"#);
+        assert_eq!(
+            parse(&xml, TintMode::WordLiteral).as_deref(),
+            Some("FF8000")
+        );
+        assert_eq!(
+            parse(&xml, TintMode::PowerPointLinear).as_deref(),
+            Some("FF8000")
+        );
+    }
+
+    /// sysClr uses lastClr; a transform child (lumMod) is applied on top.
+    #[test]
+    fn parse_color_node_sysclr_lastclr_with_lummod() {
+        let xml = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:sysClr val="windowText" lastClr="FFFFFF"><a:lumMod val="50000"/></a:sysClr></a:solidFill>"#
+        );
+        // 50% luminance of white → mid gray (uppercase, no #).
+        assert_eq!(
+            parse(&xml, TintMode::WordLiteral).as_deref(),
+            Some("808080")
+        );
+    }
+
+    /// sysClr with no lastClr falls back to `val` (docx-historical). "windowText"
+    /// is not valid hex, but the fallback path must still fire (produces 000000).
+    #[test]
+    fn parse_color_node_sysclr_val_fallback() {
+        let xml = format!(r#"<a:solidFill xmlns:a="{NS}"><a:sysClr val="000000"/></a:solidFill>"#);
+        assert_eq!(
+            parse(&xml, TintMode::WordLiteral).as_deref(),
+            Some("000000")
+        );
+    }
+
+    /// prstClr resolves via the shared preset table, WITHOUT applying transforms
+    /// (matches the parsers' prior behavior — documented latent gap).
+    #[test]
+    fn parse_color_node_prstclr_via_preset_table() {
+        let xml = format!(r#"<a:solidFill xmlns:a="{NS}"><a:prstClr val="orange"/></a:solidFill>"#);
+        assert_eq!(
+            parse(&xml, TintMode::WordLiteral).as_deref(),
+            Some("FFA500")
+        );
+        // A transform child is intentionally ignored for prstClr.
+        let xml2 = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:prstClr val="black"><a:lumMod val="50000"/></a:prstClr></a:solidFill>"#
+        );
+        assert_eq!(
+            parse(&xml2, TintMode::WordLiteral).as_deref(),
+            Some("000000")
+        );
+    }
+
+    /// schemeClr resolves through the injected ThemeResolver, then transforms.
+    #[test]
+    fn parse_color_node_schemeclr_via_resolver() {
+        let xml =
+            format!(r#"<a:solidFill xmlns:a="{NS}"><a:schemeClr val="accent1"/></a:solidFill>"#);
+        assert_eq!(
+            parse(&xml, TintMode::WordLiteral).as_deref(),
+            Some("4472C4")
+        );
+        // Unknown slot → None (caller falls back).
+        let unknown =
+            format!(r#"<a:solidFill xmlns:a="{NS}"><a:schemeClr val="accent9"/></a:solidFill>"#);
+        assert_eq!(parse(&unknown, TintMode::WordLiteral), None);
+    }
+
+    /// The two TintModes diverge on `<a:tint>`: Word reads val as retained input
+    /// (a near-white wash at 20%), PowerPoint lerps toward white in linear sRGB.
+    /// The two must produce DIFFERENT hex for the same input, proving the mode
+    /// is threaded through parse_color_node.
+    #[test]
+    fn parse_color_node_tint_mode_diverges() {
+        let xml = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:schemeClr val="accent1"><a:tint val="20000"/></a:schemeClr></a:solidFill>"#
+        );
+        let word = parse(&xml, TintMode::WordLiteral).unwrap();
+        let ppt = parse(&xml, TintMode::PowerPointLinear).unwrap();
+        assert_ne!(word, ppt);
+        // Both are 6-char uppercase hex with no '#'.
+        assert_eq!(word.len(), 6);
+        assert!(!word.contains('#'));
+        assert!(word.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    /// alpha < 1 yields an 8-char RRGGBBAA hex (transform emits the alpha byte).
+    #[test]
+    fn parse_color_node_alpha_yields_eight_hex() {
+        let xml = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="112233"><a:alpha val="50000"/></a:srgbClr></a:solidFill>"#
+        );
+        let out = parse(&xml, TintMode::WordLiteral).unwrap();
+        assert_eq!(out.len(), 8);
+        assert!(out.starts_with("112233"));
+    }
+
+    /// A container with no color child (e.g. a lone noFill sibling) → None.
+    #[test]
+    fn parse_color_node_none_when_no_color_child() {
+        let xml = format!(r#"<a:solidFill xmlns:a="{NS}"><a:noFill/></a:solidFill>"#);
+        assert_eq!(parse(&xml, TintMode::WordLiteral), None);
+    }
+
+    /// extract_color_source returns the first color element and skips others.
+    #[test]
+    fn extract_color_source_picks_first_color_child() {
+        let xml = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="ABCDEF"/><a:schemeClr val="accent1"/></a:solidFill>"#
+        );
+        let doc = Document::parse(&xml).unwrap();
+        match extract_color_source(doc.root_element()) {
+            Some(ColorSource::SrgbClr { val, .. }) => assert_eq!(val, "ABCDEF"),
+            other => panic!("expected SrgbClr first, got {other:?}"),
+        }
     }
 
     #[test]

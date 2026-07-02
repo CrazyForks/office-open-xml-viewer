@@ -2263,68 +2263,56 @@ fn parse_color_node(
     parse_color_node_tint(node, theme, ooxml_common::color::TintMode::PowerPointLinear)
 }
 
+/// Resolves a `<a:schemeClr val>` name to its base theme hex the PowerPoint
+/// way, for the shared [`ooxml_common::color::parse_color_node`]. The color
+/// grammar (srgbClr/sysClr/prstClr/schemeClr + transforms) is shared; only this
+/// theme-slot lookup is pptx-specific.
+struct PptxSchemeResolver<'a> {
+    theme: &'a HashMap<String, String>,
+}
+
+impl ooxml_common::color::ThemeResolver for PptxSchemeResolver<'_> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        // Per ECMA-376 §19.3.1.6 the master's <p:clrMap> remaps logical
+        // names (bg1/tx1/bg2/tx2/accentN/hlink/folHlink) to theme slots.
+        // `bake_clr_map` pre-bakes those logical names into the theme
+        // map, so try a direct lookup FIRST — this honors clrMap (e.g.
+        // tx1="lt1"). Fall back to the canonical alias only when the
+        // logical name was not baked (no master / unmapped name), so a
+        // missing clrMap still resolves tx1→dk1, bg1→lt1, etc.
+        if let Some(hex) = self.theme.get(name) {
+            return Some(hex.clone());
+        }
+        // Canonical logical→slot fallback, per the default §19.3.1.6
+        // clrMap (shared table: ooxml_common::color::SCHEME_DEFAULT_SLOTS).
+        // The helper also passes raw slot names (dk1/lt1/…) and accents
+        // through unchanged.
+        let canonical: &str = match name {
+            // phClr = "placeholder color" (inherits from layout).
+            // Approximate as the primary dark text color. Not part of
+            // §19.3.1.6, so it stays a local special case.
+            "phClr" => "dk1",
+            other => ooxml_common::color::default_scheme_slot(other),
+        };
+        self.theme.get(canonical).cloned()
+    }
+}
+
 /// Like `parse_color_node`, but lets the caller pick how `<a:tint>` is interpreted.
 /// Table styles (`<a:tcStyle>` band fills) use `TintMode::WordLiteral` — the literal
 /// ECMA-376 §20.1.2.3.34 definition (`val·input + (1-val)·white`, so a 20% tint is a
 /// near-white wash) — which is how PowerPoint renders table band tints. The SmartArt
 /// accent-recolor path keeps `PowerPointLinear` (see `apply_color_transforms`).
+///
+/// Thin wrapper over the shared [`ooxml_common::color::parse_color_node`]: the
+/// grammar + transforms live there; [`PptxSchemeResolver`] supplies the
+/// pptx-specific theme-slot lookup. Output is unchanged (uppercase hex, no `#`).
 fn parse_color_node_tint(
     node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
     tint_mode: ooxml_common::color::TintMode,
 ) -> Option<String> {
-    let xform = |hex: &str, c: roxmltree::Node<'_, '_>| {
-        ooxml_common::color::apply_color_transforms(hex, c, tint_mode)
-    };
-    for c in node.children().filter(|n| n.is_element()) {
-        match c.tag_name().name() {
-            "srgbClr" => {
-                let hex = attr(&c, "val")?;
-                return Some(xform(&hex, c));
-            }
-            "sysClr" => {
-                let hex = attr(&c, "lastClr")?;
-                return Some(xform(&hex, c));
-            }
-            "prstClr" => return preset_color(attr(&c, "val")?.as_str()),
-            "schemeClr" => {
-                let scheme_name = attr(&c, "val")?;
-                // Per ECMA-376 §19.3.1.6 the master's <p:clrMap> remaps logical
-                // names (bg1/tx1/bg2/tx2/accentN/hlink/folHlink) to theme slots.
-                // `bake_clr_map` pre-bakes those logical names into the theme
-                // map, so try a direct lookup FIRST — this honors clrMap (e.g.
-                // tx1="lt1"). Fall back to the canonical alias only when the
-                // logical name was not baked (no master / unmapped name), so a
-                // missing clrMap still resolves tx1→dk1, bg1→lt1, etc.
-                if let Some(hex) = theme.get(scheme_name.as_str()) {
-                    let hex = hex.clone();
-                    return Some(xform(&hex, c));
-                }
-                // Canonical logical→slot fallback, per the default §19.3.1.6
-                // clrMap (shared table: ooxml_common::color::SCHEME_DEFAULT_SLOTS).
-                // The helper also passes raw slot names (dk1/lt1/…) and accents
-                // through unchanged.
-                let canonical: &str = match scheme_name.as_str() {
-                    // phClr = "placeholder color" (inherits from layout).
-                    // Approximate as the primary dark text color. Not part of
-                    // §19.3.1.6, so it stays a local special case.
-                    "phClr" => "dk1",
-                    other => ooxml_common::color::default_scheme_slot(other),
-                };
-                let base_hex = theme.get(canonical)?.clone();
-                return Some(xform(&base_hex, c));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Resolve a DrawingML `<a:prstClr>` preset name to hex. Thin alias for the
-/// shared [`ooxml_common::theme::preset_color`] (the single source of truth),
-/// kept as a local name so the `prstClr` call sites read unchanged.
-fn preset_color(name: &str) -> Option<String> {
-    ooxml_common::theme::preset_color(name)
+    ooxml_common::color::parse_color_node(node, &PptxSchemeResolver { theme }, tint_mode)
 }
 
 // ===========================

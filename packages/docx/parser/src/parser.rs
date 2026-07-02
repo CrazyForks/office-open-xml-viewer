@@ -4598,48 +4598,48 @@ fn resolve_color_element(container: roxmltree::Node, theme: &ThemeColors) -> Opt
     resolve_color_element_with_phclr(container, theme, "")
 }
 
+/// Resolves a `<a:schemeClr val>` name to its base theme hex the Word way, for
+/// the shared [`ooxml_common::color::parse_color_node`]. Carries the `ph_clr`
+/// substitution name: when the scheme name is `phClr` (a placeholder color from
+/// a wps:style/fillRef) and `ph_clr` is non-empty, that name is resolved
+/// instead. The color grammar (srgbClr/sysClr/prstClr + transforms) is shared;
+/// only this theme-slot lookup + phClr substitution is docx-specific.
+struct DocxSchemeResolver<'a> {
+    theme: &'a ThemeColors,
+    ph_clr: &'a str,
+}
+
+impl ooxml_common::color::ThemeResolver for DocxSchemeResolver<'_> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        let resolved = if name == "phClr" && !self.ph_clr.is_empty() {
+            self.ph_clr
+        } else {
+            name
+        };
+        self.theme.resolve(resolved)
+    }
+}
+
 /// Like `resolve_color_element` but, when an inner `<a:schemeClr val="phClr"/>`
 /// is encountered, substitutes the scheme name `ph_clr` (the `<a:schemeClr>`
 /// child of the wps:style/fillRef that triggered theme lookup). Pass an empty
 /// string to disable the substitution.
+///
+/// Thin wrapper over the shared [`ooxml_common::color::parse_color_node`] with
+/// `TintMode::WordLiteral` (the spec-literal `tint = val·input + (1-val)·white`
+/// — see `ooxml-common/src/color.rs` for why this differs from PowerPoint's
+/// linear-sRGB tint). The grammar + transforms live there; [`DocxSchemeResolver`]
+/// supplies Word's theme-slot lookup and the phClr substitution. docx now also
+/// resolves `<a:prstClr>` preset names (previously dropped). Output is unchanged
+/// (uppercase hex, no `#`).
 fn resolve_color_element_with_phclr(
     container: roxmltree::Node,
     theme: &ThemeColors,
     ph_clr: &str,
 ) -> Option<String> {
-    for c in container.children().filter(|n| n.is_element()) {
-        let base = match c.tag_name().name() {
-            "srgbClr" => c.attribute("val").map(|v| v.to_uppercase()),
-            "schemeClr" => {
-                let raw_name = c.attribute("val")?;
-                let name = if raw_name == "phClr" && !ph_clr.is_empty() {
-                    ph_clr
-                } else {
-                    raw_name
-                };
-                theme.resolve(name)
-            }
-            "sysClr" => c
-                .attribute("lastClr")
-                .map(|v| v.to_uppercase())
-                .or_else(|| c.attribute("val").map(|v| v.to_uppercase())),
-            _ => None,
-        };
-        let Some(hex) = base else { continue };
-        return Some(apply_color_mods(&hex, c));
-    }
-    None
-}
-
-/// Word's interpretation of OOXML color modifiers. Wraps the shared
-/// `ooxml_common::color::apply_color_transforms` with TintMode::WordLiteral
-/// — the spec-literal `tint = val·input + (1-val)·white` formulation. See
-/// the comment in `ooxml-common/src/color.rs` for why this differs from
-/// PowerPoint's linear-sRGB tint.
-fn apply_color_mods(hex: &str, color_node: roxmltree::Node) -> String {
-    ooxml_common::color::apply_color_transforms(
-        hex,
-        color_node,
+    ooxml_common::color::parse_color_node(
+        container,
+        &DocxSchemeResolver { theme, ph_clr },
         ooxml_common::color::TintMode::WordLiteral,
     )
 }

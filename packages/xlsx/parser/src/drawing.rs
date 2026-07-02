@@ -262,67 +262,60 @@ pub(crate) fn parse_xfrm(xfrm_node: &roxmltree::Node) -> Option<Xfrm> {
     })
 }
 
-/// Apply the DrawingML color-transform children (`lumMod`, `lumOff`, `shade`,
-/// `tint`, `satMod`, …) declared inside a `<a:srgbClr>` / `<a:schemeClr>` to a
-/// resolved base hex, via the shared transform. Without this, an accent with
-/// e.g. `lumMod 20% + lumOff 80%` (a light tint) renders at full strength — so
-/// "light fill + dark border" pairs collapse to one solid mid-tone.
-fn apply_clr_mods(base_with_hash: &str, clr_node: &roxmltree::Node) -> String {
-    let base = base_with_hash.trim_start_matches('#');
-    let out = ooxml_common::color::apply_color_transforms(
-        base,
-        *clr_node,
-        ooxml_common::color::TintMode::PowerPointLinear,
-    );
-    format!("#{}", out.to_uppercase())
+/// Resolves a `<a:schemeClr val>` name to its base theme hex (no `#`) the way
+/// xlsx stores its palette, for the shared [`ooxml_common::color::parse_color_node`].
+/// `theme_colors` is collected in OOXML clrScheme document order: dk1, lt1, dk2,
+/// lt2, accent1..accent6, hlink, folHlink (see `parse_theme_colors`), each
+/// `#RRGGBB`. The `#` is stripped here because the shared transform wants clean
+/// hex; `parse_solid_fill` re-adds it for the returned color.
+struct XlsxSchemeResolver<'a> {
+    theme_colors: &'a [String],
 }
 
+impl ooxml_common::color::ThemeResolver for XlsxSchemeResolver<'_> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        // Positional index into the clrScheme-order palette. dk1/lt1 and dk2/lt2
+        // are the light/dark logical pairs (the earlier local mapping had them
+        // swapped, which darkened shapes that painted "lt1", the paper colour).
+        let idx = match name {
+            "dk1" | "tx1" => 0,
+            "lt1" | "bg1" => 1,
+            "dk2" | "tx2" => 2,
+            "lt2" | "bg2" => 3,
+            "accent1" => 4,
+            "accent2" => 5,
+            "accent3" => 6,
+            "accent4" => 7,
+            "accent5" => 8,
+            "accent6" => 9,
+            "hlink" => 10,
+            "folHlink" => 11,
+            _ => return None,
+        };
+        self.theme_colors
+            .get(idx)
+            .map(|hex| hex.trim_start_matches('#').to_owned())
+    }
+}
+
+/// Resolve a DrawingML `<a:solidFill>` (or any color container) to `#RRGGBB`
+/// (uppercase). Thin wrapper over the shared
+/// [`ooxml_common::color::parse_color_node`]: the color grammar
+/// (srgbClr/sysClr/prstClr/schemeClr + transforms lumMod/tint/…) lives there;
+/// [`XlsxSchemeResolver`] supplies the positional theme-palette lookup. xlsx
+/// re-applies its own `#`-prefix + uppercase convention on the shared output
+/// (which is already uppercase, no `#`). Without the transforms an accent with
+/// e.g. `lumMod 20% + lumOff 80%` (a light tint) would render at full strength.
 pub(crate) fn parse_solid_fill(
     fill_node: &roxmltree::Node,
     theme_colors: &[String],
 ) -> Option<String> {
-    for c in fill_node.children() {
-        match c.tag_name().name() {
-            "srgbClr" => {
-                let v = c.attribute("val")?;
-                return Some(apply_clr_mods(&format!("#{}", v.to_uppercase()), &c));
-            }
-            "sysClr" => {
-                // System colour (e.g. windowText / window). `lastClr` is the
-                // concrete value the authoring app last resolved it to.
-                let last = c.attribute("lastClr")?;
-                return Some(apply_clr_mods(&format!("#{}", last.to_uppercase()), &c));
-            }
-            "schemeClr" => {
-                let v = c.attribute("val")?;
-                // `theme_colors` is collected in OOXML clrScheme document
-                // order: dk1, lt1, dk2, lt2, accent1..accent6, hlink,
-                // folHlink. See `parse_theme_colors`. The earlier mapping
-                // here had dk1/lt1 and dk2/lt2 swapped which darkened
-                // shapes that painted "lt1" (the sheet paper colour).
-                let idx = match v {
-                    "dk1" | "tx1" => Some(0),
-                    "lt1" | "bg1" => Some(1),
-                    "dk2" | "tx2" => Some(2),
-                    "lt2" | "bg2" => Some(3),
-                    "accent1" => Some(4),
-                    "accent2" => Some(5),
-                    "accent3" => Some(6),
-                    "accent4" => Some(7),
-                    "accent5" => Some(8),
-                    "accent6" => Some(9),
-                    "hlink" => Some(10),
-                    "folHlink" => Some(11),
-                    _ => None,
-                };
-                return idx
-                    .and_then(|i| theme_colors.get(i).cloned())
-                    .map(|base| apply_clr_mods(&base, &c));
-            }
-            _ => {}
-        }
-    }
-    None
+    ooxml_common::color::parse_color_node(
+        *fill_node,
+        &XlsxSchemeResolver { theme_colors },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+    .map(|hex| format!("#{}", hex.to_uppercase()))
 }
 
 /// Parse a single custGeom path element. Each path has its own coordinate
