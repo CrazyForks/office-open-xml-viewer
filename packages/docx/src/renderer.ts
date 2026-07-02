@@ -2158,9 +2158,34 @@ export function computePages(
       // untouched so the following paragraph spaces against the paragraph BEFORE
       // the table.
       //
-      // ヒューリスティック、§17.4.57 TODO: floating table page-fit is Word runtime
-      // behavior, not spec-defined. Minimal: keep on current page (no break /
-      // relocation across pages here; only the in-page wrap band is modeled).
+      // §17.4.57 defines only the table's SIZE and POSITION, not what happens
+      // when it overflows the page bottom. Word's runtime keeps a floating table
+      // undivided and relocates it (with the anchor context that follows it) to
+      // the next page rather than splitting or clipping — the SAME "keep on
+      // page" semantics already implemented for a page-overflowing text frame
+      // (§17.3.1.11; see the framePr branch above) and a paragraph-anchored image
+      // float (anchoredFloatBottomOffset, §20.4.3.5). The tblpPr anchor/alignment
+      // vocabulary lines up 1:1 with framePr (§17.4.57 vertAnchor↔§17.3.1.11
+      // vAnchor, tblpY↔y), so this reuses that established pattern rather than
+      // inventing table-specific math:
+      //   • vertAnchor="text": the table top rides the anchor paragraph's in-flow
+      //     cursor, so moving the anchor to the next page moves the table with it.
+      //     If the table body box overflows the current column's bottom, relocate
+      //     it — the anchor text that follows it (which adds no height of its own)
+      //     trails onto the new column/page.
+      //   • vertAnchor="page"/"margin" (parser default is "page"): y is an
+      //     ABSOLUTE in-page position, so the table lands at the same spot on any
+      //     page. Relocating cannot help (Word draws it at its specified position
+      //     and lets it overflow), so these are left in place — matching the
+      //     pre-existing behaviour.
+      // A table TALLER than the page content area can never fit on a fresh page,
+      // so relocating it is futile (it would just overflow the next page too):
+      // leave it in place. This mirrors the text-frame / anchored-image guard's
+      // `<= effContentH()` fresh-fit test. Unlike a block table (below), a
+      // FLOATING table is not row-split here — Word does not divide a floating
+      // table across pages, so an over-tall one is left to overflow in place. (The
+      // table element is placed once and `continue`s, so no relocation can loop —
+      // this guard only suppresses a pointless page break for an over-tall table.)
       if (tbl.tblpPr) {
         // #513: re-point measureState.contentX/contentW at the CURRENT newspaper
         // column for the duration of the placement so the paginator estimates the
@@ -2173,13 +2198,48 @@ export function computePages(
         // measureState.scale is 1, so colW() (pt) equals the px content width
         // computeTableLayout expects (it re-divides by scale internally); colX()
         // (pt) is likewise the column's page-absolute left edge.
+        //
+        // Lay the table out against the CURRENT column band and resolve its box.
+        // computeTableLayout is the only (heavy) measurement; its `tableH` drives
+        // both the overflow test and the wrap float below (compute-once — the
+        // decision reuses this box's height, never re-measures it separately).
+        const tp = tbl.tblpPr;
+        const measureFloatBox = () =>
+          withColumnBand(() => {
+            const cW = colW() * measureState.scale;
+            const layout = computeTableLayout(tbl, cW, measureState);
+            const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
+            return computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH);
+          });
+        let box = measureFloatBox();
+        // Distance from the table's in-flow top (measureState.y == paraTop) down
+        // to its body-box bottom — the table analogue of the frame's
+        // frameBottomOff. The bottom is vSpace-exclusive (box.h is the bare table
+        // extent; the *FromText dist padding is inter-text spacing, not part of
+        // the table's own area). For vertAnchor="text" this is the table's y
+        // offset + its height; for page/margin it mixes an absolute box.y with the
+        // flow cursor and is not a keep signal, so it is gated out below.
+        const tableBottomOff = box.y + box.h - measureState.y;
+        const isTextAnchored = tp.vertAnchor !== 'page' && tp.vertAnchor !== 'margin';
+        const tableOverflowsHere = isTextAnchored && tableBottomOff > 0 && y + tableBottomOff > effContentH();
+        const tableFitsFresh = tableBottomOff > 0 && tableBottomOff <= effContentH();
+        if (y > 0 && tableOverflowsHere && tableFitsFresh) {
+          // Relocate the floating table to the next column/page BEFORE its float
+          // is registered, so no stale exclusion band is left on the old page
+          // (newPage clears floats wholesale; nextColumn keeps page-scoped ones
+          // but the table has not registered yet). The trailing anchor paragraph
+          // adds no height across this table, so it follows onto the new page. The
+          // column width can differ between columns (box.h / wrap side depend on
+          // it), so re-measure the box against the column the table landed in.
+          nextColumnOrPage(i);
+          box = measureFloatBox();
+        }
+        // Register the wrap float against the (possibly new) column band so the
+        // box x / wrap side match the column the table now sits in, and the float
+        // is registered on the page it actually landed on.
         withColumnBand(() => {
-          const cW = colW() * measureState.scale;
-          const layout = computeTableLayout(tbl, cW, measureState);
-          const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
-          const box = computeFloatTableBox(tbl.tblpPr!, measureState, measureState.y, layout.tableW, tableH);
           const side = floatTableWrapSide(box, measureState);
-          registerTableFloat(box, tbl.tblpPr!, measureState, side, tbl.overlap !== 'never');
+          registerTableFloat(box, tp, measureState, side, tbl.overlap !== 'never');
         });
         pushTagged(el as PaginatedBodyElement);
         continue;
