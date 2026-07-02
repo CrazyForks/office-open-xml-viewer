@@ -1,6 +1,7 @@
 export { DocxDocument, type LoadOptions } from './document';
 export type { WireRenderPageOptions } from './worker-protocol';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
+export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 export { buildDocxTextLayer } from './text-layer';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export { noteText } from './types';

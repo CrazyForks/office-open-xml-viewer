@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/html';
 import { buildViewerUI } from './DocxViewer.stories';
 import { DocxDocument } from './document';
 import { DocxViewer } from './viewer';
+import { DocxScrollViewer } from './scroll-viewer';
 import { buildDocxTextLayer } from './text-layer';
 import type { DocxTextRunInfo } from './renderer';
 
@@ -97,6 +98,59 @@ export const ScrollView: LayoutStory = {
           buildDocxTextLayer(textLayer, runs, '100%', '100%');
         }
         status.textContent = `Loaded ${doc.pageCount} pages`;
+      })
+      .catch((e: Error) => {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = 'red';
+      });
+
+    return root;
+  },
+};
+
+// The scroll viewer owns a live scroll subscription, a ResizeObserver, and a
+// per-slot canvas pool, so a stale instance left mounted across a Storybook
+// re-render (args change / HMR) would keep observing a detached container and
+// leak canvases. Hold the last instance module-side and destroy it before
+// building a fresh one.
+let scrollViewerInstance: DocxScrollViewer | null = null;
+
+export const ScrollViewer: LayoutStory = {
+  name: 'DocxScrollViewer — virtualized continuous scroll',
+  render() {
+    scrollViewerInstance?.destroy();
+    scrollViewerInstance = null;
+
+    const root = document.createElement('div');
+    root.style.cssText = 'font-family:sans-serif;padding:16px;';
+    const heading = document.createElement('h3');
+    heading.textContent = 'DocxScrollViewer — virtualized (Ctrl/⌘+wheel to zoom)';
+    heading.style.cssText = 'margin:0 0 8px;font-size:14px;';
+    root.appendChild(heading);
+    const status = makeStatus(root);
+
+    // The viewer owns a container-sized scroll surface; give it a fixed box.
+    const container = document.createElement('div');
+    container.style.cssText = 'height:720px;border:1px solid #ccc;background:#f5f5f5;';
+    root.appendChild(container);
+
+    const viewer = new DocxScrollViewer(container, {
+      gap: 16,
+      overscan: 1,
+      enableTextSelection: true,
+      onVisiblePageChange: (top, total) => {
+        status.textContent = `Page ${top + 1} / ${total}`;
+      },
+      onError: (e) => {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = 'red';
+      },
+    });
+    scrollViewerInstance = viewer;
+    viewer
+      .load(SAMPLE_URL)
+      .then(() => {
+        status.textContent = `Loaded ${viewer.pageCount} pages`;
       })
       .catch((e: Error) => {
         status.textContent = `Error: ${e.message}`;

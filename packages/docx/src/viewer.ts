@@ -144,6 +144,7 @@ export class DocxViewer {
       const bmp = await this._doc.renderPageToBitmap(this._currentPage, {
         width: this._opts.width,
         dpr: this._opts.dpr,
+        defaultTextColor: this._opts.defaultTextColor,
         showTrackChanges: this._opts.showTrackChanges,
       });
       this._canvas.width = bmp.width;
