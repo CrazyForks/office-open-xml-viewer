@@ -1,0 +1,130 @@
+import { describe, it, expect } from 'vitest';
+import { computeVisibleRange } from './virtual-scroll.js';
+
+// Design §5.1 contract. computeVisibleRange(heights, gap, scrollTop,
+// viewportHeight, overscan) → { start, end, topIndex, offsets, totalHeight }.
+// offsets[i] = Σ heights[0..i-1] + i*gap; totalHeight = Σ heights + (n-1)*gap
+// (gap BETWEEN items only, none after the last). start/end include overscan
+// (clamped to [0,n-1]); topIndex is the first item intersecting the viewport
+// top, EXCLUDING overscan.
+
+describe('computeVisibleRange — offsets + totalHeight (gap arithmetic)', () => {
+  it('computes prefix-sum offsets with a leading gap per item and gap only between items', () => {
+    // 3 uniform 100-tall items, gap 10: offsets 0, 110, 220; total = 300 + 2*10 = 320.
+    const r = computeVisibleRange([100, 100, 100], 10, 0, 1000, 0);
+    expect(r.offsets).toEqual([0, 110, 220]);
+    expect(r.totalHeight).toBe(320);
+  });
+
+  it('variable heights: offsets follow Σ heights[0..i-1] + i*gap', () => {
+    // heights 50, 200, 30, gap 8 → offsets 0, 58, 266; total = 280 + 2*8 = 296.
+    const r = computeVisibleRange([50, 200, 30], 8, 0, 10, 0);
+    expect(r.offsets).toEqual([0, 58, 266]);
+    expect(r.totalHeight).toBe(296);
+  });
+
+  it('single item has no gap in totalHeight', () => {
+    const r = computeVisibleRange([120], 16, 0, 500, 0);
+    expect(r.offsets).toEqual([0]);
+    expect(r.totalHeight).toBe(120);
+  });
+
+  it('tolerates zero-height items', () => {
+    // heights 100, 0, 100, gap 10 → offsets 0, 110, 120; total = 200 + 2*10 = 220.
+    const r = computeVisibleRange([100, 0, 100], 10, 0, 1000, 0);
+    expect(r.offsets).toEqual([0, 110, 120]);
+    expect(r.totalHeight).toBe(220);
+  });
+});
+
+describe('computeVisibleRange — visible range (uniform)', () => {
+  // 10 items of 100, gap 0. Viewport 250 tall.
+  const heights = Array.from({ length: 10 }, () => 100);
+
+  it('at scrollTop 0 with no overscan mounts the items beginning within the viewport', () => {
+    const r = computeVisibleRange(heights, 0, 0, 250, 0);
+    // items 0 (0..100), 1 (100..200), 2 (200..300 begins at 200 < 250) begin within [0,250).
+    expect(r.topIndex).toBe(0);
+    expect(r.start).toBe(0);
+    expect(r.end).toBe(2);
+  });
+
+  it('scrolled to 250: topIndex is the item under the viewport top', () => {
+    const r = computeVisibleRange(heights, 0, 250, 250, 0);
+    // top edge 250 → item 2 (200..300) intersects the top. Bottom edge 500 →
+    // items whose top < 500: up to index 4 (400..500 begins at 400 < 500).
+    expect(r.topIndex).toBe(2);
+    expect(r.start).toBe(2);
+    expect(r.end).toBe(4);
+  });
+});
+
+describe('computeVisibleRange — overscan clipping at both ends', () => {
+  const heights = Array.from({ length: 10 }, () => 100);
+
+  it('clips overscan at the top (cannot go below 0)', () => {
+    const r = computeVisibleRange(heights, 0, 0, 250, 2);
+    expect(r.topIndex).toBe(0);
+    expect(r.start).toBe(0);        // 0 - 2 clamped to 0
+    expect(r.end).toBe(4);          // lastVisible 2 + overscan 2
+  });
+
+  it('clips overscan at the bottom (cannot exceed n-1)', () => {
+    // scrollTop near the end so lastVisible ≈ 9; +2 overscan clamps to 9.
+    const r = computeVisibleRange(heights, 0, 900, 250, 2);
+    expect(r.topIndex).toBe(9);
+    expect(r.end).toBe(9);          // 9 + 2 clamped to 9
+    expect(r.start).toBe(7);        // 9 - 2
+  });
+
+  it('applies overscan symmetrically in the middle', () => {
+    const r = computeVisibleRange(heights, 0, 300, 200, 1);
+    // top 300 → topIndex 3; bottom 500 → lastVisible 4 (top 400 < 500).
+    expect(r.topIndex).toBe(3);
+    expect(r.start).toBe(2);        // 3 - 1
+    expect(r.end).toBe(5);          // 4 + 1
+  });
+});
+
+describe('computeVisibleRange — topIndex vs start distinction', () => {
+  it('topIndex excludes overscan; start includes it', () => {
+    const heights = Array.from({ length: 8 }, () => 50);
+    const r = computeVisibleRange(heights, 0, 200, 100, 2);
+    // top 200 → topIndex 4 (200..250). start = 4 - 2 = 2 (overscan). They differ.
+    expect(r.topIndex).toBe(4);
+    expect(r.start).toBe(2);
+    expect(r.topIndex).not.toBe(r.start);
+  });
+});
+
+describe('computeVisibleRange — degenerate inputs', () => {
+  it('empty heights → empty mount range', () => {
+    const r = computeVisibleRange([], 16, 0, 500, 1);
+    expect(r).toEqual({ start: 0, end: -1, topIndex: 0, offsets: [], totalHeight: 0 });
+    // start > end ⇒ a `for (i = start; i <= end; i++)` mount loop runs zero times.
+    expect(r.start).toBeGreaterThan(r.end);
+  });
+
+  it('single item, scrollTop 0', () => {
+    const r = computeVisibleRange([300], 16, 0, 500, 1);
+    expect(r.topIndex).toBe(0);
+    expect(r.start).toBe(0);
+    expect(r.end).toBe(0);
+    expect(r.totalHeight).toBe(300);
+  });
+
+  it('scrollTop past the end clamps topIndex/end to the last item', () => {
+    const heights = [100, 100, 100];
+    const r = computeVisibleRange(heights, 0, 99999, 250, 1);
+    expect(r.topIndex).toBe(2);     // clamped to n-1
+    expect(r.end).toBe(2);          // clamped to n-1
+    expect(r.start).toBe(1);        // 2 - 1
+  });
+
+  it('negative scrollTop behaves like 0', () => {
+    const heights = [100, 100, 100];
+    const r = computeVisibleRange(heights, 0, -50, 150, 0);
+    expect(r.topIndex).toBe(0);
+    expect(r.start).toBe(0);
+  });
+});

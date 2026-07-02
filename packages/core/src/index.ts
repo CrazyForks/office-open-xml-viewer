@@ -229,6 +229,9 @@ export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-pos
 // Format-agnostic index navigation for hidden-item "skip" mode (pptx hidden
 // slides, xlsx hidden sheets): pure math over an isHidden(i) callback.
 export { nextVisibleIndex, resolveVisibleIndex, countVisible } from './nav/visible-index';
+// Virtualization range math for the continuous-scroll viewers (DocxScrollViewer /
+// PptxScrollViewer): pure prefix-sum + binary-search over per-item heights. No DOM.
+export { computeVisibleRange, type VisibleRange } from './layout/virtual-scroll';
 // Format-agnostic font design line-metrics (OS/2 win / hhea sums) for faces the
 // browser substitutes with different metrics — shared so docx (Word's design
 // line box), pptx and xlsx can size line boxes / floor single-line height
