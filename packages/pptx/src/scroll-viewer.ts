@@ -997,9 +997,12 @@ export class PptxScrollViewer {
 
   /** Full-resolution settle re-render of the visible window (design §7 mechanisms
    *  2+3). Re-renders each mounted slot at the current scale via the double-buffer
-   *  swap (main) / same-canvas transfer (worker), then clears the preview
-   *  transform on its overlay. Dispatched at the CURRENT epoch; the existing epoch
-   *  gate discards it if a later `setScale` supersedes it mid-render. */
+   *  swap (main) / same-canvas transfer (worker). Main mode also rebuilds the text
+   *  overlay and clears its preview transform; in worker mode the overlay is
+   *  permanently empty (text selection is main-mode-only), so the transform is
+   *  inert there and is reset on recycle. Dispatched at the CURRENT epoch; the
+   *  existing epoch gate discards it if a later `setScale` supersedes it
+   *  mid-render. */
   private _settleRender(): void {
     if (this._destroyed || !this._pres || this._pres.slideCount === 0) return;
     for (const [i, slot] of [...this._slots]) {
