@@ -125,7 +125,13 @@ export interface HeaderFooter {
  *  {@link DocxDocumentModel.section}. Also stamped per {@link PaginatedBodyElement}
  *  (`sectionGeom`) by the paginator so the renderer sizes each page from its own
  *  section. `orient` is omitted — Word swaps w/h for landscape, so verbatim w/h
- *  already give the correct dims. */
+ *  already give the correct dims.
+ *
+ *  ⚠ Spread over the body-level {@link SectionProps} in `renderDocumentToCanvas`
+ *  (`{ ...doc.section, ...pageGeom }`): only add per-section PAGE-BOX fields that
+ *  exist on `SectionProps` with the same name and semantics — an optional field
+ *  colliding with a non-geometry `SectionProps` name would silently override the
+ *  body-level value the renderer promises to preserve. */
 export interface SectionGeom {
   pageWidth: number;   // pt
   pageHeight: number;  // pt
@@ -1095,7 +1101,11 @@ export type WorkerResponse =
 // ===== Public API types =====
 
 export interface RenderPageOptions {
-  /** Canvas CSS width in px; height is auto-computed from page aspect ratio */
+  /** Canvas CSS width in px; height is auto-computed from page aspect ratio.
+   *  Applies per CALL — pages of different physical widths (per-section pgSz,
+   *  §17.6.13) rendered at the same `width` get different px-per-pt scales.
+   *  For a uniform document scale, derive a per-page width from
+   *  `DocxDocument.pageSize(i)` instead of passing a constant. */
   width?: number;
   dpr?: number;
   defaultTextColor?: string;

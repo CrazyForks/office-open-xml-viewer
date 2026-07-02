@@ -337,6 +337,23 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — renderer', () => {
     expect(c1.width / c1.height).toBeCloseTo(140 / 200, 2);
   });
 
+  it('honours opts.width per CALL: same pixel width, per-page height from aspect', async () => {
+    // The scroll viewer's contract: `width` is the canvas CSS width for THIS call.
+    // Mixed-width pages rendered at a constant width fill the same pixels at
+    // different px-per-pt scales; height still follows each page's OWN aspect.
+    // Page 0 (portrait 200×140): height = 400·140/200 = 280.
+    // Page 1 (landscape 140×200): height = 400·200/140 ≈ 571.
+    const doc = mixedDoc();
+    const { canvas: c0 } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, c0, 0, { width: 400, dpr: 1 });
+    const { canvas: c1 } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, c1, 1, { width: 400, dpr: 1 });
+    expect(c0.width).toBe(400);
+    expect(c1.width).toBe(400);
+    expect(c0.height).toBe(280);
+    expect(c1.height).toBe(Math.round(400 * (200 / 140)));
+  });
+
   it('single-section document sizes every page from doc.section (no regression)', async () => {
     const section: SectionProps = {
       pageWidth: 300, pageHeight: 400,
