@@ -232,6 +232,9 @@ export { nextVisibleIndex, resolveVisibleIndex, countVisible } from './nav/visib
 // Virtualization range math for the continuous-scroll viewers (DocxScrollViewer /
 // PptxScrollViewer): pure prefix-sum + binary-search over per-item heights. No DOM.
 export { computeVisibleRange, type VisibleRange } from './layout/virtual-scroll';
+// Shared exponential wheel/pinch zoom step (Ctrl/⌘+wheel). Pure — the caller
+// clamps to its own [zoomMin, zoomMax]. Used by XlsxViewer + the scroll viewers.
+export { zoomStepScale } from './interaction/zoom';
 // Format-agnostic font design line-metrics (OS/2 win / hhea sums) for faces the
 // browser substitutes with different metrics — shared so docx (Word's design
 // line box), pptx and xlsx can size line boxes / floor single-line height

@@ -1,7 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet, XlsxComment } from './types.js';
 import type { LoadOptions } from '@silurus/ooxml-core';
-import { nextVisibleIndex, resolveVisibleIndex, countVisible } from '@silurus/ooxml-core';
+import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
@@ -10,6 +10,11 @@ import {
   computeValidationPanelPosition,
   type ResolvedList,
 } from './validation-list.js';
+
+// Re-exported for the existing xlsx zoom tests (resize-zoom.test.ts imports it
+// from this module) and any consumer that referenced it here before it moved to
+// @silurus/ooxml-core. The single source of truth is core (design §5.2).
+export { zoomStepScale } from '@silurus/ooxml-core';
 
 /** Delay (ms) before a hovered comment popup appears. A short hover dwell
  *  prevents the popup from flickering while the cursor sweeps across many
@@ -228,34 +233,6 @@ export function selectionOverlayStyle(color: string): { border: string; backgrou
     border: `2px solid ${color}`,
     background: `color-mix(in srgb, ${color} 8%, transparent)`,
   };
-}
-
-/** Ctrl/⌘ + wheel (and trackpad pinch) zoom sensitivity. `deltaY` is multiplied
- *  by this before `exp()`. Purely an interaction-feel constant (no ECMA-376
- *  bearing); lower = gentler. */
-const ZOOM_WHEEL_SENSITIVITY = 0.01;
-
-/**
- * New cell scale for one wheel/pinch zoom step. The step is *exponential* in
- * `deltaY` rather than a fixed increment, which fixes two problems with a
- * sign-only `scale ± 0.1`:
- *
- *  - A trackpad pinch arrives as a high-frequency stream of small-`deltaY`
- *    wheel events; a fixed per-event increment compounds across dozens of
- *    events per gesture and zooms wildly. Because `exp(-k·a)·exp(-k·b) =
- *    exp(-k·(a+b))`, the total zoom here depends only on the summed `deltaY`
- *    of the gesture, not on how many events the OS chops it into — so a pinch
- *    and a mouse wheel covering the same distance zoom by the same amount.
- *  - It is multiplicative, so a step feels proportional at every zoom level
- *    (the old additive `+0.1` was huge at 20% and tiny at 400%), and exactly
- *    symmetric: zooming in then out by the same delta returns to the start.
- *
- * Negative `deltaY` (scroll up / pinch out) zooms in. The result is unclamped
- * and unsnapped; {@link XlsxViewer.setScale} clamps to `[zoomMin, zoomMax]` and
- * snaps to whole percent.
- */
-export function zoomStepScale(currentScale: number, deltaY: number): number {
-  return currentScale * Math.exp(-deltaY * ZOOM_WHEEL_SENSITIVITY);
 }
 
 interface SheetAxes { col: AxisMetrics; row: AxisMetrics; }
