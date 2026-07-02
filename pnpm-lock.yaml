@@ -117,13 +117,13 @@ importers:
       '@silurus/ooxml-xlsx':
         specifier: workspace:*
         version: link:../xlsx
-      skia-canvas:
-        specifier: ^2.0.0
-        version: 2.0.2
     devDependencies:
       '@types/node':
         specifier: ^25.6.0
         version: 25.6.0
+      skia-canvas:
+        specifier: ^2.0.0
+        version: 2.0.2
       typescript:
         specifier: ^6.0.2
         version: 6.0.3
