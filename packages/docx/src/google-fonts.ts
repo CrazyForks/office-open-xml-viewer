@@ -1,6 +1,7 @@
 import {
   classifyCjkFont,
   scriptPreloadNamesForText,
+  GOOGLE_FONT_SUBSTITUTES,
   SCRIPT_GOOGLE_FONTS,
   type FontPreloadEntry,
 } from '@silurus/ooxml-core';
@@ -11,54 +12,17 @@ import type {
   DocxDocumentModel,
 } from './types.js';
 
-/** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
- *  PPTX map — these are the well-known free webfont alternatives Microsoft
- *  Office templates pull from. Substitutes that diverge from the requested
- *  family name (Calibri → Carlito, Cambria → Caladea) include
- *  `loadFamily` so the FontFaceSet load is driven against the substitute. */
-const NOTO_NASKH_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';
-const NOTO_SANS_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;700&display=swap';
-
+/** Theme-referenced typefaces commonly used by DOCX templates.
+ *
+ *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri →
+ *  Carlito, Cambria → Caladea), the popular free web fonts and the Arabic Noto
+ *  fallbacks — shared with pptx/xlsx. {@link SCRIPT_GOOGLE_FONTS} adds the
+ *  CJK (KR/SC/TC/JP) / Cyrillic / Thai / Devanagari / Hebrew Noto faces the
+ *  renderer appends to the font chain (CJK ordered by document language). Both
+ *  load only when `useGoogleFonts` is on — no binaries ship in the bundle. DOCX
+ *  currently has no format-specific additions. */
 export const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  'calibri':           { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
-  'cambria':           { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
-  'nunito sans':       { url: 'https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'nunito':            { url: 'https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'open sans':         { url: 'https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'roboto':            { url: 'https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'lato':              { url: 'https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'montserrat':        { url: 'https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'poppins':           { url: 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'raleway':           { url: 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  // Ubuntu (used as the minorFont in some templates, e.g. sample-11). Without
-  // this mapping the renderer falls back to a system sans whose horizontal
-  // metrics are narrower than Ubuntu's, so cells sized for the Ubuntu width
-  // (e.g. table cells with `tcW` measured against the Ubuntu run) wrap
-  // differently from Word — the symptom that motivated this entry was a
-  // table cell expected to break into two lines but staying on one.
-  'ubuntu':            { url: 'https://fonts.googleapis.com/css2?family=Ubuntu:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
-  // substitutes so RTL documents (e.g. sample-7, which requests Sakkal Majalla
-  // / Univers Next Arabic) render with a real web font instead of an oversized
-  // OS fallback. "Naskh" covers traditional serif-like Arabic faces; "Sans"
-  // covers the modern geometric ones.
-  'sakkal majalla':      { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'traditional arabic':  { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'simplified arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'arabic typesetting':  { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'univers next arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-  // Self-referencing entries so the generic Arabic fallback fonts (appended to
-  // the renderer's font chain) are themselves loaded whenever useGoogleFonts
-  // is enabled — see `load`, which always queues these names.
-  'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
-  // Noto faces, shared with pptx/xlsx via @silurus/ooxml-core. The renderer
-  // appends these to the font chain (CJK ordered by document language); they are
-  // loaded only when useGoogleFonts is on — no binaries ship in the bundle.
+  ...GOOGLE_FONT_SUBSTITUTES,
   ...SCRIPT_GOOGLE_FONTS,
 };
 
