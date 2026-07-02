@@ -145,6 +145,40 @@ pub struct HeaderFooter {
     pub body: Vec<BodyElement>,
 }
 
+/// ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — a section's page
+/// geometry: page size + margins + header/footer distances (all pt, converted
+/// from twips). Carried on a `BodyElement::SectionBreak` (`geom`) so mid-body
+/// sections keep their own page size (the FINAL section's geometry lives on the
+/// `SectionProps` fields of `Document.section`). Mirrored on the TS side as
+/// `SectionGeom`; the renderer resolves per-page geometry from it.
+///
+/// `orient` is intentionally omitted: Word swaps `w`/`h` for a landscape page,
+/// so the verbatim `w`/`h` already give the correct dims — no orientation flag
+/// is needed to size the page.
+///
+/// No `Default` derive on purpose: zeros ≠ spec defaults; a derived default is an
+/// all-zeros geometry (0×0 page, zero margins), which is NOT the ECMA-376 spec
+/// default (US Letter portrait, 1" margins, 0.5" header/footer). Use
+/// `spec_default_geom()` (parser.rs) when a spec-default geometry is needed.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionGeom {
+    /// page width in pt (converted from twips)
+    pub page_width: f64,
+    /// page height in pt
+    pub page_height: f64,
+    /// §17.6.11 top/bottom are ST_SignedTwipsMeasure and MAY be negative — keep
+    /// the sign (identical to `SectionProps.margin_top/bottom`).
+    pub margin_top: f64,
+    pub margin_right: f64,
+    pub margin_bottom: f64,
+    pub margin_left: f64,
+    /// distance from top of page to header (pt)
+    pub header_distance: f64,
+    /// distance from bottom of page to footer (pt)
+    pub footer_distance: f64,
+}
+
 #[derive(Serialize, Debug, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SectionProps {
@@ -294,6 +328,12 @@ pub enum BodyElement {
         /// distinct first-page header/footer. NOT inherited (each sectPr's flag
         /// stands alone, like the body-level `Document.section.title_page`).
         title_page: bool,
+        /// ECMA-376 §17.6.13 / §17.6.11 — this ENDING section's page geometry
+        /// (size + margins). `None` when the sectPr declares no `<w:pgSz>` /
+        /// `<w:pgMar>` (the renderer then falls back to the body-level section).
+        /// The final (body-level) section's geometry stays on `Document.section`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        geom: Option<SectionGeom>,
     },
 }
 

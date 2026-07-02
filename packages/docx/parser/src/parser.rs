@@ -1212,6 +1212,73 @@ fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
         .find_map(|n| attr_w(n, "val"))
 }
 
+/// ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` spec defaults for a
+/// section's page geometry: US Letter portrait (612×792 pt), 1" margins (72 pt),
+/// 0.5" header/footer distance (36 pt). This is the ONE place these defaults
+/// live — `section_geom` seeds absent sub-attributes from it, and `parse_section`
+/// falls back to it when a sectPr declares neither `<w:pgSz>` nor `<w:pgMar>`, so
+/// a SectionBreak's geometry and `Document.section` agree for a fully-inherited
+/// section. (Deliberately NOT `SectionGeom::default()`: a derived default is
+/// all-zeros, which is a 0×0 page — a footgun, not the spec default.)
+fn spec_default_geom() -> SectionGeom {
+    SectionGeom {
+        page_width: 612.0,
+        page_height: 792.0,
+        margin_top: 72.0,
+        margin_right: 72.0,
+        margin_bottom: 72.0,
+        margin_left: 72.0,
+        header_distance: 36.0,
+        footer_distance: 36.0,
+    }
+}
+
+/// ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — extract a section's page
+/// geometry from its `<w:sectPr>` into a `SectionGeom`. Returns `None` when the
+/// sectPr declares NEITHER `<w:pgSz>` NOR `<w:pgMar>` (a section that inherits both
+/// from the body — the renderer then uses the body-level geometry). When either is
+/// present, absent sub-attributes fall back to the spec defaults (US Letter portrait,
+/// 1" margins, 0.5" header/footer) — the SAME defaults `parse_section` uses so a
+/// SectionBreak's geometry and `Document.section` agree for a fully-inherited section.
+fn section_geom(sect_pr: roxmltree::Node) -> Option<SectionGeom> {
+    let pg_sz = child_w(sect_pr, "pgSz");
+    let pg_mar = child_w(sect_pr, "pgMar");
+    if pg_sz.is_none() && pg_mar.is_none() {
+        return None;
+    }
+    // Spec defaults (identical to parse_section's fallback).
+    let mut geom = spec_default_geom();
+    if let Some(pg_sz) = pg_sz {
+        if let Some(w) = attr_w(pg_sz, "w") {
+            geom.page_width = twips_to_pt(&w);
+        }
+        if let Some(h) = attr_w(pg_sz, "h") {
+            geom.page_height = twips_to_pt(&h);
+        }
+    }
+    if let Some(pg_mar) = pg_mar {
+        if let Some(v) = attr_w(pg_mar, "top") {
+            geom.margin_top = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "right") {
+            geom.margin_right = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "bottom") {
+            geom.margin_bottom = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "left") {
+            geom.margin_left = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "header") {
+            geom.header_distance = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "footer") {
+            geom.footer_distance = twips_to_pt(&v);
+        }
+    }
+    Some(geom)
+}
+
 /// Build a `BodyElement::SectionBreak` for a sectPr that ENDS a section
 /// (ECMA-376 §17.6.x). Carries the section's `<w:cols>` (§17.6.4, via
 /// `parse_columns` ⇒ `None` for a single column) and its ST_SectionMark kind
@@ -1242,6 +1309,8 @@ fn section_break_element(
         headers: resolved.headers,
         footers: resolved.footers,
         title_page: resolved.title_page,
+        // ECMA-376 §17.6.13 / §17.6.11 — this ending section's page geometry.
+        geom: section_geom(sect_pr),
     }
 }
 
@@ -1413,15 +1482,17 @@ fn parse_section(
     sect_pr: Option<roxmltree::Node>,
     rel_map: &HashMap<String, String>,
 ) -> (SectionProps, SectionRefs) {
+    // Geometry (pgSz/pgMar) defaults live in ONE place — `spec_default_geom`.
+    let default_geom = spec_default_geom();
     let default = SectionProps {
-        page_width: 612.0,
-        page_height: 792.0,
-        margin_top: 72.0,
-        margin_right: 72.0,
-        margin_bottom: 72.0,
-        margin_left: 72.0,
-        header_distance: 36.0,
-        footer_distance: 36.0,
+        page_width: default_geom.page_width,
+        page_height: default_geom.page_height,
+        margin_top: default_geom.margin_top,
+        margin_right: default_geom.margin_right,
+        margin_bottom: default_geom.margin_bottom,
+        margin_left: default_geom.margin_left,
+        header_distance: default_geom.header_distance,
+        footer_distance: default_geom.footer_distance,
         title_page: false,
         even_and_odd_headers: false,
         section_start: None,
@@ -1436,34 +1507,20 @@ fn parse_section(
     };
 
     let mut props = default;
-    if let Some(pg_sz) = child_w(sp, "pgSz") {
-        if let Some(w) = attr_w(pg_sz, "w") {
-            props.page_width = twips_to_pt(&w);
-        }
-        if let Some(h) = attr_w(pg_sz, "h") {
-            props.page_height = twips_to_pt(&h);
-        }
-    }
-    if let Some(pg_mar) = child_w(sp, "pgMar") {
-        if let Some(v) = attr_w(pg_mar, "top") {
-            props.margin_top = twips_to_pt(&v);
-        }
-        if let Some(v) = attr_w(pg_mar, "right") {
-            props.margin_right = twips_to_pt(&v);
-        }
-        if let Some(v) = attr_w(pg_mar, "bottom") {
-            props.margin_bottom = twips_to_pt(&v);
-        }
-        if let Some(v) = attr_w(pg_mar, "left") {
-            props.margin_left = twips_to_pt(&v);
-        }
-        if let Some(v) = attr_w(pg_mar, "header") {
-            props.header_distance = twips_to_pt(&v);
-        }
-        if let Some(v) = attr_w(pg_mar, "footer") {
-            props.footer_distance = twips_to_pt(&v);
-        }
-    }
+    // ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — reuse `section_geom`
+    // as the single extraction source. When the sectPr declares neither element
+    // it returns `None`, so we fall back to the same spec defaults `default` was
+    // seeded with (behavior-preserving); when either is present, the extraction
+    // is identical to reading the attributes here.
+    let geom = section_geom(sp).unwrap_or_else(spec_default_geom);
+    props.page_width = geom.page_width;
+    props.page_height = geom.page_height;
+    props.margin_top = geom.margin_top;
+    props.margin_right = geom.margin_right;
+    props.margin_bottom = geom.margin_bottom;
+    props.margin_left = geom.margin_left;
+    props.header_distance = geom.header_distance;
+    props.footer_distance = geom.footer_distance;
     props.title_page = child_w(sp, "titlePg").is_some();
     // ECMA-376 §17.6.22 — the body (final) section's start type. Non-final
     // sections carry their start type on their own SectionBreak marker; the
@@ -8738,6 +8795,122 @@ mod column_tests {
         }
     }
 
+    /// ECMA-376 §17.6.13 `<w:pgSz>` / §17.6.11 `<w:pgMar>` — a mid-body section
+    /// break carries its ENDING section's page geometry on `geom`. The final
+    /// (body-level) section's geometry stays on `Document.section` (unchanged);
+    /// this closes the hole where mid-body sections dropped pgSz/pgMar entirely,
+    /// so an earlier landscape section had no page size at all (rendered at the
+    /// body width). Values are twips → pt (twips_to_pt divides by 20): 15840 twips
+    /// = 792 pt (11"), 12240 twips = 612 pt (8.5"), 1440 twips = 72 pt (1").
+    #[test]
+    fn section_break_carries_page_geometry() {
+        // A landscape first section (w=15840, h=12240) ended by a nextPage break,
+        // followed by a portrait body section. Parsed through parse_body_elements
+        // (via `body_from`) so the pPr-nested sectPr becomes a SectionBreak marker.
+        let body = body_from(
+            r#"
+            <w:p>
+              <w:pPr>
+                <w:sectPr>
+                  <w:pgSz w:w="15840" w:h="12240"/>
+                  <w:pgMar w:top="1701" w:right="1080" w:bottom="1985" w:left="1080" w:header="851" w:footer="992"/>
+                  <w:type w:val="nextPage"/>
+                </w:sectPr>
+              </w:pPr>
+            </w:p>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            "#,
+        );
+        let sb = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::SectionBreak { geom, .. } => Some(geom.clone()),
+                _ => None,
+            })
+            .expect("a SectionBreak marker");
+        let g = sb.expect("SectionBreak carries page geometry");
+        assert_eq!(g.page_width, 792.0);
+        assert_eq!(g.page_height, 612.0);
+        // Non-default pgMar values (twips ÷ 20) so a dropped attribute would be
+        // caught — 1440/720 would collapse onto the spec defaults (72/36) and
+        // silently pass.
+        assert_eq!(g.margin_top, 85.05);
+        assert_eq!(g.margin_right, 54.0);
+        assert_eq!(g.margin_bottom, 99.25);
+        assert_eq!(g.margin_left, 54.0);
+        assert_eq!(g.header_distance, 42.55);
+        assert_eq!(g.footer_distance, 49.6);
+    }
+
+    /// ECMA-376 §17.6.13 — a sectPr with `<w:pgSz>` but NO `<w:pgMar>` still
+    /// carries `geom` (page size present ⇒ Some), and the absent pgMar
+    /// sub-attributes resolve to the SPEC defaults (72/72/72/72 margins, 36/36
+    /// header/footer) — NOT zeros. This pins the contract a later per-section
+    /// geometry task depends on: a partially-declared section inherits the spec
+    /// defaults, not an all-zeros box.
+    #[test]
+    fn section_break_pgsz_only_uses_spec_default_margins() {
+        let body = body_from(
+            r#"
+            <w:p>
+              <w:pPr>
+                <w:sectPr>
+                  <w:pgSz w:w="12240" w:h="15840"/>
+                  <w:type w:val="nextPage"/>
+                </w:sectPr>
+              </w:pPr>
+            </w:p>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            "#,
+        );
+        let sb = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::SectionBreak { geom, .. } => Some(geom.clone()),
+                _ => None,
+            })
+            .expect("a SectionBreak marker");
+        let g = sb.expect("pgSz present ⇒ geom is Some");
+        assert_eq!(g.page_width, 612.0);
+        assert_eq!(g.page_height, 792.0);
+        // pgMar absent ⇒ spec defaults, not zeros.
+        assert_eq!(g.margin_top, 72.0);
+        assert_eq!(g.margin_right, 72.0);
+        assert_eq!(g.margin_bottom, 72.0);
+        assert_eq!(g.margin_left, 72.0);
+        assert_eq!(g.header_distance, 36.0);
+        assert_eq!(g.footer_distance, 36.0);
+    }
+
+    /// ECMA-376 §17.6.11 — `w:top` / `w:bottom` are ST_SignedTwipsMeasure and MAY
+    /// be negative (a header/footer that overlaps the body text region). The sign
+    /// must be preserved: `w:top="-1440"` ⇒ `margin_top == -72.0`.
+    #[test]
+    fn section_break_negative_top_margin_keeps_sign() {
+        let body = body_from(
+            r#"
+            <w:p>
+              <w:pPr>
+                <w:sectPr>
+                  <w:pgMar w:top="-1440" w:right="1080" w:bottom="1440" w:left="1080" w:header="720" w:footer="720"/>
+                  <w:type w:val="nextPage"/>
+                </w:sectPr>
+              </w:pPr>
+            </w:p>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            "#,
+        );
+        let sb = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::SectionBreak { geom, .. } => Some(geom.clone()),
+                _ => None,
+            })
+            .expect("a SectionBreak marker");
+        let g = sb.expect("pgMar present ⇒ geom is Some");
+        assert_eq!(g.margin_top, -72.0, "negative signed top margin keeps sign");
+    }
+
     /// A single-column ending section (`<w:cols>` with no `@w:num` ⇒ §17.6.4
     /// default of 1 column) carries `columns: None`, and the default break type
     /// (absent `<w:type>`) normalizes to "nextPage". This is exactly sample-5's
@@ -8758,9 +8931,15 @@ mod column_tests {
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         match &body[1] {
-            BodyElement::SectionBreak { kind, columns, .. } => {
+            BodyElement::SectionBreak {
+                kind,
+                columns,
+                geom,
+                ..
+            } => {
                 assert_eq!(kind, "nextPage");
                 assert!(columns.is_none(), "single-column ⇒ None");
+                assert!(geom.is_none(), "sectPr without pgSz/pgMar carries no geom");
             }
             other => panic!("expected SectionBreak, got {other:?}"),
         }
