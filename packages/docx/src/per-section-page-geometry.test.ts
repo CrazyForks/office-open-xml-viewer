@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { computePages, paginateDocument } from './renderer.js';
 import type {
   BodyElement, DocParagraph, DocxTextRun, SectionProps, DocxDocumentModel,
-  SectionGeom, PaginatedBodyElement,
+  SectionGeom, PaginatedBodyElement, HeaderFooter,
 } from './types';
 
 // ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — page geometry is
@@ -36,6 +36,15 @@ function makeCtx(): CanvasRenderingContext2D {
   };
   return ctx as unknown as CanvasRenderingContext2D;
 }
+
+// `paginateDocument` builds its measure ctx from `new OffscreenCanvas(...)`, which
+// the node test env lacks. Polyfill it with the SAME deterministic stub (line
+// height = fontPx) so the HF-reserve paginator runs headless and its page-fit
+// arithmetic is exact. (The paginator-stamp/renderer tests above inject their ctx
+// directly via computePages/renderDocumentToCanvas and don't need this.)
+(globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas = class {
+  getContext() { return makeCtx(); }
+};
 
 type DocRun = DocParagraph['runs'][number];
 function textRun(text: string, fontSize: number): DocRun {
@@ -210,5 +219,61 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
         expect((el as PaginatedBodyElement).sectionGeom?.pageHeight).toBe(140);
       }
     }
+  });
+});
+
+// A single 40pt paragraph measures exactly 40pt tall under the mock ctx (line
+// height = fontPx). Same footer shape as per-section-headers-footers.test.ts's
+// `footer()` — { body: [para(...)] } — but sized to 40pt so the reserve arithmetic
+// is round. Verified empirically: measureHeaderFooterHeight(FOOTER_40PT) = 40.
+const FOOTER_40PT: HeaderFooter = { body: [para('F', 40)] };
+
+describe('per-section HF reserves (§17.6.11) — paginator', () => {
+  it('reserves footer overflow against the PAGE section margins, not the body section', () => {
+    // Mid-body section sec1 (page 0): pageHeight 200, marginTop 20, marginBottom 60,
+    // footerDistance 10 ⇒ footer extent 10+40=50 FITS the 60pt bottom margin ⇒ reserve
+    // 0. Its frame = 200−20−60 = 120 ⇒ five 20pt lines (100pt) fit.
+    // Body section (page 1): marginBottom 20 ⇒ footer extent 50 overflows ⇒ reserve 30
+    // (its OWN page). B1 fits regardless.
+    // WITHOUT the fix, computeFooterReserves reads the body-level marginBottom (20) for
+    // EVERY page ⇒ page 0 gets a phantom reserve 30 ⇒ usable 90 ⇒ only 4 lines ⇒ A5
+    // spills to page 1. WITH the fix, page 0 reads sec1's stamped marginBottom (60) ⇒
+    // reserve 0 ⇒ all five A* stay on page 0.
+    const sec1: SectionGeom = {
+      pageWidth: 200, pageHeight: 200,
+      marginTop: 20, marginRight: 20, marginBottom: 60, marginLeft: 20,
+      headerDistance: 0, footerDistance: 10,
+    };
+    const bodySection: SectionProps = {
+      pageWidth: 200, pageHeight: 200,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 0, footerDistance: 10, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps;
+    const doc = {
+      section: bodySection,
+      body: [
+        para('A1'), para('A2'), para('A3'), para('A4'), para('A5'),
+        {
+          // The mid-body section must carry the footer itself — otherwise it resolves
+          // no footer on its pages and the (phantom) reserve is never applied there,
+          // so the bug can't surface. Mirror doc.footers on the break.
+          type: 'sectionBreak', kind: 'nextPage', geom: sec1,
+          headers: { default: null, first: null, even: null },
+          footers: { default: FOOTER_40PT, first: null, even: null },
+          titlePage: false,
+        } as BodyElement,
+        para('B1'),
+      ],
+      headers: { default: null, first: null, even: null },
+      footers: { default: FOOTER_40PT, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const pages = paginateDocument(doc);
+    const textsOn = (i: number) =>
+      (pages[i] ?? []).filter((e) => e.type === 'paragraph')
+        .map((e) => ((e as { runs?: { text?: string }[] }).runs ?? []).map((r) => r.text).join(''));
+    // All five A-paragraphs fit page 0 (reserve 0 under ITS section's marginBottom 60).
+    expect(textsOn(0)).toEqual(['A1', 'A2', 'A3', 'A4', 'A5']);
+    expect(textsOn(1)).toEqual(['B1']);
   });
 });

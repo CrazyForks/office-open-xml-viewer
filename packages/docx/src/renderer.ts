@@ -2211,12 +2211,21 @@ function computeFooterReserves(
   doc: DocxDocumentModel,
   measure: RenderState,
 ): number[] {
-  const sec = doc.section;
   return pages.map((_unused, pageIdx) => {
     const footer = resolvePageFooter(pages, pageIdx, doc);
     if (!footer) return 0;
     const footerH = measureHeaderFooterHeight(footer, measure); // pt (measure is scale 1)
-    return footerOverflowPt(footerH, sec.marginBottom, sec.footerDistance);
+    // ECMA-376 §17.6.11 — margins/distances are PER-SECTION: read this page's stamped
+    // geometry (body-level fallback only for a truly empty page). Residual: footer
+    // CONTENT is still measured at the body-level width (`measure` is built once from
+    // doc.section); per-section measure width is a follow-up — it matters only when
+    // mixed page WIDTHS meet a wrapping footer.
+    const g = pages[pageIdx]?.[0]?.sectionGeom;
+    return footerOverflowPt(
+      footerH,
+      g?.marginBottom ?? doc.section.marginBottom,
+      g?.footerDistance ?? doc.section.footerDistance,
+    );
   });
 }
 
@@ -2234,12 +2243,21 @@ function computeHeaderReserves(
   doc: DocxDocumentModel,
   measure: RenderState,
 ): number[] {
-  const sec = doc.section;
   return pages.map((_unused, pageIdx) => {
     const header = resolvePageHeader(pages, pageIdx, doc);
     if (!header) return 0;
     const headerH = measureHeaderFooterHeight(header, measure); // pt (measure is scale 1)
-    return headerOverflowPt(headerH, sec.marginTop, sec.headerDistance);
+    // ECMA-376 §17.6.11 — margins/distances are PER-SECTION: read this page's stamped
+    // geometry (body-level fallback only for a truly empty page). Residual: header
+    // CONTENT is still measured at the body-level width (`measure` is built once from
+    // doc.section); per-section measure width is a follow-up — it matters only when
+    // mixed page WIDTHS meet a wrapping header.
+    const g = pages[pageIdx]?.[0]?.sectionGeom;
+    return headerOverflowPt(
+      headerH,
+      g?.marginTop ?? doc.section.marginTop,
+      g?.headerDistance ?? doc.section.headerDistance,
+    );
   });
 }
 
