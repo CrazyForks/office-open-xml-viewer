@@ -118,6 +118,26 @@ export interface HeaderFooter {
   body: BodyElement[];
 }
 
+/** ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — a section's page
+ *  geometry: page size + margins + header/footer distances (pt). Mirrors the Rust
+ *  `SectionGeom`. Carried on a {@link BodyElement} `sectionBreak` arm (`geom`) so a
+ *  mid-body section keeps its own page size; the FINAL section's geometry lives on
+ *  {@link DocxDocumentModel.section}. Also stamped per {@link PaginatedBodyElement}
+ *  (`sectionGeom`) by the paginator so the renderer sizes each page from its own
+ *  section. `orient` is omitted — Word swaps w/h for landscape, so verbatim w/h
+ *  already give the correct dims. */
+export interface SectionGeom {
+  pageWidth: number;   // pt
+  pageHeight: number;  // pt
+  /** §17.6.11 — top/bottom MAY be negative (ST_SignedTwipsMeasure); keep the sign. */
+  marginTop: number;
+  marginRight: number;
+  marginBottom: number;
+  marginLeft: number;
+  headerDistance: number;
+  footerDistance: number;
+}
+
 export interface SectionProps {
   pageWidth: number;   // pt
   pageHeight: number;  // pt
@@ -223,6 +243,10 @@ export type BodyElement =
       headers?: HeadersFooters;
       footers?: HeadersFooters;
       titlePage?: boolean;
+      /** ECMA-376 §17.6.13 / §17.6.11 — this ENDING section's page geometry
+       *  (size + margins). Absent when the sectPr inherits both pgSz and pgMar
+       *  (the renderer then falls back to the body-level section geometry). */
+      geom?: SectionGeom;
     };
 
 /** A BodyElement annotated with a line range to render. Set when the
@@ -286,6 +310,14 @@ export type PaginatedBodyElement = BodyElement & {
    *  falls back to the body-level `doc.headers`/`doc.footers`/`section.titlePage`.
    *  Runtime-only — never emitted by the parser. */
   sectionHF?: { headers: HeadersFooters; footers: HeadersFooters; titlePage: boolean };
+  /** ECMA-376 §17.6.13 / §17.6.11 — the page geometry (size + margins) of the
+   *  SECTION this element belongs to. Stamped by the paginator (from the upcoming
+   *  `SectionBreak`'s `geom`, or the body-level section for the final section) so the
+   *  renderer sizes each page from its own section — mirroring how `sectionHF`
+   *  resolves per-section headers/footers and `colGeom` per-section columns. Absent ⇒
+   *  the renderer uses the body-level `doc.section` geometry (single-section docs are
+   *  unaffected). Runtime-only — never emitted by the parser. */
+  sectionGeom?: SectionGeom;
 };
 
 export interface DocParagraph {
