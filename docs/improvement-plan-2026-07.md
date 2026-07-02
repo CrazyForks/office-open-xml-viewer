@@ -68,8 +68,8 @@
 | # | 指摘 | 場所 | 工数 |
 |---|------|------|------|
 | D1 | 存在確認のためだけにメディアを全 inflate（3 パーサー共通パターン） | `docx/parser/src/parser.rs:1270`, `xlsx/parser/src/drawing.rs:1443`, `pptx/parser/src/lib.rs:9328` | S |
-| D2 | `extract_image` / `parse_sheet` 等が呼び出し毎に全ファイルを JS→WASM コピー + central directory 再スキャン。stateful `#[wasm_bindgen]` ハンドルで解消 | 各 parser の WASM 面 | M |
-| D3 | [xlsx] `parse_sheet` 毎に workbook.xml / theme / **sharedStrings 全体**を再パース。同一 drawing XML をシート毎に 3 回以上 DOM 化 | `xlsx/parser/src/lib.rs:51-99`, `drawing.rs:1361-1500` | M |
+| D2 ✅ | `extract_image` / `parse_sheet` 等が呼び出し毎に全ファイルを JS→WASM コピー + central directory 再スキャン。stateful `#[wasm_bindgen]` ハンドルで解消 → `DocxArchive`/`PptxArchive`/`XlsxArchive`（所有 `ZipArchive<Cursor<Vec<u8>>>`）。フリー関数は thin wrapper で温存、worker は `archive` を保持し JS 側 bytes 破棄（メモリ二重化解消）。pptx sample-4 (15MB) parse+media 反復で **1.49×** | 各 parser の WASM 面 | M |
+| D3 ✅ | [xlsx] `parse_sheet` 毎に workbook.xml / theme / **sharedStrings 全体**を再パース → ハンドル内 `WorkbookShared` を 1 回パースし全シートで再利用（`parse_sheet_with`/`parse_xlsx_inner_with` に分離）。sample-12 (8 sheets) **1.61×**。drawing XML の per-sheet parse-once はシート単位再パース解消を主目的とし別途 | `xlsx/parser/src/lib.rs:51-99`, `drawing.rs:1361-1500` | M |
 | D4 | [pptx] マスター XML を ~10-12 回 DOM 再パース、レイアウトキャッシュ無し（50 スライド 1 レイアウトで 50 回パース + 50 コピー保持）、スライド XML も 2 回パース | `pptx/parser/src/lib.rs:8976, 9160-9290` | M–L |
 | D5 | theme パース 3 重実装 → `ooxml_common::theme` へ | pptx `lib.rs:1926`, xlsx `lib.rs:242`, docx `parser.rs:506` | M |
 | D6 | OPC rels + パス解決 3 重実装（leading-slash バグは pptx のみ修正済み = 他 2 つに同じ穴の可能性） → `ooxml_common::rels` へ | 各 parser | S/M |

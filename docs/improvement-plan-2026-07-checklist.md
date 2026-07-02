@@ -68,8 +68,8 @@ cargo test
 
 - [ ] ベンチ基盤: 代表ファイル 3 種で初回表示 / シート・スライド切替 / スクロール FPS の計測スクリプトを用意（以降の各項目で前後比較）
 - [ ] C2+B7+D9: 境界プロトコル統一 — parser は `Vec<u8>`（JSON bytes）返却 → worker は transferable 素通し → 受信側で 1 回 `JSON.parse`。**3 フォーマット同時に**
-- [ ] D2: stateful `#[wasm_bindgen]` アーカイブハンドル（bytes + central directory index 保持、`extract(path)` / `parse_sheet(i)`）。worker の `currentBuffer` ライフサイクルに載せる
-- [ ] D3: xlsx sharedStrings / theme / workbook.xml のハンドル内キャッシュ。sheet rels + drawing XML の parse-once 化（現状 1 つの drawing を 3 回以上 DOM 化）
+- [x] D2: stateful `#[wasm_bindgen]` アーカイブハンドル（`DocxArchive`/`PptxArchive`/`XlsxArchive` = 所有 `ZipArchive<Cursor<Vec<u8>>>` + `max` 保持）。bytes を WASM へ 1 回コピー・central directory を 1 回スキャンし `parse()`/`extract_image(path)`/`parse_sheet(i,name)` を retained archive 上で提供。フリー関数（`parse_*`/`extract_*`）は所有 archive を張る thin wrapper 化で温存（node/markdown/stories/MCP 無変更）。各 worker は `currentBuffer: Uint8Array` を `archive: *Archive|null` に置換し、構築後は JS 側 bytes を保持しない（メモリ二重化解消）。再 parse 時 `disposeArchive()` で明示 free（二重 free/UAF ガード）。ベンチ: pptx sample-4 (15MB, parse+5 media) **1.49×**、docx sample-9 (13 images) 1.10×
+- [x] D3: xlsx `WorkbookShared`（workbook.xml/rels source + sheet list + theme palette + sharedStrings）をハンドル内で 1 回パースし全シート切替で再利用。`parse_sheet` 毎の sharedStrings/theme 全再パースを解消（`parse_sheet_with`/`parse_xlsx_inner_with` に分離、フリー関数は毎回 fresh build で従来コスト維持）。ベンチ: sample-12 (8 sheets) **1.61×**、sample-9 (3 sheets) 1.30×。roxmltree `Document` は借用のためキャッシュ不可 → cached string から都度再パース（inflate なしで安価）。drawing XML の parse-once 化は sheet 単位再パース解消を主目的とし本コミット範囲では見送り（別項）
 - [ ] D4: pptx マスター DOM の parse-once 化（~10-12 回 → 1 回）、layout cache 追加（`master_cache` の鏡映）、slide XML の 2 回パース解消
 - [ ] B3: docx 画像デコードキャッシュ（`Map<string, DecodedImage>` を DocxDocument に、`destroy()` で解放）
 - [ ] A8(後半): core に `getCachedBitmapByPath`（SVG キャッシュの sibling、ImageBitmap の close 管理付き）を追加し 3 フォーマットで共用
