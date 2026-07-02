@@ -1221,6 +1221,61 @@ fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
 /// come from `<w:br w:type="column"/>` ⇒ `ColumnBreak`); the renderer would
 /// otherwise have no defined column geometry to advance into across a section
 /// boundary.
+/// ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — extract a section's page
+/// geometry from its `<w:sectPr>` into a `SectionGeom`. Returns `None` when the
+/// sectPr declares NEITHER `<w:pgSz>` NOR `<w:pgMar>` (a section that inherits both
+/// from the body — the renderer then uses the body-level geometry). When either is
+/// present, absent sub-attributes fall back to the spec defaults (US Letter portrait,
+/// 1" margins, 0.5" header/footer) — the SAME defaults `parse_section` uses so a
+/// SectionBreak's geometry and `Document.section` agree for a fully-inherited section.
+fn section_geom(sect_pr: roxmltree::Node) -> Option<SectionGeom> {
+    let pg_sz = child_w(sect_pr, "pgSz");
+    let pg_mar = child_w(sect_pr, "pgMar");
+    if pg_sz.is_none() && pg_mar.is_none() {
+        return None;
+    }
+    // Spec defaults (identical to parse_section's `default`).
+    let mut geom = SectionGeom {
+        page_width: 612.0,
+        page_height: 792.0,
+        margin_top: 72.0,
+        margin_right: 72.0,
+        margin_bottom: 72.0,
+        margin_left: 72.0,
+        header_distance: 36.0,
+        footer_distance: 36.0,
+    };
+    if let Some(pg_sz) = pg_sz {
+        if let Some(w) = attr_w(pg_sz, "w") {
+            geom.page_width = twips_to_pt(&w);
+        }
+        if let Some(h) = attr_w(pg_sz, "h") {
+            geom.page_height = twips_to_pt(&h);
+        }
+    }
+    if let Some(pg_mar) = pg_mar {
+        if let Some(v) = attr_w(pg_mar, "top") {
+            geom.margin_top = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "right") {
+            geom.margin_right = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "bottom") {
+            geom.margin_bottom = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "left") {
+            geom.margin_left = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "header") {
+            geom.header_distance = twips_to_pt(&v);
+        }
+        if let Some(v) = attr_w(pg_mar, "footer") {
+            geom.footer_distance = twips_to_pt(&v);
+        }
+    }
+    Some(geom)
+}
+
 fn section_break_element(
     sect_pr: roxmltree::Node,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
@@ -1242,6 +1297,8 @@ fn section_break_element(
         headers: resolved.headers,
         footers: resolved.footers,
         title_page: resolved.title_page,
+        // ECMA-376 §17.6.13 / §17.6.11 — this ending section's page geometry.
+        geom: section_geom(sect_pr),
     }
 }
 
@@ -8736,6 +8793,50 @@ mod column_tests {
             }
             other => panic!("expected SectionBreak, got {other:?}"),
         }
+    }
+
+    /// ECMA-376 §17.6.13 `<w:pgSz>` / §17.6.11 `<w:pgMar>` — a mid-body section
+    /// break carries its ENDING section's page geometry on `geom`. The final
+    /// (body-level) section's geometry stays on `Document.section` (unchanged);
+    /// this closes the hole where mid-body sections dropped pgSz/pgMar entirely,
+    /// so an earlier landscape section had no page size at all (rendered at the
+    /// body width). Values are twips → pt (twips_to_pt divides by 20): 15840 twips
+    /// = 792 pt (11"), 12240 twips = 612 pt (8.5"), 1440 twips = 72 pt (1").
+    #[test]
+    fn section_break_carries_page_geometry() {
+        // A landscape first section (w=15840, h=12240) ended by a nextPage break,
+        // followed by a portrait body section. Parsed through parse_body_elements
+        // (via `body_from`) so the pPr-nested sectPr becomes a SectionBreak marker.
+        let body = body_from(
+            r#"
+            <w:p>
+              <w:pPr>
+                <w:sectPr>
+                  <w:pgSz w:w="15840" w:h="12240"/>
+                  <w:pgMar w:top="1440" w:right="1080" w:bottom="1440" w:left="1080" w:header="720" w:footer="720"/>
+                  <w:type w:val="nextPage"/>
+                </w:sectPr>
+              </w:pPr>
+            </w:p>
+            <w:p><w:r><w:t>body</w:t></w:r></w:p>
+            "#,
+        );
+        let sb = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::SectionBreak { geom, .. } => Some(geom.clone()),
+                _ => None,
+            })
+            .expect("a SectionBreak marker");
+        let g = sb.expect("SectionBreak carries page geometry");
+        assert_eq!(g.page_width, 792.0);
+        assert_eq!(g.page_height, 612.0);
+        assert_eq!(g.margin_top, 72.0);
+        assert_eq!(g.margin_right, 54.0);
+        assert_eq!(g.margin_bottom, 72.0);
+        assert_eq!(g.margin_left, 54.0);
+        assert_eq!(g.header_distance, 36.0);
+        assert_eq!(g.footer_distance, 36.0);
     }
 
     /// A single-column ending section (`<w:cols>` with no `@w:num` ⇒ §17.6.4
