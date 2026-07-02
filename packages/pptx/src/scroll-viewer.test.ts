@@ -652,3 +652,167 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     v.destroy();
   });
 });
+
+describe('PptxScrollViewer — zoom (T4)', () => {
+  // Uniform 1000×600 EMU slides; `_scale` is px-per-EMU (no PT_TO_PX). Container
+  // 200×400, width:undefined ⇒ base fit maps the slide width (1000 EMU) to 200px:
+  //   base = 200 / 1000 = 0.2 px/EMU
+  //   slide height px = 600 * 0.2 = 120
+  //   offset[i] = i * (120 + gap) = i * 130
+  // Zoom ×2 ⇒ scale 0.4, height 240, stride 250. The two MANDATORY render-epoch
+  // tests (resolve + reject) live in the T3 rendering block above (already covered
+  // by WS4b-1), so they are not repeated here.
+  function setup(slideCount = 20, opts = {}) {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(slideCount, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      overscan: 1,
+      // Give the base fit (0.2) headroom: base ×2 = 0.4 stays within these bounds
+      // so the re-anchor tests exercise the zoom path, not the clamp.
+      zoomMin: 0.05,
+      zoomMax: 3,
+      ...opts,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    return { v, scrollHost, engine, container };
+  }
+
+  it('base fit scale maps the slide width to the container width', () => {
+    const { v } = setup();
+    // base = 200 / 1000 = 0.2
+    expect(v.scaleForTest()).toBeCloseTo(0.2, 6);
+    expect(v.baseScaleForTest()).toBeCloseTo(0.2, 6);
+    v.destroy();
+  });
+
+  it('re-anchors so the slide under the viewport top stays fixed across a zoom (intraFrac 0)', () => {
+    const { v, scrollHost } = setup();
+    // slide 3 top offset at base (0.2): 3 * (120 + 10) = 390
+    scrollHost.scrollTop = 390;
+    scrollHost.dispatch('scroll');
+    expect(v.topVisibleSlide).toBe(3);
+    const cur = v.scaleForTest(); // 0.2
+    v.setScale(cur * 2); // 0.4 (within [0.05, 3], no clamp)
+    expect(v.scaleForTest()).toBeCloseTo(0.4, 6);
+    // slide 3 stays the top slide; new offset = 3 * (240 + 10) = 750
+    expect(v.topVisibleSlide).toBe(3);
+    expect(Math.abs(scrollHost.scrollTop - 750)).toBeLessThan(2);
+    v.destroy();
+  });
+
+  it('re-anchors preserving the intra-slide fraction (intraFrac ≠ 0)', () => {
+    const { v, scrollHost } = setup();
+    // Scroll so HALF of slide 3 (60 of its 120px) has passed above the viewport
+    // top: scrollTop = offset[3] + 0.5*120 = 390 + 60 = 450 → intraFrac 0.5.
+    scrollHost.scrollTop = 450;
+    scrollHost.dispatch('scroll');
+    expect(v.topVisibleSlide).toBe(3);
+    v.setScale(v.scaleForTest() * 2); // 0.2 → 0.4; heights' = 240
+    // newScrollTop = offset'[3] + 0.5 * 240 = 750 + 120 = 870
+    expect(Math.abs(scrollHost.scrollTop - 870)).toBeLessThan(2);
+    // Slide 3 is still under the viewport top: offset'[3]=750 <= 870 < 1000.
+    expect(v.topVisibleSlide).toBe(3);
+    v.destroy();
+  });
+
+  it('clamps setScale to the absolute [zoomMin, zoomMax] px-per-EMU bounds', () => {
+    const { v } = setup();
+    v.setScale(100); // above zoomMax 3 (absolute, NOT a multiple of base)
+    expect(v.scaleForTest()).toBeCloseTo(3, 6);
+    v.setScale(0.001); // below zoomMin 0.05
+    expect(v.scaleForTest()).toBeCloseTo(0.05, 6);
+    v.destroy();
+  });
+
+  it('setScale defaults clamp to [0.1, 4] when zoomMin/zoomMax are unset', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(5, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    v.setScale(999);
+    expect(v.scaleForTest()).toBeCloseTo(4, 5); // default zoomMax
+    v.setScale(0.0001);
+    expect(v.scaleForTest()).toBeCloseTo(0.1, 5); // default zoomMin
+    v.destroy();
+  });
+
+  it('Ctrl+wheel zooms in and calls preventDefault; bare wheel does not zoom or preventDefault', () => {
+    const { v, scrollHost } = setup();
+    const before = v.scaleForTest();
+
+    // Bare wheel: no zoom, native scroll (preventDefault NOT called).
+    const barePrevent = vi.fn();
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: false, metaKey: false, preventDefault: barePrevent });
+    expect(v.scaleForTest()).toBe(before);
+    expect(barePrevent).not.toHaveBeenCalled();
+
+    // Ctrl+wheel (deltaY<0 = zoom in): scale increases, preventDefault called.
+    const ctrlPrevent = vi.fn();
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: true, metaKey: false, preventDefault: ctrlPrevent });
+    expect(v.scaleForTest()).toBeGreaterThan(before);
+    expect(ctrlPrevent).toHaveBeenCalledTimes(1);
+    v.destroy();
+  });
+
+  it('Cmd(meta)+wheel also zooms', () => {
+    const { v, scrollHost } = setup();
+    const before = v.scaleForTest();
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: false, metaKey: true, preventDefault() {} });
+    expect(v.scaleForTest()).toBeGreaterThan(before);
+    v.destroy();
+  });
+
+  it('positive deltaY (ctrl+wheel down) zooms out', () => {
+    const { v, scrollHost } = setup();
+    const before = v.scaleForTest();
+    scrollHost.dispatch('wheel', { deltaY: 100, ctrlKey: true, metaKey: false, preventDefault() {} });
+    expect(v.scaleForTest()).toBeLessThan(before);
+    v.destroy();
+  });
+
+  it('enableZoom:false installs no wheel handler — ctrl+wheel is inert', () => {
+    const { v, scrollHost } = setup(20, { enableZoom: false });
+    const before = v.scaleForTest();
+    // No wheel listener was registered at all.
+    expect(scrollHost._listeners.has('wheel')).toBe(false);
+    const prevent = vi.fn();
+    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: true, preventDefault: prevent });
+    expect(v.scaleForTest()).toBe(before);
+    expect(prevent).not.toHaveBeenCalled();
+    v.destroy();
+  });
+
+  it('a wheel with deltaY 0 is a no-op even with ctrl held', () => {
+    const { v, scrollHost } = setup();
+    const before = v.scaleForTest();
+    const prevent = vi.fn();
+    scrollHost.dispatch('wheel', { deltaY: 0, ctrlKey: true, preventDefault: prevent });
+    expect(v.scaleForTest()).toBe(before);
+    v.destroy();
+  });
+
+  it('setScale to the SAME scale is a no-op (no re-anchor, no epoch bump churn)', () => {
+    const { v, scrollHost } = setup();
+    scrollHost.scrollTop = 390;
+    scrollHost.dispatch('scroll');
+    const topBefore = scrollHost.scrollTop;
+    const epochBefore = v.renderEpochForTest();
+    v.setScale(v.scaleForTest()); // identical scale
+    expect(scrollHost.scrollTop).toBe(topBefore); // unchanged
+    expect(v.renderEpochForTest()).toBe(epochBefore); // no epoch bump
+    v.destroy();
+  });
+});
