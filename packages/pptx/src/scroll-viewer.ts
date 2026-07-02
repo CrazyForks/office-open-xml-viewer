@@ -19,6 +19,14 @@ import { buildPptxTextLayer } from './text-layer';
 const ZOOM_SETTLE_MS = 150;
 
 /**
+ * Default CSS `box-shadow` painted on every slide canvas — the soft drop shadow a
+ * presentation viewer casts under each slide (matches the Examples/recipe look,
+ * which the scroll viewer now reproduces with zero config). See
+ * {@link PptxScrollViewerOptions.pageShadow}.
+ */
+const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+
+/**
  * Options for {@link PptxScrollViewer}. Extends `RenderSlideOptions` (per-slide
  * render knobs, minus `onTextRun`) and `LoadOptions` (parse/worker knobs). See
  * design §8.2.
@@ -82,6 +90,21 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    * background shows through (non-breaking).
    */
   background?: string;
+  /**
+   * CSS `box-shadow` painted on every slide CANVAS (not the wrapper — the
+   * text-selection overlay must not cast its own shadow). The soft drop shadow a
+   * presentation viewer leaves under each slide.
+   *
+   * - Default (`undefined`): `'0 1px 3px rgba(0,0,0,0.2)'` — the recipe look, so
+   *   the scroll viewer reproduces the Examples appearance with zero config.
+   * - `false`: NO shadow (flat slides).
+   * - A custom string is applied verbatim. A spread-only ring such as
+   *   `'0 0 0 1px #c8ccd0'` gives a crisp 1px BORDER look — and because
+   *   `box-shadow` never affects layout (unlike `border`, which would grow the
+   *   box and shift every offset), a border and a drop shadow are the SAME knob
+   *   here rather than two competing options.
+   */
+  pageShadow?: string | false;
   /**
    * Inject an already-loaded engine to share one parse across panes (design §14).
    * When set: `load()` is unsupported (throws), the engine's own `mode` wins (an
@@ -212,10 +235,21 @@ export class PptxScrollViewer {
    *  skip the re-fit when only the height changed (a ResizeObserver fires on ANY
    *  box change, but only a WIDTH change alters the fit-to-width base scale). */
   private _lastFitWidth = 0;
+  /** Resolved slide-canvas `box-shadow` (design: the recipe drop shadow by
+   *  default). Resolved ONCE with `??` — NOT `||` — so `pageShadow: false`
+   *  survives as the "no shadow" sentinel (a `||` would treat `false` as absent
+   *  and wrongly re-apply the default). Applied by `_applyPageShadow` at EVERY
+   *  canvas-creation site (`_acquireSlot` and the double-buffer spare in
+   *  `_settleSlot`) so a recycled/re-mounted slot and a settle-swapped spare all
+   *  carry it. */
+  private readonly _pageShadow: string | false;
 
   constructor(container: HTMLElement, opts: PptxScrollViewerOptions = {}) {
     this._container = container;
     this._opts = opts;
+    // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
+    // fall through to the default.
+    this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
     this._injected = !!opts.presentation;
     if (this._injected) {
       const engine = opts.presentation as PptxPresentation;
@@ -499,6 +533,16 @@ export class PptxScrollViewer {
     }
   }
 
+  /** Apply the resolved slide-canvas shadow (design: recipe drop shadow by
+   *  default, `false` ⇒ none). Single source so `_acquireSlot` and the
+   *  double-buffer spare in `_settleSlot` stay in lock-step — a spare that missed
+   *  this would lose the shadow on the settle swap. `box-shadow` never affects
+   *  layout, so this is safe to (re)set on a live/pooled canvas without shifting
+   *  any offset. */
+  private _applyPageShadow(canvas: HTMLCanvasElement): void {
+    if (this._pageShadow !== false) canvas.style.boxShadow = this._pageShadow;
+  }
+
   private _acquireSlot(): SlideSlot {
     const reused = this._free.pop();
     if (reused) {
@@ -513,6 +557,7 @@ export class PptxScrollViewer {
     wrapper.style.cssText = 'position:absolute;';
     const canvas = document.createElement('canvas');
     canvas.style.cssText = 'display:block;background:#fff;';
+    this._applyPageShadow(canvas);
     wrapper.appendChild(canvas);
     let textLayer: HTMLDivElement | null = null;
     if (this._opts.enableTextSelection) {
@@ -994,9 +1039,12 @@ export class PptxScrollViewer {
       return;
     }
 
-    // Main mode: double-buffer. Render into a spare canvas kept off-DOM.
+    // Main mode: double-buffer. Render into a spare canvas kept off-DOM. The
+    // spare REPLACES the on-screen canvas on swap, so it must carry the slide
+    // shadow too — otherwise a settle would silently drop it.
     const spare = document.createElement('canvas');
     spare.style.cssText = 'display:block;background:#fff;';
+    this._applyPageShadow(spare);
     const runs: PptxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
     const onTextRun = wantOverlay ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
