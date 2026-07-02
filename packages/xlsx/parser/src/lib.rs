@@ -42,9 +42,8 @@ const INDEXED_COLORS: &[&str] = &[
 pub fn parse_xlsx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
     let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
-    parse_xlsx_inner(data)
-        .map(|wb| serde_json::to_string(&wb).unwrap())
-        .map_err(|e| JsValue::from_str(&e))
+    let wb = parse_xlsx_inner(data).map_err(|e| JsValue::from_str(&e))?;
+    serde_json::to_string(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
 #[wasm_bindgen]
