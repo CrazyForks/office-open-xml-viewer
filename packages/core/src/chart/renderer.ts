@@ -7,10 +7,11 @@ import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
 import {
   computeChartFrame,
   chartTitleBand,
-  chartTitleFontPx as chartTitleFontPxShared,
   chartLegendReserve,
   chartLegendBands,
   chartAxisTitleBands,
+  axisTitleMargin,
+  type ChartLegendReserve,
 } from './layout.js';
 import { niceStep, valueAxisScale } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
@@ -71,15 +72,6 @@ export function legendEntryColor(
   return chartColor(entryIndex, series[entryIndex]);
 }
 
-/** Axis-title font size (px). Honors the XML run-prop size (`<c:catAx|valAx>
- *  <c:title>…@sz`, hundredths of a point) when present — e.g. 18pt titles in
- *  sample-30 — otherwise keeps the previous proportional default so untitled-
- *  size charts are unchanged. */
-function axisTitleFontPx(sizeHpt: number | null | undefined, h: number, ptToPx: number): number {
-  if (sizeHpt) return (sizeHpt / 100) * ptToPx;
-  return Math.max(8, Math.min(10, h * 0.045));
-}
-
 /** Draw an axis title at an explicit anchor in the outer gutter band (outside
  *  the tick labels), at its real font size/bold/color. The cat title is
  *  centered under the X axis; the val title is rotated -90° centered to the
@@ -118,33 +110,6 @@ function drawAxisTitle(
  *  '#rrggbb' when the XML supplied a srgb color, else the legacy '#555'. */
 function axisTitleColor(hex: string | null | undefined): string {
   return hex ? `#${hex}` : '#555';
-}
-
-/** Margin (px) between the chart's outer edge and an axis title. ECMA-376
- *  leaves axis-title position automatic when there is no `<c:layout>/<c:manualLayout>`
- *  (§21.2.2.88 layout / §21.2.2.32 plotArea) — there is NO spec-defined inset, so
- *  the `8px` floor and `2%` factor are empirical approximations of Excel's
- *  auto-layout, not measured spec values. `dim` = width (left/val title) or
- *  height (bottom/cat title). */
-function axisTitleMargin(dim: number): number {
-  return Math.max(8, dim * 0.02);
-}
-
-interface AxisTitleLayout { catTitlePx: number; valTitlePx: number; catTitleH: number; valTitleW: number; }
-
-/** Axis-title font sizes (px) and the outer gutter bands to reserve for them
- *  (`catTitleH` → bottom pad, `valTitleW` → left pad). Identical across all four
- *  cartesian renderers; keeping reserve here and the draw anchors in
- *  drawAxisTitles in sync via one source for the band size. The per-renderer
- *  `pad` formula that consumes these differs and stays inline. */
-function axisTitleLayout(chart: ChartModel, w: number, h: number, ptToPx: number): AxisTitleLayout {
-  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
-  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
-  return {
-    catTitlePx, valTitlePx,
-    catTitleH: chart.catAxisTitle ? catTitlePx + axisTitleMargin(h) + 4 : 0,
-    valTitleW: chart.valAxisTitle ? valTitlePx + axisTitleMargin(w) + 4 : 0,
-  };
 }
 
 /** Draw both axis titles for a cartesian chart (bar/line/area/scatter),
@@ -309,28 +274,12 @@ function drawLegend(
   }
 }
 
-type LegendSide = 'r' | 'l' | 't' | 'b';
-interface LegendLayout {
-  side: LegendSide;
-  /** Reserved plot-area width (>0 when side = l or r). */
-  reserveW: number;
-  /** Reserved plot-area height (>0 when side = t or b). */
-  reserveH: number;
-}
+// Legend placement is resolved by `chartLegendReserve` (layout.ts). This alias
+// keeps the drawing helper's signature readable while sharing the single source
+// of truth for the reserve shape.
+type LegendLayout = ChartLegendReserve;
 
-/** Resolve legend placement from `<c:legendPos>`. Returns null when hidden. */
-function legendLayout(chart: ChartModel, w: number, h: number): LegendLayout | null {
-  if (!chart.showLegend) return null;
-  const pos = chart.legendPos ?? 'r';
-  const side: LegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
-  if (side === 'r' || side === 'l') {
-    return { side, reserveW: Math.max(80, w * 0.22), reserveH: 0 };
-  }
-  // Excel's top/bottom legend is a single-row strip; reserve ~8% of height.
-  return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
-}
-
-/** Draw a legend in the band reserved by {@link legendLayout}. */
+/** Draw a legend in the band reserved by {@link chartLegendReserve}. */
 function drawLegendForLayout(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -421,14 +370,6 @@ function drawAxisTick(
   ctx.stroke();
   ctx.strokeStyle = prevS;
   ctx.lineWidth = prevW;
-}
-
-function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): number {
-  // Honor the XML-specified title font size (hundredths of a point) when
-  // present. ptToPx is the pixels-per-point at the current slide scale, so
-  // a 16pt title renders at the same proportional size as PowerPoint.
-  if (chart.titleFontSizeHpt) return (chart.titleFontSizeHpt / 100) * ptToPx;
-  return Math.max(10, h * 0.085);
 }
 
 /** Resolve an axis label font size (px) from <c:txPr> hpt or a proportional
