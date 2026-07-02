@@ -7,6 +7,7 @@ import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
 import { niceStep, valueAxisScale } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
+import { elideToWidth } from './text-elide.js';
 import { hexToRgba } from '../shape/paint.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 
@@ -84,18 +85,23 @@ function drawAxisTitle(
   fontSizePx: number,
   bold: boolean,
   color: string,
+  // Available run length along the axis (plot width for the bottom cat title,
+  // plot height for the rotated val title). Titles longer than the axis are
+  // elided with an ellipsis rather than hard-cut at a fixed char count.
+  maxPx: number,
 ): void {
   ctx.save();
   ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px sans-serif`;
   ctx.fillStyle = color;
+  const label = elideToWidth(ctx, text, maxPx);
   if (axis === 'cat') {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(text.slice(0, 60), anchorX, anchorY);
+    ctx.fillText(label, anchorX, anchorY);
   } else {
     ctx.translate(anchorX, anchorY);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(text.slice(0, 60), 0, 0);
+    ctx.fillText(label, 0, 0);
   }
   ctx.restore();
 }
@@ -155,17 +161,21 @@ function drawAxisTitles(
   if (chart.valAxisTitle) {
     const anchorX = x + legLeftW + axisTitleMargin(w) + valTitlePx / 2;
     const anchorY = py0 + ph / 2;
+    // The val title is rotated -90°, so it runs along the plot HEIGHT.
     drawAxisTitle(
       ctx, chart.valAxisTitle, anchorX, anchorY, 'val',
       valTitlePx, chart.valAxisTitleFontBold ?? true, axisTitleColor(chart.valAxisTitleFontColor),
+      ph,
     );
   }
   if (chart.catAxisTitle) {
     const anchorX = px0 + pw / 2;
     const anchorY = y + h - legBottomH - axisTitleMargin(h) - catTitlePx / 2;
+    // The cat title runs horizontally along the plot WIDTH.
     drawAxisTitle(
       ctx, chart.catAxisTitle, anchorX, anchorY, 'cat',
       catTitlePx, chart.catAxisTitleFontBold ?? true, axisTitleColor(chart.catAxisTitleFontColor),
+      pw,
     );
   }
 }
@@ -253,14 +263,24 @@ function drawLegend(
     ctx.font = `${fontSize}px sans-serif`;
     ctx.textBaseline = 'middle';
     const itemGap = 12;
-    const itemWidths = entries.map((e) => sw + gap + ctx.measureText(e.label.slice(0, 30)).width);
-    const total = itemWidths.reduce((a, b) => a + b, 0) + itemGap * Math.max(0, entries.length - 1);
+    // Cap each entry's text at the full legend strip (minus its own swatch+gap)
+    // so only a single name that would span the *entire* strip is elided — the
+    // width-based replacement for the old slice(0, 30) runaway guard. Normal
+    // multi-entry labels are left intact (a shorter sibling does not shrink a
+    // longer one's budget); as before, entries whose combined width exceeds the
+    // strip simply center-overflow rather than being clipped. Elide once and
+    // reuse for both the width calc and the draw so the two never disagree.
+    const nEntries = Math.max(1, entries.length);
+    const maxTextPx = lw - sw - gap;
+    const labels = entries.map((e) => elideToWidth(ctx, e.label, maxTextPx));
+    const itemWidths = labels.map((l) => sw + gap + ctx.measureText(l).width);
+    const total = itemWidths.reduce((a, b) => a + b, 0) + itemGap * (nEntries - 1);
     let rx = lx + (lw - total) / 2;
     const ry = ly + lh / 2;
     for (let i = 0; i < entries.length; i++) {
       drawLegendSwatch(ctx, swatchStyle, entries[i].color, rx, ry - fontSize / 2, sw, fontSize);
       ctx.fillStyle = '#333'; ctx.textAlign = 'left';
-      ctx.fillText(entries[i].label.slice(0, 30), rx + sw + gap, ry);
+      ctx.fillText(labels[i], rx + sw + gap, ry);
       rx += itemWidths[i] + itemGap;
     }
     return;
@@ -269,14 +289,16 @@ function drawLegend(
   ctx.font = `${fontSize}px sans-serif`;
   ctx.textBaseline = 'middle';
   const rowH = fontSize + 4;
+  // Vertical legend: each label runs from just after the swatch to the right
+  // edge of the reserved legend column, so cap it at that remaining width.
+  const maxTextPx = lw - sw - gap;
   let ry = ly + (lh - rowH * entries.length) / 2;
   for (let i = 0; i < entries.length; i++) {
     drawLegendSwatch(ctx, swatchStyle, entries[i].color, lx, ry, sw, fontSize);
     ctx.fillStyle = '#333'; ctx.textAlign = 'left';
-    ctx.fillText(entries[i].label.slice(0, 20), lx + sw + gap, ry + fontSize / 2);
+    ctx.fillText(elideToWidth(ctx, entries[i].label, maxTextPx), lx + sw + gap, ry + fontSize / 2);
     ry += rowH;
   }
-  void lw;
 }
 
 type LegendSide = 'r' | 'l' | 't' | 'b';
@@ -896,16 +918,22 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // sample-2 slide-16's "2025年3月期" labels are `bg1 lumMod 75%` gray).
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.font = `${Math.max(8, Math.min(11, catGap * 0.5))}px sans-serif`;
+    // Column: each label is centered in a category slot of width `catGap`, so
+    // cap it just under that so neighbours don't collide. Horizontal bars: the
+    // label sits right-aligned in the left gutter between the val-title/legend
+    // band and the plot edge, so cap it at that band width.
+    const catSlotMaxPx = catGap - 4;
+    const horizLabelMaxPx = (px0 - 4) - (x + legLeftW + valTitleW);
     for (let ci = 0; ci < n; ci++) {
-      const label = (cats[ci] ?? '').toString().slice(0, 12);
+      const raw = (cats[ci] ?? '').toString();
       if (!isH) {
         const lx = px0 + ci * catGap + catGap / 2;
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        ctx.fillText(label, lx, py0 + ph + 3);
+        ctx.fillText(elideToWidth(ctx, raw, catSlotMaxPx), lx, py0 + ph + 3);
       } else {
         const ly = py0 + (n - 1 - ci) * catGap + catGap / 2;
         ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-        ctx.fillText(label, px0 - 4, ly);
+        ctx.fillText(elideToWidth(ctx, raw, horizLabelMaxPx), px0 - 4, ly);
       }
     }
   }
@@ -1140,11 +1168,14 @@ function renderLineChart(
     const catLabelColor = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.fillStyle = catLabelColor; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.font = `${catAxFontPx}px sans-serif`;
+    // Only every `labelInterval`-th category is drawn, so the horizontal room a
+    // centered label owns is the spacing between two drawn labels: (pw/n)·interval.
+    const catSlotMaxPx = (pw / n) * labelInterval - 4;
     for (let ci = 0; ci < n; ci += labelInterval) {
       const tx = toX(ci);
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx);
       ctx.fillStyle = catLabelColor;
-      ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), tx, py0 + ph + 5);
+      ctx.fillText(elideToWidth(ctx, (cats[ci] ?? '').toString(), catSlotMaxPx), tx, py0 + ph + 5);
     }
   }
 
@@ -1301,14 +1332,19 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.font = `${Math.max(8, Math.min(11, pw / n * 0.8))}px sans-serif`;
     // Show every category label that fits; thin out only when adjacent labels
-    // would collide (so 12 months all render, unlike a fixed n/8 cap).
+    // would collide (so 12 months all render, unlike a fixed n/8 cap). Measure
+    // each label's real full width (the previous slice(0,10) under-measured wide
+    // CJK labels, which weakened the collision test) to pick the interval, then
+    // draw each label elided to the room a drawn label actually owns —
+    // (pw/n)·interval, the spacing between two drawn labels.
     let maxLabelW = 0;
     for (let ci = 0; ci < n; ci++) {
-      maxLabelW = Math.max(maxLabelW, ctx.measureText((cats[ci] ?? '').toString().slice(0, 10)).width);
+      maxLabelW = Math.max(maxLabelW, ctx.measureText((cats[ci] ?? '').toString()).width);
     }
     const labelInterval = Math.max(1, Math.ceil((maxLabelW + 6) / (pw / n)));
+    const catSlotMaxPx = (pw / n) * labelInterval - 4;
     for (let ci = 0; ci < n; ci += labelInterval) {
-      ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), toX(ci), py0 + ph + 3);
+      ctx.fillText(elideToWidth(ctx, (cats[ci] ?? '').toString(), catSlotMaxPx), toX(ci), py0 + ph + 3);
     }
   }
 
@@ -1480,12 +1516,24 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 
   ctx.font = `${Math.max(8, Math.min(11, rd * 0.2))}px sans-serif`;
   ctx.fillStyle = '#444'; ctx.textBaseline = 'middle';
+  // Spoke labels radiate from just outside the ring. Cap each at the room
+  // between its anchor and the nearest horizontal plot edge so long category
+  // names are elided instead of overrunning the chart frame. Left/right-aligned
+  // labels extend toward one edge; centered (top/bottom) labels straddle the
+  // anchor, so give them twice the smaller side.
+  const plotLeftX = cx2 - pw / 2;
+  const plotRightX = cx2 + pw / 2;
   for (let i = 0; i < n; i++) {
     const a = spoke(i);
     const lx = cx2 + Math.cos(a) * (rd + 12);
     const ly = cy2 + Math.sin(a) * (rd + 12);
-    ctx.textAlign = Math.cos(a) < -0.1 ? 'right' : Math.cos(a) > 0.1 ? 'left' : 'center';
-    ctx.fillText((cats[i] ?? '').toString().slice(0, 12), lx, ly);
+    const align: CanvasTextAlign = Math.cos(a) < -0.1 ? 'right' : Math.cos(a) > 0.1 ? 'left' : 'center';
+    ctx.textAlign = align;
+    const maxPx =
+      align === 'right' ? lx - plotLeftX
+        : align === 'left' ? plotRightX - lx
+          : 2 * Math.min(plotRightX - lx, lx - plotLeftX);
+    ctx.fillText(elideToWidth(ctx, (cats[i] ?? '').toString(), maxPx), lx, ly);
   }
 
   // ECMA-376 §21.2.3.10 c:radarStyle — "filled" closes the polygon with a
