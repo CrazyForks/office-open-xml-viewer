@@ -93,20 +93,19 @@ cargo test
 - [x] A7 (#679): 10 サイトを幅ベース elide（'…' 付き二分探索、サロゲートペア安全化込み）に。凡例予算は equal-share 案を fidelity 理由で全幅に修正した結果、**現コーパス VRT 100% identical**（真にあふれる場合のみ省略）。CJK の文字数切断問題を解消
 - [x] B12: issues #674（floating-table page-fit §17.4.57）/ #675（frame keep-with-anchor §17.3.1.11）/ #676（empty-mark 1em 閾値）を撤去条件つきで起票。「inside/outside margin 近似」は現物に存在せず（#676 に注記）。**ユーザー承認済み（2026-07-03）: Phase 4 完了後に #675→#674→#676 を自律実装（Word 逆解析承認込み）**
 
-## Phase 4 — 大型構造リファクタ（CI 描画テスト稼働が前提）
+## Phase 4 — 大型構造リファクタ ✅ 一括バッチ完了（2026-07-04、PR #681, #684–#691。B2 後続のみ継続）
 
-- [ ] B1: docx renderer 機械的分割（images / paginate / line-layout / paint-paragraph / tables / shape-text / fonts / notes）— **挙動変更なしの移動のみで 1 PR**
-- [ ] B9/B10: `__test_*` バックドア廃止 + 56 テストのモジュール別再配置（分割の直後に）
-- [ ] B2: measure/paint 統一 — レイアウトを pt 空間の単一成果物に一本化（**分割とは別 PR**。element type 毎に段階施行、各段で VRT）
-- [ ] B5: textbox テキストを主エンジン（buildSegments/layoutLines）に統合（kinsoku/bidi/justify が textbox でも効くようになる）
-- [ ] B8: paginator の model 直接 stamp をラッパーレコードに置換
-- [ ] D12: pptx parser 分割（xlsx のモジュール構成を範型に theme / fill / text / shape / chart / master / markdown + `ParsedMaster`/`ParsedLayout` 構造体）
-- [ ] A1: core chart layout 抽出（`computeChartFrame` + 向きパラメタライズ axis painter、凡例実測サイズ化）— ファミリー毎に段階移行
-- [ ] A2: プリセット図形エンジン一本化 — legacy `buildShapePath` 呼び出し面の棚卸し → spec 駆動エンジンへバッチ移行（バッチ毎 VRT）→ 2,147 行 switch 削除
-- [ ] C9: pptx parser API を meta + `parse_slide(i)` に分割（D2 ハンドル上に実装）。先行で bitmap LRU のみも可
-- [ ] E4: `.wasm` 実アセット化（`wasmUrl` オプション、data-URL fallback 維持）/ worker チャンク 3 重複の解消検討
-- [ ] E9: VRT の決定論フォント化（Noto CJK を fixture に `@font-face` 同梱 + bundled chromium）→ CI-VRT・demo reference の可搬化
-- [ ] E10: リリース手順の bump 対象に site / mcp-server Cargo.toml を追加、mathjax 生成物のコミット運用見直し
+- [x] B1: **廃止（設計判断、2026-07-02 ユーザー裁定）** — 行数起点の機械的分割は独立作業として行わない。モジュール境界はドメイン構造が要求するときだけ引く。B2 の統一が生んだ相境界に沿った物理分割（verbatim + characterization、#635 手法）として B2 の最終段に吸収
+- [x] B2 (#684, #689): measure/paint 統一 — **paragraph 完了**。Stage 1 (#684): paginator が layoutLines を stamp、renderParagraph が入力一致ガード（kinsoku 値等価・NUMPAGES/noteRef 除外）で再利用。Stage 2 (#689): **zoom 不変行分割** — scale-1 の行分割 partition のみ再利用し行ジオメトリは paint scale で再測定（rescaleLayoutLines。×scale はヒンティング非線形で drift するため不採用）、非 float fallback も scale-1 化、VRT 19/19 byte-identical。**継続: table → textbox（B5 吸収 = kinsoku/bidi/justify が textbox で効く挙動変更、reference 承認が絡む）→ 相境界での物理分割（B9/B10 のテスト再配置はここで）**
+- [ ] B5/B8/B9/B10: B2 後続段に吸収（textbox 統合 / stamp コントラクト最終形 / `__test_*` 廃止・テスト再配置は物理分割時）— 上記継続項目
+- [x] D12 (#686): pptx parser lib.rs 14,107 → 5,816 行 + 8 モジュール（types/markdown/chart/theme/fill/text/shape/master、xlsx 範型）。verbatim 9 commit、golden sha256 4 ファイル byte-identical、MasterBundle→ParsedMaster rename。テスト 109 は cross-module 統合のため lib.rs 残置（将来分割候補: 低レベル単体のみ）
+- [x] A1 (#685): `computeChartFrame` + ファミリー毎 verbatim 定数の FrameParams（ドリフト表）、凡例実測化、axis/gridline painter 共有
+- [x] A2 (#687): **数値照合ハーネス preset-parity.test.ts**（WHATWG canvas 意味論・≤0.35px サンプル・fill 走査線・157 live labels×3box×2adj）で証明できた 33 preset + 3 alias のみ spec エンジンへ委譲、VRT 152 枚バイト一致。残 120 labels は幾何近似 68（spec 側が正: legacy flowchartProcess の誤角丸等）/ 構造差 51 / arc 意図的、として switch 内に分類コメント。**将来バッチ（fill-equivalent 6 種 → 微小幾何差 → 可視差）は見た目が変わるため VRT reference 更新承認とセット**
+- [x] C9: **見送り（実測判断）** — Phase 2 最適化後の実測で 209MB pptx の全スライドパース 19.4ms / 14MB 13.2ms（median）。lazy 化が節約できる時間に対し、meta 集計 4 消費者（render-worker meta / media-mime / google-fonts / MCP server）の再設計コストが見合わない。bitmap LRU は導入済み（core/image/bitmap-image-by-path.ts — 計画の誤診）
+- [x] E4 (#681): `.wasm` 実アセット化（wasmAssetUrl プラグイン **apply:'build' 必須**（dev に emitFile 不在 — CI smoke が捕捉）、`wasmUrl`/`workerTimeoutMs` オプション、data-URL fallback 維持）。チャンク -85〜89%。worker チャンク 3 重複は誤認と実証
+- [x] E9: **調査完了・ユーザー判断待ち** — フォント同梱でも macOS CoreText と Linux FreeType の rasterizer 差で pixel-perfect 可搬化は原理的に不可。案 A: 現状維持（コスト 0、private 100% カバー維持、推奨）/ 案 B: Noto 同梱 + demo のみ CI-VRT（2-3h + repo 6-8MB、検出力 demo 7-29%、reference 全置換承認必要）/ 案 C: 折衷（CI に甘い smoke VRT）
+- [x] E10 (#688): site 0.43.0 / mcp-server crate 0.1.0 → 0.69.0 系列へ（rmcp は CARGO_PKG_VERSION を initialize handshake で MCP クライアントに報告 = ユーザー可視ドリフトだった）、CLAUDE.md 手順 5 拡張。mathjax 3MB bundle を gitignore 化し core `prepare` で `pnpm install` 時自動生成（全 CI ジョブ検証済み。配布は従来どおり math.mjs に inline — 将来候補: E4 同様の実アセット化）
+- [x] B12 帰結（#690, #691, #676 コメント）: **#675 ✅ #690** frame keep-with-anchor（§17.3.1.11 は寸法のみ規定 — 既存 anchored-image float ガード §20.4.3.5 と同一意味論で明示化。vAnchor='text' のみ送り、parser 既定 'page' は据え置き）。**#674 ✅ #691** floating-table page-fit（frame と対称実装、compute-once 維持）。**#676 = 文書化済み 1-em 維持が正解と判断** — 閾値は non-empty 行と対称で一貫、Word 実規則（固定 em / 行高比率 / 字形幅 / metrics）の判別には 3 フォントサイズ×3 行間の検証 docx + Word PDF が必要（issue コメントに要件記録、blocked on validation）。#675/#674 のページ境界実サンプル検証も fixture 待ち（合成 vitest + red-check では検証済み）
 
 ## 推奨 PR 分割（Phase 1 の目安）
 
