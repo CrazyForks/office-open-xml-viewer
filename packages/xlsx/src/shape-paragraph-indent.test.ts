@@ -73,11 +73,13 @@ describe('shape paragraph indent attributes (§21.1.2.2.7 marL/marR/indent)', ()
     expect(indentedX - baseX).toBeCloseTo(expectedShift, 5);
   });
 
-  it('a paragraph with no indent attrs is byte-identical (same x) to the baseline', () => {
+  it('a paragraph with no indent attrs draws at the left inset (§21.1.2.1.1 lIns)', () => {
     // Invariant: when marL/marR/indent are all absent, leftInset=0 and
-    // availW=innerW, so the draw x is exactly padX (the pre-change value).
+    // availW=innerW, so the draw x is exactly the left text inset padLeft. That
+    // is now the spec lIns (91440 EMU = 9.6 px at cs=1) the parser emits, not the
+    // former empirical padX=7.
     const noAttrs: ShapeParagraph = { align: 'l', runs: [textRun('X')] };
-    const padX = 7 * 1; // padX = 7 * cs in drawShapeText
+    const padX = (91440 / EMU_PER_PX) * 1; // lIns 91440 EMU → 9.6 px @ cs=1
     expect(drawFirstX(noAttrs)).toBeCloseTo(padX, 5);
   });
 
@@ -90,7 +92,7 @@ describe('shape paragraph indent attributes (§21.1.2.2.7 marL/marR/indent)', ()
       indent: 228600,
       runs: [textRun('X')],
     };
-    const padX = 7 * 1;
+    const padX = (91440 / EMU_PER_PX) * 1; // left inset (lIns) = 9.6 px
     expect(drawFirstX(p)).toBeCloseTo(padX + marLpx + indentPx, 5);
   });
 });
@@ -101,7 +103,7 @@ describe('shape paragraph indent attributes (§21.1.2.2.7 marL/marR/indent)', ()
 // first-line indent on line 1), `ctr` alignment within the indented region, the
 // hanging-indent clamp, and marR narrowing the wrap width.
 describe('shape paragraph indent — wrapping, alignment region, hanging, marR', () => {
-  const PADX = 7; // padX = 7 * cs (cs=1)
+  const PADX = 91440 / EMU_PER_PX; // left inset (lIns) 91440 EMU → 9.6 px @ cs=1
   // All fillText calls for a single paragraph at a given wrap mode (sw=sh=300, cs=1).
   function callsFor(p: ShapeParagraph, wrap: 'none' | 'normal'): FillTextCall[] {
     const { ctx, calls } = makeRecordingCtx();

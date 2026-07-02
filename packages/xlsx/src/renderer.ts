@@ -3581,10 +3581,18 @@ export function drawShapeText(
   // by `cs` so the contents grow/shrink with the box on Excel's zoom slider —
   // matching how cell text scales via buildFont(font, cs). Without this the box
   // would zoom while the glyphs stayed fixed, drifting out of alignment.
-  const padX = 7 * cs;
-  const padY = 4 * cs;
-  const innerW = Math.max(0, sw - padX * 2);
-  const innerH = Math.max(0, sh - padY * 2);
+  // Text insets from `<a:bodyPr>` (ECMA-376 §21.1.2.1.1), EMU → px, scaled by
+  // `cs` like every other px size here. The parser always emits them (spec
+  // default 91440 EMU L/R = 9.6 px, 45720 EMU T/B = 4.8 px). This replaces the
+  // former empirical padX=7 / padY=4 constants with the real, per-side insets —
+  // the box is inset asymmetrically when the shape authors distinct lIns/rIns or
+  // tIns/bIns.
+  const padLeft = (txt.lIns / EMU_PER_PX) * cs;
+  const padRight = (txt.rIns / EMU_PER_PX) * cs;
+  const padTop = (txt.tIns / EMU_PER_PX) * cs;
+  const padBottom = (txt.bIns / EMU_PER_PX) * cs;
+  const innerW = Math.max(0, sw - padLeft - padRight);
+  const innerH = Math.max(0, sh - padTop - padBottom);
   if (innerW <= 0 || innerH <= 0) return;
 
   // A laid-out segment: measured text or a rasterized equation. `w` is the
@@ -3592,8 +3600,8 @@ export function drawShapeText(
   type Seg =
     | { kind: 'text'; text: string; font: string; color: string; w: number }
     | { kind: 'math'; render: MathRender; color: string; w: number; ascent: number; descent: number };
-  // `leftInset` = px from padX to this line's left edge (paragraph left margin,
-  // plus the first-line indent on a paragraph's first line). `availW` = the
+  // `leftInset` = px from padLeft to this line's left edge (paragraph left
+  // margin, plus the first-line indent on a paragraph's first line). `availW` = the
   // width of the alignment region for this line (paraW, minus the first-line
   // indent on the first line). ECMA-376 §21.1.2.2.7 (marL/marR/indent).
   type Line = { segs: Seg[]; align: string; height: number; ascent: number; hasMath: boolean; leftInset: number; availW: number };
@@ -3604,6 +3612,21 @@ export function drawShapeText(
     const px = size * PT_TO_PX * cs;
     const family = fontStackFor(run.fontFace);
     return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
+  };
+
+  // Real font ascent for a line's alphabetic baseline (used on lines that mix
+  // text with an inline/display equation, where text and math share a baseline
+  // = lineTop + ascent). Mirrors the pptx renderer: measure the rendered glyphs'
+  // `actualBoundingBoxAscent` rather than the old flat 0.85×em heuristic, which
+  // over-/under-estimated for CJK and tall fonts. `font` must already be a valid
+  // CSS font string (measureText keys off `ctx.font`). Falls back to 0.85×px
+  // when the metric is unavailable (0), matching the prior constant.
+  const measuredAscent = (font: string, px: number): number => {
+    const prev = ctx.font;
+    ctx.font = font;
+    const a = ctx.measureText('M').actualBoundingBoxAscent;
+    ctx.font = prev;
+    return a > 0 ? a : px * 0.85;
   };
 
   // Wrap each paragraph into lines (segments preserve run order).
@@ -3675,7 +3698,12 @@ export function drawShapeText(
           intendedSingleLinePx(lastTextFaceEa, fallbackPx),
         );
         lineHeight = Math.max(fallbackPx * 1.2, designFloor);
-        lineAscent = fallbackPx * 0.85;
+        // An empty line carries no segment, so this ascent is never consumed by
+        // the draw pass (no text/math to place on the baseline); it is set only
+        // to keep the Line shape consistent. Measure it the same way as text
+        // runs — the nearest preceding face at the fallback size — rather than
+        // the old 0.85×em constant.
+        lineAscent = measuredAscent(`${fallbackPx}px ${fontStackFor(lastTextFace)}`, fallbackPx);
       }
       lineHeight = applyLineSpacing(lineHeight);
       lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath, leftInset: lineLeftInset(), availW: lineAvailW() });
@@ -3757,7 +3785,7 @@ export function drawShapeText(
       );
       const singleLinePx = Math.max(pxSize * 1.2, designFloor);
       lineHeight = Math.max(lineHeight, singleLinePx);
-      lineAscent = Math.max(lineAscent, pxSize * 0.85);
+      lineAscent = Math.max(lineAscent, measuredAscent(font, pxSize));
       ctx.font = font;
       // Defensive: a run's text may still contain a literal "\n".
       const pieces = run.text.split('\n');
@@ -3791,7 +3819,7 @@ export function drawShapeText(
             // Re-seed this continuation line with the same design-line-floored
             // single-line height as the run's first line (see singleLinePx above).
             lineHeight = Math.max(lineHeight, singleLinePx);
-            lineAscent = Math.max(lineAscent, pxSize * 0.85);
+            lineAscent = Math.max(lineAscent, measuredAscent(font, pxSize));
           } else {
             buf = candidate;
           }
@@ -3812,17 +3840,17 @@ export function drawShapeText(
   // Vertical anchor — ECMA-376 §20.1.7.2 <a:bodyPr anchor>.
   // For 'ctr' we intentionally skip Math.max(0,...) so the block stays
   // visually centered even when blockH exceeds innerH (text clips at edge).
-  let y0 = padY;
-  if (txt.anchor === 'ctr') y0 = padY + (innerH - blockH) / 2;
-  else if (txt.anchor === 'b') y0 = padY + Math.max(0, innerH - blockH);
+  let y0 = padTop;
+  if (txt.anchor === 'ctr') y0 = padTop + (innerH - blockH) / 2;
+  else if (txt.anchor === 'b') y0 = padTop + Math.max(0, innerH - blockH);
 
   let lineTop = y0;
   for (const line of lines) {
     const totalW = line.segs.reduce((s, seg) => s + seg.w, 0);
-    // Per-line region: the left edge is padX + the paragraph's left inset
+    // Per-line region: the left edge is padLeft + the paragraph's left inset
     // (marL, plus first-line indent on the first line), and alignment happens
     // within the line's available width (paraW). ECMA-376 §21.1.2.2.7.
-    const base = padX + line.leftInset;
+    const base = padLeft + line.leftInset;
     let x = base;
     if (line.align === 'ctr') x = base + Math.max(0, (line.availW - totalW) / 2);
     else if (line.align === 'r') x = base + Math.max(0, line.availW - totalW);
