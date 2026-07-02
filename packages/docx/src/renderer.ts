@@ -620,6 +620,16 @@ export async function preloadImages(
 
 // ===== Main entry =====
 
+/**
+ * Per-canvas monotonic render token for the {@link renderDocumentToCanvas}
+ * cancellation guard. A WeakMap keyed on the canvas replaces the previous
+ * property monkey-patch (`canvas.__docxRenderToken`), so no non-standard field
+ * is written onto the caller's canvas and the `as unknown as` cast is gone.
+ * WeakMap keys are held weakly, so a discarded canvas is collected normally.
+ * (Mirrors the pptx renderSlide guard's renderTokens map.)
+ */
+const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
+
 export async function renderDocumentToCanvas(
   doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -635,9 +645,9 @@ export async function renderDocumentToCanvas(
   // us, stop at the next await so only the latest render's output survives.
   // (Mirrors the pptx renderSlide guard; the worker path renders each page on a
   // fresh OffscreenCanvas, so the token is a no-op there.)
-  const tokenHost = canvas as unknown as { __docxRenderToken?: number };
-  const myToken = (tokenHost.__docxRenderToken = (tokenHost.__docxRenderToken ?? 0) + 1);
-  const superseded = () => tokenHost.__docxRenderToken !== myToken;
+  const myToken = (renderTokens.get(canvas) ?? 0) + 1;
+  renderTokens.set(canvas, myToken);
+  const superseded = () => renderTokens.get(canvas) !== myToken;
 
   const dpr = opts.dpr ?? defaultDpr();
   // getContext before sizing is legal: resizing a canvas after getContext resets
