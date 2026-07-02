@@ -816,3 +816,210 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     v.destroy();
   });
 });
+
+describe('PptxScrollViewer — text selection (T5)', () => {
+  // A minimal PptxTextRunInfo: richer than docx's flat run — it carries per-shape
+  // frame geometry (shapeX/Y/W/H, rotation) so buildPptxTextLayer can group runs
+  // into a positioned shape <div> and nest the run <span> inside it.
+  const RUN = {
+    text: 'Hi',
+    inShapeX: 1,
+    inShapeY: 2,
+    w: 10,
+    h: 12,
+    fontSize: 12,
+    font: '12px serif',
+    shapeX: 0,
+    shapeY: 0,
+    shapeW: 100,
+    shapeH: 40,
+    rotation: 0,
+  };
+
+  function findSlotWrapper(scrollHost: FakeEl): FakeEl {
+    return scrollHost.children.find((c) => c.children.some((k) => k.tag === 'canvas')) as FakeEl;
+  }
+  function findTextLayer(slotWrapper: FakeEl): FakeEl {
+    return slotWrapper.children.find((c) => c.tag === 'div') as FakeEl;
+  }
+
+  it('main mode: builds a shape div with a nested run span for each visible slot', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(3, 1000, 600);
+    engine.feedTextRuns = [RUN];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Every mounted slot got its overlay built from that slide's render.
+    const mounted = v.mountedSlideIndicesForTest();
+    expect(mounted.length).toBeGreaterThan(0);
+    for (const wrapper of scrollHost.children.filter((c) => c.children.some((k) => k.tag === 'canvas'))) {
+      const textLayer = findTextLayer(wrapper);
+      // pptx nests spans INSIDE a per-shape <div> (one level deeper than docx):
+      // textLayer → shape <div> → run <span>.
+      expect(textLayer.children.length).toBe(1);
+      const shapeDiv = textLayer.children[0] as FakeEl;
+      expect(shapeDiv.tag).toBe('div');
+      expect(shapeDiv.children.length).toBe(1);
+      expect(shapeDiv.children[0].tag).toBe('span');
+      expect(shapeDiv.children[0].textContent).toBe('Hi');
+    }
+    v.destroy();
+  });
+
+  it('main mode: a rotated shape gets a CSS rotate() on its shape div', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(1, 1000, 600);
+    // Rotated shape frame: buildPptxTextLayer applies transform:rotate(totalRot).
+    engine.feedTextRuns = [{ ...RUN, rotation: 30 }];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    const wrapper = findSlotWrapper(scrollHost);
+    const textLayer = findTextLayer(wrapper);
+    const shapeDiv = textLayer.children[0] as FakeEl;
+    expect(shapeDiv.tag).toBe('div');
+    expect(shapeDiv.style.transform).toBe('rotate(30deg)');
+    // The run span still nests inside the rotated shape div.
+    expect(shapeDiv.children[0].textContent).toBe('Hi');
+    v.destroy();
+  });
+
+  it('main mode: sizes the overlay to the slot canvas size (number args)', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(1, 1000, 600);
+    engine.feedTextRuns = [RUN];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    const wrapper = findSlotWrapper(scrollHost);
+    const canvas = wrapper.children.find((c) => c.tag === 'canvas') as FakeEl;
+    const textLayer = findTextLayer(wrapper);
+    // buildPptxTextLayer takes NUMBERS and writes `${n}px`. The viewer passes
+    // canvas.width || round(widthPx) and canvas.height || round(slideHeightPx).
+    // base scale = 200/1000 = 0.2 ⇒ widthPx 200, slideHeightPx 120.
+    const expectW = canvas.width || 200;
+    const expectH = canvas.height || 120;
+    expect(textLayer.style.width).toBe(`${expectW}px`);
+    expect(textLayer.style.height).toBe(`${expectH}px`);
+    v.destroy();
+  });
+
+  it('main mode: recycling a slot clears its overlay so the free pool holds no stale spans', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(50, 1000, 600);
+    engine.feedTextRuns = [RUN];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    // The overlay is built in the renderSlide .then() microtask.
+    await Promise.resolve();
+    await Promise.resolve();
+    // A slide-0 slot exists with a built overlay (one shape div).
+    const wrapper = findSlotWrapper(scrollHost);
+    const textLayer = findTextLayer(wrapper);
+    expect(textLayer.children.length).toBe(1);
+    // Scroll far away so slide 0 recycles into the free pool.
+    scrollHost.scrollTop = 8000;
+    scrollHost.dispatch('scroll');
+    // The recycled slot's overlay was cleared (no stale spans linger in the pool).
+    expect(textLayer.children.length).toBe(0);
+    v.destroy();
+  });
+
+  it('worker mode: warns once and builds no overlay spans', async () => {
+    installDom();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(3, 1000, 600, 'worker');
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Warned exactly once with the same wording as PptxViewer, across every
+    // mounted slot's render.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/text selection is unavailable in mode: 'worker'/);
+    // No renderSlide (worker path only) and no overlay children anywhere.
+    expect(engine.renderCalls.length).toBe(0);
+    for (const wrapper of scrollHost.children.filter((c) => c.children.some((k) => k.tag === 'canvas'))) {
+      const textLayer = wrapper.children.find((c) => c.tag === 'div') as FakeEl;
+      expect(textLayer.children.length).toBe(0);
+    }
+    warn.mockRestore();
+    v.destroy();
+  });
+
+  it('stale main render (epoch moved by setScale mid-flight) does NOT rebuild the overlay', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Deferred main mode: the test resolves renderSlide manually so setScale can
+    // move the epoch WHILE slide 0's first render is in flight.
+    const engine = new FakePptxEngine(20, 1000, 600, 'main', true);
+    engine.feedTextRuns = [RUN];
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      enableTextSelection: true,
+      gap: 10,
+      zoomMin: 0.05,
+      zoomMax: 4,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    // Grab the first (stale) slide-0 render call before resolving it. Capture the
+    // slot wrapper it targets so we can inspect its overlay afterwards.
+    const staleWrapper = scrollHost.children.find((c) => c.children.some((k) => k.tag === 'canvas')) as FakeEl;
+    const staleLayer = staleWrapper.children.find((c) => c.tag === 'div') as FakeEl;
+    const staleCall = engine.renderCalls.find((c) => c.slide === 0)!;
+    // Zoom mid-flight: bumps the epoch and force-re-mounts every slot (which
+    // re-dispatches a fresh slide-0 render at the new scale).
+    v.setScale(v.scaleForTest() * 2);
+    // Now resolve the STALE (old-epoch) render. Its .then must bail on the epoch
+    // guard and NOT build the overlay.
+    staleCall.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The stale render built nothing (epoch guard). The fresh render is still
+    // deferred (not resolved), so its overlay isn't built either — the stale
+    // slot/layer holds zero children from the superseded render.
+    expect(staleLayer.children.length).toBe(0);
+    v.destroy();
+  });
+});
