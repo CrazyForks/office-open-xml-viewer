@@ -99,6 +99,11 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(a.style.color).toBe('transparent');
     expect(a.style.cursor).toBe('text');
     expect(a.style['pointer-events']).toBe('all');
+    // Declaration ORDER is load-bearing: the `font` shorthand resets line-height
+    // to `normal` in real browsers, so `line-height` must come AFTER `font` in the
+    // cssText. The parsed-prop asserts above cannot detect a reorder — pin it on
+    // the raw string.
+    expect(a.style.cssText).toMatch(/font:[^;]+;line-height:/);
     expect(b.textContent).toBe('World');
     expect(b.style.left).toBe('50px');
   });
