@@ -82,16 +82,16 @@ cargo test
 - [x] A10 (#670): per-request timeout + AbortSignal + worker error/messageerror の pending 一括 reject（常時有効）。timeout は opt-in（LoadOptions.workerTimeoutMs、既定無制限 — 巨大ファイルの正当な長時間パースを壊さない）。viewer 5 箇所の明示 forwarding
 - [~] B4: **Phase 4-1 に統合**。B3 で再訪コストの主犯（画像再デコード）は解消済み。LayoutLine[] キャッシュは B2 統一（compute-once 単一成果物）の副産物として実装するのが正道 — 中間キャッシュを別実装すると Phase 4-1 で捨てることになるため
 
-## Phase 3 — 共有層への集約（横断 1 PR / commit は関心毎）
+## Phase 3 — 共有層への集約 ✅ 完了（2026-07-03、PR #677–#680, #682 + issues #674–#676）
 
-- [ ] D5: `ooxml_common::theme`（clrScheme / fontScheme / lnStyleLst / objectDefaults）— 3 実装の挙動差を先に一覧化
-- [ ] D6: `ooxml_common::rels`（parse / find-by-type / resolve target）— **leading-slash（OPC 絶対 Target）の扱いを 3 パーサーで突き合わせ**（pptx のみ修正済みの穴）
-- [ ] D8: DrawingML color-node → fill → txBody の順で段階的に ooxml-common へ（型+パース+純述語の範囲厳守）
-- [ ] C7: TS 側 — bidi-line ×3 / google-fonts ×3 を core へ、画像デコードゲーティング述語（svgBlip / srcRect / metafile）を core に、pptx worker の `decodeDataUrl` 私的コピー削除
-- [ ] C10: Rust parser が nested `chart: ChartModel` を emit → pptx 60 フィールド手動コピーと xlsx adapter を削除
-- [ ] C8: xlsx `bodyPr@lIns/tIns/rIns/bIns` パース追加（§21.1.2.1.1）+ pptx の実測 ascent 方式を core へ lift（7px/4px・×1.2・×0.85 の経験的定数を撤去）
-- [ ] A7: チャートラベルの `slice(0,N)` を `elideToWidth(ctx, text, maxPx)` に統一
-- [ ] B12: docx の既知ヒューリスティック（float page-fit §17.4.57 / frame wrap-band §17.3.1.11 / inside-outside margin 近似等）を GitHub issue 化
+- [x] D5 (#677): ThemeColorScheme(12 slot, srgb/sys/prst)+ThemeFonts+parse_ln_style_widths+preset_color を common 化。各 parser は thin adapter で出力 byte-stable。pptx lnStyleLst/objectDefaults は契約差で意図的 local 維持。xlsx/docx が prstClr を獲得（コーパス該当なしの latent 改善）
+- [x] D6 (#677) **再定義**: leading-slash は実は 3 parser とも処理済み（計画が古い）。真の穴 = docx load_media_map の `../` 未正規化 → resolve_target 単一実装（leading-slash + ../ 正規化）で修正。BTreeMap 決定論化（serialize される HashMap 3 フィールド）も同 PR
+- [x] D8 (#680) **再定義込み**: txBody は実質 2 重（docx は wps:txbx で対象外）。color-node=ColorSource+ThemeResolver trait（sysClr は lastClr.or(val) に統一）、fill=pptx の gradFill/pattFill を verbatim 移設（xlsx/docx への新機能展開は消費側が無くスコープ外）、BodyPr=spec デフォルト込み common 化
+- [x] C7 (#678): decodeDataUrl 私的コピー削除 / google-fonts 単一レジストリ（oracle で byte-preserve、additive 差分のみ）/ preferVectorBlip type guard（4 call site）/ bidi は**共有可能な機械部分のみ**（RTL_GATE byte-identity 検証・buildVisualOrder）— docx classOverride / xlsx readingOrder 等の ECMA 根拠ある format 差は format 分岐関数を作らず各パッケージ維持
+- [x] C10 (#682): ooxml_common::chart に core TS ChartModel と 1:1 の struct 群。pptx は el.chart 直渡し（60 フィールドコピー削除）、xlsx は From<ChartData>（adapter ロジック Rust 移設・対応表は commit に）。削除した旧実装をテスト内に凍結した oracle deep-equal で等価性証明。VRT chart サンプル不変
+- [x] C8 (#680): xlsx parser が inset 4 属性をパース（spec デフォルト 91440/45720 EMU 常時 emit）、renderer は per-side inset（9.6/4.8px、asymmetric 対応）+ ascent は actualBoundingBoxAscent 実測（0.85 は fallback、pptx の inline 累積とは非同一につき core lift は原則どおり見送り）。×1.2 行送りは正確なので不変。VRT: committed 参照 byte-identical・閾値超過ゼロ（private 3 シートに spec 方向 ~2.6px の改善シフト — 参照再生成は任意の housekeeping）
+- [x] A7 (#679): 10 サイトを幅ベース elide（'…' 付き二分探索、サロゲートペア安全化込み）に。凡例予算は equal-share 案を fidelity 理由で全幅に修正した結果、**現コーパス VRT 100% identical**（真にあふれる場合のみ省略）。CJK の文字数切断問題を解消
+- [x] B12: issues #674（floating-table page-fit §17.4.57）/ #675（frame keep-with-anchor §17.3.1.11）/ #676（empty-mark 1em 閾値）を撤去条件つきで起票。「inside/outside margin 近似」は現物に存在せず（#676 に注記）。**ユーザー承認済み（2026-07-03）: Phase 4 完了後に #675→#674→#676 を自律実装（Word 逆解析承認込み）**
 
 ## Phase 4 — 大型構造リファクタ（CI 描画テスト稼働が前提）
 
