@@ -5,9 +5,16 @@
  * parts of the standard, and — importantly — each renders the same *logical*
  * shape (a "dash", a "dot", a "dot-dash") with **different on/off lengths**:
  *
- *   - docx  §17.18.2  ST_Border           (dotted / dashed / dotDash / …)
- *   - xlsx  §18.18.3  ST_BorderStyle      (dashed / dotted / dashDot / hair / …)
+ *   - docx  §17.18.2  ST_Border            (dotted / dashed / dotDash / …)
+ *   - xlsx  §18.18.3  ST_BorderStyle       (dashed / dotted / dashDot / hair / …)
  *   - pptx  §20.1.10.49 ST_PresetLineDashVal (dot / dash / lgDash / sysDash / …)
+ *           — shape/line borders (`<a:ln><a:prstDash>`)
+ *   - pptx  §20.1.10.82 ST_TextUnderlineType (dotted / dash / dotDash / …)
+ *           — run underlines; a distinct enum that reuses some of the same shape
+ *             names as the preset line dash but is NOT the same list.
+ *
+ * pptx therefore carries TWO relative tables here (preset line dash + text
+ * underline), each keyed on its own enum's strings.
  *
  * The standard gives no normative pixel geometry for any of them, so each
  * renderer carries Word-/Excel-/PowerPoint-like approximations whose multipliers
@@ -115,6 +122,45 @@ const XLSX_BORDER_PX: Record<string, RelativeDashPattern> = {
 export function xlsxBorderDashArray(style: string): number[] {
   const px = XLSX_BORDER_PX[style];
   return px ? dashArray(px, 1) : [];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pptx — ECMA-376 §20.1.10.49 ST_PresetLineDashVal (shape/line borders, lw-relative)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * §20.1.10.49 ST_PresetLineDashVal (`<a:ln><a:prstDash val>`) → relative
+ * `[on, off, …]` pattern in units of the stroked width `lineW`, so the dashes
+ * scale with line thickness. The enum has 11 members; `solid` is intentionally
+ * absent (it maps to `[]` — a continuous line) so this table holds the other 10.
+ *
+ * The values are PowerPoint-like approximations and are DELIBERATELY not the
+ * spec's binary bit representations (§20.1.10.49 documents dash/dot cadences as
+ * bit patterns, not pixel lengths). They are part of pptx's visual contract and
+ * MUST NOT be changed. The `sys*` family uses the tighter Windows cosmetic-pen
+ * cadence; `lgDash*` is the "long dash" variant.
+ */
+const PPTX_PRESET_DASH_RELATIVE: Record<string, RelativeDashPattern> = {
+  dash: [6, 3],
+  dot: [1.5, 3],
+  dashDot: [6, 3, 1.5, 3],
+  lgDash: [10, 4],
+  lgDashDot: [10, 4, 1.5, 4],
+  lgDashDotDot: [10, 4, 1.5, 4, 1.5, 4],
+  sysDash: [4, 2],
+  sysDot: [1, 2],
+  sysDashDot: [4, 2, 1, 2],
+  sysDashDotDot: [4, 2, 1, 2, 1, 2],
+};
+
+/**
+ * pptx ST_PresetLineDashVal (§20.1.10.49) style → `setLineDash` pattern scaled
+ * by the stroked width `lineW`. Returns `[]` for solid / continuous styles and
+ * for any unknown value (table miss ⇒ solid line).
+ */
+export function pptxPresetDashArray(style: string, lineW: number): number[] {
+  const relative = PPTX_PRESET_DASH_RELATIVE[style];
+  return relative ? dashArray(relative, lineW) : [];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
