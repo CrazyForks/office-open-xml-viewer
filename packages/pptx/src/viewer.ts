@@ -62,6 +62,15 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
 export class PptxViewer {
   private readonly canvas: HTMLCanvasElement;
   private readonly wrapper: HTMLDivElement;
+  /** The canvas's DOM position BEFORE the constructor reparented it into
+   *  {@link wrapper}, captured so {@link destroy} can return the caller-owned
+   *  canvas to exactly where it was. `null` parent = canvas was passed
+   *  detached. */
+  private readonly _originalParent: Node | null;
+  private readonly _originalNextSibling: Node | null;
+  /** The canvas's inline `display` before the constructor forced `block`
+   *  (empty string if it was unset), restored on {@link destroy}. */
+  private readonly _originalDisplay: string;
   private textLayer: HTMLDivElement | null = null;
   private engine: PptxPresentation | null = null;
   private readonly opts: PptxViewerOptions;
@@ -82,6 +91,11 @@ export class PptxViewer {
     this._hiddenMode = opts.hiddenSlideMode ?? 'show';
 
     const parent = canvas.parentElement;
+    // Capture the canvas's DOM position and inline display BEFORE reparenting so
+    // destroy() can put the caller-owned canvas back exactly where it was.
+    this._originalParent = parent;
+    this._originalNextSibling = canvas.nextSibling;
+    this._originalDisplay = canvas.style.display;
     this.wrapper = document.createElement('div');
     // vertical-align:top removes the inline-block baseline descender gap that
     // otherwise lets the host container's background show through below the
@@ -280,11 +294,36 @@ export class PptxViewer {
     buildPptxTextLayer(layer, runs, cssWidth, cssHeight);
   }
 
-  /** Clean up the viewer and terminate the background worker. */
+  /**
+   * Clean up the viewer and terminate the background worker.
+   *
+   * The caller-owned `<canvas>` is returned to the DOM position it held before
+   * the constructor was called (same parent, same next-sibling) and its inline
+   * `display` is restored, so the canvas can be reused — e.g. to construct a new
+   * viewer on the same element. If the canvas was passed detached (no parent) it
+   * is simply removed from the internal wrapper. Safe to call more than once.
+   */
   destroy(): void {
     this.handle?.destroy();
     this.handle = null;
     this.engine?.destroy();
+    // Return the caller-owned canvas to its original DOM slot before discarding
+    // the wrapper. insertBefore still works if the original parent was itself
+    // detached; when there was no original parent the canvas is left detached
+    // (just pulled out of the wrapper). The recorded next-sibling may have been
+    // removed or moved by the caller since construction — insertBefore throws
+    // NotFoundError for a reference that is no longer a child of the parent, so
+    // fall back to appending at the end in that case.
+    if (this._originalParent) {
+      const ref =
+        this._originalNextSibling && this._originalNextSibling.parentNode === this._originalParent
+          ? this._originalNextSibling
+          : null;
+      this._originalParent.insertBefore(this.canvas, ref);
+    } else if (this.canvas.parentNode) {
+      this.canvas.parentNode.removeChild(this.canvas);
+    }
+    this.canvas.style.display = this._originalDisplay;
     this.wrapper.remove();
   }
 }

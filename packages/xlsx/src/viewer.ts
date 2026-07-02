@@ -46,6 +46,44 @@ export type HiddenSheetMode = 'show' | 'skip' | 'dim';
  *  the named pptx `DEFAULT_HIDDEN_DIM` constant. */
 const HIDDEN_TAB_DIM_OPACITY = 0.45;
 
+/** Marker attribute on the single injected viewer stylesheet, so the module-
+ *  level injector is idempotent and destroy() can leave it in place. */
+const VIEWER_STYLE_ATTR = 'data-xlsx-viewer-styles';
+
+/** Class-constant CSS shared by every XlsxViewer: it styles pseudo-elements
+ *  (scrollbar, slider track/thumb) that inline `element.style` cannot reach, so
+ *  it must live in a stylesheet rather than on the elements. */
+const VIEWER_STYLE_CSS =
+  `.xlsx-tab-strip::-webkit-scrollbar{display:none}` +
+  `.xlsx-tab-nav{background:transparent;transition:background 0.1s;}` +
+  `.xlsx-tab-nav:hover{background:rgba(0,0,0,0.08);}` +
+  // Excel-status-bar zoom slider: a thin uniform gray track (no colored
+  // fill on either side of the thumb) with a small round gray handle.
+  `.xlsx-zoom-slider{-webkit-appearance:none;appearance:none;background:transparent;height:15px;margin:0;}` +
+  `.xlsx-zoom-slider::-webkit-slider-runnable-track{height:4px;background:#c4c4c4;border-radius:2px;}` +
+  `.xlsx-zoom-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:12px;height:12px;margin-top:-4px;border-radius:50%;background:#808080;cursor:pointer;}` +
+  `.xlsx-zoom-slider:hover::-webkit-slider-thumb{background:#5f5f5f;}` +
+  `.xlsx-zoom-slider::-moz-range-track{height:4px;background:#c4c4c4;border-radius:2px;}` +
+  `.xlsx-zoom-slider::-moz-range-thumb{width:12px;height:12px;border:none;border-radius:50%;background:#808080;cursor:pointer;}`;
+
+/**
+ * Inject the shared viewer stylesheet into `document.head` exactly once for the
+ * whole module, keyed by the {@link VIEWER_STYLE_ATTR} marker. Earlier this ran
+ * per-instance, so every mount/unmount cycle leaked another `<style>` into the
+ * head (unbounded growth). It is deliberately NEVER removed on destroy: the CSS
+ * is a class constant that any still-live viewer may depend on, and a single
+ * leftover `<style>` after the last teardown is harmless (a fixed, bounded cost,
+ * not a per-instance leak).
+ */
+function ensureViewerStyleInjected(): void {
+  if (typeof document === 'undefined' || !document.head) return;
+  if (document.head.querySelector(`style[${VIEWER_STYLE_ATTR}]`)) return;
+  const style = document.createElement('style');
+  style.setAttribute(VIEWER_STYLE_ATTR, '');
+  style.textContent = VIEWER_STYLE_CSS;
+  document.head.appendChild(style);
+}
+
 export interface XlsxViewerOptions extends LoadOptions {
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
   cellScale?: number;
@@ -253,6 +291,10 @@ function getSheetAxes(ws: Worksheet, mdw: number): SheetAxes {
 
 export class XlsxViewer {
   private wb: XlsxWorkbook | null = null;
+  /** The single subtree root the constructor appended to the caller's
+   *  container. destroy() removes it to return the container to its original
+   *  (empty) state. */
+  private wrapper!: HTMLDivElement;
   private canvas: HTMLCanvasElement;
   private canvasArea: HTMLDivElement;
   private scrollHost: HTMLDivElement;
@@ -347,8 +389,8 @@ export class XlsxViewer {
     this._mode = opts.mode ?? 'main';
     this._hiddenSheetMode = opts.hiddenSheetMode ?? 'show';
 
-    const wrapper = document.createElement('div');
-    wrapper.style.cssText =
+    this.wrapper = document.createElement('div');
+    this.wrapper.style.cssText =
       `position:relative;width:100%;height:100%;` +
       `border:1px solid #c8ccd0;background:#fff;box-sizing:border-box;font-family:sans-serif;display:flex;flex-direction:column;`;
 
@@ -444,20 +486,10 @@ export class XlsxViewer {
       `position:relative;display:flex;align-items:flex-end;flex:1;min-width:0;height:100%;` +
       `margin-left:${TAB_GAP}px;overflow-x:auto;overflow-y:hidden;gap:${TAB_GAP}px;scrollbar-width:none;`;
     this.tabStrip.classList.add('xlsx-tab-strip');
-    const style = document.createElement('style');
-    style.textContent =
-      `.xlsx-tab-strip::-webkit-scrollbar{display:none}` +
-      `.xlsx-tab-nav{background:transparent;transition:background 0.1s;}` +
-      `.xlsx-tab-nav:hover{background:rgba(0,0,0,0.08);}` +
-      // Excel-status-bar zoom slider: a thin uniform gray track (no colored
-      // fill on either side of the thumb) with a small round gray handle.
-      `.xlsx-zoom-slider{-webkit-appearance:none;appearance:none;background:transparent;height:15px;margin:0;}` +
-      `.xlsx-zoom-slider::-webkit-slider-runnable-track{height:4px;background:#c4c4c4;border-radius:2px;}` +
-      `.xlsx-zoom-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:12px;height:12px;margin-top:-4px;border-radius:50%;background:#808080;cursor:pointer;}` +
-      `.xlsx-zoom-slider:hover::-webkit-slider-thumb{background:#5f5f5f;}` +
-      `.xlsx-zoom-slider::-moz-range-track{height:4px;background:#c4c4c4;border-radius:2px;}` +
-      `.xlsx-zoom-slider::-moz-range-thumb{width:12px;height:12px;border:none;border-radius:50%;background:#808080;cursor:pointer;}`;
-    document.head.appendChild(style);
+    // Inject the shared viewer stylesheet once per module (idempotent). Formerly
+    // a per-instance `<style>` was appended to <head> on every construction,
+    // leaking one node per mount/unmount cycle.
+    ensureViewerStyleInjected();
     this.tabStrip.addEventListener('scroll', () => this.updateNavButtons());
 
     this.tabBar.appendChild(navGroup);
@@ -466,9 +498,9 @@ export class XlsxViewer {
       this.tabBar.appendChild(this.buildZoomControl());
     }
 
-    wrapper.appendChild(this.canvasArea);
-    wrapper.appendChild(this.tabBar);
-    container.appendChild(wrapper);
+    this.wrapper.appendChild(this.canvasArea);
+    this.wrapper.appendChild(this.tabBar);
+    container.appendChild(this.wrapper);
 
     this.scrollHost.addEventListener('scroll', () => {
       // Any scroll cancels a deferred tap: the press that started it was a
@@ -2202,6 +2234,21 @@ export class XlsxViewer {
     return this.canvas;
   }
 
+  /**
+   * Tear down the viewer and release resources.
+   *
+   * The caller's container is returned to the state it had before construction
+   * (empty): the entire wrapper subtree the constructor appended is removed.
+   * All document-level listeners are detached — the keydown handler here, and
+   * the validation-panel outside-click handler via {@link hideValidationPanel}.
+   * Listeners on elements inside the wrapper (scrollHost, tabs, …) need no
+   * explicit removal: removing the subtree makes them unreachable and eligible
+   * for GC. Safe to call more than once.
+   *
+   * NOTE: the shared `<style>` in `document.head` is intentionally NOT removed —
+   * it is a class constant that any still-live viewer may depend on, and one
+   * leftover sheet is a bounded, harmless cost (see {@link ensureViewerStyleInjected}).
+   */
   destroy(): void {
     this.resizeObserver?.disconnect();
     this.hideCommentPopup();
@@ -2210,5 +2257,9 @@ export class XlsxViewer {
       document.removeEventListener('keydown', this.keydownHandler);
     }
     this.wb?.destroy();
+    // Remove the whole UI subtree so the container is empty again. This also
+    // detaches every listener bound to elements within it (scrollHost pointer/
+    // wheel handlers, tab clicks, zoom slider) without per-element cleanup.
+    this.wrapper.remove();
   }
 }
