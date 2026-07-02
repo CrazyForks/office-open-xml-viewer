@@ -136,6 +136,8 @@ export const ScrollViewer: LayoutStory = {
 
     const viewer = new DocxScrollViewer(container, {
       gap: 16,
+      paddingTop: 24, // desk margin above the first page (defaults to gap when omitted)
+      paddingBottom: 24, // desk margin below the last page
       overscan: 1,
       enableTextSelection: true,
       background: '#525659', // desk gray behind/between pages (like a PDF reader)
