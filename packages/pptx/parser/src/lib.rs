@@ -1917,19 +1917,16 @@ fn attr_f64(node: &roxmltree::Node<'_, '_>, local: &str) -> Option<f64> {
 //  Relationships helpers
 // ===========================
 
-/// id → target  (used for image/slide lookups by rId)
+/// id → target  (used for image/slide lookups by rId). Thin adapter over
+/// [`ooxml_common::rels::parse_rels`] that flattens each `RelTarget` back to its
+/// raw target string (both Internal part names and External URLs are kept
+/// verbatim — resolution to a zip part happens later via [`resolve_path`]),
+/// preserving this parser's long-standing `HashMap<rId, Target>` shape.
 fn parse_rels(xml: &str) -> HashMap<String, String> {
-    let doc = match roxmltree::Document::parse(xml) {
-        Ok(d) => d,
-        Err(_) => return HashMap::new(),
-    };
-    let mut map = HashMap::new();
-    for rel in doc.root_element().children().filter(|n| n.is_element()) {
-        if let (Some(id), Some(target)) = (attr(&rel, "Id"), attr(&rel, "Target")) {
-            map.insert(id, target);
-        }
-    }
-    map
+    ooxml_common::rels::parse_rels(xml)
+        .into_iter()
+        .map(|(id, rel)| (id, rel.target))
+        .collect()
 }
 
 /// Pair diagramData rels with diagramDrawing rels in a slide's rels XML by filename
@@ -1995,29 +1992,13 @@ fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> 
 }
 
 /// Resolve a relative path against a base directory inside the ZIP.
+///
+/// Thin alias for the shared [`ooxml_common::rels::resolve_target`], which
+/// handles both root-absolute (`/ppt/charts/chart5.xml`) and relative
+/// (`../charts/chart1.xml`) Targets with `..` normalization (ECMA-376 Part 2
+/// §9.3). Kept as a local name so the many call sites read unchanged.
 fn resolve_path(base_dir: &str, target: &str) -> String {
-    // A relationship Target beginning with "/" is a package-root-absolute part
-    // name (e.g. `/ppt/charts/chart5.xml`), not a reference relative to the
-    // source part's directory. Resolve it from the package root and ignore
-    // `base_dir`; otherwise the base is prepended, yielding a path that doesn't
-    // exist in the archive (OPC part names are root-anchored when they start
-    // with "/" — ECMA-376 Part 2 §9.3). xlsx::resolve_zip_path and docx's
-    // media path resolution already handle this; pptx was the outlier.
-    let mut parts: Vec<&str> = if target.starts_with('/') {
-        Vec::new()
-    } else {
-        base_dir.split('/').collect()
-    };
-    for seg in target.split('/') {
-        match seg {
-            ".." => {
-                parts.pop();
-            }
-            "." | "" => {}
-            s => parts.push(s),
-        }
-    }
-    parts.join("/")
+    ooxml_common::rels::resolve_target(base_dir, target)
 }
 
 // ===========================

@@ -1323,17 +1323,16 @@ fn parse_worksheet(
 }
 
 /// Parse a .rels file into rId → Target map.
+/// id → target map for a `.rels` part. Thin adapter over
+/// [`ooxml_common::rels::parse_rels`] that flattens each `RelTarget` to its raw
+/// target string (both Internal part names and External hyperlink URLs are kept
+/// verbatim; part-name resolution happens later via [`resolve_zip_path`]),
+/// preserving this parser's `HashMap<rId, Target>` shape.
 pub(crate) fn parse_rels_map(xml: &str) -> HashMap<String, String> {
-    let Ok(doc) = roxmltree::Document::parse(xml) else {
-        return HashMap::new();
-    };
-    let mut map = HashMap::new();
-    for rel in doc.root_element().children().filter(|n| n.is_element()) {
-        if let (Some(id), Some(target)) = (rel.attribute("Id"), rel.attribute("Target")) {
-            map.insert(id.to_string(), target.to_string());
-        }
-    }
-    map
+    ooxml_common::rels::parse_rels(xml)
+        .into_iter()
+        .map(|(id, rel)| (id, rel.target))
+        .collect()
 }
 
 /// Parse xl/comments{N}.xml referenced from the sheet's rels and collect the
@@ -1640,28 +1639,13 @@ fn load_hyperlinks(
         .collect()
 }
 
-/// Resolve a relative path ("../media/image1.png") against a base dir ("xl/drawings").
+/// Resolve a relative path ("../media/image1.png") against a base dir
+/// ("xl/drawings"). Thin alias for the shared
+/// [`ooxml_common::rels::resolve_target`], which handles root-absolute Targets
+/// (openpyxl's `/xl/...`) and `..` normalization uniformly (ECMA-376 Part 2
+/// §9.3). Kept as a local name so existing call sites read unchanged.
 pub(crate) fn resolve_zip_path(base_dir: &str, target: &str) -> String {
-    // An absolute Target (leading "/", e.g. openpyxl's
-    // `/xl/drawings/drawing1.xml`) is package-root-relative and must ignore
-    // `base_dir`; otherwise the base would be prepended, producing a path that
-    // doesn't exist in the archive (ECMA-376 / OPC part names are root-anchored
-    // when they start with "/").
-    let mut parts: Vec<&str> = if target.starts_with('/') {
-        Vec::new()
-    } else {
-        base_dir.split('/').filter(|s| !s.is_empty()).collect()
-    };
-    for seg in target.split('/') {
-        match seg {
-            ".." => {
-                parts.pop();
-            }
-            "." | "" => {}
-            s => parts.push(s),
-        }
-    }
-    parts.join("/")
+    ooxml_common::rels::resolve_target(base_dir, target)
 }
 
 pub(crate) fn resolve_fill_color(

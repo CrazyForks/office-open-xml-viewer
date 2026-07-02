@@ -1330,11 +1330,14 @@ fn load_media_map(
     let mut media_map: HashMap<String, String> = HashMap::new();
     for (rid, target) in rel_map {
         if target.contains("media/") || target.contains("image") {
-            let path = if target.starts_with('/') {
-                target.trim_start_matches('/').to_string()
-            } else {
-                format!("{}{}", base_dir, target)
-            };
+            // Resolve the Target against the source part's directory via the
+            // shared OPC resolver (ECMA-376 Part 2 §9.3): this handles
+            // root-absolute Targets (`/word/media/...`) AND normalizes `..`
+            // segments, so a chart/footnote media ref like
+            // `../media/image.png` (base_dir `word/charts/`) resolves to
+            // `word/media/image.png` instead of the unresolved
+            // `word/charts/../media/image.png` the old `format!` left behind.
+            let path = ooxml_common::rels::resolve_target(base_dir, target);
             // Confirm the part exists before mapping the rId (keeps the lazy
             // pipeline honest: a path in the map is always extractable).
             // `index_for_name` consults only the central directory — no inflate,
@@ -5565,25 +5568,16 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     base.font_size_cs_set_here = false;
 }
 
+/// id → target map for a `.rels` part. Thin adapter over
+/// [`ooxml_common::rels::parse_rels`] that flattens each `RelTarget` to its raw
+/// target string (both Internal part names and External hyperlink URLs are kept
+/// verbatim; part-name resolution happens later in [`load_media_map`]),
+/// preserving this parser's `HashMap<rId, Target>` shape.
 fn parse_rels(xml: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    if xml.is_empty() {
-        return map;
-    }
-    let doc = match XmlDoc::parse(xml) {
-        Ok(d) => d,
-        Err(_) => return map,
-    };
-    for rel in doc
-        .root_element()
-        .children()
-        .filter(|n| n.tag_name().name() == "Relationship")
-    {
-        if let (Some(id), Some(target)) = (rel.attribute("Id"), rel.attribute("Target")) {
-            map.insert(id.to_string(), target.to_string());
-        }
-    }
-    map
+    ooxml_common::rels::parse_rels(xml)
+        .into_iter()
+        .map(|(id, rel)| (id, rel.target))
+        .collect()
 }
 
 #[cfg(test)]
@@ -7990,6 +7984,45 @@ mod svg_blip_tests {
         assert!(
             !has_image,
             "an rId whose media part is absent must be dropped, yielding no ImageRun"
+        );
+    }
+
+    /// `load_media_map` must normalize `..` segments in a relationship Target
+    /// (ECMA-376 Part 2 §9.3). A media ref that walks up out of a nested part's
+    /// directory — e.g. `../media/footnote.png` resolved against
+    /// `word/charts/` — must become the canonical part name
+    /// `word/media/footnote.png`, so the existence check finds the entry and the
+    /// rId is mapped. Before the shared `ooxml_common::rels::resolve_target`
+    /// migration, docx concatenated `base_dir + target` verbatim, leaving the
+    /// unresolved `word/charts/../media/footnote.png`; whether that matched a
+    /// zip entry was left to the zip lib's leniency. This pins the fix.
+    #[test]
+    fn load_media_map_normalizes_dotdot_target() {
+        use zip::write::SimpleFileOptions;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            let mut put = |name: &str, bytes: &[u8]| {
+                use std::io::Write;
+                zw.start_file(name, opts).unwrap();
+                zw.write_all(bytes).unwrap();
+            };
+            // The media part lives at the canonical (normalized) name.
+            put("word/media/footnote.png", PNG_1X1);
+            zw.finish().unwrap();
+        }
+        let mut zip: Zip = ZipArchive::new(Cursor::new(buf)).unwrap();
+
+        // A part at word/charts/chart1.xml references the media one directory up.
+        let mut rel_map: HashMap<String, String> = HashMap::new();
+        rel_map.insert("rIdImg".to_string(), "../media/footnote.png".to_string());
+        let media_map = load_media_map(&mut zip, &rel_map, "word/charts/");
+
+        assert_eq!(
+            media_map.get("rIdImg").map(String::as_str),
+            Some("word/media/footnote.png"),
+            "`..` must be normalized so the resolved path is the canonical part name"
         );
     }
 
