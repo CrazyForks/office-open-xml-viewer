@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import type { DocxDocument } from './document';
+import type { DocxTextRunInfo } from './renderer';
 import type { RenderPageOptions } from './types';
 import type { WireRenderPageOptions } from './worker-protocol';
 
@@ -116,6 +117,25 @@ export function makeEl(tag: string): FakeEl {
       for (const fn of this._listeners.get(type) ?? []) fn(event);
     },
   };
+  // Mirror the DOM: assigning `innerHTML = ''` detaches all children (both
+  // buildDocxTextLayer's leading clear and the viewer's overlay-teardown clear on
+  // recycle rely on this). A non-empty assignment only records the string (the
+  // viewer/text-layer never set non-empty innerHTML, so no parsing is needed).
+  let _html = '';
+  Object.defineProperty(el, 'innerHTML', {
+    get() {
+      return _html;
+    },
+    set(value: string) {
+      _html = value;
+      if (value === '') {
+        for (const c of el.children) c.parentElement = null;
+        el.children.length = 0;
+      }
+    },
+    enumerable: true,
+    configurable: true,
+  });
   return el;
 }
 
@@ -165,6 +185,10 @@ export class FakeDocxEngine {
   renderCalls: RenderCall[] = [];
   bitmapCalls: RenderCall[] = [];
   createdBitmaps: Array<{ width: number; height: number; close: ReturnType<typeof vi.fn> }> = [];
+  /** Runs fed to `renderPage`'s `onTextRun` (main mode only) so a test can drive
+   *  the viewer's per-slot text overlay (buildDocxTextLayer) without a real
+   *  render. Empty/undefined ⇒ no runs emitted. */
+  feedTextRuns?: DocxTextRunInfo[];
   constructor(
     private _pageCount: number,
     // Uniform-page convention: a single-element `_sizes` array means EVERY page
@@ -200,6 +224,9 @@ export class FakeDocxEngine {
         "renderPage(canvas) is unavailable in mode: 'worker'; use renderPageToBitmap() and paint it via an ImageBitmapRenderingContext",
       );
     }
+    // Emit any fed runs to the viewer's internal onTextRun so it can build the
+    // per-slot overlay (mirrors the real renderer emitting run geometry).
+    for (const r of this.feedTextRuns ?? []) opts?.onTextRun?.(r);
     return new Promise<void>((resolve, reject) => {
       const call: RenderCall = { page, width: opts?.width, resolve: () => resolve(), reject };
       this.renderCalls.push(call);

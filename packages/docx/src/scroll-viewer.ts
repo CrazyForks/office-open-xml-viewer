@@ -131,6 +131,11 @@ export class DocxScrollViewer {
    *  build; the engine's per-canvas token already discards the stale pixels. */
   private _renderEpoch = 0;
   private _wheelListener: ((e: WheelEvent) => void) | null = null;
+  /** One-shot latch for the worker-mode text-selection warning. The overlay is a
+   *  main-mode-only feature: in worker mode the per-run `onTextRun` geometry
+   *  cannot cross the worker boundary, so an `enableTextSelection` overlay stays
+   *  empty. We warn once (parity with `DocxViewer`) rather than per slot. */
+  private _warnedNoTextSelection = false;
 
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     this._container = container;
@@ -378,6 +383,11 @@ export class DocxScrollViewer {
       slot.bitmap.close();
       slot.bitmap = null;
     }
+    // Clear the per-slot text overlay so a slot sitting in the free pool holds no
+    // stale spans. buildDocxTextLayer also clears on its next build, but an
+    // unrendered pooled slot never gets that build, and the detached spans would
+    // otherwise linger; drop them here.
+    if (slot.textLayer) slot.textLayer.innerHTML = '';
     slot.renderedPage = -1;
     slot.wrapper.remove();
     this._free.push(slot);
@@ -465,6 +475,18 @@ export class DocxScrollViewer {
       });
   }
 
+  /** Warn once when an `enableTextSelection` overlay was requested but the render
+   *  mode is `worker` (so the overlay stays empty). Same wording as
+   *  `DocxViewer._render` — one warning per viewer, not per slot. */
+  private _maybeWarnNoTextSelection(): void {
+    if (this._opts.enableTextSelection && !this._warnedNoTextSelection) {
+      this._warnedNoTextSelection = true;
+      console.warn(
+        "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
+      );
+    }
+  }
+
   /** Route an async render failure to `onError`, or `console.error` when none is
    *  set (so failures are never fully silent), and never after teardown. */
   private _reportRenderError(err: unknown): void {
@@ -495,6 +517,11 @@ export class DocxScrollViewer {
    *    live slot at the new scale, never paint the old-scale bitmap.
    */
   private async _renderSlotBitmap(i: number, slot: PageSlot, widthPx: number, dpr: number): Promise<void> {
+    // Worker-mode + enableTextSelection: the overlay can't be populated (onTextRun
+    // doesn't cross the worker boundary), so warn once (parity with DocxViewer)
+    // and leave the overlay empty. Fires before the coalescing guards so it is
+    // reported even when this particular dispatch is coalesced/dropped.
+    this._maybeWarnNoTextSelection();
     if (this._bitmapInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this page already scrolled out of the
     // mounted window, don't dispatch at all.

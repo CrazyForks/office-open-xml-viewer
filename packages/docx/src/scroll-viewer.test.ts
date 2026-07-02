@@ -851,3 +851,162 @@ describe('DocxScrollViewer — self-load path (T7 story)', () => {
     v.destroy();
   });
 });
+
+describe('DocxScrollViewer — text selection (T5)', () => {
+  const RUN = { text: 'Hi', x: 1, y: 2, w: 10, h: 12, fontSize: 12, font: '12px serif' };
+
+  function findSlotWrapper(scrollHost: FakeEl): FakeEl {
+    return scrollHost.children.find((c) => c.children.some((k) => k.tag === 'canvas')) as FakeEl;
+  }
+  function findTextLayer(slotWrapper: FakeEl): FakeEl {
+    return slotWrapper.children.find((c) => c.tag === 'div') as FakeEl;
+  }
+
+  it('main mode: builds an overlay span per run for each visible slot', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(3, [{ widthPt: 100, heightPt: 200 }]);
+    engine.feedTextRuns = [RUN];
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Every mounted slot got its overlay built from that page's render.
+    const mounted = v.mountedPageIndicesForTest();
+    expect(mounted.length).toBeGreaterThan(0);
+    for (const wrapper of scrollHost.children.filter((c) => c.children.some((k) => k.tag === 'canvas'))) {
+      const textLayer = findTextLayer(wrapper);
+      expect(textLayer.children.length).toBe(1);
+      expect(textLayer.children[0].textContent).toBe('Hi');
+    }
+    v.destroy();
+  });
+
+  it('main mode: sizes the overlay to the slot canvas CSS size', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
+    engine.feedTextRuns = [RUN];
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    const wrapper = findSlotWrapper(scrollHost);
+    const canvas = wrapper.children.find((c) => c.tag === 'canvas') as FakeEl;
+    const textLayer = findTextLayer(wrapper);
+    // buildDocxTextLayer sizes the layer to the canvas CSS width/height. The
+    // main renderPage owns the canvas so its CSS size falls back to
+    // `${canvas.width}px` — either way the overlay must match the canvas.
+    const expectW = canvas.style.width || `${canvas.width}px`;
+    const expectH = canvas.style.height || `${canvas.height}px`;
+    expect(textLayer.style.width).toBe(expectW);
+    expect(textLayer.style.height).toBe(expectH);
+    v.destroy();
+  });
+
+  it('main mode: recycling a slot clears its overlay so the free pool holds no stale spans', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }]);
+    engine.feedTextRuns = [RUN];
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    // The overlay is built in the renderPage .then() microtask.
+    await Promise.resolve();
+    await Promise.resolve();
+    // A page-0 slot exists with a built overlay.
+    const wrapper = findSlotWrapper(scrollHost);
+    const textLayer = findTextLayer(wrapper);
+    expect(textLayer.children.length).toBe(1);
+    // Scroll far away so page 0 recycles into the free pool.
+    scrollHost.scrollTop = 8000;
+    scrollHost.dispatch('scroll');
+    // The recycled slot's overlay was cleared (no stale spans linger in the pool).
+    expect(textLayer.children.length).toBe(0);
+    v.destroy();
+  });
+
+  it('worker mode: warns once and builds no overlay spans', async () => {
+    installDom();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(3, [{ widthPt: 100, heightPt: 200 }], 'worker');
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      enableTextSelection: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Warned exactly once with the same wording as DocxViewer, across every
+    // mounted slot's render.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/text selection is unavailable in mode: 'worker'/);
+    // No renderPage (worker path only) and no overlay spans anywhere.
+    expect(engine.renderCalls.length).toBe(0);
+    for (const wrapper of scrollHost.children.filter((c) => c.children.some((k) => k.tag === 'canvas'))) {
+      const textLayer = wrapper.children.find((c) => c.tag === 'div') as FakeEl;
+      expect(textLayer.children.length).toBe(0);
+    }
+    warn.mockRestore();
+    v.destroy();
+  });
+
+  it('stale main render (epoch moved by setScale mid-flight) does NOT rebuild the overlay', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Deferred main mode: the test resolves renderPage manually so setScale can
+    // move the epoch WHILE page 0's first render is in flight.
+    const engine = new FakeDocxEngine(20, [{ widthPt: 100, heightPt: 200 }], 'main', true);
+    engine.feedTextRuns = [RUN];
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      enableTextSelection: true,
+      gap: 10,
+      zoomMin: 0.1,
+      zoomMax: 4,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    // Grab the first (stale) page-0 render call before resolving it. Capture the
+    // slot wrapper it targets so we can inspect its overlay afterwards.
+    const staleWrapper = scrollHost.children.find((c) => c.children.some((k) => k.tag === 'canvas')) as FakeEl;
+    const staleLayer = staleWrapper.children.find((c) => c.tag === 'div') as FakeEl;
+    const staleCall = engine.renderCalls.find((c) => c.page === 0)!;
+    // Zoom mid-flight: bumps the epoch and force-re-mounts every slot (which
+    // re-dispatches a fresh page-0 render at the new scale).
+    v.setScale(v.scaleForTest() * 2);
+    // Now resolve the STALE (old-epoch) render. Its .then must bail on the epoch
+    // guard and NOT build the overlay.
+    staleCall.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The stale render built nothing (epoch guard). The fresh render is still
+    // deferred (not resolved), so its overlay isn't built either — the stale
+    // slot/layer holds zero spans from the superseded render.
+    expect(staleLayer.children.length).toBe(0);
+    v.destroy();
+  });
+});
