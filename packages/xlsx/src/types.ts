@@ -1,4 +1,4 @@
-import type { MathNode, SpaceLine } from '@silurus/ooxml-core';
+import type { ChartModel, MathNode, SpaceLine } from '@silurus/ooxml-core';
 
 export interface Workbook {
   sheets: SheetMeta[];
@@ -511,7 +511,10 @@ export interface ChartAnchor {
   fromRow: number; fromRowOff: number;
   toCol: number;   toColOff: number;
   toRow: number;   toRowOff: number;
-  chart: ChartData;
+  /** The chart payload, already in the canonical {@link ChartModel} shape the
+   *  Rust parser emits (adapted from `ChartData` via `From` — formerly the TS
+   *  `adaptChartData`). Passed straight to `renderChart`. */
+  chart: ChartModel;
 }
 
 export interface ShapeAnchor {
