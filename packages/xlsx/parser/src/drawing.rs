@@ -1591,6 +1591,9 @@ fn parse_two_cell_marker(anchor: &roxmltree::Node) -> AnchorRect {
 /// `LeftCol, LeftOffsetPx, TopRow, TopOffsetPx, RightCol, RightOffsetPx,
 /// BottomRow, BottomOffsetPx`. Columns/rows are 0-based cell indices; the four
 /// offsets are **pixels** and are converted to EMU via [`EMU_PER_PX_96DPI`].
+/// The multiplication saturates instead of wrapping/panicking so a
+/// pathologically large offset in a malformed or hostile CSV clamps to
+/// `i64::MAX` rather than overflowing.
 /// Returns `None` when the CSV is malformed (< 8 numeric fields).
 fn parse_vml_client_anchor(client_data: &roxmltree::Node) -> Option<AnchorRect> {
     let anchor = client_data
@@ -1606,13 +1609,13 @@ fn parse_vml_client_anchor(client_data: &roxmltree::Node) -> Option<AnchorRect> 
     }
     Some(AnchorRect {
         from_col: vals[0].max(0) as u32,
-        from_col_off: vals[1] * EMU_PER_PX_96DPI,
+        from_col_off: vals[1].saturating_mul(EMU_PER_PX_96DPI),
         from_row: vals[2].max(0) as u32,
-        from_row_off: vals[3] * EMU_PER_PX_96DPI,
+        from_row_off: vals[3].saturating_mul(EMU_PER_PX_96DPI),
         to_col: vals[4].max(0) as u32,
-        to_col_off: vals[5] * EMU_PER_PX_96DPI,
+        to_col_off: vals[5].saturating_mul(EMU_PER_PX_96DPI),
         to_row: vals[6].max(0) as u32,
-        to_row_off: vals[7] * EMU_PER_PX_96DPI,
+        to_row_off: vals[7].saturating_mul(EMU_PER_PX_96DPI),
     })
 }
 
@@ -1675,8 +1678,9 @@ fn vml_ole_preview<'a>(
 /// its XML + its own rels map. Read once per sheet and only when there is at
 /// least one `<oleObject>` to place (so a comments-only sheet pays no extra zip
 /// read). `None` when there is no legacyDrawing, the part is missing, or it
-/// fails to parse. The VML has no `<?xml?>` declaration but is well-formed XML,
-/// so roxmltree parses it as-is (verified against real Excel output — see the
+/// fails to parse. Whether the VML part carries a `<?xml?>` declaration varies
+/// by producer; either way it is well-formed XML, so roxmltree parses it as-is
+/// (the declaration-less case is verified against real Excel output — see the
 /// `roxmltree_parses_declarationless_vml` test); no preprocessing is needed.
 fn load_legacy_vml_drawing(
     doc: &roxmltree::Document,
@@ -3244,6 +3248,29 @@ mod ole_object_tests {
         assert_eq!((a.to_col_off, a.to_row_off), (7 * 9525, 8 * 9525));
     }
 
+    /// A pathologically large `<x:Anchor>` pixel offset (e.g. a malformed or
+    /// hostile CSV) must saturate the px→EMU conversion rather than panic
+    /// (debug overflow check) or silently wrap (release build).
+    #[test]
+    fn vml_client_anchor_px_to_emu_saturates_on_overflow() {
+        let xml = format!(
+            r#"<x:ClientData xmlns:x="urn:schemas-microsoft-com:office:excel" ObjectType="Pict">
+                 <x:Anchor>0, {big}, 0, 0, 1, 0, 1, 0</x:Anchor>
+               </x:ClientData>"#,
+            big = i64::MAX
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let anchor = parse_vml_client_anchor(&doc.root_element())
+            .expect("8 numeric fields must parse even when one overflows on conversion");
+        assert_eq!(
+            anchor.from_col_off,
+            i64::MAX,
+            "saturating_mul must clamp to i64::MAX instead of panicking or wrapping"
+        );
+        // The other (well-behaved) offsets are unaffected.
+        assert_eq!(anchor.to_col_off, 0);
+    }
+
     /// The `<objectPr><anchor>` two-cell markers (EMU, exact) win over the VML
     /// `<x:Anchor>` pixel CSV when both are present, but the preview IMAGE still
     /// comes from the vmlDrawing (objectPr@r:id is object data).
@@ -3429,8 +3456,8 @@ mod ole_object_tests {
         );
     }
 
-    /// The declaration-less VML Excel actually writes (root `<xml>`, no
-    /// `<?xml?>`) must parse with roxmltree without any preprocessing. This is
+    /// Declaration-less VML (root `<xml>`, no `<?xml?>`), as some producers
+    /// write it, must parse with roxmltree without any preprocessing. This is
     /// the invariant `load_legacy_vml_drawing` relies on.
     #[test]
     fn roxmltree_parses_declarationless_vml() {
