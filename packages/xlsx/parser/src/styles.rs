@@ -519,3 +519,74 @@ pub(crate) fn parse_cell_xfs(doc: &roxmltree::Document) -> Vec<CellXf> {
     }
     xfs
 }
+
+/// ISO/IEC 29500 Strict-conformance fixture (`fix(xlsx): accept Strict
+/// namespace URIs across the parser` routed every `x:` element match here
+/// through `is_x_ns`). Before that conversion `<fonts>`/`<cellXfs>` were
+/// found via a hardcoded Transitional URI, so a Strict `xl/styles.xml` —
+/// `xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main"` — resolved to
+/// empty `fonts/cell_xfs` vectors; this pins that the style *references* a
+/// worksheet cell's `s="N"` index into now resolve identically to the
+/// Transitional case.
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+
+    const X_NS_STRICT: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+
+    fn theme() -> Vec<String> {
+        vec!["#111111".into(); 12]
+    }
+
+    #[test]
+    fn strict_styles_xml_resolves_fonts_fills_and_cell_xfs() {
+        let xml = format!(
+            r#"<styleSheet xmlns="{ns}">
+  <fonts count="2">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><b/><sz val="14"/><name val="Calibri"/><color rgb="FFFF0000"/></font>
+  </fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="2">
+    <xf fontId="0" fillId="0" borderId="0"/>
+    <xf fontId="1" fillId="1" borderId="0" applyFont="1" applyFill="1">
+      <alignment horizontal="center" wrapText="1"/>
+    </xf>
+  </cellXfs>
+</styleSheet>"#,
+            ns = X_NS_STRICT,
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+
+        let fonts = parse_fonts(&doc, &theme());
+        assert_eq!(fonts.len(), 2, "Strict <fonts> must be found via is_x_ns");
+        assert!(fonts[1].bold);
+        assert_eq!(fonts[1].size, 14.0);
+        assert_eq!(fonts[1].name.as_deref(), Some("Calibri"));
+        assert_eq!(fonts[1].color.as_deref(), Some("#FF0000"));
+
+        let fills = parse_fills(&doc, &theme());
+        assert_eq!(fills.len(), 2, "Strict <fills> must be found via is_x_ns");
+        assert_eq!(fills[1].pattern_type, "solid");
+        assert_eq!(fills[1].fg_color.as_deref(), Some("#FFFF00"));
+
+        let cell_xfs = parse_cell_xfs(&doc);
+        assert_eq!(
+            cell_xfs.len(),
+            2,
+            "Strict <cellXfs> must be found via is_x_ns"
+        );
+        // A worksheet cell's `s="1"` references cell_xfs[1] — the style
+        // reference a real Strict document round-trips through.
+        let styled = &cell_xfs[1];
+        assert_eq!(styled.font_id, 1);
+        assert_eq!(styled.fill_id, 1);
+        assert_eq!(styled.align_h.as_deref(), Some("center"));
+        assert!(styled.wrap_text);
+    }
+}

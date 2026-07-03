@@ -3469,3 +3469,82 @@ mod ole_object_tests {
         assert_eq!(doc.root_element().tag_name().name(), "xml");
     }
 }
+
+/// ISO/IEC 29500 Strict-conformance fixture (`fix(xlsx): accept Strict
+/// namespace URIs across the parser` routed `parse_drawing_anchors`'s
+/// `xdr:`/`a:` element matching through `is_xdr_ns`/`is_a_ns`, and the blip's
+/// `r:embed` through the shared `blip_embed_rid`/`attr_ns` helpers). Before
+/// that conversion `<xdr:twoCellAnchor>` was found via a hardcoded
+/// Transitional URI, so a Strict `xl/drawings/drawing1.xml` — declaring
+/// `xdr:`/`a:`/`r:` under the `http://purl.oclc.org/ooxml/…` URIs — resolved
+/// to zero anchors; this pins that a picture's `r:embed` blip still resolves
+/// to its media part.
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    const XDR_NS_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/spreadsheetDrawing";
+    const A_NS_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/main";
+    const R_NS_STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+
+    // 1×1 transparent PNG (smallest valid PNG), same fixture as `blip_svg_tests`.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn build_media_zip(png: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = SimpleFileOptions::default();
+            zw.start_file("xl/media/image1.png", opts).unwrap();
+            zw.write_all(png).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn strict_drawing_anchor_resolves_blip_embed() {
+        let xml = format!(
+            r#"<xdr:wsDr xmlns:xdr="{xdr}" xmlns:a="{a}" xmlns:r="{r}">
+  <xdr:twoCellAnchor editAs="oneCell">
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="2" name="P"/><xdr:cNvPicPr/></xdr:nvPicPr>
+      <xdr:blipFill><a:blip r:embed="rIdPng"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+      <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#,
+            xdr = XDR_NS_STRICT,
+            a = A_NS_STRICT,
+            r = R_NS_STRICT,
+        );
+
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+
+        let data = build_media_zip(PNG_1X1);
+        let mut archive = zip::ZipArchive::new(Cursor::new(data)).unwrap();
+        let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive);
+
+        assert_eq!(
+            anchors.len(),
+            1,
+            "Strict xdr:twoCellAnchor must be found via is_xdr_ns"
+        );
+        assert_eq!(anchors[0].image_path, "xl/media/image1.png");
+        assert_eq!(anchors[0].mime_type, "image/png");
+    }
+}

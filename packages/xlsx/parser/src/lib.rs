@@ -2804,3 +2804,63 @@ mod date1904_wire_shape_tests {
         assert_eq!(v.get("date1904").and_then(|d| d.as_bool()), Some(true));
     }
 }
+
+/// ISO/IEC 29500 Strict-conformance fixture (`fix(xlsx): accept Strict
+/// namespace URIs across the parser` routed `parse_row_cells`'s `<c>`/`<v>`
+/// element matching through `is_x_ns`). Before that conversion every
+/// `<row>`/`<c>`/`<v>` lookup was pinned to the Transitional `x:` URI, so a
+/// Strict worksheet — `xmlns="http://purl.oclc.org/ooxml/spreadsheetml/
+/// main"` — parsed to zero rows; this pins that cell values (shared-string
+/// text, an inline string, and a numeric literal) and each cell's `s` style
+/// index resolve identically to the Transitional case.
+#[cfg(test)]
+mod strict_namespace_cell_tests {
+    use super::*;
+
+    const X_NS_STRICT: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+
+    #[test]
+    fn strict_worksheet_resolves_cell_values_and_style_index() {
+        let shared = vec![SharedString {
+            text: "Shared Hello".to_string(),
+            runs: None,
+        }];
+        let xml = format!(
+            r#"<worksheet xmlns="{ns}">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="s" s="2"><v>0</v></c>
+      <c r="B1" t="inlineStr"><is><t>Inline Hi</t></is></c>
+      <c r="C1"><v>42.5</v></c>
+    </row>
+  </sheetData>
+</worksheet>"#,
+            ns = X_NS_STRICT,
+        );
+
+        let (ws, _) =
+            parse_worksheet(&xml, &shared, &[], "Sheet1").expect("Strict worksheet must parse");
+        assert_eq!(ws.rows.len(), 1, "Strict <row> must be found via is_x_ns");
+        let cells = &ws.rows[0].cells;
+        assert_eq!(cells.len(), 3, "Strict <c> must be found via is_x_ns");
+
+        match &cells[0].value {
+            CellValue::Text { text, .. } => assert_eq!(text, "Shared Hello"),
+            other => panic!("expected shared-string text, got {other:?}"),
+        }
+        assert_eq!(
+            cells[0].style_index, 2,
+            "the `s` style index must round-trip"
+        );
+
+        match &cells[1].value {
+            CellValue::Text { text, .. } => assert_eq!(text, "Inline Hi"),
+            other => panic!("expected inline string text, got {other:?}"),
+        }
+
+        match &cells[2].value {
+            CellValue::Number { number } => assert_eq!(*number, 42.5),
+            other => panic!("expected a number, got {other:?}"),
+        }
+    }
+}

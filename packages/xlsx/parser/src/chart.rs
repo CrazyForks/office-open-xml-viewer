@@ -2856,3 +2856,71 @@ mod date_axis_tests {
         assert_eq!(chart.cat_axis_title_size, Some(1200));
     }
 }
+
+/// ISO/IEC 29500 Strict-conformance fixture. `parse_chart_xml` and its helpers
+/// match `c:`/`a:` elements via `is_c_ns`/`is_a_ns` (see `fix(xlsx): accept
+/// Strict namespace URIs across the parser`); this pins that a Strict
+/// chartSpace — `xmlns:c="http://purl.oclc.org/ooxml/drawingml/chart"` +
+/// `xmlns:a="http://purl.oclc.org/ooxml/drawingml/main"` — yields the exact
+/// same `ChartData` (series values, categories, axis format code) as the
+/// Transitional fixture. Before the `is_c_ns`/`is_a_ns` conversion this
+/// document parsed to `None` (the top-level `<c:chart>` lookup itself is
+/// namespace-pinned), so this test only passes through the predicate path.
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+
+    const C_NS_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/chart";
+    const A_NS_STRICT: &str = "http://purl.oclc.org/ooxml/drawingml/main";
+
+    fn theme() -> Vec<String> {
+        vec!["#111111".into(); 12]
+    }
+
+    #[test]
+    fn strict_chart_series_categories_and_axis_format_code() {
+        let xml = format!(
+            r##"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:title><c:tx><c:rich><a:p><a:r><a:t>Strict Share</a:t></a:r></a:p></c:rich></c:tx></c:title>
+    <c:plotArea>
+      <c:layout/>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:grouping val="clustered"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Sales</c:v></c:pt></c:strCache></c:strRef></c:tx>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>Q1</c:v></c:pt>
+            <c:pt idx="1"><c:v>Q2</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>10</c:v></c:pt>
+            <c:pt idx="1"><c:v>20</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+        <c:axId val="1"/><c:axId val="2"/>
+      </c:barChart>
+      <c:valAx>
+        <c:axId val="1"/><c:axPos val="l"/>
+        <c:numFmt formatCode="#,##0.00" sourceLinked="0"/>
+      </c:valAx>
+      <c:catAx><c:axId val="2"/><c:axPos val="b"/></c:catAx>
+    </c:plotArea>
+    <c:legend><c:legendPos val="r"/></c:legend>
+  </c:chart>
+</c:chartSpace>"##,
+            c = C_NS_STRICT,
+            a = A_NS_STRICT,
+        );
+
+        let chart = parse_chart_xml(&xml, &theme()).expect("Strict chartSpace must parse");
+        assert_eq!(chart.chart_type, "bar");
+        assert_eq!(chart.title.as_deref(), Some("Strict Share"));
+        assert_eq!(chart.categories, vec!["Q1", "Q2"]);
+        assert_eq!(chart.series.len(), 1);
+        assert_eq!(chart.series[0].values, vec![Some(10.0), Some(20.0)]);
+        assert_eq!(chart.val_axis_format_code.as_deref(), Some("#,##0.00"));
+    }
+}
