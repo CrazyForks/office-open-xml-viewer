@@ -326,6 +326,94 @@ describe('CH4 — stackedAreaPct normalizes like the line/bar percentStacked con
   });
 });
 
+describe('CH5 — category axis numFmt applies to category tick labels (§21.2.2.71)', () => {
+  // dateAx / numeric category axes cache the categories as Excel serial numbers
+  // ("44927"). Before the fix the renderer drew those raw serials; now the
+  // catAxisFormatCode is applied so a time-series line/bar shows real dates.
+  const DATE_CATS = ['44927', '44958', '44986']; // 2023-01-01 / 02-01 / 03-01
+
+  it('a line chart formats numeric-serial categories through the date code', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: DATE_CATS,
+      catAxisFormatCode: 'm/d/yyyy',
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+    }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    expect(labels).toContain('1/1/2023');
+    expect(labels).toContain('2/1/2023');
+    expect(labels).toContain('3/1/2023');
+    // The raw serials must NOT appear as category labels anymore.
+    expect(labels.some(l => l === '44927')).toBe(false);
+  });
+
+  it('a column chart formats numeric-serial categories through the date code', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: DATE_CATS,
+      catAxisFormatCode: 'm/d/yyyy',
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+    }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    expect(labels).toContain('1/1/2023');
+    expect(labels.some(l => l === '44927')).toBe(false);
+  });
+
+  it('a horizontal bar chart formats numeric-serial categories through the date code', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: DATE_CATS,
+      catAxisFormatCode: 'm/d/yyyy',
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+    }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    expect(labels).toContain('1/1/2023');
+    expect(labels.some(l => l === '44927')).toBe(false);
+  });
+
+  it('an area chart formats numeric-serial categories through the date code', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'area',
+      categories: DATE_CATS,
+      catAxisFormatCode: 'm/d/yyyy',
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+    }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    expect(labels).toContain('1/1/2023');
+    expect(labels.some(l => l === '44927')).toBe(false);
+  });
+
+  it('string categories stay verbatim even when a format code is present', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['Q1', 'Q2', 'Q3'],
+      catAxisFormatCode: 'm/d/yyyy',
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+    }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    expect(labels).toContain('Q1');
+    expect(labels).toContain('Q2');
+    expect(labels).toContain('Q3');
+  });
+
+  it('numeric categories with no format code render as raw text (unchanged)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: DATE_CATS,
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+    }), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    expect(labels).toContain('44927');
+    expect(labels.some(l => l === '1/1/2023')).toBe(false);
+  });
+});
+
 describe('CH3 — labels are locale-independent (§18.8.30)', () => {
   // `toLocaleString()` groups thousands in every common locale, so an explicit
   // no-separator format code ("0") is the discriminator: the §18.8.30 engine

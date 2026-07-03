@@ -15,7 +15,7 @@ import {
 } from './layout.js';
 import { niceStep, valueAxisScale } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
-import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
+import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
 import { hexToRgba } from '../shape/paint.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
@@ -958,7 +958,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     const catSlotMaxPx = catGap - 4;
     const horizLabelMaxPx = (px0 - 4) - (x + legLeftW + valTitleW);
     for (let ci = 0; ci < n; ci++) {
-      const raw = (cats[ci] ?? '').toString();
+      // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
+      // (e.g. dateAx serials → real dates). No-op for string categories.
+      const raw = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode);
       if (!isH) {
         const lx = px0 + ci * catGap + catGap / 2;
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
@@ -1249,7 +1251,10 @@ function renderLineChart(
       const tx = toX(ci);
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx);
       ctx.fillStyle = catLabelColor;
-      ctx.fillText(elideToWidth(ctx, (cats[ci] ?? '').toString(), catSlotMaxPx), tx, py0 + ph + 5);
+      // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
+      // category-axis numFmt; string categories pass through unchanged.
+      const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode);
+      ctx.fillText(elideToWidth(ctx, label, catSlotMaxPx), tx, py0 + ph + 5);
     }
   }
 
@@ -1439,14 +1444,19 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // CJK labels, which weakened the collision test) to pick the interval, then
     // draw each label elided to the room a drawn label actually owns —
     // (pw/n)·interval, the spacing between two drawn labels.
+    // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
+    // category-axis numFmt before measuring and drawing; string categories
+    // pass through unchanged.
+    const labels = cats.map(c =>
+      formatCategoryLabel((c ?? '').toString(), chart.catAxisFormatCode));
     let maxLabelW = 0;
     for (let ci = 0; ci < n; ci++) {
-      maxLabelW = Math.max(maxLabelW, ctx.measureText((cats[ci] ?? '').toString()).width);
+      maxLabelW = Math.max(maxLabelW, ctx.measureText(labels[ci] ?? '').width);
     }
     const labelInterval = Math.max(1, Math.ceil((maxLabelW + 6) / (pw / n)));
     const catSlotMaxPx = (pw / n) * labelInterval - 4;
     for (let ci = 0; ci < n; ci += labelInterval) {
-      ctx.fillText(elideToWidth(ctx, (cats[ci] ?? '').toString(), catSlotMaxPx), toX(ci), py0 + ph + 3);
+      ctx.fillText(elideToWidth(ctx, labels[ci] ?? '', catSlotMaxPx), toX(ci), py0 + ph + 3);
     }
   }
 
@@ -1626,7 +1636,10 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
       align === 'right' ? lx - plotLeftX
         : align === 'left' ? plotRightX - lx
           : 2 * Math.min(plotRightX - lx, lx - plotLeftX);
-    ctx.fillText(elideToWidth(ctx, (cats[i] ?? '').toString(), maxPx), lx, ly);
+    // §21.2.2.71: format numeric-serial categories via the category-axis
+    // numFmt; string spoke labels pass through unchanged.
+    const label = formatCategoryLabel((cats[i] ?? '').toString(), chart.catAxisFormatCode);
+    ctx.fillText(elideToWidth(ctx, label, maxPx), lx, ly);
   }
 
   // ECMA-376 §21.2.3.10 c:radarStyle — "filled" closes the polygon with a
@@ -2487,7 +2500,10 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   const labelY = py0 + ph + 4;
   for (let i = 0; i < n; i++) {
     const ccx = px0 + gapW * i + gapW / 2;
-    const lines = cats[i].split(/\s+/);
+    // §21.2.2.71: format numeric-serial categories via the category-axis
+    // numFmt; string transaction labels pass through unchanged.
+    const label = formatCategoryLabel(cats[i], chart.catAxisFormatCode);
+    const lines = label.split(/\s+/);
     lines.forEach((line, li) => ctx.fillText(line, ccx, labelY + li * (fontSize + 2)));
   }
 

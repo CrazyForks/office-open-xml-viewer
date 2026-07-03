@@ -54,6 +54,28 @@ export function formatChartValWithCode(v: number, code: string | null | undefine
 }
 
 /**
+ * Format a category-axis tick label. Categories arrive as the raw cached
+ * strings the workbook stored (`<c:cat><c:strCache>` text, or the numeric
+ * text of a `<c:numCache>` on a date/number axis). ECMA-376 §21.2.2.71
+ * (`c:numFmt`) lets the category axis carry a number-format code: Excel
+ * applies it to the tick labels just as it does on the value axis. When the
+ * axis has such a code AND the raw category parses to a finite number, format
+ * it (which routes serial dates through `formatExcelDate` automatically); a
+ * missing code, `"General"`, or a non-numeric category string falls through
+ * to the raw text unchanged — no new interpretation is invented.
+ */
+export function formatCategoryLabel(raw: string, code: string | null | undefined): string {
+  if (!code) return raw;
+  // Only numeric-looking categories are formatted. `Number('')` and
+  // `Number('  ')` are 0 (falsely finite), so reject blank / whitespace text
+  // explicitly; keep genuine string categories (e.g. "Q1", "North") verbatim.
+  if (raw.trim() === '') return raw;
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return raw;
+  return formatChartValWithCode(num, code);
+}
+
+/**
  * True when `code` contains date tokens (m / d / y / h / s) outside of
  * quotes. Heuristic but robust: ECMA-376 number-format codes never use
  * those letters as numeric placeholders.

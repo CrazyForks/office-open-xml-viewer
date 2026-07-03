@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
+import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 
 describe('formatChartVal (General)', () => {
   it('shows integers raw with no abbreviation', () => {
@@ -51,5 +51,33 @@ describe('formatChartValWithCode — percent & null', () => {
     expect(formatChartValWithCode(7507, 'General')).toBe('7507');
     expect(formatChartValWithCode(7507, 'general')).toBe('7507');
     expect(formatChartValWithCode(0.5, ' General ')).toBe('0.5');
+  });
+});
+
+describe('formatCategoryLabel — category-axis numFmt (§21.2.2.71)', () => {
+  it('formats a numeric serial category through a date code', () => {
+    // 44927 = 2023-01-01 in the 1900 date system.
+    expect(formatCategoryLabel('44927', 'm/d/yyyy')).toBe('1/1/2023');
+  });
+  it('formats a numeric category through a plain number code', () => {
+    expect(formatCategoryLabel('1234567', '#,##0')).toBe('1,234,567');
+  });
+  it('leaves a string category verbatim even when a code is present', () => {
+    expect(formatCategoryLabel('Q1', 'm/d/yyyy')).toBe('Q1');
+    expect(formatCategoryLabel('North', '#,##0')).toBe('North');
+  });
+  it('leaves a numeric category verbatim when no code is present', () => {
+    expect(formatCategoryLabel('44927', null)).toBe('44927');
+    expect(formatCategoryLabel('44927', undefined)).toBe('44927');
+    expect(formatCategoryLabel('44927', '')).toBe('44927');
+  });
+  it('does not format blank or whitespace-only categories (Number("") is a false 0)', () => {
+    expect(formatCategoryLabel('', 'm/d/yyyy')).toBe('');
+    expect(formatCategoryLabel('   ', '#,##0')).toBe('   ');
+  });
+  it('a General code leaves the raw numeric text unchanged', () => {
+    // "General" routes through formatChartValWithCode → formatChartVal, which
+    // shows the raw number (44927), matching the pre-format behavior.
+    expect(formatCategoryLabel('44927', 'General')).toBe('44927');
   });
 });
