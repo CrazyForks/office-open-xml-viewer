@@ -105,9 +105,15 @@ export class DocxViewer {
   /**
    * Load a DOCX from URL or ArrayBuffer and render the first page.
    *
-   * Error contract (shared by all three viewers): on failure, if an `onError`
-   * callback was provided it is invoked and `load` resolves normally; if not,
-   * the error is rethrown so it is never silently swallowed.
+   * Error contract (shared by all three viewers):
+   * - Parse/load failure (the underlying `DocxDocument.load()` call itself
+   *   rejects): if an `onError` callback was provided it is invoked and `load`
+   *   resolves normally; if not, the error is rethrown so it is never silently
+   *   swallowed.
+   * - Render failure (the first page fails to draw AFTER a successful
+   *   parse/load): routed to the shared `_reportRenderError` contract (`onError`
+   *   if provided, else `console.error` — never silent) and `load` still
+   *   RESOLVES, matching every subsequent navigation call.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
     // SC20 atomic swap: retain the previous engine locally and only tear it down
