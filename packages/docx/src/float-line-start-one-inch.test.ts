@@ -7,11 +7,11 @@ import {
   type FloatRect,
 } from './float-layout.js';
 import {
-  __test_layoutLines as layoutLines,
-  type __test_LayoutSeg as LayoutSeg,
-  type __test_LayoutTextSeg as LayoutTextSeg,
-  type __test_WrapLayoutCtx as WrapLayoutCtx,
-} from './renderer.js';
+  layoutLines,
+  type LayoutSeg,
+  type LayoutTextSeg,
+  type WrapLayoutCtx,
+} from './line-layout.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Word's measured minimum line-start rule beside a float (issue #676).

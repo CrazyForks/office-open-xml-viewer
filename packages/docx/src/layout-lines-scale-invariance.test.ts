@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
-  __test_layoutLines as layoutLines,
-  type __test_LayoutSeg as LayoutSeg,
-  type __test_LayoutLine as LayoutLine,
-  type __test_LayoutTextSeg as LayoutTextSeg,
-  type __test_WrapLayoutCtx as WrapLayoutCtx,
-} from './renderer.js';
+  layoutLines,
+  type LayoutSeg,
+  type LayoutLine,
+  type LayoutTextSeg,
+  type WrapLayoutCtx,
+} from './line-layout.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 4-1 B2 Stage 1 — scale-invariance characterization of `layoutLines`.

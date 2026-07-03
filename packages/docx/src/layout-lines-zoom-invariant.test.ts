@@ -3,9 +3,8 @@ import {
   renderDocumentToCanvas,
   paginateDocument,
   __test_setLineReuseEnabled,
-  __test_layoutLines as layoutLines,
-  type __test_LayoutSeg as LayoutSeg,
 } from './renderer.js';
+import { layoutLines, type LayoutSeg } from './line-layout.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
