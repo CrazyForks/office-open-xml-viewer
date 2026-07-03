@@ -448,44 +448,52 @@ function drawBarDataLabel(
   orient: 'vertical' | 'horizontal',
   position: string | null,
   color: string | null,
+  negative = false,
 ): void {
   const pos = (position ?? 'outEnd');
   const fill = color ? `#${color}` : '#333';
   ctx.fillStyle = fill;
   if (orient === 'vertical') {
-    // bx/by = top-left of bar rect (bar grows upward from by+barL toward by).
-    // barL here is bar height (pixels) and barW is bar width.
+    // bx/by = top-left of bar rect, barL = bar height, barW = bar width. For a
+    // positive column the value END is the TOP edge (`by`) and the BASE the
+    // bottom (`by + barL`); for a negative column those swap (the bar hangs
+    // below the zero line, so its end is the bottom).
     const cx = bx + barW / 2;
+    const endY  = negative ? by + barL : by;         // the far (value) edge
+    const baseY = negative ? by : by + barL;          // the zero-line edge
     if (pos === 'inBase') {
-      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      ctx.fillText(text, cx, by + barL - 2);
+      ctx.textAlign = 'center'; ctx.textBaseline = negative ? 'top' : 'bottom';
+      ctx.fillText(text, cx, negative ? baseY + 2 : baseY - 2);
     } else if (pos === 'inEnd') {
-      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      ctx.fillText(text, cx, by + 2);
+      ctx.textAlign = 'center'; ctx.textBaseline = negative ? 'bottom' : 'top';
+      ctx.fillText(text, cx, negative ? endY - 2 : endY + 2);
     } else if (pos === 'ctr') {
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(text, cx, by + barL / 2);
     } else {
-      // outEnd / default: just above the bar's top edge (by).
-      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      ctx.fillText(text, cx, by - 1);
+      // outEnd / default: just beyond the value edge.
+      ctx.textAlign = 'center'; ctx.textBaseline = negative ? 'top' : 'bottom';
+      ctx.fillText(text, cx, negative ? endY + 1 : endY - 1);
     }
   } else {
-    // Horizontal: bar grows to the right from bx.
+    // Horizontal: positive bars grow to the RIGHT from bx, negative bars to the
+    // left (so the value END is the LEFT edge `bx` and the BASE the right edge).
     const cy = by + barW / 2;
+    const endX  = negative ? bx : bx + barL;          // the far (value) edge
+    const baseX = negative ? bx + barL : bx;          // the zero-line edge
     if (pos === 'inBase') {
-      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, bx + 4, cy);
+      ctx.textAlign = negative ? 'right' : 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, negative ? baseX - 4 : baseX + 4, cy);
     } else if (pos === 'inEnd') {
-      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, bx + barL - 4, cy);
+      ctx.textAlign = negative ? 'left' : 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, negative ? endX + 4 : endX - 4, cy);
     } else if (pos === 'ctr') {
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(text, bx + barL / 2, cy);
     } else {
-      // outEnd / default: just past the bar's right edge.
-      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(text, bx + barL + 2, cy);
+      // outEnd / default: just past the value edge.
+      ctx.textAlign = negative ? 'right' : 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, negative ? endX - 2 : endX + 2, cy);
     }
   }
 }
@@ -559,21 +567,44 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     : 0;
   const valAxisLenPt = (isH ? pwEst : phEst) / ptToPx;
 
+  // Value-axis extent. Bars extend from the zero line (the category-axis
+  // crossing) toward each value, so the axis must span both the positive and
+  // negative reach of the data (ECMA-376 §21.2.2.16 barChart). Negative values
+  // pull the axis minimum below 0; positive values push the maximum above it.
+  // Clustered charts take the raw extremes; stacked charts accumulate positive
+  // and negative contributions on separate sides of the zero line (Excel stacks
+  // opposite signs opposite ways), so `dataMax`/`dataMin` come from each
+  // category's positive-sum and negative-sum.
   let dataMax = 0;
+  let dataMin = 0;
   for (let ci = 0; ci < n; ci++) {
-    let stackSum = 0;
+    let posSum = 0;
+    let negSum = 0;
     for (const s of barSeries) {
       const v = s.values[ci] ?? 0;
-      if (stacked) stackSum += Math.abs(v);
-      else dataMax = Math.max(dataMax, Math.abs(v));
+      if (stacked) {
+        if (v >= 0) posSum += v; else negSum += v;
+      } else {
+        dataMax = Math.max(dataMax, v);
+        dataMin = Math.min(dataMin, v);
+      }
     }
-    if (stacked) dataMax = Math.max(dataMax, stackSum);
+    if (stacked) {
+      dataMax = Math.max(dataMax, posSum);
+      dataMin = Math.min(dataMin, negSum);
+    }
   }
-  if (pct) dataMax = 100;
+  if (pct) {
+    // percentStacked normalizes each category to Σ|v|; the axis spans the
+    // side(s) the data actually reaches (100% up if any positives, -100% down
+    // if any negatives).
+    dataMax = dataMax > 0 ? 100 : 0;
+    dataMin = dataMin < 0 ? -100 : 0;
+  }
   if (chart.valMax != null) dataMax = chart.valMax;
-  if (dataMax === 0) dataMax = 1;
-  // Bar/column anchors the value axis at 0; ignore the returned min.
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, valAxisLenPt);
+  if (chart.valMin != null) dataMin = chart.valMin;
+  if (dataMax === 0 && dataMin === 0) dataMax = 1;
+  const { min: axMin, max: axMax, step } = valueAxisScale(dataMin, dataMax, chart.valMin, chart.valMax, valAxisLenPt);
 
   // Secondary value-axis scale (combo charts). INDEPENDENT of the primary: its
   // own "nice" major unit / gridline count. Its axis is the vertical right edge,
@@ -600,11 +631,12 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (!isH && !chart.valAxisHidden) {
     ctx.font = `${tickFontPx}px sans-serif`;
     let wmax = 0;
-    const vSteps = Math.round(axMax / step);
+    const vSteps = Math.round((axMax - axMin) / step);
     for (let si = 0; si <= vSteps; si++) {
+      const val = axMin + si * step;
       const label = pct
-        ? `${Math.round(si * step)}%`
-        : formatChartValWithCode(si * step, chart.valAxisFormatCode);
+        ? `${Math.round(val)}%`
+        : formatChartValWithCode(val, chart.valAxisFormatCode);
       wmax = Math.max(wmax, ctx.measureText(label).width);
     }
     valLabelBandW = wmax + 16; // ~12px tick+gap to the axis + ~4px to the title
@@ -672,11 +704,21 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // series bound to the secondary axis map through `toYSecondary`; everything
   // else uses the primary `axMax`.
   const sRange = (sMax - sMin) || 1;
-  const toYPrimaryLine = (v: number): number => py0 + ph - (v / axMax) * ph;
+  // Primary value → pixel. `axRange`/`axMin` generalize the old `v / axMax`
+  // mapping so the zero line sits wherever the axis crosses it (mid-plot when
+  // the data straddles zero); positive-only data keeps `axMin === 0`, so the
+  // mapping is unchanged. `valX`/`valY` give the on-axis pixel for a value on
+  // the value axis (X for horizontal bars, Y for columns).
+  const axRange = (axMax - axMin) || 1;
+  const valY = (v: number): number => py0 + ph - ((v - axMin) / axRange) * ph;
+  const valX = (v: number): number => px0 + ((v - axMin) / axRange) * pw;
+  const zeroY = valY(0); // column zero line
+  const zeroX = valX(0); // horizontal-bar zero line
+  const toYPrimaryLine = valY;
   const toYSecondary   = (v: number): number => py0 + ph - ((v - sMin) / sRange) * ph;
 
   const gridColor = '#e0e0e0';
-  const steps = Math.round(axMax / step);
+  const steps = Math.round(axRange / step);
   ctx.textBaseline = 'middle';
   ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
   // Honor `<c:valAx><c:txPr>…<a:solidFill>` when present (ECMA-376 §21.2.2.*);
@@ -686,19 +728,22 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
 
   if (!chart.valAxisHidden) {
     for (let si = 0; si <= steps; si++) {
-      const val = si * step;
+      const val = axMin + si * step;
+      // The zero line is the emphasized gridline (`si === 0` was that line only
+      // while the axis was anchored at 0; with a negative minimum it moves up).
+      const isZero = Math.abs(val) < step * 1e-9;
       const label = pct
         ? `${Math.round(val)}%`
         : formatChartValWithCode(val, chart.valAxisFormatCode);
       if (!isH) {
-        const gy = py0 + ph - (val / axMax) * ph;
-        strokeValueGridlineH(ctx, px0, pw, gy, si === 0);
+        const gy = valY(val);
+        strokeValueGridlineH(ctx, px0, pw, gy, isZero);
         ctx.textAlign = 'right';
         ctx.fillText(label, px0 - 12, gy);
       } else {
-        const gx = px0 + (val / axMax) * pw;
-        ctx.strokeStyle = si === 0 ? '#aaa' : gridColor;
-        ctx.lineWidth = si === 0 ? 1 : 0.5;
+        const gx = valX(val);
+        ctx.strokeStyle = isZero ? '#aaa' : gridColor;
+        ctx.lineWidth = isZero ? 1 : 0.5;
         ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
         ctx.textAlign = 'center';
         ctx.fillText(label, gx, py0 + ph + 10);
@@ -747,11 +792,11 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // horizontal (bottom); a horizontal bar chart swaps the two.
     if (!chart.valAxisHidden && chart.valAxisMajorTickMark && chart.valAxisMajorTickMark !== 'none') {
       for (let si = 0; si <= steps; si++) {
-        const val = si * step;
+        const val = axMin + si * step;
         if (!isH) {
-          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, py0 + ph - (val / axMax) * ph, valLineColor, valLineW);
+          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, valY(val), valLineColor, valLineW);
         } else {
-          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, px0 + (val / axMax) * pw, valLineColor, valLineW);
+          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, valX(val), valLineColor, valLineW);
         }
       }
     }
@@ -796,7 +841,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const catStart   = (catGap - clusterWidth) / 2;
 
   for (let ci = 0; ci < n; ci++) {
-    let stackOffset = 0;
+    // Stacked charts accumulate positive and negative contributions on opposite
+    // sides of the zero line, so each category tracks two running offsets.
+    let posOffset = 0;
+    let negOffset = 0;
     let stackSum = 0;
     if (pct) {
       for (const s of barSeries) stackSum += Math.abs(s.values[ci] ?? 0);
@@ -806,18 +854,26 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     for (let si = 0; si < barSeries.length; si++) {
       const s = barSeries[si];
       const raw = s.values[ci] ?? 0;
-      const val = pct ? (Math.abs(raw) / stackSum) * 100 : Math.abs(raw);
+      // Signed value in axis units (percent keeps its sign — a negative slice of
+      // a percentStacked chart reaches below the zero line).
+      const sv = pct ? (raw / stackSum) * 100 : raw;
+      const negative = sv < 0;
       const color = chartColor(si, s);
 
       if (!isH) {
         const bx = stacked
           ? px0 + ci * catGap + catStart
           : px0 + ci * catGap + catStart + si * clusterGap;
-        const barH = (val / axMax) * ph;
-        const by   = py0 + ph - (stacked ? (stackOffset + val) : val) / axMax * ph;
+        // Column: the bar spans between the zero line and the value. Stacked
+        // bars start at the running offset for their sign; clustered bars start
+        // at the zero line.
+        const y0 = stacked ? valY(negative ? negOffset : posOffset) : zeroY;
+        const y1 = stacked ? valY((negative ? negOffset : posOffset) + sv) : valY(sv);
+        const by = Math.min(y0, y1);
+        const barH = Math.abs(y1 - y0);
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barW, barH);
-        if (chart.showDataLabels && val > 0) {
+        if (chart.showDataLabels && sv !== 0) {
           // ECMA-376 §21.2.2.30 / §21.1.2.3.10 — data label font size comes from
           // `<c:dLbls><c:txPr>...<a:defRPr@sz>` (hundredths of a point). When
           // the file specifies one we honor it; otherwise the proportional
@@ -827,9 +883,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
             : Math.max(7, Math.min(11, barW * 0.6));
           ctx.font = `bold ${lsz}px sans-serif`;
           const text = pct
-            ? `${Math.round(val)}%`
+            ? `${Math.round(sv)}%`
             : formatChartValWithCode(
-                val,
+                sv,
                 chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
               );
           // drawBarDataLabel takes (bx, by, barL=length, barW=thickness). For
@@ -845,6 +901,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
             'vertical',
             chart.dataLabelPosition ?? null,
             s.labelColor ?? chart.dataLabelFontColor ?? null,
+            negative,
           );
         }
       } else {
@@ -856,19 +913,21 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         const by = stacked
           ? py0 + (n - 1 - ci) * catGap + catStart
           : py0 + (n - 1 - ci) * catGap + catStart + siVisual * clusterGap;
-        const barL = (val / axMax) * pw;
-        const bx   = stacked ? px0 + (stackOffset / axMax) * pw : px0;
+        const x0 = stacked ? valX(negative ? negOffset : posOffset) : zeroX;
+        const x1 = stacked ? valX((negative ? negOffset : posOffset) + sv) : valX(sv);
+        const bx = Math.min(x0, x1);
+        const barL = Math.abs(x1 - x0);
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barL, barW);
-        if (chart.showDataLabels && val > 0) {
+        if (chart.showDataLabels && sv !== 0) {
           const lsz = chart.dataLabelFontSizeHpt
             ? (chart.dataLabelFontSizeHpt / 100) * ptToPx
             : Math.max(7, Math.min(11, barW * 0.6));
           ctx.font = `bold ${lsz}px sans-serif`;
           const text = pct
-            ? `${Math.round(val)}%`
+            ? `${Math.round(sv)}%`
             : formatChartValWithCode(
-                val,
+                sv,
                 chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
               );
           drawBarDataLabel(
@@ -877,10 +936,13 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
             'horizontal',
             chart.dataLabelPosition ?? null,
             s.labelColor ?? chart.dataLabelFontColor ?? null,
+            negative,
           );
         }
       }
-      if (stacked) stackOffset += val;
+      if (stacked) {
+        if (negative) negOffset += sv; else posOffset += sv;
+      }
     }
   }
 
