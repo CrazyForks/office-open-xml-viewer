@@ -1733,6 +1733,13 @@ export function layoutLines(
       // `alignment` (§17.18.71) and `relativeTo` (§17.18.73). The `alignment`
       // ALSO governs how the text after the ptab aligns to that position (left /
       // centered / right). All coordinates below are paraX-relative px.
+      //
+      // NOTE: the ptab target is resolved in LOGICAL (LTR) coordinates — this
+      // block runs before the per-line bidi reorder pass, so it has no notion
+      // of the paragraph's base direction. Interaction with bidi mirroring in
+      // an RTL paragraph (where "left"/"right" alignment and the box edges
+      // ought to mirror) is unverified; the primary use case (an LTR footer's
+      // centered/right-aligned PAGE field) is correct.
       if (seg.ptab) {
         // Reference box: "indent" ⇒ the paragraph content box [0, maxWidth];
         // "margin" ⇒ the text-margin box [-tabOriginPx, marginRightPx].

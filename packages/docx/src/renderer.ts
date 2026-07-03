@@ -7302,6 +7302,23 @@ function measureParaHeight(
   const indLeftPx = para.indentLeft * scale;
   const indRightPx = para.indentRight * scale;
   const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
+  // RESERVATION: no `marginRightPx` argument is passed here, so a
+  // `<w:ptab w:relativeTo="margin">` inside a table cell resolves its target
+  // against the DEFAULT (`= paraW`, the cell's INNER content box after
+  // margins/indents) rather than the true text-margin right edge
+  // (`paraW + indRightPx`, matching how `renderParagraph`'s paint pass
+  // computes `marginRightPx`/`marginRightPx1` — see its "§17.3.3.23" comment
+  // a few hundred lines up). Left unwired deliberately: this scale-1 call is
+  // also where `stampParagraphLines` below caches the partition for
+  // `renderParagraph`'s paint-time reuse gate, and that gate's
+  // `layoutLinesInputs` (types + comparison, ~L4667–4689/L5632–5644) does NOT
+  // track `marginRightPx` at all — adding it correctly here means widening
+  // both the stamp payload and the reuse-equality check, not just this call
+  // site, to keep the two in sync. That's a real change to the Phase 4-1 B2
+  // compute-once mechanism for a narrow case (a ptab inside a cell, relative
+  // to the margin rather than the indent), so it's deferred rather than
+  // threaded through opportunistically. Revisit together with any other
+  // measure/paint mismatch cleanup in this area.
   const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt);
   // Phase 4-1 B2 T2 — compute-once for TABLE-CELL paragraphs. This is the ONLY
   // point a cell paragraph's lines are laid out at scale 1: the paginator sizes

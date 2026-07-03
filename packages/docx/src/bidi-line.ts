@@ -195,8 +195,9 @@ export function resolveAlignEdge(alignment: string | undefined, baseRtl: boolean
     // both text margins — they differ only in HOW the extra space is distributed
     // (Arabic kashida elongation, Thai per-character spacing). The physical edge is
     // "justify" for all of them. NOTE: this is a MAPPING to the existing
-    // inter-word/inter-character justification; true kashida justification (U+0640
-    // tatweel elongation of Arabic joiners) is not yet implemented — follow-up.
+    // inter-word/inter-character justification.
+    // TODO(§17.18.44): true kashida (U+0640 tatweel) elongation — tracked in
+    // https://github.com/yukiyokotani/office-open-xml-viewer/issues/724
     case 'lowKashida':
     case 'mediumKashida':
     case 'highKashida':
