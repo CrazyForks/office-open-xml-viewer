@@ -347,6 +347,26 @@ export class XlsxViewer {
    *  holds one context type for its lifetime, so this is obtained once and the
    *  main-mode 2d render path is never used on the same canvas. */
   private _bitmapCtx: ImageBitmapRenderingContext | null = null;
+  /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
+   *  render rejection that lands AFTER teardown is swallowed rather than surfaced
+   *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
+   *  viewers' `_destroyed` flag. */
+  private _destroyed = false;
+  /**
+   * Concurrent-load latch (generation token). Every {@link load} increments this
+   * and captures the value; after its workbook finishes loading it re-checks the
+   * live value and BAILS (destroying its own just-loaded workbook) if a newer
+   * `load()` has since started. Without it, two overlapping `load(A)`/`load(B)`
+   * calls race the WASM parse / worker init, and whichever RESOLVES last wins the
+   * swap — even the stale `load(A)` resolving after `load(B)`; the loser's freshly
+   * created workbook (never installed, or installed then overwritten) then leaks
+   * its worker + pinned WASM allocation. The latch composes with SC20: the check
+   * runs AFTER the new workbook loads but BEFORE the field assignment and
+   * `previous?.destroy()`, so a superseded load never touches `this.wb` nor frees
+   * the current (newer) workbook. {@link destroy} also bumps it so a load in
+   * flight at teardown is treated as superseded and its workbook cleaned up.
+   */
+  private _loadGen = 0;
   private resizeObserver: ResizeObserver | null = null;
   /**
    * Pending `requestAnimationFrame` handle for a coalesced re-render, or `null`
@@ -603,13 +623,27 @@ export class XlsxViewer {
   /**
    * Load an XLSX from URL or ArrayBuffer and render the first sheet.
    *
-   * Error contract (shared by all three viewers): on failure, if an `onError`
-   * callback was provided it is invoked and `load` resolves normally; if not,
-   * the error is rethrown so it is never silently swallowed.
+   * Error contract (shared by all three viewers):
+   * - Parse/load failure (the underlying `XlsxWorkbook.load()` call itself
+   *   rejects): if an `onError` callback was provided it is invoked and `load`
+   *   resolves normally; if not, the error is rethrown so it is never silently
+   *   swallowed.
+   * - Render failure (the first sheet fails to draw AFTER a successful
+   *   parse/load): routed to the shared `_reportRenderError` contract (`onError`
+   *   if provided, else `console.error` — never silent) and `load` still
+   *   RESOLVES, matching every subsequent navigation call.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // SC20 atomic swap: retain the previous workbook locally and only tear it down
+    // AFTER the new one loads successfully. A re-load thus never orphans the old
+    // workbook's worker + pinned WASM allocation (the leak this guards), yet a
+    // FAILED re-load keeps the current workbook + its rendered sheet intact rather
+    // than dropping to an empty viewer. The 2× memory window is bounded to the
+    // load itself (the old workbook is freed the moment the new model arrives).
+    const gen = ++this._loadGen;
+    const previous = this.wb;
     try {
-      this.wb = await XlsxWorkbook.load(source, {
+      const wb = await XlsxWorkbook.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         workerTimeoutMs: this.opts.workerTimeoutMs,
@@ -617,10 +651,24 @@ export class XlsxViewer {
         math: this.opts.math,
         mode: this._mode,
       });
+      if (gen !== this._loadGen) {
+        // A newer load() (or destroy()) started while this one was in flight — we
+        // lost the concurrent-load race. Destroy the workbook we just loaded (it
+        // was never installed) and leave the winning load's workbook + SC20 swap
+        // untouched: do NOT touch `this.wb` and do NOT destroy `previous`
+        // (irrelevant to the winner; possibly already stale).
+        wb.destroy();
+        return;
+      }
+      this.wb = wb;
+      previous?.destroy();
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(this._initialSheet());
     } catch (err) {
+      // Superseded loads own no error reporting — the winning load (or destroy())
+      // is the outcome the caller awaits; swallow this stale rejection.
+      if (gen !== this._loadGen) return;
       const e = err instanceof Error ? err : new Error(String(err));
       if (this.opts.onError) {
         this.opts.onError(e);
@@ -2181,6 +2229,29 @@ export class XlsxViewer {
   }
 
   private async renderCurrentSheet(): Promise<void> {
+    // PD14 render-error contract (shared with the scroll viewers): most callers
+    // invoke this `void`-style from scroll/resize/selection handlers, so an
+    // unguarded throw would surface as an unhandled promise rejection. Catch here
+    // and route to `onError` (or `console.error` — never silent), matching
+    // DocxViewer._render and the scroll viewers.
+    try {
+      await this._renderCurrentSheet();
+    } catch (err) {
+      this._reportRenderError(err);
+    }
+  }
+
+  /** Route a render failure to `onError`, or `console.error` when none is given
+   *  (never fully silent), and never after teardown. Mirrors the scroll viewers'
+   *  `_reportRenderError`. */
+  private _reportRenderError(err: unknown): void {
+    if (this._destroyed) return;
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (this.opts.onError) this.opts.onError(e);
+    else console.error('[ooxml] XlsxViewer render failed:', e);
+  }
+
+  private async _renderCurrentSheet(): Promise<void> {
     if (!this.currentWorksheet) return;
     const ws = this.currentWorksheet;
     const w = this.canvasArea.clientWidth;
@@ -2352,6 +2423,12 @@ export class XlsxViewer {
    * leftover sheet is a bounded, harmless cost (see {@link ensureViewerStyleInjected}).
    */
   destroy(): void {
+    // First line: block any render rejection racing in from surfacing on a dead
+    // viewer (checked at the top of _reportRenderError). Bump the load generation
+    // too so a load() still in flight is treated as superseded and its workbook is
+    // cleaned up rather than installed onto a torn-down viewer.
+    this._destroyed = true;
+    this._loadGen++;
     this.resizeObserver?.disconnect();
     // Cancel any coalesced render still queued for the next frame so it can't
     // fire against a torn-down viewer (matches the destroy-completeness flow:

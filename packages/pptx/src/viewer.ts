@@ -83,6 +83,26 @@ export class PptxViewer {
    *  so this is obtained only when worker mode renders without media playback. */
   private _bitmapCtx: ImageBitmapRenderingContext | null = null;
   private _warnedNoTextSelection = false;
+  /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
+   *  render rejection that lands AFTER teardown is swallowed rather than surfaced
+   *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
+   *  viewers' `_destroyed` flag. */
+  private _destroyed = false;
+  /**
+   * Concurrent-load latch (generation token). Every {@link load} increments this
+   * and captures the value; after its engine finishes loading it re-checks the
+   * live value and BAILS (destroying its own just-loaded engine) if a newer
+   * `load()` has since started. Without it, two overlapping `load(A)`/`load(B)`
+   * calls race the WASM parse / worker init, and whichever RESOLVES last wins the
+   * swap — even the stale `load(A)` resolving after `load(B)`; the loser's freshly
+   * created engine (never installed, or installed then overwritten) then leaks its
+   * worker + pinned WASM allocation. The latch composes with SC20: the check runs
+   * AFTER the new engine loads but BEFORE the field assignment and
+   * `previous?.destroy()`, so a superseded load never touches `this.engine` nor
+   * frees the current (newer) engine. {@link destroy} also bumps it so a load in
+   * flight at teardown is treated as superseded and its engine cleaned up.
+   */
+  private _loadGen = 0;
 
   constructor(canvas: HTMLCanvasElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
@@ -129,13 +149,27 @@ export class PptxViewer {
   /**
    * Load a PPTX from URL or ArrayBuffer and render the first slide.
    *
-   * Error contract (shared by all three viewers): on failure, if an `onError`
-   * callback was provided it is invoked and `load` resolves normally; if not,
-   * the error is rethrown so it is never silently swallowed.
+   * Error contract (shared by all three viewers):
+   * - Parse/load failure (the underlying `PptxPresentation.load()` call itself
+   *   rejects): if an `onError` callback was provided it is invoked and `load`
+   *   resolves normally; if not, the error is rethrown so it is never silently
+   *   swallowed.
+   * - Render failure (the first slide fails to draw AFTER a successful
+   *   parse/load): routed to the shared `_reportRenderError` contract (`onError`
+   *   if provided, else `console.error` — never silent) and `load` still
+   *   RESOLVES, matching every subsequent navigation call.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    // SC20 atomic swap: retain the previous engine locally and only tear it down
+    // AFTER the new one loads successfully. A re-load thus never orphans the old
+    // engine's worker + pinned WASM allocation (the leak this guards), yet a
+    // FAILED re-load keeps the current engine + its rendered slide intact rather
+    // than dropping to an empty viewer. The 2× memory window is bounded to the
+    // load itself (the old engine is freed the moment the new model arrives).
+    const gen = ++this._loadGen;
+    const previous = this.engine;
     try {
-      this.engine = await PptxPresentation.load(source, {
+      const engine = await PptxPresentation.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         workerTimeoutMs: this.opts.workerTimeoutMs,
@@ -143,9 +177,27 @@ export class PptxViewer {
         math: this.opts.math,
         mode: this._mode,
       });
+      if (gen !== this._loadGen) {
+        // A newer load() (or destroy()) started while this one was in flight — we
+        // lost the concurrent-load race. Destroy the engine we just loaded (it was
+        // never installed) and leave the winning load's engine + SC20 swap
+        // untouched: do NOT touch `this.engine`/`this.handle` and do NOT destroy
+        // `previous` (irrelevant to the winner; possibly already stale).
+        engine.destroy();
+        return;
+      }
+      // Discard the stale slide's media handle before swapping engines so its RAF
+      // loop / object URLs don't outlive the replaced presentation.
+      this.handle?.destroy();
+      this.handle = null;
+      this.engine = engine;
+      previous?.destroy();
       this.currentSlide = this._initialSlide();
       await this.renderCurrentSlide();
     } catch (err) {
+      // Superseded loads own no error reporting — the winning load (or destroy())
+      // is the outcome the caller awaits; swallow this stale rejection.
+      if (gen !== this._loadGen) return;
       const e = err instanceof Error ? err : new Error(String(err));
       if (this.opts.onError) {
         this.opts.onError(e);
@@ -284,7 +336,7 @@ export class PptxViewer {
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {
-      this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      this._reportRenderError(err);
     }
 
     if (this.textLayer && !isWorker) {
@@ -294,6 +346,17 @@ export class PptxViewer {
 
   private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
     buildPptxTextLayer(layer, runs, cssWidth, cssHeight);
+  }
+
+  /** PD14 render-error contract: route a render failure to `onError`, or
+   *  `console.error` when none is given (never fully silent), and never after
+   *  teardown. Mirrors the scroll viewers' `_reportRenderError` so all three
+   *  single-canvas viewers agree. */
+  private _reportRenderError(err: unknown): void {
+    if (this._destroyed) return;
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (this.opts.onError) this.opts.onError(e);
+    else console.error('[ooxml] PptxViewer render failed:', e);
   }
 
   /**
@@ -306,6 +369,12 @@ export class PptxViewer {
    * is simply removed from the internal wrapper. Safe to call more than once.
    */
   destroy(): void {
+    // First line: block any render rejection racing in from surfacing on a dead
+    // viewer (checked at the top of _reportRenderError). Bump the load generation
+    // too so a load() still in flight is treated as superseded and its engine is
+    // cleaned up rather than installed onto a torn-down viewer.
+    this._destroyed = true;
+    this._loadGen++;
     this.handle?.destroy();
     this.handle = null;
     this.engine?.destroy();

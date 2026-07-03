@@ -189,6 +189,23 @@ export class PptxScrollViewer {
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
   private _destroyed = false;
+  /**
+   * Concurrent-load latch (generation token). Every self-loading `load()`
+   * increments this and captures the value; after its engine finishes loading it
+   * re-checks the live value and BAILS (destroying its own just-loaded engine) if
+   * a newer `load()` has since started. Without it, two overlapping
+   * `load(A)`/`load(B)` calls race the WASM parse / worker init, and whichever
+   * RESOLVES last wins the swap — even the stale `load(A)` resolving after
+   * `load(B)`; the loser's freshly created engine (never installed, or installed
+   * then overwritten) then leaks its worker + pinned WASM allocation. The latch
+   * composes with SC20: the check runs AFTER the new engine loads but BEFORE the
+   * field assignment, `previous?.destroy()`, and the recycle/relayout post-load
+   * work, so a superseded load never touches `this._pres` nor frees the current
+   * (newer) engine. Only the self-loading path uses it — the injected path throws
+   * up-front and never reaches here. `destroy()` also bumps it so a load in flight
+   * at teardown is treated as superseded and its engine cleaned up.
+   */
+  private _loadGen = 0;
   /** Worker mode: slide indices whose bitmap render is currently dispatched to the
    *  engine. Coalesces a scroll storm — we never dispatch a second render for a
    *  slide whose first is still in flight — and lets us drop slides that scrolled
@@ -340,8 +357,16 @@ export class PptxScrollViewer {
         'PptxScrollViewer.load() is unsupported when an engine is injected via opts.presentation; the injected engine is already loaded.',
       );
     }
+    // SC20 atomic swap: a self-loaded viewer OWNS its engine (destroy() tears it
+    // down when `!_injected`), so a re-load must not orphan the previous one.
+    // Retain it locally and free it only after the new engine loads — a FAILED
+    // re-load then keeps the current deck rendered rather than going blank. (The
+    // injected path returned above can never reach here, so this only ever frees
+    // an engine we created.)
+    const gen = ++this._loadGen;
+    const previous = this._pres;
     try {
-      this._pres = await PptxPresentation.load(source, {
+      const pres = await PptxPresentation.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         workerTimeoutMs: this._opts.workerTimeoutMs,
@@ -349,12 +374,35 @@ export class PptxScrollViewer {
         math: this._opts.math,
         mode: this._mode,
       });
+      if (gen !== this._loadGen) {
+        // A newer load() (or destroy()) started while this one was in flight — we
+        // lost the concurrent-load race. Destroy the engine we just loaded (it was
+        // never installed) and leave the winning load's engine + SC20 swap + its
+        // recycle/relayout work untouched: do NOT touch `this._pres` and do NOT
+        // destroy `previous` (irrelevant to the winner; possibly already stale).
+        pres.destroy();
+        return;
+      }
+      this._pres = pres;
+      previous?.destroy();
+      if (previous) {
+        // Re-loading over a prior deck: recycle every mounted slot (they hold the
+        // OLD deck's rendered canvases) and reset the top-index latch so the new
+        // deck's first window renders fresh. `_mountVisible` only RE-renders
+        // missing indices, so without this a still-mounted slide 0 would keep the
+        // previous deck's pixels.
+        for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
+        this._lastTopIndex = -1;
+      }
       // Lay out + mount the first window now that the engine exists (mirrors the
       // injected-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
       // appears.
       this.relayout();
     } catch (err) {
+      // Superseded loads own no error reporting — the winning load (or destroy())
+      // is the outcome the caller awaits; swallow this stale rejection.
+      if (gen !== this._loadGen) return;
       const e = err instanceof Error ? err : new Error(String(err));
       if (this._opts.onError) {
         this._opts.onError(e);
@@ -1258,6 +1306,10 @@ export class PptxScrollViewer {
    */
   destroy(): void {
     this._destroyed = true;
+    // Bump the load generation so a self-loading load() still in flight is treated
+    // as superseded and its engine is cleaned up rather than installed onto a
+    // torn-down viewer.
+    this._loadGen++;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;

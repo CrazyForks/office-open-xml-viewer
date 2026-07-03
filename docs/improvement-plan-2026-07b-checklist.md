@@ -62,11 +62,11 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 - [ ] RB8: cargo audit / pnpm audit ゲート(report-only 開始)
 
 ### worker / ライフサイクル
-- [ ] SC17: Archive 所有権渡し(WASM 内二重コピー解消)
-- [ ] SC18: extract 系の buffer 直 transfer
-- [ ] SC20: load() の旧エンジン orphan 解消(5箇所)
-- [ ] AR4: pptx worker init 失敗の永久 hang
-- [ ] PD14: render エラーの運命統一(onError 契約)
+- [x] **SC17**: Archive 所有権渡し(WASM 内二重コピー解消) — **完了**(branch perf/worker-lifecycle)。`Archive::new` を `Vec<u8>` 所有権受け取りへ(wasm-bindgen ABI は copy であって detach ではないため input `Uint8Array` は生存、free-function 系は buffer 再利用のため `&[u8]` 維持)。ベンチ: 219MB pptx の cold `new` で WASM peak 440→221MB(2×→1×)。
+- [x] **SC18**: extract 系の buffer 直 transfer — **完了**(branch perf/worker-lifecycle)。extract の worker 側 `.slice()` 冗長コピーを削除し `buffer` を直 transfer(wasm-bindgen glue が既に独立した full-span コピーを返すため二重コピー不要)。抽出資産あたり 1 memcpy 削減。契約は `archive-extract-transfer.test.ts` で pin(byteOffset 0・full-span・非 WASM-backed = transferable)。
+- [x] **SC20**: load() の旧エンジン orphan 解消(5箇所) — **完了**(branch perf/worker-lifecycle)。5 viewer/scroll-viewer で `load()` が旧エンジンを success-after-swap で destroy(失敗時は旧を保持して blank 化を回避)。加えて並行 load latch(世代トークン `_loadGen`、本 PR で追加)で overlapping `load(A)`/`load(B)` の遅延解決による orphan も封鎖(stale 側は自分のエンジンのみ destroy、`this.*`/`previous` 不可触)。
+- [x] **AR4**: pptx worker init 失敗の永久 hang — **完了**(branch perf/worker-lifecycle)。pptx worker(+render-worker)を `initPromise` パターンへ統一し、ready ハンドシェイクを完全撤去して init 失敗時の永久 hang を根治(未 ready のまま応答が来ない状態を作らない)。
+- [x] **PD14**: render エラーの運命統一(onError 契約) — **完了**(branch perf/worker-lifecycle)。単 canvas 3 viewer の render エラーを `_reportRenderError`(`onError` else `console.error`、never silent、`load` は resolve)へ統一し scroll-viewer と一致させた。加えて destroy 後ガード(`_destroyed` フラグ、本 PR で追加)で teardown 後に着弾した render 拒否を握り潰す(dead viewer への `onError` 発火を防止)。`load()` の JSDoc に parse/load 失敗(rethrow-or-onError)と render 失敗(`_reportRenderError` 経由・resolve)の 2 相を明記。
 
 ### CI 網
 - [ ] QA1: xlsx smoke
