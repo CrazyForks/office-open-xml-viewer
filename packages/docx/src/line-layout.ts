@@ -1055,6 +1055,20 @@ export function splitTextForLayout(text: string): string[] {
  *  (`renderParagraph`). */
 export const DEFAULT_TAB_PT = 36;
 
+/** Knuth-Plass shrink tolerance: the fraction by which the line breaker may
+ *  compress each inter-word space to keep a candidate word on the current line.
+ *  ECMA-376 prescribes no line-breaking algorithm — tolerance-based fit is
+ *  standard typography (TeX, InDesign, Word) and lets the layout absorb the
+ *  canvas `measureText` vs Word advance-width discrepancy (~0.1–0.3 px/glyph)
+ *  that would otherwise push a trailing word to the next line.
+ *
+ *  This is the ONE budget shared by both sides of the fit contract: the wrap
+ *  judgment below admits a word when the line's overflow Δ ≤ SPACE_SHRINK_RATIO ·
+ *  Σ(trailing-space widths), and the renderer's draw pass squeezes the same
+ *  spaces by the same fraction so the admitted line lands inside its box instead
+ *  of overrunning the clip (see `shrinkFitCompression` in text-distribute.ts). */
+export const SPACE_SHRINK_RATIO = 0.25;
+
 /** ECMA-376 §17.15.1.25 — resolve the document's automatic tab-stop interval
  *  (pt): the explicit `<w:defaultTabStop>` value when present, else the spec
  *  absent default of 720 twips (36pt). Mirrors {@link resolveKinsokuRules}: the
@@ -1836,15 +1850,12 @@ export function layoutLines(
     //   1. Trailing-space collapse: if this word becomes the last on the
     //      line, its trailing space (if any) collapses. We subtract it from
     //      the width used to test fit.
-    //   2. Knuth-Plass shrink tolerance: a justified line may compress
-    //      each inter-word space by up to SPACE_SHRINK_RATIO (25%) of its
-    //      natural width without harming readability. This lets us absorb
-    //      the canvas measureText vs Word advance-width discrepancy
-    //      (~0.1–0.3 px/glyph) that would otherwise push a trailing word
-    //      onto the next line. ECMA-376 doesn't prescribe a line-breaking
-    //      algorithm — tolerance-based fit is standard typography (TeX,
-    //      InDesign, Word) and keeps layout close to Word's output.
-    const SPACE_SHRINK_RATIO = 0.25;
+    //   2. Knuth-Plass shrink tolerance: a line may compress each inter-word
+    //      space by up to SPACE_SHRINK_RATIO (25%) of its natural width without
+    //      harming readability — the module constant, shared with the draw pass
+    //      so a line admitted here is squeezed by the same budget when painted
+    //      (shrinkFitCompression in text-distribute.ts) rather than overrunning
+    //      its box. See the SPACE_SHRINK_RATIO doc above.
     const trimmed = s.text.replace(/ +$/, '');
     // Subtract the GRID width of the trimmed text (not the natural width) so the
     // grid delta on EA glyphs cancels and trailingSpaceW is the bare space

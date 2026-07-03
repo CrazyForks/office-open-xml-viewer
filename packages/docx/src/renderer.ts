@@ -65,6 +65,8 @@ import {
 } from './float-layout.js';
 import {
   distributeLineSlack,
+  distributedDelta,
+  shrinkFitCompression,
   type SegStretch,
 } from './text-distribute.js';
 import {
@@ -4949,6 +4951,59 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // every line, including these.
     const endsLogicalLine = isLastLine || (line.endsWithBreak ?? false);
     const applyJustify = isJustified && (!endsLogicalLine || stretchLastLine);
+
+    // Slack distribution across the line's gaps (§17.18.44). `segStretch` /
+    // `distPerGap` drive the draw loop below; they are set either by the JUSTIFY
+    // block (expansion / compression of a jc=both/distribute line) further down,
+    // or — for a NON-justified line whose natural width overran the box because
+    // layoutLines' fit judgment spent the shrink budget to keep it on one row —
+    // by the compression here. The two are mutually exclusive (applyJustify vs
+    // not), so there is no double distribution.
+    let segStretch: Map<number, SegStretch> | null = null;
+    let distPerGap = 0;
+    // First content segment in reading order. Leading-whitespace segments before
+    // it (a paragraph's 字下げ indent) are NOT stretched — Word keeps the indent
+    // fixed and distributes slack only across the line content (§17.18.44). Only
+    // meaningful for LTR: under bidi the logical-leading segment is not the
+    // visually-leading one, so leave the skip off (0) there.
+    let firstContentSi = 0;
+    if (!paraNeedsBidi) {
+      for (let i = 0; i < segCount; i++) {
+        const seg = line.segments[i];
+        if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
+      }
+    }
+    // Shrink-to-fit compression for a NON-justified line that overflows the box
+    // (lineSlack < 0). layoutLines placed the whole line here on the promise that
+    // its inter-word spaces would be squeezed by up to SPACE_SHRINK_RATIO (its fit
+    // test admits Δ ≤ ratio·Σspace); reproduce that squeeze so the last glyph lands
+    // inside the box instead of overrunning its clip (sample-10 p1's centred title
+    // "…Conference" — the final "e" was clipped). Same spaces-only mechanism the
+    // justified negative-slack path uses. `shrinkDelta` (≤ 0) is folded into the
+    // alignment slack below so the now-narrower line re-centres/re-aligns correctly.
+    let shrinkDelta = 0;
+    if (!applyJustify && lineSlack < 0) {
+      const distSegs = line.segments.map(seg =>
+        'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
+      );
+      const shrinkDist = shrinkFitCompression(
+        distSegs,
+        lineSlack,
+        firstContentSi,
+        paraNeedsBidi ? lastDrawnSi : segCount,
+        line.ascent,
+      );
+      if (shrinkDist) {
+        segStretch = shrinkDist.perSeg;
+        distPerGap = shrinkDist.perGap;
+        shrinkDelta = distributedDelta(shrinkDist);
+      }
+    }
+    // Alignment slack AFTER any shrink squeeze: the drawn width is
+    // lineWidth + shrinkDelta, so the remaining slack the align offset centres /
+    // right-aligns against is lineSlack − shrinkDelta (0 when the squeeze fully
+    // absorbed the overflow ⇒ the line fills the box and align offset is 0).
+    const alignSlack = lineSlack - shrinkDelta;
     let alignOffset = 0;
     // ECMA-376 §22.1.2.88 `m:jc` / §22.1.2.30 `m:defJc` — a display equation's
     // justification is independent of the paragraph's text alignment. When this
@@ -4966,14 +5021,14 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       : null;
     const effEdge = mathEdge ?? alignEdge;
     if (effEdge === 'right') {
-      alignOffset = lineSlack;
+      alignOffset = alignSlack;
     } else if (effEdge === 'center') {
-      alignOffset = lineSlack / 2;
+      alignOffset = alignSlack / 2;
     } else if (effEdge === 'justify' && baseRtl && !applyJustify) {
       // The unstretched (last) line of a justified RTL paragraph aligns to the
       // leading edge — the RIGHT margin (§17.18.44 `both`: last line is
       // start-aligned). LTR keeps alignOffset 0 as before.
-      alignOffset = lineSlack;
+      alignOffset = alignSlack;
     }
     // 'left' and stretched 'justify' keep alignOffset 0.
     // Decimal-tab auto-alignment (see decimalAutoTabPx above): override the
@@ -5047,22 +5102,11 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // text-distribute.ts). distributeLineSlack returns, per logical segment, the
     // internal split points and a trailing-gap flag; the draw loop applies
     // `perGap` at each. Only computed when the line is a justify candidate
-    // (jc=both/distribute, not the last line unless distribute).
-    let segStretch: Map<number, SegStretch> | null = null;
-    let distPerGap = 0;
-    // First content segment in reading order. Leading-whitespace segments before
-    // it (a paragraph's 字下げ indent) are NOT stretched — Word keeps the indent
-    // fixed and distributes slack only across the line content (§17.18.44). Only
-    // meaningful for LTR: under bidi the logical-leading segment is not the
-    // visually-leading one, so leave the skip off (0) there.
-    let firstContentSi = 0;
+    // (jc=both/distribute, not the last line unless distribute) — a NON-justified
+    // overflowing line was already squeezed above (`shrinkFitCompression`), and
+    // `segStretch` / `distPerGap` / `firstContentSi` are hoisted before the align
+    // offset so both distributions feed the SAME draw loop.
     if (applyJustify) {
-      if (!paraNeedsBidi) {
-        for (let i = 0; i < segCount; i++) {
-          const seg = line.segments[i];
-          if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
-        }
-      }
       const slack = effAvailW - (x - lineLeft) - lineWidth;
       // Compression cap (negative slack): never eat more than ~a quarter em per
       // gap, estimated from the line ascent. For expansion this is unbounded.
@@ -6304,32 +6348,63 @@ export function renderShapeText(
         const endsLogicalLine = isLastLine || (line.endsWithBreak ?? false);
         const applyJustify = isJustified && (!endsLogicalLine || stretchLastLine);
 
-        // Alignment offset within the region. Justified lines keep 0 (slack is
-        // distributed into the gaps below); the unstretched last line of a
-        // justified RTL paragraph aligns to the leading (right) edge (§17.18.44).
-        let alignOffset = 0;
         const lineSlack = regionW - lineWidth;
+
+        // Slack distribution across the line's gaps (§17.18.44) — the SAME kernel
+        // the body uses. `segStretch` / `distPerGap` are set either by the JUSTIFY
+        // block (expansion / compression of a justified line) or, for a NON-
+        // justified line that overran the region because layoutLines' fit judgment
+        // spent the shrink budget to keep it on one row, by the compression here
+        // (sample-10 p1's centred text-box title). The two are mutually exclusive.
+        let segStretch: Map<number, SegStretch> | null = null;
+        let distPerGap = 0;
+        // First content segment (leading 字下げ whitespace is fixed); 0 under bidi.
+        let firstContentSi = 0;
+        if (!paraNeedsBidi) {
+          for (let i = 0; i < segCount; i++) {
+            const seg = line.segments[i];
+            if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
+          }
+        }
+        // Shrink-to-fit compression for a non-justified overflowing line: squeeze
+        // its inter-word spaces by the SPACE_SHRINK_RATIO budget the fit test
+        // already spent so the last glyph lands inside the box instead of being
+        // clipped. `shrinkDelta` (≤ 0) folds into the align slack so the narrower
+        // line re-aligns correctly.
+        let shrinkDelta = 0;
+        if (!applyJustify && lineSlack < 0) {
+          const distSegs = line.segments.map((seg) =>
+            'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
+          );
+          const shrinkDist = shrinkFitCompression(
+            distSegs,
+            lineSlack,
+            firstContentSi,
+            paraNeedsBidi ? lastDrawnSi : segCount,
+            line.ascent,
+          );
+          if (shrinkDist) {
+            segStretch = shrinkDist.perSeg;
+            distPerGap = shrinkDist.perGap;
+            shrinkDelta = distributedDelta(shrinkDist);
+          }
+        }
+
+        // Alignment offset within the region, AFTER any shrink squeeze. Justified
+        // lines keep 0 (slack is distributed into the gaps below); the unstretched
+        // last line of a justified RTL paragraph aligns to the leading (right) edge
+        // (§17.18.44). The drawn width is lineWidth + shrinkDelta, so the remaining
+        // slack to centre / right-align against is lineSlack − shrinkDelta.
+        const alignSlack = lineSlack - shrinkDelta;
+        let alignOffset = 0;
         if (!applyJustify) {
-          if (alignEdge === 'right') alignOffset = Math.max(0, lineSlack);
-          else if (alignEdge === 'center') alignOffset = Math.max(0, lineSlack / 2);
-          else if (alignEdge === 'justify' && baseRtl) alignOffset = Math.max(0, lineSlack);
+          if (alignEdge === 'right') alignOffset = Math.max(0, alignSlack);
+          else if (alignEdge === 'center') alignOffset = Math.max(0, alignSlack / 2);
+          else if (alignEdge === 'justify' && baseRtl) alignOffset = Math.max(0, alignSlack);
         }
         let x = regionLeft + alignOffset;
 
-        // Justified-line slack distribution (§17.18.44) — the SAME kernel the body
-        // uses. Positive slack expands inter-word + inter-CJK gaps to fill the
-        // region; negative slack compresses spaces so the last glyph lands on the
-        // region edge. Leading whitespace (a 字下げ indent) is not stretched (LTR).
-        let segStretch: Map<number, SegStretch> | null = null;
-        let distPerGap = 0;
-        let firstContentSi = 0;
         if (applyJustify) {
-          if (!paraNeedsBidi) {
-            for (let i = 0; i < segCount; i++) {
-              const seg = line.segments[i];
-              if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
-            }
-          }
           const minPerGap = -line.ascent * 0.25;
           const distSegs = line.segments.map((seg) =>
             'text' in seg ? { text: (seg as LayoutTextSeg).text } : {},
