@@ -22,18 +22,26 @@
 // preset-parity.test.ts) are likewise deleted and routed through the engine
 // via SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS: their only live legacy call path
 // (the pptx effect-mask silhouette) fills path 0, so an equal fill region
-// means an equal mask.
+// means an equal mask. Presets whose outline TOPOLOGY matches but whose
+// vertices/arcs differ by a small, spec-CORRECT amount (legacy is an
+// approximation, the spec engine is ECMA-faithful) are deleted and routed via
+// SPEC_MIGRATED_SPEC_CORRECT_PRESETS: safe for the same path-0 reason, and here
+// the visible body already renders through the spec engine so the mask simply
+// matches the body it feathers.
 //
 // Every case still in the switch is a KNOWN DIFFERENCE from the spec engine,
 // kept verbatim so no rendered pixel moves. Nature of the differences
 // (details per preset in the parity harness's PRESET_PARITY_REPORT table):
 //  - geometry approximations — the legacy math deviates from the ECMA-376
-//    guide formulas (regular-polygon rings for pentagon…dodecagon and
-//    star5/6/7/10; fixed-ratio instead of ss-based arrows/chevron/homeplate;
-//    quadratic instead of circular corner arcs for the round*/snip2* rects;
-//    simplified moon/teardrop/pie/chord/blockarc/wave/… constructions). The
-//    spec engine is the ECMA-faithful side; converging means adopting its
-//    geometry and re-approving VRT references.
+//    guide formulas (regular-polygon rings for pentagon…decagon and
+//    star5/6/7; fixed-ratio instead of ss-based arrows/chevron/homeplate;
+//    quadratic instead of circular corner arcs for round1rect / snip2* /
+//    snipRoundRect / plaque; simplified
+//    moon/teardrop/pie/chord/blockarc/wave/… constructions). The spec engine is
+//    the ECMA-faithful side; converging means adopting its geometry and
+//    re-approving VRT references. (The small-Δ, same-topology members of this
+//    family — round2SameRect, round2DiagRect, dodecagon, star10 — have been
+//    migrated; see the batch-6 bullet below.)
 //  - structural, fill-DIFFERENT — the legacy body emits a different FILLED
 //    silhouette (single-outline cloud/cloudCallout, no 3D highlight overlays
 //    for can/cube/bevel, merged contours for
@@ -45,6 +53,12 @@
 //    flowchartPredefinedProcess, flowchartSort, flowchartInternalStorage,
 //    flowchartSummingJunction — was migrated via
 //    SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS (case DELETED, mask unchanged).
+//  - spec-correct micro-geometry — same outline TOPOLOGY, vertices/arcs off by a
+//    small amount where the spec engine is the corrected side. A2 batch 6 —
+//    round2SameRect, round2DiagRect (quad vs true arc corners, Δ ≤ 1.01px),
+//    dodecagon (Δ ≤ 5.97px) and star10 (Δ ≤ 6.60px, both ring vs ECMA vertex
+//    guides) — was migrated via SPEC_MIGRATED_SPEC_CORRECT_PRESETS (case DELETED;
+//    the silhouette now matches the spec-engine body it feathers).
 //  - intentional — `arc` (the engine's spec shape is pie-wedge fill + open
 //    arc stroke; the legacy open arc is kept for effect-mask semantics, see
 //    the pptx renderer's paintShapeBody) and the bent/curved connectors
@@ -229,6 +243,50 @@ export const SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS: ReadonlySet<string> = new Se
   'flowchartsummingjunction',
 ]);
 
+/**
+ * Presets whose legacy case and the spec engine share the SAME outline topology
+ * (identical subpath count, closed flags, winding, and — for the round2* rects —
+ * the same corner-arc segment structure) but whose vertex/arc coordinates differ
+ * by a small, spec-CORRECT amount: the legacy body is an approximation and the
+ * spec engine is the ECMA-376-faithful side (presets.json IS
+ * presetShapeDefinitions.xml §20.1.9). Migrating adopts the spec geometry, so
+ * these are NOT coordinate-identical — the pin below records the design-time Δ
+ * instead of asserting exact parity (which is impossible by construction).
+ *
+ * The difference is bounded and its nature is per-preset:
+ *  - round2samerect / round2diagrect (Δ ≤ 1.01px, max over the square/wide/tall
+ *    audit boxes): the legacy corners are QUADRATIC Béziers; the spec draws true
+ *    circular quarter-arcs (`a` commands). Same 8-point outline, arc vs quad only.
+ *  - dodecagon (Δ ≤ 5.97px): the legacy body is a regular 12-gon inscribed in the
+ *    bbox via `drawPolygon`; the spec uses the ECMA-376 gdLst vertex guides
+ *    (`x1..x4`, `y1..y4`), which place the vertices on the spec's own construction
+ *    rather than a uniform ring. Same 12-vertex closed polygon.
+ *  - star10 (Δ ≤ 6.60px): the legacy body is a uniform 10-point star (single
+ *    inner-radius ratio via `drawStar`); the spec uses the per-vertex
+ *    `sx1..sx6`/`sy1..sy4` guides derived from the ECMA `hf` horizontal factor,
+ *    so inner and outer vertices are not on concentric uniform rings. Same
+ *    20-vertex closed star.
+ *
+ * Safe to route through the spec engine for the same reason as the sets above:
+ * the ONLY live legacy call path for an engine-known preset is the pptx
+ * effect-mask silhouette (paintShapeBody), which fills path 0 — and here the
+ * whole visible BODY already renders through the spec engine (renderPresetShape),
+ * so after this migration the silhouette simply matches the body it masks.
+ *
+ * Distinct from SPEC_MIGRATED_PRESETS (coordinate-identical, exact-parity pin)
+ * and from SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS (different topology / decorative
+ * strokes, fill-region-equivalence pin): here the topology is identical and the
+ * geometry is close-but-not-equal because the spec side is the corrected one.
+ *
+ * A2 batch 6 (spec-correct micro-geometry).
+ */
+export const SPEC_MIGRATED_SPEC_CORRECT_PRESETS: ReadonlySet<string> = new Set([
+  'round2samerect',
+  'round2diagrect',
+  'dodecagon',
+  'star10',
+]);
+
 /** Build the canvas path for a given OOXML preset geometry (`<a:prstGeom>`).
  *
  * The caller is responsible for `ctx.beginPath()` / `ctx.fill()` /
@@ -255,15 +313,21 @@ export function buildShapePath(
   const cy = y + h / 2;
 
   // Migrated presets: the spec-driven engine is the single implementation.
-  // Two tiers, both routed here: SPEC_MIGRATED_PRESETS (coordinate-identical to
-  // the legacy body) and SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS (same filled
-  // silhouette, decorative strokes aside — safe because the sole live legacy
-  // caller is the pptx effect-mask that fills path 0). Everything not in either
-  // set keeps its legacy output — including the plain-rect default — untouched.
+  // Three tiers, all routed here: SPEC_MIGRATED_PRESETS (coordinate-identical to
+  // the legacy body), SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS (same filled
+  // silhouette, decorative strokes aside), and SPEC_MIGRATED_SPEC_CORRECT_PRESETS
+  // (same topology, small spec-CORRECT vertex/arc drift). All three are safe
+  // because the sole live legacy caller is the pptx effect-mask that fills
+  // path 0. Everything not in any set keeps its legacy output — including the
+  // plain-rect default — untouched.
   {
     const raw = geom.toLowerCase();
     const key = LEGACY_SPEC_ALIASES[raw] ?? raw;
-    if (SPEC_MIGRATED_PRESETS.has(key) || SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS.has(key)) {
+    if (
+      SPEC_MIGRATED_PRESETS.has(key) ||
+      SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS.has(key) ||
+      SPEC_MIGRATED_SPEC_CORRECT_PRESETS.has(key)
+    ) {
       if (buildPresetGeometryPath(ctx, key, x, y, w, h, [adj, adj2, adj3, adj4])) return;
     }
   }
@@ -303,9 +367,9 @@ export function buildShapePath(
     case 'decagon':
       drawPolygon(ctx, cx, cy, w / 2, h / 2, 10);
       break;
-    case 'dodecagon':
-      drawPolygon(ctx, cx, cy, w / 2, h / 2, 12);
-      break;
+    // dodecagon migrated to the spec engine (A2 batch 6, spec-correct
+    // micro-geometry): the legacy regular 12-gon ring drifts ≤5.97px from the
+    // ECMA-376 gdLst vertex guides — see SPEC_MIGRATED_SPEC_CORRECT_PRESETS.
 
     // ── Stars ─────────────────────────────────────────────────────────────────
     // Inner-radius defaults from ECMA-376 prstGeom avLst: adj / 50000 = innerR / outerR.
@@ -319,9 +383,9 @@ export function buildShapePath(
     case 'star7':
       drawStar(ctx, cx, cy, w / 2, h / 2, 7, (adj ?? 34142) / 50000);
       break;
-    case 'star10':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 10, (adj ?? 41421) / 50000);
-      break;
+    // star10 migrated to the spec engine (A2 batch 6, spec-correct
+    // micro-geometry): the legacy uniform-ring star drifts ≤6.60px from the
+    // ECMA-376 per-vertex guides — see SPEC_MIGRATED_SPEC_CORRECT_PRESETS.
 
     // ── Arrows ────────────────────────────────────────────────────────────────
     case 'rightarrow': {
@@ -757,34 +821,10 @@ export function buildShapePath(
       ctx.closePath();
       break;
     }
-    case 'round2samerect': {
-      // Two rounded corners on same side (top); adj = corner size
-      const a = Math.min(50000, Math.max(0, adj ?? 16667));
-      const r = Math.min(w, h) * a / 100000;
-      ctx.moveTo(x + r, y);
-      ctx.lineTo(x + w - r, y);
-      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.lineTo(x, y + r);
-      ctx.quadraticCurveTo(x, y, x + r, y);
-      ctx.closePath();
-      break;
-    }
-    case 'round2diagrect': {
-      // Two rounded diagonal corners (top-left + bottom-right)
-      const a = Math.min(50000, Math.max(0, adj ?? 16667));
-      const r = Math.min(w, h) * a / 100000;
-      ctx.moveTo(x + r, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x + w, y + h - r);
-      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-      ctx.lineTo(x, y + h);
-      ctx.lineTo(x, y + r);
-      ctx.quadraticCurveTo(x, y, x + r, y);
-      ctx.closePath();
-      break;
-    }
+    // round2samerect and round2diagrect migrated to the spec engine (A2 batch 6,
+    // spec-correct micro-geometry): the legacy corners are QUADRATIC Béziers,
+    // the spec draws true circular quarter-arcs (Δ ≤ 1.01px, same 8-point
+    // outline) — see SPEC_MIGRATED_SPEC_CORRECT_PRESETS.
 
     // ── Misc shapes ───────────────────────────────────────────────────────────
     case 'plaque': {

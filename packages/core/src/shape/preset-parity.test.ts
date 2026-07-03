@@ -60,6 +60,7 @@ import {
   buildShapePath,
   SPEC_MIGRATED_PRESETS,
   SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS,
+  SPEC_MIGRATED_SPEC_CORRECT_PRESETS,
 } from './preset';
 import { buildPresetGeometryPath } from './preset-geometry';
 import presetsJson from './preset-geometry/presets.json';
@@ -1015,15 +1016,25 @@ describe('preset parity harness', () => {
     }
   });
 
-  it('the two migrated sets are disjoint', () => {
-    // A preset is EITHER coordinate-identical (SPEC_MIGRATED_PRESETS) OR merely
-    // fill-equivalent (SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS) — never both. A
-    // name in both would make the pin contract ambiguous.
-    for (const name of SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS) {
-      expect(
-        SPEC_MIGRATED_PRESETS.has(name),
-        `"${name}" is in BOTH migrated sets`,
-      ).toBe(false);
+  it('the three migrated sets are pairwise disjoint', () => {
+    // A preset belongs to EXACTLY ONE tier: coordinate-identical
+    // (SPEC_MIGRATED_PRESETS), fill-equivalent
+    // (SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS), or spec-correct micro-geometry
+    // (SPEC_MIGRATED_SPEC_CORRECT_PRESETS). A name in two would make the pin
+    // contract for it ambiguous (which guarantee is being asserted?).
+    const sets: Array<[string, ReadonlySet<string>]> = [
+      ['SPEC_MIGRATED_PRESETS', SPEC_MIGRATED_PRESETS],
+      ['SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS', SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS],
+      ['SPEC_MIGRATED_SPEC_CORRECT_PRESETS', SPEC_MIGRATED_SPEC_CORRECT_PRESETS],
+    ];
+    for (let i = 0; i < sets.length; i++) {
+      for (let j = i + 1; j < sets.length; j++) {
+        const [nameA, a] = sets[i];
+        const [nameB, b] = sets[j];
+        for (const name of a) {
+          expect(b.has(name), `"${name}" is in BOTH ${nameA} and ${nameB}`).toBe(false);
+        }
+      }
     }
   });
 
@@ -1068,6 +1079,70 @@ describe('preset parity harness', () => {
         // guarantee the pptx effect-mask relies on).
         const fill = fillEquivalentOnce(e.label, e.spec, box, []);
         expect(fill.ok, `${e.label} (fill, ${box.w}×${box.h}): ${fill.reason}`).toBe(true);
+      }
+    }
+  });
+
+  it('keeps every spec-correct micro-geometry preset routed to the spec engine', () => {
+    // A2 batch 6. These presets share the spec engine's outline TOPOLOGY but
+    // their LEGACY body drifted from the ECMA-376 guide formulas by a small,
+    // spec-CORRECT amount (the spec engine, driven by presetShapeDefinitions.xml,
+    // is the corrected side). They were migrated on that basis: the case is
+    // DELETED, so buildShapePath now emits the engine's geometry verbatim.
+    //
+    // Unlike SPEC_MIGRATED_PRESETS this is NOT a legacy-vs-engine exact-parity
+    // claim — the legacy body no longer executes and was never coordinate-equal.
+    // What is checked here is (1) set integrity and (2) delegation wiring: for
+    // every set member AND every historic alias label, buildShapePath must
+    // reproduce buildPresetGeometryPath EXACTLY (compareOnce records both and
+    // demands ≤5e-3px), at default AND perturbed adjusts so the adj1..adj4
+    // plumbing stays sound. The disjointness test above stops a name here from
+    // also claiming the stronger coordinate-identical contract.
+    //
+    // DESIGN-TIME FACT (recorded, not re-derived — the legacy bodies are gone):
+    // the max legacy-vs-spec deviation across the square/wide/tall audit boxes
+    // that classified each preset as "spec-correct micro-geometry" rather than
+    // coordinate-identical. Nature of each: round2* = quadratic vs true circular
+    // corner arcs; dodecagon / star10 = regular ring vs ECMA per-vertex guides.
+    const DESIGN_TIME_MAX_DEV_PX: Record<string, number> = {
+      round2samerect: 1.01,
+      round2diagrect: 1.01,
+      dodecagon: 5.97,
+      star10: 6.6,
+    };
+    // The recorded Δ set must exactly cover the migrated set (no drift between
+    // the documentation and what was actually migrated).
+    expect(new Set(Object.keys(DESIGN_TIME_MAX_DEV_PX))).toEqual(
+      new Set(SPEC_MIGRATED_SPEC_CORRECT_PRESETS),
+    );
+    // Every recorded Δ is a genuine micro-difference: strictly positive (these
+    // are NOT coordinate-identical) and small (the batch's ceiling was ~6.6px).
+    for (const [name, dev] of Object.entries(DESIGN_TIME_MAX_DEV_PX)) {
+      expect(dev, `${name} design-time Δ must be > TOL`).toBeGreaterThan(TOL);
+      expect(dev, `${name} design-time Δ must stay in the micro band`).toBeLessThanOrEqual(7);
+    }
+    const entries = LEGACY_SWITCH.filter((e) =>
+      SPEC_MIGRATED_SPEC_CORRECT_PRESETS.has(e.spec),
+    );
+    for (const name of SPEC_MIGRATED_SPEC_CORRECT_PRESETS) {
+      expect(
+        entries.some((e) => e.spec === name),
+        `SPEC_MIGRATED_SPEC_CORRECT_PRESETS entry "${name}" missing from the audit inventory`,
+      ).toBe(true);
+      expect(
+        PRESET_DEFS[name],
+        `spec-correct "${name}" must exist in presets.json`,
+      ).toBeDefined();
+    }
+    for (const e of entries) {
+      for (const box of BOXES) {
+        // Delegation route reproduces the engine exactly (the deleted legacy
+        // body is gone; buildShapePath is now a thin call into the engine).
+        const dflt = compareOnce(e.label, e.spec, box, []);
+        expect(dflt.ok, `${e.label} (default adj, ${box.w}×${box.h}): ${dflt.reason}`).toBe(true);
+        const adj = perturbedAdj(e.spec);
+        const pert = compareOnce(e.label, e.spec, box, adj);
+        expect(pert.ok, `${e.label} (perturbed adj, ${box.w}×${box.h}): ${pert.reason}`).toBe(true);
       }
     }
   });
