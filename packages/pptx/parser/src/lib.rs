@@ -378,6 +378,9 @@ pub(crate) fn build_smartart_drawings(
 }
 
 /// Find the Target of the first relationship whose Type ends with `type_suffix`.
+// Relationship Type is matched by suffix (`ends_with`), so the Strict purl.oclc.org
+// prefix still matches — do not change this to an exact-match comparison, or
+// Strict documents will silently stop resolving.
 pub(crate) fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> {
     let doc = roxmltree::Document::parse(rels_xml).ok()?;
     for rel in doc.root_element().children().filter(|n| n.is_element()) {
