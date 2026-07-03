@@ -78,8 +78,9 @@ export const ENCRYPTED_DOCX_SPIN0_BASE64 =
   'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
   'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
-/** Decode the embedded fixture to bytes. */
-export function encryptedDocxSpin0(): Uint8Array {
+/** Decode the embedded fixture to bytes. Returns a `Uint8Array<ArrayBuffer>` so
+ *  `.buffer` is a plain `ArrayBuffer` a `load()` factory can accept. */
+export function encryptedDocxSpin0(): Uint8Array<ArrayBuffer> {
   const bin = atob(ENCRYPTED_DOCX_SPIN0_BASE64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
