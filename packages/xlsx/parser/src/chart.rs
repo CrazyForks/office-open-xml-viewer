@@ -1544,115 +1544,33 @@ pub(crate) fn parse_marker_block(
     (symbol, size, fill, line)
 }
 
-/// Locate the first `a:solidFill > a:srgbClr@val` or `a:schemeClr@val` under
-/// `node` (children only, not deep descendants — chart spPr is structured
-/// shallowly). Returns the resolved hex without `#`. Handles theme refs and
-/// `lumMod`/`lumOff`/`tint`/`shade`/`alpha` color transforms by delegating
-/// to `apply_color_transforms`.
+/// Locate the first resolvable `<a:solidFill>` among `parent`'s direct children
+/// (children only, not deep descendants — chart spPr is structured shallowly)
+/// and resolve its color to hex **without** `#` (uppercase). The chart wire
+/// model prepends `#` on the TS side, so this matches every other chart color
+/// field.
+///
+/// Delegates the DrawingML color grammar (`srgbClr`/`sysClr`/`prstClr`/
+/// `schemeClr` + `lumMod`/`lumOff`/`tint`/`shade`/`alpha` transforms) to the
+/// shared [`ooxml_common::color::parse_color_node`] via the crate-wide
+/// [`XlsxSchemeResolver`], so scheme slots resolve through the §20.1.6.2 default
+/// clrMap (`tx2`→`dk2`, `bg2`→`lt2`) and luminance transforms apply in HLS space
+/// (§20.1.2.3.20/.21). The prior private copy in this module mapped `bg2`/`tx2`
+/// to the wrong slots and multiplied `lumMod`/`lumOff` in RGB space.
 pub(crate) fn extract_solid_fill_in_drawingml(
     parent: &roxmltree::Node,
     theme_colors: &[String],
 ) -> Option<String> {
-    for fill in parent
+    parent
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "solidFill")
-    {
-        for clr in fill.children().filter(|n| n.is_element()) {
-            match clr.tag_name().name() {
-                "srgbClr" => {
-                    if let Some(rgb) = clr.attribute("val") {
-                        return Some(apply_color_transforms(rgb, &clr));
-                    }
-                }
-                "schemeClr" => {
-                    if let Some(scheme) = clr.attribute("val") {
-                        let base = resolve_scheme_color(scheme, theme_colors);
-                        if let Some(b) = base {
-                            return Some(apply_color_transforms(&b, &clr));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
-/// Look up a scheme color name ("dk1"/"lt1"/"dk2"/"lt2"/"accent1"…"accent6"
-/// /"hlink"/"folHlink") in the workbook theme color table. Returns hex
-/// (no `#`) or None when unknown.
-pub(crate) fn resolve_scheme_color(name: &str, theme_colors: &[String]) -> Option<String> {
-    // Theme order (parse_theme_colors): dk1@0, lt1@1, dk2@2, lt2@3,
-    // accent1@4..accent6@9, hlink@10, folHlink@11.
-    let idx = match name {
-        "dk1" | "tx1" | "bg2" => 0,
-        "lt1" | "bg1" | "tx2" => 1,
-        "dk2" => 2,
-        "lt2" => 3,
-        "accent1" => 4,
-        "accent2" => 5,
-        "accent3" => 6,
-        "accent4" => 7,
-        "accent5" => 8,
-        "accent6" => 9,
-        "hlink" => 10,
-        "folHlink" => 11,
-        _ => return None,
-    };
-    theme_colors
-        .get(idx)
-        .map(|s| s.trim_start_matches('#').to_string())
-}
-
-/// Apply DrawingML color transforms (`lumMod`/`lumOff`/`tint`/`shade`/
-/// `alpha` — drop alpha) found as children of a color element. Returns a
-/// hex string without `#`. Already-existing `apply_tint` handles
-/// lumMod-style brightness changes for the simpler `lumMod-only` case;
-/// this widens it to combine multiple transforms.
-pub(crate) fn apply_color_transforms(base_hex: &str, color_el: &roxmltree::Node) -> String {
-    let cleaned = base_hex.trim_start_matches('#');
-    let r = u8::from_str_radix(cleaned.get(0..2).unwrap_or("00"), 16).unwrap_or(0);
-    let g = u8::from_str_radix(cleaned.get(2..4).unwrap_or("00"), 16).unwrap_or(0);
-    let b = u8::from_str_radix(cleaned.get(4..6).unwrap_or("00"), 16).unwrap_or(0);
-    let mut rf = r as f64 / 255.0;
-    let mut gf = g as f64 / 255.0;
-    let mut bf = b as f64 / 255.0;
-    for child in color_el.children().filter(|n| n.is_element()) {
-        let pct = child
-            .attribute("val")
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v / 100000.0);
-        let Some(p) = pct else { continue };
-        match child.tag_name().name() {
-            "lumMod" => {
-                rf *= p;
-                gf *= p;
-                bf *= p;
-            }
-            "lumOff" => {
-                rf += p;
-                gf += p;
-                bf += p;
-            }
-            "tint" => {
-                // ECMA-376: lighten toward 1.0 by `p` (0..1).
-                rf = rf + (1.0 - rf) * p;
-                gf = gf + (1.0 - gf) * p;
-                bf = bf + (1.0 - bf) * p;
-            }
-            "shade" => {
-                // Darken toward 0 by `1 - p`.
-                rf *= p;
-                gf *= p;
-                bf *= p;
-            }
-            // alpha is dropped — we render opaque.
-            _ => {}
-        }
-    }
-    let clamp = |v: f64| -> u8 { (v.clamp(0.0, 1.0) * 255.0).round() as u8 };
-    format!("{:02X}{:02X}{:02X}", clamp(rf), clamp(gf), clamp(bf))
+        .find_map(|fill| {
+            ooxml_common::color::parse_color_node(
+                fill,
+                &crate::drawing::XlsxSchemeResolver { theme_colors },
+                ooxml_common::color::TintMode::PowerPointLinear,
+            )
+        })
 }
 
 /// Walk every `<c:dPt>` direct child of the series and collect per-point
@@ -2803,5 +2721,94 @@ mod axis_title_and_border_tests {
         assert_eq!(chart.val_axis_title.as_deref(), Some("Period"));
         assert_eq!(chart.val_axis_title_size, Some(1800));
         assert_eq!(chart.val_axis_title_bold, None);
+    }
+}
+
+#[cfg(test)]
+mod solid_fill_color_tests {
+    use super::*;
+    use roxmltree::Document;
+
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    // Theme in clrScheme document order: dk1@0, lt1@1, dk2@2, lt2@3,
+    // accent1@4 … folHlink@11. Distinct hexes so a mis-index is obvious.
+    fn theme() -> Vec<String> {
+        vec![
+            "#111111".into(), // dk1 @0
+            "#FEFEFE".into(), // lt1 @1
+            "#222222".into(), // dk2 @2
+            "#EEEEEE".into(), // lt2 @3
+            "#4472C4".into(), // accent1 @4
+            "#00AA00".into(), // accent2 @5
+            "#0000AA".into(), // accent3 @6
+            "#AAAA00".into(), // accent4 @7
+            "#00AAAA".into(), // accent5 @8
+            "#AA00AA".into(), // accent6 @9
+            "#0563C1".into(), // hlink @10
+            "#954F72".into(), // folHlink @11
+        ]
+    }
+
+    fn solid_fill(inner: &str) -> String {
+        format!(r#"<a:spPr xmlns:a="{A_NS}"><a:solidFill>{inner}</a:solidFill></a:spPr>"#)
+    }
+
+    /// §20.1.6.2 default clrMap: `tx2` → `dk2` (theme slot 2), NOT `lt1`.
+    #[test]
+    fn scheme_tx2_resolves_to_dk2_slot() {
+        let xml = solid_fill(r#"<a:schemeClr val="tx2"/>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
+        // tx2 → dk2 → theme[2] = "222222" (uppercase, no `#`).
+        assert_eq!(out.as_deref(), Some("222222"));
+    }
+
+    /// §20.1.6.2 default clrMap: `bg2` → `lt2` (theme slot 3), NOT `dk1`.
+    #[test]
+    fn scheme_bg2_resolves_to_lt2_slot() {
+        let xml = solid_fill(r#"<a:schemeClr val="bg2"/>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
+        // bg2 → lt2 → theme[3] = "EEEEEE".
+        assert_eq!(out.as_deref(), Some("EEEEEE"));
+    }
+
+    /// tx1 → dk1 and bg1 → lt1 (unchanged, but pinned so a refactor can't drift).
+    #[test]
+    fn scheme_tx1_bg1_resolve_to_dk1_lt1() {
+        let tx1 = solid_fill(r#"<a:schemeClr val="tx1"/>"#);
+        let doc = Document::parse(&tx1).unwrap();
+        assert_eq!(
+            extract_solid_fill_in_drawingml(&doc.root_element(), &theme()).as_deref(),
+            Some("111111") // dk1 @0
+        );
+        let bg1 = solid_fill(r#"<a:schemeClr val="bg1"/>"#);
+        let doc = Document::parse(&bg1).unwrap();
+        assert_eq!(
+            extract_solid_fill_in_drawingml(&doc.root_element(), &theme()).as_deref(),
+            Some("FEFEFE") // lt1 @1
+        );
+    }
+
+    /// `lumMod` is a luminance modulation applied to the HLS `L` channel
+    /// (§20.1.2.3.20), NOT a per-RGB-component multiply. For `4472C4` at
+    /// `lumMod 50000`, the HLS result is `203864`; the (wrong) RGB-space
+    /// multiply would give `223962`.
+    #[test]
+    fn lummod_applies_in_hls_space_not_rgb() {
+        let xml = solid_fill(r#"<a:srgbClr val="4472C4"><a:lumMod val="50000"/></a:srgbClr>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
+        assert_eq!(out.as_deref(), Some("203864"));
+    }
+
+    /// A plain srgbClr with no transforms passes through (uppercased, no `#`).
+    #[test]
+    fn plain_srgb_passthrough() {
+        let xml = solid_fill(r#"<a:srgbClr val="ff8000"/>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
+        assert_eq!(out.as_deref(), Some("FF8000"));
     }
 }

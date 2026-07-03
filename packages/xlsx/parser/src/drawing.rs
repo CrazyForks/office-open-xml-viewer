@@ -268,8 +268,13 @@ pub(crate) fn parse_xfrm(xfrm_node: &roxmltree::Node) -> Option<Xfrm> {
 /// lt2, accent1..accent6, hlink, folHlink (see `parse_theme_colors`), each
 /// `#RRGGBB`. The `#` is stripped here because the shared transform wants clean
 /// hex; `parse_solid_fill` re-adds it for the returned color.
-struct XlsxSchemeResolver<'a> {
-    theme_colors: &'a [String],
+///
+/// Shared with the chart parser (`chart::extract_solid_fill_in_drawingml`) so a
+/// single positional-slot table serves every xlsx DrawingML color path — the
+/// chart module previously carried a private copy with `bg2`/`tx2` mapped to the
+/// wrong slots (§20.1.6.2).
+pub(crate) struct XlsxSchemeResolver<'a> {
+    pub(crate) theme_colors: &'a [String],
 }
 
 impl ooxml_common::color::ThemeResolver for XlsxSchemeResolver<'_> {
