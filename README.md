@@ -29,11 +29,15 @@ pnpm add @silurus/ooxml
 
 > **Bundler note**: the Rust parsers ship as real `.wasm` asset files next to the
 > JavaScript, referenced with the standard `new URL('…', import.meta.url)` form
-> and fetched (streaming-compiled) at load time. Vite, webpack 5, Rollup,
-> esbuild and Parcel detect that reference and copy the asset automatically — no
-> extra WebAssembly plugin is required. If your bundler cannot emit the asset (or
-> you want to serve the parser WASM from a CDN or a path you control), pass its
-> URL via the `wasmUrl` load option:
+> and fetched (streaming-compiled) at load time. Vite, webpack 5, Rollup and
+> Parcel detect that reference and copy the asset automatically — no extra
+> WebAssembly plugin is required. esbuild and the Angular CLI (whose application
+> builder is esbuild-based) do **not** process that reference
+> ([esbuild#795](https://github.com/evanw/esbuild/issues/795)): copy the `.wasm`
+> into your served output yourself and point the viewer at it with the `wasmUrl`
+> load option — see the [Angular example](#framework-examples) for the two-step
+> setup. `wasmUrl` also serves the parser WASM from a CDN or any path you
+> control:
 >
 > ```typescript
 > new DocxViewer(canvas, { wasmUrl: 'https://cdn.example.com/docx_parser_bg.wasm' });
@@ -376,6 +380,28 @@ onMounted(async () => {
 <details>
 <summary><strong>Angular 19</strong></summary>
 
+The Angular CLI's esbuild-based builder does not process the `new URL('…', import.meta.url)`
+asset reference the parsers use ([angular-cli#22388](https://github.com/angular/angular-cli/issues/22388)),
+so the `.wasm` never reaches the build output — and under `ng serve` the dependency
+optimizer additionally rewrites the reference into its own cache path. **Both steps
+below are required** (the asset copy alone fixes only production builds; `ng serve`
+still 404s without `wasmUrl`):
+
+```jsonc
+// angular.json — copy the parser WASM into the served root
+// (restart `ng serve` after editing this file)
+"architect": {
+  "build": {
+    "options": {
+      "assets": [
+        { "glob": "*_parser_bg.wasm", "input": "node_modules/@silurus/ooxml/dist", "output": "/" },
+        { "glob": "**/*", "input": "public" }
+      ]
+    }
+  }
+}
+```
+
 ```typescript
 // Angular 19 — standalone component with signal-based state
 import {
@@ -404,6 +430,7 @@ export class PptxViewerComponent implements AfterViewInit {
 
   ngAfterViewInit(): void {
     this.viewer = new PptxViewer(this.canvasEl().nativeElement, {
+      wasmUrl: '/pptx_parser_bg.wasm',
       onSlideChange: (i, t) => { this.current.set(i); this.total.set(t); },
     });
     this.viewer.load('/deck.pptx');
@@ -414,7 +441,10 @@ export class PptxViewerComponent implements AfterViewInit {
 }
 ```
 
-> Add `"allowSyntheticDefaultImports": true` and configure `@angular-builders/custom-webpack` (or use `esbuild` builder) with WASM support in your Angular workspace.
+> The `*_parser_bg.wasm` glob copies all three parsers; narrow it to
+> `pptx_parser_bg.wasm` if you only use one format. If you deploy under a
+> non-root `base href`, adjust `wasmUrl` so it resolves under your base (a
+> relative `wasmUrl` is resolved against the document URL).
 
 </details>
 
