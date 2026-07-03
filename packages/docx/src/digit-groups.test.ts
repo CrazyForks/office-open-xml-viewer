@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { splitDigitGroups } from './renderer.js';
+import { splitDigitGroups } from './line-layout.js';
 
 // ECMA-376 RTL number handling relies on UAX#9. In an AN-classified Arabic run
 // the renderer splits a token into European-digit groups + separators so the

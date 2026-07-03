@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { lineBoxHeight } from './renderer.js';
+import { lineBoxHeight } from './line-layout.js';
 import type { LineSpacing } from './types.js';
 
 // Regression: some generators emit <w:spacing w:line="0" w:lineRule="exact"/> on
