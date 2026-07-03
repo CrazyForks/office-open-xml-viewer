@@ -324,6 +324,39 @@ export type PaginatedBodyElement = BodyElement & {
    *  the renderer uses the body-level `doc.section` geometry (single-section docs are
    *  unaffected). Runtime-only — never emitted by the parser. */
   sectionGeom?: SectionGeom;
+  /** B2 table stage 1b — compute-once table layout. When this element is a table
+   *  (`type === 'table'`), the paginator stamps the per-grid-column widths (pt) it
+   *  resolved via {@link resolveColumnWidths}. The paint pass ({@link computeTableLayout})
+   *  reuses them (× the paint scale) instead of re-running the column-fit — which
+   *  re-measures the min-content width of every token in every cell — whenever its
+   *  own layout inputs match `tableLayoutInputs`. Column widths are resolved purely
+   *  in pt (scale-independent), so `× scale` reproduces the paint-scale result
+   *  exactly. Absent ⇒ the paint pass resolves the columns itself (the pre-reuse
+   *  behaviour). Runtime-only — never emitted by the parser. */
+  tableColWidthsPt?: number[];
+  /** B2 table stage 1b — the per-row heights (pt) the paginator resolved via
+   *  {@link resolveTableRowHeights} (ST_HeightRule + §17.4.85 vMerge span). For a
+   *  table split across pages this holds the heights of THIS slice's rows only (the
+   *  leading repeated `tblHeader` rows of a continuation slice included), in slice
+   *  row order, so it aligns 1:1 with the slice's `rows`. The paint pass reuses
+   *  them (× scale) when `tableLayoutInputs` matches. Absent ⇒ recompute. Runtime-
+   *  only — never emitted by the parser. */
+  tableRowHeightsPt?: number[];
+  /** B2 table stage 1b — the scale-1 (pt-space) inputs the paginator resolved the
+   *  stamped table layout with. The paint pass reuses `tableColWidthsPt` /
+   *  `tableRowHeightsPt` ONLY when its OWN inputs reconstruct to these values in the
+   *  paginator's scale-1 space — a self-verifying gate mirroring the paragraph
+   *  `layoutLinesInputs` gate. `contentWPt` is the content-band width the columns
+   *  were fit to; `hasFloats` excludes a float-wrap context (a floating table takes
+   *  the out-of-flow path and never carries this stamp anyway). Runtime-only. */
+  tableLayoutInputs?: {
+    /** Always 1 (paginator space). Present so the gate can assert it, matching the
+     *  paragraph `layoutLinesInputs.scale` convention. */
+    scale: number;
+    /** The pt content-band width `resolveColumnWidths` was fit to. Compared with a
+     *  magnitude-relative epsilon against the paint pass's `contentW / scale`. */
+    contentWPt: number;
+  };
 };
 
 export interface DocParagraph {
