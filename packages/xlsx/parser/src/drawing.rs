@@ -7,6 +7,7 @@ use ooxml_common::zip::read_zip_string;
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 // `Cursor` is only used to build in-memory archives in this module's tests; the
@@ -26,13 +27,10 @@ pub(crate) fn parse_drawing_anchors(
     let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
         return Vec::new();
     };
-    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
-    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
     let mut anchors: Vec<ImageAnchor> = Vec::new();
 
     for anchor in doc.descendants() {
-        if anchor.tag_name().name() != "twoCellAnchor"
-            || anchor.tag_name().namespace() != Some(xdr_ns)
+        if anchor.tag_name().name() != "twoCellAnchor" || !is_xdr_ns(anchor.tag_name().namespace())
         {
             continue;
         }
@@ -89,12 +87,11 @@ pub(crate) fn parse_drawing_anchors(
                 "pic" => {
                     // <xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic>
                     let blip_fill = child.children().find(|n| {
-                        n.tag_name().name() == "blipFill"
-                            && n.tag_name().namespace() == Some(xdr_ns)
+                        n.tag_name().name() == "blipFill" && is_xdr_ns(n.tag_name().namespace())
                     });
                     if let Some(bf) = blip_fill {
                         let blip = bf.children().find(|n| {
-                            n.tag_name().name() == "blip" && n.tag_name().namespace() == Some(a_ns)
+                            n.tag_name().name() == "blip" && is_a_ns(n.tag_name().namespace())
                         });
                         if let Some(b) = blip {
                             // Raster fallback (`<a:blip r:embed>`); tolerate the
@@ -110,10 +107,10 @@ pub(crate) fn parse_drawing_anchors(
                     // <xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>: the picture's
                     // own saved EMU extent. Authoritative when editAs="oneCell".
                     if let Some(sp_pr) = child.children().find(|n| {
-                        n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(xdr_ns)
+                        n.tag_name().name() == "spPr" && is_xdr_ns(n.tag_name().namespace())
                     }) {
                         if let Some(xfrm_n) = sp_pr.children().find(|n| {
-                            n.tag_name().name() == "xfrm" && n.tag_name().namespace() == Some(a_ns)
+                            n.tag_name().name() == "xfrm" && is_a_ns(n.tag_name().namespace())
                         }) {
                             if let Some(xfrm) = parse_xfrm(&xfrm_n) {
                                 native_ext_cx = xfrm.ext_x as i64;
@@ -1162,7 +1159,6 @@ pub(crate) fn parse_shape_anchors(
     let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
         return Vec::new();
     };
-    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
     let mut anchors: Vec<ShapeAnchor> = Vec::new();
 
     for anchor in doc.descendants() {
@@ -1172,7 +1168,7 @@ pub(crate) fn parse_shape_anchors(
         // size). Excel authors equation text boxes as oneCellAnchor, so we must
         // accept both or those shapes (and their math) are silently dropped.
         if (anchor_tag != "twoCellAnchor" && anchor_tag != "oneCellAnchor")
-            || anchor.tag_name().namespace() != Some(xdr_ns)
+            || !is_xdr_ns(anchor.tag_name().namespace())
         {
             continue;
         }
@@ -1653,12 +1649,13 @@ fn vml_ole_preview<'a>(
         .attribute(("urn:schemas-microsoft-com:office:office", "relid"))
         .or_else(|| imagedata.attribute("relid"))
         .or_else(|| {
-            imagedata.attribute((
-                "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            attr_ns(
+                &imagedata,
+                relationships::TRANSITIONAL,
+                relationships::STRICT,
                 "id",
-            ))
-        })
-        .or_else(|| imagedata.attribute("id"))?;
+            )
+        })?;
     let target = vml_rels.get(rid)?;
     let media_path = resolve_zip_path(vml_dir, target);
     archive.index_for_name(&media_path)?;
@@ -1691,12 +1688,12 @@ fn load_legacy_vml_drawing(
     let legacy = doc
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "legacyDrawing")?;
-    let rid = legacy
-        .attribute((
-            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-            "id",
-        ))
-        .or_else(|| legacy.attribute("id"))?;
+    let rid = attr_ns(
+        &legacy,
+        relationships::TRANSITIONAL,
+        relationships::STRICT,
+        "id",
+    )?;
     let target = sheet_rels.get(rid)?;
     let vml_path = resolve_zip_path(sheet_dir, target); // e.g. xl/drawings/vmlDrawing1.vml
     let vml_xml = read_zip_string(archive, &vml_path).ok()?;
@@ -1790,12 +1787,12 @@ pub(crate) fn parse_ole_object_anchors(
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == "objectPr");
         let object_pr_preview = object_pr.and_then(|pr| {
-            let rid = pr
-                .attribute((
-                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-                    "id",
-                ))
-                .or_else(|| pr.attribute("id"))?;
+            let rid = attr_ns(
+                &pr,
+                relationships::TRANSITIONAL,
+                relationships::STRICT,
+                "id",
+            )?;
             let target = sheet_rels.get(rid)?;
             let media_path = resolve_zip_path(sheet_dir, target);
             archive.index_for_name(&media_path)?;
