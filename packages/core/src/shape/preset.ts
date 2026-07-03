@@ -17,7 +17,12 @@
 // doesn't carry (`rect`). Presets whose hand-written case was proven
 // coordinate-identical to the spec engine (see preset-parity.test.ts) have
 // had their case DELETED and are routed through the engine via
-// SPEC_MIGRATED_PRESETS below.
+// SPEC_MIGRATED_PRESETS below. Presets whose outline STRUCTURE differs but
+// whose FILLED region is identical (see the fill-region scan in
+// preset-parity.test.ts) are likewise deleted and routed through the engine
+// via SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS: their only live legacy call path
+// (the pptx effect-mask silhouette) fills path 0, so an equal fill region
+// means an equal mask.
 //
 // Every case still in the switch is a KNOWN DIFFERENCE from the spec engine,
 // kept verbatim so no rendered pixel moves. Nature of the differences
@@ -29,14 +34,17 @@
 //    simplified moon/teardrop/pie/chord/blockarc/wave/… constructions). The
 //    spec engine is the ECMA-faithful side; converging means adopting its
 //    geometry and re-approving VRT references.
-//  - structural — the legacy body emits fewer/merged subpaths (single-outline
-//    cloud/cloudCallout, no 3D highlight overlays for can/cube/bevel, merged
-//    contours for plus/mathMultiply/mathNotEqual/arrow-callouts, missing
-//    decorative strokes on flowchart* variants, donut hole winding). Six of
-//    these are fill-equivalent (identical silhouettes; only decorative stroke
-//    lines differ): accentCallout1, accentBorderCallout1,
+//  - structural, fill-DIFFERENT — the legacy body emits a different FILLED
+//    silhouette (single-outline cloud/cloudCallout, no 3D highlight overlays
+//    for can/cube/bevel, merged contours for
+//    plus/mathMultiply/mathNotEqual/arrow-callouts, donut hole winding). These
+//    stay legacy because their mask silhouette would move.
+//  - structural, fill-EQUIVALENT — same filled silhouette, difference confined
+//    to decorative interior stroke lines the fill scan ignores. The first such
+//    batch (A2 batch 5) — accentCallout1, accentBorderCallout1,
 //    flowchartPredefinedProcess, flowchartSort, flowchartInternalStorage,
-//    flowchartSummingJunction — the cheapest future convergence batch.
+//    flowchartSummingJunction — was migrated via
+//    SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS (case DELETED, mask unchanged).
 //  - intentional — `arc` (the engine's spec shape is pie-wedge fill + open
 //    arc stroke; the legacy open arc is kept for effect-mask semantics, see
 //    the pptx renderer's paintShapeBody) and the bent/curved connectors
@@ -132,6 +140,9 @@ const LEGACY_SPEC_ALIASES: Record<string, string> = {
   oval: 'ellipse',
   rtriangle: 'rttriangle',
   roundrectangle: 'roundrect',
+  // Historic misspelling the legacy switch accepted as a synonym for
+  // flowchartSummingJunction (presets.json only carries the correct spelling).
+  flowchartsumingjunction: 'flowchartsummingjunction',
 };
 
 /**
@@ -165,8 +176,9 @@ export const SPEC_MIGRATED_PRESETS: ReadonlySet<string> = new Set([
   'star32',
   // batch 3 — straight connectors, plain callout1 pair, matched arrows
   // (bent/curved connectors stay legacy: their case draws a straight
-  // diagonal, not the spec elbow/curve; accent callouts stay: accent-bar
-  // placement differs)
+  // diagonal, not the spec elbow/curve. The accent callout1 pair is
+  // fill-equivalent, not exact, and lives in
+  // SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS below.)
   'line',
   'straightconnector1',
   'callout1',
@@ -188,6 +200,33 @@ export const SPEC_MIGRATED_PRESETS: ReadonlySet<string> = new Set([
   'flowchartextract',
   'flowchartpreparation',
   'flowchartcollate',
+]);
+
+/**
+ * Presets whose legacy case emits a DIFFERENT outline structure from the spec
+ * engine (extra/fewer subpaths, shifted decorative lines) yet whose FILLED
+ * region is identical — proven by the dense winding-rule fill scan in
+ * preset-parity.test.ts (fillEquivalent), across the same square/wide/tall
+ * boxes. These are safe to route through the spec engine because their ONLY
+ * live legacy call path is the pptx effect-mask silhouette (paintShapeBody),
+ * which fills path 0: an equal fill region ⇒ an equal mask. The decorative
+ * interior strokes that differ (predefinedProcess side bars, sort/summing
+ * divider lines, internalStorage inner rules, accent callout bar + leader) are
+ * emitted by the spec engine's own direct-draw path (renderPresetShape), not
+ * by this function, so their appearance is unchanged.
+ *
+ * Distinct from SPEC_MIGRATED_PRESETS (coordinate-identical) because the pin
+ * test asserts fill-region equivalence for these, not exact geometry.
+ *
+ * A2 batch 5 (fill-equivalent).
+ */
+export const SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS: ReadonlySet<string> = new Set([
+  'accentcallout1',
+  'accentbordercallout1',
+  'flowchartpredefinedprocess',
+  'flowchartsort',
+  'flowchartinternalstorage',
+  'flowchartsummingjunction',
 ]);
 
 /** Build the canvas path for a given OOXML preset geometry (`<a:prstGeom>`).
@@ -216,12 +255,15 @@ export function buildShapePath(
   const cy = y + h / 2;
 
   // Migrated presets: the spec-driven engine is the single implementation.
-  // (Guarded by SPEC_MIGRATED_PRESETS so unmigrated engine-known presets keep
-  // their legacy output — including the plain-rect default — untouched.)
+  // Two tiers, both routed here: SPEC_MIGRATED_PRESETS (coordinate-identical to
+  // the legacy body) and SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS (same filled
+  // silhouette, decorative strokes aside — safe because the sole live legacy
+  // caller is the pptx effect-mask that fills path 0). Everything not in either
+  // set keeps its legacy output — including the plain-rect default — untouched.
   {
     const raw = geom.toLowerCase();
     const key = LEGACY_SPEC_ALIASES[raw] ?? raw;
-    if (SPEC_MIGRATED_PRESETS.has(key)) {
+    if (SPEC_MIGRATED_PRESETS.has(key) || SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS.has(key)) {
       if (buildPresetGeometryPath(ctx, key, x, y, w, h, [adj, adj2, adj3, adj4])) return;
     }
   }
@@ -459,38 +501,13 @@ export function buildShapePath(
     }
 
     // ── Callouts ──────────────────────────────────────────────────────────────
-    // Only the callout1 family (2-point: attach + tip) is handled here.
-    // callout2 / callout3 require adj5..adj8 which exceed this function's
-    // 4-adjustment signature, so they go through the generic preset engine
-    // (`renderPresetShape`) that reads the full presets.json definition.
-    case 'accentcallout1':
-    case 'accentbordercallout1': {
-      // ECMA-376 callout1 gd block (presets.json):
-      //   y1 = h * adj1 / 100000   (attach Y)
-      //   x1 = w * adj2 / 100000   (attach X)
-      //   y2 = h * adj3 / 100000   (tip Y)
-      //   x2 = w * adj4 / 100000   (tip X)
-      // Note the (Y, X) pairing: odd-indexed adj are Y fractions. The previous
-      // implementation had X/Y swapped, which made the line point to the
-      // wrong side of the shape.
-      const attXf = (adj2 !== null ? adj2 : -8333)  / 100000;
-      const attYf = (adj  !== null ? adj  : 18750)  / 100000;
-      const tipXf = (adj4 !== null ? adj4 : -38333) / 100000;
-      const tipYf = (adj3 !== null ? adj3 : 112500) / 100000;
-
-      // Text rectangle (the bounding box itself).
-      ctx.rect(x, y, w, h);
-      if (geom.startsWith('accent')) {
-        // Accent variants add a vertical bar on the left edge (~8% inset).
-        const barX = x + w * 0.08;
-        ctx.moveTo(barX, y);
-        ctx.lineTo(barX, y + h);
-      }
-      // Callout line: attach → tip. Either point may sit outside the bbox.
-      ctx.moveTo(x + attXf * w, y + attYf * h);
-      ctx.lineTo(x + tipXf * w, y + tipYf * h);
-      break;
-    }
+    // The callout1 family (2-point: attach + tip) is fully spec-engine-driven:
+    // callout1/bordercallout1 via SPEC_MIGRATED_PRESETS and accentCallout1/
+    // accentBorderCallout1 via SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS (A2 batch 5)
+    // — the accent bar + leader are decorative strokes that leave the filled
+    // silhouette unchanged. callout2 / callout3 require adj5..adj8 which exceed
+    // this function's 4-adjustment signature, so they also go through the
+    // generic preset engine (`renderPresetShape`) reading the full presets.json.
     case 'wedgerectcallout': {
       // Wedge (triangle-tail) callout: rect + filled triangle pointer.
       ctx.rect(x, y, w, h * 0.8);
@@ -877,26 +894,9 @@ export function buildShapePath(
       ctx.closePath();
       break;
     }
-    case 'flowchartpredefinedprocess': {
-      const barW = w * 0.1;
-      ctx.rect(x, y, w, h);
-      ctx.moveTo(x + barW, y);
-      ctx.lineTo(x + barW, y + h);
-      ctx.moveTo(x + w - barW, y);
-      ctx.lineTo(x + w - barW, y + h);
-      break;
-    }
-    case 'flowchartsort': {
-      // Diamond
-      ctx.moveTo(cx, y);
-      ctx.lineTo(x + w, cy);
-      ctx.lineTo(cx, y + h);
-      ctx.lineTo(x, cy);
-      ctx.closePath();
-      ctx.moveTo(x, cy);
-      ctx.lineTo(x + w, cy);
-      break;
-    }
+    // flowchartPredefinedProcess and flowchartSort migrated to the spec engine
+    // (A2 batch 5, fill-equivalent): the side bars / centre divider are
+    // decorative strokes; the filled body (rect / diamond) is identical.
     case 'moon': {
       // Crescent moon
       ctx.arc(cx, cy, Math.min(w, h) / 2, -Math.PI / 2, Math.PI / 2);
@@ -1808,17 +1808,9 @@ export function buildShapePath(
       break;
     }
 
-    // ── Flowchart: internal storage (rect with two inner lines) ───────────────
-    case 'flowchartinternalstorage': {
-      ctx.rect(x, y, w, h);
-      const bw = w * 0.15;
-      const bh = h * 0.15;
-      ctx.moveTo(x + bw, y);
-      ctx.lineTo(x + bw, y + h);
-      ctx.moveTo(x, y + bh);
-      ctx.lineTo(x + w, y + bh);
-      break;
-    }
+    // flowchartInternalStorage migrated to the spec engine (A2 batch 5,
+    // fill-equivalent): the two inner rules are decorative strokes; the filled
+    // body is the plain rectangle, identical to the engine's.
 
     // ── Flowchart: magnetic drum (cylinder on its side with left cap) ─────────
     case 'flowchartmagneticdrum': {
@@ -1835,17 +1827,10 @@ export function buildShapePath(
       break;
     }
 
-    // ── Flowchart: summing junction (circle + X) ──────────────────────────────
-    case 'flowchartsumingjunction':
-    case 'flowchartsummingjunction': {
-      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
-      const r = Math.min(w, h) / 2 * 0.65;
-      ctx.moveTo(cx - r, cy - r);
-      ctx.lineTo(cx + r, cy + r);
-      ctx.moveTo(cx + r, cy - r);
-      ctx.lineTo(cx - r, cy + r);
-      break;
-    }
+    // flowchartSummingJunction (and its historic misspelling alias) migrated to
+    // the spec engine (A2 batch 5, fill-equivalent): the inscribed X is a
+    // decorative stroke; the filled body is the circle, identical to the
+    // engine's. The alias is mapped in LEGACY_SPEC_ALIASES.
 
     // ── Flowchart: magnetic tape (circle with tail) ───────────────────────────
     case 'flowchartmagnetictape': {

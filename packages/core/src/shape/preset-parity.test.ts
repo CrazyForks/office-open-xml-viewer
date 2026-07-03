@@ -56,7 +56,11 @@
 
 import { writeFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
-import { buildShapePath, SPEC_MIGRATED_PRESETS } from './preset';
+import {
+  buildShapePath,
+  SPEC_MIGRATED_PRESETS,
+  SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS,
+} from './preset';
 import { buildPresetGeometryPath } from './preset-geometry';
 import presetsJson from './preset-geometry/presets.json';
 
@@ -795,6 +799,26 @@ function compareOnce(
   return compareShapes(legacy, engine, ORIENTATION_EXEMPT.has(spec));
 }
 
+/**
+ * Fill-region parity for one box + adj set: do the legacy body and the spec
+ * engine produce the same FILLED silhouette (under the live fill rule) even
+ * when their outline structure differs? This is the contract that makes a
+ * preset safe to route through the engine for the pptx effect-mask path, which
+ * fills path 0 — see SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS.
+ */
+function fillEquivalentOnce(
+  label: string,
+  spec: string,
+  box: (typeof BOXES)[number],
+  adj: (number | null)[],
+): { ok: boolean; reason: string | null } {
+  const { legacy, engine, engineOk } = recordBoth(label, spec, box, adj);
+  if (!engineOk) return { ok: false, reason: 'preset missing from presets.json' };
+  const rule = ORIENTATION_EXEMPT.has(spec) ? 'evenodd' : 'nonzero';
+  const ok = fillEquivalent(normalize(legacy), normalize(engine), rule);
+  return { ok, reason: ok ? null : `filled region differs (${rule})` };
+}
+
 export interface AuditRow {
   label: string;
   spec: string;
@@ -987,6 +1011,63 @@ describe('preset parity harness', () => {
         const adj = perturbedAdj(e.spec);
         const pert = compareOnce(e.label, e.spec, box, adj);
         expect(pert.ok, `${e.label} (perturbed adj, ${box.w}×${box.h}): ${pert.reason}`).toBe(true);
+      }
+    }
+  });
+
+  it('the two migrated sets are disjoint', () => {
+    // A preset is EITHER coordinate-identical (SPEC_MIGRATED_PRESETS) OR merely
+    // fill-equivalent (SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS) — never both. A
+    // name in both would make the pin contract ambiguous.
+    for (const name of SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS) {
+      expect(
+        SPEC_MIGRATED_PRESETS.has(name),
+        `"${name}" is in BOTH migrated sets`,
+      ).toBe(false);
+    }
+  });
+
+  it('keeps every fill-equivalent migrated preset routed to the spec engine', () => {
+    // These presets were migrated on the weaker-but-sufficient guarantee that
+    // their FILLED silhouette matches the spec engine even though the outline
+    // STRUCTURE differs by decorative strokes (proven by the fill-region scan
+    // in the audit table — see the DIFF/fill-equiv=YES rows). Once routed,
+    // buildShapePath emits the engine's geometry verbatim, so this pin checks
+    // the delegation is actually wired: for every set member AND every historic
+    // alias label, buildShapePath must reproduce the engine's path exactly (the
+    // fill-equivalent input body is gone; only the engine runs now), at default
+    // AND perturbed adjusts so the adj1..adj4 plumbing stays sound.
+    //
+    // The classification that *allowed* the migration (legacy body was DIFF but
+    // fill-equivalent, not coordinate-identical) is a design-time fact recorded
+    // in the audit table; it is not re-derivable here because the legacy body
+    // no longer executes. The disjointness test above stops a name from also
+    // claiming the stronger exact-parity contract.
+    const entries = LEGACY_SWITCH.filter((e) =>
+      SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS.has(e.spec),
+    );
+    for (const name of SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS) {
+      expect(
+        entries.some((e) => e.spec === name),
+        `SPEC_MIGRATED_FILL_EQUIVALENT_PRESETS entry "${name}" missing from the audit inventory`,
+      ).toBe(true);
+      expect(
+        PRESET_DEFS[name],
+        `fill-equivalent "${name}" must exist in presets.json`,
+      ).toBeDefined();
+    }
+    for (const e of entries) {
+      for (const box of BOXES) {
+        // Delegation route reproduces the engine exactly (fill ⇒ also equal).
+        const dflt = compareOnce(e.label, e.spec, box, []);
+        expect(dflt.ok, `${e.label} (default adj, ${box.w}×${box.h}): ${dflt.reason}`).toBe(true);
+        const adj = perturbedAdj(e.spec);
+        const pert = compareOnce(e.label, e.spec, box, adj);
+        expect(pert.ok, `${e.label} (perturbed adj, ${box.w}×${box.h}): ${pert.reason}`).toBe(true);
+        // And it is fill-equivalent under the live fill rule (the actual
+        // guarantee the pptx effect-mask relies on).
+        const fill = fillEquivalentOnce(e.label, e.spec, box, []);
+        expect(fill.ok, `${e.label} (fill, ${box.w}×${box.h}): ${fill.reason}`).toBe(true);
       }
     }
   });
