@@ -112,12 +112,12 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 ## Phase 4 — フォーマット固有フィデリティ深化
 
 - [ ] WD2: pgNumType / フィールド書式
-- [ ] WD3: w:object OLE + VML imagedata / textpath(watermark)
+- [ ] WD3: w:object OLE + VML imagedata / textpath(watermark) — **OLE 部は前倒しで完了**(PR feature/ole-preview、ユーザー指示 2026-07-03): `w:object` → `v:imagedata` を既存 ImageRun へ(寸法 = VML CSS style pt、fallback dxaOrig/dyaOrig ÷20)。残 = 素の `w:pict` 内 v:imagedata(非 OLE inline VML 画像)/ v:textpath watermark / CT_Object 第一子の modern `w:drawing` 委譲(§17.3.3.19)
 - [ ] WD4: run spacing / w / position / kern(VRT 承認前提)
 - [ ] WD5: w:em 圏点
 - [ ] WD6: pgBorders / lnNumType / セクション vAlign
 - [ ] WD7: 隣接セル境界競合(§17.4.66)
-- [ ] PP1: OLE プレビュー画像
+- [x] PP1: OLE プレビュー画像 — **前倒しで完了**(PR feature/ole-preview、ユーザー指示 2026-07-03)。graphicFrame の ole URI → oleObj の preview `p:pic` を parse_picture 再利用で emit(graphicFrame xfrm が権威 §19.3.2.4)。**レビュー CRITICAL 検出**: PowerPoint 正規出力は Choice=spid(pic と排他、Part 3 §B.1)/Fallback=pic なので「pic を持つ oleObj を選ぶ」能力述語に修正(MCE §9.3)。README の Not Planned 撤回。EMF/WMF プレビューの描画品質は共有メタファイルデコーダーの限界に従う(XF13 は pptx 固有でなく 3 フォーマット共通のデコーダー天井と再定義)。**xlsx 横断**: `<oleObjects>`(§18.3.1.60)パース + image MIME ガードまで実装。ただし Excel 実出力のプレビューは vmlDrawing パート(`oleObject@shapeId` ↔ `v:shape@id`)にあり、objectPr@r:id はデータ part(MS-OI29500 確認、当初実装の前提はレビューが反証)— **vmlDrawing 経路は続く PR で完結**(それまで xlsx OLE は silent skip、README は ❌ のまま)
 - [ ] PP3: SmartArt フォールバック(S: 枠 → M: テキストリスト)
 - [ ] PP4: WordArt prstTxWarp
 - [ ] XL3: 数値書式文法完成(+ corpus テーブル)
