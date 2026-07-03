@@ -65,6 +65,13 @@ jobs:
       - name: Build library
         run: pnpm build
 
+      # PD13 — fail the release if a WASM parser was re-inlined into a JS bundle
+      # as a base64 data-URL (which once bloated the package ~6 MB). The parsers
+      # must ship as real .wasm assets referenced by URL; this gate scans the
+      # freshly built dist/ for the base64 WASM magic before we pack.
+      - name: Guard against base64-inlined WASM
+        run: pnpm check:no-inline-wasm
+
       # ── Verify the package that is about to be published ──────────────────────
       # publint checks packaging correctness (exports ordering, file presence,
       # module/type field sanity). attw checks that every entrypoint resolves to
