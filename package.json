@@ -70,6 +70,7 @@
     "build-storybook": "storybook build",
     "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm",
     "vrt": "pnpm -r vrt",
+    "vrt:worker": "pnpm --filter @silurus/ooxml-pptx --filter @silurus/ooxml-docx --filter @silurus/ooxml-xlsx vrt:worker",
     "smoke": "playwright test --config tests/smoke/playwright.config.ts layouts",
     "test": "vitest run",
     "lint": "ast-grep scan",

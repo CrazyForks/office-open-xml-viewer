@@ -144,3 +144,13 @@ jobs:
           fi
       - name: Smoke tests
         run: pnpm smoke
+
+      # Worker/main pixel-equivalence: each package renders demo/sample-1 on the
+      # main thread and in a Web Worker (OffscreenCanvas) and asserts the two
+      # canvases match (<=0.5% pixel diff). This is a same-machine relative
+      # comparison — it guards the worker render path, NOT font portability — and
+      # uses only the committed demo sample, so it is CI-safe (the private-sample
+      # VRT in each package's visual.spec.ts stays local-only). Reuses the same
+      # Google Chrome the smoke job already relies on.
+      - name: Worker-equivalence tests
+        run: pnpm vrt:worker

@@ -37,7 +37,8 @@
     "build": "tsc --build && vite build",
     "preview": "vite preview",
     "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm",
-    "vrt": "playwright test --config playwright.config.ts"
+    "vrt": "playwright test --config playwright.config.ts",
+    "vrt:worker": "playwright test --config playwright.config.ts worker-equivalence"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
