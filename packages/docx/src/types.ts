@@ -371,6 +371,10 @@ export interface DocParagraph {
     | 'right' | 'end'
     | 'justify' | 'both'
     | 'distribute'
+    // §17.18.44 Arabic kashida + Thai justification variants — mapped onto the
+    // existing justify/distribute slack kernel (see bidi-line `resolveAlignEdge`).
+    | 'lowKashida' | 'mediumKashida' | 'highKashida'
+    | 'thaiDistribute'
     | string;
   indentLeft: number;   // pt
   indentRight: number;  // pt

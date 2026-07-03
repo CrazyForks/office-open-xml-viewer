@@ -55,6 +55,8 @@ import {
   segmentsHaveRtl,
   computeLineVisualOrder,
   resolveAlignEdge,
+  jcIsFullyJustified,
+  jcStretchesLastLine,
   type AlignEdge,
   type LineVisualOrder,
 } from './bidi-line.js';
@@ -4817,16 +4819,15 @@ function renderParagraph(
     ctx.fillRect(sb.x, sb.y, sb.w, sb.h);
   }
 
-  // ECMA-376 §17.18.44 ST_Jc: "both" and "distribute" fully justify the line
-  // by expanding inter-word spaces. The last line of a "both" paragraph is
-  // traditionally left-aligned (not stretched); "distribute" also stretches
-  // the last line. We count whitespace chars in trailing positions of each
-  // segment and divide the slack proportionally across them.
-  const isJustified =
-    para.alignment === 'justify' ||
-    para.alignment === 'both' ||
-    para.alignment === 'distribute';
-  const stretchLastLine = para.alignment === 'distribute';
+  // ECMA-376 §17.18.44 ST_Jc: "both" / "justify" / "distribute" (and the kashida
+  // + thaiDistribute variants) fully justify the line by expanding inter-word
+  // spaces. The last line of a "both" paragraph is traditionally left-aligned
+  // (not stretched); "distribute"/"thaiDistribute" also stretch the last line. We
+  // count whitespace chars in trailing positions of each segment and divide the
+  // slack proportionally across them. (jc classification lives in bidi-line so the
+  // §17.18.44 knowledge stays single-source.)
+  const isJustified = jcIsFullyJustified(para.alignment);
+  const stretchLastLine = jcStretchesLastLine(para.alignment);
 
   // Bidirectional text. The paragraph's base direction comes from w:bidi
   // (ECMA-376 §17.3.1.6). We engage the (exact) bidi pass only when the base is
@@ -6416,13 +6417,14 @@ export function renderShapeText(
       // floats / decimal-auto-tab / run decorations (body-only) do not apply —
       // ShapeTextRun carries no underline/border/highlight/ruby/revision.
       const { lines: lineList, baseRtl, ind } = layout;
-      // 'distribute' spreads every line; 'both' spreads all but the logical-last;
-      // otherwise resolve the physical edge from the block alignment + base dir.
-      const alignEdge = layout.alignment === 'distribute'
+      // 'distribute'/'thaiDistribute' spread every line; 'both'/'justify'/kashida
+      // spread all but the logical-last; otherwise resolve the physical edge from
+      // the block alignment + base dir. (§17.18.44 classification in bidi-line.)
+      const alignEdge = jcIsFullyJustified(layout.alignment)
         ? 'justify'
         : resolveAlignEdge(layout.alignment, baseRtl);
       const isJustified = alignEdge === 'justify';
-      const stretchLastLine = layout.alignment === 'distribute';
+      const stretchLastLine = jcStretchesLastLine(layout.alignment);
       const paraNeedsBidi = baseRtl || lineList.some((ln) => segmentsHaveRtl(ln.segments));
       ctx.textAlign = 'left';
       for (let li = 0; li < lineList.length; li++) {
