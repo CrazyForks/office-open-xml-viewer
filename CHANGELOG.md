@@ -4,6 +4,21 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.70.1 — 2026-07-03
+
+Patch. Documentation-only: correct the Angular / esbuild guidance for loading
+the parser WASM assets (#709). No code changes.
+
+- **README:** the bundler note wrongly claimed esbuild detects the
+  `new URL('…', import.meta.url)` asset reference — it does not
+  (evanw/esbuild#795), and neither does the Angular CLI's esbuild-based
+  application builder (angular/angular-cli#22388). The Angular 19 example now
+  documents the verified two-step setup: copy `*_parser_bg.wasm` with an
+  `angular.json` assets glob **and** pass `wasmUrl` — the copy alone fixes only
+  production builds, because `ng serve` resolves the reference into Vite's
+  dep-optimizer cache. Retires the stale `@angular-builders/custom-webpack`
+  note. (#710)
+
 ## 0.70.0 — 2026-07-03
 
 Minor. Continuous-scroll viewers (`DocxScrollViewer` / `PptxScrollViewer`),
