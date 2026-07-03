@@ -10883,3 +10883,113 @@ mod ole_object_tests {
         );
     }
 }
+
+/// Strict-conformance (ISO/IEC 29500 Strict) fixtures. These mirror ordinary
+/// paragraph/run/hyperlink/math tests but declare the WordprocessingML,
+/// relationships and math namespaces under the `http://purl.oclc.org/ooxml/...`
+/// URIs that Office emits when a document is saved in Strict mode. They assert
+/// the parser produces the SAME model it does for the Transitional equivalents —
+/// proving `ooxml_common::ns` accepts both conformance classes.
+///
+/// The URIs are declared verbatim from the ECMA-376 5th edition Strict XML
+/// Schema `targetNamespace` values. End-to-end validation against real
+/// Office-authored Strict `.docx` files belongs to the QA11 public-conformance
+/// corpus track; these synthetic fixtures cover the parser namespace matching.
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+
+    const W_STRICT: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+    const R_STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    const M_STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/math";
+
+    fn text_runs(p: &DocParagraph) -> Vec<&TextRun> {
+        p.runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some(t.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Parse a `<w:p>` declared under the Strict w / r / m namespaces.
+    fn parse_strict_p(inner: &str, rels: &HashMap<String, String>) -> DocParagraph {
+        let xml = format!(
+            r#"<w:p xmlns:w="{W_STRICT}" xmlns:r="{R_STRICT}" xmlns:m="{M_STRICT}">{inner}</w:p>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        let mut field = FieldState::default();
+        parse_paragraph(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &media,
+            rels,
+            &theme,
+            None,
+            &mut field,
+        )
+    }
+
+    // A Strict paragraph's run text and bold/italic direct formatting resolve
+    // exactly as in a Transitional paragraph (element matching via `is_w_ns`,
+    // attribute reads via `attr_w`).
+    #[test]
+    fn strict_run_bold_italic_text() {
+        let p = parse_strict_p(
+            r#"<w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>Hello Strict</w:t></w:r>"#,
+            &HashMap::new(),
+        );
+        let runs = text_runs(&p);
+        assert_eq!(runs.len(), 1, "one text run expected");
+        assert_eq!(runs[0].text, "Hello Strict");
+        assert!(runs[0].bold, "Strict <w:b/> ⇒ bold");
+        assert!(runs[0].italic, "Strict <w:i/> ⇒ italic");
+    }
+
+    // A Strict `<w:hyperlink r:id>` resolves its URL through the relationships
+    // map — exercising the Strict relationships namespace on the `r:id`
+    // attribute (`attr_ns`).
+    #[test]
+    fn strict_hyperlink_rid_resolves() {
+        let mut rels = HashMap::new();
+        rels.insert("rId1".to_string(), "https://example.com/".to_string());
+        let p = parse_strict_p(
+            r#"<w:hyperlink r:id="rId1"><w:r><w:t>link</w:t></w:r></w:hyperlink>"#,
+            &rels,
+        );
+        let runs = text_runs(&p);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "link");
+        assert_eq!(
+            runs[0].hyperlink.as_deref(),
+            Some("https://example.com/"),
+            "Strict r:id must resolve via relationships"
+        );
+    }
+
+    // A Strict display-math paragraph's per-instance justification (`m:jc`)
+    // reaches the Math run — exercising the Strict math namespace on `m:val`.
+    #[test]
+    fn strict_omathpara_jc_reaches_run() {
+        let p = parse_strict_p(
+            r#"<m:oMathPara><m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr>
+               <m:oMath><m:r><m:t>α</m:t></m:r></m:oMath></m:oMathPara>"#,
+            &HashMap::new(),
+        );
+        let jc = p.runs.iter().find_map(|r| match r {
+            DocRun::Math { jc, .. } => Some(jc.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            jc,
+            Some(Some("left".to_string())),
+            "Strict m:jc/@m:val must reach the Math run"
+        );
+    }
+}

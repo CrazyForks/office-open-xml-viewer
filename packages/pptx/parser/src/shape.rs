@@ -2515,3 +2515,133 @@ mod ole_tests {
         );
     }
 }
+
+/// Strict-conformance (ISO/IEC 29500 Strict) fixtures. PresentationML and
+/// DrawingML elements are matched by local name (already Strict-safe); the one
+/// namespace-pinned site is `attr_r`, which reads `r:embed` / `r:id`. These
+/// tests declare the p / a / r namespaces under the `http://purl.oclc.org/ooxml/`
+/// Strict URIs and assert a shape's text and a picture's resolved image path come
+/// out identical to the Transitional case — proving `attr_r` accepts the Strict
+/// relationships namespace. (Real Office-authored Strict `.pptx` end-to-end
+/// validation is the QA11 public-conformance-corpus track.)
+#[cfg(test)]
+mod strict_namespace_tests {
+    use super::*;
+    use crate::master::LayoutPlaceholders;
+    use std::io::{Cursor, Write};
+
+    const STRICT_NS: &str = concat!(
+        r#"xmlns:p="http://purl.oclc.org/ooxml/presentationml/main" "#,
+        r#"xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" "#,
+        r#"xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships""#
+    );
+
+    fn tiny_png() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        b.extend_from_slice(&[0, 0, 0, 13]);
+        b.extend_from_slice(b"IHDR");
+        b.extend_from_slice(&2u32.to_be_bytes());
+        b.extend_from_slice(&2u32.to_be_bytes());
+        b.extend_from_slice(&[8, 6, 0, 0, 0]);
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        b
+    }
+
+    fn zip_with(parts: &[(&str, &[u8])]) -> PptxZip {
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default();
+            for (path, bytes) in parts {
+                w.start_file(*path, o).unwrap();
+                w.write_all(bytes).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+    }
+
+    /// Parse each child of the `<p:spTree>` root, mirroring the real slide
+    /// driver (which iterates `cSld > spTree`'s element children).
+    fn run(xml: &str, zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<SlideElement> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let lph = LayoutPlaceholders::default();
+        let theme = HashMap::new();
+        let smart = HashMap::new();
+        let mut out = Vec::new();
+        for node in doc.root_element().children().filter(|n| n.is_element()) {
+            parse_sp_tree_node(
+                node,
+                &lph,
+                "ppt/slides",
+                rels,
+                &smart,
+                zip,
+                &theme,
+                &mut out,
+                false,
+                None,
+            );
+        }
+        out
+    }
+
+    // A Strict `<p:sp>` text body yields the run text (local-name matching is
+    // namespace-agnostic), and a Strict `<p:pic>` resolves its blip `r:embed`
+    // through the relationships map into an `image_path` — the latter exercises
+    // `attr_r` against the Strict relationships URI.
+    #[test]
+    fn strict_shape_text_and_picture_embed_resolve() {
+        let mut rels = HashMap::new();
+        rels.insert("rIdImg".to_string(), "../media/image1.png".to_string());
+        let mut zip = zip_with(&[("ppt/media/image1.png", &tiny_png())]);
+
+        let xml = format!(
+            r#"<p:spTree {STRICT_NS}>
+                <p:sp>
+                  <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                  <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="457200"/></a:xfrm>
+                    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                  <p:txBody><a:bodyPr/><a:p><a:r><a:t>Strict Slide</a:t></a:r></a:p></p:txBody>
+                </p:sp>
+                <p:pic>
+                  <p:nvPicPr><p:cNvPr id="3" name="Image"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+                  <p:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+                  <p:spPr><a:xfrm><a:off x="0" y="500000"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+                    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                </p:pic>
+              </p:spTree>"#
+        );
+
+        let out = run(&xml, &mut zip, &rels);
+
+        let shape_text = out.iter().find_map(|e| match e {
+            SlideElement::Shape(s) => s
+                .text_body
+                .as_ref()
+                .and_then(|tb| tb.paragraphs.first())
+                .and_then(|para| para.runs.first())
+                .and_then(|r| match r {
+                    TextRun::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        });
+        assert_eq!(
+            shape_text.as_deref(),
+            Some("Strict Slide"),
+            "Strict shape text must parse"
+        );
+
+        let image_path = out.iter().find_map(|e| match e {
+            SlideElement::Picture(p) => Some(p.image_path.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            image_path.as_deref(),
+            Some("ppt/media/image1.png"),
+            "Strict r:embed must resolve to the media part via attr_r"
+        );
+    }
+}
