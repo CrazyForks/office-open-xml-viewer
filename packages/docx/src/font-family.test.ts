@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeFontFamily } from './renderer.js';
+import { normalizeFontFamily } from './line-layout.js';
 
 describe('normalizeFontFamily — Arabic substitute fonts', () => {
   it('puts the Arabic substitute first so Latin/digits resolve from the same family as Arabic', () => {
