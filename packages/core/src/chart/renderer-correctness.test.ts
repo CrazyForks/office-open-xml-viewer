@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import type { ChartModel, ChartSeries, ChartRect } from '../types/chart';
 import { renderChart } from './renderer.js';
+import { formatChartValWithCode } from './chart-number-format.js';
 
 interface RectCall { x: number; y: number; w: number; h: number; fs: string }
 interface TextCall { text: string; x: number; y: number }
@@ -674,5 +675,46 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
     // tick label would appear — after the fix the ticks are un-grouped.
     expect(rec.texts.every(t => !t.text.includes('1,000,000'))).toBe(true);
     expect(rec.texts.some(t => /^\d{4,}$/.test(t.text))).toBe(true);
+  });
+});
+
+describe('scatter series data labels honor c:date1904 (§21.2.2.38)', () => {
+  // The scatter path was the one call site (of 18) that did not thread
+  // chart.date1904 into its data-label value formatter, so a date-format-code
+  // label rendered against the 1900 epoch even in a 1904 chart (1462 days off).
+  const SERIAL = 45292; // 1900-system 2024-01-01
+  function scatterWithDateLabel(date1904: boolean): TextCall[] {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      date1904,
+      series: [series({
+        name: 'S',
+        // No categories → useIndexX; the y-value carries the serial date.
+        values: [SERIAL],
+        seriesDataLabels: {
+          showVal: true,
+          showCatName: false,
+          showSerName: false,
+          showPercent: false,
+          formatCode: 'd-mmm-yy',
+        },
+      })],
+    }), RECT, 1);
+    return rec.texts;
+  }
+
+  it('formats the data label against the chart date system (1900 vs 1904 differ)', () => {
+    const expected1900 = formatChartValWithCode(SERIAL, 'd-mmm-yy', false);
+    const expected1904 = formatChartValWithCode(SERIAL, 'd-mmm-yy', true);
+    // The two epochs are 1462 days apart, so the expected strings must differ —
+    // otherwise the test could not tell whether date1904 was threaded.
+    expect(expected1900).not.toBe(expected1904);
+
+    expect(scatterWithDateLabel(false).some(t => t.text === expected1900)).toBe(true);
+    expect(scatterWithDateLabel(true).some(t => t.text === expected1904)).toBe(true);
+    // Guard against a regression that ignores the flag: the 1904 chart must NOT
+    // emit the 1900-epoch label.
+    expect(scatterWithDateLabel(true).some(t => t.text === expected1900)).toBe(false);
   });
 });

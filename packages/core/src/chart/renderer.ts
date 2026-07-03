@@ -2012,7 +2012,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
 
     // Per-point data labels (`<c:dLbl idx>`) and series-level defaults.
-    drawSeriesDataLabels(ctx, s, cats, useIndexX, toX, toY, ph, ptToPx);
+    drawSeriesDataLabels(ctx, s, cats, useIndexX, toX, toY, ph, ptToPx, chart.date1904);
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleBand.bandH + 2);
@@ -2204,6 +2204,10 @@ function drawSeriesDataLabels(
   toY: (v: number) => number,
   ph: number,
   ptToPx: number,
+  /** Chart date system (`<c:date1904>`, §21.2.2.38). Threaded so date-format
+   *  value labels resolve against the correct epoch. Defaults to false, which
+   *  also accepts the optional `ChartModel.date1904` when it is undefined. */
+  date1904 = false,
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   if (overrides.length === 0 && !s.seriesDataLabels) return;
@@ -2223,7 +2227,7 @@ function drawSeriesDataLabels(
       if (seriesDef.showCatName && !useIndexX) parts.push(cats[i] ?? '');
       if (seriesDef.showSerName) parts.push(s.name);
       if (seriesDef.showVal) {
-        parts.push(formatChartValWithCode(yv, seriesDef.formatCode ?? null));
+        parts.push(formatChartValWithCode(yv, seriesDef.formatCode ?? null, date1904));
       }
       text = parts.filter(Boolean).join(' ');
       if (!text) continue;
