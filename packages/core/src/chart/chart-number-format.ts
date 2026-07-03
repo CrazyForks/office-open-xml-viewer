@@ -5,6 +5,8 @@
 // literal escapes, thousands separators, decimals, percent, and Excel serial
 // dates.
 
+import { excelSerialToUtcDate } from '../excel-date';
+
 /** Excel's default `formatCode="General"` for charts: raw numbers with no
  *  "k"/"M" abbreviation, trailing decimal zeros trimmed. */
 export function formatChartVal(v: number): string {
@@ -100,19 +102,15 @@ function isDateFormatCode(code: string): boolean {
 }
 
 /**
- * Format an Excel serial date with the supplied code. Uses the conventional
- * 1900-based epoch with the spec's leap-year bug (i.e. serial 60 maps to
- * March 1, 1900, treating Feb 29, 1900 as a real day). For most chart
- * usage (post-1900 dates) this matches Excel's display.
+ * Format an Excel serial date with the supplied code. Delegates the serial →
+ * calendar-date conversion to the shared core `excelSerialToUtcDate`
+ * (ECMA-376 §18.17.4.1), which carries the 1900 Lotus leap-year-bug compat and
+ * the 1900/1904 date-system select. `date1904` comes from `<c:date1904>`
+ * (§21.2.2.38); it defaults to false so existing 1900-system charts are
+ * unchanged.
  */
-function formatExcelDate(serial: number, code: string): string {
-  // Days since 1899-12-30 (so serial 1 → 1900-01-01). The leap-year bug
-  // means serials 60..62 are off by one if you use a strict Date — we
-  // mimic Excel by subtracting an extra day for serials < 60.
-  const baseUtcMs = Date.UTC(1899, 11, 30);
-  const adjusted = serial < 60 ? serial + 1 : serial;
-  const ms = baseUtcMs + Math.floor(adjusted) * 86400000;
-  const date = new Date(ms);
+function formatExcelDate(serial: number, code: string, date1904 = false): string {
+  const date = excelSerialToUtcDate(Math.floor(serial), date1904);
   const yyyy = date.getUTCFullYear();
   const M = date.getUTCMonth() + 1;
   const D = date.getUTCDate();

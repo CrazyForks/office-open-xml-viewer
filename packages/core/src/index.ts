@@ -248,6 +248,10 @@ export {
   crossRunKinsokuRetract,
 } from './text/kinsoku';
 export { isCjkBreakChar, isLatinWordCodePoint } from './text/cjk-ranges';
+// Shared Excel serial-date → UTC `Date` conversion (ECMA-376 §18.17.4.1),
+// with the 1900 Lotus leap-year-bug compat and 1900/1904 date-system select.
+// Used by the xlsx cell formatter and the core chart date formatter.
+export { excelSerialToUtcDate } from './excel-date';
 export { highlightBox } from './text/highlight-box';
 export {
   distributeLineSlack,

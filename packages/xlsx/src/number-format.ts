@@ -1,3 +1,4 @@
+import { excelSerialToUtcDate } from '@silurus/ooxml-core';
 import type { Cell, CellValue, Styles } from './types.js';
 import { todaySerial, nowSerial } from './formula.js';
 
@@ -167,19 +168,21 @@ function resolveJpEra(date: Date): { abbr: string; short: string; long: string; 
   return { abbr: last.abbr, short: last.short, long: last.long, year: date.getUTCFullYear() };
 }
 
-/** Convert an Excel date serial to a UTC Date (avoids local-timezone off-by-one errors). */
-function excelSerialToUTCDate(serial: number): Date {
-  return new Date((serial - 25569) * 86400 * 1000);
-}
-
 /**
  * Format an Excel date serial using an ECMA-376 format code.
  * Supports: y/yy/yyy/yyyy, m/mm/mmm/mmmm/mmmmm, d/dd/ddd/dddd,
  *           h/hh, m/mm (minutes when after h), s/ss, AM/PM, A/P,
  *           quoted literals, bracket escapes, _ padding, * fill.
+ *
+ * `date1904` selects the date system (`<workbookPr date1904>`, §18.2.28). The
+ * serial → calendar-date conversion is delegated to the shared core
+ * `excelSerialToUtcDate` (§18.17.4.1), which carries the 1900 Lotus
+ * leap-year-bug compat and the 1904 epoch. It defaults to false so 1900-system
+ * workbooks are unchanged (apart from the serial ≤ 59 leap-bug compat, which is
+ * now correct in both systems).
  */
-function formatExcelDateCode(serial: number, fmtCode: string): string {
-  const date = excelSerialToUTCDate(serial);
+function formatExcelDateCode(serial: number, fmtCode: string, date1904 = false): string {
+  const date = excelSerialToUtcDate(serial, date1904);
   const yr = date.getUTCFullYear();
   const mo = date.getUTCMonth() + 1;   // 1-12
   const dy = date.getUTCDate();

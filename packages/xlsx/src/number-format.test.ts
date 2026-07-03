@@ -97,3 +97,21 @@ describe('date formats (Excel serial; 45292 = 2024-01-01)', () => {
     expect(fmt(45292, 'dd')).toBe('01');
   });
 });
+
+describe('date formats — 1900 Lotus leap-year-bug compat (§18.17.4.1)', () => {
+  // The cell formatter now delegates serial → date to the shared core
+  // `excelSerialToUtcDate`, which shifts serials < 60 by +1 day to reproduce
+  // Excel's phantom 1900-02-29. This changes output ONLY for serials ≤ 59.
+  it('serial 1 renders 1900-01-01', () => {
+    expect(fmt(1, 'yyyy-mm-dd')).toBe('1900-01-01');
+  });
+  it('serial 59 renders 1900-02-28 (was off-by-one before the compat fix)', () => {
+    expect(fmt(59, 'yyyy-mm-dd')).toBe('1900-02-28');
+  });
+  it('serial 61 renders 1900-03-01 (day after the phantom leap day)', () => {
+    expect(fmt(61, 'yyyy-mm-dd')).toBe('1900-03-01');
+  });
+  it('modern serials (≥ 60) are unchanged: 45292 → 2024-01-01', () => {
+    expect(fmt(45292, 'yyyy-mm-dd')).toBe('2024-01-01');
+  });
+});
