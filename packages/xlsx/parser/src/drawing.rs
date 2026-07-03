@@ -7,6 +7,7 @@ use ooxml_common::zip::read_zip_string;
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
 // `Cursor` is only used to build in-memory archives in this module's tests; the
 // production archive type is `crate::XlsxZip`.
@@ -1532,34 +1533,222 @@ pub(crate) fn load_sheet_images(
     all_anchors
 }
 
+/// The two-cell `<from>`/`<to>` marker rect of an OLE-object anchor, in the same
+/// units the renderer's `ImageAnchor` uses (col/row indices + EMU offsets).
+struct AnchorRect {
+    from_col: u32,
+    from_col_off: i64,
+    from_row: u32,
+    from_row_off: i64,
+    to_col: u32,
+    to_col_off: i64,
+    to_row: u32,
+    to_row_off: i64,
+}
+
+/// Parse a `<objectPr><anchor>` (or drawing-style) two-cell marker: `<from>`/
+/// `<to>` each carrying `col`/`colOff`/`row`/`rowOff` (CT_Marker, EMU offsets),
+/// matched by local name so namespace prefixes don't matter.
+fn parse_two_cell_marker(anchor: &roxmltree::Node) -> AnchorRect {
+    let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
+    let (mut to_col, mut to_col_off, mut to_row, mut to_row_off) = (0u32, 0i64, 0u32, 0i64);
+    for marker in anchor.children().filter(|n| n.is_element()) {
+        let is_from = match marker.tag_name().name() {
+            "from" => true,
+            "to" => false,
+            _ => continue,
+        };
+        let (mut col, mut col_off, mut row, mut row_off) = (0u32, 0i64, 0u32, 0i64);
+        for c in marker.children() {
+            match (c.tag_name().name(), c.text()) {
+                ("col", Some(t)) => col = t.trim().parse().unwrap_or(0),
+                ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
+                ("row", Some(t)) => row = t.trim().parse().unwrap_or(0),
+                ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+        if is_from {
+            (from_col, from_col_off, from_row, from_row_off) = (col, col_off, row, row_off);
+        } else {
+            (to_col, to_col_off, to_row, to_row_off) = (col, col_off, row, row_off);
+        }
+    }
+    AnchorRect {
+        from_col,
+        from_col_off,
+        from_row,
+        from_row_off,
+        to_col,
+        to_col_off,
+        to_row,
+        to_row_off,
+    }
+}
+
+/// Parse a legacy VML `<x:ClientData><x:Anchor>` into the two-cell rect. The
+/// element's text is an 8-value CSV (`[MS-OI29500] 2.1.639 / VML §14.2`):
+/// `LeftCol, LeftOffsetPx, TopRow, TopOffsetPx, RightCol, RightOffsetPx,
+/// BottomRow, BottomOffsetPx`. Columns/rows are 0-based cell indices; the four
+/// offsets are **pixels** and are converted to EMU via [`EMU_PER_PX_96DPI`].
+/// The multiplication saturates instead of wrapping/panicking so a
+/// pathologically large offset in a malformed or hostile CSV clamps to
+/// `i64::MAX` rather than overflowing.
+/// Returns `None` when the CSV is malformed (< 8 numeric fields).
+fn parse_vml_client_anchor(client_data: &roxmltree::Node) -> Option<AnchorRect> {
+    let anchor = client_data
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Anchor")?;
+    let text = anchor.text()?;
+    let vals: Vec<i64> = text
+        .split(',')
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .collect();
+    if vals.len() < 8 {
+        return None;
+    }
+    Some(AnchorRect {
+        from_col: vals[0].max(0) as u32,
+        from_col_off: vals[1].saturating_mul(EMU_PER_PX_96DPI),
+        from_row: vals[2].max(0) as u32,
+        from_row_off: vals[3].saturating_mul(EMU_PER_PX_96DPI),
+        to_col: vals[4].max(0) as u32,
+        to_col_off: vals[5].saturating_mul(EMU_PER_PX_96DPI),
+        to_row: vals[6].max(0) as u32,
+        to_row_off: vals[7].saturating_mul(EMU_PER_PX_96DPI),
+    })
+}
+
+/// Locate the OLE preview part inside a parsed legacy VML drawing, keyed by
+/// `oleObject@shapeId`. Excel connects the worksheet's `<oleObject shapeId="N">`
+/// to a VML `<v:shape id="_x0000_s{N}">`; that shape's `<v:imagedata>` carries
+/// the preview image rId (`o:relid`, or `r:id`) which resolves through the *VML
+/// part's own* rels (`xl/drawings/_rels/vmlDrawingK.vml.rels`), NOT the sheet
+/// rels. Returns the resolved image zip path + the shape's `<x:ClientData>`
+/// (for the `<x:Anchor>` fallback) when the preview resolves to an image part.
+///
+/// Comment (note) shapes in the same VML are `type="#_x0000_t202"` /
+/// `ObjectType="Note"` and carry no `<v:imagedata>`; they never match a
+/// `shapeId` used by `<oleObject>` and are additionally filtered by the
+/// imagedata requirement, so a comments-only VML yields nothing here.
+fn vml_ole_preview<'a>(
+    vml_doc: &'a roxmltree::Document<'a>,
+    vml_rels: &HashMap<String, String>,
+    vml_dir: &str,
+    shape_id: &str,
+    archive: &mut crate::XlsxZip,
+) -> Option<(String, roxmltree::Node<'a, 'a>)> {
+    let target_id = format!("_x0000_s{shape_id}");
+    let shape = vml_doc.descendants().find(|n| {
+        n.is_element()
+            && n.tag_name().name() == "shape"
+            && n.attribute("id") == Some(&target_id[..])
+    })?;
+    let imagedata = shape
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "imagedata")?;
+    // VML `<v:imagedata>` names the preview via `o:relid` (Excel's usual form)
+    // or `r:id`; both resolve through the VML part's own rels.
+    let rid = imagedata
+        .attribute(("urn:schemas-microsoft-com:office:office", "relid"))
+        .or_else(|| imagedata.attribute("relid"))
+        .or_else(|| {
+            imagedata.attribute((
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                "id",
+            ))
+        })
+        .or_else(|| imagedata.attribute("id"))?;
+    let target = vml_rels.get(rid)?;
+    let media_path = resolve_zip_path(vml_dir, target);
+    archive.index_for_name(&media_path)?;
+    // Preview parts are metafiles/bitmaps (EMF/WMF/PNG…); require an image MIME
+    // so a mis-typed rels target can never feed non-image bytes to the renderer.
+    if !mime_from_ext(&media_path).starts_with("image/") {
+        return None;
+    }
+    let client_data = shape
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "ClientData")?;
+    Some((media_path, client_data))
+}
+
+/// Resolve the sheet's legacy VML drawing part (`<legacyDrawing r:id>`,
+/// §18.3.1.55 → the sheet rels `vmlDrawing` relationship), read it, and return
+/// its XML + its own rels map. Read once per sheet and only when there is at
+/// least one `<oleObject>` to place (so a comments-only sheet pays no extra zip
+/// read). `None` when there is no legacyDrawing, the part is missing, or it
+/// fails to parse. Whether the VML part carries a `<?xml?>` declaration varies
+/// by producer; either way it is well-formed XML, so roxmltree parses it as-is
+/// (the declaration-less case is verified against real Excel output — see the
+/// `roxmltree_parses_declarationless_vml` test); no preprocessing is needed.
+fn load_legacy_vml_drawing(
+    doc: &roxmltree::Document,
+    sheet_rels: &HashMap<String, String>,
+    sheet_dir: &str,
+    archive: &mut crate::XlsxZip,
+) -> Option<(String, HashMap<String, String>, String)> {
+    let legacy = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "legacyDrawing")?;
+    let rid = legacy
+        .attribute((
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            "id",
+        ))
+        .or_else(|| legacy.attribute("id"))?;
+    let target = sheet_rels.get(rid)?;
+    let vml_path = resolve_zip_path(sheet_dir, target); // e.g. xl/drawings/vmlDrawing1.vml
+    let vml_xml = read_zip_string(archive, &vml_path).ok()?;
+    // Directory + file split for the VML part's own rels.
+    let (vml_dir, vml_file) = vml_path.rsplit_once('/')?;
+    let vml_rels_path = format!("{vml_dir}/_rels/{vml_file}.rels");
+    let vml_rels = read_zip_string(archive, &vml_rels_path)
+        .ok()
+        .map(|xml| parse_rels_map(&xml))
+        .unwrap_or_default();
+    Some((vml_xml, vml_rels, vml_dir.to_string()))
+}
+
 /// Parse worksheet `<oleObjects>` (the collection element, ECMA-376
 /// §18.3.1.60) into preview `ImageAnchor`s. An embedded OLE object we can't run
-/// still needs a visible on-sheet representation, placed by the
-/// `<objectPr><anchor>` two-cell markers (§18.3.1.56 / §18.3.1.59).
+/// still needs a visible on-sheet representation.
 ///
-/// **Caveat on `objectPr@r:id` (§18.3.1.56):** the ECMA-376 text says this
-/// relationship "targets the Embedded Object Part … of type `oleObject`", i.e.
-/// the object *data* part (a `.bin`), NOT a preview image. Empirically, Excel
-/// does not reference the on-sheet preview image from `objectPr@r:id` either —
-/// the preview EMF/BMP is carried by a legacy VML drawing (`v:imagedata r:id`
-/// in the sheet's `vmlDrawingN.vml`, connected via `oleObject@shapeId` ↔ the
-/// VML `v:shape@id`), exactly like Word's `<w:object><v:shape><v:imagedata>`
-/// path (see docx `parse_object_ole_image`). So `objectPr@r:id`, when present,
-/// points at object data, and resolving it as an image would push a `.bin` into
-/// the image pipeline.
+/// **Where the preview image lives.** Real Excel output stores the on-sheet
+/// preview (typically an EMF metafile) in a legacy VML drawing, NOT in
+/// `objectPr@r:id`. Each `<oleObject shapeId="N">` is connected to a VML
+/// `<v:shape id="_x0000_s{N}"><v:imagedata o:relid>` in the sheet's
+/// `vmlDrawingK.vml` (reached via `<legacyDrawing r:id>` §18.3.1.55), whose rId
+/// resolves through the *VML part's* own rels — exactly like Word's
+/// `<w:object><v:shape><v:imagedata>` path (see docx `parse_object_ole_image`).
+/// The parts differ (Word's OLE VML lives inline in the document; Excel's lives
+/// in a standalone vmlDrawing keyed by shapeId), so the code is not shared; only
+/// the CSS-dimension/VML grammar is conceptually common.
 ///
-/// Guard: after resolving `objectPr@r:id` to a part we require its MIME (via
-/// `mime_from_ext`) to be `image/*`; a non-image target (`.bin`,
-/// `application/octet-stream`) is skipped. This structurally prevents feeding
-/// object data to the renderer. The VML-drawing preview path is a follow-up;
-/// until then a `.bin`-only object silently skips (== main's "not drawn").
+/// **Preview-source priority.** For each object:
+///   1. If `objectPr@r:id` (§18.3.1.56) resolves to a genuine **image** part,
+///      use it. The spec text says this relationship targets the *object data*
+///      part, and real Excel does point it at a `.bin`, but a spec-faithful
+///      producer *could* emit an image here, so we honour that first and gate it
+///      by an `image/*` MIME check (a `.bin` ⇒ `application/octet-stream` is
+///      rejected, never fed to the renderer).
+///   2. Otherwise fall back to the **vmlDrawing** preview keyed by
+///      `oleObject@shapeId` (the real-Excel path).
 ///
-/// `<oleObject>` is commonly wrapped in `mc:AlternateContent` where the Choice
-/// carries the full objectPr/anchor and the Fallback a bare oleObject; we skip
-/// any oleObject nested in an `mc:Fallback` so each object contributes exactly
-/// one anchor (no double-draw). An oleObject without a resolvable image-typed
-/// objectPr preview is skipped (icon-only / data-only / link-only), matching
-/// the prior silent-skip.
+/// An object that resolves neither is skipped (icon-only / data-only /
+/// link-only), matching the prior silent-skip.
+///
+/// **Anchor priority.** When present, the `<objectPr><anchor>` two-cell markers
+/// (EMU, exact) win. Otherwise the VML `<x:ClientData><x:Anchor>` 8-value
+/// pixel CSV is converted to a two-cell rect. An object with neither is skipped.
+///
+/// `<oleObject>` is commonly wrapped in `mc:AlternateContent`; we skip any
+/// oleObject nested in an `mc:Fallback` so each object contributes exactly one
+/// anchor (no double-draw).
+///
+/// The vmlDrawing is loaded once per sheet and only when at least one
+/// `<oleObject>` exists (a comments-only sheet — whose VML holds only
+/// `type="#_x0000_t202"` / `ObjectType="Note"` shapes — pays no extra zip read).
 pub(crate) fn parse_ole_object_anchors(
     sheet_xml: &str,
     sheet_rels: &HashMap<String, String>,
@@ -1569,106 +1758,109 @@ pub(crate) fn parse_ole_object_anchors(
     let Ok(doc) = roxmltree::Document::parse(sheet_xml) else {
         return Vec::new();
     };
-    let mut anchors: Vec<ImageAnchor> = Vec::new();
 
-    for ole in doc
+    // Collect the (non-Fallback) oleObjects up front so we can decide whether to
+    // read the vmlDrawing at all.
+    let ole_objects: Vec<roxmltree::Node> = doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "oleObject")
-    {
         // Skip the AlternateContent Fallback twin so a Choice+Fallback pair
         // yields one anchor, not two.
-        if ole
-            .ancestors()
-            .any(|a| a.is_element() && a.tag_name().name() == "Fallback")
-        {
-            continue;
-        }
-        // The preview image + placement live in `<objectPr r:id><anchor>`.
-        let Some(object_pr) = ole
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "objectPr")
-        else {
-            continue;
-        };
-        let Some(rid) = object_pr
-            .attribute((
-                "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-                "id",
-            ))
-            .or_else(|| object_pr.attribute("id"))
-        else {
-            continue;
-        };
-        // Resolve rId → media zip path, verifying the entry exists (a dangling
-        // rId is dropped, matching parse_drawing_anchors).
-        let Some(target) = sheet_rels.get(rid) else {
-            continue;
-        };
-        let media_path = resolve_zip_path(sheet_dir, target);
-        if archive.index_for_name(&media_path).is_none() {
-            continue;
-        }
-        let mime_type = mime_from_ext(&media_path).to_string();
-        // §18.3.1.56: objectPr@r:id nominally targets the *object data* part, not
-        // an image. Only route genuine image parts into the picture pipeline; a
-        // non-image target (e.g. a `.bin` ⇒ application/octet-stream) is skipped
-        // so object data can never reach the renderer as a bitmap.
-        if !mime_type.starts_with("image/") {
-            continue;
-        }
+        .filter(|n| {
+            !n.ancestors()
+                .any(|a| a.is_element() && a.tag_name().name() == "Fallback")
+        })
+        .collect();
+    if ole_objects.is_empty() {
+        return Vec::new();
+    }
 
-        // `<anchor><from>/<to>` two-cell markers (same CT_Marker grammar as a
-        // drawing anchor; children matched by local name, namespace-tolerant).
-        let Some(anchor) = object_pr
+    // Lazily load the sheet's legacy VML drawing (once) — only reached because
+    // there is at least one oleObject to place. `vml` owns the XML string; the
+    // parsed document borrows from it, so both live to the end of the function.
+    let vml = load_legacy_vml_drawing(&doc, sheet_rels, sheet_dir, archive);
+    let vml_parsed = vml
+        .as_ref()
+        .and_then(|(xml, rels, dir)| roxmltree::Document::parse(xml).ok().map(|d| (d, rels, dir)));
+
+    let mut anchors: Vec<ImageAnchor> = Vec::new();
+    for ole in ole_objects {
+        // (1) Spec-faithful producer path: an image-typed `objectPr@r:id`.
+        let object_pr = ole
             .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "anchor")
-        else {
+            .find(|n| n.is_element() && n.tag_name().name() == "objectPr");
+        let object_pr_preview = object_pr.and_then(|pr| {
+            let rid = pr
+                .attribute((
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                    "id",
+                ))
+                .or_else(|| pr.attribute("id"))?;
+            let target = sheet_rels.get(rid)?;
+            let media_path = resolve_zip_path(sheet_dir, target);
+            archive.index_for_name(&media_path)?;
+            // §18.3.1.56: this relationship nominally targets the object *data*
+            // part. Only genuine image parts enter the picture pipeline; a
+            // non-image target (`.bin` ⇒ application/octet-stream) is rejected.
+            if !mime_from_ext(&media_path).starts_with("image/") {
+                return None;
+            }
+            Some(media_path)
+        });
+
+        // (2) Real-Excel path: the vmlDrawing preview keyed by `shapeId`.
+        let shape_id = ole.attribute("shapeId");
+        let vml_preview = match (&object_pr_preview, shape_id, &vml_parsed) {
+            // objectPr already resolved an image — no need to touch the VML.
+            (Some(_), _, _) => None,
+            (None, Some(sid), Some((vml_doc, vml_rels, vml_dir))) => {
+                vml_ole_preview(vml_doc, vml_rels, vml_dir, sid, archive)
+            }
+            _ => None,
+        };
+
+        let image_path = match (&object_pr_preview, &vml_preview) {
+            (Some(p), _) => p.clone(),
+            (None, Some((p, _))) => p.clone(),
+            (None, None) => continue,
+        };
+        let mime_type = mime_from_ext(&image_path).to_string();
+
+        // Anchor: `<objectPr><anchor>` (EMU) wins; else the VML `<x:Anchor>`
+        // pixel CSV. Skip when neither places the object.
+        let rect = object_pr
+            .and_then(|pr| {
+                pr.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "anchor")
+            })
+            .map(|a| parse_two_cell_marker(&a))
+            .or_else(|| {
+                vml_preview
+                    .as_ref()
+                    .and_then(|(_, client_data)| parse_vml_client_anchor(client_data))
+            });
+        let Some(rect) = rect else {
             continue;
         };
-        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) =
-            (0u32, 0i64, 0u32, 0i64);
-        let (mut to_col, mut to_col_off, mut to_row, mut to_row_off) = (0u32, 0i64, 0u32, 0i64);
-        for marker in anchor.children().filter(|n| n.is_element()) {
-            let is_from = match marker.tag_name().name() {
-                "from" => true,
-                "to" => false,
-                _ => continue,
-            };
-            let (mut col, mut col_off, mut row, mut row_off) = (0u32, 0i64, 0u32, 0i64);
-            for c in marker.children() {
-                match (c.tag_name().name(), c.text()) {
-                    ("col", Some(t)) => col = t.trim().parse().unwrap_or(0),
-                    ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
-                    ("row", Some(t)) => row = t.trim().parse().unwrap_or(0),
-                    ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
-                    _ => {}
-                }
-            }
-            if is_from {
-                (from_col, from_col_off, from_row, from_row_off) = (col, col_off, row, row_off);
-            } else {
-                (to_col, to_col_off, to_row, to_row_off) = (col, col_off, row, row_off);
-            }
-        }
 
         anchors.push(ImageAnchor {
-            from_col,
-            from_col_off,
-            from_row,
-            from_row_off,
-            to_col,
-            to_col_off,
-            to_row,
-            to_row_off,
-            // OLE previews always place via the two-cell `<anchor>`. Note this
-            // "twoCell" is a convenience default in the ST_EditAs value space
-            // (§20.5.3.3), not a faithful conversion of the anchor's own
-            // moveWithCells/sizeWithCells booleans (CT_ObjectAnchor); those live
-            // in a different value space and are not mapped here.
+            from_col: rect.from_col,
+            from_col_off: rect.from_col_off,
+            from_row: rect.from_row,
+            from_row_off: rect.from_row_off,
+            to_col: rect.to_col,
+            to_col_off: rect.to_col_off,
+            to_row: rect.to_row,
+            to_row_off: rect.to_row_off,
+            // OLE previews always place via the two-cell rect. This "twoCell" is
+            // a convenience default in the ST_EditAs value space (§20.5.3.3), not
+            // a faithful conversion of the anchor's own moveWithCells/
+            // sizeWithCells booleans (CT_ObjectAnchor); those live in a different
+            // value space and are not mapped here.
             edit_as: Some("twoCell".to_string()),
             native_ext_cx: 0,
             native_ext_cy: 0,
-            image_path: media_path,
+            image_path,
             mime_type,
             svg_image_path: None,
             src_rect: None,
@@ -2960,5 +3152,323 @@ mod ole_object_tests {
             "a .bin (non-image) objectPr target must be skipped, got {} anchor(s)",
             anchors.len()
         );
+    }
+
+    // ─── vmlDrawing preview path (real Excel output) ────────────────────────
+
+    /// A standalone legacy VML drawing part, root `<xml>` (no `<?xml?>`
+    /// declaration — exactly how Excel writes it). `shapes` is the raw inner
+    /// markup for the `<v:shape>`s under the root.
+    fn vml_part(shapes: &str) -> String {
+        format!(
+            concat!(
+                r#"<xml xmlns:v="urn:schemas-microsoft-com:vml" "#,
+                r#"xmlns:o="urn:schemas-microsoft-com:office:office" "#,
+                r#"xmlns:x="urn:schemas-microsoft-com:office:excel" "#,
+                r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{}</xml>"#
+            ),
+            shapes
+        )
+    }
+
+    fn rels_part(pairs: &[(&str, &str)]) -> String {
+        let mut s = String::from(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        );
+        for (id, target) in pairs {
+            s.push_str(&format!(
+                r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{target}"/>"#
+            ));
+        }
+        s.push_str("</Relationships>");
+        s
+    }
+
+    /// Canonical Excel structure: `<oleObject shapeId>` (no image-typed
+    /// objectPr) + `<legacyDrawing r:id>` → vmlDrawing part → VML rels → EMF.
+    /// The `<v:imagedata o:relid>` preview must surface as one ImageAnchor.
+    #[test]
+    fn vml_drawing_preview_keyed_by_shape_id_emits_anchor() {
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <oleObject progId="Package" shapeId="1025" r:id="rIdData">
+                  <objectPr defaultSize="0" r:id="rIdData"/>
+                </oleObject>
+              </oleObjects>
+              <legacyDrawing r:id="rIdVml"/>
+            </worksheet>"#,
+            ns = OLE_NS,
+        );
+        // Sheet rels: the objectPr@r:id points at object DATA (.bin, rejected),
+        // the legacyDrawing points at the vmlDrawing part.
+        let mut sheet_rels = HashMap::new();
+        sheet_rels.insert(
+            "rIdData".to_string(),
+            "../embeddings/oleObject1.bin".to_string(),
+        );
+        sheet_rels.insert(
+            "rIdVml".to_string(),
+            "../drawings/vmlDrawing1.vml".to_string(),
+        );
+
+        let vml = vml_part(
+            r##"<v:shape id="_x0000_s1025" type="#_x0000_t75" style='width:96pt;height:48pt'>
+                 <v:imagedata o:relid="rIdImg" o:title=""/>
+                 <x:ClientData ObjectType="Pict">
+                   <x:Anchor>1, 5, 2, 6, 4, 7, 7, 8</x:Anchor>
+                 </x:ClientData>
+               </v:shape>"##,
+        );
+        let vml_rels = rels_part(&[("rIdImg", "../media/image1.emf")]);
+        let mut archive = archive_with(&[
+            ("xl/embeddings/oleObject1.bin", b"\x00datablob"),
+            ("xl/drawings/vmlDrawing1.vml", vml.as_bytes()),
+            (
+                "xl/drawings/_rels/vmlDrawing1.vml.rels",
+                vml_rels.as_bytes(),
+            ),
+            ("xl/media/image1.emf", b"emfbytes"),
+        ]);
+
+        let anchors =
+            parse_ole_object_anchors(&sheet_xml, &sheet_rels, "xl/worksheets", &mut archive);
+        assert_eq!(anchors.len(), 1, "one vmlDrawing preview anchor expected");
+        let a = &anchors[0];
+        assert_eq!(a.image_path, "xl/media/image1.emf");
+        assert_eq!(a.mime_type, "image/emf");
+        // x:Anchor CSV: L=1,LOff=5,T=2,TOff=6,R=4,ROff=7,B=7,BOff=8 (px→EMU ×9525)
+        assert_eq!((a.from_col, a.from_row), (1, 2));
+        assert_eq!(
+            (a.from_col_off, a.from_row_off),
+            (5 * 9525, 6 * 9525),
+            "x:Anchor px offsets convert to EMU via ×9525"
+        );
+        assert_eq!((a.to_col, a.to_row), (4, 7));
+        assert_eq!((a.to_col_off, a.to_row_off), (7 * 9525, 8 * 9525));
+    }
+
+    /// A pathologically large `<x:Anchor>` pixel offset (e.g. a malformed or
+    /// hostile CSV) must saturate the px→EMU conversion rather than panic
+    /// (debug overflow check) or silently wrap (release build).
+    #[test]
+    fn vml_client_anchor_px_to_emu_saturates_on_overflow() {
+        let xml = format!(
+            r#"<x:ClientData xmlns:x="urn:schemas-microsoft-com:office:excel" ObjectType="Pict">
+                 <x:Anchor>0, {big}, 0, 0, 1, 0, 1, 0</x:Anchor>
+               </x:ClientData>"#,
+            big = i64::MAX
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let anchor = parse_vml_client_anchor(&doc.root_element())
+            .expect("8 numeric fields must parse even when one overflows on conversion");
+        assert_eq!(
+            anchor.from_col_off,
+            i64::MAX,
+            "saturating_mul must clamp to i64::MAX instead of panicking or wrapping"
+        );
+        // The other (well-behaved) offsets are unaffected.
+        assert_eq!(anchor.to_col_off, 0);
+    }
+
+    /// The `<objectPr><anchor>` two-cell markers (EMU, exact) win over the VML
+    /// `<x:Anchor>` pixel CSV when both are present, but the preview IMAGE still
+    /// comes from the vmlDrawing (objectPr@r:id is object data).
+    #[test]
+    fn objectpr_anchor_wins_over_vml_anchor() {
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <oleObject shapeId="1026" r:id="rIdData">
+                  <objectPr r:id="rIdData">
+                    <anchor>
+                      <from><xdr:col>3</xdr:col><xdr:colOff>111</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>222</xdr:rowOff></from>
+                      <to><xdr:col>8</xdr:col><xdr:colOff>333</xdr:colOff><xdr:row>9</xdr:row><xdr:rowOff>444</xdr:rowOff></to>
+                    </anchor>
+                  </objectPr>
+                </oleObject>
+              </oleObjects>
+              <legacyDrawing r:id="rIdVml"/>
+            </worksheet>"#,
+            ns = OLE_NS,
+        );
+        let mut sheet_rels = HashMap::new();
+        sheet_rels.insert(
+            "rIdData".to_string(),
+            "../embeddings/oleObject1.bin".to_string(),
+        );
+        sheet_rels.insert(
+            "rIdVml".to_string(),
+            "../drawings/vmlDrawing1.vml".to_string(),
+        );
+        let vml = vml_part(
+            r##"<v:shape id="_x0000_s1026" type="#_x0000_t75">
+                 <v:imagedata o:relid="rIdImg"/>
+                 <x:ClientData ObjectType="Pict"><x:Anchor>0, 0, 0, 0, 1, 0, 1, 0</x:Anchor></x:ClientData>
+               </v:shape>"##,
+        );
+        let vml_rels = rels_part(&[("rIdImg", "../media/image1.wmf")]);
+        let mut archive = archive_with(&[
+            ("xl/embeddings/oleObject1.bin", b"data"),
+            ("xl/drawings/vmlDrawing1.vml", vml.as_bytes()),
+            (
+                "xl/drawings/_rels/vmlDrawing1.vml.rels",
+                vml_rels.as_bytes(),
+            ),
+            ("xl/media/image1.wmf", b"wmf"),
+        ]);
+        let anchors =
+            parse_ole_object_anchors(&sheet_xml, &sheet_rels, "xl/worksheets", &mut archive);
+        assert_eq!(anchors.len(), 1);
+        let a = &anchors[0];
+        assert_eq!(a.image_path, "xl/media/image1.wmf");
+        // objectPr EMU anchor wins — NOT the VML pixel CSV.
+        assert_eq!(
+            (a.from_col, a.from_col_off, a.from_row, a.from_row_off),
+            (3, 111, 3, 222)
+        );
+        assert_eq!(
+            (a.to_col, a.to_col_off, a.to_row, a.to_row_off),
+            (8, 333, 9, 444)
+        );
+    }
+
+    /// A comments-only vmlDrawing (`type="#_x0000_t202"` / `ObjectType="Note"`,
+    /// no `<v:imagedata>`) whose shapeId never matches an oleObject must emit
+    /// nothing. Guards against the note VML being mistaken for a preview.
+    #[test]
+    fn comment_only_vml_emits_nothing() {
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <oleObject shapeId="1025" r:id="rIdData">
+                  <objectPr r:id="rIdData"/>
+                </oleObject>
+              </oleObjects>
+              <legacyDrawing r:id="rIdVml"/>
+            </worksheet>"#,
+            ns = OLE_NS,
+        );
+        let mut sheet_rels = HashMap::new();
+        sheet_rels.insert(
+            "rIdData".to_string(),
+            "../embeddings/oleObject1.bin".to_string(),
+        );
+        sheet_rels.insert(
+            "rIdVml".to_string(),
+            "../drawings/vmlDrawing1.vml".to_string(),
+        );
+        // A Note shape with a DIFFERENT shapeId (6146) and no imagedata.
+        let vml = vml_part(
+            r##"<v:shape id="_x0000_s6146" type="#_x0000_t202" style='visibility:hidden'>
+                 <v:textbox><div></div></v:textbox>
+                 <x:ClientData ObjectType="Note"><x:Anchor>11, 15, 4, 7, 22, 11, 7, 15</x:Anchor></x:ClientData>
+               </v:shape>"##,
+        );
+        let mut archive = archive_with(&[
+            ("xl/embeddings/oleObject1.bin", b"data"),
+            ("xl/drawings/vmlDrawing1.vml", vml.as_bytes()),
+        ]);
+        let anchors =
+            parse_ole_object_anchors(&sheet_xml, &sheet_rels, "xl/worksheets", &mut archive);
+        assert!(
+            anchors.is_empty(),
+            "note VML must not be picked up as an OLE preview, got {}",
+            anchors.len()
+        );
+    }
+
+    /// shapeId mismatch, missing imagedata, and a missing VML rels part each
+    /// skip cleanly (no anchor, no panic).
+    #[test]
+    fn vml_preview_skips_on_mismatch_or_missing_rels() {
+        // Case A: shapeId in the sheet (999) does not match the VML shape (1025).
+        let sheet = |sid: &str| {
+            format!(
+                r#"<worksheet {ns}><sheetData/>
+                  <oleObjects><oleObject shapeId="{sid}" r:id="rIdData"><objectPr r:id="rIdData"/></oleObject></oleObjects>
+                  <legacyDrawing r:id="rIdVml"/>
+                </worksheet>"#,
+                ns = OLE_NS,
+                sid = sid,
+            )
+        };
+        let mut sheet_rels = HashMap::new();
+        sheet_rels.insert(
+            "rIdData".to_string(),
+            "../embeddings/oleObject1.bin".to_string(),
+        );
+        sheet_rels.insert(
+            "rIdVml".to_string(),
+            "../drawings/vmlDrawing1.vml".to_string(),
+        );
+        let vml_ok = vml_part(
+            r##"<v:shape id="_x0000_s1025" type="#_x0000_t75"><v:imagedata o:relid="rIdImg"/>
+                 <x:ClientData ObjectType="Pict"><x:Anchor>0,0,0,0,1,0,1,0</x:Anchor></x:ClientData></v:shape>"##,
+        );
+        let vml_rels = rels_part(&[("rIdImg", "../media/image1.emf")]);
+
+        // A: mismatch → nothing.
+        let mut arch_a = archive_with(&[
+            ("xl/embeddings/oleObject1.bin", b"d"),
+            ("xl/drawings/vmlDrawing1.vml", vml_ok.as_bytes()),
+            (
+                "xl/drawings/_rels/vmlDrawing1.vml.rels",
+                vml_rels.as_bytes(),
+            ),
+            ("xl/media/image1.emf", b"emf"),
+        ]);
+        assert!(
+            parse_ole_object_anchors(&sheet("999"), &sheet_rels, "xl/worksheets", &mut arch_a)
+                .is_empty(),
+            "shapeId mismatch ⇒ no anchor"
+        );
+
+        // B: matching shape but NO imagedata → nothing.
+        let vml_no_img = vml_part(
+            r##"<v:shape id="_x0000_s1025" type="#_x0000_t75"><x:ClientData ObjectType="Pict"><x:Anchor>0,0,0,0,1,0,1,0</x:Anchor></x:ClientData></v:shape>"##,
+        );
+        let mut arch_b = archive_with(&[
+            ("xl/embeddings/oleObject1.bin", b"d"),
+            ("xl/drawings/vmlDrawing1.vml", vml_no_img.as_bytes()),
+            (
+                "xl/drawings/_rels/vmlDrawing1.vml.rels",
+                vml_rels.as_bytes(),
+            ),
+            ("xl/media/image1.emf", b"emf"),
+        ]);
+        assert!(
+            parse_ole_object_anchors(&sheet("1025"), &sheet_rels, "xl/worksheets", &mut arch_b)
+                .is_empty(),
+            "no imagedata ⇒ no anchor"
+        );
+
+        // C: imagedata present but the VML rels part is absent → relid unresolved.
+        let mut arch_c = archive_with(&[
+            ("xl/embeddings/oleObject1.bin", b"d"),
+            ("xl/drawings/vmlDrawing1.vml", vml_ok.as_bytes()),
+            ("xl/media/image1.emf", b"emf"),
+        ]);
+        assert!(
+            parse_ole_object_anchors(&sheet("1025"), &sheet_rels, "xl/worksheets", &mut arch_c)
+                .is_empty(),
+            "missing vmlDrawing rels ⇒ relid unresolved ⇒ no anchor"
+        );
+    }
+
+    /// Declaration-less VML (root `<xml>`, no `<?xml?>`), as some producers
+    /// write it, must parse with roxmltree without any preprocessing. This is
+    /// the invariant `load_legacy_vml_drawing` relies on.
+    #[test]
+    fn roxmltree_parses_declarationless_vml() {
+        let vml = vml_part(
+            r##"<v:shape id="_x0000_s1025" type="#_x0000_t75"><v:imagedata o:relid="rIdImg"/></v:shape>"##,
+        );
+        assert!(
+            !vml.starts_with("<?xml"),
+            "fixture must have no XML declaration"
+        );
+        let doc = roxmltree::Document::parse(&vml).expect("declaration-less VML must parse");
+        assert_eq!(doc.root_element().tag_name().name(), "xml");
     }
 }
