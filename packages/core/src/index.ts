@@ -40,6 +40,9 @@ export type {
   SecondaryValueAxis,
 } from './types/chart';
 export type { LoadOptions } from './types/load-options';
+// Typed load-time error (PD4 seed): the `load()` factories throw this with a
+// stable `code` for container-level failures detected on the main thread.
+export { OoxmlError, type OoxmlErrorCode } from './errors/ooxml-error';
 export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
 // Shared Office-font → Google-Fonts substitute registry (Calibri → Carlito,
 // Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package
