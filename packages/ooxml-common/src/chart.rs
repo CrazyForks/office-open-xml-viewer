@@ -2580,9 +2580,20 @@ pub fn parse_chart_part(
     } else if find_chart("pieChart").is_some() || find_chart("pie3DChart").is_some() {
         "pie".to_string()
     } else if find_chart("ofPieChart").is_some() {
-        // §21.2.2.126 ofPieChart (pie-of-pie / bar-of-pie). Rendered as a single
-        // plain pie over the whole series — the secondary plot (the exploded
-        // detail pie/bar) is NOT split out. See the ofPie handling note below.
+        // §21.2.2.126 ofPieChart (pie-of-pie / bar-of-pie). DECISION: draw the
+        // whole series as ONE plain pie (main-pie-only fallback) rather than
+        // splitting the tail data points into the secondary pie/bar. The
+        // split is governed by `<c:splitType>` (§21.2.2.197: `auto` / `cust` /
+        // `percent` / `pos` / `val`), `<c:splitPos>` (§21.2.2.196) and
+        // `<c:custSplit>`, plus `<c:secondPieSize>` and `<c:serLines>` for the
+        // connector geometry — all of which need a validated fixture to lay out
+        // correctly. Without one, splitting risks assigning the wrong points to
+        // the secondary plot; a single combined pie is a lossless, always-correct
+        // representation of the same data (every point is shown as a slice). The
+        // secondary-plot elements are ignored (not errors). A `bar` `ofPieType`
+        // is likewise flattened to a pie — the bar-of-pie's detail column is the
+        // same subset-of-points concern. `<c:varyColors>` still cycles the accent
+        // palette across the slices (handled by the shared pie color path below).
         "pie".to_string()
     } else if find_chart("doughnutChart").is_some() {
         "doughnut".to_string()
@@ -5700,8 +5711,9 @@ mod tests {
         assert_eq!(m.stock_up_down_bars, Some(true));
     }
 
-    /// §21.2.2.126 ofPieChart → `pie` (main-pie-only fallback; the secondary
-    /// plot is not split out — see the parse-time note).
+    /// §21.2.2.126 ofPieChart → `pie` (main-pie-only fallback). Uses the
+    /// two-point CH13_SER for the type-only assertion; the full-contract test
+    /// below adds the secondary-plot elements.
     #[test]
     fn parse_chart_part_ofpie_flattens_to_pie() {
         let group = format!(
@@ -5712,6 +5724,58 @@ mod tests {
         let m = parse_chart_part(d.root_element(), &FixtureResolver).expect("ofPie parses");
         assert_eq!(m.chart_type, "pie");
         assert_eq!(m.series[0].values, vec![Some(3.0), Some(7.0)]);
+    }
+
+    /// Full ofPieChart contract: the secondary-plot elements (`<c:splitType>`,
+    /// `<c:splitPos>`, `<c:secondPieSize>`, `<c:serLines>`) are IGNORED — the
+    /// whole series still becomes a single `pie` whose every data point is a
+    /// slice, and `<c:varyColors>` cycles the accent palette across the slices.
+    /// A `bar` `ofPieType` flattens the same way. Pins the "draw one combined
+    /// pie" decision so a future edit can't silently start honoring the split.
+    #[test]
+    fn parse_chart_part_ofpie_full_contract_ignores_split() {
+        let ser = r#"<c:ser><c:idx val="0"/>
+            <c:cat><c:strCache>
+              <c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt>
+              <c:pt idx="2"><c:v>C</c:v></c:pt><c:pt idx="3"><c:v>D</c:v></c:pt>
+            </c:strCache></c:cat>
+            <c:val><c:numCache>
+              <c:pt idx="0"><c:v>40</c:v></c:pt><c:pt idx="1"><c:v>30</c:v></c:pt>
+              <c:pt idx="2"><c:v>20</c:v></c:pt><c:pt idx="3"><c:v>10</c:v></c:pt>
+            </c:numCache></c:val></c:ser>"#;
+        // bar-of-pie with a custom split of the last two points into the bar,
+        // plus connector series-lines — all of which we ignore.
+        let group = format!(
+            r#"<c:ofPieChart>
+                <c:ofPieType val="bar"/>
+                <c:varyColors val="1"/>
+                {ser}
+                <c:gapWidth val="100"/>
+                <c:splitType val="pos"/>
+                <c:splitPos val="2"/>
+                <c:secondPieSize val="75"/>
+                <c:serLines/>
+            </c:ofPieChart>"#
+        );
+        let xml = chart_space_with_group(&group);
+        let d = chart_space_of(&xml);
+        let m = parse_chart_part(d.root_element(), &AccentResolver).expect("ofPie parses");
+        assert_eq!(m.chart_type, "pie");
+        // Every one of the four points is present as a slice value (nothing was
+        // diverted to a phantom secondary plot).
+        assert_eq!(
+            m.series[0].values,
+            vec![Some(40.0), Some(30.0), Some(20.0), Some(10.0)]
+        );
+        // varyColors cycled the accent palette across all four slices.
+        let colors = m.series[0]
+            .data_point_colors
+            .as_ref()
+            .expect("varyColors slice palette");
+        assert_eq!(colors[0].as_deref(), Some("4472C4")); // accent1
+        assert_eq!(colors[1].as_deref(), Some("ED7D31")); // accent2
+        assert_eq!(colors[2].as_deref(), Some("A5A5A5")); // accent3
+        assert_eq!(colors[3].as_deref(), Some("FFC000")); // accent4
     }
 
     /// A resolver that DOES supply the default series accent palette (like the
