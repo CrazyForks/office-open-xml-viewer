@@ -181,6 +181,14 @@ export interface SectionProps {
    *  spec default). Non-final sections carry their start type on their own
    *  SectionBreak marker. */
   sectionStart?: string | null;
+  /** ECMA-376 §17.6.20 `<w:textDirection w:val>` (ST_TextDirection §17.18.93) —
+   *  the section's flow direction. Absent / `null` ⇒ "lrTb" (horizontal,
+   *  left-to-right / top-to-bottom, the default). `"tbRl"` = vertical Japanese
+   *  (glyphs stack top→bottom, lines advance right→left); the renderer lays the
+   *  page out horizontally and rotates it +90° at paint, keeping CJK glyphs
+   *  upright and Latin sideways. Only a non-default value is emitted by the
+   *  parser, so horizontal documents keep byte-identical rendering. */
+  textDirection?: string | null;
   /** ECMA-376 §17.6.5 w:docGrid/@w:type — "default" | "lines" | "linesAndChars" | "snapToChars". */
   docGridType?: string | null;
   /** ECMA-376 §17.6.5 w:docGrid/@w:linePitch in pt. When docGridType is "lines" or
