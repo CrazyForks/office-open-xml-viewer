@@ -305,6 +305,24 @@ pub struct ChartModel {
     /// does NOT yet draw them (tracked as a follow-up). `None` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stock_up_down_bars: Option<bool>,
+    // ── chartEx box-and-whisker / sunburst (CH15, MS 2014 chartex ext) ────────
+    /// Structured box-and-whisker data (`chart_type == "boxWhisker"`). `None`
+    /// for every other chart type — the field is populated ONLY by
+    /// `parse_chartex_part` when the series `layoutId` is `boxWhisker`, so the
+    /// flat `categories`/`series` model (which waterfall/treemap consume) is
+    /// unchanged and the wire stays byte-stable for those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_box: Option<ChartexBoxWhisker>,
+    /// Structured sunburst hierarchy (`chart_type == "sunburst"`). `None`
+    /// otherwise (byte-stable for the flat-model chartEx charts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_sunburst: Option<ChartexSunburst>,
+    /// Theme accent palette (`accent1..6` resolved to hex, no `#`) for chartEx
+    /// charts that color by branch/series index (boxWhisker series, sunburst
+    /// branches). `None` when the resolver supplies no default palette (pptx);
+    /// the renderer then falls back to its own `CHART_PALETTE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_accents: Option<Vec<String>>,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -541,6 +559,81 @@ pub struct SecondaryValueAxis {
     pub title_font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_font_color: Option<String>,
+}
+
+/// One box-and-whisker series (chartEx `boxWhisker`, MS 2014 chartex ext).
+///
+/// A chartEx box-and-whisker chart carries one `<cx:series layoutId="boxWhisker">`
+/// per data column, each referencing its own `<cx:data>` (via `<cx:dataId>`) of
+/// RAW sample points grouped by category. Statistics (quartiles / mean /
+/// whiskers / outliers) are computed by the renderer per the
+/// `<cx:layoutPr><cx:statistics quartileMethod>` and `<cx:visibility>` flags;
+/// the parser only groups the raw points by category and threads the flags.
+/// Mirror of TS `ChartexBoxSeries`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartexBoxSeries {
+    /// Series display name (`<cx:tx><cx:txData><cx:v>`), e.g. "Series1".
+    pub name: String,
+    /// Series fill (hex, no `#`) — the theme accent cycled by series index
+    /// (`accent[(idx % 6) + 1]`). `None` when the resolver supplies no default
+    /// palette (pptx); the renderer then falls back to its own palette.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Raw sample values grouped by category, parallel to
+    /// `ChartexBoxWhisker::categories`. Outer index = category, inner = the
+    /// sample points that fell in that category (source order preserved).
+    pub values_by_category: Vec<Vec<f64>>,
+    /// `<cx:layoutPr><cx:visibility meanMarker>` — draw the mean `×` marker.
+    pub mean_marker: bool,
+    /// `<cx:layoutPr><cx:visibility meanLine>` — draw a mean connector line.
+    pub mean_line: bool,
+    /// `<cx:layoutPr><cx:visibility outliers>` — draw outlier points.
+    pub show_outliers: bool,
+    /// `<cx:layoutPr><cx:visibility nonoutliers>` — draw the non-outlier
+    /// (interior) points as dots in addition to the box.
+    pub show_nonoutliers: bool,
+    /// `<cx:layoutPr><cx:statistics quartileMethod>` — `"exclusive"` (Excel
+    /// default, median excluded when splitting halves) or `"inclusive"`.
+    pub quartile_method: String,
+}
+
+/// A chartEx box-and-whisker chart: the unique categories plus one series per
+/// data column. Mirror of TS `ChartexBoxWhisker`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartexBoxWhisker {
+    /// Unique category labels in first-seen order (the box groups on the
+    /// category axis). Each series bins its raw points into these.
+    pub categories: Vec<String>,
+    /// One entry per `<cx:series>`.
+    pub series: Vec<ChartexBoxSeries>,
+}
+
+/// One row of a chartEx `sunburst` (MS 2014 chartex ext). A sunburst encodes
+/// its hierarchy as one `<cx:strDim type="cat">` with several `<cx:lvl>`
+/// (lvl[0] = deepest / Leaf, last lvl = root / Branch) and a single
+/// `<cx:numDim type="size">`. Each row's `path` is the branch→…→leaf label
+/// chain with empty trailing segments trimmed (a node that is itself a leaf
+/// terminates early); `size` is that row's size value. Mirror of TS
+/// `ChartexSunburstRow`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartexSunburstRow {
+    /// Label chain root→leaf (Branch, Stem, …, Leaf), empty tail trimmed.
+    pub path: Vec<String>,
+    /// `<cx:numDim type="size">` value for this row (attaches to the deepest
+    /// node in `path`).
+    pub size: f64,
+}
+
+/// A chartEx sunburst: the flat rows the renderer folds into a ring tree, plus
+/// the theme accent palette to color branches. Mirror of TS `ChartexSunburst`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartexSunburst {
+    /// One row per deepest-level data point.
+    pub rows: Vec<ChartexSunburstRow>,
 }
 
 /// Mirror of TS `ChartManualLayout`.
@@ -1710,6 +1803,58 @@ pub fn parse_chartex_part(
     let layout_id = attr(&series_node, "layoutId").unwrap_or_default();
     let chart_type = layout_id; // "waterfall", "treemap", etc.
 
+    // ── chartEx title (MS 2014 chartex ext) ──────────────────────────────────
+    // `<cx:chart><cx:title><cx:tx><cx:rich>` mirrors the DrawingML rich-text of a
+    // legacy `<c:title>`; `flatten_rich_text` walks its `<a:p>/<a:r>/<a:t>`
+    // identically. Only populated for the layouts CH15 renders (boxWhisker /
+    // sunburst) so waterfall/treemap wire output stays byte-stable. `None`
+    // otherwise.
+    let chartex_title = if chart_type == "boxWhisker" || chart_type == "sunburst" {
+        root.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "title")
+            .and_then(|t| {
+                t.descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "rich")
+            })
+            .map(|rich| flatten_rich_text(rich, None))
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    // ── chartEx theme accent palette ─────────────────────────────────────────
+    // boxWhisker series and sunburst branches color by index off the theme
+    // accents (`accent[(idx % 6) + 1]`, the same cycle Office draws). Resolve
+    // accent1..6 once here; `None` when the resolver owns no default palette
+    // (pptx), letting the renderer fall back to its own `CHART_PALETTE`.
+    let chartex_accents: Option<Vec<String>> =
+        if chart_type == "boxWhisker" || chart_type == "sunburst" {
+            let accents: Vec<String> = (0..6)
+                .filter_map(|i| resolver.resolve_series_accent(i))
+                .collect();
+            if accents.len() == 6 {
+                Some(accents)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    // ── chartEx box-and-whisker structured parse ─────────────────────────────
+    let chartex_box = if chart_type == "boxWhisker" {
+        parse_chartex_boxwhisker(root, resolver)
+    } else {
+        None
+    };
+
+    // ── chartEx sunburst structured parse ────────────────────────────────────
+    let chartex_sunburst = if chart_type == "sunburst" {
+        parse_chartex_sunburst(root)
+    } else {
+        None
+    };
+
     // Categories from chartData > data > strDim[@type="cat"] > lvl > pt
     let categories: Vec<String> = root
         .descendants()
@@ -1875,7 +2020,7 @@ pub fn parse_chartex_part(
 
     Some(ChartModel {
         chart_type,
-        title: None,
+        title: chartex_title,
         categories,
         series,
         val_max: None,
@@ -1984,7 +2129,274 @@ pub fn parse_chartex_part(
         stock_hi_low_lines: None,
         stock_hi_low_line_color: None,
         stock_up_down_bars: None,
+        chartex_box,
+        chartex_sunburst,
+        chartex_accents,
     })
+}
+
+/// Parse the structured box-and-whisker data of a chartEx `boxWhisker`.
+///
+/// A box-and-whisker chart has one `<cx:series layoutId="boxWhisker">` per data
+/// column; each series' `<cx:dataId val="N">` selects a `<cx:data id="N">`
+/// carrying RAW sample points (a `<cx:strDim type="cat">` of per-point category
+/// labels and a `<cx:numDim type="val">` of the sample values). This groups
+/// each series' points by the unique categories (taken in first-seen order from
+/// the first series' data) and threads the `<cx:layoutPr>` visibility /
+/// statistics flags. Quartiles / mean / whiskers / outliers are the renderer's
+/// job. Returns `None` when there is no plottable series.
+fn parse_chartex_boxwhisker(root: Node, resolver: &dyn ColorResolver) -> Option<ChartexBoxWhisker> {
+    // Build id -> <cx:data> lookup.
+    let data_by_id: std::collections::HashMap<String, Node> = root
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "data")
+        .filter_map(|d| attr(&d, "id").map(|id| (id, d)))
+        .collect();
+
+    // Series nodes, in document order (one column each).
+    let series_nodes: Vec<Node> = root
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "series")
+        .collect();
+    if series_nodes.is_empty() {
+        return None;
+    }
+
+    // Per-series raw (category-label, value) points, resolving each series' own
+    // <cx:dataId> -> <cx:data>.
+    let per_series_points: Vec<Vec<(String, f64)>> = series_nodes
+        .iter()
+        .map(|s| {
+            let data_id = s
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "dataId")
+                .and_then(|n| attr(&n, "val"));
+            let data = data_id.as_ref().and_then(|id| data_by_id.get(id).copied());
+            match data {
+                Some(d) => chartex_data_cat_val_points(d),
+                None => Vec::new(),
+            }
+        })
+        .collect();
+
+    // Unique categories in first-seen order across all series (first series'
+    // order dominates; later series only contribute unseen labels).
+    let mut categories: Vec<String> = Vec::new();
+    for pts in &per_series_points {
+        for (cat, _) in pts {
+            if !categories.iter().any(|c| c == cat) {
+                categories.push(cat.clone());
+            }
+        }
+    }
+    if categories.is_empty() {
+        return None;
+    }
+    let cat_index: std::collections::HashMap<&str, usize> = categories
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.as_str(), i))
+        .collect();
+
+    let series: Vec<ChartexBoxSeries> = series_nodes
+        .iter()
+        .enumerate()
+        .map(|(si, s)| {
+            let name = s
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "txData")
+                .and_then(|tx| tx.children().find(|n| n.tag_name().name() == "v"))
+                .and_then(|v| v.text().map(|t| t.to_string()))
+                .unwrap_or_default();
+
+            // Bin this series' raw points into the shared category order.
+            let mut values_by_category: Vec<Vec<f64>> = vec![Vec::new(); categories.len()];
+            for (cat, v) in &per_series_points[si] {
+                if let Some(&ci) = cat_index.get(cat.as_str()) {
+                    values_by_category[ci].push(*v);
+                }
+            }
+
+            // `<cx:layoutPr><cx:visibility …>` flags; Office defaults when omitted:
+            // meanMarker on, meanLine off, outliers on, nonoutliers off.
+            let vis = s
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "visibility");
+            let bool_attr = |name: &str, dflt: bool| {
+                vis.and_then(|v| attr(&v, name))
+                    .map(|s| s == "1" || s == "true")
+                    .unwrap_or(dflt)
+            };
+            let quartile_method = s
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "statistics")
+                .and_then(|st| attr(&st, "quartileMethod"))
+                .unwrap_or_else(|| "exclusive".to_string());
+
+            ChartexBoxSeries {
+                name,
+                color: resolver.resolve_series_accent(si),
+                values_by_category,
+                mean_marker: bool_attr("meanMarker", true),
+                mean_line: bool_attr("meanLine", false),
+                show_outliers: bool_attr("outliers", true),
+                show_nonoutliers: bool_attr("nonoutliers", false),
+                quartile_method,
+            }
+        })
+        .collect();
+
+    Some(ChartexBoxWhisker { categories, series })
+}
+
+/// Collect a chartEx `<cx:data>`'s (category-label, value) sample points: the
+/// `<cx:strDim type="cat">` first `<cx:lvl>` supplies per-point labels, the
+/// `<cx:numDim type="val">` first `<cx:lvl>` the values. Points align by their
+/// `idx` attribute; a point with no numeric value is dropped.
+fn chartex_data_cat_val_points(data: Node) -> Vec<(String, f64)> {
+    let cat_lvl = data
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "strDim"
+                && attr(n, "type").as_deref() == Some("cat")
+        })
+        .and_then(|dim| {
+            dim.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+        });
+    let val_lvl = data
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "numDim"
+                && matches!(attr(n, "type").as_deref(), Some("val") | Some("size"))
+        })
+        .and_then(|dim| {
+            dim.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+        });
+    let (Some(cat_lvl), Some(val_lvl)) = (cat_lvl, val_lvl) else {
+        return Vec::new();
+    };
+
+    // Index the category labels by their `idx`.
+    let cats: std::collections::HashMap<usize, String> = cat_lvl
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+        .filter_map(|pt| {
+            let idx = attr(&pt, "idx").and_then(|v| v.parse::<usize>().ok())?;
+            let label = pt.text().unwrap_or("").to_string();
+            Some((idx, label))
+        })
+        .collect();
+
+    val_lvl
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+        .filter_map(|pt| {
+            let idx = attr(&pt, "idx").and_then(|v| v.parse::<usize>().ok())?;
+            let v = pt.text().and_then(|t| t.parse::<f64>().ok())?;
+            let cat = cats.get(&idx).cloned().unwrap_or_default();
+            Some((cat, v))
+        })
+        .collect()
+}
+
+/// Parse the structured hierarchy of a chartEx `sunburst`.
+///
+/// A sunburst's single `<cx:data>` carries a `<cx:strDim type="cat">` with
+/// several `<cx:lvl>` (lvl[0] = deepest / Leaf, subsequent lvls step toward the
+/// root, last lvl = Branch) and one `<cx:numDim type="size">`. Each data-point
+/// `idx` yields a root→leaf `path` (Branch, …, Leaf) with empty trailing
+/// segments trimmed — a node that is itself a leaf terminates before the
+/// deepest level — and the `size` value at that `idx`. Returns `None` when
+/// there is no size dimension or no rows.
+fn parse_chartex_sunburst(root: Node) -> Option<ChartexSunburst> {
+    let cat_dim = root.descendants().find(|n| {
+        n.is_element()
+            && n.tag_name().name() == "strDim"
+            && attr(n, "type").as_deref() == Some("cat")
+    })?;
+    // Levels in document order: lvl[0] = Leaf (deepest), last = Branch (root).
+    let levels: Vec<Node> = cat_dim
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "lvl")
+        .collect();
+    if levels.is_empty() {
+        return None;
+    }
+
+    // size dimension (chartEx sunburst uses type="size").
+    let size_lvl = root
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "numDim"
+                && matches!(attr(n, "type").as_deref(), Some("size") | Some("val"))
+        })
+        .and_then(|dim| {
+            dim.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+        })?;
+    let sizes: std::collections::HashMap<usize, f64> = size_lvl
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+        .filter_map(|pt| {
+            let idx = attr(&pt, "idx").and_then(|v| v.parse::<usize>().ok())?;
+            let v = pt.text().and_then(|t| t.parse::<f64>().ok())?;
+            Some((idx, v))
+        })
+        .collect();
+
+    // Per-level idx -> label maps.
+    let level_maps: Vec<std::collections::HashMap<usize, String>> = levels
+        .iter()
+        .map(|lvl| {
+            lvl.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                .filter_map(|pt| {
+                    let idx = attr(&pt, "idx").and_then(|v| v.parse::<usize>().ok())?;
+                    let label = pt.text().unwrap_or("").to_string();
+                    Some((idx, label))
+                })
+                .collect()
+        })
+        .collect();
+
+    // Row count = the max ptCount / max idx across levels + sizes.
+    let n = sizes
+        .keys()
+        .chain(level_maps.iter().flat_map(|m| m.keys()))
+        .copied()
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+
+    let mut rows: Vec<ChartexSunburstRow> = Vec::new();
+    for idx in 0..n {
+        let size = *sizes.get(&idx).unwrap_or(&0.0);
+        // Build path root→leaf: iterate levels from LAST (Branch/root) to FIRST
+        // (Leaf/deepest). Trailing empty leaf cells are trimmed so a node that is
+        // itself a leaf terminates early.
+        let mut path: Vec<String> = Vec::new();
+        for lvl in level_maps.iter().rev() {
+            let label = lvl.get(&idx).cloned().unwrap_or_default();
+            if label.is_empty() {
+                // Empty deeper cell terminates the path (no further descent).
+                break;
+            }
+            path.push(label);
+        }
+        if path.is_empty() {
+            continue;
+        }
+        rows.push(ChartexSunburstRow { path, size });
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    Some(ChartexSunburst { rows })
 }
 
 // ============================================================================
@@ -3842,6 +4254,10 @@ pub fn parse_chart_part(
         stock_hi_low_lines,
         stock_hi_low_line_color,
         stock_up_down_bars,
+        // Legacy `c:` charts never carry the chartEx boxWhisker/sunburst model.
+        chartex_box: None,
+        chartex_sunburst: None,
+        chartex_accents: None,
     })
 }
 
@@ -4038,6 +4454,9 @@ mod tests {
             stock_hi_low_lines: None,
             stock_hi_low_line_color: None,
             stock_up_down_bars: None,
+            chartex_box: None,
+            chartex_sunburst: None,
+            chartex_accents: None,
         };
         let v = serde_json::to_value(&m).unwrap();
         let obj = v.as_object().unwrap();
@@ -4940,6 +5359,13 @@ mod tests {
         fn theme_minor_font_latin(&self) -> Option<String> {
             Some("Calibri".to_string())
         }
+
+        fn resolve_series_accent(&self, idx: usize) -> Option<String> {
+            // Cycle a 6-accent palette exactly like the docx resolver so chartEx
+            // box/sunburst tests can assert the branch/series colors.
+            const ACCENTS: [&str; 6] = ["5B9BD5", "ED7D31", "A5A5A5", "FFC000", "4472C4", "70AD47"];
+            Some(ACCENTS[idx % 6].to_string())
+        }
     }
 
     fn chart_space_of(xml: &str) -> Document<'_> {
@@ -5828,6 +6254,163 @@ mod tests {
         let d = chart_space_of(&xml);
         let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("parses");
         assert_eq!(m.categories, vec!["FY2024 1Q"]);
+    }
+
+    // ── CH15: chartEx boxWhisker / sunburst structured parse ─────────────────
+
+    /// A box-and-whisker chart with two series, each referencing its own
+    /// `<cx:data>` (via `<cx:dataId>`) of RAW sample points grouped across two
+    /// categories. Verifies: (a) categories unique-in-order, (b) each series'
+    /// points binned by category, (c) series colored by the cycled theme accent,
+    /// (d) `<cx:visibility>` / `<cx:statistics>` flags threaded, (e) the title
+    /// is parsed and the accent palette exposed.
+    #[test]
+    fn parse_chartex_part_boxwhisker_two_series_binned_by_category() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chartData>
+                <cx:data id="0">
+                  <cx:strDim type="cat"><cx:lvl ptCount="3">
+                    <cx:pt idx="0">Cat A</cx:pt><cx:pt idx="1">Cat A</cx:pt><cx:pt idx="2">Cat B</cx:pt>
+                  </cx:lvl></cx:strDim>
+                  <cx:numDim type="val"><cx:lvl ptCount="3">
+                    <cx:pt idx="0">1</cx:pt><cx:pt idx="1">3</cx:pt><cx:pt idx="2">10</cx:pt>
+                  </cx:lvl></cx:numDim>
+                </cx:data>
+                <cx:data id="1">
+                  <cx:strDim type="cat"><cx:lvl ptCount="3">
+                    <cx:pt idx="0">Cat A</cx:pt><cx:pt idx="1">Cat B</cx:pt><cx:pt idx="2">Cat B</cx:pt>
+                  </cx:lvl></cx:strDim>
+                  <cx:numDim type="val"><cx:lvl ptCount="3">
+                    <cx:pt idx="0">5</cx:pt><cx:pt idx="1">7</cx:pt><cx:pt idx="2">9</cx:pt>
+                  </cx:lvl></cx:numDim>
+                </cx:data>
+              </cx:chartData>
+              <cx:chart>
+                <cx:title><cx:tx><cx:rich><a:p><a:r><a:t>My box chart</a:t></a:r></a:p></cx:rich></cx:tx></cx:title>
+                <cx:plotArea><cx:plotAreaRegion>
+                  <cx:series layoutId="boxWhisker">
+                    <cx:tx><cx:txData><cx:v>Series1</cx:v></cx:txData></cx:tx>
+                    <cx:dataId val="0"/>
+                    <cx:layoutPr>
+                      <cx:visibility meanLine="0" meanMarker="1" nonoutliers="0" outliers="1"/>
+                      <cx:statistics quartileMethod="exclusive"/>
+                    </cx:layoutPr>
+                  </cx:series>
+                  <cx:series layoutId="boxWhisker">
+                    <cx:tx><cx:txData><cx:v>Series2</cx:v></cx:txData></cx:tx>
+                    <cx:dataId val="1"/>
+                    <cx:layoutPr>
+                      <cx:visibility meanLine="1" meanMarker="0" nonoutliers="1" outliers="0"/>
+                      <cx:statistics quartileMethod="inclusive"/>
+                    </cx:layoutPr>
+                  </cx:series>
+                </cx:plotAreaRegion></cx:plotArea>
+              </cx:chart>
+            </cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("boxWhisker parses");
+        assert_eq!(m.chart_type, "boxWhisker");
+        assert_eq!(m.title.as_deref(), Some("My box chart"));
+        assert_eq!(
+            m.chartex_accents.as_deref(),
+            Some(
+                &["5B9BD5", "ED7D31", "A5A5A5", "FFC000", "4472C4", "70AD47"].map(String::from)[..]
+            )
+        );
+        let box_data = m.chartex_box.expect("box data present");
+        assert_eq!(box_data.categories, vec!["Cat A", "Cat B"]);
+        assert_eq!(box_data.series.len(), 2);
+
+        let s0 = &box_data.series[0];
+        assert_eq!(s0.name, "Series1");
+        assert_eq!(s0.color.as_deref(), Some("5B9BD5")); // accent1 (series idx 0)
+                                                         // Series1: Cat A got points 1 & 3, Cat B got 10.
+        assert_eq!(s0.values_by_category, vec![vec![1.0, 3.0], vec![10.0]]);
+        assert!(s0.mean_marker && !s0.mean_line && s0.show_outliers && !s0.show_nonoutliers);
+        assert_eq!(s0.quartile_method, "exclusive");
+
+        let s1 = &box_data.series[1];
+        assert_eq!(s1.name, "Series2");
+        assert_eq!(s1.color.as_deref(), Some("ED7D31")); // accent2 (series idx 1)
+                                                         // Series2: Cat A got 5, Cat B got 7 & 9.
+        assert_eq!(s1.values_by_category, vec![vec![5.0], vec![7.0, 9.0]]);
+        assert!(!s1.mean_marker && s1.mean_line && !s1.show_outliers && s1.show_nonoutliers);
+        assert_eq!(s1.quartile_method, "inclusive");
+    }
+
+    /// A sunburst with three `<cx:lvl>` (Leaf / Stem / Branch, in document
+    /// order) and a `<cx:numDim type="size">`. Verifies each row's path is built
+    /// root→leaf (Branch first) with empty trailing (leaf) cells trimmed so a
+    /// node that is itself a leaf terminates early, and that sizes attach by idx.
+    #[test]
+    fn parse_chartex_part_sunburst_hierarchy_paths_trim_empty_tail() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chartData><cx:data id="0">
+                <cx:strDim type="cat">
+                  <cx:lvl ptCount="3">
+                    <cx:pt idx="0">Leaf 1</cx:pt><cx:pt idx="1"/><cx:pt idx="2">Leaf 3</cx:pt>
+                  </cx:lvl>
+                  <cx:lvl ptCount="3">
+                    <cx:pt idx="0">Stem 1</cx:pt><cx:pt idx="1">Leaf 2</cx:pt><cx:pt idx="2">Stem 2</cx:pt>
+                  </cx:lvl>
+                  <cx:lvl ptCount="3">
+                    <cx:pt idx="0">Branch 1</cx:pt><cx:pt idx="1">Branch 1</cx:pt><cx:pt idx="2">Branch 2</cx:pt>
+                  </cx:lvl>
+                </cx:strDim>
+                <cx:numDim type="size"><cx:lvl ptCount="3">
+                  <cx:pt idx="0">22</cx:pt><cx:pt idx="1">17</cx:pt><cx:pt idx="2">18</cx:pt>
+                </cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart>
+                <cx:title><cx:tx><cx:rich><a:p><a:r><a:t>My sunburst</a:t></a:r></a:p></cx:rich></cx:tx></cx:title>
+                <cx:plotArea><cx:plotAreaRegion>
+                  <cx:series layoutId="sunburst"><cx:dataId val="0"/></cx:series>
+                </cx:plotAreaRegion></cx:plotArea>
+              </cx:chart>
+            </cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("sunburst parses");
+        assert_eq!(m.chart_type, "sunburst");
+        assert_eq!(m.title.as_deref(), Some("My sunburst"));
+        let sb = m.chartex_sunburst.expect("sunburst data present");
+        assert_eq!(sb.rows.len(), 3);
+        // Row 0: full Branch→Stem→Leaf chain.
+        assert_eq!(sb.rows[0].path, vec!["Branch 1", "Stem 1", "Leaf 1"]);
+        assert_eq!(sb.rows[0].size, 22.0);
+        // Row 1: empty Leaf cell → path terminates at Stem ("Leaf 2" is itself a leaf).
+        assert_eq!(sb.rows[1].path, vec!["Branch 1", "Leaf 2"]);
+        assert_eq!(sb.rows[1].size, 17.0);
+        // Row 2: full chain under a different branch.
+        assert_eq!(sb.rows[2].path, vec!["Branch 2", "Stem 2", "Leaf 3"]);
+        assert_eq!(sb.rows[2].size, 18.0);
+    }
+
+    /// A waterfall chart (the pre-CH15 chartEx path) must NOT get any of the new
+    /// boxWhisker/sunburst structured fields — they stay `None`, keeping the wire
+    /// byte-stable for the flat-model chartEx renderers.
+    #[test]
+    fn parse_chartex_part_waterfall_leaves_chartex_box_sunburst_none() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+              <cx:chartData><cx:data id="0">
+                <cx:strDim type="cat"><cx:lvl ptCount="1"><cx:pt idx="0">A</cx:pt></cx:lvl></cx:strDim>
+                <cx:numDim type="val"><cx:lvl ptCount="1"><cx:pt idx="0">5</cx:pt></cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="waterfall"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        let m = parse_chartex_part(d.root_element(), &FixtureResolver).expect("waterfall parses");
+        assert!(m.chartex_box.is_none());
+        assert!(m.chartex_sunburst.is_none());
+        assert!(m.chartex_accents.is_none());
+        assert!(m.title.is_none());
     }
 
     // ── CH13: 3D flattening / stock / ofPie type detection ───────────────────

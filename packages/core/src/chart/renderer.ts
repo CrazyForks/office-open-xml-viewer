@@ -4054,6 +4054,256 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   ctx.restore();
 }
 
+// ─── chartEx: box-and-whisker (CH15, MS 2014 chartex ext) ────────────────────
+
+/** Statistics of one box in a box-and-whisker plot. */
+interface BoxStats {
+  q1: number;
+  median: number;
+  q3: number;
+  /** Whisker ends = min/max of the NON-outlier points. */
+  whiskerLo: number;
+  whiskerHi: number;
+  mean: number;
+  outliers: number[];
+  /** Interior (non-outlier) points, for the optional inner-point dots. */
+  inner: number[];
+}
+
+/**
+ * Linear-interpolated quantile of `sorted` at probability `p` (0..1).
+ * `method === 'inclusive'` uses the R-7 / Excel `QUARTILE.INC` rank
+ * `p·(n−1)`; anything else uses the `exclusive` (R-6 / `QUARTILE.EXC`) rank
+ * `p·(n+1)` clamped into `[1, n]` — the box-and-whisker default Office writes
+ * (`<cx:statistics quartileMethod="exclusive">`).
+ */
+function boxQuantile(sorted: number[], p: number, method: string): number {
+  const n = sorted.length;
+  if (n === 0) return 0;
+  if (n === 1) return sorted[0];
+  let pos: number;
+  if (method === 'inclusive') {
+    pos = p * (n - 1) + 1; // 1-based rank
+  } else {
+    pos = p * (n + 1);
+    if (pos < 1) pos = 1;
+    if (pos > n) pos = n;
+  }
+  const lo = Math.floor(pos);
+  const frac = pos - lo;
+  if (lo >= n) return sorted[n - 1];
+  return sorted[lo - 1] + frac * (sorted[lo] - sorted[lo - 1]);
+}
+
+/**
+ * Compute the five-number summary + mean + outliers for one box, using the
+ * 1.5·IQR outlier fence (the Tukey rule Office applies; points beyond
+ * `Q1 − 1.5·IQR` / `Q3 + 1.5·IQR` are outliers and the whiskers stop at the
+ * most extreme non-outlier).
+ */
+function computeBoxStats(values: number[], method: string): BoxStats | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const q1 = boxQuantile(sorted, 0.25, method);
+  const median = boxQuantile(sorted, 0.5, method);
+  const q3 = boxQuantile(sorted, 0.75, method);
+  const iqr = q3 - q1;
+  const loFence = q1 - 1.5 * iqr;
+  const hiFence = q3 + 1.5 * iqr;
+  const inner: number[] = [];
+  const outliers: number[] = [];
+  for (const v of sorted) {
+    if (v < loFence || v > hiFence) outliers.push(v);
+    else inner.push(v);
+  }
+  const whiskerLo = inner.length ? inner[0] : sorted[0];
+  const whiskerHi = inner.length ? inner[inner.length - 1] : sorted[sorted.length - 1];
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  return { q1, median, q3, whiskerLo, whiskerHi, mean, outliers, inner };
+}
+
+/**
+ * Render a chartEx box-and-whisker chart (MS 2014 chartex extension — there is
+ * no ECMA-376 section; the structure is Microsoft's `<cx:chartSpace>` with a
+ * `<cx:series layoutId="boxWhisker">` per column, each referencing raw sample
+ * points via `<cx:dataId>`). The parser (`parse_chartex_boxwhisker`) groups the
+ * raw points by category and threads the `<cx:layoutPr>` visibility/statistics
+ * flags into `chart.chartexBox`; this renderer derives the five-number summary
+ * per (category, series) and draws, for each box: the IQR rectangle (Q1..Q3),
+ * the median line, whiskers to the non-outlier min/max (with end caps), the
+ * mean `×` marker, and outlier dots. Colors come from the theme accent palette
+ * (`chart.chartexAccents`, cycled by series) — the blue/orange/gray Office
+ * default — falling back to `CHART_PALETTE` when a resolver supplies no palette.
+ */
+function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+  const box = chart.chartexBox;
+  if (!box || box.categories.length === 0 || box.series.length === 0) return;
+  const { x, y, w, h } = r;
+
+  // Shared title band + cartesian plot rect. Reserve a category-label band at
+  // the bottom and a value-label gutter on the left; no legend (Office draws
+  // box-and-whisker without one by default).
+  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const catAxFontPx0 = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const valAxFontPx0 = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const pad = {
+    t: titleBand.bandH + valAxFontPx0 / 2 + 2,
+    r: w * 0.02,
+    b: (chart.catAxisHidden ? h * 0.02 : catAxisLabelBandH(catAxFontPx0)),
+    l: chart.valAxisHidden ? w * 0.02 : w * 0.1,
+  };
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleBand,
+    legendSideReserveFrac: 0,
+    pad,
+  });
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, frame.title.fontPx);
+  const { px0, py0, pw, ph } = frame.plotRect;
+
+  const cats = box.categories;
+  const nCat = cats.length;
+  const nSer = box.series.length;
+
+  // Value-axis extent across every sample point in every box.
+  let dataMin = Infinity;
+  let dataMax = -Infinity;
+  for (const s of box.series) {
+    for (const group of s.valuesByCategory) {
+      for (const v of group) {
+        if (v < dataMin) dataMin = v;
+        if (v > dataMax) dataMax = v;
+      }
+    }
+  }
+  if (!isFinite(dataMin) || !isFinite(dataMax)) return;
+  // Excel's auto value axis (nice-rounded min/max/step). For the sample data
+  // (−78..128) this yields −100..150 step 50, matching PowerPoint.
+  const { min: axisMin, max: axisMax, step } = valueAxisScale(
+    dataMin, dataMax, chart.valMin, chart.valMax, ph / ptToPx, chart.valAxisMajorUnit,
+  );
+  const span = axisMax - axisMin || 1;
+  const yOf = (v: number): number => py0 + ph * (1 - (v - axisMin) / span);
+
+  const font = chartFontFamily(chart, chart.valAxisFontFace, 'minor');
+  const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+
+  // Value-axis gridlines + labels (unless the value axis is hidden).
+  ctx.save();
+  if (!chart.valAxisHidden) {
+    ctx.font = `${valFontPx}px ${font}`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let v = axisMin; v <= axisMax + 1e-6; v += step) {
+      const gy = yOf(v);
+      ctx.strokeStyle = '#e6e6e6';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#595959';
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 4, gy);
+    }
+  }
+  // Category-axis baseline.
+  if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
+    ctx.strokeStyle = '#bfbfbf';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  }
+
+  // Category slots; each slot holds `nSer` boxes side by side. `<cx:catScaling
+  // gapWidth>` widens the inter-category gap (parser normalizes the fraction to
+  // the legacy percent, default 150%). The boxes fill the slot minus that gap,
+  // split evenly with a thin inter-box gutter.
+  const slotW = pw / nCat;
+  const gapWidthPct = chart.barGapWidth ?? 150;
+  const groupW = slotW / (1 + gapWidthPct / 100);
+  const boxGutter = groupW * 0.06;
+  const boxW = (groupW - boxGutter * (nSer - 1)) / nSer;
+  const paletteOf = (si: number): string => {
+    const accent = chart.chartexAccents?.[si % (chart.chartexAccents?.length ?? 1)];
+    const fill = box.series[si].color ?? accent ?? CHART_PALETTE[si % CHART_PALETTE.length];
+    return `#${fill}`;
+  };
+  // A darker edge for the box border / median / whisker: reuse the fill so the
+  // outline reads as the same accent (Office draws box outlines in the series
+  // color at full strength over a lighter fill). We fill solid and stroke in a
+  // slightly darkened variant for legibility.
+
+  const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  for (let ci = 0; ci < nCat; ci++) {
+    const slotLeft = px0 + slotW * ci + (slotW - groupW) / 2;
+    for (let si = 0; si < nSer; si++) {
+      const s = box.series[si];
+      const stats = computeBoxStats(s.valuesByCategory[ci] ?? [], s.quartileMethod);
+      if (!stats) continue;
+      const bx = slotLeft + si * (boxW + boxGutter);
+      const cx = bx + boxW / 2;
+      const fill = paletteOf(si);
+      const yQ1 = yOf(stats.q1);
+      const yQ3 = yOf(stats.q3);
+      const boxTop = Math.min(yQ1, yQ3);
+      const boxH = Math.max(1, Math.abs(yQ1 - yQ3));
+
+      // Whiskers: vertical line from box edges to whisker ends, with end caps.
+      const capW = boxW * 0.4;
+      ctx.strokeStyle = fill;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx, yOf(stats.whiskerHi)); ctx.lineTo(cx, yQ3);
+      ctx.moveTo(cx, yQ1); ctx.lineTo(cx, yOf(stats.whiskerLo));
+      ctx.moveTo(cx - capW / 2, yOf(stats.whiskerHi)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerHi));
+      ctx.moveTo(cx - capW / 2, yOf(stats.whiskerLo)); ctx.lineTo(cx + capW / 2, yOf(stats.whiskerLo));
+      ctx.stroke();
+
+      // IQR box: solid accent fill + a thin darker edge.
+      ctx.fillStyle = fill;
+      ctx.fillRect(bx, boxTop, boxW, boxH);
+      ctx.strokeStyle = '#404040';
+      ctx.lineWidth = 0.75;
+      ctx.strokeRect(bx + 0.375, boxTop + 0.375, boxW - 0.75, boxH - 0.75);
+
+      // Median line across the box.
+      const yMed = yOf(stats.median);
+      ctx.strokeStyle = '#404040';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(bx, yMed); ctx.lineTo(bx + boxW, yMed); ctx.stroke();
+
+      // Mean `×` marker.
+      if (s.meanMarker) {
+        const mY = yOf(stats.mean);
+        const mR = Math.max(2, boxW * 0.14);
+        ctx.strokeStyle = '#595959';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx - mR, mY - mR); ctx.lineTo(cx + mR, mY + mR);
+        ctx.moveTo(cx + mR, mY - mR); ctx.lineTo(cx - mR, mY + mR);
+        ctx.stroke();
+      }
+
+      // Outlier dots.
+      if (s.showOutliers) {
+        ctx.fillStyle = fill;
+        const oR = Math.max(1.5, boxW * 0.06);
+        for (const o of stats.outliers) {
+          ctx.beginPath(); ctx.arc(cx, yOf(o), oR, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    }
+
+    // Category label (centered under the slot), word-wrapped like the other
+    // cartesian renderers.
+    if (!chart.catAxisHidden) {
+      ctx.font = `${catFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+      ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      const label = cats[ci];
+      const ccx = px0 + slotW * ci + slotW / 2;
+      ctx.fillText(label, ccx, py0 + ph + 4);
+    }
+  }
+  ctx.restore();
+}
+
 // ─── Background frame + dispatcher ──────────────────────────────────────────
 
 /**
@@ -4099,7 +4349,11 @@ export function renderChart(
     ctx.restore();
   }
 
-  if (chart.series.length === 0) {
+  // chartEx box-and-whisker / sunburst carry their data in the structured
+  // `chartexBox` / `chartexSunburst` fields, not the flat `series` array, so the
+  // empty-series "(no data)" guard must not fire for them.
+  const hasChartexData = chart.chartexBox != null || chart.chartexSunburst != null;
+  if (chart.series.length === 0 && !hasChartexData) {
     ctx.fillStyle = '#888';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
@@ -4137,6 +4391,8 @@ export function renderChart(
       renderWaterfallChart(ctx, chart, rect); break;
     case 'stock':
       renderStockChart(ctx, chart, rect, ptToPx); break;
+    case 'boxWhisker':
+      renderBoxWhiskerChart(ctx, chart, rect, ptToPx); break;
     default:
       ctx.fillStyle = '#888';
       ctx.font = '11px sans-serif';

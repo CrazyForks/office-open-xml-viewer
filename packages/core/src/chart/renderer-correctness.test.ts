@@ -2338,3 +2338,93 @@ describe('CH14 — pie callout data labels', () => {
     expect(rec.rects.filter(r => r.fs === '#FFFFFF').length).toBe(0);
   });
 });
+
+// CH15 — chartEx box-and-whisker (MS 2014 chartex ext). Verify the derived
+// statistics (exclusive quartiles + 1.5·IQR outlier fence + mean) and the
+// value-axis scale drive observable geometry: the IQR box rects, the outlier
+// dots, and the nice-rounded axis labels.
+describe('CH15 — chartEx box-and-whisker', () => {
+  // The sample-24 Category-1 orange series: an obvious outlier at 128 sits far
+  // beyond Q3 + 1.5·IQR, so the whisker stops at 34 and 128 is drawn as a dot.
+  const CAT1_ORANGE = [-3, 1, -6, 10, 34, 128, 22, -12, -28];
+
+  function boxModel(over: Partial<ChartModel> = {}): ChartModel {
+    return baseModel({
+      chartType: 'boxWhisker',
+      title: 'box',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5', 'FFC000', '4472C4', '70AD47'],
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [
+          {
+            name: 'S1',
+            color: 'ED7D31',
+            valuesByCategory: [CAT1_ORANGE],
+            meanMarker: true,
+            meanLine: false,
+            showOutliers: true,
+            showNonoutliers: false,
+            quartileMethod: 'exclusive',
+          },
+        ],
+      },
+      ...over,
+    });
+  }
+
+  it('labels the value axis with Excel nice-rounded gridline values including a negative bound', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel(), RECT, 1);
+    const labels = rec.texts.map(t => t.text);
+    // The data spans −28..128, so the auto axis must reach BELOW zero (a
+    // negative label) and ABOVE the max (a label ≥ 128's rounded ceiling),
+    // and cross zero. Exact bounds depend on the axis length, so assert the
+    // scale SHAPE rather than pinned numbers.
+    expect(labels).toContain('0');
+    expect(labels.some(l => l.startsWith('-'))).toBe(true);
+    expect(labels.some(l => Number(l) >= 130)).toBe(true);
+  });
+
+  it('draws exactly one IQR box rect and one outlier dot for a single box with one outlier', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel(), RECT, 1);
+    // Exactly one filled IQR rect (Q1..Q3) for the single box.
+    expect(rec.fillRects.length).toBe(1);
+    // The 128 point is the sole outlier → one dot (arc). The box-and-whisker
+    // renderer draws arcs ONLY for outliers (the mean `×` and whiskers are line
+    // segments), so the arc count equals the outlier count.
+    expect(rec.arcs.length).toBe(1);
+    // The outlier dot sits ABOVE the box top (smaller y = higher value).
+    const box = rec.fillRects[0];
+    expect(rec.arcs[0].y).toBeLessThan(box.y);
+  });
+
+  it('suppresses outlier dots when <cx:visibility outliers="0">', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['Category 1'],
+        series: [{
+          name: 'S1', color: 'ED7D31', valuesByCategory: [CAT1_ORANGE],
+          meanMarker: true, meanLine: false, showOutliers: false, showNonoutliers: false,
+          quartileMethod: 'exclusive',
+        }],
+      },
+    }), RECT, 1);
+    expect(rec.arcs.length).toBe(0);
+  });
+
+  it('draws one IQR box per (category, series) — 3 categories × 2 series = 6 boxes', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, boxModel({
+      chartexBox: {
+        categories: ['A', 'B', 'C'],
+        series: [
+          { name: 'S1', color: '5B9BD5', valuesByCategory: [[1, 2, 3], [4, 5, 6], [7, 8, 9]], meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: false, quartileMethod: 'exclusive' },
+          { name: 'S2', color: 'ED7D31', valuesByCategory: [[2, 3, 4], [5, 6, 7], [8, 9, 10]], meanMarker: true, meanLine: false, showOutliers: true, showNonoutliers: false, quartileMethod: 'exclusive' },
+        ],
+      },
+    }), RECT, 1);
+    expect(rec.fillRects.length).toBe(6);
+  });
+});
