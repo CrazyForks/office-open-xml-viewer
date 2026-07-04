@@ -886,3 +886,448 @@ describe('CH7 — line/area series honor a secondary value axis (§21.2.2.*)', (
     });
   }
 });
+
+// ─── CH9 — line/area marker detail, error bars, per-point labels, smooth,
+//          dispBlanksAs (§21.2.2.32 / §21.2.2.20 / §21.2.2.45 / §21.2.2.194 /
+//          §21.2.2.42) ─────────────────────────────────────────────────────
+//
+// scatter already consumes s.markerSymbol/size/fill/line, s.errBars,
+// s.dataLabelOverrides + s.seriesDataLabels, and smooth splines. CH9 wires the
+// same series-level fields into the line and area families, adds per-series
+// smooth (`<c:ser><c:smooth>`), and honors the chartSpace `dispBlanksAs` value
+// when deciding how null cells break/span/zero the plotted line.
+
+interface ArcCall { x: number; y: number; r: number }
+interface FillRectCall { x: number; y: number; w: number; h: number }
+
+/** Recording context that captures the primitives markers / smooth / error
+ *  bars emit: `arc` (circle/star markers + the default line dot), `fillRect`
+ *  (square marker + dash), `bezierCurveTo` (smooth spline), and `fillText`
+ *  (data labels). Also groups stroked/filled path vertices into SEGMENTS
+ *  (delimited by `beginPath`) so a test can inspect the polyline a series
+ *  drew — used to tell gap / zero / span apart for dispBlanksAs. */
+function markerRecordingCtx(): {
+  ctx: CanvasRenderingContext2D;
+  arcs: ArcCall[];
+  fillRects: FillRectCall[];
+  beziers: number;
+  texts: TextCall[];
+  segments: Array<Array<{ x: number; y: number }>>;
+} {
+  const arcs: ArcCall[] = [];
+  const fillRects: FillRectCall[] = [];
+  const texts: TextCall[] = [];
+  const segments: Array<Array<{ x: number; y: number }>> = [];
+  let current: Array<{ x: number; y: number }> | null = null;
+  let beziers = 0;
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif',
+    fillStyle: '#000',
+    strokeStyle: '#000',
+    lineWidth: 1,
+    textAlign: 'start',
+    textBaseline: 'alphabetic',
+    lineCap: 'butt',
+    lineJoin: 'miter',
+    globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const push = (x: number, y: number): void => {
+    if (!current) { current = []; segments.push(current); }
+    current.push({ x, y });
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'beginPath':
+          return () => { current = null; };
+        case 'moveTo':
+        case 'lineTo':
+          return (x: number, y: number) => push(x, y);
+        case 'arc':
+          return (x: number, y: number, rad: number) => { arcs.push({ x, y, r: rad }); push(x, y); };
+        case 'fillRect':
+          return (x: number, y: number, w: number, h: number) => fillRects.push({ x, y, w, h });
+        case 'bezierCurveTo':
+          return () => { beziers += 1; };
+        case 'fillText':
+          return (text: string, x: number, y: number) => texts.push({ text, x, y });
+        case 'createLinearGradient':
+        case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        default:
+          return () => undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return {
+    ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
+    arcs, fillRects, texts, segments,
+    get beziers() { return beziers; },
+  } as never;
+}
+
+describe('CH9 — line/area consume marker detail (§21.2.2.32)', () => {
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: markerSymbol="square" draws square markers (fillRect), not the default circle`, () => {
+      const rec = markerRecordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({ name: 'S', values: [3, 5, 4], showMarker: true, markerSymbol: 'square' })],
+      }), RECT, 1);
+      // One square fillRect per data point. (Area also fills the region with a
+      // path, not a fillRect, so every fillRect here is a marker.)
+      expect(rec.fillRects.length).toBe(3);
+      // Squares are square: w === h.
+      for (const fr of rec.fillRects) expect(Math.round(fr.w)).toBe(Math.round(fr.h));
+    });
+
+    it(`${chartType}: markerSize scales the marker (bigger size → bigger square)`, () => {
+      const small = markerRecordingCtx();
+      renderChart(small.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B'],
+        series: [series({ name: 'S', values: [3, 5], showMarker: true, markerSymbol: 'square', markerSize: 4 })],
+      }), RECT, 1);
+      const big = markerRecordingCtx();
+      renderChart(big.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B'],
+        series: [series({ name: 'S', values: [3, 5], showMarker: true, markerSymbol: 'square', markerSize: 20 })],
+      }), RECT, 1);
+      expect(big.fillRects[0].w).toBeGreaterThan(small.fillRects[0].w);
+    });
+
+    it(`${chartType}: a series WITHOUT markerSymbol keeps the default circle marker`, () => {
+      // Byte-stability: the fixed-circle fast path must remain when no symbol
+      // is specified — no fillRect (square), markers are drawn via arc.
+      const rec = markerRecordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({ name: 'S', values: [3, 5, 4], showMarker: true })],
+      }), RECT, 1);
+      expect(rec.fillRects.length).toBe(0);
+      // 3 marker dots (arcs). Line also strokes with arc-free paths, so all
+      // arcs are markers here.
+      const markerArcs = rec.arcs.filter(a => a.r < 10);
+      expect(markerArcs.length).toBe(3);
+    });
+  }
+});
+
+describe('CH9 — stacked-area markers/labels sit on the fill\'s band top (§21.2.2.32)', () => {
+  // The fill loop draws bands back-to-front (si = length-1 → 0), accumulating
+  // stackBase AFTER each band, so band si's top edge is the REVERSE-cumulative
+  // sum Σ_{k=si..length-1}. Series 0 (drawn last, on top of the stack) ends up
+  // with the FULL total as its top edge; series 1 (drawn first, at the bottom
+  // of the stack) has only its own value as its top edge. A marker/label pass
+  // that instead used a forward-cumulative Σ_{k=0..si} would misplace both.
+  it('a 2-series stacked area places each series\' marker at its own band top, not a forward-cumulative sum', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['A'],
+      series: [
+        series({ name: 'S0', values: [10], showMarker: true }),
+        series({ name: 'S1', values: [40], showMarker: true }),
+      ],
+    }), RECT, 1);
+    // One marker arc per series (single category).
+    expect(rec.arcs.length).toBe(2);
+    const ys = rec.arcs.map(a => a.y).sort((a, b) => a - b);
+    // toY is monotonically decreasing in value, so the HIGHER cumulative value
+    // (S0's band top = 10 + 40 = 50) must plot at the SMALLER y (higher on
+    // screen) than S1's band top (= 40 alone). The two must be DISTINCT —
+    // the forward-cumulative bug placed S0 at 10 and S1 at 50, i.e. swapped
+    // relative to the correct reverse-cumulative 50/40 split.
+    const [higherY, lowerY] = ys; // higherY = smaller number = higher on screen
+    expect(higherY).toBeLessThan(lowerY);
+    // Recover the plotted axis value from screen y using the chart's own
+    // scale invariants: with valMax defaulting to the data max (50, rounded up
+    // by valueAxisScale) and a linear py0..py0+ph mapping, the S0 marker (band
+    // top 50) must sit strictly above (smaller y) the S1 marker (band top 40).
+    // Concretely assert the two are NOT equal to the forward-cumulative
+    // (wrong) values, which would give band tops of 10 (S0) and 50 (S1) —
+    // i.e. S0 LOWER on screen (larger y) than S1. Reverse-cumulative flips
+    // that: S0 must be the topmost (smallest y) of the two.
+    const s0Y = rec.arcs[0].y;
+    const s1Y = rec.arcs[1].y;
+    expect(s0Y).toBeLessThan(s1Y);
+  });
+
+  it('a 3-series stacked area orders markers by reverse-cumulative band top (series 0 highest, last series lowest)', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['A'],
+      series: [
+        series({ name: 'S0', values: [5], showMarker: true }),
+        series({ name: 'S1', values: [15], showMarker: true }),
+        series({ name: 'S2', values: [30], showMarker: true }),
+      ],
+    }), RECT, 1);
+    expect(rec.arcs.length).toBe(3);
+    // Reverse-cumulative band tops: S0 = 5+15+30 = 50 (highest, smallest y),
+    // S1 = 15+30 = 45, S2 = 30 (lowest, largest y).
+    const [s0Y, s1Y, s2Y] = rec.arcs.map(a => a.y);
+    expect(s0Y).toBeLessThan(s1Y);
+    expect(s1Y).toBeLessThan(s2Y);
+  });
+});
+
+describe('CH9 — line/area draw per-series error bars (§21.2.2.20)', () => {
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: a series with errBars strokes a vertical bar around each point`, () => {
+      const withBars = pathRecordingCtx();
+      renderChart(withBars.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({
+          name: 'S',
+          values: [10, 20, 15],
+          errBars: [{ dir: 'y', barType: 'both', plus: [2, 2, 2], minus: [2, 2, 2], noEndCap: false }],
+        })],
+      }), RECT, 1);
+      const without = pathRecordingCtx();
+      renderChart(without.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({ name: 'S', values: [10, 20, 15] })],
+      }), RECT, 1);
+      // Error bars add vertical segments (constant x, varying y) — 2-vertex
+      // "bar" segments the plain plot never emits. Count vertical 2-point segs.
+      const verticalSegs = (segs: Array<Array<{ x: number; y: number }>>): number =>
+        segs.filter(s => s.length === 2 && Math.round(s[0].x) === Math.round(s[1].x)
+          && Math.round(s[0].y) !== Math.round(s[1].y)).length;
+      expect(verticalSegs(withBars.segments)).toBeGreaterThan(verticalSegs(without.segments));
+    });
+  }
+});
+
+describe('CH9 — line/area per-point data labels (§21.2.2.45)', () => {
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: dataLabelOverrides render custom text at the point, and delete (empty) skips it`, () => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({
+          name: 'S',
+          values: [3, 5, 4],
+          dataLabelOverrides: [
+            { idx: 0, text: 'FIRST' },
+            { idx: 1, text: '' }, // deleted
+            { idx: 2, text: 'THIRD', fontColor: 'FF0000' },
+          ],
+        })],
+      }), RECT, 1);
+      const labelTexts = rec.texts.map(t => t.text);
+      expect(labelTexts).toContain('FIRST');
+      expect(labelTexts).toContain('THIRD');
+      // The deleted (empty) label must not appear.
+      expect(labelTexts.some(t => t === '')).toBe(false);
+    });
+
+    it(`${chartType}: seriesDataLabels showVal renders each point's value`, () => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B'],
+        series: [series({
+          name: 'S',
+          values: [42, 7],
+          seriesDataLabels: {
+            showVal: true, showCatName: false, showSerName: false, showPercent: false,
+          },
+        })],
+      }), RECT, 1);
+      expect(rec.texts.some(t => t.text === '42')).toBe(true);
+      expect(rec.texts.some(t => t.text === '7')).toBe(true);
+    });
+  }
+});
+
+describe('CH9 — line/area smooth splines (§21.2.2.194)', () => {
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: smooth series draws a bezier spline; non-smooth draws straight segments`, () => {
+      const smooth = markerRecordingCtx();
+      renderChart(smooth.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C', 'D'],
+        series: [series({ name: 'S', values: [3, 5, 4, 6], smooth: true })],
+      }), RECT, 1);
+      const straight = markerRecordingCtx();
+      renderChart(straight.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C', 'D'],
+        series: [series({ name: 'S', values: [3, 5, 4, 6] })],
+      }), RECT, 1);
+      expect(smooth.beziers).toBeGreaterThan(0);
+      expect(straight.beziers).toBe(0);
+    });
+  }
+});
+
+describe('CH9 — dispBlanksAs controls null-cell handling (§21.2.2.42)', () => {
+  // A series with a hole in the middle: gap breaks the line, zero pins the
+  // point to the value-axis zero, span bridges the neighbours with a straight
+  // line (the null is skipped, the two sides connect).
+  function holeModel(chartType: 'line', dispBlanksAs?: string): ChartModel {
+    return baseModel({
+      chartType,
+      categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [10, null, 20] })],
+      ...(dispBlanksAs ? { dispBlanksAs } : {}),
+    });
+  }
+
+  /** The single plotted-line segment (the polyline the series stroked). Chrome
+   *  (gridlines/axis) is flat in one axis; the data line varies in both. */
+  function dataLine(segs: Array<Array<{ x: number; y: number }>>): Array<{ x: number; y: number }> {
+    const data = segs.filter(s => {
+      if (s.length < 2) return false;
+      const xs = new Set(s.map(p => Math.round(p.x)));
+      return xs.size > 1; // spans horizontally → it's the value polyline
+    });
+    // The longest such segment is the series line.
+    return data.sort((a, b) => b.length - a.length)[0] ?? [];
+  }
+
+  it('gap (default when absent): the null breaks the line, nothing plots at the middle category', () => {
+    // With a middle hole the line must NOT connect A→C directly. The default
+    // (no dispBlanksAs) keeps the historical gap behavior (byte-stable).
+    const rec = pathRecordingCtx();
+    renderChart(rec.ctx, holeModel('line'), RECT, 1);
+    const line = dataLine(rec.segments);
+    const midX = RECT.x + RECT.w / 2;
+    const nearMid = line.filter(p => Math.abs(p.x - midX) < RECT.w * 0.1);
+    // gap: no vertex at the middle category (the null point is skipped and not
+    // bridged, so nothing is plotted near the center x from the connecting run).
+    expect(nearMid.length).toBe(0);
+  });
+
+  it('zero: the null cell plots at the value-axis zero (a low mid vertex)', () => {
+    const rec = pathRecordingCtx();
+    renderChart(rec.ctx, holeModel('line', 'zero'), RECT, 1);
+    const line = dataLine(rec.segments);
+    const midX = RECT.x + RECT.w / 2;
+    const midPts = line.filter(p => Math.abs(p.x - midX) < RECT.w * 0.1);
+    // zero: the middle category IS plotted (at value 0), so a vertex exists near
+    // the center x — and it sits at the BOTTOM of the plot (largest y).
+    expect(midPts.length).toBeGreaterThan(0);
+    const maxY = Math.max(...line.map(p => p.y));
+    expect(midPts.some(p => Math.abs(p.y - maxY) < 1)).toBe(true);
+  });
+
+  it('span: the null is skipped but A and C connect directly (no mid vertex, endpoints high)', () => {
+    const rec = pathRecordingCtx();
+    renderChart(rec.ctx, holeModel('line', 'span'), RECT, 1);
+    const line = dataLine(rec.segments);
+    // span: only A and C are vertices, joined by a straight lineTo, so the
+    // polyline has exactly the two endpoints and NO mid vertex (unlike zero) —
+    // yet unlike gap the run is continuous.
+    const midX = RECT.x + RECT.w / 2;
+    const midPts = line.filter(p => Math.abs(p.x - midX) < RECT.w * 0.1);
+    expect(midPts.length).toBe(0);
+    // Both endpoints present and at their real (non-zero) heights — the chord
+    // runs high across the plot, not down to the baseline.
+    const firstX = RECT.x + RECT.w * (0.5 / 3);
+    const lastX = RECT.x + RECT.w * (2.5 / 3);
+    expect(line.some(p => Math.abs(p.x - firstX) < RECT.w * 0.12)).toBe(true);
+    expect(line.some(p => Math.abs(p.x - lastX) < RECT.w * 0.12)).toBe(true);
+  });
+});
+
+describe('CH9 — dispBlanksAs="zero" applies to per-point data labels too (§21.2.2.42)', () => {
+  // The marker loop (line 1452 in renderer.ts) already draws a marker for a
+  // null point in "zero" mode. drawCategoryDataLabels must agree: a null cell
+  // reads as 0 for BOTH the marker and its label, so "0" is drawn at the null
+  // category — matching the spec's "treat the blank cell as zero" semantics
+  // (a zero value gets a value label like any other plotted point).
+  function labelHoleModel(dispBlanksAs?: string): ChartModel {
+    return baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [series({
+        name: 'S',
+        values: [10, null, 20],
+        seriesDataLabels: { showVal: true, showSerName: false, showCatName: false, showPercent: false },
+      })],
+      ...(dispBlanksAs ? { dispBlanksAs } : {}),
+    });
+  }
+
+  /** Data labels only — excludes the value-axis tick column (fixed left x) and
+   *  the category-axis row (fixed bottom y), which also emit plain numeric /
+   *  "A"/"B"/"C" text via fillText. */
+  function dataLabelTexts(texts: TextCall[]): string[] {
+    const axisTickX = Math.min(...texts.map(t => t.x));
+    const catAxisY = Math.max(...texts.map(t => t.y));
+    return texts
+      .filter(t => Math.abs(t.x - axisTickX) > 1 && Math.abs(t.y - catAxisY) > 1)
+      .map(t => t.text);
+  }
+
+  it('zero: the null category gets a "0" label alongside 10 and 20', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, labelHoleModel('zero'), RECT, 1);
+    const labelTexts = dataLabelTexts(rec.texts);
+    expect(labelTexts).toContain('10');
+    expect(labelTexts).toContain('20');
+    expect(labelTexts).toContain('0');
+  });
+
+  it('gap (default when absent): the null category gets no label at all', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, labelHoleModel(), RECT, 1);
+    const labelTexts = dataLabelTexts(rec.texts);
+    expect(labelTexts).toContain('10');
+    expect(labelTexts).toContain('20');
+    expect(labelTexts.some(t => t === '0')).toBe(false);
+  });
+
+  it('span: the null category is skipped (no label), same as gap', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, labelHoleModel('span'), RECT, 1);
+    const labelTexts = dataLabelTexts(rec.texts);
+    expect(labelTexts).toContain('10');
+    expect(labelTexts).toContain('20');
+    expect(labelTexts.some(t => t === '0')).toBe(false);
+  });
+
+  it('a stacked line always labels a null cell at 0, regardless of dispBlanksAs (a stacked sum already reads null as 0)', () => {
+    // Mirrors the marker loop's own gate (renderer.ts ~line 1453): stacked
+    // series never skip a null point, independent of dispBlanksAs — a null
+    // contributes 0 to the running stack sum either way. No dispBlanksAs set
+    // (defaults to "gap" for an unstacked series) must NOT suppress the label
+    // here, since this series is stacked.
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedLine',
+      categories: ['A', 'B', 'C'],
+      series: [series({
+        name: 'S',
+        values: [10, null, 20],
+        seriesDataLabels: { showVal: true, showSerName: false, showCatName: false, showPercent: false },
+      })],
+    }), RECT, 1);
+    const labelTexts = dataLabelTexts(rec.texts);
+    expect(labelTexts).toContain('10');
+    expect(labelTexts).toContain('20');
+    expect(labelTexts).toContain('0');
+  });
+});

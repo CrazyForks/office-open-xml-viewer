@@ -1202,12 +1202,24 @@ function renderLineChart(
         return t || 1;
       })
     : null;
+  // How null cells are plotted (`<c:dispBlanksAs>`, §21.2.2.42). Default "gap"
+  // preserves the historical line break (byte-stable). "zero" treats a null as
+  // 0; "span" bridges the neighbours with a straight line (skip the null but
+  // keep the run going). Only unstacked charts see nulls — a stacked sum already
+  // reads null as 0 — so the value only steers the unstacked path below.
+  const dispBlanks = chart.dispBlanksAs ?? 'gap';
+
   // The plotted (cumulative) value for series `si` at category `ci`: the running
   // sum of series 0..si, percent-normalized when pct. Un-stacked charts return
-  // the raw value. Null cells contribute 0 to the stack (matching the area
-  // renderer's `?? 0`); full dispBlanksAs support is tracked separately (CH9).
+  // the raw value (with "zero"-mode nulls read as 0). Null cells contribute 0 to
+  // the stack (matching the area renderer's `?? 0`).
   const plotted = (si: number, ci: number): number => {
-    if (!stacked) return chart.series[si].values[ci] as number;
+    if (!stacked) {
+      const v = chart.series[si].values[ci];
+      // "zero": a blank plots at value 0. gap/span never reach here for a null
+      // (the caller skips those indices), so the `?? 0` is only used by "zero".
+      return v == null ? 0 : v;
+    }
     let sum = 0;
     for (let k = 0; k <= si; k++) sum += chart.series[k].values[ci] ?? 0;
     return pct && pctTotals ? (sum / pctTotals[ci]) * 100 : sum;
@@ -1383,27 +1395,81 @@ function renderLineChart(
     const yOf = yMapFor(s);
     ctx.strokeStyle = color; ctx.lineWidth = lineWidthPx; ctx.setLineDash([]);
     ctx.beginPath();
-    let started = false;
+    // Collect runs of consecutive present points (a null breaks the line into a
+    // fresh run; stacked charts have no nulls in the plotted sum). Each run is
+    // stroked as a polyline or a smooth spline (§21.2.2.194) via appendCurve.
+    // For a non-smooth series this emits the exact prior moveTo/lineTo sequence
+    // (byte-stable); smooth swaps the straight segments for a Bézier curve.
+    const smooth = s.smooth === true;
+    let run: Array<{ x: number; y: number }> = [];
+    const flushRun = (): void => {
+      if (run.length === 0) return;
+      ctx.moveTo(run[0].x, run[0].y);
+      appendCurve(ctx, run, smooth);
+      run = [];
+    };
     for (let ci = 0; ci < n; ci++) {
-      // Unstacked: a null cell breaks the line. Stacked: a null contributes 0
-      // to the running sum (no gap), matching the area renderer.
-      if (!stacked && s.values[ci] == null) { started = false; continue; }
-      const py = yOf(plotted(si, ci)); const px = toX(ci);
-      if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+      // Unstacked null handling per dispBlanksAs (§21.2.2.42): "gap" flushes the
+      // run (line breaks — the historical default); "span" skips the null but
+      // keeps the run open (neighbours join directly); "zero" plots it at 0
+      // (plotted() reads a null as 0). Stacked charts never have plotted nulls.
+      if (!stacked && s.values[ci] == null) {
+        if (dispBlanks === 'gap') { flushRun(); continue; }
+        if (dispBlanks === 'span') continue;
+        // "zero": fall through and push a point at value 0.
+      }
+      run.push({ x: toX(ci), y: yOf(plotted(si, ci)) });
     }
+    flushRun();
     ctx.stroke();
+
+    // Error bars (`<c:errBars>`, §21.2.2.20) — drawn under the markers so the
+    // dots overlay the bar tips. Only fires for series that carry them.
+    const plottedOf = (ci: number): number => plotted(si, ci);
+    for (const eb of s.errBars ?? []) {
+      drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, color);
+    }
+
     ctx.fillStyle = color;
     // ECMA-376 §21.2.2.32 — when the series resolves to no marker, skip the
     // data-point dots but keep data labels. Markers / labels pin to the plotted
     // (cumulative) value so they ride the stacked line, not the raw datum.
     const drawMarkers = s.showMarker !== false;
+    // Series carrying explicit `<c:marker>` detail route through drawMarker
+    // (symbol/size/fill/line + per-point `<c:dPt>` overrides). Series without
+    // any detail keep the historical fixed-circle fast path unchanged
+    // (byte-stable). `markerSymbol: "none"` is caught by the showMarker gate.
+    const hasMarkerDetail = seriesHasMarkerDetail(s);
+    // Per-point / series-level data labels (`<c:dLbl idx>` / `<c:dLbls>`) take
+    // precedence over the family's simple `showDataLabels` value dump.
+    const perPointLabels = drawCategoryDataLabels(
+      ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false,
+      // Mirror the marker loop's gate just below: stacked series never see a
+      // plotted null (a stacked sum already reads null as 0), and unstacked
+      // "zero" mode plots the null at 0 — both cases get a label too.
+      stacked || dispBlanks === 'zero',
+    );
+    if (perPointLabels) ctx.fillStyle = color;
     for (let ci = 0; ci < n; ci++) {
-      if (!stacked && s.values[ci] == null) continue;
+      // A null point gets a marker/label only in "zero" mode (plotted at 0);
+      // "gap"/"span" leave the hole empty.
+      if (!stacked && s.values[ci] == null && dispBlanks !== 'zero') continue;
       const pv = plotted(si, ci);
       if (drawMarkers) {
-        ctx.beginPath(); ctx.arc(toX(ci), yOf(pv), markerR, 0, Math.PI * 2); ctx.fill();
+        if (hasMarkerDetail) {
+          const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
+          const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle');
+          if (symbol !== 'none') {
+            const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
+            const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? color;
+            const line = dpt?.markerLine ?? s.markerLine ?? null;
+            drawMarker(ctx, toX(ci), yOf(pv), symbol, sizePt, fill, line, ptToPx);
+          }
+        } else {
+          ctx.beginPath(); ctx.arc(toX(ci), yOf(pv), markerR, 0, Math.PI * 2); ctx.fill();
+        }
       }
-      if (chart.showDataLabels) {
+      if (chart.showDataLabels && !perPointLabels) {
         ctx.font = `${dataLabelPx}px sans-serif`;
         ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
         const labelOffset = drawMarkers ? markerR + 1 : 2;
@@ -1609,20 +1675,35 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // stacked), so its `toY` mapping stays the primary one.
     const yOf = yMapFor(s);
 
+    // Smooth (`<c:ser><c:smooth>`, §21.2.2.194) curves the top edge through the
+    // points; the baseline connection stays straight. Non-smooth keeps the exact
+    // prior moveTo/lineTo sequence (byte-stable) — appendCurve with smooth=false
+    // emits identical lineTo calls.
+    //
+    // NB: `CT_AreaSer` (§A.5.1) has no `<c:smooth>` child (only `CT_LineSer` /
+    // `CT_ScatterSer` do), so `extract_series_smooth` never sets `s.smooth` for
+    // a real area series and this branch is dead against actual chart XML —
+    // it only fires for a model constructed directly (tests / other producers).
+    // Kept for symmetry with the line renderer above rather than dropped.
+    const smooth = s.smooth === true;
     ctx.beginPath();
     if (stacked && stackBase) {
+      const topPts = [];
       for (let ci = 0; ci < n; ci++) {
-        const v = stackedValue(si, ci) + stackBase[ci];
-        const px = toX(ci); const py = toY(v);
-        if (ci === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        topPts.push({ x: toX(ci), y: toY(stackedValue(si, ci) + stackBase[ci]) });
       }
+      ctx.moveTo(topPts[0].x, topPts[0].y);
+      appendCurve(ctx, topPts, smooth);
       for (let ci = n - 1; ci >= 0; ci--) {
         ctx.lineTo(toX(ci), toY(stackBase[ci]));
       }
       for (let ci = 0; ci < n; ci++) stackBase[ci] += stackedValue(si, ci);
     } else {
+      const topPts = [];
+      for (let ci = 0; ci < n; ci++) topPts.push({ x: toX(ci), y: yOf(s.values[ci] ?? 0) });
       ctx.moveTo(toX(0), baseY);
-      for (let ci = 0; ci < n; ci++) ctx.lineTo(toX(ci), yOf(s.values[ci] ?? 0));
+      ctx.lineTo(topPts[0].x, topPts[0].y);
+      appendCurve(ctx, topPts, smooth);
       ctx.lineTo(toX(n - 1), baseY);
     }
     ctx.closePath();
@@ -1630,6 +1711,75 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.fill();
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]);
     ctx.stroke();
+  }
+
+  // Markers, error bars, and per-point data labels for area series. Drawn in a
+  // SEPARATE forward pass (after all fills) so the fill loop above stays
+  // byte-identical, and each block fires ONLY for series carrying the relevant
+  // fields — an area chart with no marker/errBar/dLbl detail draws exactly as
+  // before. The plotted top-of-band value matches where the fill's top edge sat
+  // (cumulative for stacked). ECMA-376 §21.2.2.32 / §21.2.2.20 / §21.2.2.45.
+  //
+  // NB: an area chart's filled region has always read a blank cell as 0
+  // (`?? 0`), so `<c:dispBlanksAs>` (§21.2.2.42) is a no-op for the area family
+  // here — breaking or spanning a *filled* region is not modeled, and changing
+  // the default would break byte-stability. dispBlanksAs steers the line family
+  // (where "gap" is the historical default).
+  {
+    const areaMarkerR = Math.max(2, 2.5 * ptToPx);
+    // Top of each series' band per category (stacked); the raw value otherwise.
+    // Rebuilt here independently of the fill loop's mutated stackBase. The fill
+    // loop above draws bands back-to-front (si = length-1 → 0) and accumulates
+    // stackBase AFTER each band, so band si's top edge is the REVERSE-cumulative
+    // sum Σ_{k=si..length-1} — series 0 (drawn last, on top) reaches the full
+    // stack total; the last series (drawn first, at the bottom) has only its
+    // own value. A forward sum (Σ_{k=0..si}) would swap that ordering.
+    const topValue = (si: number, ci: number): number => {
+      if (stacked) {
+        let sum = 0;
+        for (let k = si; k < chart.series.length; k++) sum += stackedValue(k, ci);
+        return sum;
+      }
+      return chart.series[si].values[ci] ?? 0;
+    };
+    for (let si = 0; si < chart.series.length; si++) {
+      const s = chart.series[si];
+      const color = chartColor(si, s);
+      const yOf = yMapFor(s);
+      const plottedOf = (ci: number): number => topValue(si, ci);
+      // Error bars first (markers overlay their tips).
+      for (const eb of s.errBars ?? []) {
+        drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, color);
+      }
+      // Markers only when the series opts in (`<c:marker>` symbol/size/… — area
+      // charts default to NO markers, so nothing fires without explicit detail).
+      if (s.showMarker === true || seriesHasMarkerDetail(s)) {
+        for (let ci = 0; ci < n; ci++) {
+          if (s.values[ci] == null) continue;
+          const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
+          const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle');
+          if (symbol === 'none') continue;
+          const px = toX(ci); const py = yOf(plottedOf(ci));
+          if (seriesHasMarkerDetail(s)) {
+            const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
+            const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? color;
+            const line = dpt?.markerLine ?? s.markerLine ?? null;
+            drawMarker(ctx, px, py, symbol, sizePt, fill, line, ptToPx);
+          } else {
+            ctx.fillStyle = color;
+            ctx.beginPath(); ctx.arc(px, py, areaMarkerR, 0, Math.PI * 2); ctx.fill();
+          }
+        }
+      }
+      // Per-point / series-level data labels. Area's filled region has always
+      // read a blank cell as 0 (`?? 0`, see the topValue/plottedOf comment
+      // above), so every category index is a "plotted" point here regardless
+      // of dispBlanksAs — pass true unconditionally (byte-stable: unchanged
+      // from before this parameter existed).
+      drawCategoryDataLabels(
+        ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false, true,
+      );
+    }
   }
 
   if (!chart.valAxisHidden) {
@@ -2544,6 +2694,36 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+/** Append `pts` to the CURRENT path starting from `pts[0]` (which the caller has
+ *  already `moveTo`'d, or the first point is the current pen position). When
+ *  `smooth` and there are ≥3 points, draw a Catmull-Rom → cubic-Bézier curve
+ *  through the points (tangents from neighbours, the same formula scatter uses,
+ *  ECMA-376 §21.2.2.194); otherwise straight `lineTo` segments. The caller owns
+ *  `beginPath`/`moveTo`/`stroke`/`fill` so this composes into both the line
+ *  stroke and the area fill's top edge. */
+function appendCurve(
+  ctx: CanvasRenderingContext2D,
+  pts: Array<{ x: number; y: number }>,
+  smooth: boolean,
+): void {
+  if (pts.length === 0) return;
+  if (smooth && pts.length >= 3) {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] ?? pts[i];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[i + 2] ?? p2;
+      const cp1x = p1.x + (p2.x - p0.x) / 6;
+      const cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp2x = p2.x - (p3.x - p1.x) / 6;
+      const cp2y = p2.y - (p3.y - p1.y) / 6;
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+    }
+  } else {
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  }
+}
+
 function dashPatternForPreset(preset: string | undefined): number[] {
   if (!preset) return [];
   switch (preset) {
@@ -2556,6 +2736,128 @@ function dashPatternForPreset(preset: string | undefined): number[] {
     case 'dashDotDot':case 'sysDashDotDot':case 'lgDashDotDot': return [4, 2, 1, 2, 1, 2];
     default: return [];
   }
+}
+
+/** True when the series carries any explicit `<c:marker>` detail (symbol, size,
+ *  fill, line) or per-point `<c:dPt>` marker overrides — i.e. a reason to route
+ *  through {@link drawMarker} instead of the line/area family's historical
+ *  fixed-circle fast path. A series without any of these keeps the exact prior
+ *  circle marker (byte-stable), so charts that never parsed marker detail are
+ *  unchanged. `markerSymbol: "none"` counts as detail (it disables the marker),
+ *  handled by the caller's showMarker gate. */
+function seriesHasMarkerDetail(s: ChartSeries): boolean {
+  return (
+    s.markerSymbol != null ||
+    s.markerSize != null ||
+    s.markerFill != null ||
+    s.markerLine != null ||
+    (s.dataPointOverrides != null && s.dataPointOverrides.length > 0)
+  );
+}
+
+/** Draw error bars for a category-axis series (line / area). Mirrors the scatter
+ *  {@link drawSeriesErrorBars} cap/dash geometry, but maps points by CATEGORY
+ *  INDEX (`xAt(ci)`) with a per-series value→px mapping (`yAt`) instead of the
+ *  numeric X mapping scatter uses. Only the Y direction is drawn: a category
+ *  axis has no data-unit X scale, so `<c:errBars dir="x">` cannot be positioned
+ *  (Excel likewise only shows Y error bars on category charts). `plotted`
+ *  returns the point's plotted (possibly stacked) value so bars ride the drawn
+ *  line. Null cells are skipped. */
+function drawCategoryErrorBars(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  eb: NonNullable<ChartSeries['errBars']>[number],
+  n: number,
+  xAt: (ci: number) => number,
+  yAt: (v: number) => number,
+  plotted: (ci: number) => number,
+  fallbackColor: string,
+): void {
+  if (eb.dir === 'x') return; // no data-unit X scale on a category axis
+  const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
+  const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
+  ctx.save();
+  ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
+  ctx.lineWidth = eb.lineWidthEmu ? Math.max(0.5, eb.lineWidthEmu / EMU_PER_PT) : 1;
+  ctx.setLineDash(dashPatternForPreset(eb.dash));
+  const capHalf = ctx.lineWidth * 1.5;
+  for (let ci = 0; ci < n; ci++) {
+    if (s.values[ci] == null) continue;
+    const pv = plotted(ci);
+    const px = xAt(ci); const py = yAt(pv);
+    const drawSeg = (dataDelta: number): void => {
+      const y2 = yAt(pv + dataDelta);
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, y2); ctx.stroke();
+      if (!eb.noEndCap) {
+        ctx.save(); ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(px - capHalf, y2); ctx.lineTo(px + capHalf, y2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    };
+    if (drawPlus) { const v = eb.plus[ci]; if (v != null) drawSeg(v); }
+    if (drawMinus) { const v = eb.minus[ci]; if (v != null) drawSeg(-v); }
+  }
+  ctx.restore();
+}
+
+/** Per-point data labels for a category-axis series (line / area). Consumes the
+ *  same `<c:dLbl idx>` overrides and series-level `<c:dLbls>` block scatter does
+ *  ({@link drawSeriesDataLabels}), but maps points by CATEGORY INDEX with the
+ *  series' plotted value → px mapping. Returns true when it handled the labels
+ *  for this series (so the caller skips the family's legacy `showDataLabels`
+ *  path), false when the series has no override/series-level label config.
+ *
+ *  `plotNullAsZero` mirrors the marker loop's dispBlanksAs gate (§21.2.2.42):
+ *  a null cell normally has no label (gap/span leave the point unplotted), but
+ *  in "zero" mode the blank IS a plotted point (value 0) and gets a label like
+ *  any other — the line-chart caller passes `dispBlanks === 'zero'`. The area
+ *  caller passes `true` unconditionally: area's fill has always read a blank
+ *  cell as 0 (`?? 0`, dispBlanksAs is a no-op for the filled region), so its
+ *  per-point labels have likewise always covered every category index. */
+function drawCategoryDataLabels(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  cats: string[],
+  n: number,
+  xAt: (ci: number) => number,
+  yAt: (v: number) => number,
+  plotted: (ci: number) => number,
+  ph: number,
+  ptToPx: number,
+  date1904: boolean,
+  plotNullAsZero: boolean,
+): boolean {
+  const overrides = s.dataLabelOverrides ?? [];
+  const seriesDef = s.seriesDataLabels;
+  if (overrides.length === 0 && !seriesDef) return false;
+  for (let ci = 0; ci < n; ci++) {
+    if (s.values[ci] == null && !plotNullAsZero) continue;
+    const pv = plotted(ci);
+    const ovr = overrides.find(o => o.idx === ci);
+    let text: string;
+    if (ovr) {
+      if (ovr.text === '') continue; // `<c:delete val="1"/>` — deleted label
+      text = ovr.text;
+    } else if (seriesDef && (seriesDef.showVal || seriesDef.showSerName || seriesDef.showCatName)) {
+      const parts: string[] = [];
+      if (seriesDef.showCatName) parts.push(cats[ci] ?? '');
+      if (seriesDef.showSerName) parts.push(s.name);
+      if (seriesDef.showVal) parts.push(formatChartValWithCode(pv, seriesDef.formatCode ?? null, date1904));
+      text = parts.filter(Boolean).join(' ');
+      if (!text) continue;
+    } else {
+      continue;
+    }
+    const pos = ovr?.position ?? seriesDef?.position ?? 't';
+    const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
+    const fontSizePx = sizeHpt ? (sizeHpt / 100) * ptToPx : Math.max(9, Math.min(11, ph / 25));
+    const color = ovr?.fontColor ?? seriesDef?.fontColor;
+    const bold = ovr?.fontBold ?? seriesDef?.fontBold ?? false;
+    drawDataLabelText(ctx, xAt(ci), yAt(pv), text, pos, fontSizePx, color, bold);
+  }
+  return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

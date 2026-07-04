@@ -458,6 +458,11 @@ pub struct ChartSeries {
     /// time so the renderer just draws lines.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub err_bars: Vec<ErrBars>,
+    /// `<c:ser><c:smooth val>` (ECMA-376 §21.2.2.194) — line/area smoothing
+    /// flag. None = straight polyline (default); Some(true/false) when the
+    /// element is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth: Option<bool>,
 }
 
 /// Per-point override pulled from `<c:dPt idx="N">` siblings of a series
@@ -794,6 +799,11 @@ pub struct ChartData {
     /// resolve against the 1904 date system. Default false (1900 system).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub date1904: bool,
+    /// `<c:chart><c:dispBlanksAs val>` (ECMA-376 §21.2.2.42) — null-cell
+    /// plotting for line/area ("gap" | "zero" | "span"). None = absent
+    /// (renderer defaults to "gap").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disp_blanks_as: Option<String>,
 }
 
 /// Generic `<c:manualLayout>` block (used for title, plotArea, legend).
