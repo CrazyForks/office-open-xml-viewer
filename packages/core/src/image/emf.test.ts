@@ -63,12 +63,20 @@ class Writer {
 // EMF record type ids ([MS-EMF] 2.1.1 RecordType).
 const EMR = {
   HEADER: 1,
+  SETWINDOWEXTEX: 9,
+  SETWINDOWORGEX: 10,
+  SETVIEWPORTEXTEX: 11,
+  SETVIEWPORTORGEX: 12,
   EOF: 14,
+  SETMAPMODE: 17,
   SETPOLYFILLMODE: 19,
   SETTEXTALIGN: 22,
   SETTEXTCOLOR: 24,
+  SCALEVIEWPORTEXTEX: 31,
+  SCALEWINDOWEXTEX: 32,
   SAVEDC: 33,
   RESTOREDC: 34,
+  SETWORLDTRANSFORM: 35,
   MODIFYWORLDTRANSFORM: 36,
   SELECTOBJECT: 37,
   CREATEPEN: 38,
@@ -355,6 +363,182 @@ describe('playEmf — world transform, pen, polyline16', () => {
     const m = makeRecordingCtx();
     playEmf(file, m.ctx, 100, 100);
     expect(m.calls.some((c) => c.op === 'stroke')).toBe(false);
+  });
+});
+
+// ── playEmf: window/viewport mapping (MS-EMF 2.3.11 page→device) ─────────────
+
+describe('playEmf — window/viewport mapping (page → device)', () => {
+  it('MM_TEXT default leaves geometry at the world-transform mapping', () => {
+    // No window/viewport records → the page→device stage is the identity, so a
+    // 1:1 device mapping (bounds == target) draws logical points unchanged.
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(100).i32(100).u32(2).i16(10).i16(20).i16(30).i16(40),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+    const moves = m.calls.filter((c) => c.op === 'moveTo');
+    const lines = m.calls.filter((c) => c.op === 'lineTo');
+    expect(moves[0].args).toEqual([10, 20]);
+    expect(lines[0].args).toEqual([30, 40]);
+  });
+
+  it('maps page → device via window origin/extent and viewport origin/extent', () => {
+    // Window {org 0,0; ext 1000×1000} → Viewport {org 0,0; ext 100×100} on a
+    // 100×100 device (bounds 0..100), target 100×100 (device→target ×1).
+    // page→device factor = vpExt/winExt = 100/1000 = 0.1, so logical (500,800)
+    // → device (50,80) → px (50,80).
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.SETMAPMODE, (w) => w.u32(8)), // MM_ANISOTROPIC
+      record(EMR.SETWINDOWEXTEX, (w) => w.i32(1000).i32(1000)),
+      record(EMR.SETVIEWPORTEXTEX, (w) => w.i32(100).i32(100)),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(500).i16(800).i16(100).i16(200),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+    const moves = m.calls.filter((c) => c.op === 'moveTo');
+    const lines = m.calls.filter((c) => c.op === 'lineTo');
+    expect(moves[0].args[0]).toBeCloseTo(50, 4);
+    expect(moves[0].args[1]).toBeCloseTo(80, 4);
+    expect(lines[0].args[0]).toBeCloseTo(10, 4);
+    expect(lines[0].args[1]).toBeCloseTo(20, 4);
+  });
+
+  it('honors window and viewport origins (page → device offset)', () => {
+    // winOrg (100,100), vpOrg (10,20), ext 1:1. device = (page−winOrg)+vpOrg.
+    // logical (150,160) → device (150−100+10, 160−100+20) = (60,80) → px.
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.SETMAPMODE, (w) => w.u32(8)),
+      record(EMR.SETWINDOWORGEX, (w) => w.i32(100).i32(100)),
+      record(EMR.SETVIEWPORTORGEX, (w) => w.i32(10).i32(20)),
+      record(EMR.SETWINDOWEXTEX, (w) => w.i32(100).i32(100)),
+      record(EMR.SETVIEWPORTEXTEX, (w) => w.i32(100).i32(100)),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(100).i32(100).u32(2).i16(150).i16(160).i16(110).i16(120),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playEmf(file, m.ctx, 100, 100);
+    const moves = m.calls.filter((c) => c.op === 'moveTo');
+    const lines = m.calls.filter((c) => c.op === 'lineTo');
+    expect(moves[0].args[0]).toBeCloseTo(60, 4);
+    expect(moves[0].args[1]).toBeCloseTo(80, 4);
+    expect(lines[0].args[0]).toBeCloseTo(20, 4);
+    expect(lines[0].args[1]).toBeCloseTo(40, 4);
+  });
+
+  it('brings large window-space geometry back on-canvas (pptx null-drop fix)', () => {
+    // Regression for the pptx EMF null-drop: a chart drawn in a big logical
+    // window (0..10000) with NO window→viewport mapping would land ~100× off
+    // the device bounds (0..100) → clipped to nothing → drew=false → null.
+    // With the mapping (window 10000 → viewport 100) it scales onto the raster.
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.SETMAPMODE, (w) => w.u32(8)),
+      record(EMR.SETWINDOWEXTEX, (w) => w.i32(10000).i32(10000)),
+      record(EMR.SETVIEWPORTEXTEX, (w) => w.i32(100).i32(100)),
+      // brush ih=1 SOLID blue; polygon fills a big window-space rectangle.
+      record(EMR.CREATEBRUSHINDIRECT, (w) => w.u32(1).u32(0).u32(0x00ff0000).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYGON16, (w) =>
+        w
+          .i32(0)
+          .i32(0)
+          .i32(10000)
+          .i32(10000)
+          .u32(4)
+          .i16(1000)
+          .i16(1000)
+          .i16(9000)
+          .i16(1000)
+          .i16(9000)
+          .i16(9000)
+          .i16(1000)
+          .i16(9000),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+    const moves = m.calls.filter((c) => c.op === 'moveTo');
+    const lines = m.calls.filter((c) => c.op === 'lineTo');
+    // All four corners land inside 0..100 (10..90), not off at 1000..9000.
+    const xs = [moves[0].args[0], ...lines.map((l) => l.args[0])] as number[];
+    const ys = [moves[0].args[1], ...lines.map((l) => l.args[1])] as number[];
+    for (const v of [...xs, ...ys]) {
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(100);
+    }
+    expect(moves[0].args[0]).toBeCloseTo(10, 4);
+    expect(moves[0].args[1]).toBeCloseTo(10, 4);
+    expect(m.calls.some((c) => c.op === 'fill')).toBe(true);
+  });
+
+  it('SCALEVIEWPORTEXTEX scales the viewport extent by num/denom', () => {
+    // viewport ext 100, then SCALE ×(1/2) → 50. window 1000 → factor 50/1000.
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.SETMAPMODE, (w) => w.u32(8)),
+      record(EMR.SETWINDOWEXTEX, (w) => w.i32(1000).i32(1000)),
+      record(EMR.SETVIEWPORTEXTEX, (w) => w.i32(100).i32(100)),
+      record(EMR.SCALEVIEWPORTEXTEX, (w) => w.i32(1).i32(2).i32(1).i32(2)),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(1000).i16(1000).i16(0).i16(0),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playEmf(file, m.ctx, 100, 100);
+    const moves = m.calls.filter((c) => c.op === 'moveTo');
+    // (1000)·(50/1000) = 50.
+    expect(moves[0].args[0]).toBeCloseTo(50, 4);
+    expect(moves[0].args[1]).toBeCloseTo(50, 4);
+  });
+
+  it('scopes the window/viewport mapping to SAVEDC/RESTOREDC', () => {
+    // SAVEDC, set a window/viewport mapping, RESTOREDC → the mapping reverts to
+    // the identity, so the second polyline draws at the world mapping again.
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.SAVEDC, () => {}),
+      record(EMR.SETMAPMODE, (w) => w.u32(8)),
+      record(EMR.SETWINDOWEXTEX, (w) => w.i32(1000).i32(1000)),
+      record(EMR.SETVIEWPORTEXTEX, (w) => w.i32(100).i32(100)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(500).i16(500).i16(0).i16(0),
+      ),
+      record(EMR.RESTOREDC, (w) => w.i32(-1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(100).i32(100).u32(2).i16(50).i16(50).i16(0).i16(0),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playEmf(file, m.ctx, 100, 100);
+    const moves = m.calls.filter((c) => c.op === 'moveTo');
+    // First polyline (scaled): 500·0.1 = 50. Second (post-restore, identity): 50.
+    expect(moves[0].args[0]).toBeCloseTo(50, 4);
+    expect(moves[1].args[0]).toBeCloseTo(50, 4);
   });
 });
 
