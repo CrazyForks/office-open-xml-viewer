@@ -1,5 +1,6 @@
 use crate::parse_color;
 use crate::types::*;
+use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::is_x_ns;
 use ooxml_common::zip::read_zip_string;
 
@@ -12,7 +13,7 @@ pub(crate) fn parse_default_font(archive: &mut crate::XlsxZip) -> (Option<String
     let Ok(xml) = read_zip_string(archive, "xl/styles.xml") else {
         return (None, None);
     };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+    let Ok(doc) = parse_guarded(&xml) else {
         return (None, None);
     };
     let mut font_id: usize = 0;
@@ -60,7 +61,7 @@ pub(crate) fn parse_styles(
     theme_colors: &[String],
 ) -> Result<Styles, String> {
     let xml = read_zip_string(archive, "xl/styles.xml")?;
-    let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
+    let doc = parse_guarded(&xml).map_err(|e| e.to_string())?;
 
     let num_fmts = parse_num_fmts(&doc);
     let fonts = parse_fonts(&doc, theme_colors);

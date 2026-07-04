@@ -775,14 +775,62 @@ describe('decodeRasterOrMetafile', () => {
     expect(cib).toHaveBeenCalledWith(blob);
   });
 
-  it('sniffs a ≤44-byte slice for raster: only the header is read, the Blob is handed to createImageBitmap whole', async () => {
+  it('a PNG decode bomb (60000×60000 header, tiny payload) → null, WITHOUT calling createImageBitmap (RB1)', async () => {
+    // The decode-bomb guard: a valid PNG header declaring a 60000×60000 image
+    // (~14 GB RGBA once decoded) must be refused BEFORE createImageBitmap ever
+    // allocates the surface. The fixture is a couple dozen bytes.
+    const cib = vi.fn(async (_blob: Blob) => ({ width: 1, height: 1, close() {} }) as unknown as ImageBitmap);
+    vi.stubGlobal('createImageBitmap', cib);
+    // 8-byte PNG signature + IHDR chunk declaring 60000×60000.
+    const bomb = new Uint8Array(26);
+    bomb.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    // IHDR length (13), "IHDR", then big-endian W=60000, H=60000.
+    bomb.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const put = (o: number, v: number) => {
+      bomb[o] = (v >>> 24) & 0xff;
+      bomb[o + 1] = (v >>> 16) & 0xff;
+      bomb[o + 2] = (v >>> 8) & 0xff;
+      bomb[o + 3] = v & 0xff;
+    };
+    put(16, 60000);
+    put(20, 60000);
+    const blob = new Blob([bomb as BlobPart], { type: 'image/png' });
+    const bmp = await decodeRasterOrMetafile(blob, { widthPt: 50, heightPt: 50 });
+    expect(bmp).toBeNull(); // refused — graceful "skip the picture" contract
+    expect(cib).not.toHaveBeenCalled(); // never handed to the decoder
+  });
+
+  it('an in-budget PNG (1920×1080 header) still decodes (no false positive)', async () => {
+    const fake = { width: 1920, height: 1080, close() {} } as unknown as ImageBitmap;
+    const cib = vi.fn(async (_blob: Blob) => fake);
+    vi.stubGlobal('createImageBitmap', cib);
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const put = (o: number, v: number) => {
+      png[o] = (v >>> 24) & 0xff;
+      png[o + 1] = (v >>> 16) & 0xff;
+      png[o + 2] = (v >>> 8) & 0xff;
+      png[o + 3] = v & 0xff;
+    };
+    put(16, 1920);
+    put(20, 1080);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+    const bmp = await decodeRasterOrMetafile(blob, { widthPt: 50, heightPt: 50 });
+    expect(bmp).toBe(fake);
+    expect(cib).toHaveBeenCalledTimes(1);
+  });
+
+  it('sniffs a header slice for raster: only the header is read, the Blob is handed to createImageBitmap whole', async () => {
     const fake = { width: 3, height: 4, close() {} } as unknown as ImageBitmap;
     const cib = vi.fn(async (_blob: Blob) => fake);
     vi.stubGlobal('createImageBitmap', cib);
 
-    // A raster smaller than the 44-byte sniff window. slice(0,44) must not throw
-    // and the sub-44-byte `isWmf`/`isEmf` length guards must both return false so
-    // the blob falls through to createImageBitmap.
+    // A raster smaller than the sniff window. slice(0,N) must not throw (Blob.slice
+    // clamps to the actual length) and the short `isWmf`/`isEmf` length guards must
+    // both return false so the blob falls through to createImageBitmap. This 7-byte
+    // "PNG-ish" buffer has no valid IHDR, so the dimension sniff returns null
+    // (fail-open) and does not block it.
     const tiny = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]); // 7 bytes, PNG-ish
     const base = new Blob([tiny as BlobPart], { type: 'image/png' });
 

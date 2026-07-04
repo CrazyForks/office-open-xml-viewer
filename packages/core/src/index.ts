@@ -144,6 +144,16 @@ export {
   decodeRasterOrMetafile,
   type DecodeRasterOptions,
 } from './image/wmf';
+// Raster pixel-dimension budget + header sniff (decode-bomb guard, RB1). Shared
+// caps live in `./image/pixel-budget`; `decodeRasterOrMetafile` uses the sniff to
+// refuse an over-budget PNG/JPEG/GIF/BMP/WEBP before `createImageBitmap`.
+export { MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS } from './image/pixel-budget';
+export {
+  sniffRasterDimensions,
+  rasterExceedsBudget,
+  rasterHeaderExceedsBudget,
+  type RasterDimensions,
+} from './image/raster-dimensions';
 // Shared `<a:srcRect>` crop (§20.1.8.55) for all three renderers: the source-rect
 // math, the full-frame raster size for a cropped metafile, and the draw wrapper.
 export {
@@ -232,6 +242,15 @@ export type { MathNode, MathFormula, MathStyle } from './types/math';
 export { EMU_PER_INCH, EMU_PER_PT, EMU_PER_PX, PT_TO_PX } from './units';
 export { isHTMLCanvas, defaultDpr } from './canvas/env';
 export { crispOffset } from './canvas/crisp';
+// Canvas backing-store size clamp (browser-limit guard, RB5): bound a requested
+// canvas size to per-axis + total-area limits every engine honors, preserving
+// aspect ratio, so a pathological page/slide size can't produce a blank canvas.
+export {
+  clampCanvasSize,
+  MAX_CANVAS_DIMENSION,
+  MAX_CANVAS_AREA,
+  type ClampedCanvasSize,
+} from './canvas/clamp';
 // Shared border / line dash-pattern core (§17.18.2 ST_Border / §18.18.3
 // ST_BorderStyle / §20.1.10.49 ST_PresetLineDashVal shape borders /
 // §20.1.10.82 ST_TextUnderlineType run underlines). The

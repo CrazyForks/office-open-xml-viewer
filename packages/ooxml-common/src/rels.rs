@@ -66,7 +66,7 @@ pub fn parse_rels(xml: &str) -> BTreeMap<String, RelTarget> {
     if xml.is_empty() {
         return map;
     }
-    let doc = match roxmltree::Document::parse(xml) {
+    let doc = match crate::depth::parse_guarded(xml) {
         Ok(d) => d,
         Err(_) => return map,
     };

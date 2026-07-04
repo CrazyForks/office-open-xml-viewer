@@ -8,6 +8,7 @@
 
 use crate::parse_color_node;
 use crate::types::*;
+use ooxml_common::depth::parse_guarded;
 use std::collections::HashMap;
 
 /// `ooxml_common::chart::ColorResolver` implementation backed by pptx's
@@ -46,7 +47,7 @@ pub(crate) fn parse_legacy_chart(
     xml: &str,
     theme: &HashMap<String, String>,
 ) -> Option<ChartElement> {
-    let doc = roxmltree::Document::parse(xml).ok()?;
+    let doc = parse_guarded(xml).ok()?;
     let root = doc.root_element();
     let resolver = PptxColorResolver { theme };
     let chart = ooxml_common::chart::parse_chart_part(root, &resolver)?;
@@ -72,7 +73,7 @@ pub(crate) fn parse_chartex(
     style_xml: Option<&str>,
     theme: &HashMap<String, String>,
 ) -> Option<ChartElement> {
-    let doc = roxmltree::Document::parse(xml).ok()?;
+    let doc = parse_guarded(xml).ok()?;
     let root = doc.root_element();
     let resolver = PptxColorResolver { theme };
     // chartEx (waterfall/boxWhisker/…) reads its title font size from the

@@ -1,0 +1,99 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { getPosterBitmap } from './renderer.js';
+import type { MediaElement } from './types';
+
+/**
+ * RB1 (poster path): a `<p:pic>` media element's poster image is attacker-
+ * controllable bytes (`posterPath` / `posterMimeType` come from the
+ * `<a:blip>` in shape.rs). `getPosterBitmap` used to hand the raw poster blob
+ * straight to `createImageBitmap`, which sizes its decoded RGBA surface from the
+ * image HEADER — so a tiny PNG declaring 60000×60000 forces a ~14 GB allocation
+ * (a decompression bomb) that OOMs the tab, bypassing the RB1 guard that already
+ * protects picture blips.
+ *
+ * The fix routes the poster through the same `rasterHeaderExceedsBudget` sniff.
+ * These tests assert the bomb is rejected BEFORE `createImageBitmap` is called,
+ * and that a normal in-budget poster still decodes.
+ */
+
+/** Big-endian u32 into a byte array at `o`. */
+function putBeU32(b: Uint8Array, o: number, v: number): void {
+  b[o] = (v >>> 24) & 0xff;
+  b[o + 1] = (v >>> 16) & 0xff;
+  b[o + 2] = (v >>> 8) & 0xff;
+  b[o + 3] = v & 0xff;
+}
+
+/** A PNG header (8-byte sig + IHDR) declaring `w × h` with almost no payload. */
+function pngHeader(w: number, h: number): Uint8Array {
+  const b = new Uint8Array(26);
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  putBeU32(b, 8, 13);
+  b.set([0x49, 0x48, 0x44, 0x52], 12); // "IHDR"
+  putBeU32(b, 16, w);
+  putBeU32(b, 20, h);
+  return b;
+}
+
+const SENTINEL = { width: 1, height: 1, close: () => {} } as unknown as ImageBitmap;
+
+function mediaEl(posterMimeType = 'image/png'): MediaElement {
+  return {
+    type: 'media',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+    mediaKind: 'video',
+    posterPath: 'ppt/media/image1.png',
+    posterMimeType,
+    mediaPath: 'ppt/media/media1.mp4',
+    mimeType: 'video/mp4',
+  } as unknown as MediaElement;
+}
+
+describe('getPosterBitmap — RB1 poster decode-bomb guard', () => {
+  let createImageBitmapSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    createImageBitmapSpy = vi.fn(async (_blob: Blob) => SENTINEL);
+    vi.stubGlobal('createImageBitmap', createImageBitmapSpy);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects a 60000×60000 PNG poster bomb WITHOUT calling createImageBitmap', async () => {
+    const bomb = pngHeader(60000, 60000); // ~14 GB decoded — tiny on the wire
+    const fetchMedia = vi.fn(
+      async (_path: string) => new Blob([bomb as BlobPart], { type: 'image/png' }),
+    );
+
+    // A fresh element each time (the cache is keyed by element identity).
+    await expect(getPosterBitmap(mediaEl(), fetchMedia)).rejects.toThrow();
+    expect(createImageBitmapSpy).not.toHaveBeenCalled();
+  });
+
+  it('decodes a normal in-budget poster (guard does not block legitimate images)', async () => {
+    const ok = pngHeader(1920, 1080);
+    const fetchMedia = vi.fn(
+      async (_path: string) => new Blob([ok as BlobPart], { type: 'image/png' }),
+    );
+
+    const bmp = await getPosterBitmap(mediaEl(), fetchMedia);
+    expect(bmp).toBe(SENTINEL);
+    expect(createImageBitmapSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an unrecognized (non-raster) poster header to decode normally (fail-open)', async () => {
+    // e.g. an SVG poster: not a recognized raster ⇒ not blocked by the sniff.
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+    const fetchMedia = vi.fn(
+      async (_path: string) => new Blob([svg], { type: 'image/svg+xml' }),
+    );
+
+    const bmp = await getPosterBitmap(mediaEl('image/svg+xml'), fetchMedia);
+    expect(bmp).toBe(SENTINEL);
+    expect(createImageBitmapSpy).toHaveBeenCalledTimes(1);
+  });
+});

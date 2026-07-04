@@ -22,6 +22,7 @@ use crate::{
     note_layout_master_parse, parse_rels, read_zip_str, resolve_path, PptxZip,
 };
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, SrcRect};
+use ooxml_common::depth::parse_guarded;
 use std::collections::HashMap;
 
 /// Keyed first by idx (integer), then by type string.
@@ -1399,7 +1400,7 @@ pub(crate) fn parse_layout(
     zip: &mut PptxZip,
 ) -> ParsedLayout {
     note_layout_master_parse();
-    let doc = match roxmltree::Document::parse(layout_xml) {
+    let doc = match parse_guarded(layout_xml) {
         Ok(d) => d,
         // Unparseable layout → same as no layout: default placeholders/bg and
         // showMasterSp = true (the slide's own flag still applies downstream).
@@ -1570,7 +1571,7 @@ pub(crate) fn build_master_bundle(
     // every map defaults to empty, exactly as the prior `Option::map` chain did.
     let master_doc: Option<roxmltree::Document<'_>> = master_xml_opt.as_deref().and_then(|xml| {
         note_layout_master_parse();
-        roxmltree::Document::parse(xml).ok()
+        parse_guarded(xml).ok()
     });
     let master_root: Option<roxmltree::Node<'_, '_>> =
         master_doc.as_ref().map(|d| d.root_element());

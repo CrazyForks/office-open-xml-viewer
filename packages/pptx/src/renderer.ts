@@ -54,6 +54,7 @@ import {
   materialClass,
   isHTMLCanvas,
   defaultDpr,
+  clampCanvasSize,
   classifyCjkFont,
   classifyFontGeneric,
   cjkFallbackChain,
@@ -73,6 +74,7 @@ import {
   isSymbolFontFamily,
   drawUnderline,
   intendedSingleLinePx,
+  rasterHeaderExceedsBudget,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -3180,7 +3182,10 @@ function paintBeveledFlat(
  *  bounded and fine for the per-slide warm-up this serves. */
 const posterBitmapCache = new WeakMap<MediaElement, Promise<ImageBitmap>>();
 
-function getPosterBitmap(
+// Exported for the RB1 poster decode-bomb neutralization test (asserts an
+// over-budget poster is rejected before `createImageBitmap`). Not part of the
+// public package surface.
+export function getPosterBitmap(
   el: MediaElement,
   fetchMedia: (path: string) => Promise<Blob>,
 ): Promise<ImageBitmap> {
@@ -3191,6 +3196,20 @@ function getPosterBitmap(
     const typed = el.posterMimeType
       ? new Blob([blob], { type: el.posterMimeType })
       : blob;
+    // Decode-bomb guard: `el.posterPath`/`posterMimeType` come from the
+    // attacker-controllable `<a:blip>` (shape.rs), and `createImageBitmap` sizes
+    // its decoded RGBA surface from the image HEADER, not the compressed length —
+    // a tiny PNG/JPEG declaring e.g. 60000×60000 forces a multi-GB allocation.
+    // Sniff the pixel dimensions from a 64 KiB header prefix and reject an
+    // over-budget raster BEFORE it reaches createImageBitmap, exactly as
+    // `decodeRasterOrMetafile` (RB1) does for picture blips. A rejection here
+    // makes both callers fall through to their plain media fill (graceful
+    // degradation). The 64 KiB prefix covers a JPEG SOF past EXIF/ICC; an
+    // unrecognized header is not blocked (fail-open).
+    const head = new Uint8Array(await typed.slice(0, 64 * 1024).arrayBuffer());
+    if (rasterHeaderExceedsBudget(head)) {
+      throw new Error('poster raster exceeds the pixel budget');
+    }
     return createImageBitmap(typed);
   })();
   posterBitmapCache.set(el, p);
@@ -4061,8 +4080,17 @@ export async function renderSlide(
   const canvasH = Math.round(slideHeight * scale);
 
   const dpr = opts.dpr ?? defaultDpr();
-  canvas.width  = canvasW * dpr;
-  canvas.height = canvasH * dpr;
+  // Clamp the backing store to browser canvas limits (RB5). A huge target width
+  // (or large dpr × slide size) can exceed the per-axis / total-area cap, at
+  // which point the browser silently allocates a smaller-or-empty buffer and the
+  // slide renders blank. `clampCanvasSize` scales BOTH axes by one factor (≤ 1)
+  // so the aspect ratio is kept; we fold that into the effective dpr, keep the
+  // CSS box at its intended size, and the browser stretches the (slightly
+  // lower-res) backing store to fill it — a visible slide beats a blank one.
+  const clamped = clampCanvasSize(canvasW * dpr, canvasH * dpr);
+  const effectiveDpr = clamped.clamped ? dpr * clamped.scale : dpr;
+  canvas.width = clamped.width;
+  canvas.height = clamped.height;
   // CSS size only applies to the visible HTMLCanvasElement (not OffscreenCanvas)
   if (isHTMLCanvas(canvas)) {
     canvas.style.width = `${canvasW}px`;
@@ -4075,13 +4103,17 @@ export async function renderSlide(
 
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
   if (!ctx) throw new Error('Could not get 2D context');
-  ctx.scale(dpr, dpr);
+  // Use the effective dpr (folded with any clamp factor) so drawing fills the
+  // clamped backing store and crisp-offset math stays aligned with it.
+  ctx.scale(effectiveDpr, effectiveDpr);
 
   const rc: RenderContext = {
     themeMajorFont: opts.majorFont ?? null,
     themeMinorFont: opts.minorFont ?? null,
     themeHlinkColor: opts.hlinkColor ?? null,
-    dpr,
+    // The backing store may have been clamped below `canvasSize × dpr`; downstream
+    // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
+    dpr: effectiveDpr,
   };
 
   await renderBackground(ctx, slide.background, canvasW, canvasH, scale, opts.fetchImage);

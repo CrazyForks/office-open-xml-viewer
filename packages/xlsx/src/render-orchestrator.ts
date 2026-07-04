@@ -1,6 +1,7 @@
 import {
   defaultDpr,
   isHTMLCanvas,
+  clampCanvasSize,
   getCachedSvgImageByPath,
   preferVectorBlip,
   decodeRasterOrMetafile,
@@ -234,8 +235,17 @@ export async function renderWorksheetViewport(
   // (improvement plan C4). The inner renderViewport starts with an explicit
   // clearRect + white fill, so nothing depends on the width-assignment's implicit
   // clear; skipping the same-size resize is safe.
-  const bw = Math.round(width * dpr);
-  const bh = Math.round(height * dpr);
+  // Clamp the backing store to browser canvas limits (RB5). A very large viewport
+  // (or high dpr × large viewport, e.g. an extreme zoom) can exceed the per-axis
+  // or total-area cap, at which point the browser silently allocates a smaller-
+  // or-empty buffer and the sheet renders blank. `clampCanvasSize` scales BOTH
+  // axes by one factor (≤ 1) so the aspect ratio is kept; we fold that factor
+  // into the effective dpr, keep the CSS box at the requested size, and the
+  // browser stretches the (slightly lower-res) backing store to fill it.
+  const clamped = clampCanvasSize(width * dpr, height * dpr);
+  const effectiveDpr = clamped.clamped ? dpr * clamped.scale : dpr;
+  const bw = clamped.width;
+  const bh = clamped.height;
   if (target.width !== bw) target.width = bw;
   if (target.height !== bh) target.height = bh;
   // Set CSS display size so the browser renders at 1:1 device pixels (no browser-level scaling).
@@ -253,8 +263,10 @@ export async function renderWorksheetViewport(
   // resize above is skipped the backing store is NOT re-created, so its transform
   // is not reset to identity, and a relative scale() would compound the dpr every
   // frame (progressive zoom). setTransform is idempotent whether or not the store
-  // was reallocated.
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // was reallocated. Use the effective dpr (folded with any clamp factor) so
+  // drawing fills the clamped backing store; renderViewport gets the same value
+  // so its own dpr-dependent math stays aligned.
+  ctx.setTransform(effectiveDpr, 0, 0, effectiveDpr, 0, 0);
 
-  renderViewport(ctx, ws, styles, viewport, { ...opts, dpr, loadedImages: imageCache });
+  renderViewport(ctx, ws, styles, viewport, { ...opts, dpr: effectiveDpr, loadedImages: imageCache });
 }

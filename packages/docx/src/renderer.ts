@@ -26,6 +26,7 @@ import {
   resolveBaseDirection,
   isHTMLCanvas,
   defaultDpr,
+  clampCanvasSize,
   classifyCjkFont,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
@@ -790,8 +791,20 @@ export async function renderDocumentToCanvas(
   const scale = cssWidth / sec.pageWidth;  // px per pt
   const cssHeight = sec.pageHeight * scale;
 
-  canvas.width = Math.round(cssWidth * dpr);
-  canvas.height = Math.round(cssHeight * dpr);
+  // Clamp the backing store to browser canvas limits (RB5). A pathological page
+  // size (or a large dpr × page size) can exceed the per-axis / total-area cap,
+  // at which point the browser silently allocates a smaller-or-empty buffer and
+  // the page renders blank. `clampCanvasSize` scales BOTH axes by one factor
+  // (≤ 1) so the aspect ratio is kept; we fold that factor into the effective
+  // dpr, keep the CSS box at its intended size, and the browser stretches the
+  // (slightly lower-res) backing store to fill it — a visible page beats a blank
+  // one. `effectiveDpr` is stored on the state so crisp-offset math stays aligned
+  // with the real backing-store scale.
+  const clamped = clampCanvasSize(cssWidth * dpr, cssHeight * dpr);
+  const effectiveDpr = clamped.clamped ? dpr * clamped.scale : dpr;
+
+  canvas.width = clamped.width;
+  canvas.height = clamped.height;
 
   if (isHTMLCanvas(canvas)) {
     canvas.style.width = `${cssWidth}px`;
@@ -799,7 +812,7 @@ export async function renderDocumentToCanvas(
     if (!canvas.style.display) canvas.style.display = 'block';
   }
 
-  ctx.scale(dpr, dpr);
+  ctx.scale(effectiveDpr, effectiveDpr);
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
@@ -828,7 +841,9 @@ export async function renderDocumentToCanvas(
   const baseState: RenderState = {
     ctx,
     scale,
-    dpr,
+    // The backing store may have been clamped below `cssSize × dpr`; crisp-offset
+    // math must use the SAME effective dpr the ctx was scaled by (see above).
+    dpr: effectiveDpr,
     contentX: sec.marginLeft * scale,
     contentW: (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale,
     y: bodyTopPt * scale,

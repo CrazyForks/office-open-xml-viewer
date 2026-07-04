@@ -1,5 +1,6 @@
 use crate::resolve_zip_path;
 use crate::types::*;
+use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_x_ns, is_xdr_ns};
 use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
@@ -43,7 +44,7 @@ pub(crate) fn load_all_pivot_cache_fields(archive: &mut crate::XlsxZip) -> Pivot
         let Ok(xml) = read_zip_string(archive, &name) else {
             continue;
         };
-        let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        let Ok(doc) = parse_guarded(&xml) else {
             continue;
         };
         for field in doc.descendants() {
@@ -92,7 +93,7 @@ pub(crate) fn load_all_slicer_caches(
         let Ok(xml) = read_zip_string(archive, &path) else {
             continue;
         };
-        let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        let Ok(doc) = parse_guarded(&xml) else {
             continue;
         };
         let root = doc.root_element();
@@ -134,7 +135,7 @@ pub(crate) struct SlicerDef {
 
 pub(crate) fn parse_slicers_xml(xml: &str) -> HashMap<String, SlicerDef> {
     let mut out: HashMap<String, SlicerDef> = HashMap::new();
-    let Ok(doc) = roxmltree::Document::parse(xml) else {
+    let Ok(doc) = parse_guarded(xml) else {
         return out;
     };
     for slicer in doc
@@ -162,7 +163,7 @@ pub(crate) fn load_sheet_slicers(
     let Ok(sheet_rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
-    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+    let Ok(rels_doc) = parse_guarded(&sheet_rels_xml) else {
         return Vec::new();
     };
 
@@ -231,7 +232,7 @@ pub(crate) fn parse_slicer_anchors(
     slicer_caches: &HashMap<String, SlicerCacheInfo>,
     pivot_fields: &PivotCacheFields,
 ) -> Vec<SlicerAnchor> {
-    let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
+    let Ok(doc) = parse_guarded(drawing_xml) else {
         return Vec::new();
     };
     let mc_ns = "http://schemas.openxmlformats.org/markup-compatibility/2006";

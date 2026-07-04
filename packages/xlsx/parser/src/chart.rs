@@ -1,5 +1,6 @@
 use crate::types::*;
 use crate::{find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_zip_path};
+use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_c_ns, is_r_ns, is_xdr_ns};
 use ooxml_common::zip::read_zip_string;
 
@@ -34,7 +35,7 @@ pub(crate) fn load_sheet_charts(
     let Ok(sheet_rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
-    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+    let Ok(rels_doc) = parse_guarded(&sheet_rels_xml) else {
         return Vec::new();
     };
 
@@ -63,7 +64,7 @@ pub(crate) fn load_sheet_charts(
         let Ok(drawing_xml) = read_zip_string(archive, &drawing_path) else {
             continue;
         };
-        let Ok(draw_doc) = roxmltree::Document::parse(&drawing_xml) else {
+        let Ok(draw_doc) = parse_guarded(&drawing_xml) else {
             continue;
         };
 
@@ -234,7 +235,7 @@ pub(crate) fn load_sheet_charts(
             // `parse_chartex_part` structure walk (waterfall / boxWhisker /
             // treemap / sunburst / … — ECMA-376 does not cover these; they are
             // the Microsoft 2014 chartex extension). Same `ColorResolver`.
-            let Ok(chart_doc) = roxmltree::Document::parse(&chart_xml) else {
+            let Ok(chart_doc) = parse_guarded(&chart_xml) else {
                 continue;
             };
             let resolver = XlsxColorResolver {
