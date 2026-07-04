@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 use wasm_bindgen::prelude::*;
 
+use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
 use ooxml_common::zip::read_zip_string;
 
@@ -108,7 +109,7 @@ impl WorkbookShared {
     fn load(archive: &mut XlsxZip) -> Result<WorkbookShared, String> {
         let workbook_xml = read_zip_string(archive, "xl/workbook.xml")?;
         let (sheets, date1904) = {
-            let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
+            let wb_doc = parse_guarded(&workbook_xml).map_err(|e| e.to_string())?;
             (
                 parse_workbook_sheets(&wb_doc),
                 parse_workbook_date1904(&wb_doc),
@@ -144,7 +145,7 @@ fn parse_sheet_with(
     sheet_index: u32,
     name: &str,
 ) -> Result<Vec<u8>, JsValue> {
-    let wb_doc = roxmltree::Document::parse(&shared.workbook_xml).map_err(|e| e.to_string())?;
+    let wb_doc = parse_guarded(&shared.workbook_xml).map_err(|e| e.to_string())?;
     // `workbook.xml.rels` is mandatory for a sheet parse (the original
     // `parse_sheet` read it with `?`). `WorkbookShared` caches it leniently for
     // the `parse_xlsx` path, so on the (defensive) missing-rels case re-read it
@@ -153,7 +154,7 @@ fn parse_sheet_with(
         read_zip_string(archive, "xl/_rels/workbook.xml.rels")
             .map_err(|e| JsValue::from_str(&e))?;
     }
-    let rels_doc = roxmltree::Document::parse(&shared.rels_xml).map_err(|e| e.to_string())?;
+    let rels_doc = parse_guarded(&shared.rels_xml).map_err(|e| e.to_string())?;
 
     let sheet_meta = shared
         .sheets
@@ -237,7 +238,7 @@ fn parse_xlsx_inner_with(
     // small head read of each sheet entry is enough — we never decompress the
     // (potentially huge) `<sheetData>` body just to read the tab color.
     let mut sheets = shared.sheets.clone();
-    if let Ok(rels_doc) = roxmltree::Document::parse(&shared.rels_xml) {
+    if let Ok(rels_doc) = parse_guarded(&shared.rels_xml) {
         for sheet in sheets.iter_mut() {
             let Some(path) = resolve_sheet_path(&rels_doc, &sheet.r_id) else {
                 continue;
@@ -619,7 +620,7 @@ fn read_shared_strings(archive: &mut XlsxZip, theme_colors: &[String]) -> Vec<Sh
     let Ok(xml) = read_zip_string(archive, "xl/sharedStrings.xml") else {
         return Vec::new();
     };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+    let Ok(doc) = parse_guarded(&xml) else {
         return Vec::new();
     };
     let mut strings = Vec::new();
@@ -726,15 +727,11 @@ fn parse_worksheet(
     theme_colors: &[String],
     name: &str,
 ) -> Result<(Worksheet, HyperlinkRids), String> {
-    // Guard against a pathologically deep worksheet XML: roxmltree's tree builder
-    // recurses per element-nesting level, so a sheet nested thousands deep
-    // overflows the fixed WASM stack and traps *inside* `Document::parse` before
-    // our own depth-guarded drawing walk runs. Reject it up front. See
-    // `ooxml_common::depth::xml_too_deep`.
-    if ooxml_common::depth::xml_too_deep(xml.as_bytes()) {
-        return Err("worksheet XML nesting depth exceeds the safe limit".to_string());
-    }
-    let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
+    // Guard against a pathologically deep worksheet XML: the nesting-depth
+    // pre-check now lives inside `parse_guarded`, which rejects an over-deep
+    // part before roxmltree's tree builder can recurse and overflow the fixed
+    // WASM stack. See `ooxml_common::depth::parse_guarded`.
+    let doc = parse_guarded(xml).map_err(|e| e.to_string())?;
 
     let mut rows = Vec::new();
     let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
@@ -1395,7 +1392,7 @@ fn load_sheet_comments(archive: &mut XlsxZip, sheet_path: &str) -> Vec<XlsxComme
     let Ok(rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
-    let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else {
+    let Ok(rels_doc) = parse_guarded(&rels_xml) else {
         return Vec::new();
     };
 
@@ -1458,7 +1455,7 @@ fn load_persons(archive: &mut XlsxZip) -> HashMap<String, String> {
         let Ok(xml) = read_zip_string(archive, &path) else {
             continue;
         };
-        let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        let Ok(doc) = parse_guarded(&xml) else {
             continue;
         };
         for p in doc
@@ -1484,7 +1481,7 @@ fn parse_threaded_comments_xml(
     tc_xml: &str,
     persons: &HashMap<String, String>,
 ) -> Vec<XlsxComment> {
-    let Ok(doc) = roxmltree::Document::parse(tc_xml) else {
+    let Ok(doc) = parse_guarded(tc_xml) else {
         return Vec::new();
     };
     // Preserve document order of first appearance per cell ref.
@@ -1543,7 +1540,7 @@ fn parse_threaded_comments_xml(
 /// Returns an empty vec on malformed XML. Split out from `load_sheet_comments`
 /// so the parse path is unit-testable without a ZIP archive.
 fn parse_comments_xml(comments_xml: &str) -> Vec<XlsxComment> {
-    let Ok(comments_doc) = roxmltree::Document::parse(comments_xml) else {
+    let Ok(comments_doc) = parse_guarded(comments_xml) else {
         return Vec::new();
     };
 
@@ -1855,7 +1852,7 @@ fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> 
         return Vec::new();
     }
     let mut values: Vec<Option<f64>> = vec![None; total];
-    let Ok(doc) = roxmltree::Document::parse(sheet_xml) else {
+    let Ok(doc) = parse_guarded(sheet_xml) else {
         return values;
     };
     let row_span = (range.right - range.left + 1) as usize;
@@ -1902,7 +1899,7 @@ fn load_sheet_sparklines(
     rels_doc: &roxmltree::Document,
     theme_colors: &[String],
 ) -> Vec<SparklineGroup> {
-    let Ok(doc) = roxmltree::Document::parse(sheet_xml) else {
+    let Ok(doc) = parse_guarded(sheet_xml) else {
         return Vec::new();
     };
     let mut groups: Vec<SparklineGroup> = Vec::new();

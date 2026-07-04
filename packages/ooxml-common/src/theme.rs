@@ -51,7 +51,7 @@ impl ThemeColorScheme {
     /// malformed XML yields an empty scheme.
     pub fn parse(xml: &str) -> Self {
         let mut colors = BTreeMap::new();
-        let Ok(doc) = roxmltree::Document::parse(xml) else {
+        let Ok(doc) = crate::depth::parse_guarded(xml) else {
             return Self { colors };
         };
         let Some(scheme) = doc
@@ -140,7 +140,7 @@ impl ThemeFonts {
     /// Parse the `<a:fontScheme>` (major + minor × latin/ea/cs). Missing scheme
     /// or malformed XML yields all-`None`.
     pub fn parse(xml: &str) -> Self {
-        let Ok(doc) = roxmltree::Document::parse(xml) else {
+        let Ok(doc) = crate::depth::parse_guarded(xml) else {
             return Self::default();
         };
         let Some(scheme) = doc
@@ -186,7 +186,7 @@ fn parse_font_group(scheme: roxmltree::Node<'_, '_>, group_name: &str) -> ThemeF
 /// EMU = 0.75 pt (§20.1.2.2.24). Missing scheme or malformed XML yields an empty
 /// list.
 pub fn parse_ln_style_widths(xml: &str) -> Vec<i64> {
-    let Ok(doc) = roxmltree::Document::parse(xml) else {
+    let Ok(doc) = crate::depth::parse_guarded(xml) else {
         return Vec::new();
     };
     for node in doc.descendants() {

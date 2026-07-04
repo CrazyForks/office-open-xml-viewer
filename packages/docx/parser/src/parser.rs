@@ -1,7 +1,11 @@
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
-use ooxml_common::depth::DepthGuard;
+use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
+// Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
+// before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
+// the in-module unit tests, which parse trusted, hand-written fixtures directly.
+#[cfg(test)]
 use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
 use zip::ZipArchive;
@@ -198,15 +202,11 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     let chart_map = load_chart_map(zip, &rel_map, &theme);
 
     let doc_xml = read_zip_string(zip, "word/document.xml")?;
-    // Guard against a pathologically deep `word/document.xml`: roxmltree's tree
-    // builder recurses per element-nesting level, so a document nested thousands
-    // deep overflows the fixed WASM stack and traps *inside* `XmlDoc::parse` before
-    // our own depth-guarded walk runs. Reject it up front. See
-    // `ooxml_common::depth::xml_too_deep`.
-    if ooxml_common::depth::xml_too_deep(doc_xml.as_bytes()) {
-        return Err("word/document.xml nesting depth exceeds the safe limit".to_string());
-    }
-    let xml_doc = XmlDoc::parse(&doc_xml).map_err(|e| e.to_string())?;
+    // `parse_guarded` runs the allocation-free depth pre-check BEFORE roxmltree's
+    // tree builder (which recurses per element-nesting level and would overflow
+    // the fixed WASM stack, trapping the whole parse, on a pathologically deep
+    // `word/document.xml`). Every attacker-controllable part is parsed this way.
+    let xml_doc = parse_guarded(&doc_xml).map_err(|e| e.to_string())?;
 
     let body_node = xml_doc
         .root_element()
@@ -412,7 +412,7 @@ fn collect_revisions(body: roxmltree::Node) -> Vec<crate::types::DocxRevision> {
 
 /// Parse word/comments.xml into a flat list of `<w:comment>` entries.
 fn parse_comments(xml: &str) -> Vec<crate::types::DocxComment> {
-    let Ok(doc) = roxmltree::Document::parse(xml) else {
+    let Ok(doc) = parse_guarded(xml) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -501,7 +501,7 @@ fn parse_notes(
     let local_media_map = load_media_map(zip, &local_rel_map, &base_dir);
     let local_chart_map = load_chart_map(zip, &local_rel_map, theme);
 
-    let Ok(doc) = XmlDoc::parse(&xml) else {
+    let Ok(doc) = parse_guarded(&xml) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -691,7 +691,7 @@ impl ThemeColors {
 
 /// Extract `<w:themeFontLang w:bidi="…"/>` from word/settings.xml (§17.15.1.88).
 fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
-    let doc = XmlDoc::parse(settings_xml).ok()?;
+    let doc = parse_guarded(settings_xml).ok()?;
     let node = doc
         .root_element()
         .descendants()
@@ -706,7 +706,7 @@ fn parse_theme_font_bidi_lang(settings_xml: &str) -> Option<String> {
 /// `SectionProps.even_and_odd_headers`, which the renderer's `pickHeaderFooter`
 /// already consumes for the even-page branch.
 fn parse_even_and_odd_headers(settings_xml: &str) -> bool {
-    let Ok(doc) = XmlDoc::parse(settings_xml) else {
+    let Ok(doc) = parse_guarded(settings_xml) else {
         return false;
     };
     bool_prop(doc.root_element(), "evenAndOddHeaders").unwrap_or(false)
@@ -727,7 +727,7 @@ fn parse_even_and_odd_headers(settings_xml: &str) -> bool {
 /// Returns `None` when none of these elements are present, so the renderer
 /// falls back to its built-in Japanese defaults with kinsoku ON.
 fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentSettings> {
-    let doc = XmlDoc::parse(settings_xml).ok()?;
+    let doc = parse_guarded(settings_xml).ok()?;
     let root = doc.root_element();
 
     let kinsoku = bool_prop(root, "kinsoku");
@@ -797,7 +797,7 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
     if rels_xml.is_empty() {
         return None;
     }
-    let doc = XmlDoc::parse(rels_xml).ok()?;
+    let doc = parse_guarded(rels_xml).ok()?;
     for rel in doc
         .root_element()
         .children()
@@ -822,7 +822,7 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
 /// as `auto`.
 fn parse_font_table(xml: &str) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    let Ok(doc) = XmlDoc::parse(xml) else {
+    let Ok(doc) = parse_guarded(xml) else {
         return map;
     };
     for font in doc.root_element().descendants().filter(|n| {
@@ -877,7 +877,7 @@ fn parse_embedded_fonts(
     base_dir: &str,
 ) -> Vec<crate::types::EmbeddedFont> {
     let mut out = Vec::new();
-    let Ok(doc) = XmlDoc::parse(font_table_xml) else {
+    let Ok(doc) = parse_guarded(font_table_xml) else {
         return out;
     };
     for font in doc.root_element().descendants().filter(|n| {
@@ -1530,7 +1530,7 @@ fn load_header_footer_set(
         let local_media_map = load_media_map(zip, &local_rel_map, "word/");
         let local_chart_map = load_chart_map(zip, &local_rel_map, theme);
 
-        let xml_doc = match XmlDoc::parse(&xml) {
+        let xml_doc = match parse_guarded(&xml) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -5104,7 +5104,7 @@ fn resolve_fill_ref(fill_ref: roxmltree::Node, theme: &ThemeColors) -> Option<Sh
         .unwrap_or("dk1");
 
     let xml = theme.theme_xml.as_ref()?;
-    let doc = XmlDoc::parse(xml).ok()?;
+    let doc = parse_guarded(xml).ok()?;
     let fmt = doc
         .root_element()
         .descendants()
@@ -5404,7 +5404,7 @@ fn parse_docx_chart(
     style_xml: Option<&str>,
     theme: &ThemeColors,
 ) -> Option<ooxml_common::chart::ChartModel> {
-    let doc = XmlDoc::parse(chart_xml).ok()?;
+    let doc = parse_guarded(chart_xml).ok()?;
     let root = doc.root_element();
     let resolver = DocxColorResolver { theme };
     let is_chartex = root

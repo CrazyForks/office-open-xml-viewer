@@ -5,6 +5,7 @@
 //! (`child`, `attr`) stay in `lib.rs` and are imported here.
 
 use crate::{attr, child};
+use ooxml_common::depth::parse_guarded;
 use std::collections::HashMap;
 
 /// Parse the color scheme from a theme XML file.
@@ -37,7 +38,7 @@ pub(crate) fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
         }
     }
 
-    let doc = match roxmltree::Document::parse(xml) {
+    let doc = match parse_guarded(xml) {
         Ok(d) => d,
         Err(_) => return map,
     };
@@ -203,7 +204,7 @@ pub(crate) fn bake_clr_map(theme: &mut HashMap<String, String>, master_xml: Opti
     // Find the master's <p:clrMap> element (direct child of <p:sldMaster>) and
     // resolve its 12 logical→slot attrs, then apply.
     let clr_map = master_xml.and_then(|xml| {
-        let doc = roxmltree::Document::parse(xml).ok()?;
+        let doc = parse_guarded(xml).ok()?;
         let node = child(doc.root_element(), "clrMap")?;
         Some(parse_clr_map_node(node))
     });
@@ -224,7 +225,7 @@ pub(crate) fn parse_clr_map_ovr(xml: &str) -> Option<HashMap<String, String>> {
     if !xml.contains("clrMapOvr") {
         return None;
     }
-    let doc = roxmltree::Document::parse(xml).ok()?;
+    let doc = parse_guarded(xml).ok()?;
     // <p:clrMapOvr> is a direct child of <p:sld> / <p:sldLayout> (right after
     // <p:cSld>); the choice inside is masterClrMapping XOR overrideClrMapping.
     let ovr = child(doc.root_element(), "clrMapOvr")?;
@@ -277,5 +278,55 @@ impl ooxml_common::color::ThemeResolver for PptxSchemeResolver<'_> {
             other => ooxml_common::color::default_scheme_slot(other),
         };
         self.theme.get(canonical).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shallow_theme_xml_parses_colors() {
+        // A normal theme parses through `parse_guarded` unchanged (sanity: the
+        // guard does not reject legitimate parts).
+        let xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <a:themeElements><a:clrScheme name="Office">
+              <a:dk1><a:srgbClr val="000000"/></a:dk1>
+              <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+            </a:clrScheme></a:themeElements></a:theme>"#;
+        let map = parse_theme_colors(xml);
+        assert_eq!(map.get("dk1").map(String::as_str), Some("000000"));
+        assert_eq!(map.get("lt1").map(String::as_str), Some("FFFFFF"));
+    }
+
+    // ── RB2 neutralization (roxmltree layer): a pathologically deep theme/part
+    //    XML is rejected by the depth pre-check in `parse_guarded` BEFORE
+    //    roxmltree's recursive tree builder runs, so `parse_theme_colors` returns
+    //    gracefully instead of trapping. This runs on the DEFAULT (small)
+    //    test-thread stack ON PURPOSE: handing 5 000-deep XML straight to
+    //    roxmltree here would overflow and abort the process. That it returns is
+    //    the guarantee. (The shape-walk DepthGuard is covered separately in
+    //    shape.rs on a generous stack.)
+    #[test]
+    fn deeply_nested_theme_xml_is_rejected_not_trapped() {
+        let mut xml = String::from(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#,
+        );
+        // 5 000 levels — ~20× MAX_XML_DEPTH and far past roxmltree's ~1 000-deep
+        // small-stack overflow threshold.
+        for _ in 0..5_000 {
+            xml.push_str("<a:x>");
+        }
+        for _ in 0..5_000 {
+            xml.push_str("</a:x>");
+        }
+        xml.push_str("</a:theme>");
+
+        // Must return (not trap); the rejected part yields no colors.
+        let map = parse_theme_colors(&xml);
+        assert!(
+            map.is_empty(),
+            "an over-deep theme XML must be rejected, yielding no colors"
+        );
     }
 }

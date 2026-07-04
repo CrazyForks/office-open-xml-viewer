@@ -1,8 +1,8 @@
 use crate::styles::{parse_run_fmt, RunFmt};
 use crate::xml_util::*;
 use ooxml_common::blip::mime_from_ext;
+use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{attr_ns, relationships};
-use roxmltree::Document as XmlDoc;
 use std::collections::{HashMap, HashSet};
 
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
@@ -161,7 +161,7 @@ impl NumberingMap {
     /// picture bullets, leaving levels on their text/glyph markers.
     pub fn parse(xml: &str, media_map: &HashMap<String, String>) -> Self {
         let mut map = NumberingMap::default();
-        let doc = match XmlDoc::parse(xml) {
+        let doc = match parse_guarded(xml) {
             Ok(d) => d,
             Err(_) => return map,
         };

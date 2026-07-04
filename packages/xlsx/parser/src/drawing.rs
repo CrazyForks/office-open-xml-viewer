@@ -7,7 +7,7 @@ use ooxml_common::zip::read_zip_string;
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
-use ooxml_common::depth::DepthGuard;
+use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
@@ -54,7 +54,7 @@ pub(crate) fn parse_drawing_anchors(
     drawing_dir: &str,
     archive: &mut crate::XlsxZip,
 ) -> Vec<ImageAnchor> {
-    let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
+    let Ok(doc) = parse_guarded(drawing_xml) else {
         return Vec::new();
     };
     let mut anchors: Vec<ImageAnchor> = Vec::new();
@@ -1211,7 +1211,7 @@ pub(crate) fn parse_shape_anchors(
     theme_ln_widths: &[i64],
     rid_urls: &HashMap<String, String>,
 ) -> Vec<ShapeAnchor> {
-    let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
+    let Ok(doc) = parse_guarded(drawing_xml) else {
         return Vec::new();
     };
     let mut anchors: Vec<ShapeAnchor> = Vec::new();
@@ -1457,7 +1457,7 @@ pub(crate) fn load_sheet_shape_groups(
     let Ok(sheet_rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
-    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+    let Ok(rels_doc) = parse_guarded(&sheet_rels_xml) else {
         return Vec::new();
     };
     let mut drawing_targets: Vec<String> = Vec::new();
@@ -1550,7 +1550,7 @@ pub(crate) fn load_sheet_images(
     };
 
     // Find all drawing relationships
-    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+    let Ok(rels_doc) = parse_guarded(&sheet_rels_xml) else {
         return Vec::new();
     };
     let mut drawing_targets: Vec<String> = Vec::new();
@@ -1817,7 +1817,7 @@ pub(crate) fn parse_ole_object_anchors(
     sheet_dir: &str,
     archive: &mut crate::XlsxZip,
 ) -> Vec<ImageAnchor> {
-    let Ok(doc) = roxmltree::Document::parse(sheet_xml) else {
+    let Ok(doc) = parse_guarded(sheet_xml) else {
         return Vec::new();
     };
 
@@ -1843,7 +1843,7 @@ pub(crate) fn parse_ole_object_anchors(
     let vml = load_legacy_vml_drawing(&doc, sheet_rels, sheet_dir, archive);
     let vml_parsed = vml
         .as_ref()
-        .and_then(|(xml, rels, dir)| roxmltree::Document::parse(xml).ok().map(|d| (d, rels, dir)));
+        .and_then(|(xml, rels, dir)| parse_guarded(xml).ok().map(|d| (d, rels, dir)));
 
     let mut anchors: Vec<ImageAnchor> = Vec::new();
     for ole in ole_objects {
@@ -2749,6 +2749,35 @@ mod hidden_tests {
             anchors[0].shapes.len(),
             1,
             "leaf under a shallow group nest must survive"
+        );
+    }
+
+    // ── RB2 neutralization (roxmltree layer): a pathologically deep drawing XML
+    //    is rejected by the depth pre-check in `parse_guarded` BEFORE roxmltree's
+    //    recursive tree builder runs, so `parse_shape_anchors` returns gracefully
+    //    instead of trapping. Unlike the two tests above (which spawn a 256 MB
+    //    stack to exercise OUR collect_shapes guard), this runs on the DEFAULT
+    //    (small) test-thread stack ON PURPOSE: handing 5 000-deep XML straight to
+    //    roxmltree here would overflow and abort the process. That it returns is
+    //    the guarantee.
+    #[test]
+    fn deeply_nested_drawing_xml_is_rejected_not_trapped() {
+        let mut xml = format!(r#"<xdr:wsDr {NS}>"#, NS = NS);
+        // 5 000 levels — ~20× MAX_XML_DEPTH and far past roxmltree's ~1 000-deep
+        // small-stack overflow threshold.
+        for _ in 0..5_000 {
+            xml.push_str("<xdr:grpSp>");
+        }
+        for _ in 0..5_000 {
+            xml.push_str("</xdr:grpSp>");
+        }
+        xml.push_str("</xdr:wsDr>");
+
+        // Must return (not trap); the rejected part yields no anchors.
+        let anchors = parse_shape_anchors(&xml, &theme(), &[6_350], &HashMap::new());
+        assert!(
+            anchors.is_empty(),
+            "an over-deep drawing XML must be rejected, yielding no anchors"
         );
     }
 }

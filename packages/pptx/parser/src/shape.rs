@@ -20,7 +20,7 @@ use crate::{
     table_style_presets, PptxZip, TableStyleDef,
 };
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid};
-use ooxml_common::depth::DepthGuard;
+use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::ns::{is_diagram_uri, is_pml_ole_uri};
 use ooxml_common::units::EMU_PER_PX_96DPI;
 use std::collections::HashMap;
@@ -943,7 +943,7 @@ pub(crate) fn parse_table_styles_xml(
     theme: &HashMap<String, String>,
 ) -> HashMap<String, TableStyleDef> {
     let mut map = HashMap::new();
-    let Ok(doc) = roxmltree::Document::parse(xml) else {
+    let Ok(doc) = parse_guarded(xml) else {
         return map;
     };
     let root = doc.root_element();
@@ -2055,7 +2055,7 @@ fn parse_smartart_drawing(
     out: &mut Vec<SlideElement>,
     zip: &mut PptxZip,
 ) {
-    let doc = match roxmltree::Document::parse(drawing_xml) {
+    let doc = match parse_guarded(drawing_xml) {
         Ok(d) => d,
         Err(_) => return,
     };
@@ -2787,6 +2787,13 @@ mod hidden_tests {
         // parsing RETURNS instead of aborting. A group deeper than the limit drops
         // its subtree, so the single leaf below it does NOT survive — the assertion
         // is simply that we get here (no trap) with a bounded result.
+        //
+        // NB: this runs on a 256 MB stack, so it cannot by itself catch a removed
+        // DepthGuard (the big stack absorbs the recursion). The LOAD-BEARING
+        // coverage for the roxmltree-layer trap is the default-stack neutralization
+        // test `theme::tests::deeply_nested_theme_xml_is_rejected_not_trapped`
+        // (and the docx/xlsx siblings), which would overflow if `parse_guarded`'s
+        // pre-check were bypassed. This test's job is the truncation contract.
         let out = run_deep(2_000);
         assert!(out.len() <= 1, "guard should bound the emitted shapes");
     }

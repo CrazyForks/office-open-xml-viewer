@@ -1,3 +1,4 @@
+use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::is_r_ns;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -361,7 +362,7 @@ pub(crate) fn build_smartart_drawings(
     zip: &mut PptxZip,
 ) -> HashMap<String, String> {
     let mut result: HashMap<String, String> = HashMap::new();
-    let doc = match roxmltree::Document::parse(rels_xml) {
+    let doc = match parse_guarded(rels_xml) {
         Ok(d) => d,
         Err(_) => return result,
     };
@@ -418,7 +419,7 @@ pub(crate) fn build_smartart_drawings(
 fn smartart_drawing_relid(data_target: &str, zip: &mut PptxZip) -> Option<String> {
     let data_path = resolve_path("ppt/slides", data_target);
     let xml = read_zip_str(zip, &data_path).ok()?;
-    let doc = roxmltree::Document::parse(&xml).ok()?;
+    let doc = parse_guarded(&xml).ok()?;
     doc.descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "dataModelExt")
         .and_then(|n| n.attribute("relId"))
@@ -443,7 +444,7 @@ fn trailing_num(target: &str) -> Option<u32> {
 // prefix still matches — do not change this to an exact-match comparison, or
 // Strict documents will silently stop resolving.
 pub(crate) fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> {
-    let doc = roxmltree::Document::parse(rels_xml).ok()?;
+    let doc = parse_guarded(rels_xml).ok()?;
     for rel in doc.root_element().children().filter(|n| n.is_element()) {
         if let Some(rel_type) = attr(&rel, "Type") {
             if rel_type.ends_with(type_suffix) {
@@ -570,12 +571,9 @@ fn parse_slide(
     // Guard against a pathologically deep slide XML: roxmltree's tree builder
     // recurses per element-nesting level, so a slide nested thousands deep
     // overflows the fixed WASM stack and traps *inside* `Document::parse` before
-    // our own depth-guarded shape walk runs. Reject it up front. See
-    // `ooxml_common::depth::xml_too_deep`.
-    if ooxml_common::depth::xml_too_deep(xml.as_bytes()) {
-        return Err("slide XML nesting depth exceeds the safe limit".into());
-    }
-    let doc = roxmltree::Document::parse(xml)?;
+    // our own depth-guarded shape walk runs. The nesting-depth pre-check that
+    // rejects it now lives in `parse_guarded`.
+    let doc = parse_guarded(xml)?;
     let root = doc.root_element(); // <p:sld>
     let hidden = slide_is_hidden(root);
     let c_sld = child(root, "cSld");
@@ -646,7 +644,7 @@ fn parse_slide(
         if eff.is_some() {
             if let Some(mxml) = master_xml {
                 note_layout_master_parse();
-                if let Ok(mdoc) = roxmltree::Document::parse(mxml) {
+                if let Ok(mdoc) = parse_guarded(mxml) {
                     extract_decorative_shapes(
                         mdoc.root_element(),
                         master_dir,
@@ -668,7 +666,7 @@ fn parse_slide(
     // (e.g. coloured bands, logos) that are not placeholder anchors.
     if let Some(lxml) = layout_xml {
         note_layout_master_parse();
-        if let Ok(ldoc) = roxmltree::Document::parse(lxml) {
+        if let Ok(ldoc) = parse_guarded(lxml) {
             let lroot = ldoc.root_element();
             if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
                 let empty_lph = LayoutPlaceholders::default();
@@ -739,7 +737,7 @@ fn load_notes_slide(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Option
         resolve_path("ppt/slides", target)
     };
     let xml = read_zip_str(zip, &path).ok()?;
-    let doc = roxmltree::Document::parse(&xml).ok()?;
+    let doc = parse_guarded(&xml).ok()?;
     let mut buf = String::new();
     let mut prev_was_text = false;
     for n in doc.descendants() {
@@ -781,7 +779,7 @@ fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<
     let Ok(xml) = read_zip_str(zip, &path) else {
         return Vec::new();
     };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+    let Ok(doc) = parse_guarded(&xml) else {
         return Vec::new();
     };
 
@@ -789,7 +787,7 @@ fn load_pptx_comments(zip: &mut PptxZip, rels: &HashMap<String, String>) -> Vec<
     let author_xml = read_zip_str(zip, "ppt/commentAuthors.xml").ok();
     let mut authors: HashMap<String, String> = HashMap::new();
     if let Some(ax) = author_xml {
-        if let Ok(adoc) = roxmltree::Document::parse(&ax) {
+        if let Ok(adoc) = parse_guarded(&ax) {
             for a in adoc
                 .descendants()
                 .filter(|n| n.is_element() && n.tag_name().name() == "cmAuthor")
@@ -842,7 +840,7 @@ fn parse_presentation_from_bytes(data: &[u8]) -> Result<Presentation, Box<dyn st
 fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::error::Error>> {
     // --- presentation.xml ---
     let pres_xml = read_zip_str(zip, "ppt/presentation.xml")?;
-    let pres_doc = roxmltree::Document::parse(&pres_xml)?;
+    let pres_doc = parse_guarded(&pres_xml)?;
     let pres_root = pres_doc.root_element();
 
     let sld_sz = child(pres_root, "sldSz");
@@ -1083,7 +1081,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
             // (previously each re-parsed the same string — 3 parses per override slide).
             let master_doc = bundle.master_xml.as_deref().and_then(|xml| {
                 note_layout_master_parse();
-                roxmltree::Document::parse(xml).ok()
+                parse_guarded(xml).ok()
             });
             let master_root = master_doc.as_ref().map(|d| d.root_element());
             let master_bg: Option<Fill> = master_root.and_then(|root| {

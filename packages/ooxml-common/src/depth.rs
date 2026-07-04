@@ -271,6 +271,60 @@ pub fn xml_too_deep(bytes: &[u8]) -> bool {
     xml_nesting_exceeds(bytes, MAX_XML_DEPTH)
 }
 
+/// Error returned by [`parse_guarded`] — either the depth pre-check rejected the
+/// input, or `roxmltree` itself failed to parse it.
+///
+/// It implements [`Display`](std::fmt::Display) so the many parse sites that map
+/// a parse failure to a `String` (`.map_err(|e| e.to_string())`) keep working
+/// unchanged, while sites that only care whether they got a `Document` can keep
+/// using `.ok()` / `let Ok(..) else`.
+#[derive(Debug)]
+pub enum GuardedParseError {
+    /// The raw XML nests deeper than [`MAX_XML_DEPTH`]; handing it to
+    /// `roxmltree::Document::parse` would risk a stack-overflow trap, so the
+    /// caller must degrade gracefully (skip the part) instead.
+    TooDeep,
+    /// `roxmltree::Document::parse` rejected the (in-depth-budget) input.
+    Xml(roxmltree::Error),
+}
+
+impl std::fmt::Display for GuardedParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GuardedParseError::TooDeep => {
+                write!(f, "XML nesting depth exceeds the safe limit")
+            }
+            GuardedParseError::Xml(e) => std::fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl std::error::Error for GuardedParseError {}
+
+/// Parse `xml` into a [`roxmltree::Document`], but **only after** the
+/// allocation-free [`xml_too_deep`] pre-check confirms the element nesting is
+/// within [`MAX_XML_DEPTH`].
+///
+/// `roxmltree`'s tree builder recurses per element-nesting level, so a part
+/// nested a few thousand deep overflows the fixed WASM linear-memory stack and
+/// **traps the whole parse inside `Document::parse`** — before any of our own
+/// depth-guarded walks (see [`DepthGuard`]) get a chance to run. Every parse of
+/// attacker-controllable XML (any part read out of the untrusted ZIP) must go
+/// through this wrapper rather than calling `roxmltree::Document::parse`
+/// directly, so the pre-check is impossible to forget at an individual site.
+///
+/// On success the returned [`roxmltree::Document`] borrows from `xml`, exactly as
+/// `Document::parse` does. On failure the caller degrades gracefully (skip the
+/// part, keep the rest of the document) — matching the existing
+/// "unsupported/oversized ⇒ skip it, keep rendering" contract in these parsers.
+#[inline]
+pub fn parse_guarded(xml: &str) -> Result<roxmltree::Document<'_>, GuardedParseError> {
+    if xml_too_deep(xml.as_bytes()) {
+        return Err(GuardedParseError::TooDeep);
+    }
+    roxmltree::Document::parse(xml).map_err(GuardedParseError::Xml)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +462,51 @@ mod tests {
         let mut v = nested_xml(300);
         v.extend(std::iter::repeat_n(b'x', 1_000_000));
         assert!(xml_nesting_exceeds(&v, 256));
+    }
+
+    // ── parse_guarded (the wrapper every attacker-facing parse site must use) ──
+
+    #[test]
+    fn parse_guarded_accepts_shallow_xml() {
+        let doc = parse_guarded("<r><a>x</a></r>").expect("shallow XML parses");
+        assert_eq!(doc.root_element().tag_name().name(), "r");
+    }
+
+    #[test]
+    fn parse_guarded_rejects_too_deep_before_roxmltree_runs() {
+        // The load-bearing guarantee: a part nested far past MAX_XML_DEPTH is
+        // rejected by the pre-check and never reaches roxmltree's recursive tree
+        // builder (which would overflow the WASM stack and trap). 10_000-deep is
+        // well past the ~1000 overflow threshold, so if the pre-check were absent
+        // this call would trap instead of returning an Err — this test only runs
+        // on the (small) native stack precisely because parse_guarded short-
+        // circuits before roxmltree is invoked.
+        let deep = String::from_utf8(nested_xml(10_000)).unwrap();
+        let err = parse_guarded(&deep).expect_err("over-deep XML is rejected");
+        assert!(matches!(err, GuardedParseError::TooDeep));
+        assert_eq!(err.to_string(), "XML nesting depth exceeds the safe limit");
+    }
+
+    #[test]
+    fn parse_guarded_reports_roxmltree_errors_for_in_budget_input() {
+        // In-depth-budget but malformed input surfaces roxmltree's own error,
+        // Display-forwarded so `.map_err(|e| e.to_string())` sites are unchanged.
+        let err = parse_guarded("<r><a></r>").expect_err("malformed XML is rejected");
+        assert!(matches!(err, GuardedParseError::Xml(_)));
+        // The message is roxmltree's, not the depth message.
+        assert_ne!(err.to_string(), "XML nesting depth exceeds the safe limit");
+    }
+
+    #[test]
+    fn parse_guarded_document_borrows_from_input() {
+        // The returned Document borrows `xml`, just like Document::parse — so a
+        // caller can read node text without an extra allocation.
+        let xml = String::from("<r><t>hello</t></r>");
+        let doc = parse_guarded(&xml).unwrap();
+        let t = doc
+            .descendants()
+            .find(|n| n.tag_name().name() == "t")
+            .unwrap();
+        assert_eq!(t.text(), Some("hello"));
     }
 }

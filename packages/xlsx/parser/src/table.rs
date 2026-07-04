@@ -1,5 +1,6 @@
 use crate::types::*;
 use crate::{parse_cell_ref, resolve_zip_path};
+use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::is_x_ns;
 use ooxml_common::zip::read_zip_string;
 
@@ -55,7 +56,7 @@ pub(crate) fn parse_table_styles_map(
     let Ok(xml) = read_zip_string(archive, "xl/styles.xml") else {
         return map;
     };
-    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+    let Ok(doc) = parse_guarded(&xml) else {
         return map;
     };
     for n in doc.descendants() {
@@ -130,7 +131,7 @@ pub(crate) fn load_sheet_tables(
     let Ok(rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
-    let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else {
+    let Ok(rels_doc) = parse_guarded(&rels_xml) else {
         return Vec::new();
     };
 
@@ -153,7 +154,7 @@ pub(crate) fn load_sheet_tables(
         let Ok(xml) = read_zip_string(archive, &table_path) else {
             continue;
         };
-        let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        let Ok(doc) = parse_guarded(&xml) else {
             continue;
         };
         let root = doc.root_element();
