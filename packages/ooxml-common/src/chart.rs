@@ -237,6 +237,24 @@ pub struct ChartModel {
     /// keeps the renderer's historical no-category-gridlines behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_major_gridlines: Option<bool>,
+    /// `<c:valAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` resolved gridline
+    /// colour (hex, no `#`) — §21.2.2.100. `None` when the value axis omits the
+    /// element or gives it no explicit colour; the renderer then keeps its faint
+    /// default gridline (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_gridline_color: Option<String>,
+    /// `<c:valAx><c:majorGridlines><c:spPr><a:ln w>` gridline width in EMU.
+    /// `None` = the renderer's default hairline (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_gridline_width_emu: Option<u32>,
+    /// `<c:catAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` resolved gridline
+    /// colour (hex, no `#`). Only meaningful when `cat_axis_major_gridlines` is
+    /// on. `None` keeps the faint default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_gridline_color: Option<String>,
+    /// `<c:catAx><c:majorGridlines><c:spPr><a:ln w>` gridline width in EMU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_gridline_width_emu: Option<u32>,
     /// `<c:valAx><c:minorGridlines>` presence (§21.2.2.109).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_minor_gridlines: Option<bool>,
@@ -1406,7 +1424,24 @@ pub fn extract_axis_line_style(
     axis_node: Node,
     resolver: &dyn ColorResolver,
 ) -> (Option<String>, Option<u32>, bool) {
-    let Some(sp_pr) = child(axis_node, "spPr") else {
+    extract_sp_pr_ln_style(axis_node, resolver)
+}
+
+/// `<…><c:spPr><a:ln>` line style for any node that carries a `<c:spPr>` shape
+/// property (an axis, a `<c:majorGridlines>` element, etc.). Returns
+/// `(color, width_emu, no_fill)` with the same contract as
+/// [`extract_axis_line_style`]:
+///
+///  - `color`: resolved hex (no `#`) when the line carries a `<a:solidFill>`.
+///  - `width_emu`: the `<a:ln w>` width in EMU when present.
+///  - `no_fill`: true when the line is explicitly `<a:noFill>`.
+///
+/// `(None, None, false)` when the node has no `<c:spPr><a:ln>`.
+fn extract_sp_pr_ln_style(
+    node: Node,
+    resolver: &dyn ColorResolver,
+) -> (Option<String>, Option<u32>, bool) {
+    let Some(sp_pr) = child(node, "spPr") else {
         return (None, None, false);
     };
     let Some(ln) = child(sp_pr, "ln") else {
@@ -1414,12 +1449,12 @@ pub fn extract_axis_line_style(
     };
     let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
     let no_fill = child(ln, "noFill").is_some();
-    // The axis rule is a SHAPE stroke, so resolve it through `resolve_shape_fill`
+    // The rule is a SHAPE stroke, so resolve it through `resolve_shape_fill`
     // (full DrawingML grammar incl. lumMod/lumOff tints). xlsx keeps its lighter
     // transform-free `resolve_solid_fill` for series/legend/title fills, so a
-    // scheme-color axis line (e.g. a `bg1 lumMod 65%` light-gray rule) must go
-    // through the shape path to render at the right strength rather than its
-    // untransformed base color.
+    // scheme-color line (e.g. a `bg1 lumMod 65%` light-gray rule, or an
+    // `accent3` gridline) must go through the shape path to render at the right
+    // strength rather than its untransformed base color.
     let color = resolver.resolve_shape_fill(ln);
     (color, width, no_fill)
 }
@@ -1441,6 +1476,28 @@ pub fn extract_axis_line_style(
 /// and omits it on the category axis, so this maps directly to "draw them".
 pub fn axis_has_major_gridlines(axis_node: Node) -> bool {
     child(axis_node, "majorGridlines").is_some()
+}
+
+/// `<c:catAx|valAx><c:majorGridlines><c:spPr><a:ln>` gridline style (ECMA-376
+/// §21.2.2.100, `CT_ChartLines` → DrawingML §20.1.2.2.24). The `<c:spPr>` on the
+/// gridlines element styles the gridline stroke exactly like `<c:spPr>` on an
+/// axis styles the axis rule, so this reuses the same `<a:ln>` resolver. Returns
+/// `(color, width_emu)`: the resolved hex (no `#`) when the line carries a
+/// `<a:solidFill>` (e.g. `accent3`), and the `<a:ln w>` width in EMU when
+/// present. `(None, None)` when the axis omits `<c:majorGridlines>` or the
+/// element carries no `<c:spPr><a:ln>` — the renderer then keeps its faint
+/// default gridline. `<a:noFill>` is not exposed here: gridline PRESENCE is
+/// already modeled by [`axis_has_major_gridlines`], so a no-fill gridline only
+/// means "no explicit colour", handled by the `None` colour fallback.
+pub fn extract_gridline_style(
+    axis_node: Node,
+    resolver: &dyn ColorResolver,
+) -> (Option<String>, Option<u32>) {
+    let Some(gridlines) = child(axis_node, "majorGridlines") else {
+        return (None, None);
+    };
+    let (color, width, _no_fill) = extract_sp_pr_ln_style(gridlines, resolver);
+    (color, width)
 }
 
 /// `<c:catAx|valAx><c:minorGridlines>` presence (ECMA-376 §21.2.2.109). Same
@@ -3048,6 +3105,15 @@ pub fn parse_chart_part(
     // so we only emit `Some(false)` when a value axis EXISTS without the element.
     let val_axis_major_gridlines = val_ax.map(|ax| axis_has_major_gridlines(ax));
     let cat_axis_major_gridlines = cat_ax.map(|ax| axis_has_major_gridlines(ax));
+    // `<c:majorGridlines><c:spPr><a:ln>` colour/width — the explicit gridline
+    // style (e.g. sample-1 slide 5's `accent3` 0.25 pt value-axis gridlines).
+    // `(None, None)` when absent, so the renderer keeps its faint default.
+    let (val_axis_gridline_color, val_axis_gridline_width_emu) = val_ax
+        .map(|ax| extract_gridline_style(ax, color_resolver))
+        .unwrap_or((None, None));
+    let (cat_axis_gridline_color, cat_axis_gridline_width_emu) = cat_ax
+        .map(|ax| extract_gridline_style(ax, color_resolver))
+        .unwrap_or((None, None));
     let val_axis_minor_gridlines = val_ax.map(|ax| axis_has_minor_gridlines(ax));
     let val_axis_major_unit = val_ax.and_then(extract_axis_major_unit);
     let val_axis_minor_unit = val_ax.and_then(extract_axis_minor_unit);
@@ -3184,6 +3250,10 @@ pub fn parse_chart_part(
         // ── Axis scale model (CH6) ──────────────────────────────────────
         val_axis_major_gridlines,
         cat_axis_major_gridlines,
+        val_axis_gridline_color,
+        val_axis_gridline_width_emu,
+        cat_axis_gridline_color,
+        cat_axis_gridline_width_emu,
         val_axis_minor_gridlines,
         val_axis_major_unit,
         val_axis_minor_unit,
@@ -3373,6 +3443,10 @@ mod tests {
             disp_blanks_as: None,
             val_axis_major_gridlines: None,
             cat_axis_major_gridlines: None,
+            val_axis_gridline_color: None,
+            val_axis_gridline_width_emu: None,
+            cat_axis_gridline_color: None,
+            cat_axis_gridline_width_emu: None,
             val_axis_minor_gridlines: None,
             val_axis_major_unit: None,
             val_axis_minor_unit: None,
@@ -3694,6 +3768,46 @@ mod tests {
         assert_eq!(
             extract_axis_line_style(d.root_element(), &StubResolver),
             (None, None, false)
+        );
+    }
+
+    #[test]
+    fn gridline_style_solid_scheme_with_width() {
+        // sample-1 slide 5: `<c:majorGridlines><c:spPr><a:ln w="3175">
+        // <a:solidFill><a:schemeClr val="accent3"/>` → the explicit gridline
+        // colour + 0.25 pt width (3175 EMU) the renderer must honor.
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <c:majorGridlines><c:spPr><a:ln w="3175"><a:solidFill><a:schemeClr val="accent3"/></a:solidFill></a:ln></c:spPr></c:majorGridlines>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        let (color, width) = extract_gridline_style(d.root_element(), &StubResolver);
+        assert_eq!(color.as_deref(), Some("accent3"));
+        assert_eq!(width, Some(3175));
+    }
+
+    #[test]
+    fn gridline_style_present_without_sppr() {
+        // `<c:majorGridlines/>` with no `<c:spPr>` → gridlines are requested
+        // (presence-only) but carry no explicit colour/width; the renderer keeps
+        // its faint default. `(None, None)`.
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:majorGridlines/>
+        </c:valAx>"#;
+        let d = root_of(xml);
+        assert_eq!(
+            extract_gridline_style(d.root_element(), &StubResolver),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn gridline_style_absent() {
+        // No `<c:majorGridlines>` at all → `(None, None)`.
+        let xml = r#"<c:valAx xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+        let d = root_of(xml);
+        assert_eq!(
+            extract_gridline_style(d.root_element(), &StubResolver),
+            (None, None)
         );
     }
 
@@ -4288,7 +4402,7 @@ mod tests {
                   <c:valAx>
                     <c:axId val="2"/>
                     <c:axPos val="l"/>
-                    <c:majorGridlines/>
+                    <c:majorGridlines><c:spPr><a:ln w="3175"><a:solidFill><a:schemeClr val="accent3"/></a:solidFill></a:ln></c:spPr></c:majorGridlines>
                     <c:scaling><c:min val="0"/><c:max val="30"/></c:scaling>
                   </c:valAx>
                 </c:plotArea>
@@ -4325,6 +4439,13 @@ mod tests {
         assert_eq!(m.val_max, Some(30.0));
         assert_eq!(m.val_axis_major_gridlines, Some(true));
         assert_eq!(m.cat_axis_major_gridlines, Some(false));
+        // The value-axis `<c:majorGridlines><c:spPr><a:ln>` carries an explicit
+        // `accent3` colour (resolver → A5A5A5) and a 3175 EMU (0.25 pt) width.
+        assert_eq!(m.val_axis_gridline_color.as_deref(), Some("A5A5A5"));
+        assert_eq!(m.val_axis_gridline_width_emu, Some(3175));
+        // The category axis has no gridlines element → no gridline style.
+        assert_eq!(m.cat_axis_gridline_color, None);
+        assert_eq!(m.cat_axis_gridline_width_emu, None);
         assert_eq!(m.cat_axis_line_color.as_deref(), Some("808080"));
         // `extract_chart_space_border` reads `<a:srgbClr@val>` directly (not
         // through the resolver, unlike series/title colors), so the case is

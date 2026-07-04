@@ -526,6 +526,28 @@ export interface ChartModel {
    * ⇒ no category gridlines (the historical default, byte-stable).
    */
   catAxisMajorGridlines?: boolean | null;
+  /**
+   * `<c:valAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` resolved gridline
+   * color (hex without `#`) — ECMA-376 §21.2.2.100. When set, the value-axis
+   * major gridlines are stroked in this color instead of the renderer's faint
+   * `#e0e0e0` default (e.g. sample-1 slide 5's `accent3` gridlines). null/absent
+   * ⇒ the historical default (byte-stable).
+   */
+  valAxisGridlineColor?: string | null;
+  /**
+   * `<c:valAx><c:majorGridlines><c:spPr><a:ln w>` gridline width in EMU. When
+   * set, the value-axis gridline stroke width is derived from this (floored so a
+   * hairline stays visible). null/absent ⇒ the renderer's 0.5 px default.
+   */
+  valAxisGridlineWidthEmu?: number | null;
+  /**
+   * `<c:catAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` resolved gridline
+   * color (hex without `#`). Only meaningful when {@link catAxisMajorGridlines}
+   * is on. null/absent ⇒ the faint default.
+   */
+  catAxisGridlineColor?: string | null;
+  /** `<c:catAx><c:majorGridlines><c:spPr><a:ln w>` gridline width in EMU. */
+  catAxisGridlineWidthEmu?: number | null;
   /** `<c:valAx><c:minorGridlines>` presence (§21.2.2.109). Only drawn when a
    *  minor step is resolvable (see {@link valAxisMinorUnit}). */
   valAxisMinorGridlines?: boolean | null;

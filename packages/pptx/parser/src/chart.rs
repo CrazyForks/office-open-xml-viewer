@@ -333,6 +333,10 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
             // CH6 fields unset — the renderer keeps its defaults (byte-stable).
             val_axis_major_gridlines: None,
             cat_axis_major_gridlines: None,
+            val_axis_gridline_color: None,
+            val_axis_gridline_width_emu: None,
+            cat_axis_gridline_color: None,
+            cat_axis_gridline_width_emu: None,
             val_axis_minor_gridlines: None,
             val_axis_major_unit: None,
             val_axis_minor_unit: None,
