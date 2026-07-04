@@ -15,14 +15,27 @@
 //     record is EMR_HEADER (iType=1); the last is EMR_EOF (iType=14).
 //   - All values little-endian. COLORREF = u32 0x00BBGGRR (low byte = R), shared
 //     byte layout with WMF (we reuse {@link colorRefToCss}).
-//   - The world transform (EMR_SETWORLDTRANSFORM / EMR_MODIFYWORLDTRANSFORM,
-//     [MS-EMF] 2.3.12) is a 2×3 affine and does *all* scaling for these files
-//     (no SETWINDOW/VIEWPORT records, MM_TEXT default). Getting the affine
-//     multiply order right ([MS-EMF] 2.3.12: MWT_LEFTMULTIPLY ⇒ the supplied
-//     XFORM is the LEFT operand, `newWT = xform × WT`) is what makes
-//     bars/axes/labels land in the right place.
+//   - The full [MS-EMF] coordinate pipeline is world → page → device → target:
+//       1. WORLD → PAGE: the world transform (EMR_SETWORLDTRANSFORM /
+//          EMR_MODIFYWORLDTRANSFORM, [MS-EMF] 2.3.12), a 2×3 affine. Getting the
+//          multiply order right ([MS-EMF] 2.3.12: MWT_LEFTMULTIPLY ⇒ the
+//          supplied XFORM is the LEFT operand, `newWT = xform × WT`) is what
+//          makes bars/axes/labels land in the right place in world-scaled files.
+//       2. PAGE → DEVICE: the window→viewport mapping (SETMAPMODE +
+//          SET{WINDOW,VIEWPORT}{ORG,EXT}EX + SCALE{WINDOW,VIEWPORT}EXTEX,
+//          [MS-EMF] 2.3.11 / 2.1.21 MapMode). GDI computes device coords as
+//          `D = (P − winOrg)·(vpExt/winExt) + vpOrg`. Under the default MM_TEXT
+//          (winOrg=vpOrg=0, winExt=vpExt=1) this is the identity, so files that
+//          scale purely with the world transform are unaffected; files that set
+//          MM_ANISOTROPIC/ISOTROPIC + explicit window/viewport extents (common
+//          for charts pasted as EMF, e.g. from Excel/Visio into pptx) map
+//          correctly instead of collapsing to a blank/off-canvas raster.
+//       3. DEVICE → TARGET: the EMR_HEADER rclFrame/rclBounds rectangle scaled
+//          onto the W×H raster (see the HEADER case).
 //
-// Implemented records: HEADER, SETWORLDTRANSFORM, MODIFYWORLDTRANSFORM,
+// Implemented records: HEADER, SETMAPMODE, SETWINDOWORGEX/SETWINDOWEXTEX,
+// SETVIEWPORTORGEX/SETVIEWPORTEXTEX, SCALEWINDOWEXTEX/SCALEVIEWPORTEXTEX,
+// SETWORLDTRANSFORM, MODIFYWORLDTRANSFORM,
 // SAVEDC/RESTOREDC, SELECTOBJECT (incl. stock objects), DELETEOBJECT,
 // CREATEPEN, EXTCREATEPEN, CREATEBRUSHINDIRECT, CREATEMONOBRUSH /
 // CREATEDIBPATTERNBRUSHPT (→ average solid color), EXTCREATEFONTINDIRECTW,
@@ -55,12 +68,19 @@ const EMR = {
   POLYLINETO: 6,
   POLYPOLYLINE: 7,
   POLYPOLYGON: 8,
+  SETWINDOWEXTEX: 9,
+  SETWINDOWORGEX: 10,
+  SETVIEWPORTEXTEX: 11,
+  SETVIEWPORTORGEX: 12,
   EOF: 14,
+  SETMAPMODE: 17,
   SETPOLYFILLMODE: 19,
   SETBKMODE: 18,
   SETTEXTALIGN: 22,
   SETTEXTCOLOR: 24,
   MOVETOEX: 27,
+  SCALEVIEWPORTEXTEX: 31,
+  SCALEWINDOWEXTEX: 32,
   SAVEDC: 33,
   RESTOREDC: 34,
   SETWORLDTRANSFORM: 35,
@@ -106,6 +126,21 @@ const STOCK = {
   NULL_PEN: 0x80000008,
   DC_BRUSH: 0x80000012,
   DC_PEN: 0x8000000e,
+} as const;
+
+// MapMode enumeration ([MS-EMF] 2.1.21). The metric modes below express a fixed
+// physical size per logical unit; GDI derives their window/viewport extents from
+// the reference-device resolution in the EMR_HEADER. MM_TEXT is 1 device px per
+// logical unit (y-down); the metric modes are y-UP (viewport Y extent negative).
+const MM = {
+  TEXT: 1,
+  LOMETRIC: 2, // 0.1 mm per unit
+  HIMETRIC: 3, // 0.01 mm per unit
+  LOENGLISH: 4, // 0.01 inch per unit
+  HIENGLISH: 5, // 0.001 inch per unit
+  TWIPS: 6, // 1/1440 inch per unit
+  ISOTROPIC: 7,
+  ANISOTROPIC: 8,
 } as const;
 
 // ── color ─────────────────────────────────────────────────────────────────
@@ -234,7 +269,23 @@ interface PlayState {
   boundsW: number;
   boundsH: number;
   // GDI state
-  wt: Xform; // current world transform (logical → device)
+  wt: Xform; // current world transform (world → page)
+  // window→viewport mapping ([MS-EMF] 2.3.11): page → device via
+  // `D = (P − winOrg)·(vpExt/winExt) + vpOrg`. MM_TEXT default is the identity
+  // (winOrg=vpOrg=0, winExt=vpExt=1), so world-scaled files are unchanged.
+  mapMode: number;
+  winOrgX: number;
+  winOrgY: number;
+  winExtX: number;
+  winExtY: number;
+  vpOrgX: number;
+  vpOrgY: number;
+  vpExtX: number;
+  vpExtY: number;
+  // Reference-device resolution from the EMR_HEADER, used to derive fixed
+  // window/viewport extents for the metric map modes ([MS-EMF] 2.1.21).
+  devPxPerMmX: number;
+  devPxPerMmY: number;
   objects: Map<number, EmfObject>; // indexed by ihObject
   curPen: Pen | null;
   curBrush: Brush | null;
@@ -253,6 +304,15 @@ interface PlayState {
 /** Snapshot of the graphics state pushed by EMR_SAVEDC. */
 interface SavedDc {
   wt: Xform;
+  mapMode: number;
+  winOrgX: number;
+  winOrgY: number;
+  winExtX: number;
+  winExtY: number;
+  vpOrgX: number;
+  vpOrgY: number;
+  vpExtX: number;
+  vpExtY: number;
   curPen: Pen | null;
   curBrush: Brush | null;
   curFont: Font | null;
@@ -265,32 +325,60 @@ interface SavedDc {
 }
 
 // ── coordinate pipeline ─────────────────────────────────────────────────────
+//
+// [MS-EMF] maps world → page → device → target:
+//   1. world → PAGE via the world transform ([MS-EMF] 2.2.28 XFORM):
+//        `Xp = m11·Xw + m21·Yw + dx`, `Yp = m12·Xw + m22·Yw + dy`
+//   2. page → DEVICE via the window→viewport mapping ([MS-EMF] 2.3.11):
+//        `Xd = (Xp − winOrgX)·(vpExtX/winExtX) + vpOrgX` (and likewise Y)
+//   3. device → TARGET via the header frame/bounds → W×H raster scale.
 
-/** logical → device via world transform ([MS-EMF] 2.2.28):
- *  `Xd = m11·Xl + m21·Yl + dx`, `Yd = m12·Xl + m22·Yl + dy`. */
-function worldX(s: PlayState, xl: number, yl: number): number {
+/** world → page X (world transform only). */
+function pageX(s: PlayState, xl: number, yl: number): number {
   return s.wt.m11 * xl + s.wt.m21 * yl + s.wt.dx;
 }
-function worldY(s: PlayState, xl: number, yl: number): number {
+/** world → page Y (world transform only). */
+function pageY(s: PlayState, xl: number, yl: number): number {
   return s.wt.m12 * xl + s.wt.m22 * yl + s.wt.dy;
 }
 
-/** logical point → target px: world transform, then device→target
- *  `px = (Xd − left)·W/boundsW`, `py = (Yd − top)·H/boundsH`. */
+/** page → device scale along X (`vpExtX/winExtX`); 1 under MM_TEXT. */
+function pageScaleX(s: PlayState): number {
+  return s.winExtX !== 0 ? s.vpExtX / s.winExtX : 1;
+}
+/** page → device scale along Y (`vpExtY/winExtY`); 1 under MM_TEXT. */
+function pageScaleY(s: PlayState): number {
+  return s.winExtY !== 0 ? s.vpExtY / s.winExtY : 1;
+}
+/** page → device X ([MS-EMF] 2.3.11). */
+function deviceX(s: PlayState, xp: number): number {
+  return (xp - s.winOrgX) * pageScaleX(s) + s.vpOrgX;
+}
+/** page → device Y ([MS-EMF] 2.3.11). */
+function deviceY(s: PlayState, yp: number): number {
+  return (yp - s.winOrgY) * pageScaleY(s) + s.vpOrgY;
+}
+
+/** logical (world) point → target px: world transform, then window→viewport
+ *  page→device, then device→target. */
 function toPx(s: PlayState, xl: number, yl: number): [number, number] {
-  const Xd = worldX(s, xl, yl);
-  const Yd = worldY(s, xl, yl);
+  const Xd = deviceX(s, pageX(s, xl, yl));
+  const Yd = deviceY(s, pageY(s, xl, yl));
   const px = ((Xd - s.left) * s.W) / s.boundsW;
   const py = ((Yd - s.top) * s.H) / s.boundsH;
   return [px, py];
 }
 
-/** Average world scale magnitude (column-vector lengths) — used to scale pen
- *  width logically before the device→target scale. */
+/** Average world scale magnitude (column-vector lengths) — the world→page part
+ *  of the pen/font scale. */
 function worldScale(s: PlayState): number {
   const sx = Math.hypot(s.wt.m11, s.wt.m12);
   const sy = Math.hypot(s.wt.m21, s.wt.m22);
   return (sx + sy) / 2;
+}
+/** Average page→device scale magnitude (window→viewport); 1 under MM_TEXT. */
+function pageScale(s: PlayState): number {
+  return (Math.abs(pageScaleX(s)) + Math.abs(pageScaleY(s))) / 2;
 }
 /** Average device→target scale (px per device unit). */
 function deviceScale(s: PlayState): number {
@@ -305,11 +393,74 @@ function deviceScaleY(s: PlayState): number {
   return s.H / s.boundsH;
 }
 
-/** Device line width: scale the pen's logical width through world+device and
- *  clamp to ≥0.75 so hairlines stay visible. */
+/** Device line width: scale the pen's logical width through world → page →
+ *  device → target and clamp to ≥0.75 so hairlines stay visible. */
 function deviceLineWidth(s: PlayState, logicalWidth: number): number {
-  const w = logicalWidth * worldScale(s) * deviceScale(s);
+  const w = logicalWidth * worldScale(s) * pageScale(s) * deviceScale(s);
   return Math.max(0.75, w);
+}
+
+/**
+ * Apply EMR_SETMAPMODE ([MS-EMF] 2.3.11 / MapMode enumeration 2.1.21).
+ *
+ * MM_TEXT / MM_ANISOTROPIC / MM_ISOTROPIC leave the current window & viewport
+ * origins/extents in place (the app sets them with the SET*ORGEX/SET*EXTEX
+ * records). The five metric modes impose a fixed physical scale — one logical
+ * unit is a fixed fraction of an inch or millimetre — with a y-UP axis; GDI
+ * realizes that by fixed window/viewport extents derived from the reference
+ * device resolution (px per mm from the EMR_HEADER). We compute those extents
+ * so the page→device stage reproduces the physical scale. Origins reset to 0.
+ */
+function applyMapMode(s: PlayState, mode: number): void {
+  s.mapMode = mode;
+  if (mode === MM.TEXT) {
+    // 1 logical unit = 1 device px, y-down. Reset to the identity mapping.
+    s.winOrgX = 0;
+    s.winOrgY = 0;
+    s.vpOrgX = 0;
+    s.vpOrgY = 0;
+    s.winExtX = 1;
+    s.winExtY = 1;
+    s.vpExtX = 1;
+    s.vpExtY = 1;
+    return;
+  }
+  if (mode === MM.ANISOTROPIC || mode === MM.ISOTROPIC) {
+    // The application supplies window/viewport extents explicitly; keep the
+    // current ones (default 1:1 until a SET*EXTEX record arrives).
+    return;
+  }
+  // Metric modes: a fixed physical unit per logical unit, y-UP. Realize as a
+  // window extent of `unitMm` logical units mapping to `devPxPerMm` device px,
+  // i.e. vpExt/winExt = px per logical unit. Needs the header device resolution;
+  // if it is unknown, leave the mapping untouched (degrade to world-transform).
+  if (s.devPxPerMmX <= 0 || s.devPxPerMmY <= 0) return;
+  const MM_PER_INCH = 25.4;
+  // Physical size, in millimetres, of ONE logical unit for each metric mode.
+  const unitMm =
+    mode === MM.LOMETRIC
+      ? 0.1
+      : mode === MM.HIMETRIC
+        ? 0.01
+        : mode === MM.LOENGLISH
+          ? 0.01 * MM_PER_INCH
+          : mode === MM.HIENGLISH
+            ? 0.001 * MM_PER_INCH
+            : mode === MM.TWIPS
+              ? MM_PER_INCH / 1440
+              : 0;
+  if (unitMm <= 0) return;
+  s.winOrgX = 0;
+  s.winOrgY = 0;
+  s.vpOrgX = 0;
+  s.vpOrgY = 0;
+  // 1 logical unit → unitMm mm → unitMm·devPxPerMm device px. Encode as
+  // winExt=1, vpExt=px-per-unit. Viewport Y is negated: metric modes are y-UP
+  // while device space is y-down ([MS-EMF] 2.1.21).
+  s.winExtX = 1;
+  s.winExtY = 1;
+  s.vpExtX = unitMm * s.devPxPerMmX;
+  s.vpExtY = -(unitMm * s.devPxPerMmY);
 }
 
 // ── stock objects ([MS-EMF] 2.1.31) ─────────────────────────────────────────
@@ -729,7 +880,13 @@ function drawText(s: PlayState, c: EmfCursor, dv: DataView, recStart: number): v
   if (str.length === 0) return;
 
   const font = s.curFont;
-  const px = Math.abs(font?.height ?? 0) * worldScaleY(s) * deviceScaleY(s);
+  // Font height is in logical units: world→page (worldScaleY), page→device
+  // (|pageScaleY|, 1 under MM_TEXT), then device→target (deviceScaleY).
+  const px =
+    Math.abs(font?.height ?? 0) *
+    worldScaleY(s) *
+    Math.abs(pageScaleY(s)) *
+    deviceScaleY(s);
   if (!Number.isFinite(px) || px < 1) return;
 
   const { ctx } = s;
@@ -867,6 +1024,20 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
     boundsW: W,
     boundsH: H,
     wt: identity(),
+    // MM_TEXT default: page→device is the identity (winOrg=vpOrg=0,
+    // winExt=vpExt=1), so files that scale purely with the world transform are
+    // byte-for-byte unaffected by the window→viewport stage.
+    mapMode: MM.TEXT,
+    winOrgX: 0,
+    winOrgY: 0,
+    winExtX: 1,
+    winExtY: 1,
+    vpOrgX: 0,
+    vpOrgY: 0,
+    vpExtX: 1,
+    vpExtY: 1,
+    devPxPerMmX: 0,
+    devPxPerMmY: 0,
     objects: new Map(),
     curPen: null,
     curBrush: null,
@@ -942,6 +1113,10 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
               s.top = fTop * sy;
               s.boundsW = Math.max(1, fwMm * sx);
               s.boundsH = Math.max(1, fhMm * sy);
+              // Reference-device resolution in px per mm, for the metric map
+              // modes ([MS-EMF] 2.1.21). szlDevice is px, szlMillimeters is mm.
+              s.devPxPerMmX = devCx / mmCx;
+              s.devPxPerMmY = devCy / mmCy;
             }
           }
           break;
@@ -961,12 +1136,73 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           else if (iMode === 4) s.wt = x;
           break;
         }
+        case EMR.SETMAPMODE: {
+          // data: u32 MapMode ([MS-EMF] 2.3.11).
+          applyMapMode(s, c.u32());
+          break;
+        }
+        case EMR.SETWINDOWORGEX: {
+          // data: POINTL { i32 x, i32 y } ([MS-EMF] 2.3.11).
+          s.winOrgX = c.i32();
+          s.winOrgY = c.i32();
+          break;
+        }
+        case EMR.SETWINDOWEXTEX: {
+          // data: SIZEL { i32 cx, i32 cy } — the window extent, page space.
+          const cx = c.i32();
+          const cy = c.i32();
+          if (cx !== 0) s.winExtX = cx;
+          if (cy !== 0) s.winExtY = cy;
+          break;
+        }
+        case EMR.SETVIEWPORTORGEX: {
+          s.vpOrgX = c.i32();
+          s.vpOrgY = c.i32();
+          break;
+        }
+        case EMR.SETVIEWPORTEXTEX: {
+          // data: SIZEL { i32 cx, i32 cy } — the viewport extent, device space.
+          const cx = c.i32();
+          const cy = c.i32();
+          if (cx !== 0) s.vpExtX = cx;
+          if (cy !== 0) s.vpExtY = cy;
+          break;
+        }
+        case EMR.SCALEWINDOWEXTEX: {
+          // data: i32 xNum, i32 xDenom, i32 yNum, i32 yDenom ([MS-EMF] 2.3.11):
+          // window extent ×= num/denom. Divisor 0 leaves that axis unchanged.
+          const xNum = c.i32();
+          const xDenom = c.i32();
+          const yNum = c.i32();
+          const yDenom = c.i32();
+          if (xDenom !== 0) s.winExtX = (s.winExtX * xNum) / xDenom;
+          if (yDenom !== 0) s.winExtY = (s.winExtY * yNum) / yDenom;
+          break;
+        }
+        case EMR.SCALEVIEWPORTEXTEX: {
+          const xNum = c.i32();
+          const xDenom = c.i32();
+          const yNum = c.i32();
+          const yDenom = c.i32();
+          if (xDenom !== 0) s.vpExtX = (s.vpExtX * xNum) / xDenom;
+          if (yDenom !== 0) s.vpExtY = (s.vpExtY * yNum) / yDenom;
+          break;
+        }
         case EMR.SAVEDC: {
           // Mirror the GDI state push on the canvas too, so a clip set via
           // SELECTCLIPPATH (below) is scoped to the matching RESTOREDC.
           s.ctx.save();
           s.stack.push({
             wt: { ...s.wt },
+            mapMode: s.mapMode,
+            winOrgX: s.winOrgX,
+            winOrgY: s.winOrgY,
+            winExtX: s.winExtX,
+            winExtY: s.winExtY,
+            vpOrgX: s.vpOrgX,
+            vpOrgY: s.vpOrgY,
+            vpExtX: s.vpExtX,
+            vpExtY: s.vpExtY,
             curPen: s.curPen,
             curBrush: s.curBrush,
             curFont: s.curFont,
@@ -991,6 +1227,15 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           }
           if (saved) {
             s.wt = saved.wt;
+            s.mapMode = saved.mapMode;
+            s.winOrgX = saved.winOrgX;
+            s.winOrgY = saved.winOrgY;
+            s.winExtX = saved.winExtX;
+            s.winExtY = saved.winExtY;
+            s.vpOrgX = saved.vpOrgX;
+            s.vpOrgY = saved.vpOrgY;
+            s.vpExtX = saved.vpExtX;
+            s.vpExtY = saved.vpExtY;
             s.curPen = saved.curPen;
             s.curBrush = saved.curBrush;
             s.curFont = saved.curFont;
