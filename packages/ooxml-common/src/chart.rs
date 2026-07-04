@@ -289,7 +289,7 @@ pub struct ChartModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_label_rotation: Option<i32>,
     // ── Stock chart (CH13, §21.2.2.198) ──────────────────────────────────────
-    /// `<c:stockChart><c:hiLowLines>` (§21.2.2.60) presence. When `Some(true)`
+    /// `<c:stockChart><c:hiLowLines>` (§21.2.2.80) presence. When `Some(true)`
     /// the stock renderer draws a vertical line spanning each category's
     /// low↔high value. Only emitted for a stock chart (`chart_type == "stock"`);
     /// `None` on every other chart type keeps the wire byte-stable.
@@ -300,7 +300,7 @@ pub struct ChartModel {
     /// `stock_hi_low_lines == Some(true)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stock_hi_low_line_color: Option<String>,
-    /// `<c:stockChart><c:upDownBars>` (§21.2.2.227) presence. Parsed so a file
+    /// `<c:stockChart><c:upDownBars>` (§21.2.2.218) presence. Parsed so a file
     /// that carries open-close up/down bars is recognized; the stock renderer
     /// does NOT yet draw them (tracked as a follow-up). `None` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2549,11 +2549,13 @@ pub fn parse_chart_part(
     // equivalents: the child data structure (`<c:ser>`/`<c:cat>`/`<c:val>`/
     // grouping/`<c:dLbls>`) is identical to the 2D form, so a 3D chart is drawn
     // as the corresponding 2D chart. The 3D-only elements (`<c:view3D>`
-    // §21.2.2.228, `<c:surface>` §21.2.2.177, `<a:scene3d>`/`<a:sp3d>` shape 3D
-    // and `<c:gapDepth>` §21.2.2.55) are ignored. This 2D-flattening is the
-    // established strategy of web chart engines (Google Slides, Keynote) and was
-    // approved in the CH13 plan; a faithful isometric 3D projection is out of
-    // scope. `surfaceChart`/`surface3DChart` are NOT flattened (they have no 2D
+    // §21.2.2.228, the 3D chart-space surfaces `<c:floor>` §21.2.2.69 /
+    // `<c:sideWall>` §21.2.2.191 / `<c:backWall>` §21.2.2.11 (all `CT_Surface`),
+    // `<a:scene3d>`/`<a:sp3d>` shape 3D and `<c:gapDepth>` §21.2.2.74) are
+    // ignored. This 2D-flattening is the established strategy of web chart
+    // engines (Google Slides, Keynote) and was approved in the CH13 plan; a
+    // faithful isometric 3D projection is out of scope.
+    // `surfaceChart`/`surface3DChart` are NOT flattened (they have no 2D
     // analogue) and stay "unknown".
     let read_grouping = |group: &Node, default: &str| -> String {
         group
@@ -2563,7 +2565,7 @@ pub fn parse_chart_part(
             .unwrap_or_else(|| default.into())
     };
     let chart_type = if let Some(bc) = find_chart("barChart").or_else(|| find_chart("bar3DChart")) {
-        // §21.2.2.17 barDir + §21.2.2.79 grouping. bar3DChart shares both
+        // §21.2.2.17 barDir + §21.2.2.77 grouping (Bar Grouping). bar3DChart shares both
         // (its extra `<c:gapDepth>` is ignored). `clustered` is the 2D default;
         // `standard` (the bar3DChart default) folds to clustered as well since
         // `canonical_chart_type` treats any non-stacked grouping as clustered.
@@ -2583,8 +2585,8 @@ pub fn parse_chart_part(
         // §21.2.2.126 ofPieChart (pie-of-pie / bar-of-pie). DECISION: draw the
         // whole series as ONE plain pie (main-pie-only fallback) rather than
         // splitting the tail data points into the secondary pie/bar. The
-        // split is governed by `<c:splitType>` (§21.2.2.197: `auto` / `cust` /
-        // `percent` / `pos` / `val`), `<c:splitPos>` (§21.2.2.196) and
+        // split is governed by `<c:splitType>` (§21.2.2.196: `auto` / `cust` /
+        // `percent` / `pos` / `val`), `<c:splitPos>` (§21.2.2.195) and
         // `<c:custSplit>`, plus `<c:secondPieSize>` and `<c:serLines>` for the
         // connector geometry — all of which need a validated fixture to lay out
         // correctly. Without one, splitting risks assigning the wrong points to
@@ -2614,8 +2616,8 @@ pub fn parse_chart_part(
         "unknown".to_string()
     };
 
-    // §21.2.2.198 stockChart decoration: `<c:hiLowLines>` (§21.2.2.60) and
-    // `<c:upDownBars>` (§21.2.2.227). Both are direct children of `<c:stockChart>`.
+    // §21.2.2.198 stockChart decoration: `<c:hiLowLines>` (§21.2.2.80) and
+    // `<c:upDownBars>` (§21.2.2.218). Both are direct children of `<c:stockChart>`.
     // The hi-lo line spans each category's low↔high; its `<c:spPr><a:ln>` fill is
     // resolved so the renderer strokes it in the file's color (else a gray
     // default). up/down bars are recognized but not yet drawn (follow-up). Every
@@ -3026,7 +3028,7 @@ pub fn parse_chart_part(
                 })
                 .collect();
 
-            // §21.2.2.228 `<c:varyColors>`: a pie/doughnut varies each DATA POINT
+            // §21.2.2.227 `<c:varyColors>`: a pie/doughnut varies each DATA POINT
             // by the theme accent palette (`accent[(i % 6) + 1]`), rather than
             // giving the whole series one fill. It defaults to ON for the pie
             // family, so an absent element still cycles the accents. When on, fill
@@ -5779,7 +5781,7 @@ mod tests {
     }
 
     /// A resolver that DOES supply the default series accent palette (like the
-    /// real docx/xlsx resolvers), used to pin the §21.2.2.228 `<c:varyColors>`
+    /// real docx/xlsx resolvers), used to pin the §21.2.2.227 `<c:varyColors>`
     /// per-slice accent fill. `FixtureResolver` returns `None` for accents so it
     /// cannot exercise this path.
     struct AccentResolver;
@@ -5797,7 +5799,7 @@ mod tests {
         }
     }
 
-    /// §21.2.2.228 varyColors (default ON for pie): each slice without an
+    /// §21.2.2.227 varyColors (default ON for pie): each slice without an
     /// explicit `<c:dPt>` fill takes the theme accent for its point index, so a
     /// docx/xlsx pie matches Office instead of the renderer's built-in palette.
     /// The one slice that DOES carry a `<c:dPt>` fill keeps it.
