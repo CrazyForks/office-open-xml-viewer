@@ -1746,3 +1746,88 @@ describe('CH6 — axis scale model', () => {
     expect(horizGridlines(rec.segs).length).toBeGreaterThan(2);
   });
 });
+
+/** Recording context that counts rotate() calls and captures fillText, for the
+ *  category-label rotation / tickLblPos tests. */
+function rotateRecordingCtx(): { ctx: CanvasRenderingContext2D; rotates: number[]; texts: string[] } {
+  const rotates: number[] = [];
+  const texts: string[] = [];
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'rotate': return (r: number) => { rotates.push(r); };
+        case 'fillText': return (text: string) => texts.push(String(text));
+        case 'createLinearGradient': case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        case 'save': case 'restore': case 'beginPath': case 'closePath':
+        case 'fill': case 'stroke': case 'moveTo': case 'lineTo': case 'arc':
+        case 'bezierCurveTo': case 'quadraticCurveTo': case 'rect': case 'fillRect':
+        case 'strokeRect': case 'clearRect': case 'strokeText': case 'setLineDash':
+        case 'translate': case 'scale': case 'clip': case 'setTransform':
+        case 'resetTransform': case 'getTransform':
+          return () => undefined;
+        default: return undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, rotates, texts };
+}
+
+describe('CH6 — category-axis label rotation + tickLblPos (commit 2)', () => {
+  const colModel = (over: Partial<ChartModel>): ChartModel => baseModel({
+    chartType: 'clusteredBar',
+    categories: ['Alpha', 'Beta', 'Gamma'],
+    series: [series({ name: 'S', values: [10, 20, 30] })],
+    ...over,
+  });
+
+  it('catAxisTickLabelPos="none" hides the category labels', () => {
+    const shown = rotateRecordingCtx();
+    renderChart(shown.ctx, colModel({}), RECT, 1);
+    expect(shown.texts.some(t => t.startsWith('Alpha'))).toBe(true);
+
+    const hidden = rotateRecordingCtx();
+    renderChart(hidden.ctx, colModel({ catAxisTickLabelPos: 'none' }), RECT, 1);
+    expect(hidden.texts.some(t => t.startsWith('Alpha'))).toBe(false);
+    // Value tick labels still present.
+    expect(hidden.texts.some(t => /^\d+$/.test(t))).toBe(true);
+  });
+
+  it('catAxisLabelRotation rotates the column category labels', () => {
+    const flat = rotateRecordingCtx();
+    renderChart(flat.ctx, colModel({}), RECT, 1);
+    expect(flat.rotates.length).toBe(0);
+
+    const rot = rotateRecordingCtx();
+    // -2700000 60000ths = -45°.
+    renderChart(rot.ctx, colModel({ catAxisLabelRotation: -2_700_000 }), RECT, 1);
+    expect(rot.rotates.length).toBeGreaterThan(0);
+    const rad = rot.rotates[0];
+    expect(rad).toBeCloseTo((-45 * Math.PI) / 180, 6);
+    // Labels still drawn (just rotated).
+    expect(rot.texts.some(t => t.startsWith('Alpha'))).toBe(true);
+  });
+
+  it('rotation 0 keeps the un-rotated fast path (byte-stable, no rotate calls)', () => {
+    const rec = rotateRecordingCtx();
+    renderChart(rec.ctx, colModel({ catAxisLabelRotation: 0 }), RECT, 1);
+    expect(rec.rotates.length).toBe(0);
+  });
+});

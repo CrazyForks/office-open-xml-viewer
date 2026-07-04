@@ -557,6 +557,43 @@ function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: numb
   return Math.max(8, h * 0.045);
 }
 
+/** Whether the CATEGORY tick labels should be drawn. `<c:catAx><c:tickLblPos
+ *  val="none">` (ECMA-376 §21.2.2.207) hides them; anything else (incl. absent)
+ *  shows them, so the default is byte-stable. */
+function catLabelsVisible(chart: ChartModel): boolean {
+  return chart.catAxisTickLabelPos !== 'none';
+}
+
+/** Category-axis label rotation in RADIANS (canvas convention), from
+ *  `<c:catAx><c:txPr><a:bodyPr rot>` (DrawingML `ST_Angle`, 60000ths of a
+ *  degree). Returns 0 when unset — the un-rotated fast path callers keep. */
+function catLabelRotationRad(chart: ChartModel): number {
+  const rot = chart.catAxisLabelRotation;
+  if (rot == null || rot === 0) return 0;
+  return (rot / 60000) * (Math.PI / 180);
+}
+
+/** Draw a category label at `(x, y)` with optional rotation. `rotRad === 0`
+ *  keeps the exact non-rotated draw the callers used before (byte-stable):
+ *  `ctx.fillText(text, x, y)` with the caller's current align/baseline. When
+ *  rotated, the label pivots around `(x, y)` and is right-aligned+middle so the
+ *  text trails up-left from the tick, matching PowerPoint's angled axis labels. */
+function drawRotatedCatLabel(
+  ctx: CanvasRenderingContext2D, text: string, x: number, y: number, rotRad: number,
+): void {
+  if (rotRad === 0) {
+    ctx.fillText(text, x, y);
+    return;
+  }
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rotRad);
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
 /** Resolved secondary value-axis scale (combo charts). `min`/`max`/`step` are
  *  the "nice" bounds + major unit; `makeToY(py0, ph)` builds the value→pixel
  *  mapping once the final plot rect is known (the scale is computed BEFORE the
@@ -1241,7 +1278,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
   }
 
-  if (!chart.catAxisHidden) {
+  if (!chart.catAxisHidden && catLabelsVisible(chart)) {
     // `<c:catAx><c:txPr>…<a:solidFill>` colors the category tick labels (e.g.
     // sample-2 slide-16's "2025年3月期" labels are `bg1 lumMod 75%` gray).
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
@@ -1252,6 +1289,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // band and the plot edge, so cap it at that band width.
     const catSlotMaxPx = catGap - 4;
     const horizLabelMaxPx = (px0 - 4) - (x + legLeftW + valTitleW);
+    // `<c:catAx><c:txPr><a:bodyPr rot>` rotates the column labels (0 = flat).
+    const rotRad = catLabelRotationRad(chart);
     for (let ci = 0; ci < n; ci++) {
       // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
       // (e.g. dateAx serials → real dates). No-op for string categories.
@@ -1259,7 +1298,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
       if (!isH) {
         const lx = px0 + ci * catGap + catGap / 2;
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        ctx.fillText(elideToWidth(ctx, raw, catSlotMaxPx), lx, py0 + ph + 3);
+        // Rotation elides against a longer diagonal budget; unrotated keeps the
+        // slot width and the byte-stable `fillText(text, x, y)` path.
+        const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
+        drawRotatedCatLabel(ctx, elideToWidth(ctx, raw, budget), lx, py0 + ph + 3, rotRad);
       } else {
         const ly = py0 + (n - 1 - ci) * catGap + catGap / 2;
         ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
@@ -1681,14 +1723,19 @@ function renderLineChart(
     // Only every `labelInterval`-th category is drawn, so the horizontal room a
     // centered label owns is the spacing between two drawn labels: (pw/n)·interval.
     const catSlotMaxPx = (pw / n) * labelInterval - 4;
+    // Ticks are still drawn under `tickLblPos="none"`; only the labels drop.
+    const showLabels = catLabelsVisible(chart);
+    const rotRad = catLabelRotationRad(chart);
     for (let ci = 0; ci < n; ci += labelInterval) {
       const tx = toX(ci);
       drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx);
+      if (!showLabels) continue;
       ctx.fillStyle = catLabelColor;
       // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
       // category-axis numFmt; string categories pass through unchanged.
       const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
-      ctx.fillText(elideToWidth(ctx, label, catSlotMaxPx), tx, py0 + ph + 5);
+      const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
+      drawRotatedCatLabel(ctx, elideToWidth(ctx, label, budget), tx, py0 + ph + 5, rotRad);
     }
   }
 
