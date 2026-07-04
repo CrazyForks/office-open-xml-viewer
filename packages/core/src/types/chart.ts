@@ -121,6 +121,46 @@ export interface ChartSeries {
    * polyline (the default; byte-stable for series that never set it).
    */
   smooth?: boolean | null;
+  /**
+   * `<c:ser><c:trendline>` per-series trendlines (ECMA-376 §21.2.2.211,
+   * `CT_Trendline`). A series can carry several (e.g. a linear fit + a moving
+   * average). null/undefined/empty = no trendline (the default; byte-stable for
+   * series that never declare one).
+   */
+  trendLines?: ChartTrendline[] | null;
+}
+
+/**
+ * `<c:ser><c:trendline>` (ECMA-376 §21.2.2.211). A regression/smoothing curve
+ * fitted to the series' data points.
+ */
+export interface ChartTrendline {
+  /**
+   * `<c:trendlineType val>` (§21.2.2.213, `ST_TrendlineType` §21.2.3.50):
+   * "linear" | "exp" | "log" | "power" | "poly" | "movingAvg". The renderer
+   * currently draws "linear" (least squares) and "movingAvg"; other types parse
+   * but are not yet plotted (tracked as a follow-up).
+   */
+  trendlineType: string;
+  /** `<c:order val>` — polynomial order (`poly`, default 2). */
+  order?: number | null;
+  /** `<c:period val>` — moving-average window (`movingAvg`, default 2). */
+  period?: number | null;
+  /** `<c:forward val>` — units to extend the line past the last point. */
+  forward?: number | null;
+  /** `<c:backward val>` — units to extend the line before the first point. */
+  backward?: number | null;
+  /** `<c:intercept val>` — forced y-intercept (linear/exp). null = free fit. */
+  intercept?: number | null;
+  /** `<c:dispRSqr val="1">` — show the R² value (label; not yet rendered). */
+  dispRSqr?: boolean | null;
+  /** `<c:dispEq val="1">` — show the fit equation (label; not yet rendered). */
+  dispEq?: boolean | null;
+  /** `<c:spPr><a:ln><a:solidFill>` trendline color (hex without '#'). null =
+   *  inherit the series color. */
+  lineColor?: string | null;
+  /** `<c:spPr><a:ln w>` trendline width in EMU. */
+  lineWidthEmu?: number | null;
 }
 
 export interface ChartDataPointOverride {

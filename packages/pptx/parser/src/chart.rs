@@ -564,6 +564,12 @@ pub(crate) fn parse_legacy_chart(
                 // Shared with the xlsx parser via ooxml-common so both honor the
                 // CT_Boolean implied-true semantics.
                 smooth: ooxml_common::chart::extract_series_smooth(*ser),
+                // `<c:ser><c:trendline>` (§21.2.2.211) — regression lines. Shared
+                // extractor; the line color resolves through the pptx theme.
+                trend_lines: ooxml_common::chart::extract_series_trendlines(
+                    *ser,
+                    &PptxColorResolver { theme },
+                ),
             }
         })
         .collect();
@@ -1173,6 +1179,8 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
         err_bars: None,
         // chartEx (waterfall) has no `<c:smooth>` concept.
         smooth: None,
+        // chartEx series carry no classic `<c:trendline>`.
+        trend_lines: None,
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`

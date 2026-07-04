@@ -13,7 +13,7 @@ import {
   axisTitleMargin,
   type ChartLegendReserve,
 } from './layout.js';
-import { niceStep, valueAxisScale, axisFraction, logAxisScale } from './axis-scale.js';
+import { niceStep, valueAxisScale, axisFraction, logAxisScale, fitTrendline } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
@@ -548,6 +548,60 @@ function planValueAxis(
     min, max, step, majorLines, minorLines,
     frac: (v: number) => (reversed ? 1 - (v - min) / range : (v - min) / range),
   };
+}
+
+/** Draw a series' `<c:trendline>` regression lines (ECMA-376 §21.2.2.211).
+ *  Each trendline is fitted over the series' non-null `(categoryIndex, value)`
+ *  points via {@link fitTrendline} and stroked (dashed) through the chart's
+ *  `toX` (category-index → pixel) and `toY` (value → pixel) maps. `forward` /
+ *  `backward` extend the linear fit past the data ends by that many category
+ *  units. Unsupported types (exp/log/power/poly) fit to nothing and draw
+ *  nothing. `seriesColor` is the fallback stroke when the trendline declares no
+ *  `<a:ln>` color. Byte-stable no-op for series with no trendline. */
+function drawSeriesTrendlines(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  seriesColor: string,
+  toX: (i: number) => number,
+  toY: (v: number) => number,
+  ptToPx: number,
+): void {
+  const tls = s.trendLines;
+  if (!tls || tls.length === 0) return;
+  // Collect the fittable (index, value) points once.
+  const xs: number[] = []; const ys: number[] = [];
+  for (let i = 0; i < s.values.length; i++) {
+    const v = s.values[i];
+    if (v != null) { xs.push(i); ys.push(v); }
+  }
+  if (xs.length < 2) return;
+  const prevDash = ctx.getLineDash ? ctx.getLineDash() : [];
+  for (const tl of tls) {
+    const fit = fitTrendline(xs, ys, tl.trendlineType, {
+      period: tl.period, intercept: tl.intercept,
+    });
+    if (fit.xs.length < 2) continue;
+    // For a linear fit, forward/backward extend the two endpoints along the
+    // fitted slope (in category-index units).
+    let fxs = fit.xs; let fys = fit.ys;
+    if (tl.trendlineType === 'linear') {
+      const m = (fit.ys[1] - fit.ys[0]) / ((fit.xs[1] - fit.xs[0]) || 1);
+      const bwd = tl.backward ?? 0; const fwd = tl.forward ?? 0;
+      const x0 = fit.xs[0] - bwd; const x1 = fit.xs[1] + fwd;
+      fxs = [x0, x1];
+      fys = [fit.ys[0] - m * bwd, fit.ys[1] + m * fwd];
+    }
+    ctx.strokeStyle = tl.lineColor ? `#${tl.lineColor}` : seriesColor;
+    ctx.lineWidth = tl.lineWidthEmu ? axisLineWidthPx(tl.lineWidthEmu, ptToPx) : 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    for (let i = 0; i < fxs.length; i++) {
+      const px = toX(fxs[i]); const py = toY(fys[i]);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash(prevDash);
 }
 
 /** Resolve an axis label font size (px) from <c:txPr> hpt or a proportional
@@ -1338,6 +1392,8 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
         }
       }
+      // Trendlines (`<c:trendline>`, §21.2.2.211) for the combo line series.
+      drawSeriesTrendlines(ctx, s, color, (i) => px0 + i * catGap + catGap / 2, yOf, ptToPx);
     }
   }
 
@@ -1567,8 +1623,7 @@ function renderLineChart(
   // folds in the CH6 major unit / logBase / orientation; with none set it is
   // byte-identical to the old `valueAxisScale` + linear `toY`.
   const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx);
-  const { min: axMin, max: axMax, step } = plan;
-  if (axMax - axMin === 0) return;
+  if (plan.max - plan.min === 0) return;
 
   const toY = (v: number) => py0 + ph - plan.frac(v) * ph;
   // Secondary series map through their own scale; `secScale` is null on the
@@ -1578,10 +1633,12 @@ function renderLineChart(
     isSecondarySeries(s) ? toYSecondary : toY;
   // crossBetween="between" (default) insets the first/last category by half a
   // step so points aren't flush against the axes. "midCat" anchors them.
+  // A `maxMin` category orientation (§21.2.2.130) mirrors the index left↔right.
   const between = isCrossBetween(chart);
+  const catRev = catAxisReversed(chart);
   const toX = between
-    ? (i: number) => px0 + ((i + 0.5) / n) * pw
-    : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
+    ? (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + ((i + 0.5) / n) * pw; }
+    : (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw); };
 
   if (!chart.valAxisHidden) {
     ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
@@ -1713,6 +1770,11 @@ function renderLineChart(
         ctx.fillStyle = color;
       }
     }
+
+    // Trendlines (`<c:trendline>`, §21.2.2.211) over this series' points —
+    // drawn on top of the line/markers, dashed, in the series color unless the
+    // trendline declares its own `<a:ln>`.
+    drawSeriesTrendlines(ctx, s, color, toX, yOf, ptToPx);
   }
 
   if (!chart.catAxisHidden) {

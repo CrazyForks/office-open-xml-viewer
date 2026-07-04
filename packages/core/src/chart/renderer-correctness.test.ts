@@ -1831,3 +1831,77 @@ describe('CH6 — category-axis label rotation + tickLblPos (commit 2)', () => {
     expect(rec.rotates.length).toBe(0);
   });
 });
+
+/** Recording context that captures line-dash state alongside stroked segments,
+ *  so a dashed trendline can be distinguished from the solid data line. */
+function dashSegRecordingCtx(): { ctx: CanvasRenderingContext2D; segs: Array<{ dashed: boolean }> } {
+  const segs: Array<{ dashed: boolean }> = [];
+  let dash: number[] = [];
+  let pending = false;
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText': return (t: string) => ({ width: String(t).length * 6 });
+        case 'setLineDash': return (d: number[]) => { dash = d ?? []; };
+        case 'getLineDash': return () => dash;
+        case 'lineTo': return () => { pending = true; };
+        case 'stroke': return () => { if (pending) { segs.push({ dashed: dash.length > 0 }); pending = false; } };
+        case 'createLinearGradient': case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        case 'save': case 'restore': case 'beginPath': case 'closePath':
+        case 'fill': case 'moveTo': case 'arc': case 'bezierCurveTo':
+        case 'quadraticCurveTo': case 'rect': case 'fillRect': case 'strokeRect':
+        case 'clearRect': case 'fillText': case 'strokeText': case 'translate':
+        case 'rotate': case 'scale': case 'clip': case 'setTransform':
+        case 'resetTransform': case 'getTransform':
+          return () => undefined;
+        default: return undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, segs };
+}
+
+describe('CH6-follow — series trendlines (commit 3)', () => {
+  const lineWithTrend = (over: Partial<ChartSeries>): ChartModel => baseModel({
+    chartType: 'line',
+    categories: ['A', 'B', 'C', 'D'],
+    series: [series({ name: 'S', values: [1, 3, 5, 7], ...over })],
+  });
+
+  it('a linear trendline draws a dashed line', () => {
+    const noTrend = dashSegRecordingCtx();
+    renderChart(noTrend.ctx, lineWithTrend({}), RECT, 1);
+    expect(noTrend.segs.some(s => s.dashed)).toBe(false);
+
+    const withTrend = dashSegRecordingCtx();
+    renderChart(withTrend.ctx, lineWithTrend({ trendLines: [{ trendlineType: 'linear' }] }), RECT, 1);
+    expect(withTrend.segs.some(s => s.dashed)).toBe(true);
+    // The solid data line is still drawn too.
+    expect(withTrend.segs.some(s => !s.dashed)).toBe(true);
+  });
+
+  it('a movingAvg trendline draws a dashed line', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, lineWithTrend({ trendLines: [{ trendlineType: 'movingAvg', period: 2 }] }), RECT, 1);
+    expect(rec.segs.some(s => s.dashed)).toBe(true);
+  });
+
+  it('an unsupported trendline type draws nothing extra (dashed absent)', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, lineWithTrend({ trendLines: [{ trendlineType: 'poly', order: 2 }] }), RECT, 1);
+    expect(rec.segs.some(s => s.dashed)).toBe(false);
+  });
+
+  it('no trendLines field is byte-stable (no dashed segments)', () => {
+    const rec = dashSegRecordingCtx();
+    renderChart(rec.ctx, lineWithTrend({}), RECT, 1);
+    expect(rec.segs.every(s => !s.dashed)).toBe(true);
+  });
+});

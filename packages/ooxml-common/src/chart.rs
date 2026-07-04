@@ -318,6 +318,36 @@ pub struct ChartSeries {
     /// polyline (the default); only serialized when the file sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smooth: Option<bool>,
+    /// `<c:ser><c:trendline>` per-series trendlines (§21.2.2.211). `None`/empty
+    /// when the series declares none (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trend_lines: Option<Vec<ChartTrendline>>,
+}
+
+/// Mirror of TS `ChartTrendline` — `<c:ser><c:trendline>` (§21.2.2.211).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartTrendline {
+    /// `<c:trendlineType val>` (§21.2.2.213) — linear|exp|log|power|poly|movingAvg.
+    pub trendline_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backward: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercept: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disp_r_sqr: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disp_eq: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_width_emu: Option<u32>,
 }
 
 /// Mirror of TS `ChartDataPointOverride`.
@@ -940,6 +970,76 @@ pub fn extract_series_smooth(ser_node: Node) -> Option<bool> {
     })
 }
 
+/// Parse `bool_val`: a `CT_Boolean` child's `val` where an absent attribute
+/// implies true (the OOXML default when the element is present).
+fn bool_child(parent: Node, name: &str) -> Option<bool> {
+    child(parent, name).map(|n| match n.attribute("val") {
+        None => true,
+        Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
+    })
+}
+
+/// `<c:ser><c:trendline>` (ECMA-376 §21.2.2.211, `CT_Trendline`) — every
+/// trendline declared on `ser_node` (0..N). Each carries a required
+/// `<c:trendlineType>` plus optional order/period/forward/backward/intercept,
+/// the `<c:dispRSqr>` / `<c:dispEq>` label flags, and an `<c:spPr><a:ln>` line
+/// style (color resolved via `resolver`, width in EMU). Returns `None` when the
+/// series declares no trendline (byte-stable); otherwise the parsed vec. Shared
+/// so pptx and xlsx honor trendlines identically.
+pub fn extract_series_trendlines(
+    ser_node: Node,
+    resolver: &dyn ColorResolver,
+) -> Option<Vec<ChartTrendline>> {
+    let mut out = Vec::new();
+    for tl in ser_node
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "trendline")
+    {
+        // trendlineType is required per the schema; skip a malformed trendline
+        // that somehow lacks it rather than emitting an empty type.
+        let Some(trendline_type) = child(tl, "trendlineType").and_then(|n| n.attribute("val"))
+        else {
+            continue;
+        };
+        let u32_val = |name: &str| -> Option<u32> {
+            child(tl, name)
+                .and_then(|n| n.attribute("val"))
+                .and_then(|v| v.parse::<u32>().ok())
+        };
+        let f64_val = |name: &str| -> Option<f64> {
+            child(tl, name)
+                .and_then(|n| n.attribute("val"))
+                .and_then(|v| v.parse::<f64>().ok())
+        };
+        // `<c:spPr><a:ln>` line style: solidFill color + width.
+        let (line_color, line_width_emu) = match child(tl, "spPr").and_then(|sp| child(sp, "ln")) {
+            None => (None, None),
+            Some(ln) => {
+                let color = child(ln, "solidFill").and_then(|sf| resolver.resolve_solid_fill(sf));
+                let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
+                (color, width)
+            }
+        };
+        out.push(ChartTrendline {
+            trendline_type: trendline_type.to_string(),
+            order: u32_val("order"),
+            period: u32_val("period"),
+            forward: f64_val("forward"),
+            backward: f64_val("backward"),
+            intercept: f64_val("intercept"),
+            disp_r_sqr: bool_child(tl, "dispRSqr"),
+            disp_eq: bool_child(tl, "dispEq"),
+            line_color,
+            line_width_emu,
+        });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// `<c:chart><c:dispBlanksAs val>` (ECMA-376 §21.2.2.42, `ST_DispBlanksAs`
 /// §21.2.3.10) — how blank cells are plotted ("gap" | "zero" | "span").
 /// `root` may be the `<c:chartSpace>` or `<c:chart>` node; the single
@@ -1298,6 +1398,7 @@ mod tests {
                 err_bars: None,
                 bubble_sizes: None,
                 smooth: None,
+                trend_lines: None,
             }],
             show_data_labels: false,
             val_min: None,
@@ -2112,5 +2213,40 @@ mod tests {
             extract_axis_tick_label_rotation(root_of(&bare).root_element()),
             None
         );
+    }
+
+    #[test]
+    fn series_trendlines_parse() {
+        // No trendline → None (byte-stable).
+        let none = format!(r#"<c:ser xmlns:c="{C_NS}"/>"#);
+        assert_eq!(
+            extract_series_trendlines(root_of(&none).root_element(), &StubResolver),
+            None
+        );
+        // A linear fit + a period-3 moving average, the linear one with a red line.
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:trendline>
+                   <c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="ff0000"/></a:solidFill></a:ln></c:spPr>
+                   <c:trendlineType val="linear"/>
+                   <c:dispEq val="1"/>
+                   <c:dispRSqr val="1"/>
+                 </c:trendline>
+                 <c:trendline>
+                   <c:trendlineType val="movingAvg"/>
+                   <c:period val="3"/>
+                 </c:trendline>
+               </c:ser>"#
+        );
+        let got = extract_series_trendlines(root_of(&xml).root_element(), &StubResolver).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].trendline_type, "linear");
+        assert_eq!(got[0].line_color.as_deref(), Some("FF0000"));
+        assert_eq!(got[0].line_width_emu, Some(19050));
+        assert_eq!(got[0].disp_eq, Some(true));
+        assert_eq!(got[0].disp_r_sqr, Some(true));
+        assert_eq!(got[1].trendline_type, "movingAvg");
+        assert_eq!(got[1].period, Some(3));
+        assert_eq!(got[1].line_color, None);
     }
 }

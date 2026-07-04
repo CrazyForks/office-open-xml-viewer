@@ -146,6 +146,8 @@ impl From<ChartSeries> for CmSeries {
             err_bars: some_if_nonempty(s.err_bars),
             bubble_sizes: None,
             smooth: s.smooth,
+            // Shared `ChartTrendline` type flows straight through (no adapter).
+            trend_lines: s.trend_lines,
             // `order` is xlsx parse-time only (used for stacking/legend sort
             // before emit); core `ChartSeries` has no such field.
         }
@@ -1629,6 +1631,10 @@ pub(crate) fn parse_chart_series(
     // `<c:ser><c:smooth>` (§21.2.2.194) — line/area spline flag. Shared with the
     // pptx parser so both honor the CT_Boolean implied-true semantics.
     let smooth = ooxml_common::chart::extract_series_smooth(*node);
+    // `<c:ser><c:trendline>` (§21.2.2.211) — regression lines. Shared extractor;
+    // the line color resolves through the workbook theme.
+    let trend_lines =
+        ooxml_common::chart::extract_series_trendlines(*node, &XlsxColorResolver { theme_colors });
 
     ChartSeries {
         name,
@@ -1649,6 +1655,7 @@ pub(crate) fn parse_chart_series(
         series_data_labels,
         err_bars,
         smooth,
+        trend_lines,
     }
 }
 

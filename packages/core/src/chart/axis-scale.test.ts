@@ -6,6 +6,7 @@ import {
   valueAxisScale,
   axisFraction,
   logAxisScale,
+  fitTrendline,
 } from './axis-scale.js';
 
 describe('niceStep', () => {
@@ -165,5 +166,40 @@ describe('logAxisScale (power-of-base bounds + gridline exponents)', () => {
     const s = logAxisScale(0, 500, 10);
     expect(s.min).toBeGreaterThan(0);
     expect(s.max).toBe(1000);
+  });
+});
+
+describe('fitTrendline', () => {
+  it('linear least squares recovers a perfect line', () => {
+    // y = 2x + 1 at x = 0,1,2,3
+    const t = fitTrendline([0, 1, 2, 3], [1, 3, 5, 7], 'linear');
+    expect(t.xs).toEqual([0, 3]);
+    expect(t.ys[0]).toBeCloseTo(1, 9);
+    expect(t.ys[1]).toBeCloseTo(7, 9);
+  });
+  it('linear fit through noisy data has the least-squares slope', () => {
+    // x 0..3, y 1,2,2,5 → slope = (nΣxy-ΣxΣy)/(nΣx²-(Σx)²) = (4*29-6*10)/(4*14-36)=56/20=1.2
+    const t = fitTrendline([0, 1, 2, 3], [1, 2, 2, 5], 'linear');
+    const slope = (t.ys[1] - t.ys[0]) / (t.xs[1] - t.xs[0]);
+    expect(slope).toBeCloseTo(1.2, 9);
+  });
+  it('linear fit honors a forced intercept', () => {
+    // Force b=0: m = Σxy/Σx². Σxy = 0·1+1·2+2·2+3·5 = 21; Σx² = 14 → m = 1.5.
+    const t = fitTrendline([0, 1, 2, 3], [1, 2, 2, 5], 'linear', { intercept: 0 });
+    expect(t.ys[0]).toBeCloseTo(0, 9); // line passes through (0,0)
+    const slope = (t.ys[1] - t.ys[0]) / (t.xs[1] - t.xs[0]);
+    expect(slope).toBeCloseTo(21 / 14, 9);
+  });
+  it('moving average (period 2) trails the mean of the last two points', () => {
+    const t = fitTrendline([0, 1, 2, 3], [10, 20, 30, 40], 'movingAvg', { period: 2 });
+    expect(t.xs).toEqual([1, 2, 3]);
+    expect(t.ys).toEqual([15, 25, 35]);
+  });
+  it('unsupported types return empty (parse-only for now)', () => {
+    expect(fitTrendline([0, 1, 2], [1, 2, 4], 'exp')).toEqual({ xs: [], ys: [] });
+    expect(fitTrendline([0, 1, 2], [1, 2, 4], 'poly')).toEqual({ xs: [], ys: [] });
+  });
+  it('too few points returns empty', () => {
+    expect(fitTrendline([0], [1], 'linear')).toEqual({ xs: [], ys: [] });
   });
 });

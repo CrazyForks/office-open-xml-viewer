@@ -463,6 +463,11 @@ pub struct ChartSeries {
     /// element is present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smooth: Option<bool>,
+    /// `<c:ser><c:trendline>` per-series trendlines (ECMA-376 §21.2.2.211).
+    /// Reuses the shared `ooxml_common` type so it flows straight to the
+    /// ChartModel. None = no trendline (byte-stable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend_lines: Option<Vec<ooxml_common::chart::ChartTrendline>>,
 }
 
 /// Per-point override pulled from `<c:dPt idx="N">` siblings of a series
