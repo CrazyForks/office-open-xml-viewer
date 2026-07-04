@@ -54,6 +54,7 @@ import {
   materialClass,
   isHTMLCanvas,
   defaultDpr,
+  clampCanvasSize,
   classifyCjkFont,
   classifyFontGeneric,
   cjkFallbackChain,
@@ -4061,8 +4062,17 @@ export async function renderSlide(
   const canvasH = Math.round(slideHeight * scale);
 
   const dpr = opts.dpr ?? defaultDpr();
-  canvas.width  = canvasW * dpr;
-  canvas.height = canvasH * dpr;
+  // Clamp the backing store to browser canvas limits (RB5). A huge target width
+  // (or large dpr × slide size) can exceed the per-axis / total-area cap, at
+  // which point the browser silently allocates a smaller-or-empty buffer and the
+  // slide renders blank. `clampCanvasSize` scales BOTH axes by one factor (≤ 1)
+  // so the aspect ratio is kept; we fold that into the effective dpr, keep the
+  // CSS box at its intended size, and the browser stretches the (slightly
+  // lower-res) backing store to fill it — a visible slide beats a blank one.
+  const clamped = clampCanvasSize(canvasW * dpr, canvasH * dpr);
+  const effectiveDpr = clamped.clamped ? dpr * clamped.scale : dpr;
+  canvas.width = clamped.width;
+  canvas.height = clamped.height;
   // CSS size only applies to the visible HTMLCanvasElement (not OffscreenCanvas)
   if (isHTMLCanvas(canvas)) {
     canvas.style.width = `${canvasW}px`;
@@ -4075,13 +4085,17 @@ export async function renderSlide(
 
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
   if (!ctx) throw new Error('Could not get 2D context');
-  ctx.scale(dpr, dpr);
+  // Use the effective dpr (folded with any clamp factor) so drawing fills the
+  // clamped backing store and crisp-offset math stays aligned with it.
+  ctx.scale(effectiveDpr, effectiveDpr);
 
   const rc: RenderContext = {
     themeMajorFont: opts.majorFont ?? null,
     themeMinorFont: opts.minorFont ?? null,
     themeHlinkColor: opts.hlinkColor ?? null,
-    dpr,
+    // The backing store may have been clamped below `canvasSize × dpr`; downstream
+    // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
+    dpr: effectiveDpr,
   };
 
   await renderBackground(ctx, slide.background, canvasW, canvasH, scale, opts.fetchImage);

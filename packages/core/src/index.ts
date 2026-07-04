@@ -242,6 +242,15 @@ export type { MathNode, MathFormula, MathStyle } from './types/math';
 export { EMU_PER_INCH, EMU_PER_PT, EMU_PER_PX, PT_TO_PX } from './units';
 export { isHTMLCanvas, defaultDpr } from './canvas/env';
 export { crispOffset } from './canvas/crisp';
+// Canvas backing-store size clamp (browser-limit guard, RB5): bound a requested
+// canvas size to per-axis + total-area limits every engine honors, preserving
+// aspect ratio, so a pathological page/slide size can't produce a blank canvas.
+export {
+  clampCanvasSize,
+  MAX_CANVAS_DIMENSION,
+  MAX_CANVAS_AREA,
+  type ClampedCanvasSize,
+} from './canvas/clamp';
 // Shared border / line dash-pattern core (§17.18.2 ST_Border / §18.18.3
 // ST_BorderStyle / §20.1.10.49 ST_PresetLineDashVal shape borders /
 // §20.1.10.82 ST_TextUnderlineType run underlines). The
