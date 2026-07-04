@@ -2428,3 +2428,73 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(rec.fillRects.length).toBe(6);
   });
 });
+
+// CH15 — chartEx sunburst (MS 2014 chartex ext). Verify the hierarchy folds
+// into concentric rings, each branch's sub-tree shares its accent color, and
+// angular spans are size-proportional.
+describe('CH15 — chartEx sunburst', () => {
+  // Two branches, each with two stems, each stem with one leaf. Branch A is
+  // twice the total of Branch B (so it must sweep twice the angle).
+  function sunburstModel(over: Partial<ChartModel> = {}): ChartModel {
+    return baseModel({
+      chartType: 'sunburst',
+      title: 'sun',
+      chartexAccents: ['5B9BD5', 'ED7D31', 'A5A5A5', 'FFC000', '4472C4', '70AD47'],
+      chartexSunburst: {
+        rows: [
+          { path: ['Branch A', 'Stem 1', 'Leaf 1'], size: 30 },
+          { path: ['Branch A', 'Stem 2', 'Leaf 2'], size: 30 },
+          { path: ['Branch B', 'Stem 3', 'Leaf 3'], size: 15 },
+          { path: ['Branch B', 'Stem 4', 'Leaf 4'], size: 15 },
+        ],
+      },
+      ...over,
+    });
+  }
+
+  it('draws three concentric rings (Branch / Stem / Leaf) with distinct radii', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    // Each ring segment emits an outer + inner arc; across all segments the
+    // distinct radii cluster into 3 outer + 3 inner boundaries → at least 3
+    // distinct radius bands (inner hole excluded).
+    const radii = [...new Set(rec.arcs.map(a => Math.round(a.r)))].sort((a, b) => a - b);
+    // 4 radius boundaries: hole, branch/stem, stem/leaf, outer.
+    expect(radii.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('colors every node in a branch with that branch\'s accent (branch A=accent1, B=accent2)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    // Segment fills (excluding the white label fills). Branch A subtree (root +
+    // 2 stems + 2 leaves = 5 nodes) all accent1; Branch B (5 nodes) all accent2.
+    const segFills = rec.fills.filter(f => f !== '#ffffff' && f !== '#000');
+    const a1 = segFills.filter(f => f === '#5B9BD5').length;
+    const a2 = segFills.filter(f => f === '#ED7D31').length;
+    expect(a1).toBe(5);
+    expect(a2).toBe(5);
+  });
+
+  it('draws white segment labels for the branch/stem/leaf names', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    const whiteLabels = rec.fontTexts.filter(t => t.fill === '#ffffff').map(t => t.text);
+    // Labels are word-wrapped, so assert on the first word of each name.
+    expect(whiteLabels.some(t => t.includes('Branch'))).toBe(true);
+    expect(whiteLabels.some(t => t.includes('Stem'))).toBe(true);
+    expect(whiteLabels.some(t => t.includes('Leaf'))).toBe(true);
+  });
+
+  it('sweeps each branch proportional to its aggregated size (Branch A twice Branch B)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), RECT, 1);
+    // The innermost ring (smallest non-hole outer radius) carries the two branch
+    // segments. Each segment's outer arc sweep = a1 − a0. Branch A (size 60) must
+    // sweep ~2× Branch B (size 30).
+    const innerOuterR = [...new Set(rec.arcs.map(a => Math.round(a.r)))].sort((a, b) => a - b)[1];
+    const branchArcs = rec.arcs.filter(a => Math.round(a.r) === innerOuterR && !a.ccw);
+    const sweeps = branchArcs.map(a => Math.abs(a.a1 - a.a0)).sort((x, y) => y - x);
+    expect(sweeps.length).toBeGreaterThanOrEqual(2);
+    expect(sweeps[0] / sweeps[1]).toBeCloseTo(2, 1);
+  });
+});

@@ -4304,6 +4304,228 @@ function renderBoxWhiskerChart(ctx: CanvasRenderingContext2D, chart: ChartModel,
   ctx.restore();
 }
 
+// ─── chartEx: sunburst (CH15, MS 2014 chartex ext) ───────────────────────────
+
+/** A node in the sunburst ring tree. `value` is the sum of descendant leaf
+ *  sizes (or the node's own size when it is a leaf). `a0`/`a1` are its angular
+ *  span (radians, canvas convention) once laid out; `depth` is its ring index
+ *  (0 = innermost / root). */
+interface SunburstNode {
+  label: string;
+  value: number;
+  depth: number;
+  children: SunburstNode[];
+  /** Root-branch index (which top-level branch this node descends from) — used
+   *  to color the whole sub-tree in one accent. */
+  branchIndex: number;
+  a0: number;
+  a1: number;
+}
+
+/**
+ * Fold the flat `path`/`size` rows into a ring tree. Each row is a root→leaf
+ * label chain; walking the chain interns each label under its parent. The size
+ * is added at the DEEPEST node of the row (a node's `value` is the sum of the
+ * sizes beneath it). Children keep first-seen (source) order so the ring sweep
+ * order matches PowerPoint.
+ */
+function buildSunburstTree(rows: { path: string[]; size: number }[]): SunburstNode {
+  const root: SunburstNode = {
+    label: '', value: 0, depth: -1, children: [], branchIndex: -1, a0: 0, a1: 0,
+  };
+  for (const row of rows) {
+    let node = root;
+    for (let d = 0; d < row.path.length; d++) {
+      const label = row.path[d];
+      let child = node.children.find(c => c.label === label);
+      if (!child) {
+        child = {
+          label,
+          value: 0,
+          depth: d,
+          children: [],
+          // Top-level nodes (d === 0) define the branch index; deeper nodes
+          // inherit their ancestor's.
+          branchIndex: d === 0 ? node.children.length : node.branchIndex,
+          a0: 0, a1: 0,
+        };
+        node.children.push(child);
+      }
+      child.value += row.size;
+      node = child;
+    }
+  }
+  root.value = root.children.reduce((s, c) => s + c.value, 0);
+  return root;
+}
+
+/** Assign angular spans top-down: each node partitions its `[a0, a1)` range
+ *  across its children proportional to their value, in child (source) order. */
+function layoutSunburstAngles(node: SunburstNode): void {
+  const total = node.children.reduce((s, c) => s + c.value, 0);
+  if (total <= 0) return;
+  let a = node.a0;
+  for (const child of node.children) {
+    const sweep = ((node.a1 - node.a0) * child.value) / total;
+    child.a0 = a;
+    child.a1 = a + sweep;
+    a = child.a1;
+    layoutSunburstAngles(child);
+  }
+}
+
+/** Maximum ring depth (number of levels below the root). */
+function sunburstMaxDepth(node: SunburstNode): number {
+  if (node.children.length === 0) return node.depth;
+  return Math.max(...node.children.map(sunburstMaxDepth));
+}
+
+/**
+ * Render a chartEx sunburst (MS 2014 chartex extension — no ECMA-376 section;
+ * the structure is a `<cx:series layoutId="sunburst">` over a `<cx:strDim
+ * type="cat">` of several `<cx:lvl>` and one `<cx:numDim type="size">`). The
+ * parser (`parse_chartex_sunburst`) yields the flat root→leaf `path`/`size`
+ * rows in `chart.chartexSunburst`; this renderer folds them into a ring tree,
+ * lays out each node's angular span proportional to its aggregated size, and
+ * draws concentric rings (inner = root/Branch, outward = Stem, Leaf) from 12
+ * o'clock clockwise. Every node in a branch shares that branch's theme accent
+ * (`chart.chartexAccents`, cycled by top-level index — the blue/orange/gray
+ * Office default). Labels are drawn white and centered in each segment, rotated
+ * to follow the arc and elided when the wedge is too small.
+ */
+function renderSunburstChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+  const sb = chart.chartexSunburst;
+  if (!sb || sb.rows.length === 0) return;
+  const { x, y, w, h } = r;
+
+  // Radial frame (title band on top, no legend — Office draws sunburst without
+  // one). Reuse the pie frame params so the geometry matches the other radial
+  // charts.
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0,
+    radialGapFrac: 0.02,
+  });
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, frame.title.fontPx);
+  const { px0, py0, pw, ph } = frame.plotRect;
+  const cx = px0 + pw / 2;
+  const cy = py0 + ph / 2;
+  const outerR = Math.min(pw, ph) * 0.46;
+
+  const root = buildSunburstTree(sb.rows);
+  if (root.value <= 0 || root.children.length === 0) return;
+  // Full circle from 12 o'clock (−90°), clockwise (canvas angles grow CW), each
+  // parent partitioning its range across its children in source (first-seen)
+  // order. This is the natural spec-consistent reading of the `<cx:lvl>` point
+  // order. NB: Excel's own sunburst places the branches AFTER the first in a
+  // different rotational order (for sample-24 the observed clockwise order is
+  // Branch 1, 3, 2 rather than 1, 2, 3) — an undocumented runtime layout choice.
+  // Matching it exactly would require reverse-engineering that ordering, which
+  // the project's spec-first policy forbids without a documented rule, so the
+  // rings/hierarchy/proportions/colors match while the branch *placement* order
+  // is the straightforward source order.
+  root.a0 = -Math.PI / 2;
+  root.a1 = -Math.PI / 2 + Math.PI * 2;
+  layoutSunburstAngles(root);
+
+  const maxDepth = sunburstMaxDepth(root); // 0-based deepest ring index
+  const ringCount = maxDepth + 1;
+  // Small center hole (Office draws a modest hole, ~18% of the outer radius);
+  // the remaining band is split evenly across the rings.
+  const innerR = outerR * 0.18;
+  const ringBand = (outerR - innerR) / ringCount;
+
+  const accents = chart.chartexAccents;
+  const branchColor = (bi: number): string => {
+    const hex = accents?.[bi % accents.length] ?? CHART_PALETTE[bi % CHART_PALETTE.length];
+    return `#${hex}`;
+  };
+
+  const labelFont = chartFontFamily(chart, chart.dataLabelFontFace, 'minor');
+  const labelPx = Math.max(7, Math.min(13, outerR * 0.075));
+
+  // Draw every non-root node as a ring segment, deepest-last so borders read on
+  // top. Iterate breadth-first by depth.
+  const byDepth: SunburstNode[][] = Array.from({ length: ringCount }, () => []);
+  const collect = (n: SunburstNode): void => {
+    if (n.depth >= 0) byDepth[n.depth].push(n);
+    n.children.forEach(collect);
+  };
+  collect(root);
+
+  ctx.save();
+  for (let d = 0; d < ringCount; d++) {
+    const rInner = innerR + d * ringBand;
+    const rOuter = rInner + ringBand;
+    for (const node of byDepth[d]) {
+      const sweep = node.a1 - node.a0;
+      if (sweep <= 1e-4) continue;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rOuter, node.a0, node.a1);
+      ctx.arc(cx, cy, rInner, node.a1, node.a0, true);
+      ctx.closePath();
+      ctx.fillStyle = branchColor(node.branchIndex);
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Label: white, centered at the mid-radius / mid-angle, rotated to run
+      // along the arc (tangential), word-wrapped and elided to the wedge.
+      const midA = (node.a0 + node.a1) / 2;
+      const midR = (rInner + rOuter) / 2;
+      // Radial room the label may occupy (the ring band, minus padding).
+      const radialRoom = ringBand - 4;
+      // Tangential arc length at the mid radius.
+      const arcLen = sweep * midR;
+      // Skip labels that plainly cannot fit even one glyph.
+      if (radialRoom < labelPx * 0.9 && arcLen < labelPx * 0.9) continue;
+
+      ctx.save();
+      ctx.translate(cx + Math.cos(midA) * midR, cy + Math.sin(midA) * midR);
+      // Orient the text so it reads along the ring: rotate to the tangent, and
+      // flip on the left half so it isn't upside-down.
+      let rot = midA + Math.PI / 2;
+      const deg = ((rot * 180) / Math.PI) % 360;
+      if (deg > 90 && deg < 270) rot += Math.PI;
+      ctx.rotate(rot);
+      ctx.font = `${labelPx}px ${labelFont}`;
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // The text runs along the tangent (rotated frame's x-axis), so its
+      // available width is the arc length and its stacking room (wrap lines) is
+      // the radial band.
+      const words = node.label.split(/\s+/).filter(Boolean);
+      const maxLineW = arcLen - 2;
+      const lines: string[] = [];
+      let cur = '';
+      for (const word of words) {
+        const trial = cur ? `${cur} ${word}` : word;
+        if (ctx.measureText(trial).width <= maxLineW || !cur) {
+          cur = trial;
+        } else {
+          lines.push(cur);
+          cur = word;
+        }
+      }
+      if (cur) lines.push(cur);
+      // Cap the number of lines to what the radial band holds.
+      const lineH = labelPx * 1.05;
+      const maxLines = Math.max(1, Math.floor(radialRoom / lineH));
+      const shown = lines.slice(0, maxLines).map(l => elideToWidth(ctx, l, maxLineW));
+      const totalH = shown.length * lineH;
+      shown.forEach((line, li) => {
+        if (line === '') return;
+        ctx.fillText(line, 0, -totalH / 2 + lineH / 2 + li * lineH);
+      });
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
 // ─── Background frame + dispatcher ──────────────────────────────────────────
 
 /**
@@ -4393,6 +4615,8 @@ export function renderChart(
       renderStockChart(ctx, chart, rect, ptToPx); break;
     case 'boxWhisker':
       renderBoxWhiskerChart(ctx, chart, rect, ptToPx); break;
+    case 'sunburst':
+      renderSunburstChart(ctx, chart, rect, ptToPx); break;
     default:
       ctx.fillStyle = '#888';
       ctx.font = '11px sans-serif';
