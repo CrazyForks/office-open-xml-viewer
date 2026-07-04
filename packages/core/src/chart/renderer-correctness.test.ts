@@ -1164,7 +1164,7 @@ describe('CH9 — line/area per-point data labels (§21.2.2.45)', () => {
   }
 });
 
-describe('CH11 — line/area/scatter data labels honor <c:dLblPos> (§21.2.2.16)', () => {
+describe('CH11 — line/area/scatter data labels honor <c:dLblPos> (§21.2.2.48)', () => {
   // drawDataLabelText encodes each position purely through textAlign/textBaseline
   // (+ a directional offset), so the recorded align/baseline of a value label is
   // a faithful witness of the resolved <c:dLblPos>:

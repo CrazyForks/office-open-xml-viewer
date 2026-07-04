@@ -1789,7 +1789,7 @@ function renderLineChart(
       // "zero" mode plots the null at 0 — both cases get a label too.
       stacked || dispBlanks === 'zero',
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
-      // §21.2.2.16 `<c:dLblPos>` precedence: per-point/series positions win, else
+      // §21.2.2.48 `<c:dLblPos>` precedence: per-point/series positions win, else
       // the chart-level position, else PowerPoint's line-chart default `'r'`
       // (right of the point).
       chart.dataLabelPosition ?? 'r',
@@ -1815,7 +1815,7 @@ function renderLineChart(
         }
       }
       if (chart.showDataLabels && !perPointLabels) {
-        // §21.2.2.16 `<c:dLblPos>`: the family-level `showDataLabels` value dump
+        // §21.2.2.48 `<c:dLblPos>`: the family-level `showDataLabels` value dump
         // honors the chart-level position (else PowerPoint's line default `'r'`,
         // right of the point) instead of the old fixed "above the point". Offset
         // in the label's direction by the marker radius + 1px gap so the text
@@ -2147,7 +2147,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       drawCategoryDataLabels(
         ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false, true,
         chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
-        // §21.2.2.16 `<c:dLblPos>` precedence: chart-level position, else the
+        // §21.2.2.48 `<c:dLblPos>` precedence: chart-level position, else the
         // area-chart default `'ctr'` (centered on the point, ECMA-376 default
         // for the areaChart group).
         chart.dataLabelPosition ?? 'ctr',
@@ -2908,7 +2908,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     drawSeriesDataLabels(
       ctx, s, cats, useIndexX, toX, toY, ph, ptToPx, chart.date1904,
       chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
-      // §21.2.2.16 `<c:dLblPos>`: chart-level position, else the scatter default
+      // §21.2.2.48 `<c:dLblPos>`: chart-level position, else the scatter default
       // `'r'` (right of the marker) — unchanged from the previous hardcoded 'r'.
       chart.dataLabelPosition ?? 'r',
     );
@@ -3109,7 +3109,7 @@ function drawSeriesDataLabels(
   date1904 = false,
   /** Resolved data-label CSS font-family; defaults to sans-serif (byte-stable). */
   fontFamily = 'sans-serif',
-  /** Fallback `<c:dLblPos>` (§21.2.2.16) when neither the per-point override nor
+  /** Fallback `<c:dLblPos>` (§21.2.2.48) when neither the per-point override nor
    *  the series-level block sets one: the chart-level position, else the
    *  per-chart-type default (scatter defaults to `'r'`). */
   defaultPos = 'r',
@@ -3345,7 +3345,7 @@ function drawCategoryDataLabels(
   // sans-serif). Defaults to sans-serif so callers that don't pass it stay
   // byte-stable.
   fontFamily = 'sans-serif',
-  /** Fallback `<c:dLblPos>` (§21.2.2.16) when neither the per-point override nor
+  /** Fallback `<c:dLblPos>` (§21.2.2.48) when neither the per-point override nor
    *  the series-level block sets one: the chart-level position, else the
    *  per-chart-type default. Line defaults to `'r'` (PowerPoint), area to
    *  `'ctr'`. */
