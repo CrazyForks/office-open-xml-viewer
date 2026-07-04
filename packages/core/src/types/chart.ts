@@ -387,6 +387,21 @@ export interface ChartModel {
    * the attribute is omitted, so `<c:date1904/>` alone means date1904=true.
    */
   date1904?: boolean;
+  /**
+   * `<c:chartSpace><c:chart><c:dispBlanksAs val>` (ECMA-376 §21.2.2.42,
+   * `ST_DispBlanksAs` §21.2.3.10) — how blank (null) cells are plotted on
+   * line/area charts:
+   *   - "gap"  → leave a gap (break the line). The renderer's historical
+   *              behavior and the model default when the element is absent.
+   *   - "zero" → plot the blank as the value 0 (the point drops to the axis).
+   *   - "span" → skip the blank but connect its neighbours with a straight
+   *              line (bridge the gap).
+   * Note the XSD `@val` default is "zero" (applies when `<c:dispBlanksAs/>` is
+   * present but the attribute is omitted); when the ELEMENT is absent entirely
+   * Office falls back to "gap", which is what we model as the default. Only
+   * consulted for the line and area families. null/undefined = "gap".
+   */
+  dispBlanksAs?: string | null;
 }
 
 /**

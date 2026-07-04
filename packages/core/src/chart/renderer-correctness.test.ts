@@ -1121,3 +1121,73 @@ describe('CH9 — line/area smooth splines (§21.2.2.194)', () => {
     });
   }
 });
+
+describe('CH9 — dispBlanksAs controls null-cell handling (§21.2.2.42)', () => {
+  // A series with a hole in the middle: gap breaks the line, zero pins the
+  // point to the value-axis zero, span bridges the neighbours with a straight
+  // line (the null is skipped, the two sides connect).
+  function holeModel(chartType: 'line', dispBlanksAs?: string): ChartModel {
+    return baseModel({
+      chartType,
+      categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [10, null, 20] })],
+      ...(dispBlanksAs ? { dispBlanksAs } : {}),
+    });
+  }
+
+  /** The single plotted-line segment (the polyline the series stroked). Chrome
+   *  (gridlines/axis) is flat in one axis; the data line varies in both. */
+  function dataLine(segs: Array<Array<{ x: number; y: number }>>): Array<{ x: number; y: number }> {
+    const data = segs.filter(s => {
+      if (s.length < 2) return false;
+      const xs = new Set(s.map(p => Math.round(p.x)));
+      return xs.size > 1; // spans horizontally → it's the value polyline
+    });
+    // The longest such segment is the series line.
+    return data.sort((a, b) => b.length - a.length)[0] ?? [];
+  }
+
+  it('gap (default when absent): the null breaks the line, nothing plots at the middle category', () => {
+    // With a middle hole the line must NOT connect A→C directly. The default
+    // (no dispBlanksAs) keeps the historical gap behavior (byte-stable).
+    const rec = pathRecordingCtx();
+    renderChart(rec.ctx, holeModel('line'), RECT, 1);
+    const line = dataLine(rec.segments);
+    const midX = RECT.x + RECT.w / 2;
+    const nearMid = line.filter(p => Math.abs(p.x - midX) < RECT.w * 0.1);
+    // gap: no vertex at the middle category (the null point is skipped and not
+    // bridged, so nothing is plotted near the center x from the connecting run).
+    expect(nearMid.length).toBe(0);
+  });
+
+  it('zero: the null cell plots at the value-axis zero (a low mid vertex)', () => {
+    const rec = pathRecordingCtx();
+    renderChart(rec.ctx, holeModel('line', 'zero'), RECT, 1);
+    const line = dataLine(rec.segments);
+    const midX = RECT.x + RECT.w / 2;
+    const midPts = line.filter(p => Math.abs(p.x - midX) < RECT.w * 0.1);
+    // zero: the middle category IS plotted (at value 0), so a vertex exists near
+    // the center x — and it sits at the BOTTOM of the plot (largest y).
+    expect(midPts.length).toBeGreaterThan(0);
+    const maxY = Math.max(...line.map(p => p.y));
+    expect(midPts.some(p => Math.abs(p.y - maxY) < 1)).toBe(true);
+  });
+
+  it('span: the null is skipped but A and C connect directly (no mid vertex, endpoints high)', () => {
+    const rec = pathRecordingCtx();
+    renderChart(rec.ctx, holeModel('line', 'span'), RECT, 1);
+    const line = dataLine(rec.segments);
+    // span: only A and C are vertices, joined by a straight lineTo, so the
+    // polyline has exactly the two endpoints and NO mid vertex (unlike zero) —
+    // yet unlike gap the run is continuous.
+    const midX = RECT.x + RECT.w / 2;
+    const midPts = line.filter(p => Math.abs(p.x - midX) < RECT.w * 0.1);
+    expect(midPts.length).toBe(0);
+    // Both endpoints present and at their real (non-zero) heights — the chord
+    // runs high across the plot, not down to the baseline.
+    const firstX = RECT.x + RECT.w * (0.5 / 3);
+    const lastX = RECT.x + RECT.w * (2.5 / 3);
+    expect(line.some(p => Math.abs(p.x - firstX) < RECT.w * 0.12)).toBe(true);
+    expect(line.some(p => Math.abs(p.x - lastX) < RECT.w * 0.12)).toBe(true);
+  });
+});

@@ -170,6 +170,12 @@ pub struct ChartModel {
     /// default 1900 system) for wire parity.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub date1904: bool,
+    /// `<c:chart><c:dispBlanksAs val>` (ECMA-376 §21.2.2.42) — how blank cells
+    /// are plotted on line/area charts ("gap" | "zero" | "span"). `None` when
+    /// the element is absent (the renderer defaults to "gap"); only serialized
+    /// when the file sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disp_blanks_as: Option<String>,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -701,6 +707,19 @@ pub fn extract_series_smooth(ser_node: Node) -> Option<bool> {
     })
 }
 
+/// `<c:chart><c:dispBlanksAs val>` (ECMA-376 §21.2.2.42, `ST_DispBlanksAs`
+/// §21.2.3.10) — how blank cells are plotted ("gap" | "zero" | "span").
+/// `root` may be the `<c:chartSpace>` or `<c:chart>` node; the single
+/// `<c:dispBlanksAs>` is found by descendant walk either way. Returns `None`
+/// when the element is absent (the renderer defaults to "gap"). Per the XSD the
+/// `@val` default is "zero" (applies only when `<c:dispBlanksAs/>` is present
+/// but the attribute is omitted). Shared so pptx and xlsx behave identically.
+pub fn extract_disp_blanks_as(root: Node) -> Option<String> {
+    root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "dispBlanksAs")
+        .map(|n| n.attribute("val").unwrap_or("zero").to_string())
+}
+
 pub fn extract_chart_space_border(chart_space_root: Node) -> (Option<String>, Option<u32>) {
     let Some(ln) = child(chart_space_root, "spPr").and_then(|sp| child(sp, "ln")) else {
         return (None, None);
@@ -1016,6 +1035,7 @@ mod tests {
             radar_style: None,
             secondary_val_axis: None,
             date1904: false,
+            disp_blanks_as: None,
         };
         let v = serde_json::to_value(&m).unwrap();
         let obj = v.as_object().unwrap();
@@ -1158,6 +1178,33 @@ mod tests {
             r#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:smooth/></c:ser>"#,
         );
         assert_eq!(extract_series_smooth(bare.root_element()), Some(true));
+    }
+
+    #[test]
+    fn disp_blanks_as_variants() {
+        // Absent element → None (renderer defaults to "gap").
+        let absent = root_of(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#,
+        );
+        assert_eq!(extract_disp_blanks_as(absent.root_element()), None);
+        // Explicit values pass through.
+        for want in ["gap", "zero", "span"] {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:dispBlanksAs val="{want}"/></c:chart></c:chartSpace>"#,
+            );
+            assert_eq!(
+                extract_disp_blanks_as(root_of(&xml).root_element()).as_deref(),
+                Some(want)
+            );
+        }
+        // Bare `<c:dispBlanksAs/>` → XSD @val default "zero".
+        let bare = root_of(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:dispBlanksAs/></c:chart></c:chartSpace>"#,
+        );
+        assert_eq!(
+            extract_disp_blanks_as(bare.root_element()).as_deref(),
+            Some("zero")
+        );
     }
 
     #[test]

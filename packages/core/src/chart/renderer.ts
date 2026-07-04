@@ -1202,12 +1202,24 @@ function renderLineChart(
         return t || 1;
       })
     : null;
+  // How null cells are plotted (`<c:dispBlanksAs>`, §21.2.2.42). Default "gap"
+  // preserves the historical line break (byte-stable). "zero" treats a null as
+  // 0; "span" bridges the neighbours with a straight line (skip the null but
+  // keep the run going). Only unstacked charts see nulls — a stacked sum already
+  // reads null as 0 — so the value only steers the unstacked path below.
+  const dispBlanks = chart.dispBlanksAs ?? 'gap';
+
   // The plotted (cumulative) value for series `si` at category `ci`: the running
   // sum of series 0..si, percent-normalized when pct. Un-stacked charts return
-  // the raw value. Null cells contribute 0 to the stack (matching the area
-  // renderer's `?? 0`); full dispBlanksAs support is tracked separately (CH9).
+  // the raw value (with "zero"-mode nulls read as 0). Null cells contribute 0 to
+  // the stack (matching the area renderer's `?? 0`).
   const plotted = (si: number, ci: number): number => {
-    if (!stacked) return chart.series[si].values[ci] as number;
+    if (!stacked) {
+      const v = chart.series[si].values[ci];
+      // "zero": a blank plots at value 0. gap/span never reach here for a null
+      // (the caller skips those indices), so the `?? 0` is only used by "zero".
+      return v == null ? 0 : v;
+    }
     let sum = 0;
     for (let k = 0; k <= si; k++) sum += chart.series[k].values[ci] ?? 0;
     return pct && pctTotals ? (sum / pctTotals[ci]) * 100 : sum;
@@ -1397,9 +1409,15 @@ function renderLineChart(
       run = [];
     };
     for (let ci = 0; ci < n; ci++) {
-      // Unstacked: a null cell breaks the line. Stacked: a null contributes 0
-      // to the running sum (no gap), matching the area renderer.
-      if (!stacked && s.values[ci] == null) { flushRun(); continue; }
+      // Unstacked null handling per dispBlanksAs (§21.2.2.42): "gap" flushes the
+      // run (line breaks — the historical default); "span" skips the null but
+      // keeps the run open (neighbours join directly); "zero" plots it at 0
+      // (plotted() reads a null as 0). Stacked charts never have plotted nulls.
+      if (!stacked && s.values[ci] == null) {
+        if (dispBlanks === 'gap') { flushRun(); continue; }
+        if (dispBlanks === 'span') continue;
+        // "zero": fall through and push a point at value 0.
+      }
       run.push({ x: toX(ci), y: yOf(plotted(si, ci)) });
     }
     flushRun();
@@ -1429,7 +1447,9 @@ function renderLineChart(
     );
     if (perPointLabels) ctx.fillStyle = color;
     for (let ci = 0; ci < n; ci++) {
-      if (!stacked && s.values[ci] == null) continue;
+      // A null point gets a marker/label only in "zero" mode (plotted at 0);
+      // "gap"/"span" leave the hole empty.
+      if (!stacked && s.values[ci] == null && dispBlanks !== 'zero') continue;
       const pv = plotted(si, ci);
       if (drawMarkers) {
         if (hasMarkerDetail) {
@@ -1689,6 +1709,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // fields — an area chart with no marker/errBar/dLbl detail draws exactly as
   // before. The plotted top-of-band value matches where the fill's top edge sat
   // (cumulative for stacked). ECMA-376 §21.2.2.32 / §21.2.2.20 / §21.2.2.45.
+  //
+  // NB: an area chart's filled region has always read a blank cell as 0
+  // (`?? 0`), so `<c:dispBlanksAs>` (§21.2.2.42) is a no-op for the area family
+  // here — breaking or spanning a *filled* region is not modeled, and changing
+  // the default would break byte-stability. dispBlanksAs steers the line family
+  // (where "gap" is the historical default).
   {
     const areaMarkerR = Math.max(2, 2.5 * ptToPx);
     // Cumulative top of each series' band per category (stacked); the raw value

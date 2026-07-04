@@ -243,6 +243,7 @@ impl From<ChartData> for ChartModel {
             radar_style: c.radar_style,
             secondary_val_axis: None,
             date1904: c.date1904,
+            disp_blanks_as: c.disp_blanks_as,
         }
     }
 }
@@ -553,6 +554,10 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
     let date1904 = chart_space_root
         .map(ooxml_common::chart::extract_chart_date1904)
         .unwrap_or(false);
+
+    // `<c:chart><c:dispBlanksAs>` (ECMA-376 §21.2.2.42) — null-cell plotting for
+    // line/area. Shared with the pptx parser via ooxml-common.
+    let disp_blanks_as = chart_space_root.and_then(ooxml_common::chart::extract_disp_blanks_as);
 
     // `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.27).
     let title_manual_layout = chart_root
@@ -1067,6 +1072,7 @@ pub(crate) fn parse_chart_xml(xml: &str, theme_colors: &[String]) -> Option<Char
         chart_border_color,
         chart_border_width_emu,
         date1904,
+        disp_blanks_as,
     })
 }
 
@@ -2417,6 +2423,43 @@ mod pie_doughnut_tests {
         let m = ChartModel::from(parse_chart_xml(&xml, &theme()).expect("parses"));
         assert_eq!(m.series[0].smooth, Some(true));
         assert_eq!(m.series[1].smooth, None);
+    }
+
+    /// `<c:chart><c:dispBlanksAs val="span"/>` (§21.2.2.42) surfaces on the
+    /// adapter; absence leaves `disp_blanks_as = None` (renderer defaults to
+    /// "gap").
+    #[test]
+    fn adapter_disp_blanks_as() {
+        let with = format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:plotArea><c:lineChart>
+      <c:ser><c:idx val="0"/><c:order val="0"/>
+        <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+      </c:ser>
+    </c:lineChart></c:plotArea>
+    <c:dispBlanksAs val="span"/>
+  </c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+        );
+        let m = ChartModel::from(parse_chart_xml(&with, &theme()).expect("parses"));
+        assert_eq!(m.disp_blanks_as.as_deref(), Some("span"));
+
+        let without = format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart><c:plotArea><c:lineChart>
+    <c:ser><c:idx val="0"/><c:order val="0"/>
+      <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+    </c:ser>
+  </c:lineChart></c:plotArea></c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+        );
+        let m0 = ChartModel::from(parse_chart_xml(&without, &theme()).expect("parses"));
+        assert_eq!(m0.disp_blanks_as, None);
     }
 
     /// `<c:date1904/>` as a direct child of `<c:chartSpace>` (ECMA-376

@@ -819,6 +819,10 @@ pub(crate) fn parse_legacy_chart(
     // CT_Boolean implied-true semantics.
     let date1904 = ooxml_common::chart::extract_chart_date1904(root);
 
+    // `<c:chart><c:dispBlanksAs>` (ECMA-376 §21.2.2.42) — null-cell plotting for
+    // line/area. Shared with the xlsx parser via ooxml-common.
+    let disp_blanks_as = ooxml_common::chart::extract_disp_blanks_as(root);
+
     Some(ChartElement {
         x: 0,
         y: 0,
@@ -897,6 +901,7 @@ pub(crate) fn parse_legacy_chart(
             cat_axis_max: None,
             radar_style: None,
             date1904,
+            disp_blanks_as,
         },
     })
 }
@@ -1151,6 +1156,8 @@ pub(crate) fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Optio
             // `<c:date1904>` element does not apply here, so keep the 1900
             // default until/unless a chartEx date system is wired.
             date1904: false,
+            // chartEx waterfall has no line/area blanks to display.
+            disp_blanks_as: None,
         },
     })
 }
