@@ -10,12 +10,11 @@ use serde::{Deserialize, Serialize};
 // Chart data-model structs now live in `ooxml_common::chart` (the Rust mirror
 // of core's TS `ChartModel`). The parser builds a `ChartModel` and emits it as
 // the single nested `chart` field of `ChartElement` — the pptx JSON shape the
-// TS renderer consumes without a per-field adapter. `ChartSeriesData` /
-// `SecondaryValueAxis` / `ChartManualLayout` (formerly defined here) are the
-// shared `ChartSeries` / `SecondaryValueAxis` / `ChartManualLayout`.
-pub(crate) use ooxml_common::chart::{
-    ChartManualLayout, ChartModel, ChartSeries as ChartSeriesData, SecondaryValueAxis,
-};
+// TS renderer consumes without a per-field adapter. The legacy chart-structure
+// parse itself now lives in `ooxml_common::chart::parse_chart_part`, so this
+// crate only needs `ChartModel` and `ChartSeries` (aliased `ChartSeriesData`)
+// for the chartEx adapter that stays pptx-local.
+pub(crate) use ooxml_common::chart::{ChartModel, ChartSeries as ChartSeriesData};
 
 /// A gradient color stop. The owned type + `<a:gs>` parse now live in
 /// `ooxml_common::fill` (shared DrawingML fill grammar); re-exported here under
