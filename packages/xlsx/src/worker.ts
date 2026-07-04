@@ -1,4 +1,4 @@
-import init, { XlsxArchive } from './wasm/xlsx_parser.js';
+import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types.js';
 
@@ -20,6 +20,9 @@ import type { WorkerRequest, WorkerResponse } from './types.js';
 // handle from a discarded instance.
 const host = new WasmParserHost<XlsxArchive>(init, {
   freeArchive: (a) => a.free(),
+  // RB6 recovery must re-instantiate, not re-`init` (a no-op against the
+  // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
+  reinit,
 });
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {

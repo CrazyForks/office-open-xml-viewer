@@ -7,7 +7,7 @@
  *
  * Single-document contract: the proxy issues one `parse` and then renders.
  */
-import init, { DocxArchive } from './wasm/docx_parser.js';
+import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts, WasmParserHost } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, PaginatedBodyElement } from './types';
 import { paginateDocument, renderDocumentToCanvas, physicalPageSizePt } from './renderer';
@@ -20,6 +20,9 @@ import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './
 // clean linear memory. The host owns the `DocxArchive` handle (`host.archive`).
 const host = new WasmParserHost<DocxArchive>(init, {
   freeArchive: (a) => a.free(),
+  // RB6 recovery must re-instantiate, not re-`init` (a no-op against the
+  // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
+  reinit,
 });
 let doc: DocxDocumentModel | null = null;
 let pages: PaginatedBodyElement[][] | null = null;

@@ -70,6 +70,17 @@ export class WasmTrapError extends Error {
  * Both leave the instance unusable. A `Result::Err(JsValue::from_str(...))`
  * arrives as a thrown *string* or a plain `Error`, which this returns `false`
  * for — the instance survives that.
+ *
+ * The discriminator is the error's TYPE / NAME, never its message substring
+ * alone. A genuine trap always carries a trap-shaped constructor: a
+ * `WebAssembly.RuntimeError` / `CompileError` / `LinkError` (matched by
+ * `instanceof` and by `name`, since the `instanceof` check does not survive a
+ * structured-clone across the worker boundary), or a `RangeError` for a failed
+ * allocation. A plain `Error` (name `'Error'`) is a GRACEFUL parser error even
+ * when its message mentions "out of memory" — e.g. a wrapper that surfaces a
+ * lenient degradation as `new Error('...out of memory...')`. Classifying that as
+ * a trap would needlessly recycle a healthy instance and drop its open archive,
+ * so message-substring sniffing is deliberately NOT done here.
  */
 export function isWasmTrap(err: unknown): boolean {
   // `WebAssembly.RuntimeError` is the canonical trap. Guard the reference in
@@ -80,22 +91,14 @@ export function isWasmTrap(err: unknown): boolean {
   // A failed allocation (`memory.grow` past the maximum) surfaces as a
   // RangeError rather than a RuntimeError; the instance is equally unusable.
   if (err instanceof RangeError) return true;
-  // Some engines wrap the trap in a generic Error whose name/message still
-  // identifies it; match those defensively without over-matching graceful
-  // parser strings (which never mention "wasm"/"unreachable"/"memory").
+  // A trap that crossed the worker boundary (structured-clone strips the
+  // prototype) or was re-thrown as a generic Error still carries the trap-shaped
+  // NAME. Match those, but require the name — never a message substring on a
+  // plain `Error`, which would over-match a graceful "out of memory" parser
+  // error and poison a healthy instance.
   if (err instanceof Error) {
     const name = err.name;
     if (name === 'RuntimeError' || name === 'CompileError' || name === 'LinkError') return true;
-    const msg = err.message.toLowerCase();
-    if (
-      msg.includes('unreachable') ||
-      msg.includes('out of memory') ||
-      msg.includes('memory access out of bounds') ||
-      msg.includes('call stack') ||
-      msg.includes('recursion')
-    ) {
-      return true;
-    }
   }
   return false;
 }
@@ -112,6 +115,22 @@ export type WasmInitInput = string | URL | ArrayBuffer | ArrayBufferView | Respo
  *  wasm-bindgen `init(input)` free function each parser package exports. */
 export type WasmInit = (input: WasmInitInput) => Promise<unknown>;
 
+/**
+ * How a {@link WasmParserHost} REBUILDS its WASM module after a trap. Mirrors the
+ * `reinit(input)` free function `scripts/append-wasm-reinit.mjs` appends to each
+ * parser glue.
+ *
+ * This is distinct from {@link WasmInit} for a load-bearing reason: wasm-bindgen's
+ * generated `init` keeps its instance in a module-level singleton and
+ * short-circuits (`if (wasm !== undefined) return wasm;`) on every later call, so
+ * re-running `init` after a trap hands back the SAME poisoned instance and
+ * "recovery" silently does nothing. `reinit` nulls that singleton first, forcing a
+ * genuine `WebAssembly.instantiate` with fresh linear memory. The host therefore
+ * MUST use `reinit` (not `init`) on the recovery path — see
+ * {@link WasmParserHost.ensureReady}.
+ */
+export type WasmReinit = (input: WasmInitInput) => Promise<unknown>;
+
 /** Optional per-host hooks. */
 export interface WasmParserHostOptions<TArchive> {
   /**
@@ -122,6 +141,15 @@ export interface WasmParserHostOptions<TArchive> {
    * archive.
    */
   readonly freeArchive?: (archive: TArchive) => void;
+  /**
+   * How to force a FRESH instance after a trap (the glue's `reinit` export). If
+   * omitted, the host falls back to calling {@link WasmInit} again — but note that
+   * against the real wasm-bindgen singleton that fallback is a NO-OP (the poisoned
+   * instance is reused). Production callers MUST pass this; it is optional only so
+   * unit tests that assert lifecycle bookkeeping can omit it. When present it is
+   * the sole re-instantiation path; `init` is used only for the very first load.
+   */
+  readonly reinit?: WasmReinit;
 }
 
 /**
@@ -225,10 +253,17 @@ export class WasmParserHost<TArchive = unknown> {
       if (this._wasmInput === null) {
         throw new Error('WasmParserHost: setWasmUrl was never called');
       }
-      // Fresh module = fresh linear memory. Only flip `_poisoned` off once the
-      // re-init settles successfully, so a failed re-init stays poisoned and is
-      // retried on the following request rather than handing back a dead module.
-      const p = this._init(this._wasmInput);
+      // Recovery MUST use `reinit`, not `init`: wasm-bindgen's `init` returns the
+      // cached (poisoned) instance on every later call, so re-`init`-ing recovers
+      // nothing. `reinit` nulls the singleton first, forcing a real
+      // `WebAssembly.instantiate` with fresh linear memory. Fall back to `init`
+      // only when no `reinit` was supplied (unit tests that don't drive real
+      // glue); production callers always pass `reinit`.
+      const rebuild = this._opts.reinit ?? this._init;
+      // Only flip `_poisoned` off once the rebuild settles successfully, so a
+      // failed rebuild stays poisoned and is retried on the following request
+      // rather than handing back a dead module.
+      const p = rebuild(this._wasmInput);
       this._initPromise = p;
       await p;
       this._poisoned = false;

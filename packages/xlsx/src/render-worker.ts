@@ -9,7 +9,7 @@
  * re-`parse` resets all per-document caches so a reused worker never serves
  * stale sheets / images.
  */
-import init, { XlsxArchive } from './wasm/xlsx_parser.js';
+import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import { decodeDataUrl, preloadGoogleFonts, WasmParserHost } from '@silurus/ooxml-core';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
@@ -25,6 +25,9 @@ import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protoco
 // nulled by the host on a trap.
 const host = new WasmParserHost<XlsxArchive>(init, {
   freeArchive: (a) => a.free(),
+  // RB6 recovery must re-instantiate, not re-`init` (a no-op against the
+  // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
+  reinit,
 });
 let workbook: ParsedWorkbook | null = null;
 let fontsLoaded: Promise<void> = Promise.resolve();

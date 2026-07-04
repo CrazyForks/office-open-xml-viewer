@@ -10,7 +10,7 @@
  * resume against the new model — callers must not interleave them.
  */
 import type { MediaElement, Presentation } from './types';
-import init, { PptxArchive } from './wasm/pptx_parser.js';
+import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import { renderSlide } from './renderer';
 import { selectNotes } from './notes';
 import { findMimeTypeForPath } from './media-mime';
@@ -27,6 +27,9 @@ import type { RenderWorkerRequest, RenderWorkerResponse, PresentationMeta } from
 // re-parse, freed + nulled by the host on a trap.
 const host = new WasmParserHost<PptxArchive>(init, {
   freeArchive: (a) => a.free(),
+  // RB6 recovery must re-instantiate, not re-`init` (a no-op against the
+  // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
+  reinit,
 });
 let pres: Presentation | null = null;
 /** Settled before any render when `useGoogleFonts` was requested. */

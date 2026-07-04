@@ -1,6 +1,6 @@
 import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types';
-import init, { PptxArchive } from './wasm/pptx_parser.js';
+import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 
 // RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
 // stack overflow, poisoning this worker's single WASM instance so every LATER
@@ -19,6 +19,10 @@ import init, { PptxArchive } from './wasm/pptx_parser.js';
 // double-frees a handle from a discarded instance.
 const host = new WasmParserHost<PptxArchive>(init, {
   freeArchive: (a) => a.free(),
+  // RB6 recovery: `init` re-run is a no-op against wasm-bindgen's cached
+  // singleton, so a trap would poison every LATER file. `reinit` nulls the
+  // singleton first, forcing a genuine re-instantiation on fresh linear memory.
+  reinit,
 });
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
