@@ -563,6 +563,29 @@ pub trait ColorResolver {
     /// and applies the surrounding lumMod/lumOff/tint/shade transforms.
     fn resolve_solid_fill(&self, node: Node) -> Option<String>;
 
+    /// Resolve the first `<a:solidFill>` among `parent`'s **direct children** to
+    /// a hex string (no leading `#`) using the full DrawingML color grammar,
+    /// including `lumMod`/`lumOff`/`tint`/`shade` transforms.
+    ///
+    /// This is the resolver used for chart *shape* fills that sit one level
+    /// below their container — marker fill/line (`<c:marker><c:spPr>` /
+    /// `…<a:ln>`), per-point fills (`<c:dPt><c:spPr>`) and error-bar strokes
+    /// (`<c:errBars><c:spPr>` / `…<a:ln>`). It is intentionally distinct from
+    /// [`ColorResolver::resolve_solid_fill`]: some resolvers (xlsx) resolve
+    /// *series* fills through a lighter, transform-free path for historical
+    /// byte-compatibility, while shape fills always want the full grammar.
+    ///
+    /// The default implementation finds the direct-child `<a:solidFill>` and
+    /// delegates to [`ColorResolver::resolve_solid_fill`], which is correct for
+    /// resolvers whose `resolve_solid_fill` already applies the full grammar
+    /// (pptx). xlsx overrides it to route through its DrawingML color path.
+    fn resolve_shape_fill(&self, parent: Node) -> Option<String> {
+        parent
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+            .and_then(|fill| self.resolve_solid_fill(fill))
+    }
+
     /// Theme major (heading) Latin typeface name, or `None` when the theme
     /// declares no `fontScheme`. Used as the chart-text fallback face when a run
     /// carries no explicit `<a:latin>`. Defaults to `None` so resolvers that do
@@ -574,6 +597,28 @@ pub trait ColorResolver {
     /// Theme minor (body) Latin typeface name, or `None` when the theme declares
     /// no `fontScheme`. Companion to [`ColorResolver::theme_major_font_latin`].
     fn theme_minor_font_latin(&self) -> Option<String> {
+        None
+    }
+
+    /// Default series fill for a series with no explicit `<c:spPr>` fill, keyed
+    /// by its `<c:idx>` (ECMA-376 §21.2.2.84). Office cycles the theme accents:
+    /// `theme.accent[(idx % 6) + 1]`. Returning the resolved accent hex here
+    /// (no leading `#`) lets the renderer draw the correct default palette
+    /// without needing theme access.
+    ///
+    /// Defaults to `None` so a resolver whose renderer already owns a default
+    /// palette (pptx) leaves the series color unset and lets that palette apply.
+    fn resolve_series_accent(&self, _idx: usize) -> Option<String> {
+        None
+    }
+
+    /// Chart-area background to use when the `<c:chartSpace>` carries **no**
+    /// `<c:spPr>` at all. Excel relies on its default opaque-white chart area in
+    /// that case, so the xlsx resolver returns `Some("FFFFFF")`; PowerPoint
+    /// composites the chart transparently over the slide, so pptx returns `None`.
+    /// (When `<c:spPr>` *is* present the parser honours whatever it resolves to —
+    /// a solid hex or `noFill` → `None` — regardless of this default.)
+    fn default_chart_bg(&self) -> Option<String> {
         None
     }
 }
@@ -663,6 +708,113 @@ pub fn extract_axis_min_max(axis_node: Node) -> (Option<f64>, Option<f64>) {
         .and_then(|n| n.attribute("val"))
         .and_then(|v| v.parse::<f64>().ok());
     (mn, mx)
+}
+
+/// `<c:catAx|valAx><c:crosses val>` and `<c:crossesAt val>` (ECMA-376
+/// §21.2.2.33/§21.2.2.34). `crosses` is `autoZero` | `min` | `max`; `crossesAt`
+/// is an explicit numeric override. Returns `(crosses, crosses_at)`.
+pub fn extract_axis_crosses(axis_node: Node) -> (Option<String>, Option<f64>) {
+    let crosses = child(axis_node, "crosses")
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string());
+    let crosses_at = child(axis_node, "crossesAt")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok());
+    (crosses, crosses_at)
+}
+
+/// `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10): `standard` (line
+/// only), `marker` (line + markers), or `filled` (closed area). `None` when
+/// the chart is not a radar chart or omits the element.
+pub fn extract_radar_style(root: Node) -> Option<String> {
+    root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "radarStyle")
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string())
+}
+
+/// Parse a `<c:layout><c:manualLayout>` node into a [`ChartManualLayout`]
+/// (ECMA-376 §21.2.2.88). `layout_node` is the `<c:layout>` element; returns
+/// `None` when it carries no `<c:manualLayout>` child. `xMode`/`yMode` default
+/// to `"edge"`; `x`/`y` default to 0; `w`/`h` stay `None` when absent.
+pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
+    let manual = child(layout_node, "manualLayout")?;
+    let mut x_mode = "edge".to_string();
+    let mut y_mode = "edge".to_string();
+    let mut layout_target: Option<String> = None;
+    let mut x = 0.0_f64;
+    let mut y = 0.0_f64;
+    let mut w: Option<f64> = None;
+    let mut h: Option<f64> = None;
+    for ch in manual.children().filter(|n| n.is_element()) {
+        let val_str = attr(&ch, "val");
+        match ch.tag_name().name() {
+            "xMode" => {
+                if let Some(v) = val_str {
+                    x_mode = v;
+                }
+            }
+            "yMode" => {
+                if let Some(v) = val_str {
+                    y_mode = v;
+                }
+            }
+            "layoutTarget" => {
+                layout_target = val_str;
+            }
+            "x" => {
+                if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) {
+                    x = v;
+                }
+            }
+            "y" => {
+                if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) {
+                    y = v;
+                }
+            }
+            "w" => {
+                w = val_str.and_then(|s| s.parse::<f64>().ok());
+            }
+            "h" => {
+                h = val_str.and_then(|s| s.parse::<f64>().ok());
+            }
+            _ => {}
+        }
+    }
+    Some(ChartManualLayout {
+        x_mode,
+        y_mode,
+        layout_target,
+        x,
+        y,
+        w,
+        h,
+    })
+}
+
+/// `<c:legend><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.31) → a
+/// [`LegendManualLayout`]. Unlike the plot/title layout, the legend variant has
+/// no `layoutTarget` and always carries explicit `w`/`h` (defaulting to 0).
+/// `legend_node` is the `<c:legend>` element. `None` when it has no manual layout.
+pub fn extract_legend_manual_layout(legend_node: Node) -> Option<LegendManualLayout> {
+    let layout = child(legend_node, "layout")?;
+    let manual = child(layout, "manualLayout")?;
+    let val = |tag: &str| {
+        child(manual, tag).and_then(|n| n.attribute("val").and_then(|v| v.parse::<f64>().ok()))
+    };
+    let mode = |tag: &str| {
+        child(manual, tag)
+            .and_then(|n| n.attribute("val").map(|v| v.to_string()))
+            .unwrap_or_else(|| "edge".to_string())
+    };
+    Some(LegendManualLayout {
+        x_mode: mode("xMode"),
+        y_mode: mode("yMode"),
+        x: val("x").unwrap_or(0.0),
+        y: val("y").unwrap_or(0.0),
+        w: val("w").unwrap_or(0.0),
+        h: val("h").unwrap_or(0.0),
+    })
 }
 
 /// `<c:catAx|valAx><c:delete val="1"/>` — true when the axis (labels, ticks
@@ -1262,7 +1414,13 @@ pub fn extract_axis_line_style(
     };
     let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
     let no_fill = child(ln, "noFill").is_some();
-    let color = child(ln, "solidFill").and_then(|sf| resolver.resolve_solid_fill(sf));
+    // The axis rule is a SHAPE stroke, so resolve it through `resolve_shape_fill`
+    // (full DrawingML grammar incl. lumMod/lumOff tints). xlsx keeps its lighter
+    // transform-free `resolve_solid_fill` for series/legend/title fills, so a
+    // scheme-color axis line (e.g. a `bg1 lumMod 65%` light-gray rule) must go
+    // through the shape path to render at the right strength rather than its
+    // untransformed base color.
+    let color = resolver.resolve_shape_fill(ln);
     (color, width, no_fill)
 }
 
@@ -1394,6 +1552,582 @@ pub fn extract_chartex_axis_hidden(root: Node) -> (bool, bool) {
     (cat_hidden, val_hidden)
 }
 
+// ============================================================================
+// Series-detail extractors (markers, per-point overrides, data labels, error
+// bars) — moved verbatim from the xlsx crate so `parse_chart_part` populates
+// the rich per-series fields for both pptx and xlsx.
+// ============================================================================
+
+/// Parse `<c:marker>` into `(symbol, size, fill, line)` — colors are hex without
+/// `#`. ECMA-376 §21.2.2.32 / §21.2.2.34. Fill and line come from `<c:spPr>`
+/// nested inside the marker, resolved via the full DrawingML color grammar
+/// ([`ColorResolver::resolve_shape_fill`]). `size` is the point value parsed as
+/// an integer (matching Excel's `<c:size val>` unsignedByte) then widened to
+/// `f64` for the shared model.
+pub fn parse_marker_block(
+    marker_node: Option<Node>,
+    resolver: &dyn ColorResolver,
+) -> (Option<String>, Option<f64>, Option<String>, Option<String>) {
+    let Some(mk) = marker_node else {
+        return (None, None, None, None);
+    };
+    let symbol = child(mk, "symbol")
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string());
+    let size = child(mk, "size")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v as f64);
+    let sp_pr = child(mk, "spPr");
+    let fill = sp_pr.and_then(|p| resolver.resolve_shape_fill(p));
+    let line = sp_pr
+        .and_then(|p| child(p, "ln"))
+        .and_then(|ln| resolver.resolve_shape_fill(ln));
+    (symbol, size, fill, line)
+}
+
+/// Walk every `<c:dPt>` direct child of the series and collect per-point
+/// overrides. Multiple `<c:dPt>` per series is normal; each targets one
+/// `<c:idx>` (ECMA-376 §21.2.2.39). Fill from `<c:spPr>`, marker from a nested
+/// `<c:marker>`, and `<c:explosion>` (pie/doughnut pull-out) are captured.
+pub fn parse_data_point_overrides(
+    ser_node: Node,
+    resolver: &dyn ColorResolver,
+) -> Vec<ChartDataPointOverride> {
+    let mut result = Vec::new();
+    for dpt in ser_node
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dPt")
+    {
+        let idx = child(dpt, "idx")
+            .and_then(|n| n.attribute("val"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let color = child(dpt, "spPr").and_then(|p| resolver.resolve_shape_fill(p));
+        let mk = child(dpt, "marker");
+        let (marker_symbol, marker_size, marker_fill, marker_line) =
+            parse_marker_block(mk, resolver);
+        let explosion = extract_dpt_explosion(dpt);
+        result.push(ChartDataPointOverride {
+            idx,
+            color,
+            marker_symbol,
+            marker_size,
+            marker_fill,
+            marker_line,
+            explosion,
+        });
+    }
+    result
+}
+
+/// Resolve `<c:ser><c:extLst><c:ext><c15:datalabelsRange>` cache: index → label
+/// text. Used to substitute `<a:fld type="CELLRANGE">` placeholders. Missing
+/// entries stay absent from the map.
+pub fn collect_dlbl_range_cache(ser_node: Node) -> std::collections::HashMap<u32, String> {
+    let mut map: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let Some(ext_lst) = child(ser_node, "extLst") else {
+        return map;
+    };
+    for ext in ext_lst
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "ext")
+    {
+        for range in ext
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "datalabelsRange")
+        {
+            for cache in range
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "dlblRangeCache")
+            {
+                for pt in cache
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                {
+                    let Some(idx) = pt.attribute("idx").and_then(|v| v.parse::<u32>().ok()) else {
+                        continue;
+                    };
+                    let v = child(pt, "v")
+                        .and_then(|n| n.text())
+                        .unwrap_or("")
+                        .to_string();
+                    map.insert(idx, v);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Walk a `<c:tx><c:rich>` (or any DrawingML rich-text root) and reduce it to
+/// plain text. `<a:fld type="CELLRANGE">` placeholders are substituted from
+/// `cellrange_cache`. Other field types and runs are concatenated; newlines
+/// come from paragraph breaks.
+pub fn flatten_rich_text(rich_root: Node, cellrange_cache: Option<&str>) -> String {
+    let mut out = String::new();
+    let mut first_para = true;
+    for p in rich_root
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "p")
+    {
+        if !first_para {
+            out.push('\n');
+        }
+        first_para = false;
+        for c in p.children().filter(|n| n.is_element()) {
+            match c.tag_name().name() {
+                "r" => {
+                    if let Some(t) = c.children().find(|n| n.tag_name().name() == "t") {
+                        if let Some(s) = t.text() {
+                            out.push_str(s);
+                        }
+                    }
+                }
+                "fld" => {
+                    let typ = c.attribute("type").unwrap_or("");
+                    if typ == "CELLRANGE" {
+                        if let Some(s) = cellrange_cache {
+                            out.push_str(s);
+                        }
+                    } else if let Some(t) = c.children().find(|n| n.tag_name().name() == "t") {
+                        if let Some(s) = t.text() {
+                            out.push_str(s);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Parse a series-level `<c:dLbls>` into `(series_defaults, per_idx_overrides)`.
+/// ECMA-376 §21.2.2.47. Colors resolve through [`ColorResolver::resolve_shape_fill`]
+/// so a scheme-color label text picks up its lumMod/lumOff transforms.
+pub fn parse_series_data_labels(
+    ser_node: Node,
+    resolver: &dyn ColorResolver,
+    cellrange_cache: &std::collections::HashMap<u32, String>,
+) -> (Option<ChartSeriesDataLabels>, Vec<ChartDataLabelOverride>) {
+    let Some(d_lbls) = child(ser_node, "dLbls") else {
+        return (None, Vec::new());
+    };
+
+    let bool_attr = |n: Node, name: &str| {
+        child(n, name)
+            .and_then(|c| c.attribute("val"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    };
+
+    let position = child(d_lbls, "dLblPos")
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string());
+    let format_code = child(d_lbls, "numFmt")
+        .and_then(|n| n.attribute("formatCode"))
+        .map(|s| s.to_string());
+    // defRPr fill / bold / size come from the dLbls-level `<c:txPr>`.
+    let txpr = child(d_lbls, "txPr");
+    let font_color = txpr.and_then(|tx| {
+        tx.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
+            .and_then(|def| resolver.resolve_shape_fill(def))
+    });
+    let font_bold_default = txpr.and_then(|tx| {
+        tx.descendants()
+            .find(|n| {
+                n.is_element() && (n.tag_name().name() == "defRPr" || n.tag_name().name() == "rPr")
+            })
+            .and_then(|n| n.attribute("b"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    });
+    let font_size_default = txpr.and_then(|tx| {
+        tx.descendants()
+            .find(|n| {
+                n.is_element() && (n.tag_name().name() == "defRPr" || n.tag_name().name() == "rPr")
+            })
+            .and_then(|n| n.attribute("sz"))
+            .and_then(|v| v.parse::<i32>().ok())
+    });
+
+    let series_defaults = ChartSeriesDataLabels {
+        show_val: bool_attr(d_lbls, "showVal"),
+        show_cat_name: bool_attr(d_lbls, "showCatName"),
+        show_ser_name: bool_attr(d_lbls, "showSerName"),
+        show_percent: bool_attr(d_lbls, "showPercent"),
+        position: position.clone(),
+        font_color: font_color.clone(),
+        format_code,
+        font_bold: font_bold_default,
+        font_size_hpt: font_size_default,
+    };
+
+    let mut overrides = Vec::new();
+    for dl in d_lbls
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbl")
+    {
+        let idx = child(dl, "idx")
+            .and_then(|n| n.attribute("val"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let deleted = child(dl, "delete")
+            .and_then(|n| n.attribute("val"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let pos = child(dl, "dLblPos")
+            .and_then(|n| n.attribute("val"))
+            .map(|s| s.to_string());
+        let cache_for_idx = cellrange_cache.get(&idx).map(|s| s.as_str());
+        let text = if deleted {
+            String::new()
+        } else {
+            match child(dl, "tx") {
+                Some(tx_node) => flatten_rich_text(tx_node, cache_for_idx),
+                None => cache_for_idx.unwrap_or("").to_string(),
+            }
+        };
+        let font_color = child(dl, "txPr").and_then(|tx| {
+            tx.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
+                .and_then(|def| resolver.resolve_shape_fill(def))
+        });
+        let font_size_hpt = dl
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
+            .and_then(|def| def.attribute("sz"))
+            .and_then(|v| v.parse::<i32>().ok());
+        let font_bold = dl
+            .descendants()
+            .find(|n| {
+                n.is_element() && (n.tag_name().name() == "defRPr" || n.tag_name().name() == "rPr")
+            })
+            .and_then(|def| def.attribute("b"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        overrides.push(ChartDataLabelOverride {
+            idx,
+            text,
+            position: pos,
+            font_color,
+            font_size_hpt,
+            font_bold,
+        });
+    }
+
+    let any_default = series_defaults.show_val
+        || series_defaults.show_cat_name
+        || series_defaults.show_ser_name
+        || series_defaults.show_percent
+        || series_defaults.position.is_some()
+        || series_defaults.font_color.is_some()
+        || series_defaults.format_code.is_some()
+        || series_defaults.font_bold.is_some()
+        || series_defaults.font_size_hpt.is_some();
+    let series_out = if any_default {
+        Some(series_defaults)
+    } else {
+        None
+    };
+    (series_out, overrides)
+}
+
+/// Read a `<c:numRef><c:numCache>` or `<c:numLit>` block under `parent` and
+/// return per-point values keyed by `<c:pt idx>`. Length is at least
+/// `expected_len` (padded with `None`).
+pub fn extract_num_block(parent: Node, expected_len: usize) -> Vec<Option<f64>> {
+    let cache = parent.descendants().find(|n| {
+        n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")
+    });
+    let Some(cache) = cache else {
+        return Vec::new();
+    };
+    let pt_count: usize = child(cache, "ptCount")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(expected_len);
+    let len = pt_count.max(expected_len);
+    let mut values: Vec<Option<f64>> = vec![None; len];
+    for pt in cache
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+    {
+        let Some(idx) = pt.attribute("idx").and_then(|v| v.parse::<usize>().ok()) else {
+            continue;
+        };
+        let v = child(pt, "v")
+            .and_then(|n| n.text())
+            .and_then(|s| s.trim().parse::<f64>().ok());
+        if idx < values.len() {
+            values[idx] = v;
+        }
+    }
+    values
+}
+
+/// Parse all `<c:errBars>` direct children of a series and resolve per-point
+/// plus / minus deltas to absolute numbers. Each errBars block fixes a
+/// direction (x|y); a series can have at most one of each direction.
+/// ECMA-376 §21.2.2.20.
+pub fn parse_error_bars(
+    ser_node: Node,
+    series_values: &[Option<f64>],
+    resolver: &dyn ColorResolver,
+) -> Vec<ChartErrBars> {
+    let mut result = Vec::new();
+    for eb in ser_node
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "errBars")
+    {
+        let dir = child(eb, "errDir")
+            .and_then(|n| n.attribute("val"))
+            .unwrap_or("y")
+            .to_string();
+        let bar_type = child(eb, "errBarType")
+            .and_then(|n| n.attribute("val"))
+            .unwrap_or("both")
+            .to_string();
+        let val_type = child(eb, "errValType")
+            .and_then(|n| n.attribute("val"))
+            .unwrap_or("fixedVal")
+            .to_string();
+        let no_end_cap = child(eb, "noEndCap")
+            .and_then(|n| n.attribute("val"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let n_points = series_values.len();
+        let mut plus: Vec<Option<f64>> = vec![None; n_points];
+        let mut minus: Vec<Option<f64>> = vec![None; n_points];
+
+        match val_type.as_str() {
+            "cust" => {
+                for (slot, target) in [("plus", &mut plus), ("minus", &mut minus)] {
+                    let Some(side) = child(eb, slot) else {
+                        continue;
+                    };
+                    let vals = extract_num_block(side, n_points);
+                    if !vals.is_empty() {
+                        let len = vals.len().min(target.len());
+                        target[..len].copy_from_slice(&vals[..len]);
+                    }
+                }
+            }
+            "fixedVal" => {
+                let v = child(eb, "val")
+                    .and_then(|n| n.attribute("val"))
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                for i in 0..n_points {
+                    plus[i] = Some(v);
+                    minus[i] = Some(v);
+                }
+            }
+            "percentage" => {
+                let pct = child(eb, "val")
+                    .and_then(|n| n.attribute("val"))
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                for (i, v) in series_values.iter().enumerate() {
+                    if let Some(val) = v {
+                        let d = val.abs() * pct / 100.0;
+                        plus[i] = Some(d);
+                        minus[i] = Some(d);
+                    }
+                }
+            }
+            "stdErr" | "stdDev" => {
+                let nums: Vec<f64> = series_values.iter().filter_map(|v| *v).collect();
+                if !nums.is_empty() {
+                    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                    let var =
+                        nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+                    let std = var.sqrt();
+                    let mult = child(eb, "val")
+                        .and_then(|n| n.attribute("val"))
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(1.0);
+                    let sample = if val_type == "stdErr" {
+                        std / (nums.len() as f64).sqrt()
+                    } else {
+                        std
+                    };
+                    let delta = sample * mult;
+                    for i in 0..n_points {
+                        plus[i] = Some(delta);
+                        minus[i] = Some(delta);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let sp_pr = child(eb, "spPr");
+        let color = sp_pr.and_then(|p| match child(p, "ln") {
+            Some(l) => resolver.resolve_shape_fill(l),
+            None => resolver.resolve_shape_fill(p),
+        });
+        let line_width_emu = sp_pr
+            .and_then(|p| child(p, "ln"))
+            .and_then(|ln| ln.attribute("w"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let dash = sp_pr
+            .and_then(|p| child(p, "ln"))
+            .and_then(|ln| child(ln, "prstDash"))
+            .and_then(|n| n.attribute("val"))
+            .map(|s| s.to_string());
+
+        result.push(ChartErrBars {
+            dir,
+            bar_type,
+            plus,
+            minus,
+            no_end_cap,
+            color,
+            line_width_emu,
+            dash,
+        });
+    }
+    result
+}
+
+/// Positional string-cache collector for `<c:cat>` / `<c:xVal>`. Reads
+/// `<c:ptCount>` to size the result, then places each `<c:pt idx>` string at its
+/// index (multi-level caches use the innermost `<c:lvl>`). Unlike a naive
+/// document-order collector this preserves gaps (sparse caches) so a category
+/// list that starts at `idx=1`, or a value series with a hole, keeps its true
+/// length and alignment (ECMA-376 §21.2.2.20/.75/.181).
+pub fn collect_str_cache_positional(ser_node: Node, child_tag: &str) -> Vec<String> {
+    let Some(container) = ser_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == child_tag)
+    else {
+        return Vec::new();
+    };
+
+    // Multi-level categories: use only the first (innermost) lvl.
+    if let Some(multi_cache) = container
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "multiLvlStrCache")
+    {
+        let pt_count: usize = child(multi_cache, "ptCount")
+            .and_then(|n| n.attribute("val"))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if let Some(first_lvl) = child(multi_cache, "lvl") {
+            let mut pts: Vec<(usize, String)> = Vec::new();
+            for pt in first_lvl
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+            {
+                let idx: usize = pt
+                    .attribute("idx")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let val = child(pt, "v")
+                    .and_then(|n| n.text())
+                    .unwrap_or("")
+                    .to_string();
+                pts.push((idx, val));
+            }
+            let len = pt_count.max(pts.iter().map(|(i, _)| i + 1).max().unwrap_or(0));
+            let mut result = vec![String::new(); len];
+            for (idx, val) in pts {
+                if idx < result.len() {
+                    result[idx] = val;
+                }
+            }
+            return result;
+        }
+    }
+
+    // Standard strRef/strCache or numRef/numCache.
+    let mut pt_count: usize = 0;
+    let mut pts: Vec<(usize, String)> = Vec::new();
+    for desc in container.descendants() {
+        match desc.tag_name().name() {
+            "ptCount" => {
+                pt_count = desc
+                    .attribute("val")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            }
+            "pt" => {
+                let idx: usize = desc
+                    .attribute("idx")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let val = child(desc, "v")
+                    .and_then(|n| n.text())
+                    .unwrap_or("")
+                    .to_string();
+                pts.push((idx, val));
+            }
+            _ => {}
+        }
+    }
+    if pt_count == 0 {
+        pt_count = pts.len();
+    }
+    let mut result = vec![String::new(); pt_count];
+    for (idx, val) in pts {
+        if idx < result.len() {
+            result[idx] = val;
+        }
+    }
+    result
+}
+
+/// Positional numeric-cache collector for `<c:val>` / `<c:yVal>`. Reads
+/// `<c:ptCount>` to size the result, then places each `<c:pt idx>` value at its
+/// index (padding gaps with `None`). Sparse-safe companion to
+/// [`collect_str_cache_positional`].
+pub fn collect_num_cache_positional(ser_node: Node, child_tag: &str) -> Vec<Option<f64>> {
+    let Some(container) = ser_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == child_tag)
+    else {
+        return Vec::new();
+    };
+
+    let mut pt_count: usize = 0;
+    let mut pts: Vec<(usize, f64)> = Vec::new();
+    for desc in container.descendants() {
+        match desc.tag_name().name() {
+            "ptCount" => {
+                pt_count = desc
+                    .attribute("val")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            }
+            "pt" => {
+                let idx: usize = desc
+                    .attribute("idx")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                if let Some(v) = child(desc, "v")
+                    .and_then(|n| n.text())
+                    .and_then(|t| t.parse::<f64>().ok())
+                {
+                    pts.push((idx, v));
+                }
+            }
+            _ => {}
+        }
+    }
+    if pt_count == 0 {
+        pt_count = pts.len();
+    }
+    let mut result: Vec<Option<f64>> = vec![None; pt_count];
+    for (idx, val) in pts {
+        if idx < result.len() {
+            result[idx] = Some(val);
+        }
+    }
+    result
+}
+
 /// Parse the shared body of a legacy DrawingML chart (`c:` namespace) into a
 /// [`ChartModel`]. `chart_root` is the `<c:chartSpace>` root element; the
 /// crate-specific `<a:solidFill>` resolution (pptx theme map vs. xlsx theme
@@ -1474,10 +2208,16 @@ pub fn parse_chart_part(
         "unknown".to_string()
     };
 
-    // Title text
-    let title_node_opt = root
+    // Title text. The CHART title is the direct-child `<c:title>` of `<c:chart>`
+    // (ECMA-376 §21.2.2.6) — NOT any `<c:title>` descendant. A `descendants()`
+    // search would pick up the first AXIS title (which lives inside `<c:plotArea>`
+    // → `<c:valAx>`/`<c:catAx>`) on a chart that has axis titles but no chart
+    // title, wrongly promoting it to the chart title. Scope strictly to the
+    // `<c:chart>` element's own `<c:title>` child.
+    let chart_node = root
         .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "title");
+        .find(|n| n.is_element() && n.tag_name().name() == "chart");
+    let title_node_opt = chart_node.and_then(|c| child(c, "title"));
     let title = title_node_opt.and_then(|title_node| {
         let texts: Vec<String> = title_node
             .descendants()
@@ -1537,14 +2277,45 @@ pub fn parse_chart_part(
             .find(|c| c.is_element() && c.tag_name().name() == "axId")
             .and_then(|c| attr(&c, "val"))
     };
-    // Primary = first value axis that isn't on the right; secondary (only when a
-    // second value axis exists) = a value axis on the right edge.
-    let val_ax = val_ax_nodes
-        .iter()
-        .find(|n| ax_pos(n).as_deref() != Some("r"))
-        .or_else(|| val_ax_nodes.first())
-        .copied();
-    let secondary_val_ax = if val_ax_nodes.len() >= 2 {
+    // The category axis is normally `<c:catAx>` or, for a date/time-series X
+    // axis, `<c:dateAx>` (§21.2.2.39) — same child grammar, so every cat-axis
+    // read below treats them identically. A SCATTER / BUBBLE chart has NO catAx:
+    // it declares two `<c:valAx>` and the *horizontal* one (`axPos` b/t) plays
+    // the category-axis role, while the *vertical* one (`axPos` l/r) is the
+    // value axis. Detect this and route the horizontal valAx into `cat_ax` so
+    // its tick-label / line / format / crossing properties land in the cat-axis
+    // fields, exactly as Excel presents them.
+    let real_cat_ax = root
+        .descendants()
+        .find(|n| n.is_element() && matches!(n.tag_name().name(), "catAx" | "dateAx"));
+    let is_scatter_axes = real_cat_ax.is_none() && val_ax_nodes.len() >= 2;
+    let scatter_x_val_ax = if is_scatter_axes {
+        val_ax_nodes
+            .iter()
+            .find(|n| matches!(ax_pos(n).as_deref(), Some("b") | Some("t")))
+            .copied()
+    } else {
+        None
+    };
+    let cat_ax = real_cat_ax.or(scatter_x_val_ax);
+
+    // Primary value axis. Normally the first value axis that isn't on the right.
+    // For scatter it's the VERTICAL (l/r) axis — never the horizontal one, which
+    // is the category axis above. Secondary (combo charts) = a right-edge valAx.
+    let val_ax = if is_scatter_axes {
+        val_ax_nodes
+            .iter()
+            .find(|n| matches!(ax_pos(n).as_deref(), Some("l") | Some("r")))
+            .or_else(|| val_ax_nodes.first())
+            .copied()
+    } else {
+        val_ax_nodes
+            .iter()
+            .find(|n| ax_pos(n).as_deref() != Some("r"))
+            .or_else(|| val_ax_nodes.first())
+            .copied()
+    };
+    let secondary_val_ax = if !is_scatter_axes && val_ax_nodes.len() >= 2 {
         val_ax_nodes
             .iter()
             .find(|n| ax_pos(n).as_deref() == Some("r"))
@@ -1553,13 +2324,6 @@ pub fn parse_chart_part(
         None
     };
     let secondary_ax_id = secondary_val_ax.as_ref().and_then(ax_id_of);
-    // The category axis is `<c:catAx>` or, for a date/time-series X axis,
-    // `<c:dateAx>` (§21.2.2.39) — same child grammar, so every cat-axis read
-    // below (hidden, tick label size/color/bold, line style, tick marks, format
-    // code) treats them identically.
-    let cat_ax = root
-        .descendants()
-        .find(|n| n.is_element() && matches!(n.tag_name().name(), "catAx" | "dateAx"));
     let (val_min, val_max) = val_ax.map(extract_axis_min_max).unwrap_or((None, None));
     let val_axis_hidden = val_ax.map(axis_is_deleted).unwrap_or(false);
     let cat_axis_hidden = cat_ax.map(axis_is_deleted).unwrap_or(false);
@@ -1588,76 +2352,61 @@ pub fn parse_chart_part(
         return None;
     }
 
-    // Helper: collect <c:pt> values from a cache node (strCache or numCache)
-    let collect_pt_strings = |cache: roxmltree::Node<'_, '_>| -> Vec<String> {
-        cache
-            .children()
-            .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-            .filter_map(|pt| {
-                pt.children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "v")
-            })
-            .filter_map(|v| v.text().map(|t| t.to_string()))
-            .collect()
-    };
-
     // ECMA-376 §21.2.2: category data may be in a *Cache (backing a *Ref) or a *Lit (inline literal).
     // Accept strCache/numCache (external refs with cached values) AND strLit/numLit (inline literals).
+    // Still used for the series-name lookup below; category/value data now flows
+    // through the positional collectors.
     let is_pt_container =
         |name: &str| matches!(name, "strCache" | "numCache" | "strLit" | "numLit");
 
-    // Category labels live under `<c:cat>` in one of two shapes:
-    //   * single-level: a strCache/numCache/strLit/numLit holding `<c:pt>`
-    //     children directly, or
-    //   * multi-level: a `<c:multiLvlStrCache>` (ECMA-376 §21.2.2.95) whose
-    //     `<c:pt>` are nested one level deeper inside `<c:lvl>` elements.
-    // For a multi-level axis we use the innermost level (the first `<c:lvl>`),
-    // which carries one label per data point — matching how Word / PowerPoint
-    // label the category axis. Missing this path left `categories` empty, which
-    // collapsed `pt_count` to 1 and truncated every series to a single value
-    // (issue #556: area chart rendered as a blank zero-width sliver).
-    let cat_node = ser_nodes[0]
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "cat");
-    let categories: Vec<String> = cat_node
-        .and_then(|cat| {
-            cat.descendants()
-                .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
-                .map(&collect_pt_strings)
-                .filter(|v| !v.is_empty())
-                .or_else(|| {
-                    // Multi-level: collect from the first `<c:lvl>` of the cache.
-                    cat.descendants()
-                        .find(|n| n.is_element() && n.tag_name().name() == "lvl")
-                        .map(&collect_pt_strings)
-                })
-        })
-        .unwrap_or_default();
-
-    let pt_count = categories.len().max(1);
+    // Chart-level category labels from the first series, using the POSITIONAL
+    // collector so a sparse cache (labels that start at `idx=1`, or a hole in
+    // the middle) keeps its true length and per-index alignment. The old
+    // document-order collector collapsed such caches, truncating every series
+    // and mis-registering data (issue: cat-less line 11→1, idx=1 radar 11→10).
+    // Scatter/bubble carry their X labels in `<c:xVal>` (there is no `<c:cat>`),
+    // so read that instead — the shared category list mirrors the first series'
+    // X data, matching how Excel drives the horizontal-axis labels.
+    let chart_uses_xval = chart_type == "scatter" || chart_type == "bubble";
+    let categories: Vec<String> = if chart_uses_xval {
+        collect_str_cache_positional(ser_nodes[0], "xVal")
+    } else {
+        collect_str_cache_positional(ser_nodes[0], "cat")
+    };
 
     let is_scatter_like = chart_type == "scatter" || chart_type == "bubble";
 
-    // A combo chart's primary type is the first recognized group (bar wins);
-    // line series only need the "line" override when the chart isn't ALREADY a
-    // line chart (otherwise every series in a pure line chart would carry a
-    // redundant override).
-    let primary_is_line =
-        chart_type == "line" || chart_type == "stackedLine" || chart_type == "stackedLinePct";
+    // Map a chart-group element name to the per-series `seriesType` string the
+    // renderer dispatches on (mixed bar+line charts key line vs. non-line off
+    // this field). Mirrors the xlsx `type_map`; `bubbleChart` folds to
+    // `scatter` like everything else.
+    let group_series_type = |group_name: &str| -> Option<String> {
+        match group_name {
+            "barChart" => Some("bar"),
+            "lineChart" => Some("line"),
+            "areaChart" => Some("area"),
+            "pieChart" => Some("pie"),
+            "doughnutChart" => Some("doughnut"),
+            "radarChart" => Some("radar"),
+            "scatterChart" | "bubbleChart" => Some("scatter"),
+            _ => None,
+        }
+        .map(|s| s.to_string())
+    };
 
     let series: Vec<ChartSeries> = ser_nodes
         .iter()
         .map(|ser| {
             // Each `<c:ser>` is a direct child of its chart-group element
-            // (`<c:barChart>`/`<c:lineChart>`/…). Tag line-group series of a
-            // combo chart so the renderer draws them as a line over the columns
-            // (ECMA-376 §21.2.2.97), and flag series whose group references the
-            // secondary value axis so they plot against the right-hand scale.
+            // (`<c:barChart>`/`<c:lineChart>`/…). `series_type` carries that
+            // group's type so the renderer can draw line-group series as a line
+            // over the columns in a combo chart (ECMA-376 §21.2.2.97); we also
+            // flag series whose group references the secondary value axis so they
+            // plot against the right-hand scale.
             let group = ser.parent();
-            let series_type = match group.map(|p| p.tag_name().name()) {
-                Some("lineChart") if !primary_is_line => Some("line".to_string()),
-                _ => None,
-            };
+            let series_type = group
+                .map(|p| p.tag_name().name())
+                .and_then(group_series_type);
             let use_secondary_axis = match (group, secondary_ax_id.as_deref()) {
                 (Some(g), Some(sec)) => g
                     .children()
@@ -1693,78 +2442,59 @@ pub fn parse_chart_part(
                 })
                 .unwrap_or_default();
 
-            // Per-series X values for scatter/bubble: ECMA-376 §21.2.2.43 puts numeric
-            // X data in `<c:xVal>` (with its own numCache / numLit) instead of the
-            // shared `<c:cat>`. Read it as strings so the core ChartSeries.categories
-            // field can stay string-typed (renderScatterChart parses each entry back
-            // to a float).
-            let x_cache = if is_scatter_like {
-                ser.children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "xVal")
-                    .and_then(|x| {
-                        x.descendants()
-                            .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
-                    })
-            } else {
-                None
-            };
-            let series_categories: Option<Vec<String>> = x_cache.map(&collect_pt_strings);
+            // `<c:idx val>` (ECMA-376 §21.2.2.84) — the canonical series index
+            // Office uses for default-palette color selection. `<c:order>` is a
+            // separate display-order field and must NOT drive coloring.
+            let series_idx: usize = child(*ser, "idx")
+                .and_then(|n| n.attribute("val"))
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
 
-            // Y values: scatter/bubble use `<c:yVal>`, everything else uses `<c:val>`.
-            // Restrict the descendant walk to the matching tag so a sibling `<c:xVal>`
-            // (also a numCache) can't be picked up as the Y series.
-            let val_cache = if is_scatter_like {
-                ser.children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "yVal")
-                    .and_then(|y| {
-                        y.descendants().find(|n| {
-                            n.is_element()
-                                && (n.tag_name().name() == "numCache"
-                                    || n.tag_name().name() == "numLit")
-                        })
-                    })
-            } else {
-                ser.children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "val")
-                    .and_then(|v| {
-                        v.descendants().find(|n| {
-                            n.is_element()
-                                && (n.tag_name().name() == "numCache"
-                                    || n.tag_name().name() == "numLit")
-                        })
-                    })
-            };
-
-            // For scatter/bubble the point count comes from this series' xVal (each
-            // series can have a different point count). For other charts it's the
-            // shared category count.
-            let series_pt_count = if is_scatter_like {
-                series_categories
-                    .as_ref()
-                    .map(|c| c.len())
-                    .unwrap_or(0)
-                    .max(1)
-            } else {
-                pt_count
-            };
-
-            let mut values: Vec<Option<f64>> = vec![None; series_pt_count];
-            if let Some(cache) = val_cache {
-                for pt in cache
-                    .children()
-                    .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-                {
-                    let idx: usize = attr(&pt, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let val: Option<f64> = pt
-                        .children()
-                        .find(|n| n.is_element() && n.tag_name().name() == "v")
-                        .and_then(|v| v.text())
-                        .and_then(|t| t.parse().ok());
-                    if idx < values.len() {
-                        values[idx] = val;
+            // Per-series category labels. Scatter/bubble put numeric X data in
+            // `<c:xVal>` (ECMA-376 §21.2.2.43); every other type reads the
+            // series' own `<c:cat>`, falling back to the shared chart-level
+            // `categories` when this series carries none (mixed / combo charts
+            // share one category axis). Emitted as `None` only when the resulting
+            // list is empty, matching the historical xlsx wire shape (every
+            // series carried its resolved `categories`).
+            let series_categories: Option<Vec<String>> = {
+                let cats = if is_scatter_like {
+                    collect_str_cache_positional(*ser, "xVal")
+                } else {
+                    let own = collect_str_cache_positional(*ser, "cat");
+                    if own.is_empty() {
+                        categories.clone()
+                    } else {
+                        own
                     }
+                };
+                if cats.is_empty() {
+                    None
+                } else {
+                    Some(cats)
                 }
-            }
+            };
+
+            // Y values (scatter/bubble → `<c:yVal>`, else `<c:val>`), collected
+            // POSITIONALLY. The series' own cache `<c:ptCount>` sizes the vector
+            // and each `<c:pt idx>` lands at its index — the length no longer
+            // rides on the category count, so a value series with more points
+            // than there are cat labels (cat-less line, sparse radar) keeps all
+            // of its data.
+            let val_tag = if is_scatter_like { "yVal" } else { "val" };
+            let values: Vec<Option<f64>> = collect_num_cache_positional(*ser, val_tag);
+            let series_pt_count = values.len().max(1);
+            // Value-cache node for the series-value number format (`<c:formatCode>`).
+            let val_cache = ser
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == val_tag)
+                .and_then(|v| {
+                    v.descendants().find(|n| {
+                        n.is_element()
+                            && (n.tag_name().name() == "numCache"
+                                || n.tag_name().name() == "numLit")
+                    })
+                });
 
             // Bubble per-point sizes (ECMA-376 §21.2.2.4 `<c:bubbleSize>`).
             // Only meaningful for bubble charts; scatter / others ignore.
@@ -1801,7 +2531,13 @@ pub fn parse_chart_part(
                 None
             };
 
-            // Series color from spPr > solidFill (bar/area/pie) or spPr > ln > solidFill (line)
+            // Series color from spPr > solidFill (bar/area/pie) or spPr > ln >
+            // solidFill (line/scatter/radar carry their color on the stroke).
+            // When neither is present, fall back to the theme accent for this
+            // series index (`theme.accent[(idx % 6) + 1]`) via the resolver, so
+            // the default Office palette renders without theme access. Resolvers
+            // whose renderer owns its own palette (pptx) return `None` here and
+            // keep `color` unset.
             let color = ser
                 .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "spPr")
@@ -1818,7 +2554,8 @@ pub fn parse_chart_part(
                                 })
                         })
                 })
-                .and_then(|fill| color_resolver.resolve_solid_fill(fill));
+                .and_then(|fill| color_resolver.resolve_solid_fill(fill))
+                .or_else(|| color_resolver.resolve_series_accent(series_idx));
 
             // Per-data-point colors from <c:dPt> (§21.2.2.52; important for
             // pie charts). The point index is the CHILD element `<c:idx val>`
@@ -1853,31 +2590,25 @@ pub fn parse_chart_part(
 
             let has_dpt_colors = data_point_colors.iter().any(|c| c.is_some());
 
-            // Per-point `<c:dPt><c:explosion>` (§21.2.2.61) — pie/doughnut slice
-            // pull-out. Only the explosion is captured here (fills already flow
-            // through `data_point_colors`); a dPt with no explosion yields no
-            // override so the wire stays clean for the common non-exploded pie.
-            let data_point_overrides: Vec<ChartDataPointOverride> = ser
-                .children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "dPt")
-                .filter_map(|dpt| {
-                    let idx = dpt
-                        .children()
-                        .find(|n| n.is_element() && n.tag_name().name() == "idx")
-                        .and_then(|n| attr(&n, "val"))
-                        .and_then(|v| v.parse::<u32>().ok())?;
-                    let explosion = extract_dpt_explosion(dpt)?;
-                    Some(ChartDataPointOverride {
-                        idx,
-                        color: None,
-                        marker_symbol: None,
-                        marker_size: None,
-                        marker_fill: None,
-                        marker_line: None,
-                        explosion: Some(explosion),
+            // Per-point `<c:dPt>` overrides (§21.2.2.39): marker (symbol/size/
+            // fill/line) and `<c:explosion>` (pie/doughnut pull-out). Plain
+            // per-point FILL flows through `data_point_colors` above (the pie
+            // model the pptx path established), so we only emit an override when
+            // it carries a marker or explosion — a color-only dPt yields no
+            // override and stays clean on the wire. This makes the shared parser
+            // populate xlsx's marker overrides (e.g. sample-26 scatter) without
+            // double-representing pie slice fills.
+            let data_point_overrides: Vec<ChartDataPointOverride> =
+                parse_data_point_overrides(*ser, color_resolver)
+                    .into_iter()
+                    .filter(|o| {
+                        o.marker_symbol.is_some()
+                            || o.marker_size.is_some()
+                            || o.marker_fill.is_some()
+                            || o.marker_line.is_some()
+                            || o.explosion.is_some()
                     })
-                })
-                .collect();
+                    .collect();
 
             // Series value number format from `<c:val>…<c:numCache><c:formatCode>`.
             // Used for data labels when `<c:dLbls>` carries no explicit `<c:numFmt>`
@@ -1909,6 +2640,32 @@ pub fn parse_chart_part(
                 })
                 .and_then(|fill| color_resolver.resolve_solid_fill(fill));
 
+            // Marker styling (ECMA-376 §21.2.2.32/§21.2.2.34). A per-series
+            // `<c:marker>` gives the symbol/size/fill/line; when the symbol is
+            // absent the chart-type-level `<c:lineChart><c:marker val>` default
+            // (§21.2.2.33) governs visibility. Scatter defaults to visible
+            // markers even without an explicit flag.
+            let chart_marker_default = group
+                .and_then(|g| child(g, "marker"))
+                .and_then(|m| m.attribute("val"))
+                .map(|v| v != "0")
+                .unwrap_or(false);
+            let marker_node = child(*ser, "marker");
+            let (marker_symbol, marker_size, marker_fill, marker_line) =
+                parse_marker_block(marker_node, color_resolver);
+            let show_marker = match (&marker_symbol, is_scatter_like) {
+                (Some(sym), _) => sym != "none",
+                (None, true) => true,
+                _ => chart_marker_default,
+            };
+
+            // Series-level `<c:dLbls>` defaults + per-idx custom labels, and
+            // error bars (§21.2.2.20, resolved to absolute plus/minus arrays).
+            let dlbl_range_cache = collect_dlbl_range_cache(*ser);
+            let (series_data_labels, data_label_overrides) =
+                parse_series_data_labels(*ser, color_resolver, &dlbl_range_cache);
+            let err_bars = parse_error_bars(*ser, &values, color_resolver);
+
             ChartSeries {
                 name,
                 values,
@@ -1932,22 +2689,30 @@ pub fn parse_chart_part(
                 // the wire exactly as the old `skip_serializing_if = "Not::not"`
                 // did.
                 use_secondary_axis: if use_secondary_axis { Some(true) } else { None },
-                // Fields the legacy `<c:chart>` path doesn't populate (marker
-                // styling, per-point overrides, per-series dLbls, error bars) —
-                // pptx renders these from the series color today.
-                show_marker: None,
-                marker_symbol: None,
-                marker_size: None,
-                marker_fill: None,
-                marker_line: None,
+                // Marker styling / per-series data labels / error bars, now
+                // populated by the shared extractors so both pptx and xlsx get
+                // markers, dLbls and errBars from the one parse path.
+                show_marker: Some(show_marker),
+                marker_symbol,
+                marker_size,
+                marker_fill,
+                marker_line,
                 data_point_overrides: if data_point_overrides.is_empty() {
                     None
                 } else {
                     Some(data_point_overrides)
                 },
-                data_label_overrides: None,
-                series_data_labels: None,
-                err_bars: None,
+                data_label_overrides: if data_label_overrides.is_empty() {
+                    None
+                } else {
+                    Some(data_label_overrides)
+                },
+                series_data_labels,
+                err_bars: if err_bars.is_empty() {
+                    None
+                } else {
+                    Some(err_bars)
+                },
                 // `<c:ser><c:smooth>` (§21.2.2.194) — line/area spline flag.
                 // Shared with the xlsx parser via ooxml-common so both honor the
                 // CT_Boolean implied-true semantics.
@@ -1976,14 +2741,21 @@ pub fn parse_chart_part(
         });
 
     // Outer chartSpace spPr: we want the child of chartSpace (not plotArea).
-    let chart_bg = root
+    // When the `<c:spPr>` is PRESENT we honor whatever it resolves to (a
+    // `<a:solidFill>` hex or, for `<a:noFill>` / an spPr with no fill child,
+    // `None`). When it is ABSENT the file relies on the host default chart area
+    // — Excel's opaque white vs. PowerPoint's transparent composite — supplied
+    // by the resolver via `default_chart_bg`.
+    let chart_sp_pr = root
         .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-        .and_then(|sp| {
-            sp.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
-        })
-        .and_then(|fill| color_resolver.resolve_solid_fill(fill));
+        .find(|n| n.is_element() && n.tag_name().name() == "spPr");
+    let chart_bg = match chart_sp_pr {
+        Some(sp) => sp
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+            .and_then(|fill| color_resolver.resolve_solid_fill(fill)),
+        None => color_resolver.default_chart_bg(),
+    };
 
     // <c:legend> + <c:legendPos val> — shared helper.
     let (show_legend, legend_pos) = extract_legend(root);
@@ -2288,6 +3060,34 @@ pub fn parse_chart_part(
         .and_then(|t| t.parent())
         .and_then(extract_axis_title_face);
 
+    // Minor tick marks (ECMA-376 §21.2.2.115) — raw ST_TickMark string, `None`
+    // when the axis omits `<c:minorTickMark>` (renderer default applies).
+    let cat_axis_minor_tick_mark = cat_ax.and_then(|n| extract_axis_tick_mark(n, "minorTickMark"));
+    let val_axis_minor_tick_mark = val_ax.and_then(|n| extract_axis_tick_mark(n, "minorTickMark"));
+
+    // Axis crossing (`<c:crosses>` / `<c:crossesAt>`, ECMA-376 §21.2.2.33/.34).
+    let (cat_axis_crosses, cat_axis_crosses_at) =
+        cat_ax.map(extract_axis_crosses).unwrap_or((None, None));
+    let (val_axis_crosses, val_axis_crosses_at) =
+        val_ax.map(extract_axis_crosses).unwrap_or((None, None));
+
+    // Category-axis explicit scaling bounds (`<c:scaling><c:min|max>`).
+    let (cat_axis_min, cat_axis_max) = cat_ax.map(extract_axis_min_max).unwrap_or((None, None));
+
+    // `<c:radarChart><c:radarStyle>` (ECMA-376 §21.2.3.10).
+    let radar_style = extract_radar_style(root);
+
+    // Legend `<c:layout><c:manualLayout>` (ECMA-376 §21.2.2.31).
+    let legend_manual_layout = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "legend")
+        .and_then(extract_legend_manual_layout);
+
+    // Chart-title `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.88).
+    let title_manual_layout = title_node_opt
+        .and_then(|t| child(t, "layout"))
+        .and_then(extract_manual_layout);
+
     Some(ChartModel {
         chart_type,
         title,
@@ -2362,18 +3162,18 @@ pub fn parse_chart_part(
         // ChartModel fields the legacy pptx `<c:chart>` path leaves unset
         // (they were never in the pptx `ChartElement` copy, so they defaulted
         // to `undefined` on the TS side and stay absent on the wire).
-        val_axis_minor_tick_mark: None,
-        cat_axis_minor_tick_mark: None,
-        legend_manual_layout: None,
-        title_manual_layout: None,
-        cat_axis_crosses: None,
-        cat_axis_crosses_at: None,
-        val_axis_crosses: None,
-        val_axis_crosses_at: None,
+        val_axis_minor_tick_mark,
+        cat_axis_minor_tick_mark,
+        legend_manual_layout,
+        title_manual_layout,
+        cat_axis_crosses,
+        cat_axis_crosses_at,
+        val_axis_crosses,
+        val_axis_crosses_at,
         cat_axis_format_code,
-        cat_axis_min: None,
-        cat_axis_max: None,
-        radar_style: None,
+        cat_axis_min,
+        cat_axis_max,
+        radar_style,
         date1904,
         disp_blanks_as,
         // ── Axis scale model (CH6) ──────────────────────────────────────
@@ -3587,7 +4387,10 @@ mod tests {
 
         let bar_series = &m.series[0];
         assert_eq!(bar_series.name, "Units");
-        assert_eq!(bar_series.series_type, None);
+        // Every series now carries its chart-group type (the renderer keys line
+        // vs. non-line off this; a bar series is `Some("bar")`, treated as
+        // non-line, identical in rendering to the old `None`).
+        assert_eq!(bar_series.series_type.as_deref(), Some("bar"));
         assert_eq!(bar_series.use_secondary_axis, None);
 
         let line_series = &m.series[1];
