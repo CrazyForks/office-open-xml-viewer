@@ -166,7 +166,7 @@ pub struct ChartModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_val_axis: Option<SecondaryValueAxis>,
     // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
-    /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60, `ST_HoleSizePercent`
+    /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.82, `ST_HoleSizePercent`
     /// §21.2.3.55) — hole diameter as 1–90% of the outer diameter. `None` when
     /// absent; the renderer defaults an absent doughnut hole to 50%.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1169,7 +1169,7 @@ pub fn extract_legend_font_color(root: Node, resolver: &dyn ColorResolver) -> Op
 // Pie / doughnut geometry (CH8)
 // ============================================================================
 
-/// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60) — hole diameter percentage
+/// `<c:doughnutChart><c:holeSize val>` (§21.2.2.82) — hole diameter percentage
 /// (1–90). Clamped to the ECMA range. `None` when absent. `root` is the chart
 /// space (or `<c:chart>`); the search is scoped to a `<c:doughnutChart>` so a
 /// hole size only ever comes from a doughnut plot.
