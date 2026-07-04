@@ -144,6 +144,16 @@ export {
   decodeRasterOrMetafile,
   type DecodeRasterOptions,
 } from './image/wmf';
+// Raster pixel-dimension budget + header sniff (decode-bomb guard, RB1). Shared
+// caps live in `./image/pixel-budget`; `decodeRasterOrMetafile` uses the sniff to
+// refuse an over-budget PNG/JPEG/GIF/BMP/WEBP before `createImageBitmap`.
+export { MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS } from './image/pixel-budget';
+export {
+  sniffRasterDimensions,
+  rasterExceedsBudget,
+  rasterHeaderExceedsBudget,
+  type RasterDimensions,
+} from './image/raster-dimensions';
 // Shared `<a:srcRect>` crop (§20.1.8.55) for all three renderers: the source-rect
 // math, the full-frame raster size for a cropped metafile, and the draw wrapper.
 export {

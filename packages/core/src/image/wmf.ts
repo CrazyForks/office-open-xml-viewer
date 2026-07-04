@@ -38,6 +38,7 @@
 
 import { decodePackedDib, blitDibToCtx } from './dib.js';
 import { renderEmfToBitmap } from './emf.js';
+import { rasterHeaderExceedsBudget } from './raster-dimensions.js';
 import { createAuxCanvas } from '../canvas/aux-canvas.js';
 
 // WMF record function codes (the subset we act on; others are skipped by size).
@@ -720,15 +721,18 @@ export async function decodeRasterOrMetafile(
 ): Promise<ImageBitmap | null> {
   const { widthPt = 0, heightPt = 0, suppressBoundaryFrame = false } = opts;
 
-  // Sniff only the header, not the whole blob. `isEmf` reads bytes 40-43 (u32@40
-  // == " EMF") and `isWmf` at most the 18-byte standard header, so 44 bytes is
-  // sufficient for either magic. The overwhelmingly common case — a raster
-  // (PNG/JPEG/GIF/BMP/WEBP) — then hands the Blob straight to createImageBitmap
-  // without ever materializing the full bytes in JS, avoiding a whole-image
-  // arrayBuffer() copy per decode. A metafile pays a 44-byte read plus the full
-  // read below (two reads), but metafiles are small and rare next to the raster
-  // fast path, so the net is a large reduction in copied bytes.
-  const head = new Uint8Array(await data.slice(0, 44).arrayBuffer());
+  // Sniff a header prefix, not the whole blob. `isEmf` reads bytes 40-43 (u32@40
+  // == " EMF") and `isWmf` at most the 18-byte standard header, and the raster
+  // pixel-dimension sniff (below) needs ≤30 bytes for PNG/GIF/BMP/WEBP but must
+  // walk JPEG marker segments to reach the Start-Of-Frame — which can sit a few
+  // hundred bytes in past EXIF/ICC metadata. A 64 KiB prefix covers the SOF of
+  // essentially every real JPEG while staying far smaller than a full-image copy;
+  // if the SOF is even deeper the sniff simply fails open (not recognized ⇒ not
+  // blocked). The common raster case then hands the Blob straight to
+  // createImageBitmap without materializing the full bytes in JS. `Blob.slice`
+  // clamps to the blob's actual length, so a tiny image just yields a short head.
+  const RASTER_SNIFF_BYTES = 64 * 1024;
+  const head = new Uint8Array(await data.slice(0, RASTER_SNIFF_BYTES).arrayBuffer());
 
   if (isWmf(head)) {
     const { w, h } = wmfRasterTarget(widthPt, heightPt);
@@ -738,5 +742,11 @@ export async function decodeRasterOrMetafile(
     const { w, h } = wmfRasterTarget(widthPt, heightPt);
     return renderEmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h);
   }
+  // Decode-bomb guard: if the header declares a recognized raster (PNG/JPEG/GIF/
+  // BMP/WEBP) whose pixel dimensions exceed the shared budget, refuse it BEFORE
+  // `createImageBitmap` allocates a multi-GB surface. Returning null matches the
+  // existing "unsupported image ⇒ skip the picture, keep rendering" contract that
+  // every caller already handles. An unrecognized header is not blocked here.
+  if (rasterHeaderExceedsBudget(head)) return null;
   return createImageBitmap(data);
 }

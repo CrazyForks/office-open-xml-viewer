@@ -8,26 +8,21 @@
 // palette + pixels contiguously — via {@link decodePackedDib}).
 
 import { createAuxCanvas } from '../canvas/aux-canvas.js';
+import { MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS } from './pixel-budget.js';
 
 /**
- * Maximum width or height (px) accepted for a decoded DIB. 32767 is the largest
- * dimension every major browser accepts for a `<canvas>` / `OffscreenCanvas`
- * (Chrome/Firefox/Safari all top out at 32767 on at least one axis). A DIB
- * exceeding this could never be blitted (`blitDibToCtx` allocates an aux canvas
- * of exactly `dib.width × dib.height`), so it is rejected at decode time.
+ * Maximum width or height (px) accepted for a decoded DIB, and the megapixel
+ * budget for the `width × height × 4` RGBA buffer. Shared with the standalone
+ * raster header sniff (`./raster-dimensions.ts`) via `./pixel-budget` so a DIB
+ * embedded in a metafile and a standalone blip are held to the SAME limits: a
+ * DIB past the dimension cap could never be blitted (`blitDibToCtx` allocates an
+ * aux canvas of exactly `dib.width × dib.height`), and one past the megapixel
+ * cap (e.g. a crafted 65535×65535 header ≈ 17 GB RGBA) is refused before the
+ * allocation. With both axes ≤ 32767 the product is exact in a double, so a
+ * plain numeric comparison suffices — no BigInt.
  */
-const MAX_DIB_DIMENSION = 32767;
-
-/**
- * Megapixel budget for a decoded DIB: 64 MP (2^26 px). The decode allocates a
- * `width × height × 4` RGBA buffer, so 64 MP bounds it to 256 MiB — the
- * practical ceiling for a metafile-embedded raster (a 600-DPI A4 scan is
- * ~35 MP, well under this). A crafted 65535×65535 header (≈4.29e9 px → ~17 GB
- * RGBA) exceeds the budget by ~64× and is refused before allocation. The
- * product stays exact in an IEEE-754 double (max ≈ 32767² ≪ 2^53), so a plain
- * numeric comparison suffices — no BigInt needed.
- */
-const MAX_DIB_PIXELS = 1 << 26; // 67_108_864 px = 64 MP
+const MAX_DIB_DIMENSION = MAX_RASTER_DIMENSION;
+const MAX_DIB_PIXELS = MAX_RASTER_PIXELS;
 
 /** A decoded DIB as top-down RGBA (what `ImageData`/`putImageData` expects). */
 export interface DecodedDib {
