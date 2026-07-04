@@ -1344,8 +1344,8 @@ pub fn extract_chartex_axis_hidden(root: Node) -> (bool, bool) {
 /// delegate to. The graphic-frame geometry (`x`/`y`/`w`/`h`) stays in each
 /// crate's wrapper.
 ///
-/// Moved verbatim from the pptx `parse_legacy_chart` body — the only edits are
-/// mechanical: `parse_color_node(fill, theme)` became
+/// Moved from the pptx `parse_legacy_chart` body with only the mechanical
+/// edits listed below: `parse_color_node(fill, theme)` became
 /// `color_resolver.resolve_solid_fill(fill)`, the `ooxml_common::chart::`
 /// self-prefix was dropped, the local `PptxColorResolver` was replaced by the
 /// passed `color_resolver`, and the `ChartElement` frame wrapper was replaced
@@ -3268,5 +3268,371 @@ mod tests {
         assert_eq!(got[1].trendline_type, "movingAvg");
         assert_eq!(got[1].period, Some(3));
         assert_eq!(got[1].line_color, None);
+    }
+
+    // ========================================================================
+    // `parse_chart_part` direct contract tests.
+    //
+    // These call the shared entry point itself (not the per-crate wrappers),
+    // so a future edit that breaks the parse — in this PR or in PR2 (xlsx
+    // switch) / PR3 (chartEx) — fails here first. Each test asserts concrete
+    // output values (chart-type strings, hex colors, font names, axis
+    // presence/absence) rather than just "parses without panicking", so the
+    // parse *contract* is pinned, not merely its shape.
+
+    /// Minimal theme-aware resolver for `parse_chart_part` tests: resolves
+    /// `<a:srgbClr>` verbatim (uppercased, matching real resolvers' hex
+    /// normalization) and `<a:schemeClr>` against a small fixed table covering
+    /// the slots real decks use for chart text/borders. Also overrides the
+    /// theme major/minor Latin font hooks so CH10 theme-fallback fields can be
+    /// exercised without pulling in a crate's full theme parser.
+    struct FixtureResolver;
+
+    impl ColorResolver for FixtureResolver {
+        fn resolve_solid_fill(&self, node: Node) -> Option<String> {
+            let c = node.children().find(|n| {
+                n.is_element() && matches!(n.tag_name().name(), "srgbClr" | "schemeClr")
+            })?;
+            match c.tag_name().name() {
+                "srgbClr" => c.attribute("val").map(|v| v.to_uppercase()),
+                "schemeClr" => match c.attribute("val")? {
+                    "accent1" => Some("4472C4".to_string()),
+                    "accent2" => Some("ED7D31".to_string()),
+                    "accent3" => Some("A5A5A5".to_string()),
+                    "tx1" | "dk1" => Some("000000".to_string()),
+                    "bg1" | "lt1" => Some("FFFFFF".to_string()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+
+        fn theme_major_font_latin(&self) -> Option<String> {
+            Some("Calibri Light".to_string())
+        }
+
+        fn theme_minor_font_latin(&self) -> Option<String> {
+            Some("Calibri".to_string())
+        }
+    }
+
+    fn chart_space_of(xml: &str) -> Document<'_> {
+        Document::parse(xml).expect("parse chartSpace fixture")
+    }
+
+    /// (a) Bar chart with the full decoration set: title (size/bold/color),
+    /// legend, styled category + value axes, gap/overlap, chartSpace border,
+    /// and value-axis major gridlines. Every field asserted here is a distinct
+    /// probe `parse_chart_part` wires up; a regression in any one shows here
+    /// without needing a full-document golden diff.
+    #[test]
+    fn parse_chart_part_bar_full_decoration() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart>
+                <c:title><c:tx><c:rich>
+                  <a:p><a:pPr><a:defRPr sz="1800" b="1"><a:solidFill><a:srgbClr val="1b4332"/></a:solidFill></a:defRPr></a:pPr>
+                  <a:r><a:t>Quarterly Revenue</a:t></a:r></a:p>
+                </c:rich></c:tx></c:title>
+                <c:plotArea>
+                  <c:barChart>
+                    <c:barDir val="col"/>
+                    <c:grouping val="clustered"/>
+                    <c:gapWidth val="80"/>
+                    <c:overlap val="-10"/>
+                    <c:ser>
+                      <c:idx val="0"/>
+                      <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                      <c:spPr><a:solidFill><a:srgbClr val="2d6a4f"/></a:solidFill></c:spPr>
+                      <c:cat><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt></c:strCache></c:cat>
+                      <c:val><c:numCache><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:val>
+                    </c:ser>
+                    <c:axId val="1"/>
+                    <c:axId val="2"/>
+                  </c:barChart>
+                  <c:catAx>
+                    <c:axId val="1"/>
+                    <c:axPos val="b"/>
+                    <c:spPr><a:ln><a:solidFill><a:srgbClr val="808080"/></a:solidFill></a:ln></c:spPr>
+                  </c:catAx>
+                  <c:valAx>
+                    <c:axId val="2"/>
+                    <c:axPos val="l"/>
+                    <c:majorGridlines/>
+                    <c:scaling><c:min val="0"/><c:max val="30"/></c:scaling>
+                  </c:valAx>
+                </c:plotArea>
+                <c:legend><c:legendPos val="b"/></c:legend>
+              </c:chart>
+              <c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="1b4332"/></a:solidFill></a:ln></c:spPr>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let m = parse_chart_part(doc.root_element(), &FixtureResolver).expect("bar chart parses");
+
+        assert_eq!(m.chart_type, "clusteredBar");
+        assert_eq!(m.title.as_deref(), Some("Quarterly Revenue"));
+        assert_eq!(m.title_font_size_hpt, Some(1800));
+        assert_eq!(m.title_font_bold, Some(true));
+        // `parse_chart_part` hardcodes `title_font_color: None` (the srgb is
+        // never resolved into the wire `ChartModel` even though the raw XML
+        // carries one) — pin the known limitation so a future "fix" that
+        // starts populating it is a deliberate, visible contract change.
+        assert_eq!(m.title_font_color, None);
+        assert_eq!(m.categories, vec!["Q1".to_string(), "Q2".to_string()]);
+        assert_eq!(m.series.len(), 1);
+        assert_eq!(m.series[0].name, "Revenue");
+        assert_eq!(m.series[0].values, vec![Some(10.0), Some(20.0)]);
+        assert_eq!(m.series[0].color.as_deref(), Some("2D6A4F"));
+        assert!(m.show_legend);
+        assert_eq!(m.legend_pos.as_deref(), Some("b"));
+        assert_eq!(m.bar_gap_width, Some(80));
+        assert_eq!(m.bar_overlap, Some(-10));
+        assert_eq!(m.val_min, Some(0.0));
+        assert_eq!(m.val_max, Some(30.0));
+        assert_eq!(m.val_axis_major_gridlines, Some(true));
+        assert_eq!(m.cat_axis_major_gridlines, Some(false));
+        assert_eq!(m.cat_axis_line_color.as_deref(), Some("808080"));
+        // `extract_chart_space_border` reads `<a:srgbClr@val>` directly (not
+        // through the resolver, unlike series/title colors), so the case is
+        // whatever the XML wrote — lowercase here — not uppercased.
+        assert_eq!(m.chart_border_color.as_deref(), Some("1b4332"));
+        assert_eq!(m.chart_border_width_emu, Some(19050));
+        assert!(!m.cat_axis_hidden);
+        assert!(!m.val_axis_hidden);
+    }
+
+    /// (b) Combo chart: a bar series on the primary value axis plus a line
+    /// series bound to a SECONDARY value axis (`axPos="r"`). Verifies the
+    /// series↔axId binding produces `series_type: "line"` and
+    /// `use_secondary_axis: true` on the line series only, and that
+    /// `secondary_val_axis` is populated from the right-hand `<c:valAx>`.
+    #[test]
+    fn parse_chart_part_combo_with_secondary_axis() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea>
+                <c:barChart>
+                  <c:barDir val="col"/>
+                  <c:grouping val="clustered"/>
+                  <c:ser>
+                    <c:idx val="0"/>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Units</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strCache><c:pt idx="0"><c:v>Jan</c:v></c:pt><c:pt idx="1"><c:v>Feb</c:v></c:pt></c:strCache></c:cat>
+                    <c:val><c:numCache><c:pt idx="0"><c:v>5</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt></c:numCache></c:val>
+                  </c:ser>
+                  <c:axId val="1"/>
+                  <c:axId val="2"/>
+                </c:barChart>
+                <c:lineChart>
+                  <c:grouping val="standard"/>
+                  <c:ser>
+                    <c:idx val="1"/>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Margin %</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strCache><c:pt idx="0"><c:v>Jan</c:v></c:pt><c:pt idx="1"><c:v>Feb</c:v></c:pt></c:strCache></c:cat>
+                    <c:val><c:numCache><c:pt idx="0"><c:v>0.3</c:v></c:pt><c:pt idx="1"><c:v>0.4</c:v></c:pt></c:numCache></c:val>
+                  </c:ser>
+                  <c:axId val="1"/>
+                  <c:axId val="3"/>
+                </c:lineChart>
+                <c:catAx><c:axId val="1"/><c:axPos val="b"/></c:catAx>
+                <c:valAx>
+                  <c:axId val="2"/>
+                  <c:axPos val="l"/>
+                  <c:crosses val="autoZero"/>
+                </c:valAx>
+                <c:valAx>
+                  <c:axId val="3"/>
+                  <c:axPos val="r"/>
+                  <c:crosses val="max"/>
+                  <c:scaling><c:min val="0"/><c:max val="1"/></c:scaling>
+                  <c:title><c:tx><c:rich><a:p><a:r><a:t>Margin</a:t></a:r></a:p></c:rich></c:tx></c:title>
+                </c:valAx>
+              </c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let m = parse_chart_part(doc.root_element(), &FixtureResolver).expect("combo chart parses");
+
+        assert_eq!(m.chart_type, "clusteredBar");
+        assert_eq!(m.series.len(), 2);
+
+        let bar_series = &m.series[0];
+        assert_eq!(bar_series.name, "Units");
+        assert_eq!(bar_series.series_type, None);
+        assert_eq!(bar_series.use_secondary_axis, None);
+
+        let line_series = &m.series[1];
+        assert_eq!(line_series.name, "Margin %");
+        assert_eq!(line_series.series_type.as_deref(), Some("line"));
+        assert_eq!(line_series.use_secondary_axis, Some(true));
+
+        let sec = m.secondary_val_axis.expect("secondary axis populated");
+        assert_eq!(sec.min, Some(0.0));
+        assert_eq!(sec.max, Some(1.0));
+        assert_eq!(sec.title.as_deref(), Some("Margin"));
+        assert!(!sec.hidden);
+    }
+
+    /// (c) Doughnut chart with per-point `<c:dPt>` colors, `showPercent`, and
+    /// `holeSize`/`firstSliceAng`. Doughnut (not pie) is used because
+    /// `extract_hole_size` only ever matches a `<c:doughnutChart>` — a pie
+    /// fixture would leave `hole_size` permanently `None`.
+    #[test]
+    fn parse_chart_part_doughnut_dpt_colors_and_geometry() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea>
+                <c:doughnutChart>
+                  <c:holeSize val="45"/>
+                  <c:firstSliceAng val="90"/>
+                  <c:ser>
+                    <c:idx val="0"/>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Share</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:srgbClr val="ff0000"/></a:solidFill></c:spPr></c:dPt>
+                    <c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:srgbClr val="00ff00"/></a:solidFill></c:spPr></c:dPt>
+                    <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strCache></c:cat>
+                    <c:val><c:numCache><c:pt idx="0"><c:v>60</c:v></c:pt><c:pt idx="1"><c:v>40</c:v></c:pt></c:numCache></c:val>
+                    <c:dLbls><c:showPercent val="1"/></c:dLbls>
+                  </c:ser>
+                </c:doughnutChart>
+              </c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let m =
+            parse_chart_part(doc.root_element(), &FixtureResolver).expect("doughnut chart parses");
+
+        assert_eq!(m.chart_type, "doughnut");
+        assert_eq!(m.hole_size, Some(45));
+        assert_eq!(m.first_slice_angle, Some(90));
+        assert!(m.show_data_labels);
+
+        let colors = m.series[0]
+            .data_point_colors
+            .as_ref()
+            .expect("dPt colors populated");
+        assert_eq!(colors[0].as_deref(), Some("FF0000"));
+        assert_eq!(colors[1].as_deref(), Some("00FF00"));
+    }
+
+    /// (d) A date-category axis (`<c:dateAx>` instead of `<c:catAx>`) combined
+    /// with `<c:date1904/>`. `parse_chart_part` treats `dateAx` identically to
+    /// `catAx` for every cat-axis probe (hidden/format-code/etc.) — this pins
+    /// that the dateAx path is actually reached (not silently skipped because
+    /// the finder only looked for `catAx`).
+    #[test]
+    fn parse_chart_part_date_axis_and_date1904() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:date1904/>
+              <c:chart><c:plotArea>
+                <c:lineChart>
+                  <c:grouping val="standard"/>
+                  <c:ser>
+                    <c:idx val="0"/>
+                    <c:tx><c:v>Temp</c:v></c:tx>
+                    <c:cat><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:cat>
+                    <c:val><c:numCache><c:pt idx="0"><c:v>21</c:v></c:pt><c:pt idx="1"><c:v>23</c:v></c:pt></c:numCache></c:val>
+                  </c:ser>
+                </c:lineChart>
+                <c:dateAx>
+                  <c:axPos val="b"/>
+                  <c:numFmt formatCode="m/d/yyyy"/>
+                </c:dateAx>
+                <c:valAx><c:axPos val="l"/></c:valAx>
+              </c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let m =
+            parse_chart_part(doc.root_element(), &FixtureResolver).expect("dateAx chart parses");
+
+        assert_eq!(m.chart_type, "line");
+        assert!(m.date1904);
+        assert_eq!(m.cat_axis_format_code.as_deref(), Some("m/d/yyyy"));
+        assert!(!m.cat_axis_hidden);
+    }
+
+    /// (e) `chart_type` normalization for stacked/percentStacked, as actually
+    /// computed inline by `parse_chart_part` (a separate code path from the
+    /// standalone `canonical_chart_type` helper — pptx's `ChartModel` only
+    /// keeps the resolved string, not the raw `grouping`/`barDir`, so this
+    /// inline match IS the contract for the pptx wire value). Pins the real
+    /// (not necessarily "clean") existing behavior: for BAR, `stacked` and
+    /// `percentStacked` collapse to the SAME string (no `Pct` variant at this
+    /// layer); for LINE they're distinguished; a `percentStacked` AREA isn't
+    /// matched at all and falls through to plain `"area"`.
+    #[test]
+    fn parse_chart_part_stacked_percent_stacked_chart_type() {
+        fn bar_chart_type(grouping: &str, bar_dir: &str) -> String {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea>
+                  <c:barChart>
+                    <c:barDir val="{bar_dir}"/>
+                    <c:grouping val="{grouping}"/>
+                    <c:ser><c:idx val="0"/>
+                      <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt></c:strCache></c:cat>
+                      <c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:val>
+                    </c:ser>
+                  </c:barChart>
+                </c:plotArea></c:chart></c:chartSpace>"#
+            );
+            let doc = chart_space_of(&xml);
+            parse_chart_part(doc.root_element(), &FixtureResolver)
+                .unwrap()
+                .chart_type
+        }
+        fn line_chart_type(grouping: &str) -> String {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea>
+                  <c:lineChart>
+                    <c:grouping val="{grouping}"/>
+                    <c:ser><c:idx val="0"/>
+                      <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt></c:strCache></c:cat>
+                      <c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:val>
+                    </c:ser>
+                  </c:lineChart>
+                </c:plotArea></c:chart></c:chartSpace>"#
+            );
+            let doc = chart_space_of(&xml);
+            parse_chart_part(doc.root_element(), &FixtureResolver)
+                .unwrap()
+                .chart_type
+        }
+
+        assert_eq!(bar_chart_type("stacked", "col"), "stackedBar");
+        // NOT "stackedBarPct" — parse_chart_part's inline bar match folds
+        // percentStacked into the same bucket as stacked.
+        assert_eq!(bar_chart_type("percentStacked", "col"), "stackedBar");
+        assert_eq!(bar_chart_type("percentStacked", "bar"), "stackedBarH");
+        // Line DOES distinguish percentStacked, unlike bar.
+        assert_eq!(line_chart_type("percentStacked"), "stackedLinePct");
+    }
+
+    /// (f) Two structural "not a chart" shapes: no `<c:plotArea>` at all, and
+    /// a `<c:plotArea>` present but declaring zero `<c:ser>` series. Both must
+    /// return `None` rather than an empty/degenerate `ChartModel`.
+    #[test]
+    fn parse_chart_part_returns_none_for_missing_plot_area_or_empty_series() {
+        let no_plot_area = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:title/></c:chart></c:chartSpace>"#
+        );
+        assert!(parse_chart_part(
+            chart_space_of(&no_plot_area).root_element(),
+            &FixtureResolver
+        )
+        .is_none());
+
+        let empty_series = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea>
+                <c:barChart><c:barDir val="col"/><c:grouping val="clustered"/></c:barChart>
+              </c:plotArea></c:chart></c:chartSpace>"#
+        );
+        assert!(parse_chart_part(
+            chart_space_of(&empty_series).root_element(),
+            &FixtureResolver
+        )
+        .is_none());
     }
 }
