@@ -762,6 +762,11 @@ fn parse_si_node(node: &roxmltree::Node, theme_colors: &[String]) -> SharedStrin
     let mut text = String::new();
     let mut runs: Vec<Run> = Vec::new();
     let mut has_runs = false;
+    // ECMA-376 §18.4.6 `<rPh>` phonetic runs (furigana) and §18.4.3
+    // `<phoneticPr>` display properties. Accumulated alongside the base text so
+    // a String Item's reading rides with the string without polluting `text`.
+    let mut phonetic_runs: Vec<PhoneticRun> = Vec::new();
+    let mut phonetic_pr: Option<PhoneticProperties> = None;
     for child in node.children() {
         if !child.is_element() {
             continue;
@@ -771,6 +776,45 @@ fn parse_si_node(node: &roxmltree::Node, theme_colors: &[String]) -> SharedStrin
                 if let Some(s) = child.text() {
                     text.push_str(s);
                 }
+            }
+            "rPh" if is_x_ns(child.tag_name().namespace()) => {
+                // §18.4.6: sb/eb are zero-based base-text character offsets
+                // (sb < eb). The hint text sits in the child <t>.
+                let sb: u32 = child
+                    .attribute("sb")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let eb: u32 = child
+                    .attribute("eb")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let mut rph_text = String::new();
+                for rc in child.children() {
+                    if rc.tag_name().name() == "t" {
+                        if let Some(s) = rc.text() {
+                            rph_text.push_str(s);
+                        }
+                    }
+                }
+                phonetic_runs.push(PhoneticRun {
+                    sb,
+                    eb,
+                    text: rph_text,
+                });
+            }
+            "phoneticPr" if is_x_ns(child.tag_name().namespace()) => {
+                // §18.4.3: fontId required (0-based into styles fonts); type
+                // defaults to fullwidthKatakana, alignment to left. We carry
+                // the raw enum strings; the renderer applies the defaults.
+                let font_id: u32 = child
+                    .attribute("fontId")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                phonetic_pr = Some(PhoneticProperties {
+                    font_id,
+                    r#type: child.attribute("type").map(|s| s.to_string()),
+                    alignment: child.attribute("alignment").map(|s| s.to_string()),
+                });
             }
             "r" if is_x_ns(child.tag_name().namespace()) => {
                 has_runs = true;
@@ -839,6 +883,8 @@ fn parse_si_node(node: &roxmltree::Node, theme_colors: &[String]) -> SharedStrin
     SharedString {
         text,
         runs: if has_runs { Some(runs) } else { None },
+        phonetic_runs,
+        phonetic_pr,
     }
 }
 /// Pending cell-hyperlink descriptors, awaiting rels resolution of the external
@@ -2231,6 +2277,8 @@ fn parse_row_cells(
                     CellValue::Text {
                         text: ss.text,
                         runs: ss.runs,
+                        phonetic_runs: ss.phonetic_runs,
+                        phonetic_pr: ss.phonetic_pr,
                     }
                 }
                 None => CellValue::Empty,
@@ -2251,6 +2299,8 @@ fn parse_row_cells(
                 "str" => CellValue::Text {
                     text: v_text,
                     runs: None,
+                    phonetic_runs: Vec::new(),
+                    phonetic_pr: None,
                 },
                 "b" => CellValue::Bool {
                     bool: v_text == "1" || v_text == "true",
@@ -2263,11 +2313,18 @@ fn parse_row_cells(
                         CellValue::Text {
                             text: v_text,
                             runs: None,
+                            phonetic_runs: Vec::new(),
+                            phonetic_pr: None,
                         }
                     }
                 }
             }
         };
+
+        // ECMA-376 §18.3.1.4 `<c ph="1">` — per-cell furigana display toggle.
+        // Defaults to false (schema default), so a cell only shows its String
+        // Item's phonetic hint when it explicitly opts in.
+        let show_phonetic = attr_bool(&c_node, "ph").unwrap_or(false);
 
         cells.push(Cell {
             col,
@@ -2275,6 +2332,7 @@ fn parse_row_cells(
             value,
             style_index,
             formula,
+            show_phonetic,
         });
     }
     cells
@@ -3186,6 +3244,7 @@ mod strict_namespace_cell_tests {
         let shared = vec![SharedString {
             text: "Shared Hello".to_string(),
             runs: None,
+            ..Default::default()
         }];
         let xml = format!(
             r#"<worksheet xmlns="{ns}">
@@ -3225,6 +3284,124 @@ mod strict_namespace_cell_tests {
         match &cells[2].value {
             CellValue::Number { number } => assert_eq!(*number, 42.5),
             other => panic!("expected a number, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod phonetic_tests {
+    use super::*;
+
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    /// ECMA-376 §18.4.6 / §18.4.3: a `<si>` with `<rPh>` runs and a
+    /// `<phoneticPr>` must parse the furigana runs (sb/eb + hint text) and the
+    /// display properties, while `text` stays the base string only.
+    #[test]
+    fn parse_si_node_reads_rph_and_phonetic_pr() {
+        let xml = format!(
+            r#"<si xmlns="{ns}"><t>課長</t><rPh sb="0" eb="1"><t>カ</t></rPh><rPh sb="1" eb="2"><t>チョウ</t></rPh><phoneticPr fontId="2" type="Hiragana" alignment="center"/></si>"#,
+            ns = NS,
+        );
+        let doc = roxmltree::Document::parse(&xml).expect("parse");
+        let ss = parse_si_node(&doc.root_element(), &[]);
+        assert_eq!(ss.text, "課長", "base text excludes the furigana");
+        assert_eq!(ss.phonetic_runs.len(), 2, "two rPh runs");
+        assert_eq!(ss.phonetic_runs[0].sb, 0);
+        assert_eq!(ss.phonetic_runs[0].eb, 1);
+        assert_eq!(ss.phonetic_runs[0].text, "カ");
+        assert_eq!(ss.phonetic_runs[1].sb, 1);
+        assert_eq!(ss.phonetic_runs[1].eb, 2);
+        assert_eq!(ss.phonetic_runs[1].text, "チョウ");
+        let pr = ss.phonetic_pr.expect("phoneticPr present");
+        assert_eq!(pr.font_id, 2);
+        assert_eq!(pr.r#type.as_deref(), Some("Hiragana"));
+        assert_eq!(pr.alignment.as_deref(), Some("center"));
+    }
+
+    /// A `<phoneticPr>` with only the required `fontId` leaves `type` /
+    /// `alignment` absent so the consumer applies the schema defaults
+    /// (fullwidthKatakana / left) rather than a wrong hard-coded value.
+    #[test]
+    fn phonetic_pr_omits_optional_attrs_when_absent() {
+        let xml = format!(
+            r#"<si xmlns="{ns}"><t>山</t><rPh sb="0" eb="1"><t>ヤマ</t></rPh><phoneticPr fontId="1"/></si>"#,
+            ns = NS,
+        );
+        let doc = roxmltree::Document::parse(&xml).expect("parse");
+        let ss = parse_si_node(&doc.root_element(), &[]);
+        let pr = ss.phonetic_pr.expect("phoneticPr present");
+        assert_eq!(pr.font_id, 1);
+        assert!(pr.r#type.is_none(), "type absent → consumer defaults");
+        assert!(
+            pr.alignment.is_none(),
+            "alignment absent → consumer defaults"
+        );
+    }
+
+    /// A `<si>` with NO phonetic markup yields empty phonetic_runs and no
+    /// phonetic_pr, so non-Japanese workbooks stay byte-identical on the wire.
+    #[test]
+    fn plain_si_has_no_phonetic_data() {
+        let xml = format!(r#"<si xmlns="{ns}"><t>Hello</t></si>"#, ns = NS);
+        let doc = roxmltree::Document::parse(&xml).expect("parse");
+        let ss = parse_si_node(&doc.root_element(), &[]);
+        assert!(ss.phonetic_runs.is_empty());
+        assert!(ss.phonetic_pr.is_none());
+    }
+
+    /// ECMA-376 §18.3.1.4 `<c ph="1">` sets the cell's show_phonetic flag;
+    /// a cell without `ph` (or with `ph="0"`) stays false (schema default).
+    #[test]
+    fn cell_ph_attribute_drives_show_phonetic() {
+        let xml = format!(
+            r#"<worksheet xmlns="{ns}"><sheetData><row r="1">
+              <c r="A1" t="s" ph="1"><v>0</v></c>
+              <c r="B1" t="s" ph="0"><v>0</v></c>
+              <c r="C1" t="s"><v>0</v></c>
+            </row></sheetData></worksheet>"#,
+            ns = NS,
+        );
+        let shared = vec![SharedString {
+            text: "課長".to_string(),
+            ..Default::default()
+        }];
+        let (ws, _) = parse_worksheet(&xml, &shared, &[], "Sheet1").expect("parse");
+        let cells = &ws.rows[0].cells;
+        assert!(cells[0].show_phonetic, "ph=1 → show");
+        assert!(!cells[1].show_phonetic, "ph=0 → hide");
+        assert!(
+            !cells[2].show_phonetic,
+            "no ph → hide (schema default false)"
+        );
+    }
+
+    /// An inline string (`t="inlineStr"`) carries its own `<rPh>` runs straight
+    /// onto the resolved `CellValue::Text` (no shared-string indirection).
+    #[test]
+    fn inline_string_carries_phonetic_runs() {
+        let xml = format!(
+            r#"<worksheet xmlns="{ns}"><sheetData><row r="1">
+              <c r="A1" t="inlineStr" ph="1"><is><t>森</t><rPh sb="0" eb="1"><t>モリ</t></rPh><phoneticPr fontId="1"/></is></c>
+            </row></sheetData></worksheet>"#,
+            ns = NS,
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parse");
+        let cell = &ws.rows[0].cells[0];
+        assert!(cell.show_phonetic);
+        match &cell.value {
+            CellValue::Text {
+                text,
+                phonetic_runs,
+                phonetic_pr,
+                ..
+            } => {
+                assert_eq!(text, "森");
+                assert_eq!(phonetic_runs.len(), 1);
+                assert_eq!(phonetic_runs[0].text, "モリ");
+                assert_eq!(phonetic_pr.as_ref().expect("pr").font_id, 1);
+            }
+            other => panic!("expected text cell, got {other:?}"),
         }
     }
 }
