@@ -3238,16 +3238,17 @@ function estimateParagraphHeight(
   suppressSpaceBefore = false,
   paraXPt = 0,
 ): number {
-  const indLeft = para.indentLeft;
-  const indRight = para.indentRight;
+  // ECMA-376 §17.3.1.12 / Part 4 §14.11.2 — the transitional left/right indent
+  // attributes are logical start/end, so they swap physical sides in a bidi
+  // paragraph. Resolve the PHYSICAL indents once and use them for the float
+  // window (paraX), the tab origin and the text-margin right edge below, so
+  // this measure pass agrees with renderParagraph's paint pass (a bidi
+  // paragraph's tab stops anchor at the text margin — layoutBidiTabStops —
+  // and a mismatched tabOrigin/marginRight here would wrap differently).
+  const indLeft = para.bidi === true ? para.indentRight : para.indentLeft;
+  const indRight = para.bidi === true ? para.indentLeft : para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
-  // Float-wrap windows are evaluated at the paragraph's content left edge =
-  // contentX + physical left indent, matching renderParagraph. The left/right
-  // indents swap to physical sides in a bidi paragraph (§17.3.1.12 / Part 4
-  // §14.11.2), so use the bidi-resolved left indent; otherwise an indented / RTL
-  // paragraph wrapping a square float would measure the gap at the wrong X and
-  // diverge from the paint pass.
-  const paraX = paraXPt + (para.bidi === true ? indRight : indLeft);
+  const paraX = paraXPt + indLeft;
   const segs = buildSegments(para.runs, state);
   // Word renders ruby paragraphs with consistent line spacing — every line
   // in a paragraph that carries ANY furigana snaps to the same pitch
@@ -3479,16 +3480,17 @@ function splitParagraphAcrossPages(
     if (tagSectionPageNumType) el.sectionPageNumType = tagSectionPageNumType();
     return el;
   };
-  const indLeft = para.indentLeft;
-  const indRight = para.indentRight;
+  // Mirror renderParagraph's PHYSICAL indents (ECMA-376 §17.3.1.12; the
+  // left/right indents swap to physical sides in a bidi paragraph, Part 4
+  // §14.11.2). They feed the float-window X (paraX), the tab origin and the
+  // text-margin right edge passed to layoutLines below — a logical/physical
+  // mismatch there would anchor a bidi paragraph's tab stops differently from
+  // the paint pass (layoutBidiTabStops measures stops from the text margin)
+  // and re-introduce a paginate/render disagreement.
+  const indLeft = para.bidi === true ? para.indentRight : para.indentLeft;
+  const indRight = para.bidi === true ? para.indentLeft : para.indentRight;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
-  // Mirror renderParagraph's paragraph-content left edge: contentX + the
-  // physical left indent (ECMA-376 §17.3.1.12; the left/right indents swap to
-  // physical sides in a bidi paragraph, Part 4 §14.11.2). Using the bare margin
-  // here would evaluate square-float wrap windows at the wrong X for indented /
-  // RTL paragraphs, re-introducing a paginate/render disagreement.
-  const physLeftInd = para.bidi === true ? indRight : indLeft;
-  const paraX = marginLeftPt + physLeftInd;
+  const paraX = marginLeftPt + indLeft;
   // A paragraph with no layoutable inline lines (literally empty, or only
   // wrap-float anchors) is a single paragraph-mark line (§17.3.1.29) that cannot
   // be split. If it doesn't fit in the space left on this page, relocate it
@@ -8530,8 +8532,12 @@ function measureParaHeight(
   // slightly differently from the paint pass. No such cell exists in the covered
   // samples; revisit together with estimateParagraphHeight if list-in-cell
   // fidelity is needed.
-  const indLeftPx = para.indentLeft * scale;
-  const indRightPx = para.indentRight * scale;
+  // PHYSICAL indents (§17.3.1.12 / Part 4 §14.11.2 — logical start/end swap
+  // sides under a bidi paragraph), matching renderParagraph's paint pass so a
+  // bidi cell paragraph's tab origin / text-margin edge agree between the row
+  // measurer and the paint (LTR values are untouched).
+  const indLeftPx = (para.bidi === true ? para.indentRight : para.indentLeft) * scale;
+  const indRightPx = (para.bidi === true ? para.indentLeft : para.indentRight) * scale;
   const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
   // RESERVATION: no `marginRightPx` argument is passed here, so a
   // `<w:ptab w:relativeTo="margin">` inside a table cell resolves its target
@@ -8550,7 +8556,11 @@ function measureParaHeight(
   // to the margin rather than the indent), so it's deferred rather than
   // threaded through opportunistically. Revisit together with any other
   // measure/paint mismatch cleanup in this area.
-  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt, paraW, para.bidi === true);
+  // marginRightPx: LTR keeps the deliberate `paraW` reservation above (ptab in a
+  // cell). A BIDI cell paragraph needs the true text-margin edge — its tab stops
+  // anchor there (layoutBidiTabStops) — so pass `paraW + indRightPx` only then;
+  // LTR cell layout is byte-identical.
+  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt, para.bidi === true ? paraW + indRightPx : paraW, para.bidi === true);
   // Phase 4-1 B2 T2 — compute-once for TABLE-CELL paragraphs. This is the ONLY
   // point a cell paragraph's lines are laid out at scale 1: the paginator sizes
   // every table row through computeTablePtLayout → resolveTableRowHeights →
@@ -8588,7 +8598,7 @@ function measureParaHeight(
     stampParagraphLines(para, lines, {
       paraW,
       firstIndent: para.indentFirst,
-      tabOriginPx: indLeftPx, // == para.indentLeft at scale 1
+      tabOriginPx: indLeftPx, // == the PHYSICAL left indent at scale 1 (bidi swaps sides)
       gridDeltaPx: gridCharDeltaPx(grid, 1),
       hasFloats: false,
       kinsoku: state.kinsoku,
