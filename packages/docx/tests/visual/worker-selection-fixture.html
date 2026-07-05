@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>* { margin: 0; padding: 0; } canvas { display: block; }</style>
+</head>
+<body>
+  <!-- IX6 functional worker-equivalence: build a real DocxViewer in BOTH main
+       and worker mode, capture the text-selection overlay DOM (one span per run)
+       and the findText match set, then expose both so the spec can assert
+       main === worker. Proves the run geometry crosses the worker boundary
+       identically (selection) and that findText works in worker mode. -->
+  <div id="main-host"></div>
+  <div id="worker-host"></div>
+  <script type="module">
+    import { DocxViewer } from '/src/index.ts';
+
+    const params = new URLSearchParams(location.search);
+    const name = params.get('docx') ?? 'demo/sample-1';
+    const query = params.get('q') ?? 'the';
+    const width = 900;
+
+    // Serialize the text-selection overlay: one entry per span, rounded so
+    // sub-pixel rasterization jitter between the main <canvas> and the worker
+    // OffscreenCanvas cannot spuriously fail an exact-equality assertion. The
+    // run GEOMETRY is computed identically in both modes (same renderer), so the
+    // rounded boxes must match exactly.
+    const serializeOverlay = (host) => {
+      const layer = host.querySelector('div'); // the viewer's text layer
+      const spans = layer ? [...layer.querySelectorAll('span')] : [];
+      return spans.map((s) => ({
+        text: s.textContent,
+        left: Math.round(parseFloat(s.style.left) || 0),
+        top: Math.round(parseFloat(s.style.top) || 0),
+      }));
+    };
+
+    const buildViewer = async (hostId, mode) => {
+      const host = document.getElementById(hostId);
+      const canvas = document.createElement('canvas');
+      host.appendChild(canvas);
+      const resp = await fetch(`/${name}.docx`);
+      if (!resp.ok) throw new Error(`fetch ${name}.docx -> ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      const viewer = new DocxViewer(canvas, {
+        mode,
+        width,
+        enableTextSelection: true,
+        useGoogleFonts: true,
+      });
+      await viewer.load(buf);
+      // findText scans every page; capture the match set (count + per-match page).
+      const matches = await viewer.findText(query);
+      const overlay = serializeOverlay(host);
+      return {
+        overlay,
+        matches: matches.map((m) => ({ text: m.text, page: m.location.page })),
+        pageCount: viewer.pageCount,
+        viewer,
+      };
+    };
+
+    try {
+      const main = await buildViewer('main-host', 'main');
+      const worker = await buildViewer('worker-host', 'worker');
+
+      document.body.dataset.mainOverlay = JSON.stringify(main.overlay);
+      document.body.dataset.workerOverlay = JSON.stringify(worker.overlay);
+      document.body.dataset.mainMatches = JSON.stringify(main.matches);
+      document.body.dataset.workerMatches = JSON.stringify(worker.matches);
+      document.body.dataset.pageCount = String(main.pageCount);
+
+      main.viewer.destroy();
+      worker.viewer.destroy();
+      document.body.dataset.status = 'ready';
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = err.message;
+      console.error('[worker-selection-fixture] error:', err);
+    }
+  </script>
+</body>
+</html>
