@@ -393,6 +393,48 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
     expect(floatCount).toBe(1);
   });
 
+  it('(d2) SPLITS a page-anchored floating table that is TALLER than the body content area (sample-28 p.15 shape)', () => {
+    // vertAnchor="page", tblpY=10: 6 rows × 30pt = 180pt total. The body content
+    // area is 100pt (pageH 140 − margins 20+20). A page-anchored table taller than
+    // the text region CANNOT fit even clamped to the top — so, like Word (sample-28
+    // p.15 competitor-info form: PDF splits it across pages 15→16), it ROW-SPLITS.
+    // Slice 1 sits at its absolute tblpY (page-y 10 ⇒ content-relative −10, i.e. it
+    // starts in the top margin band down through the body); continuation slices flow
+    // from the next page's body top (tblpY=0). This is distinct from (d): there the
+    // table (60pt) FITS the 100pt text region and is instead clamped up in place.
+    const body = [
+      para({ text: 'a' }),
+      floatTableRows(tblp({ vertAnchor: 'page', tblpY: 10 }), 6, 30),
+      para({ text: 'anchor' }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    // Taller than one page ⇒ paginated across ≥ 2 pages, every row placed once.
+    expect(pages.length).toBeGreaterThanOrEqual(2);
+    const allRows = pages.flatMap((p) => floatRowsOn(p));
+    expect(allRows).toEqual(['r1', 'r2', 'r3', 'r4', 'r5', 'r6']);
+    // More than one slice (the table was divided, not crammed onto one page).
+    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    expect(floatCount).toBeGreaterThanOrEqual(2);
+    // The trailing anchor paragraph flows beside the FINAL band (last page).
+    expect(hasAnchorText(pages[pages.length - 1], 'anchor')).toBe(true);
+  });
+
+  it('(e2) SPLITS a margin-anchored floating table taller than the body content area', () => {
+    // vertAnchor="margin", tblpY=0: 6 rows × 30pt = 180pt > the 100pt text region ⇒
+    // splits (mirrors (d2); the margin band top coincides with the body top here).
+    const body = [
+      para({ text: 'a' }),
+      floatTableRows(tblp({ vertAnchor: 'margin', tblpY: 0 }), 6, 30),
+      para({ text: 'anchor' }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    expect(pages.length).toBeGreaterThanOrEqual(2);
+    const allRows = pages.flatMap((p) => floatRowsOn(p));
+    expect(allRows).toEqual(['r1', 'r2', 'r3', 'r4', 'r5', 'r6']);
+    const floatCount = pages.reduce((s, p) => s + p.filter(isFloatTable).length, 0);
+    expect(floatCount).toBeGreaterThanOrEqual(2);
+  });
+
   it('registers each slice as its own floating table so both pages report a float element', () => {
     // Sanity: a split leaves a floating-table element on BOTH pages (one slice
     // each), never a single element straddling the boundary.

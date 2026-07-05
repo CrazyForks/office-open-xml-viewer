@@ -52,6 +52,14 @@ export function computeFloatTableBox(
   paraTop: number,
   tableW: number,
   tableH: number,
+  /** When true, skip the vertAnchor=page/margin bottom-clamp (§17.4.57 Word
+   *  ground truth, sample-18) so the RAW absolute box is returned. The paginator
+   *  uses this to find where a page/margin-anchored table that overflows the text
+   *  region must be row-SPLIT (sample-28 p.15): the raw tblpY top drives slice 1's
+   *  position, and clamping (which pins a too-tall box to the container top) would
+   *  hide the overflow the split is meant to resolve. Placement (paint) keeps the
+   *  clamp. Ignored for vertAnchor="text" (never clamped). */
+  skipVClamp = false,
 ): FloatTableBox {
   const sc = state.scale;
   // §17.4.57 + §17.18.35: horzAnchor's literal default is "page", which would
@@ -100,7 +108,7 @@ export function computeFloatTableBox(
   // excluded — its overflow is handled by the paginator's row-split (the floating
   // analogue of splitTableAcrossPages), and its band rides the flow cursor, so
   // clamping here would be wrong. Mirrors computeFrameBox exactly (§17.3.1.11).
-  if (tp.vertAnchor === 'page' || tp.vertAnchor === 'margin') {
+  if (!skipVClamp && (tp.vertAnchor === 'page' || tp.vertAnchor === 'margin')) {
     y = clampAbsBoxIntoContainer(y, tableH, vBand);
   }
 
