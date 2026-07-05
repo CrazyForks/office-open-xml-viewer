@@ -4101,6 +4101,13 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
       if (j.lastRi === el.rows.length - 1) {
         spec = cell.borderB;
       } else {
+        // KNOWN LATENT LIMITATION: span vs subdivided neighbour with differing
+        // borders resolves only the origin slot — a gridSpan cell whose bottom
+        // faces MULTIPLE below-cells with different borderT specs (e.g.
+        // [thin, thick]) picks the winner from slot (lastRi+1, ci) alone and
+        // strokes the whole span with it, dropping the non-origin slots' specs.
+        // Zero occurrences in the private corpus; segment-wise resolution
+        // tracked in issue #824.
         const below = jobAt(j.lastRi + 1, j.ci);
         spec = resolveTableBorderConflict(cell.borderB, below ? below.cell.borderT : null);
       }
@@ -4114,6 +4121,13 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
       if (physRightOuter) {
         spec = physRightSpec;
       } else {
+        // KNOWN LATENT LIMITATION: span vs subdivided neighbour with differing
+        // borders resolves only the origin slot — a rowSpan cell whose physical-
+        // right edge faces MULTIPLE right-neighbours with different facing specs
+        // picks the winner from slot (ri, physRightNbrCi) alone and strokes the
+        // whole span with it, dropping the non-origin slots' specs. Zero
+        // occurrences in the private corpus; segment-wise resolution tracked in
+        // issue #824.
         const right = jobAt(j.ri, physRightNbrCi);
         spec = resolveTableBorderConflict(physRightSpec, right ? nbrPhysLeftSpec(right.cell) : null);
       }
