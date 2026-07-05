@@ -2817,6 +2817,10 @@ export class XlsxViewer {
     if (this.keydownHandler) {
       document.removeEventListener('keydown', this.keydownHandler);
     }
+    // IX2 — drop the find state (matches + cursor) so a stale
+    // findNext()/findPrev() after teardown returns null instead of a match
+    // pointing into a dead viewer (same fix as DocxViewer/PptxViewer.destroy).
+    this._find.invalidate();
     this.wb?.destroy();
     // Remove the whole UI subtree so the container is empty again. This also
     // detaches every listener bound to elements within it (scrollHost pointer/

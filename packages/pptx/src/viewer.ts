@@ -583,6 +583,10 @@ export class PptxViewer {
     this.handle?.destroy();
     this.handle = null;
     this.engine?.destroy();
+    // IX2 — drop the find state (matches + cached runs) so a stale
+    // findNext()/findPrev() after teardown returns null instead of a match
+    // pointing into a dead viewer.
+    this._find.invalidate();
     // Return the caller-owned canvas to its original DOM slot before discarding
     // the wrapper. insertBefore still works if the original parent was itself
     // detached; when there was no original parent the canvas is left detached
