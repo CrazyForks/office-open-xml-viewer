@@ -1369,6 +1369,24 @@ fn read_section_break_type(sect_pr: roxmltree::Node) -> Option<String> {
         .find_map(|n| attr_w(n, "val"))
 }
 
+/// ECMA-376 §17.6.12 `<w:pgNumType>` — parse a section's page-numbering settings.
+/// Returns `None` when the sectPr has no `<w:pgNumType>` OR the element carries
+/// neither `@w:start` nor `@w:fmt` (only chapter attributes, which are out of
+/// scope) — a `None` result means "numbering continues; decimal", identical to an
+/// absent element, so the renderer's per-page counter is unaffected. `@w:start`
+/// is ST_DecimalNumber (signed; Word writes `start="0"`); a non-integer value is
+/// dropped. `@w:fmt` is ST_NumberFormat (§17.18.59), carried verbatim for the TS
+/// `formatOrdinalNumber` kernel to map.
+fn parse_pgnum_type(sect_pr: roxmltree::Node) -> Option<PageNumType> {
+    let pg = child_w(sect_pr, "pgNumType")?;
+    let start = attr_w(pg, "start").and_then(|s| s.trim().parse::<i64>().ok());
+    let fmt = attr_w(pg, "fmt").map(|s| s.trim().to_string());
+    if start.is_none() && fmt.is_none() {
+        return None;
+    }
+    Some(PageNumType { start, fmt })
+}
+
 /// ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` spec defaults for a
 /// section's page geometry: US Letter portrait (612×792 pt), 1" margins (72 pt),
 /// 0.5" header/footer distance (36 pt). This is the ONE place these defaults
@@ -1468,6 +1486,8 @@ fn section_break_element(
         title_page: resolved.title_page,
         // ECMA-376 §17.6.13 / §17.6.11 — this ending section's page geometry.
         geom: section_geom(sect_pr),
+        // ECMA-376 §17.6.12 — this ending section's page-numbering restart/format.
+        page_num_type: parse_pgnum_type(sect_pr),
     }
 }
 
@@ -1728,6 +1748,7 @@ fn parse_section(
         doc_grid_line_pitch: None,
         doc_grid_char_space: None,
         columns: None,
+        page_num_type: None,
     };
 
     let Some(sp) = sect_pr else {
@@ -1805,6 +1826,11 @@ fn parse_section(
     // column leaves `columns` None so the renderer keeps its full-width column
     // (unchanged behavior).
     props.columns = parse_columns(sp);
+
+    // ECMA-376 §17.6.12 w:pgNumType — page-numbering restart (@w:start) + format
+    // (@w:fmt). `None` when absent (numbering continues; decimal). The renderer
+    // resolves the displayed page number per physical page from this.
+    props.page_num_type = parse_pgnum_type(sp);
 
     // Collect header/footer references from THIS sectPr.
     let mut refs = SectionRefs::default();
@@ -11126,6 +11152,48 @@ mod column_tests {
         let (props, _) = parse_section(Some(doc.root_element()), &rel_map);
         let cols = props.columns.expect("columns surfaced on SectionProps");
         assert_eq!(cols.count, 2);
+    }
+
+    /// ECMA-376 §17.6.12 `<w:pgNumType>` — `@w:start` (restart) and `@w:fmt`
+    /// (format) surface on SectionProps.page_num_type so the renderer can compute
+    /// the displayed page number per section. Absent element / chapter-only
+    /// element ⇒ None (numbering continues; decimal).
+    #[test]
+    fn section_props_carries_pgnum_type() {
+        let parse = |sect: &str| {
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#, ns = W_NS);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let rel_map: HashMap<String, String> = HashMap::new();
+            parse_section(Some(doc.root_element()), &rel_map).0
+        };
+        // start only (the common restart case; Word writes start="0" too).
+        let p = parse(r#"<w:pgNumType w:start="25"/>"#)
+            .page_num_type
+            .unwrap();
+        assert_eq!(p.start, Some(25));
+        assert_eq!(p.fmt, None);
+        let p0 = parse(r#"<w:pgNumType w:start="0"/>"#)
+            .page_num_type
+            .unwrap();
+        assert_eq!(p0.start, Some(0));
+        // fmt only (numbering continues, but re-formatted).
+        let pf = parse(r#"<w:pgNumType w:fmt="lowerRoman"/>"#)
+            .page_num_type
+            .unwrap();
+        assert_eq!(pf.start, None);
+        assert_eq!(pf.fmt, Some("lowerRoman".to_string()));
+        // both.
+        let pb = parse(r#"<w:pgNumType w:start="1" w:fmt="upperRoman"/>"#)
+            .page_num_type
+            .unwrap();
+        assert_eq!(pb.start, Some(1));
+        assert_eq!(pb.fmt, Some("upperRoman".to_string()));
+        // absent element ⇒ None.
+        assert!(parse(r#"<w:cols w:num="2"/>"#).page_num_type.is_none());
+        // chapter-only element (start/fmt absent) ⇒ None (out-of-scope attrs).
+        assert!(parse(r#"<w:pgNumType w:chapStyle="1" w:chapSep="colon"/>"#)
+            .page_num_type
+            .is_none());
     }
 
     /// ECMA-376 §17.6.22 — the body (final) section's `<w:type>` start type is

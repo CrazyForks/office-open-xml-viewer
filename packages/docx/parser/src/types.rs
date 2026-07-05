@@ -179,6 +179,35 @@ pub struct HeaderFooter {
     pub body: Vec<BodyElement>,
 }
 
+/// ECMA-376 §17.6.12 `<w:pgNumType>` — a section's page-numbering settings. Only
+/// the two attributes that affect the DISPLAYED page number are carried:
+///
+/// * `start` (`@w:start`, ST_DecimalNumber) — the page number shown on the FIRST
+///   page of the section. When absent (`None`) numbering continues from the
+///   previous section's highest page number (§17.6.12). Kept as a signed integer
+///   because Word writes `start="0"` (and, in principle, negatives).
+/// * `fmt` (`@w:fmt`, ST_NumberFormat §17.18.59) — the number format for every
+///   page number in the section (decimal / upperRoman / lowerLetter / …). `None`
+///   ⇒ the spec default `decimal`. Carried verbatim; the TS renderer maps it via
+///   the shared `formatOrdinalNumber` kernel.
+///
+/// `chapStyle`/`chapSep` (chapter-prefixed numbering) are intentionally NOT
+/// modeled — out of scope for this pass (they require resolving heading numbering
+/// state); a `<w:pgNumType>` that carries only those is treated as "no start / no
+/// fmt" and numbering continues normally.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PageNumType {
+    /// `@w:start` — the first page number of the section. `None` ⇒ continue from
+    /// the previous section (§17.6.12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<i64>,
+    /// `@w:fmt` — ST_NumberFormat (§17.18.59) for this section's page numbers.
+    /// `None` ⇒ decimal (the spec default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fmt: Option<String>,
+}
+
 /// ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — a section's page
 /// geometry: page size + margins + header/footer distances (all pt, converted
 /// from twips). Carried on a `BodyElement::SectionBreak` (`geom`) so mid-body
@@ -275,6 +304,12 @@ pub struct SectionProps {
     /// content column (unchanged behavior).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<ColumnsSpec>,
+    /// ECMA-376 §17.6.12 `<w:pgNumType>` — the body (final) section's
+    /// page-numbering settings (start / fmt). `None` when the body-level sectPr
+    /// omits `<w:pgNumType>`. The renderer resolves the DISPLAYED page number per
+    /// physical page from this + the per-section `geom.pageNumType`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_num_type: Option<PageNumType>,
 }
 
 /// ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration.
@@ -378,6 +413,16 @@ pub enum BodyElement {
         /// The final (body-level) section's geometry stays on `Document.section`.
         #[serde(skip_serializing_if = "Option::is_none")]
         geom: Option<SectionGeom>,
+        /// ECMA-376 §17.6.12 `<w:pgNumType>` — this ENDING section's page-numbering
+        /// settings (start / fmt). `None` when the sectPr omits `<w:pgNumType>` (or
+        /// carries only chapter attributes) — numbering continues; decimal. Carried
+        /// SEPARATELY from `geom` (not bundled) because a section may inherit its
+        /// page geometry yet still restart / re-format its page numbers; the
+        /// renderer resolves the displayed number per physical page from this + the
+        /// body-level `Document.section.page_num_type`. Mirrors how `columns` /
+        /// `headers` are carried per-terminating-section.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        page_num_type: Option<PageNumType>,
     },
 }
 
