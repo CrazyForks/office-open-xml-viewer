@@ -517,6 +517,39 @@ function valGridStroke(
   return { color, width, explicit: chart.valAxisGridlineColor != null };
 }
 
+/** Whether to draw CATEGORY-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`,
+ *  ECMA-376 §21.2.2.100). Office omits them by default, so only `true` turns
+ *  them on (null/undefined/false ⇒ off, byte-stable). */
+function drawCatMajorGridlines(chart: ChartModel): boolean {
+  return chart.catAxisMajorGridlines === true;
+}
+
+/** Resolve the CATEGORY-axis major gridline stroke, mirroring
+ *  {@link valGridStroke}. `<c:catAx><c:majorGridlines><c:spPr><a:ln>` gives the
+ *  color/width (`chart.catAxisGridlineColor`/`catAxisGridlineWidthEmu`); absent
+ *  ⇒ the same faint `#e0e0e0`/0.5 px default as the value axis. Category
+ *  gridlines have no zero-line emphasis (there is no "zero category"), so a
+ *  single resolved stroke suffices. */
+function catGridStroke(chart: ChartModel, ptToPx: number): { color: string; width: number } {
+  return resolveGridline(chart.catAxisGridlineColor, chart.catAxisGridlineWidthEmu, ptToPx);
+}
+
+/** The plot-fraction positions (0..1 across the category extent) of the CATEGORY
+ *  major gridlines / ticks for `n` categories. With crossBetween="between" (the
+ *  bar/column default) they sit on the `n+1` band BOUNDARIES; under "midCat"
+ *  they sit at the `n` category CENTERS. Shared by the category tick loop and
+ *  the category-gridline pass so both stay aligned (§21.2.2.100/§21.2.2.32). */
+function catGridlineFractions(chart: ChartModel, n: number): number[] {
+  if (n <= 0) return [];
+  const onBoundary = isCrossBetween(chart);
+  const fracs: number[] = [];
+  const last = onBoundary ? n : n - 1;
+  for (let ci = 0; ci <= last; ci++) {
+    fracs.push(onBoundary ? ci / n : (n === 1 ? 0.5 : ci / (n - 1)));
+  }
+  return fracs;
+}
+
 /** True when the value axis is reversed (`<c:valAx><c:scaling><c:orientation
  *  val="maxMin">`, ECMA-376 §21.2.2.130). Absent/"minMax" ⇒ false (byte-stable). */
 function valAxisReversed(chart: ChartModel): boolean {
@@ -1222,6 +1255,30 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
   }
 
+  // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100).
+  // Perpendicular to the value gridlines: vertical for a column chart (cat axis
+  // runs along x), horizontal for a horizontal-bar chart (cat axis runs along
+  // y). Positioned at the same fractions as the category ticks — band
+  // boundaries under crossBetween="between" (bar default), category centers
+  // under "midCat". Drawn under the bars (like value gridlines). Office omits
+  // these by default so the common path is byte-stable.
+  if (!chart.catAxisHidden && drawCatMajorGridlines(chart)) {
+    const cg = catGridStroke(chart, ptToPx);
+    ctx.strokeStyle = cg.color;
+    ctx.lineWidth = cg.width;
+    for (const frac of catGridlineFractions(chart, n)) {
+      ctx.beginPath();
+      if (!isH) {
+        const gx = px0 + frac * pw;
+        ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph);
+      } else {
+        const gy = py0 + frac * ph;
+        ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy);
+      }
+      ctx.stroke();
+    }
+  }
+
   // Axis rules. The CATEGORY axis runs along the bars' baseline — bottom
   // (horizontal) for a column chart, left (vertical) for a horizontal bar
   // chart — and the VALUE axis is perpendicular to it. The previous code
@@ -1747,6 +1804,20 @@ function renderLineChart(
         ctx.textAlign = 'right';
         ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
       }
+    }
+  }
+
+  // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100):
+  // vertical lines at the category ticks across the plot height. Off by default
+  // (byte-stable). Shared placement with the bar renderer via
+  // `catGridlineFractions`.
+  if (!chart.catAxisHidden && drawCatMajorGridlines(chart)) {
+    const cg = catGridStroke(chart, ptToPx);
+    ctx.strokeStyle = cg.color;
+    ctx.lineWidth = cg.width;
+    for (const frac of catGridlineFractions(chart, n)) {
+      const gx = px0 + frac * pw;
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
   }
 
@@ -2443,6 +2514,17 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode, chart.date1904), px0 - 6, gy);
+    }
+  }
+  // Category-axis MAJOR gridlines (`<c:catAx><c:majorGridlines>`, §21.2.2.100):
+  // vertical lines at the category ticks. Off by default (byte-stable).
+  if (!chart.catAxisHidden && drawCatMajorGridlines(chart)) {
+    const cg = catGridStroke(chart, ptToPx);
+    ctx.strokeStyle = cg.color;
+    ctx.lineWidth = cg.width;
+    for (const frac of catGridlineFractions(chart, n)) {
+      const gx = px0 + frac * pw;
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
   }
   // Category-axis baseline + value-axis rule. `<c:*Ax><c:spPr><a:ln><a:noFill>`

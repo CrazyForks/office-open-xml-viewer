@@ -1856,6 +1856,13 @@ function horizGridlines(segs: Seg[]): Seg[] {
   });
 }
 
+/** Category-axis MAJOR gridlines: near-vertical segments spanning the plot
+ *  height (x roughly constant, big y span). Filters by the gridline color so
+ *  bar edges / data lines aren't counted. */
+function vertGridlines(segs: Seg[], color = '#e0e0e0'): Seg[] {
+  return segs.filter(s => Math.abs(s.x0 - s.x1) < 0.5 && Math.abs(s.y1 - s.y0) > 50 && s.ss === color);
+}
+
 describe('CH6 — axis scale model', () => {
   const lineModel = (over: Partial<ChartModel>): ChartModel => baseModel({
     chartType: 'line',
@@ -1992,6 +1999,71 @@ describe('CH6 — axis scale model', () => {
     const rec = segRecordingCtx();
     renderChart(rec.ctx, lineModel({}), RECT, 1);
     expect(horizGridlines(rec.segs).length).toBeGreaterThan(2);
+  });
+});
+
+// #744: `<c:catAx><c:majorGridlines>` (ECMA-376 §21.2.2.100) draws VERTICAL
+// gridlines at each category tick across the plot height. The parse+type
+// surface (catAxisMajorGridlines / catAxisGridlineColor / catAxisGridlineWidthEmu)
+// already existed but had no renderer consumer, so a chart declaring cat-axis
+// gridlines rendered without them.
+describe('#744 — category-axis (vertical) major gridlines', () => {
+  const colModel = (over: Partial<ChartModel>): ChartModel => baseModel({
+    chartType: 'clusteredBar',
+    categories: ['A', 'B', 'C', 'D'],
+    series: [series({ name: 'S', values: [10, 20, 30, 40] })],
+    ...over,
+  });
+
+  it('OFF by default: no vertical gridlines (byte-stable)', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, colModel({}), RECT, 1);
+    expect(vertGridlines(rec.segs).length).toBe(0);
+  });
+
+  it('catAxisMajorGridlines=true draws vertical gridlines spanning the plot height', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, colModel({ catAxisMajorGridlines: true }), RECT, 1);
+    const grids = vertGridlines(rec.segs);
+    // At least one gridline per category boundary/center. crossBetween="between"
+    // (bar default) → n+1 dividers; either way several full-height verticals.
+    expect(grids.length).toBeGreaterThanOrEqual(3);
+    // Each spans (nearly) the whole plot height — much taller than a bar.
+    const tallest = Math.max(...grids.map(s => Math.abs(s.y1 - s.y0)));
+    expect(tallest).toBeGreaterThan(RECT.h * 0.5);
+  });
+
+  it('honors an explicit catAxisGridlineColor / width (§21.2.2.100)', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, colModel({
+      catAxisMajorGridlines: true,
+      catAxisGridlineColor: '8fa878',
+      catAxisGridlineWidthEmu: 12700, // 1 pt
+    }), RECT, 1);
+    const colored = vertGridlines(rec.segs, '#8fa878');
+    expect(colored.length).toBeGreaterThanOrEqual(3);
+    // 1 pt × ptToPx=1 → 1 px width.
+    expect(colored.every(s => s.lw === 1)).toBe(true);
+    // No faint default lines remain when a color is pinned.
+    expect(vertGridlines(rec.segs, '#e0e0e0').length).toBe(0);
+  });
+
+  it('line chart also draws category gridlines when declared', () => {
+    // The cat-gridline pass is wired into the bar, line and area renderers.
+    const off = segRecordingCtx();
+    renderChart(off.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+    }), RECT, 1);
+    expect(vertGridlines(off.segs).length).toBe(0);
+
+    const on = segRecordingCtx();
+    renderChart(on.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [10, 20, 30] })],
+      catAxisMajorGridlines: true,
+    }), RECT, 1);
+    expect(vertGridlines(on.segs).length).toBeGreaterThanOrEqual(3);
   });
 });
 
