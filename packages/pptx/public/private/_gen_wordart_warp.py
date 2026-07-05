@@ -25,13 +25,21 @@ def set_warp(shape, preset, adjs=None):
     """Add <a:prstTxWarp prst=preset><a:avLst>…</a:avLst> to the shape's bodyPr.
 
     `adjs` is an optional dict {gd_name: value} for avLst <a:gd fmla="val …"/>.
+
+    ORDER MATTERS: CT_TextBodyProperties (ECMA-376 dml-main.xsd) is an xsd
+    SEQUENCE — prstTxWarp must be the FIRST child of <a:bodyPr>, before the
+    EG_TextAutofit group (<a:spAutoFit/> etc.), scene3d, EG_Text3D and extLst.
+    python-pptx's add_textbox pre-populates bodyPr with <a:spAutoFit/>, so a
+    plain SubElement APPEND lands the warp after it; PowerPoint treats the
+    schema-order-violating element as invalid and silently ignores it (the
+    text renders un-warped). Insert at index 0 instead.
     """
     txBody = shape.text_frame._txBody
     bodyPr = txBody.find(qn("a:bodyPr"))
     # Remove any existing warp so re-runs are idempotent.
     for old in bodyPr.findall(qn("a:prstTxWarp")):
         bodyPr.remove(old)
-    warp = etree.SubElement(bodyPr, qn("a:prstTxWarp"))
+    warp = bodyPr.makeelement(qn("a:prstTxWarp"), {})
     warp.set("prst", preset)
     av = etree.SubElement(warp, qn("a:avLst"))
     if adjs:
@@ -39,6 +47,7 @@ def set_warp(shape, preset, adjs=None):
             gd = etree.SubElement(av, qn("a:gd"))
             gd.set("name", name)
             gd.set("fmla", f"val {int(val)}")
+    bodyPr.insert(0, warp)
 
 
 def add_wordart(slide, *, left, top, width, height, text, preset, adjs=None,

@@ -324,6 +324,14 @@ pub(crate) fn parse_text_body(
     // the preset name + adjust values; the renderer maps glyphs through the
     // matching envelope from presetTextWarpDefinitions.xml. `prst="textNoShape"`
     // means "no warp", so it is treated as absent.
+    //
+    // Schema note: CT_TextBodyProperties (dml-main.xsd) is an xsd:sequence whose
+    // FIRST child is prstTxWarp — before EG_TextAutofit (spAutoFit/normAutofit),
+    // scene3d, EG_Text3D and extLst. Real Office files always emit it in that
+    // position, and PowerPoint IGNORES a prstTxWarp placed later in the
+    // sequence. This name-based lookup is deliberately position-independent for
+    // robustness, but any fixture/generator we author must emit the schema
+    // order or PowerPoint itself will render the text un-warped.
     let text_warp = body_pr
         .and_then(|n| child(n, "prstTxWarp"))
         .and_then(|n| attr(&n, "prst"))

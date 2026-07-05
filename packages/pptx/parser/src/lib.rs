@@ -3752,9 +3752,12 @@ mod tests {
             )
         };
 
-        // A warp with two avLst adjust values.
+        // A warp with two avLst adjust values, in the real Office child order:
+        // CT_TextBodyProperties is an xsd:sequence with prstTxWarp FIRST, then
+        // the EG_TextAutofit group (here <spAutoFit/>) — PowerPoint emits (and
+        // only honours) this order, so the fixture mimics it.
         let tb = parse(
-            r#"<bodyPr><prstTxWarp prst="textArchUp"><avLst><gd name="adj1" fmla="val 10800000"/><gd name="adj2" fmla="val 25000"/></avLst></prstTxWarp></bodyPr>"#,
+            r#"<bodyPr wrap="none"><prstTxWarp prst="textArchUp"><avLst><gd name="adj1" fmla="val 10800000"/><gd name="adj2" fmla="val 25000"/></avLst></prstTxWarp><spAutoFit/></bodyPr>"#,
         );
         let warp = tb.text_warp.as_ref().expect("textArchUp warp present");
         assert_eq!(warp.preset, "textArchUp");
