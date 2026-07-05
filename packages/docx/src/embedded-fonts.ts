@@ -17,13 +17,18 @@ import type { DocxDocumentModel, EmbeddedFontRef } from './types';
  * embeds no fonts. Individual part fetches are concurrent; a rejected fetch
  * skips only that face (the rest still register) so one missing part never
  * aborts the whole document.
+ *
+ * Returns the shared `FontFace` objects registered for this document (deduped +
+ * refcounted in core). The caller ({@link DocxDocument}) holds them and passes
+ * them to `unregisterEmbeddedFonts` in `destroy()` so they leave `document.fonts`
+ * when the document is discarded, instead of leaking on every open (SPA leak).
  */
 export async function loadEmbeddedFonts(
   doc: DocxDocumentModel,
   fetchFontBytes: (partPath: string) => Promise<Uint8Array>,
-): Promise<void> {
+): Promise<FontFace[]> {
   const refs = doc.embeddedFonts;
-  if (!refs || refs.length === 0) return;
+  if (!refs || refs.length === 0) return [];
 
   const faces = await Promise.all(
     refs.map(async (ref): Promise<EmbeddedFontFace | null> => {
@@ -45,8 +50,8 @@ export async function loadEmbeddedFonts(
   );
 
   const loadable = faces.filter((f): f is EmbeddedFontFace => f !== null);
-  if (loadable.length === 0) return;
-  await registerEmbeddedFonts(loadable);
+  if (loadable.length === 0) return [];
+  return registerEmbeddedFonts(loadable);
 }
 
 /** bold / boldItalic slots ⇒ CSS `font-weight: bold`; otherwise `normal`. */

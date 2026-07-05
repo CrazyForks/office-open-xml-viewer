@@ -342,13 +342,43 @@ function pageY(s: PlayState, xl: number, yl: number): number {
   return s.wt.m12 * xl + s.wt.m22 * yl + s.wt.dy;
 }
 
-/** page → device scale along X (`vpExtX/winExtX`); 1 under MM_TEXT. */
-function pageScaleX(s: PlayState): number {
+/** Raw page → device scale along X (`vpExtX/winExtX`), before any isotropic
+ *  aspect correction; 1 under MM_TEXT. */
+function rawPageScaleX(s: PlayState): number {
   return s.winExtX !== 0 ? s.vpExtX / s.winExtX : 1;
 }
-/** page → device scale along Y (`vpExtY/winExtY`); 1 under MM_TEXT. */
-function pageScaleY(s: PlayState): number {
+/** Raw page → device scale along Y (`vpExtY/winExtY`); 1 under MM_TEXT. */
+function rawPageScaleY(s: PlayState): number {
   return s.winExtY !== 0 ? s.vpExtY / s.winExtY : 1;
+}
+/**
+ * The common magnitude both axes use under MM_ISOTROPIC ([MS-EMF] 2.1.21):
+ * "one unit along the x-axis is equal to one unit along the y-axis". GDI
+ * realises that by shrinking the axis with the larger extent ratio down to the
+ * SMALLER of the two |vpExt/winExt| ratios, so the picture fits its viewport
+ * without distortion. Returns the shared |scale|; the callers reapply each
+ * axis's sign so the y-flip (negative viewport extent) is preserved.
+ */
+function isotropicMagnitude(s: PlayState): number {
+  return Math.min(Math.abs(rawPageScaleX(s)), Math.abs(rawPageScaleY(s)));
+}
+/** page → device scale along X. Under MM_ISOTROPIC both axes share the smaller
+ *  |ratio| (equal-aspect, §2.1.21); otherwise the raw x ratio. */
+function pageScaleX(s: PlayState): number {
+  if (s.mapMode === MM.ISOTROPIC) {
+    const raw = rawPageScaleX(s);
+    return raw < 0 ? -isotropicMagnitude(s) : isotropicMagnitude(s);
+  }
+  return rawPageScaleX(s);
+}
+/** page → device scale along Y. Under MM_ISOTROPIC both axes share the smaller
+ *  |ratio| (equal-aspect, §2.1.21); otherwise the raw y ratio. */
+function pageScaleY(s: PlayState): number {
+  if (s.mapMode === MM.ISOTROPIC) {
+    const raw = rawPageScaleY(s);
+    return raw < 0 ? -isotropicMagnitude(s) : isotropicMagnitude(s);
+  }
+  return rawPageScaleY(s);
 }
 /** page → device X ([MS-EMF] 2.3.11). */
 function deviceX(s: PlayState, xp: number): number {
@@ -427,7 +457,11 @@ function applyMapMode(s: PlayState, mode: number): void {
   }
   if (mode === MM.ANISOTROPIC || mode === MM.ISOTROPIC) {
     // The application supplies window/viewport extents explicitly; keep the
-    // current ones (default 1:1 until a SET*EXTEX record arrives).
+    // current ones (default 1:1 until a SET*EXTEX record arrives). ANISOTROPIC
+    // scales each axis independently; ISOTROPIC forces both axes to the SMALLER
+    // |vpExt/winExt| ratio (equal-aspect, [MS-EMF] 2.1.21) — that correction is
+    // applied in pageScaleX/pageScaleY (gated on `mapMode === MM.ISOTROPIC`), so
+    // it tracks any later SET*EXTEX / SCALE*EXTEX without recomputation here.
     return;
   }
   // Metric modes: a fixed physical unit per logical unit, y-UP. Realize as a

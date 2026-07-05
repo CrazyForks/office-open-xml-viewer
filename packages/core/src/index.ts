@@ -30,6 +30,7 @@ export type {
   ChartDataLabelOverride,
   ChartDataPointOverride,
   ChartErrBars,
+  ChartLabelBox,
   ChartManualLayout,
   ChartModel,
   ChartRect,
@@ -71,6 +72,7 @@ export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
 // `.fntdata` (raw sfnt) faces turned into FontFace objects in the active set.
 export {
   registerEmbeddedFonts,
+  unregisterEmbeddedFonts,
   deobfuscateOdttf,
   type EmbeddedFontFace,
 } from './fonts/embedded';

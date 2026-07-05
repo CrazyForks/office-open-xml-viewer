@@ -2337,6 +2337,182 @@ describe('CH14 — pie callout data labels', () => {
     // No white callout boxes are drawn.
     expect(rec.rects.filter(r => r.fs === '#FFFFFF').length).toBe(0);
   });
+
+  // #767 — the bestFit de-overlap must keep every callout box INSIDE the chart
+  // rect even when many slivers stack in one column. The old separate() slid the
+  // column up for a bottom overflow, then unconditionally slid it back down for a
+  // top underflow, cancelling the up-slide so a 9+-label column spilled ~200px
+  // past the bottom edge. Stress with many same-side slivers and assert 0
+  // overflow + 0 overlap.
+  function pieStressModel(): ChartModel {
+    // 14 slices: 12 slivers swept early (clustered top→right→bottom, so most
+    // land in ONE column) + 2 large slices. Single-line percent labels keep each
+    // box short enough that a 9+-box column still fits within the plot band, so
+    // both invariants (0 overflow AND 0 overlap) can hold — the regime the old
+    // cancel-slide broke by spilling the column ~200px past the bottom edge.
+    const cats: string[] = [];
+    const values: number[] = [];
+    for (let i = 0; i < 12; i++) { cats.push(`Sliver ${i + 1}`); values.push(3); }
+    cats.push('Big A'); values.push(40);
+    cats.push('Big B'); values.push(40);
+    return baseModel({
+      chartType: 'pie',
+      title: 'Coffee Production',
+      categories: cats,
+      series: [series({
+        name: 'Prod',
+        values,
+        seriesDataLabels: {
+          showVal: false, showCatName: false, showSerName: false, showPercent: true,
+          position: 'bestFit',
+          labelBox: { fill: 'FFFFFF', borderColor: '4472C4', borderWidthEmu: 12700 },
+          showLeaderLines: true, leaderLineColor: 'A6A6A6', leaderLineWidthEmu: 9525,
+        },
+      })],
+    });
+  }
+
+  it('keeps every callout box inside the chart rect with no overlaps under many slivers (#767)', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, pieStressModel(), RECT, 1);
+    const boxes = rec.rects.filter(r => r.fs === '#FFFFFF');
+    // All 14 slices are drawn (none dropped).
+    expect(boxes.length).toBe(14);
+
+    // (a) 0 overflow: every box lies fully within the chart rect [0..h] × [0..w].
+    for (const b of boxes) {
+      expect(b.y).toBeGreaterThanOrEqual(RECT.y - 0.5);
+      expect(b.y + b.h).toBeLessThanOrEqual(RECT.y + RECT.h + 0.5);
+      expect(b.x).toBeGreaterThanOrEqual(RECT.x - 0.5);
+      expect(b.x + b.w).toBeLessThanOrEqual(RECT.x + RECT.w + 0.5);
+    }
+
+    // The stress must actually pack 9+ boxes into a single vertical column — the
+    // regime that broke the old cancel-slide. Split by column via box centre x.
+    const midX = RECT.x + RECT.w / 2;
+    const rightCol = boxes.filter(b => b.x + b.w / 2 >= midX)
+      .sort((p, q) => p.y - q.y);
+    const leftCol = boxes.filter(b => b.x + b.w / 2 < midX)
+      .sort((p, q) => p.y - q.y);
+    expect(Math.max(rightCol.length, leftCol.length)).toBeGreaterThanOrEqual(9);
+
+    // (b) 0 overlap within each column: consecutive boxes never overlap
+    // vertically (boxes in different columns may share a y-band harmlessly).
+    for (const col of [rightCol, leftCol]) {
+      for (let k = 1; k < col.length; k++) {
+        expect(col[k].y).toBeGreaterThanOrEqual(col[k - 1].y + col[k - 1].h - 0.5);
+      }
+    }
+  });
+
+  // #767 (follow-up) — the original stress above used SINGLE-line percent labels,
+  // whose short boxes never triggered the TOP-underflow half of the bug. The old
+  // separate() slid a bottom-heavy column UP to clear the bottom edge, then failed
+  // to slide it back DOWN: its cap measured "room" against the bottom edge the
+  // up-slide had just pinned (room = 0), so a top underflow of ~40-100px was left
+  // uncorrected. The guard was ASYMMETRIC — it kept boxes off the BOTTOM but let
+  // the first box of an up-slid column escape well ABOVE the plot top.
+  //
+  // This case reproduces the top escape with TALL two-line labels (long wrapped
+  // category name + percent, showCatName + showPercent) and bottom-heavy slice
+  // orders that pack many slivers into ONE column at the pie's BOTTOM — before the
+  // symmetric round-trip clamp these drove the topmost box to y ≈ -40…-100. It
+  // asserts 0 overflow at BOTH the top AND the bottom edge across several
+  // geometries and slice arrangements.
+  //
+  // Overlap is deliberately NOT asserted here: with this many two-line boxes the
+  // column genuinely over-packs (more label than the plot can hold), so the
+  // documented over-pack path lets boxes touch/overlap rather than escape the
+  // frame — trading escape for overlap is the whole point of the clamp. The
+  // 0-overlap invariant is covered by the single-line stress above, whose short
+  // boxes DO fit, which is exactly why that case uses single-line labels.
+  function pieTwoLineStressModel(
+    arrange: 'bottomHeavy' | 'bigMid',
+    firstSliceAngle: number,
+  ): ChartModel {
+    const cats: string[] = [];
+    const values: number[] = [];
+    const longName = (i: number): string => `Very Long Category Name Number ${i + 1}`;
+    if (arrange === 'bottomHeavy') {
+      // A big slice, then 12 slivers, then a big slice — the slivers sweep
+      // through the bottom into one column, each label two lines tall.
+      cats.push('Big A'); values.push(48);
+      for (let i = 0; i < 12; i++) { cats.push(longName(i)); values.push(3); }
+      cats.push('Big B'); values.push(48);
+    } else {
+      // Big slices in the middle of the order rotate the sliver run to the top
+      // half, another arrangement that drove the pre-fix top escape.
+      for (let i = 0; i < 5; i++) { cats.push(longName(i)); values.push(3); }
+      cats.push('Big A'); values.push(40);
+      cats.push('Big B'); values.push(40);
+      for (let i = 5; i < 10; i++) { cats.push(longName(i)); values.push(3); }
+    }
+    return baseModel({
+      chartType: 'pie',
+      title: 'Coffee Production',
+      categories: cats,
+      firstSliceAngle,
+      series: [series({
+        name: 'Prod',
+        values,
+        seriesDataLabels: {
+          // TWO lines per label: category name + percent → a tall box, the regime
+          // the single-line stress above never reached.
+          showVal: false, showCatName: true, showSerName: false, showPercent: true,
+          position: 'bestFit',
+          labelBox: { fill: 'FFFFFF', borderColor: '4472C4', borderWidthEmu: 12700 },
+          showLeaderLines: true, leaderLineColor: 'A6A6A6', leaderLineWidthEmu: 9525,
+        },
+      })],
+    });
+  }
+
+  // Geometries + slice arrangements that all drove a top-edge escape before the
+  // symmetric round-trip clamp. Each combo must keep every box inside the plot
+  // rect at BOTH ends.
+  const stressGeoms: Array<[string, ChartRect]> = [
+    ['tall', { x: 0, y: 0, w: 640, h: 360 }],
+    ['square', { x: 0, y: 0, w: 400, h: 400 }],
+    ['wide', { x: 0, y: 0, w: 700, h: 300 }],
+  ];
+  const stressCases: Array<['bottomHeavy' | 'bigMid', number]> = [
+    ['bottomHeavy', 0],
+    ['bigMid', 180],
+  ];
+  for (const [gName, geom] of stressGeoms) {
+    for (const [arrange, fsa] of stressCases) {
+      it(`two-line callouts stay inside the rect at BOTH edges (${gName}/${arrange}) (#767)`, () => {
+        const rec = recordingCtx();
+        renderChart(rec.ctx, pieTwoLineStressModel(arrange, fsa), geom, 1);
+        const boxes = rec.rects.filter(r => r.fs === '#FFFFFF');
+        // Every slice's callout is drawn (none dropped).
+        expect(boxes.length).toBeGreaterThanOrEqual(12);
+
+        // (a) 0 overflow at the TOP edge — the half of #767 the old guard missed
+        // (pre-fix this drove the topmost box to a negative y, ~40-100px above
+        // the plot top).
+        for (const b of boxes) {
+          expect(b.y, `top overflow in ${gName}/${arrange}`).toBeGreaterThanOrEqual(geom.y - 0.5);
+        }
+        // (a') 0 overflow at the BOTTOM edge — the half #767 already guarded.
+        for (const b of boxes) {
+          expect(b.y + b.h, `bottom overflow in ${gName}/${arrange}`).toBeLessThanOrEqual(geom.y + geom.h + 0.5);
+        }
+        // Horizontal containment stays intact too.
+        for (const b of boxes) {
+          expect(b.x).toBeGreaterThanOrEqual(geom.x - 0.5);
+          expect(b.x + b.w).toBeLessThanOrEqual(geom.x + geom.w + 0.5);
+        }
+
+        // The stress must actually pack a deep single column — the regime that
+        // broke the old cancel-slide. Split by box centre x.
+        const midX = geom.x + geom.w / 2;
+        const rightCol = boxes.filter(b => b.x + b.w / 2 >= midX);
+        const leftCol = boxes.filter(b => b.x + b.w / 2 < midX);
+        expect(Math.max(rightCol.length, leftCol.length)).toBeGreaterThanOrEqual(6);
+      });
+    }
+  }
 });
 
 // CH15 — chartEx box-and-whisker (MS 2014 chartex ext). Verify the derived

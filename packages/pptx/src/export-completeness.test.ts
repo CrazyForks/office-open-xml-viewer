@@ -8,7 +8,11 @@ import { findMissingExportsFromUrl, formatMissing } from '@silurus/ooxml-core/te
  * `TableElement` / `ChartElement` / `MediaElement` members were unexported.
  */
 describe('pptx public API export completeness', () => {
-  it('exports every in-package type reachable from index.ts', () => {
+  // Spins up a full `ts.createProgram` over the package's type surface; under the
+  // parallel full suite the default 5s vitest timeout is occasionally exceeded on
+  // a cold/loaded machine (the compile is CPU-bound, not flaky logic). Give it
+  // ample headroom so the API-freeze guard is deterministic.
+  it('exports every in-package type reachable from index.ts', { timeout: 30000 }, () => {
     const missing = findMissingExportsFromUrl(import.meta.url, './index.ts', {
       // `SlideRenderOptions` is `RenderOptions & { math }`, the *internal*
       // parameter type of `renderSlide`. The `math` engine is implementation
