@@ -60,21 +60,36 @@ export function verticalOrientation(cp: number): VerticalOrientation {
 }
 
 /**
- * The vertical-form (`<vertical>` compatibility) substitution for a Tu/Tr code
- * point, or `null` when there is no dedicated vertical glyph to substitute.
+ * DRAW-TIME vertical-form substitution for vo=Tu punctuation: the U+FE10–U+FE19
+ * "Vertical Forms" presentation glyph to paint instead of `cp`, or `null` when
+ * there is none to apply.
  *
  * UAX #50 §5 ("Glyph Changes for Vertical Orientation") describes the Tu/Tr
- * transform as substituting the glyph with a vertical presentation form. Unicode
- * supplies those forms in the CJK Compatibility Forms block "Vertical Forms"
- * (U+FE10–U+FE19, "PRESENTATION FORM FOR VERTICAL …"), each carrying a
- * `<vertical>` compatibility decomposition back to its horizontal source in
- * UnicodeData.txt. This map is the inverse of those decompositions for the
- * commas / stops / colons / brackets / ellipsis a Japanese document uses; the
- * source code points are exactly the Tu-class punctuation the corner-cell shift
- * applies to (、。！？：；，． and 【】…). Small kana (also Tu) have no vertical
- * presentation form — the font substitutes a smaller upright glyph via its own
- * `vert`/`vrt2` OpenType feature, which a Canvas cannot invoke — so they return
- * null and are drawn upright unchanged.
+ * transform as substituting a vertical glyph variant. A Canvas cannot invoke the
+ * font's `vert`/`vrt2` OpenType feature, so for the Tu punctuation that has a
+ * dedicated Unicode presentation form we substitute the code point itself and
+ * let the font supply the pre-positioned glyph (upper-right cell corner).
+ *
+ * NOTE: this map is a rendering mapping (fullwidth/CJK source → vertical form),
+ * NOT the strict inverse of UnicodeData's `<vertical>` compatibility
+ * decompositions. Per UnicodeData.txt, FE10/FE13–FE16 decompose to the ASCII
+ * comma / colon / semicolon / exclamation / question mark
+ * (U+002C/003A/003B/0021/003F) — but vertical Japanese text carries the
+ * FULLWIDTH forms, so the map keys on those. Only FE11 (← 3001 、) and
+ * FE12 (← 3002 。) are exact inverses.
+ *
+ * Every key is vo=Tu, i.e. actually reaches the renderers' upright/substitute
+ * draw branch. Deliberately NOT in the map:
+ *   • ：FF1A / ；FF1B and 〖3016 / 〗3017 are vo=Tr — the Tr draw branch rotates
+ *     them and never consults this map. Making Tr substitute-first (FE13/FE14/
+ *     FE17/FE18 here, plus the U+FE35+ forms for fullwidth parens/brackets —
+ *     UAX#50's Tr means "substitute a vertical glyph, rotate only as fallback")
+ *     is tracked as follow-up in issues #790 / #771.
+ *   • … U+2026 is vo=R — the sideways branch rotates it 90° with the page, so
+ *     its three dots already stack vertically, visually equivalent to Word's
+ *     vertical ellipsis; no substitution is needed.
+ *   • Small kana (vo=Tu) have no U+FExx presentation form — a true vertical
+ *     variant needs the font's `vert` feature — so they draw upright unchanged.
  *
  * Renderers apply this ONLY at glyph-draw time (glyph selection): the text model,
  * advance/width (kept at 1 em), selection, and find/highlight all continue to use
@@ -87,33 +102,14 @@ export function verticalFormSubstitute(cp: number): number | null {
   return VERTICAL_FORM_MAP.get(cp) ?? null;
 }
 
-// Inverse of the U+FE10–U+FE19 `<vertical>` compatibility decompositions
-// (UnicodeData.txt) — source (horizontal) code point → vertical presentation
-// form. Names per the Unicode "CJK Compatibility Forms" chart:
-//   U+FE10 PRESENTATION FORM FOR VERTICAL COMMA               <vertical> FF0C
-//   U+FE11 PRESENTATION FORM FOR VERTICAL IDEOGRAPHIC COMMA   <vertical> 3001 、
-//   U+FE12 PRESENTATION FORM FOR VERTICAL IDEOGRAPHIC FULL STOP <vertical> 3002 。
-//   U+FE13 PRESENTATION FORM FOR VERTICAL COLON               <vertical> FF1A ：
-//   U+FE14 PRESENTATION FORM FOR VERTICAL SEMICOLON           <vertical> FF1B ；
-//   U+FE15 PRESENTATION FORM FOR VERTICAL EXCLAMATION MARK    <vertical> FF01 ！
-//   U+FE16 PRESENTATION FORM FOR VERTICAL QUESTION MARK       <vertical> FF1F ？
-//   U+FE17 PRESENTATION FORM FOR VERTICAL LEFT WHITE LENTICULAR BRACKET  <vertical> 3016 〖
-//   U+FE18 PRESENTATION FORM FOR VERTICAL RIGHT WHITE LENTICULAR BRACKET <vertical> 3017 〗
-//   U+FE19 PRESENTATION FORM FOR VERTICAL HORIZONTAL ELLIPSIS <vertical> 2026 …
-// (U+FE19's source 2026 is vo=R, not Tu; it is included because a horizontal
-// ellipsis in vertical Japanese is still conventionally set upright via the
-// vertical form when the font provides it. The corner brackets 「」（） etc. are
-// Tr with no U+FExx vertical form — the font's own `vert` feature reshapes them;
-// a Canvas rotates them instead, handled by the Tr rotation path in the renderer.)
+// vo=Tu punctuation → U+FE10–U+FE19 vertical presentation form. See the
+// verticalFormSubstitute doc above for why the map keys on the fullwidth forms
+// and why Tr/R punctuation (：；〖〗…) is excluded. Names per the Unicode
+// "Vertical Forms" chart (U+FE10–U+FE1F).
 const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
-  [0xff0c, 0xfe10], // ， fullwidth comma
-  [0x3001, 0xfe11], // 、 ideographic comma
-  [0x3002, 0xfe12], // 。 ideographic full stop
-  [0xff1a, 0xfe13], // ： fullwidth colon
-  [0xff1b, 0xfe14], // ； fullwidth semicolon
-  [0xff01, 0xfe15], // ！ fullwidth exclamation mark
-  [0xff1f, 0xfe16], // ？ fullwidth question mark
-  [0x3016, 0xfe17], // 〖 left white lenticular bracket
-  [0x3017, 0xfe18], // 〗 right white lenticular bracket
-  [0x2026, 0xfe19], // … horizontal ellipsis
+  [0xff0c, 0xfe10], // ， fullwidth comma       → PRESENTATION FORM FOR VERTICAL COMMA
+  [0x3001, 0xfe11], // 、 ideographic comma     → … FOR VERTICAL IDEOGRAPHIC COMMA
+  [0x3002, 0xfe12], // 。 ideographic full stop → … FOR VERTICAL IDEOGRAPHIC FULL STOP
+  [0xff01, 0xfe15], // ！ fullwidth exclamation → … FOR VERTICAL EXCLAMATION MARK
+  [0xff1f, 0xfe16], // ？ fullwidth question    → … FOR VERTICAL QUESTION MARK
 ]);

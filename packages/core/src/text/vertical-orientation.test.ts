@@ -71,15 +71,23 @@ describe('verticalOrientation (UAX #50 Vertical_Orientation)', () => {
 });
 
 describe('verticalFormSubstitute (UAX #50 §5 vertical-form glyph substitution)', () => {
-  it('maps the punctuation with a dedicated U+FE1x vertical form', () => {
+  it('maps the Tu punctuation with a dedicated U+FE1x vertical form', () => {
     expect(verticalFormSubstitute(0x3001)).toBe(0xfe11); // 、 → ︑
     expect(verticalFormSubstitute(0x3002)).toBe(0xfe12); // 。 → ︒
     expect(verticalFormSubstitute(0xff0c)).toBe(0xfe10); // ， → ︐
-    expect(verticalFormSubstitute(0xff1a)).toBe(0xfe13); // ： → ︓
-    expect(verticalFormSubstitute(0xff1b)).toBe(0xfe14); // ； → ︔
     expect(verticalFormSubstitute(0xff01)).toBe(0xfe15); // ！ → ︕
     expect(verticalFormSubstitute(0xff1f)).toBe(0xfe16); // ？ → ︖
-    expect(verticalFormSubstitute(0x2026)).toBe(0xfe19); // … → ︙
+  });
+
+  it('returns null for non-Tu punctuation (Tr rotates, R stays sideways — no substitute)', () => {
+    // ：； and 〖〗 are vo=Tr: the renderer's rotate branch never substitutes.
+    // Substitute-first Tr (FE13/FE14/FE17/FE18) is the #790/#771 follow-up.
+    expect(verticalFormSubstitute(0xff1a)).toBeNull(); // ：
+    expect(verticalFormSubstitute(0xff1b)).toBeNull(); // ；
+    expect(verticalFormSubstitute(0x3016)).toBeNull(); // 〖
+    expect(verticalFormSubstitute(0x3017)).toBeNull(); // 〗
+    // … is vo=R: rotated sideways, its dots stack vertically already.
+    expect(verticalFormSubstitute(0x2026)).toBeNull(); // …
   });
 
   it('returns null for code points without a vertical presentation form', () => {

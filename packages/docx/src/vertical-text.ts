@@ -12,17 +12,19 @@
 //   • vo=U  (upright): CJK ideographs, kana, Hangul, fullwidth forms. Drawn with
 //     a local −90° counter-rotation about the glyph's own centre, cancelling the
 //     page rotation so it stands UPRIGHT while still advancing down the line.
-//   • vo=Tu (transform, fallback upright): 、。！？：；，． and small kana. UAX#50
+//   • vo=Tu (transform, fallback upright): 、。，．！？ and small kana. UAX#50
 //     substitutes a vertical presentation glyph; where Unicode supplies one
-//     (U+FE10–U+FE19, core `verticalFormSubstitute`) we draw THAT code point
-//     upright, so the comma/full stop sit in the cell's upper-right as Word does;
-//     where none exists (small kana) we draw the original upright unchanged.
-//   • vo=Tr (transform, fallback rotate): （「」〈〉“” and the ー prolonged sound
-//     mark. UAX#50's fallback (no vertical glyph available to a Canvas — the
-//     font's `vert`/`vrt2` OpenType feature is not reachable via `fillText`) is
-//     to ROTATE the glyph 90° CW. A plain `fillText` in the +90° page frame is
+//     (、。，！？ → U+FE10–FE12/FE15/FE16, core `verticalFormSubstitute`) we draw
+//     THAT code point upright, so the comma/full stop sit in the cell's
+//     upper-right as Word does; where none exists (．, small kana) we draw the
+//     original upright unchanged (． keeps a corner-nudge fallback).
+//   • vo=Tr (transform, fallback rotate): （「」〈〉“”：；〖〗 and the ー prolonged
+//     sound mark. UAX#50's fallback (no vertical glyph available to a Canvas —
+//     the font's `vert`/`vrt2` OpenType feature is not reachable via `fillText`)
+//     is to ROTATE the glyph 90° CW. A plain `fillText` in the +90° page frame is
 //     already that rotation; we draw the glyph CENTRED on the column axis (these
 //     are full-width cells) so the rotated bracket/長音符 sits mid-column.
+//     Substitute-first Tr (FE13/FE14/FE17/FE18, FE35+) is the #790/#771 follow-up.
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation. Stay
 //     SIDEWAYS (rotated with the page) — the conventional "縦中横 not applied"
 //     appearance — drawn as an ordinary contextual `fillText` at the alphabetic
@@ -88,7 +90,7 @@ export function isUprightVerticalGlyph(cp: number): boolean {
 /** The Tu punctuation whose upper-right cell position is approximated by a
  *  draw-time nudge WHEN the font has no U+FExx vertical form to substitute (see
  *  {@link verticalGlyphOffset}). The comma/full stop that DO have a vertical form
- *  ({@link verticalFormSubstitute}: 、。，：；！？) are substituted instead and the
+ *  ({@link verticalFormSubstitute}: 、。，！？) are substituted instead and the
  *  font positions them, so they are NOT nudged. The fullwidth full stop ． (FF0E)
  *  has no vertical form in Unicode, so it stays on the nudge fallback. */
 const VERTICAL_PUNCT_UPPER_RIGHT = new Set<number>([
@@ -201,8 +203,10 @@ export function drawVerticalRun(
       // vo=U or Tu. Counter-rotate −90° about the cell centre so the glyph
       // (which the page rotation would otherwise lay on its side) stands upright.
       // For Tu punctuation with a Unicode vertical presentation form
-      // (、。，：；！？ → U+FE10–U+FE16), draw THAT glyph so the font places it in
-      // the cell's upper-right (Word behaviour); the original advance is kept.
+      // (、。，！？ → U+FE10–FE12/FE15/FE16), draw THAT glyph so the font places
+      // it in the cell's upper-right (Word behaviour); the original advance is
+      // kept. (：；〖〗 are vo=Tr — they take the rotate branch below, never this
+      // substitution; substitute-first Tr is the #790/#771 follow-up.)
       // Substitution is a GLYPH-only change: the width above and everything the
       // renderer reports (selection, find) use the original `ch`.
       const drawCp = verticalFormSubstitute(cp);
