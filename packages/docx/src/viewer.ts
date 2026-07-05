@@ -5,8 +5,8 @@ import type { DocxTextRunInfo } from './renderer';
 import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
-import { openExternalHyperlink } from '@silurus/ooxml-core';
-import type { HyperlinkTarget, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
+import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale } from '@silurus/ooxml-core';
+import type { HyperlinkTarget, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -17,6 +17,17 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   enableTextSelection?: boolean;
   /** Called when a page finishes rendering. */
   onPageChange?: (index: number, total: number) => void;
+  /** IX9 zoom contract ({@link ZoomableViewer}) — the clamp range for
+   *  {@link DocxViewer.setScale} / `zoomIn` / `zoomOut` / `fitWidth` / `fitPage`,
+   *  as user-facing zoom factors (`1` = 100% = the page at its natural pt→px
+   *  size). Defaults 0.1–4 (10%–400%), matching the other viewers. */
+  zoomMin?: number;
+  zoomMax?: number;
+  /** IX9 — fires whenever the zoom factor actually changes (`1` = 100%): from
+   *  {@link DocxViewer.setScale}, `zoomIn`/`zoomOut`, or `fitWidth`/`fitPage`.
+   *  Named `onScaleChange` to match the pptx/xlsx viewers so all five share one
+   *  notification shape. */
+  onScaleChange?: (scale: number) => void;
   /** IX1 (design decision — NOT user-confirmed, integrator may veto). Called when
    *  a hyperlink run is clicked. When omitted, the default is: external → open in a
    *  new tab via core `openExternalHyperlink` (sanitised, noopener,noreferrer);
@@ -26,9 +37,18 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   onError?: (err: Error) => void;
 }
 
-export class DocxViewer {
+export class DocxViewer implements ZoomableViewer {
   private _doc: DocxDocument | null = null;
   private _currentPage = 0;
+  /**
+   * IX9 explicit zoom factor (`1` = 100% = the page at its natural pt→px width),
+   * or `null` when the caller has never invoked a zoom method. `null` preserves
+   * the pre-IX9 render path EXACTLY: the page renders at `opts.width` (or its
+   * natural width when that is unset), so default rendering is byte-identical. The
+   * first `setScale`/`zoomIn`/`zoomOut`/`fitWidth`/`fitPage` call latches a number
+   * here, after which `_renderPage` derives the canvas width from it instead.
+   */
+  private _scale: number | null = null;
   private _canvas: HTMLCanvasElement;
   private _wrapper: HTMLDivElement;
   /** The canvas's DOM position BEFORE the constructor reparented it into
@@ -221,6 +241,110 @@ export class DocxViewer {
   async nextPage(): Promise<void> { await this.goToPage(this._currentPage + 1); }
   async prevPage(): Promise<void> { await this.goToPage(this._currentPage - 1); }
 
+  // ─── IX9 zoom contract (ZoomableViewer) ───────────────────────────────────
+
+  /** Natural (100%) CSS-px width of the current page — `widthPt × PT_TO_PX`.
+   *  This is the scale-1 reference every zoom factor multiplies. 0 when nothing
+   *  is loaded. */
+  private _naturalWidthPx(): number {
+    if (!this._doc || this._doc.pageCount === 0) return 0;
+    return this._doc.pageSize(this._currentPage).widthPt * PT_TO_PX;
+  }
+
+  /**
+   * The width (CSS px) `_renderPage` renders the current page at, honouring the
+   * zoom state. `_scale === null` (no zoom method ever called) ⇒ the pre-IX9
+   * value `opts.width` verbatim (byte-identical default: `undefined` lets the
+   * renderer use the page's natural width). Once a factor latched ⇒
+   * `naturalWidth × scale` (rounded), so the on-screen page is exactly `scale ×`
+   * its natural size regardless of the original `opts.width`.
+   */
+  private _renderWidth(): number | undefined {
+    if (this._scale === null) return this._opts.width;
+    const natural = this._naturalWidthPx();
+    if (natural <= 0) return this._opts.width; // unloaded — fall back, defer
+    return Math.round(natural * this._scale);
+  }
+
+  /** IX9 {@link ZoomableViewer} — the current zoom factor (`1` = 100%). Before
+   *  any zoom method is called this is the EFFECTIVE scale implied by the current
+   *  render width: `opts.width / naturalWidth`, or `1` when `opts.width` is unset
+   *  (the page renders at its natural size) or nothing is loaded. */
+  getScale(): number {
+    if (this._scale !== null) return this._scale;
+    const natural = this._naturalWidthPx();
+    if (natural <= 0) return 1;
+    return this._opts.width && this._opts.width > 0 ? this._opts.width / natural : 1;
+  }
+
+  private _zoomMin(): number { return this._opts.zoomMin ?? 0.1; }
+  private _zoomMax(): number { return this._opts.zoomMax ?? 4; }
+
+  /**
+   * IX9 {@link ZoomableViewer} — set the absolute zoom factor (`1` = 100% = the
+   * page at its natural pt→px width), clamped to `[zoomMin, zoomMax]`, and
+   * re-render the current page at the new size. Fires `onScaleChange` when the
+   * clamped factor actually changes. Resolves once the re-render settles. A no-op
+   * (but still latches the scale) when nothing is loaded.
+   */
+  async setScale(scale: number): Promise<void> {
+    const next = clampScale(scale, this._zoomMin(), this._zoomMax());
+    const changed = next !== this.getScale();
+    this._scale = next;
+    await this._render();
+    if (changed) this._opts.onScaleChange?.(next);
+  }
+
+  /** IX9 {@link ZoomableViewer} — step up to the next rung of the shared zoom
+   *  ladder (clamped to `zoomMax`). */
+  async zoomIn(): Promise<void> { await this.setScale(nextZoomStep(this.getScale())); }
+
+  /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
+  async zoomOut(): Promise<void> { await this.setScale(prevZoomStep(this.getScale())); }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the current page's WIDTH to the host
+   * container (the element the canvas lives in, or `opts.container` if supplied),
+   * then re-render. Defers (no-op) when nothing is loaded or the container is
+   * unlaid-out. Routes through {@link setScale}, so the factor is clamped and
+   * `onScaleChange` fires.
+   */
+  async fitWidth(): Promise<void> { await this._fit('width'); }
+
+  /**
+   * IX9 {@link ZoomableViewer} — fit the WHOLE current page (width and height)
+   * inside the container so it is visible without scrolling; takes the tighter of
+   * the width/height fit. Defers when unloaded / unlaid-out.
+   */
+  async fitPage(): Promise<void> { await this._fit('page'); }
+
+  /** Shared fit for {@link fitWidth}/{@link fitPage}: measure the natural page
+   *  size + the container box, ask core's pure `fitScale`, apply via setScale. */
+  private async _fit(mode: 'width' | 'page'): Promise<void> {
+    if (!this._doc || this._doc.pageCount === 0) return;
+    const size = this._doc.pageSize(this._currentPage);
+    const container = this._fitContainer();
+    if (!container) return;
+    const scale = fitScale(
+      {
+        contentWidth: size.widthPt * PT_TO_PX,
+        contentHeight: size.heightPt * PT_TO_PX,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+      },
+      mode,
+    );
+    if (scale <= 0) return; // unlaid-out / empty — defer
+    await this.setScale(scale);
+  }
+
+  /** The element a fit measures against: the explicit `opts.container`, else the
+   *  host the wrapper was inserted into (`_wrapper.parentElement`). `null` when
+   *  the canvas was mounted detached (no host to fit to). */
+  private _fitContainer(): { clientWidth: number; clientHeight: number } | null {
+    return this._opts.container ?? this._wrapper.parentElement ?? null;
+  }
+
   /**
    * IX2 — find every occurrence of `query` in the document and highlight them
    * all (a soft box per match, drawn on the highlight overlay over the drawn
@@ -377,13 +501,18 @@ export class DocxViewer {
         "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
       );
     }
+    // IX9: the width to render at. When no zoom method was ever called
+    // (`_scale === null`) this is exactly `opts.width` (pre-IX9 path, byte-
+    // identical default); once a zoom latched a factor it is `naturalWidth ×
+    // scale`.
+    const renderWidth = this._renderWidth();
     if (isWorker) {
       const dpr = this._opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
       // Only serializable render options may cross to the worker — spreading the
       // full viewer opts would postMessage non-cloneable values (the math
       // engine, callbacks, container element) and throw a DataCloneError.
       const bmp = await this._doc.renderPageToBitmap(this._currentPage, {
-        width: this._opts.width,
+        width: renderWidth,
         dpr: this._opts.dpr,
         defaultTextColor: this._opts.defaultTextColor,
         showTrackChanges: this._opts.showTrackChanges,
@@ -402,7 +531,7 @@ export class DocxViewer {
       // instead of re-rendering it offscreen.
       const runs: DocxTextRunInfo[] = [];
       const onTextRun = (r: DocxTextRunInfo) => runs.push(r);
-      await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, onTextRun });
+      await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, width: renderWidth, onTextRun });
       if (this._textLayer) {
         this._buildTextLayer(this._textLayer, runs);
       }
