@@ -353,6 +353,10 @@ export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-pos
 // ECMA-376 §17.18.59 ST_NumberFormat rendering + §17.16.4.3.1 field-format switch
 // parsing — the shared numbering kernel (page numbers, list markers, …).
 export { formatOrdinalNumber, type NumberFormat } from './text/number-format';
+// Office-style decimal (round-half-up) formatting for fixed-precision display —
+// Excel/Word/PowerPoint round `.xx5` up where `toFixed` rounds the binary double
+// down (2.675 → "2.68"). Shared by xlsx number-format + chart label formatting.
+export { roundDecimalHalfUp } from './text/round-decimal';
 export { parseFieldFormatSwitch } from './text/field-format-switch';
 // ECMA-376 §17.16.4.1 date-and-time formatting ("picture") switch — evaluates a
 // DATE/TIME field's `\@ "…"` picture against a given instant (shared by docx/pptx).

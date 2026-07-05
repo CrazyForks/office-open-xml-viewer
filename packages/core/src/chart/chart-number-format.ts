@@ -6,6 +6,7 @@
 // dates.
 
 import { excelSerialToUtcDate } from '../excel-date';
+import { roundDecimalHalfUp } from '../text/round-decimal';
 
 /** Excel's default `formatCode="General"` for charts: raw numbers with no
  *  "k"/"M" abbreviation, trailing decimal zeros trimmed. */
@@ -13,8 +14,11 @@ export function formatChartVal(v: number): string {
   // Matches Excel's default `<c:valAx><c:numFmt formatCode="General">` which
   // shows raw numbers — no "k"/"M" abbreviation.
   if (Number.isInteger(v)) return String(v);
-  // Trim trailing zeros on decimals (so 0.50 → "0.5") but cap at 6 digits.
-  return v.toFixed(6).replace(/\.?0+$/, '');
+  // Cap at 6 decimals and trim trailing zeros (0.50 → "0.5"). Round half-UP on
+  // the decimal value like Excel (matters only at a `.xxxxxx5` boundary; equal
+  // to `toFixed(6)` otherwise), so this path never disagrees with the explicit
+  // number-format sections below.
+  return roundDecimalHalfUp(v, 6).replace(/\.?0+$/, '');
 }
 
 /**
@@ -300,7 +304,9 @@ function formatNumericPattern(value: number, pattern: string): string {
   const fracDigits = (fracPart.match(/[#0?]/g) ?? []).length;
   // Minimum integer digits = count of `0` in integer part.
   const minIntDigits = (intPart.replace(/,/g, '').match(/0/g) ?? []).length;
-  const rounded = value.toFixed(fracDigits);
+  // Office rounds a chart label's decimals half-UP on the decimal value
+  // (2.675 → "2.68"); `toFixed` would round the binary double down.
+  const rounded = roundDecimalHalfUp(value, fracDigits);
   const [ints, fracs = ''] = rounded.split('.');
   const paddedInts = ints.padStart(minIntDigits, '0');
   const withSeparators = thousands ? paddedInts.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : paddedInts;

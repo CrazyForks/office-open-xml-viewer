@@ -1,4 +1,4 @@
-import { excelSerialToUtcDate } from '@silurus/ooxml-core';
+import { excelSerialToUtcDate, roundDecimalHalfUp } from '@silurus/ooxml-core';
 import type { Cell, CellValue, Styles } from './types.js';
 import { todaySerial, nowSerial } from './formula.js';
 
@@ -993,12 +993,14 @@ function renderNumericSection(num: number, body: string, useMagnitude: boolean):
       // placeholder count so `#0.0E+0` on 1.22e7 → `12.2E+6`.
       e = Math.floor(e / intPlaceCount) * intPlaceCount;
       mantissa = abs / Math.pow(10, e);
-      if (parseFloat(mantissa.toFixed(decCount)) >= Math.pow(10, intPlaceCount)) {
+      if (parseFloat(roundDecimalHalfUp(mantissa, decCount)) >= Math.pow(10, intPlaceCount)) {
         e += intPlaceCount;
         mantissa = abs / Math.pow(10, e);
       }
     }
-    const mantStr = mantissa.toFixed(decCount);
+    // Round the mantissa's decimals half-UP like the plain section (Excel is
+    // consistent across sections); `toFixed` would round the binary double down.
+    const mantStr = roundDecimalHalfUp(mantissa, decCount);
     const [mInt, mFrac = ''] = mantStr.split('.');
     const intText = fillIntegerTemplate(mInt, lex.intSpec, false);
     const fracText = fillFractionText(mFrac, lex.fracSpec);
@@ -1009,7 +1011,9 @@ function renderNumericSection(num: number, body: string, useMagnitude: boolean):
 
   // ── Plain fixed-point section ─────────────────────────────────────────────
   const decCount = lex.fracSpec.length;
-  const rounded = abs.toFixed(decCount);
+  // Excel rounds the displayed decimals half-UP on the decimal value
+  // (2.675 under `0.00` → "2.68"); `toFixed` rounds the binary double down.
+  const rounded = roundDecimalHalfUp(abs, decCount);
   const [intDigitsRaw, fracDigits = ''] = rounded.split('.');
   let intDigits = intDigitsRaw.replace(/^0+/, '');
   // Keep a leading zero when a `0`/`?` placeholder forces the units digit, or
