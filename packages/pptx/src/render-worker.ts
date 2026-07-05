@@ -32,8 +32,11 @@ const host = new WasmParserHost<PptxArchive>(init, {
   reinit,
 });
 let pres: Presentation | null = null;
-/** Settled before any render when `useGoogleFonts` was requested. */
-let fontsLoaded: Promise<void> = Promise.resolve();
+/** Settled before any render when `useGoogleFonts` was requested. The resolved
+ *  value (the preloaded FontFace[]) is unused here: the worker owns its own
+ *  FontFaceSet (`self.fonts`) and terminates with it, so there is nothing to
+ *  release — only the sequencing (fonts landed before first paint) matters. */
+let fontsLoaded: Promise<unknown> = Promise.resolve();
 const mediaCache = new Map<string, Promise<Blob>>();
 const imageCache = new Map<string, Promise<Blob>>();
 

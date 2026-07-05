@@ -30,7 +30,11 @@ const host = new WasmParserHost<XlsxArchive>(init, {
   reinit,
 });
 let workbook: ParsedWorkbook | null = null;
-let fontsLoaded: Promise<void> = Promise.resolve();
+/** Settled before any render when `useGoogleFonts` was requested. The resolved
+ *  value (the preloaded FontFace[]) is unused here: the worker owns its own
+ *  FontFaceSet (`self.fonts`) and terminates with it, so there is nothing to
+ *  release — only the sequencing (fonts landed before first paint) matters. */
+let fontsLoaded: Promise<unknown> = Promise.resolve();
 const sheetCache = new Map<number, Worksheet>();
 const imageCache = new Map<string, CanvasImageSource | null>();
 // Fetched image *bytes* (as Blobs) keyed by zip path. Twin of the docx render

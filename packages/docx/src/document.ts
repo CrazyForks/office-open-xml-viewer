@@ -2,6 +2,7 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
+  unloadGoogleFonts,
   unregisterEmbeddedFonts,
   WorkerBridge,
   defaultDpr,
@@ -63,6 +64,12 @@ export class DocxDocument {
    *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
    *  core, so a font shared with another open document survives until both go). */
   private _embeddedFontFaces: FontFace[] = [];
+  /** Google-Fonts `FontFace` objects this document preloaded into `document.fonts`
+   *  (main mode only — in worker mode the worker owns them and terminates with its
+   *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
+   *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
+   *  so a web font shared with another open document survives until both go). */
+  private _googleFontFaces: FontFace[] = [];
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open documents never swap a shared zip path (e.g.
    *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
@@ -126,7 +133,7 @@ export class DocxDocument {
       opts.workerTimeoutMs,
     );
     if (mode === 'main' && opts.useGoogleFonts && doc._document) {
-      await preloadGoogleFonts(
+      doc._googleFontFaces = await preloadGoogleFonts(
         docxFontPreloadNames(doc._document),
         DOCX_GOOGLE_FONTS,
       );
@@ -188,6 +195,15 @@ export class DocxDocument {
     if (this._embeddedFontFaces.length > 0) {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];
+    }
+    // Release the Google-Fonts substitutes this document preloaded into the
+    // shared FontFaceSet (main mode). Same refcount contract as the embedded
+    // fonts: a web font also used by another open document stays until that one
+    // is destroyed too. Without this, every opened document left its Google
+    // FontFace objects in `document.fonts` forever (SPA memory leak).
+    if (this._googleFontFaces.length > 0) {
+      unloadGoogleFonts(this._googleFontFaces);
+      this._googleFontFaces = [];
     }
     // Release this document's three per-fetchImage image caches: the decoded
     // base raster bitmaps (GPU-backed, shared with pptx/xlsx), the a:clrChange

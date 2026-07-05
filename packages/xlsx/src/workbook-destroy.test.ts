@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { WorkerBridge, type WorkerLike } from '@silurus/ooxml-core';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { WorkerBridge, preloadGoogleFonts, type WorkerLike, type FontPreloadEntry } from '@silurus/ooxml-core';
 import { XlsxWorkbook } from './workbook.js';
 
 /**
@@ -26,6 +26,40 @@ interface DestroyProbe {
   destroy(): void;
 }
 
+// ── Fake FontFaceSet so destroy()'s Google-Fonts release is observable ───────
+const G = globalThis as Record<string, unknown>;
+const ORIG_FONTS = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
+afterEach(() => {
+  G.document = ORIG_FONTS.document;
+  G.self = ORIG_FONTS.self;
+  G.fetch = ORIG_FONTS.fetch;
+  G.FontFace = ORIG_FONTS.FontFace;
+});
+
+const CSS = `@font-face { font-family: 'Carlito'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/carlito/y.woff2) format('woff2'); }`;
+interface FakeFace { family: string }
+function installFontFaceSet(): { added: FakeFace[] } {
+  const added: FakeFace[] = [];
+  class FakeFontFace {
+    constructor(public family: string, public source: string, public descriptors?: object) {}
+    load(): Promise<FakeFontFace> { return Promise.resolve(this); }
+  }
+  const set = {
+    add: (f: FakeFace) => { added.push(f); },
+    delete: (f: FakeFace) => { const i = added.indexOf(f); if (i >= 0) added.splice(i, 1); return i >= 0; },
+    [Symbol.iterator]() { return added[Symbol.iterator](); },
+    ready: Promise.resolve(),
+  };
+  G.FontFace = FakeFontFace;
+  G.document = { fonts: set };
+  G.fetch = async () => ({ ok: true, text: async () => CSS });
+  delete G.self;
+  return { added };
+}
+const MAP: Record<string, FontPreloadEntry> = {
+  calibri: { url: 'https://fonts.googleapis.com/css2?family=Carlito', loadFamily: 'Carlito' },
+};
+
 describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
   function makeWorkbook() {
     const worker = new SilentWorker();
@@ -38,6 +72,7 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     instance.sheetCache = new Map();
     instance.imageCache = new Map();
     instance.imageBlobCache = new Map();
+    instance.googleFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { wb: instance as unknown as DestroyProbe, bridge, worker };
   }
@@ -54,6 +89,22 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     const { wb } = makeWorkbook();
     wb.destroy();
     expect(() => wb.destroy()).not.toThrow();
+  });
+
+  // Wiring guard: destroy() must actually release the Google-Fonts substitutes
+  // the workbook preloaded. The other tests set `googleFontFaces = []`, so they
+  // never exercise the unload branch — a dropped call would go unnoticed.
+  it('destroy() releases the workbook’s Google fonts from the FontFaceSet', async () => {
+    const { added } = installFontFaceSet();
+    const held = await preloadGoogleFonts(['Calibri'], MAP);
+    expect(added).toHaveLength(1);
+
+    const { wb } = makeWorkbook();
+    (wb as unknown as { googleFontFaces: FontFace[] }).googleFontFaces = held;
+    wb.destroy();
+
+    expect(added).toHaveLength(0);
+    expect((wb as unknown as { googleFontFaces: FontFace[] }).googleFontFaces).toHaveLength(0);
   });
 });
 
@@ -75,6 +126,7 @@ describe('XlsxWorkbook.destroy() — closes cached ImageBitmaps (GPU-leak guard)
     instance.sheetCache = new Map();
     instance.imageCache = imageCache;
     instance.imageBlobCache = new Map();
+    instance.googleFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return instance as unknown as DestroyProbe;
   }

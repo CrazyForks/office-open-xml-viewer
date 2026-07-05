@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { WorkerBridge, type WorkerLike } from '@silurus/ooxml-core';
+import { describe, it, expect, afterEach } from 'vitest';
+import { WorkerBridge, preloadGoogleFonts, type WorkerLike, type FontPreloadEntry } from '@silurus/ooxml-core';
 import { PptxPresentation } from './presentation';
 
 /**
@@ -26,6 +26,40 @@ interface DestroyProbe {
   destroy(): void;
 }
 
+// ── Fake FontFaceSet so destroy()'s Google-Fonts release is observable ───────
+const G = globalThis as Record<string, unknown>;
+const ORIG_FONTS = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
+afterEach(() => {
+  G.document = ORIG_FONTS.document;
+  G.self = ORIG_FONTS.self;
+  G.fetch = ORIG_FONTS.fetch;
+  G.FontFace = ORIG_FONTS.FontFace;
+});
+
+const CSS = `@font-face { font-family: 'Carlito'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/carlito/y.woff2) format('woff2'); }`;
+interface FakeFace { family: string }
+function installFontFaceSet(): { added: FakeFace[] } {
+  const added: FakeFace[] = [];
+  class FakeFontFace {
+    constructor(public family: string, public source: string, public descriptors?: object) {}
+    load(): Promise<FakeFontFace> { return Promise.resolve(this); }
+  }
+  const set = {
+    add: (f: FakeFace) => { added.push(f); },
+    delete: (f: FakeFace) => { const i = added.indexOf(f); if (i >= 0) added.splice(i, 1); return i >= 0; },
+    [Symbol.iterator]() { return added[Symbol.iterator](); },
+    ready: Promise.resolve(),
+  };
+  G.FontFace = FakeFontFace;
+  G.document = { fonts: set };
+  G.fetch = async () => ({ ok: true, text: async () => CSS });
+  delete G.self;
+  return { added };
+}
+const MAP: Record<string, FontPreloadEntry> = {
+  calibri: { url: 'https://fonts.googleapis.com/css2?family=Carlito', loadFamily: 'Carlito' },
+};
+
 describe('PptxPresentation.destroy() — rejects in-flight worker requests', () => {
   function makePresentation() {
     const worker = new SilentWorker();
@@ -37,6 +71,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     // Fields destroy() clears after terminate(); undefined would throw.
     instance._mediaCache = new Map();
     instance._imageCache = new Map();
+    instance._googleFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { pres: instance as unknown as DestroyProbe, bridge, worker };
   }
@@ -53,5 +88,23 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     const { pres } = makePresentation();
     pres.destroy();
     expect(() => pres.destroy()).not.toThrow();
+  });
+
+  // Wiring guard: destroy() must actually release the Google-Fonts substitutes
+  // the deck preloaded into the shared FontFaceSet. The other tests set
+  // `_googleFontFaces = []`, so they never exercise the unload branch — a dropped
+  // call (or a wrong field name) would go unnoticed. Preload a real face through
+  // core, hand it to the deck, then assert destroy() removes it and clears the array.
+  it('destroy() releases the deck’s Google fonts from the FontFaceSet', async () => {
+    const { added } = installFontFaceSet();
+    const held = await preloadGoogleFonts(['Calibri'], MAP);
+    expect(added).toHaveLength(1); // the web font is in the shared set
+
+    const { pres } = makePresentation();
+    (pres as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces = held;
+    pres.destroy();
+
+    expect(added).toHaveLength(0); // face left the set
+    expect((pres as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces).toHaveLength(0);
   });
 });

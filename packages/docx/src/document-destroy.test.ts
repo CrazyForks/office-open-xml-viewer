@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { WorkerBridge, registerEmbeddedFonts, type WorkerLike } from '@silurus/ooxml-core';
+import {
+  WorkerBridge,
+  registerEmbeddedFonts,
+  preloadGoogleFonts,
+  type WorkerLike,
+  type FontPreloadEntry,
+} from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 
 /**
@@ -24,12 +30,14 @@ class SilentWorker implements WorkerLike {
   }
 }
 
-// ── Fake FontFaceSet so destroy()'s embedded-font release is observable ──────
+// ── Fake FontFaceSet so destroy()'s embedded-font / Google-Fonts release is
+// observable ──────────────────────────────────────────────────────────────
 const G = globalThis as Record<string, unknown>;
-const ORIG_FONTS = { document: G.document, self: G.self, FontFace: G.FontFace };
+const ORIG_FONTS = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
 afterEach(() => {
   G.document = ORIG_FONTS.document;
   G.self = ORIG_FONTS.self;
+  G.fetch = ORIG_FONTS.fetch;
   G.FontFace = ORIG_FONTS.FontFace;
 });
 
@@ -52,6 +60,33 @@ function installFontFaceSet(): { added: FakeFace[] } {
   delete G.self;
   return { added };
 }
+
+// ── Google-Fonts flavored fake: `preloadGoogleFonts` needs `fetch` (to pull
+// the CSS) and a string-`src` `FontFace` constructor, unlike the ArrayBuffer
+// source used by the embedded-font fake above. Mirrors the fake used by
+// `presentation-destroy.test.ts` / `workbook-destroy.test.ts`. ──────────────
+const GOOGLE_CSS = `@font-face { font-family: 'Carlito'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/carlito/y.woff2) format('woff2'); }`;
+function installGoogleFontFaceSet(): { added: FakeFace[] } {
+  const added: FakeFace[] = [];
+  class FakeFontFace {
+    constructor(public family: string, public source: string, public descriptors?: object) {}
+    load(): Promise<FakeFontFace> { return Promise.resolve(this); }
+  }
+  const set = {
+    add: (f: FakeFace) => { added.push(f); },
+    delete: (f: FakeFace) => { const i = added.indexOf(f); if (i >= 0) added.splice(i, 1); return i >= 0; },
+    [Symbol.iterator]() { return added[Symbol.iterator](); },
+    ready: Promise.resolve(),
+  };
+  G.FontFace = FakeFontFace;
+  G.document = { fonts: set };
+  G.fetch = async () => ({ ok: true, text: async () => GOOGLE_CSS });
+  delete G.self;
+  return { added };
+}
+const GOOGLE_FONT_MAP: Record<string, FontPreloadEntry> = {
+  calibri: { url: 'https://fonts.googleapis.com/css2?family=Carlito', loadFamily: 'Carlito' },
+};
 
 /** A minimal valid sfnt header so registerEmbeddedFonts accepts the face. */
 const validHeader = (): Uint8Array =>
@@ -76,6 +111,7 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     // Fields destroy() clears after terminate(); undefined would throw.
     instance._imageCache = new Map();
     instance._embeddedFontFaces = [];
+    instance._googleFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { doc: instance as unknown as DestroyProbe, bridge, worker };
   }
@@ -116,5 +152,28 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     // left the FontFaceSet, and the held array was cleared.
     expect(added).toHaveLength(0);
     expect((doc as unknown as { _embeddedFontFaces: FontFace[] })._embeddedFontFaces).toHaveLength(0);
+  });
+
+  // Wiring guard: destroy() must actually release the Google-Fonts substitutes
+  // the document preloaded into the shared FontFaceSet. The other tests set
+  // `_googleFontFaces = []`, so they never exercise the unload branch — a
+  // dropped call (or a wrong field name) would go unnoticed. Preload a real
+  // face through core, hand it to the document, then assert destroy() removes
+  // it from the (fake) FontFaceSet and clears the held array. Twin of the
+  // embedded-fonts guard above; same shape as
+  // `presentation-destroy.test.ts` / `workbook-destroy.test.ts`.
+  it('destroy() releases the document’s Google fonts from the FontFaceSet', async () => {
+    const { added } = installGoogleFontFaceSet();
+    const held = await preloadGoogleFonts(['Calibri'], GOOGLE_FONT_MAP);
+    expect(added).toHaveLength(1); // the web font is in the shared set
+
+    const { doc } = makeDocument();
+    (doc as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces = held;
+    doc.destroy();
+
+    // destroy() called unloadGoogleFonts(held): last holder gone → the face
+    // left the FontFaceSet, and the held array was cleared.
+    expect(added).toHaveLength(0);
+    expect((doc as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces).toHaveLength(0);
   });
 });

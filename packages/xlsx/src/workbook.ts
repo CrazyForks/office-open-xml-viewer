@@ -2,6 +2,7 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
+  unloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
   dropSvgImageCache,
@@ -66,6 +67,12 @@ export class XlsxWorkbook {
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
   private math: MathRenderer | undefined;
+  /** Google-Fonts `FontFace` objects this workbook preloaded into `document.fonts`
+   *  (main mode only — in worker mode the worker owns them and terminates with its
+   *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
+   *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
+   *  so a web font shared with another open workbook survives until both go). */
+  private googleFontFaces: FontFace[] = [];
   private _mode: 'main' | 'worker' = 'main';
 
   private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
@@ -172,7 +179,7 @@ export class XlsxWorkbook {
       console.warn(`[ooxml] xlsx opened with a degraded part: ${workbookError}`);
     }
     if (this._mode === 'main' && opts.useGoogleFonts) {
-      await preloadGoogleFonts(
+      this.googleFontFaces = await preloadGoogleFonts(
         xlsxFontPreloadNames(this.parsedWorkbook),
         XLSX_GOOGLE_FONTS,
       );
@@ -417,6 +424,15 @@ export class XlsxWorkbook {
     this.bridge.terminate();
     this.parsedWorkbook = null;
     this.sheetCache.clear();
+    // Release the Google-Fonts substitutes this workbook preloaded into the
+    // shared FontFaceSet (main mode). Refcounted in core: a web font also used by
+    // another open workbook stays until that one is destroyed too. Without this,
+    // every opened workbook left its Google FontFace objects in `document.fonts`
+    // forever (SPA memory leak).
+    if (this.googleFontFaces.length > 0) {
+      unloadGoogleFonts(this.googleFontFaces);
+      this.googleFontFaces = [];
+    }
     // Closes each cached ImageBitmap's GPU backing before dropping the map —
     // see closeAndClearImageCache for why a bare `.clear()` would leak.
     closeAndClearImageCache(this.imageCache);
