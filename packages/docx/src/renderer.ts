@@ -3773,6 +3773,19 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
 
   const grid = table.colWidths;
 
+  // Overflow cap for the fit passes below. A BLOCK table is confined to its text
+  // column band (`contentWPt`). A FLOATING table (§17.4.57 `<w:tblpPr>`) is
+  // positioned absolutely, out of flow — Word keeps its declared `<w:tblW>`/
+  // `<w:tblGrid>` width even past the column band, letting the box extend into
+  // the page margins (sample-28's page-anchored forms: a fixed grid of 523.75pt
+  // and autofit-preferred grids of 522pt on a 451.35pt band all render at full
+  // grid width, centered across the margins — Word-PDF measured). The physical
+  // page is the only hard constraint, so a float's cap is the page width. The
+  // preferred-width BASES are unchanged (pct still resolves against the column
+  // band, §17.18.90); only the overflow clamp is relaxed. Same principle as the
+  // negative-`tblInd` budget widening in renderTable (§17.4.50).
+  const fitCapPt = table.tblpPr ? Math.max(contentWPt, state.pageWidth) : contentWPt;
+
   // Per-column minimum content width (pt). Single-column cells set a hard floor;
   // a gridSpan cell's min is distributed across its columns in proportion to the
   // tblGrid so a wide spanning cell does not over-inflate any one column.
@@ -3810,13 +3823,13 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
   // preferred width keeps proportionally more, matching Word's PDF layout.
   const fitToContent = (widths: number[]): number[] => {
     const total = widths.reduce((s, w) => s + w, 0);
-    if (total <= contentWPt || total <= 0) return widths;
+    if (total <= fitCapPt || total <= 0) return widths;
     const minTotal = minW.reduce((s, w) => s + w, 0);
-    if (minTotal >= contentWPt) {
+    if (minTotal >= fitCapPt) {
       // Even the minimums overflow — scale the minimums so the table still
       // fits (content clips, as Word does when forced narrower than its words).
-      const s = contentWPt / minTotal;
-      return minTotal > 0 ? minW.map((w) => w * s) : widths.map(() => contentWPt / n);
+      const s = fitCapPt / minTotal;
+      return minTotal > 0 ? minW.map((w) => w * s) : widths.map(() => fitCapPt / n);
     }
     // Iteratively pin columns to their min and redistribute the rest by
     // preferred-width proportion. Converges in ≤ n passes (each pass pins at
@@ -3825,7 +3838,7 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
     const out = widths.slice();
     const pinned = new Array(n).fill(false);
     for (let pass = 0; pass < n; pass++) {
-      let free = contentWPt;
+      let free = fitCapPt;
       let weightSum = 0;
       for (let c = 0; c < n; c++) {
         if (pinned[c]) free -= out[c];
@@ -3851,12 +3864,13 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
 
   // Fixed layout: tblGrid is authoritative (ECMA-376 §17.4.52) and content is
   // clipped, never grown — so scale proportionally to fit, ignoring min content
-  // widths (which only govern the autofit branch below).
+  // widths (which only govern the autofit branch below). The cap is the column
+  // band for a block table, the page width for a floating one (see fitCapPt).
   if (table.layout === 'fixed') {
     const g = grid.slice();
     const total = g.reduce((s, w) => s + w, 0);
-    if (total > contentWPt && total > 0) {
-      const s = contentWPt / total;
+    if (total > fitCapPt && total > 0) {
+      const s = fitCapPt / total;
       return g.map((w) => w * s);
     }
     return g;
