@@ -994,6 +994,15 @@ pub struct ShapeRun {
     /// paragraph) isn't supported in shape bodies yet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub text_blocks: Vec<ShapeText>,
+    /// ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` — the shape's DEFAULT text
+    /// color (hex, no `#`). A text-box run that sets no explicit `<w:color>`
+    /// takes this before falling back to the document/theme default (black). The
+    /// same DrawingML `<a:fontRef>` PowerPoint resolves for placeholder text
+    /// (pptx `shape.rs`); Word applies it to `<wps:txbx>` runs. This resolves the
+    /// COLOR axis only — the `fontRef @idx` (major/minor/none) font-face effect is
+    /// out of scope here (fonts already resolve through `rFonts`/docDefaults).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_text_color: Option<String>,
     /// Vertical anchor for the shape text box: "t" (top), "ctr" (center),
     /// "b" (bottom). Read from <wps:bodyPr @anchor>. Default = "t".
     #[serde(skip_serializing_if = "Option::is_none")]

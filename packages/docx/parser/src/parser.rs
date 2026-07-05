@@ -4876,6 +4876,27 @@ fn parse_wsp_shape(
     let head_end = parse_line_end("headEnd");
     let tail_end = parse_line_end("tailEnd");
 
+    // ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` → the shape's DEFAULT text
+    // color. A `<wps:txbx>` run that sets no explicit `<w:color>` inherits this
+    // (Word draws sample-28's white cover banner text from a `<a:fontRef
+    // idx="minor"><a:schemeClr val="lt1"/></a:fontRef>` — the runs carry no color
+    // of their own). Mirrors pptx's `default_text_color` from the placeholder
+    // fontRef (shape.rs). `<a:fontRef>` is a plain color container (its child is a
+    // `<a:schemeClr>`/`<a:srgbClr>`), so it resolves through the SAME shared
+    // DrawingML color grammar the fill/stroke use (`resolve_color_element` →
+    // `ooxml_common::color::parse_color_node` with Word's slot lookup + literal
+    // tint), including any lumMod/lumOff/shade transforms on the inner color.
+    // The `@idx` (major/minor/none) font-face selection is intentionally ignored
+    // here — this axis carries only the color (fonts resolve via rFonts/docDefaults).
+    let default_text_color = wsp
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "style")
+        .and_then(|st| {
+            st.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "fontRef")
+        })
+        .and_then(|fr| resolve_color_element(fr, theme));
+
     // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
     // and the bodyPr (insets / vertical anchor).
     let (
@@ -4911,6 +4932,7 @@ fn parse_wsp_shape(
         flip_v,
         wrap_mode: anchor_meta.wrap_mode.clone(),
         text_blocks,
+        default_text_color,
         text_anchor,
         text_autofit,
         text_inset_l,
@@ -13000,6 +13022,122 @@ mod txbx_inline_image_tests {
                   <w:r><w:t>x</w:t></w:r></w:p>"#,
         );
         assert_eq!(absent.bidi, None, "absent ⇒ unspecified (inherit)");
+    }
+}
+
+// ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` — the shape's DEFAULT text
+// color. A `<wps:txbx>` run that sets no `<w:color>` of its own inherits this
+// (sample-28's white Arabic cover banner: the runs carry no color, so Word draws
+// them in the fontRef's `lt1` = white). Mirrors pptx's placeholder fontRef color
+// (shape.rs). These tests pin the parser's `ShapeRun.default_text_color`.
+#[cfg(test)]
+mod shape_fontref_color_tests {
+    use super::*;
+
+    /// A theme whose `lt1`/`dk1`/`accent1` slots are known, matching sample-28's
+    /// scheme (`lt1 = window/FFFFFF`, `dk1 = windowText/000000`).
+    fn theme() -> ThemeColors {
+        ThemeColors::parse(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <a:themeElements><a:clrScheme name="t">
+                   <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+                   <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+                   <a:dk2><a:srgbClr val="44546A"/></a:dk2>
+                   <a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>
+                   <a:accent1><a:srgbClr val="4472C4"/></a:accent1>
+                 </a:clrScheme></a:themeElements>
+               </a:theme>"#,
+        )
+    }
+
+    /// Build a minimal `<wps:wsp>` with the given `<wps:style>` fragment and a
+    /// one-run text box, then parse it into a `ShapeRun` via `parse_wsp_shape`.
+    fn shape_with_style(style: &str) -> ShapeRun {
+        let xml = format!(
+            r#"<wps:wsp
+                 xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                 xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/></a:xfrm>
+                   <a:prstGeom prst="rect"/></wps:spPr>
+                 {style}
+                 <wps:txbx><w:txbxContent><w:p><w:r><w:t>الملاحق</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+               </wps:wsp>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        parse_wsp_shape(
+            &StyleMap::default(),
+            doc.root_element(),
+            &theme(),
+            &HashMap::new(),
+            0.0,
+            true,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0,
+        )
+        .expect("shape parses")
+    }
+
+    /// sample-28's cover banner: `<a:fontRef idx="minor"><a:schemeClr val="lt1"/>`
+    /// resolves `lt1` → window → FFFFFF (white). The `@idx` is ignored (color axis
+    /// only). This is the value that gives a color-less run its white text.
+    #[test]
+    fn fontref_scheme_color_resolves_shape_default_text_color() {
+        let shape = shape_with_style(
+            r#"<wps:style><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></wps:style>"#,
+        );
+        assert_eq!(
+            shape.default_text_color.as_deref(),
+            Some("FFFFFF"),
+            "fontRef schemeClr lt1 → white"
+        );
+    }
+
+    /// A `<a:fontRef>` with an explicit srgbClr resolves that hex directly, and a
+    /// `<a:lumMod>`/`<a:lumOff>` transform on the inner scheme color is honored —
+    /// the same DrawingML grammar the fill/stroke path uses.
+    #[test]
+    fn fontref_srgb_and_scheme_transform() {
+        let srgb = shape_with_style(
+            r#"<wps:style><a:fontRef idx="major"><a:srgbClr val="C0504D"/></a:fontRef></wps:style>"#,
+        );
+        assert_eq!(srgb.default_text_color.as_deref(), Some("C0504D"));
+
+        // accent1 (4472C4) with lumMod 50% darkens it; assert it resolves to SOME
+        // color that is not the untransformed base (the transform is applied, not
+        // dropped). The exact hex is owned by the shared color grammar.
+        let transformed = shape_with_style(
+            r#"<wps:style><a:fontRef idx="minor"><a:schemeClr val="accent1"><a:lumMod val="50000"/></a:schemeClr></a:fontRef></wps:style>"#,
+        );
+        let c = transformed
+            .default_text_color
+            .as_deref()
+            .expect("transformed accent1 resolves");
+        assert_ne!(c, "4472C4", "lumMod transform must alter the base accent1");
+    }
+
+    /// No `<wps:style>` (or a style with no `<a:fontRef>`) ⇒ `default_text_color`
+    /// stays None, so a color-less run keeps falling back to the document/theme
+    /// default (black). This is the no-regression case for the many existing text
+    /// boxes that carry run colors or rely on the black default.
+    #[test]
+    fn absent_fontref_leaves_default_text_color_none() {
+        let no_style = shape_with_style("");
+        assert_eq!(no_style.default_text_color, None, "no <wps:style> ⇒ None");
+
+        let style_without_fontref = shape_with_style(
+            r#"<wps:style><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef></wps:style>"#,
+        );
+        assert_eq!(
+            style_without_fontref.default_text_color, None,
+            "style with no <a:fontRef> ⇒ None"
+        );
     }
 }
 
