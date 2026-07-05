@@ -829,6 +829,15 @@ export interface ShapeRun {
   wrapSide?: string | null;
   /** Text rendered INSIDE the shape's bounding box (`<wps:txbx><w:txbxContent>`). */
   textBlocks?: ShapeText[];
+  /** ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` — the shape's DEFAULT text
+   *  color (hex, no `#`). A text-box run ({@link ShapeTextRun}) with no explicit
+   *  {@link ShapeTextRun.color} inherits this before falling back to the
+   *  document/theme default (black); an explicit run color still wins. This is
+   *  the color axis of the fontRef only — the `@idx` (major/minor/none) font-face
+   *  selection is out of scope (fonts resolve via rFonts/docDefaults). Mirrors
+   *  pptx's per-shape default text color from the placeholder fontRef. Absent ⇒
+   *  no shape default (the run color or black applies). */
+  defaultTextColor?: string | null;
   /** "t" | "ctr" | "b" — vertical anchor for the shape's text body (`<wps:bodyPr @anchor>`). */
   textAnchor?: string | null;
   /** ECMA-376 §21.1.2.1.1 auto-fit mode from `<wps:bodyPr>`, normalized to the

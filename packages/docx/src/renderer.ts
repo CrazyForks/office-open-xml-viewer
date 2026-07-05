@@ -7011,10 +7011,19 @@ export function renderShapeText(
 ): void {
   const effState: RenderState =
     state ?? shapeRenderState(ctx, scale, fontFamilyClasses, images);
-  // Default glyph colour for tab leaders (§17.3.1.37) drawn on this path. Text
-  // runs carry their own colour; a leader has none, so it takes the document
-  // default (black when the caller threads no state — the unit-test path).
-  const defaultColor = effState.defaultColor ?? '#000000';
+  // Default glyph colour for a run/leader that carries no explicit colour.
+  // Precedence (ECMA-376 §17.3.2.6 run color > §20.1.4.1.17 shape fontRef default
+  // > document/theme default): a `<wps:style><a:fontRef>` gives the WHOLE text box
+  // a default color (sample-28's cover banner draws its color-less Arabic runs in
+  // the fontRef's `lt1` = white; without this they fell back to black on the dark
+  // panel). The shape default folds OVER the document default (black when the
+  // caller threads no state — the unit-test path). A run's own `<w:color>` still
+  // wins (resolved per segment below). Mirrors pptx renderTextBody's
+  // `shapeDefaultTextColor ?? themeDefaultColor`.
+  const documentDefaultColor = effState.defaultColor ?? '#000000';
+  const defaultColor = shape.defaultTextColor
+    ? `#${shape.defaultTextColor}`
+    : documentDefaultColor;
   const blocks = shape.textBlocks ?? [];
   const lIns = (shape.textInsetL ?? 0) * scale;
   const tIns = (shape.textInsetT ?? 0) * scale;
@@ -7470,7 +7479,11 @@ export function renderShapeText(
               ? s.fontSize * scale * 0.15
               : 0;
           ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
-          ctx.fillStyle = s.color ? `#${s.color}` : '#000000';
+          // §17.3.2.6: a run's own color wins; otherwise fall to `defaultColor`,
+          // which folds the shape's §20.1.4.1.17 fontRef default over the
+          // document/theme default (black). A color-less run in a fontRef text
+          // box (sample-28's white cover banner) thus draws in the fontRef color.
+          ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
           // Draw the glyphs (§17.18.44). Anchor each justified piece to the
           // WHOLE-string cumulative advance plus accumulated pitch, the SAME core
           // helper the body uses, so contextual CJK packing (約物半角) is honoured
