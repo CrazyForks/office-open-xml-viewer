@@ -318,6 +318,36 @@ pub(crate) fn parse_text_body(
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
 
+    // ECMA-376 §20.1.9.19 — `<a:bodyPr><a:prstTxWarp prst="…">` selects a WordArt
+    // text-warp envelope (ST_TextShapeType). Its `<a:avLst>` carries `<a:gd>`
+    // adjust overrides in adj1/adj2/… order (thousandths of a percent). We record
+    // the preset name + adjust values; the renderer maps glyphs through the
+    // matching envelope from presetTextWarpDefinitions.xml. `prst="textNoShape"`
+    // means "no warp", so it is treated as absent.
+    let text_warp = body_pr
+        .and_then(|n| child(n, "prstTxWarp"))
+        .and_then(|n| attr(&n, "prst"))
+        .filter(|p| p != "textNoShape")
+        .map(|preset| {
+            let adj = body_pr
+                .and_then(|n| child(n, "prstTxWarp"))
+                .and_then(|w| child(w, "avLst"))
+                .map(|av| {
+                    av.children()
+                        .filter(|c| c.is_element() && c.tag_name().name() == "gd")
+                        .filter_map(|gd| {
+                            // fmla is "val <n>" for avLst adjust guides.
+                            attr(&gd, "fmla").and_then(|f| {
+                                f.strip_prefix("val ")
+                                    .and_then(|v| v.trim().parse::<i64>().ok())
+                            })
+                        })
+                        .collect::<Vec<i64>>()
+                })
+                .unwrap_or_default();
+            TextWarp { preset, adj }
+        });
+
     // Own lstStyle > lvl1pPr, then fall back to layout/master inherited values
     let own_lvl1_ppr = child(tx_body, "lstStyle").and_then(|ls| child(ls, "lvl1pPr"));
     let own_def_rpr = own_lvl1_ppr.and_then(|lp| child(lp, "defRPr"));
@@ -454,6 +484,7 @@ pub(crate) fn parse_text_body(
         num_col,
         spc_col,
         rtl_col,
+        text_warp,
     }
 }
 
