@@ -2880,23 +2880,37 @@ function drawPieCalloutLabels(
       const minGap = (prev.boxH + cur.boxH) / 2 + 3;
       if (cur.cyBox - prev.cyBox < minGap) cur.cyBox = prev.cyBox + minGap;
     }
-    // If the stack now runs past the bottom bound, slide the whole column up.
-    const last = col[col.length - 1];
-    const overflow = (last.cyBox + last.boxH / 2) - bottomLimit;
-    if (overflow > 0) for (const l of col) l.cyBox -= overflow;
-    // If it now runs above the top bound, slide back down — but CAP the shift so
-    // the bottom box does not re-cross bottomLimit (the fits-in-band case makes
-    // that cap a no-op; keeping it makes the invariant explicit).
-    const first = col[0];
-    const underflow = topLimit - (first.cyBox - first.boxH / 2);
-    if (underflow > 0) {
-      const room = bottomLimit - (last.cyBox + last.boxH / 2);
-      const shift = Math.min(underflow, Math.max(0, room));
-      if (shift > 0) for (const l of col) l.cyBox += shift;
-    }
+    // The overlap push above is one-directional (boxes only move DOWN), so a
+    // bottom-heavy initial layout can now overrun EITHER bound. Because we are
+    // in the fits case (stackH ≤ band) the rigid column is shorter than the
+    // band, so a single slide brings BOTH ends inside [topLimit, bottomLimit] at
+    // once. Slide up by any bottom overflow, then — symmetrically — down by any
+    // top underflow. Sliding the whole column down cannot re-cross the bottom
+    // because the column fits, so this two-step slide is a true round-trip
+    // clamp (the earlier code capped the down-slide against a bottom "room" that
+    // the prior up-slide had already zeroed, so a top underflow of ~100px was
+    // left uncorrected — #767 was asymmetric, guarding only the bottom edge).
+    const bottomOverflow = (col[col.length - 1].cyBox + col[col.length - 1].boxH / 2) - bottomLimit;
+    if (bottomOverflow > 0) for (const l of col) l.cyBox -= bottomOverflow;
+    const topUnderflow = topLimit - (col[0].cyBox - col[0].boxH / 2);
+    if (topUnderflow > 0) for (const l of col) l.cyBox += topUnderflow;
   };
   separate(labels.filter(l => !l.leftSide));
   separate(labels.filter(l => l.leftSide));
+
+  // Final round-trip clamp (both edges): guarantee no box escapes the plot rect
+  // vertically, independent of which separate() branch ran. In the fits case the
+  // symmetric slide above already lands every box inside [topLimit, bottomLimit];
+  // in the over-packed case the equal-step distribution pins the first top to
+  // topLimit and last bottom to bottomLimit. This per-box clamp is therefore a
+  // no-op on the current paths, but makes the "no box leaves the frame at either
+  // end" invariant explicit and robust to future layout changes. Clamp top FIRST
+  // then bottom so a box taller than the band (degenerate) pins to the TOP edge
+  // rather than escaping upward.
+  for (const l of labels) {
+    l.cyBox = Math.max(topLimit + l.boxH / 2, l.cyBox);
+    l.cyBox = Math.min(bottomLimit - l.boxH / 2, l.cyBox);
+  }
 
   // Horizontal clamp: keep each box fully inside the chart rect.
   const leftLimit = boundsX + 2;
