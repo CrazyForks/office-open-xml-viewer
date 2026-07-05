@@ -54,6 +54,8 @@ export type {
   // ECMA-376 §21.2).
   ChartRun,
   ShapeRun,
+  // VML `<v:textpath>` watermark text (reachable via ShapeRun.textPath).
+  TextPath,
   ShapeText,
   // Per-run shape-text formatting (reachable via ShapeText.runs).
   ShapeTextRun,

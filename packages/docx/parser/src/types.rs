@@ -948,6 +948,40 @@ pub struct ShapeRun {
     /// | "largest". Defaults to "bothSides" when absent. Mirrors ImageRun.wrap_side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_side: Option<String>,
+    /// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — WordArt text laid along the
+    /// shape's path (a text watermark). When set the renderer draws this string,
+    /// scaled to fill the shape box (`fitshape`), rotated by `rotation`, and
+    /// filled with `fill`/`fill_opacity`, INSTEAD of a fill/stroke panel + body
+    /// text. `None` for an ordinary VML shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_path: Option<TextPath>,
+    /// ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — the fill's alpha in
+    /// [0.0, 1.0] (default 1.0 ⇒ opaque). Used with `text_path` to draw the
+    /// watermark semi-transparently. `None` ⇒ fully opaque.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_opacity: Option<f64>,
+}
+
+/// ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt vector text path. Word
+/// emits this for text watermarks (the `PowerPlusWaterMarkObject` shape). The
+/// text is stretched to fit the shape's bounding box (`fitshape`, the WordArt
+/// `#_x0000_t136` shapetype default), so the on-screen size derives from the
+/// shape geometry rather than the nominal `font-size` in the textpath style.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TextPath {
+    /// The `string` attribute — the watermark text (e.g. "DRAFT").
+    pub string: String,
+    /// `font-family` from the textpath `style` CSS `font`/`font-family` (quotes
+    /// stripped). `None` ⇒ the renderer's default family.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// `font-weight:bold` (or the `bold` keyword in the `font` shorthand).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    /// `font-style:italic` (or the `italic` keyword in the `font` shorthand).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]

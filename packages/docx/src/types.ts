@@ -776,6 +776,30 @@ export interface ShapeRun {
   textInsetT?: number;  // pt
   textInsetR?: number;  // pt
   textInsetB?: number;  // pt
+  /** ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — WordArt text laid on the
+   *  shape path (a text watermark). When set the renderer draws this string,
+   *  scaled to fill the box (`fitshape`), rotated by {@link ShapeRun.rotation},
+   *  filled with {@link ShapeRun.fill} at {@link ShapeRun.fillOpacity} alpha —
+   *  INSTEAD of a fill/stroke panel + body text. */
+  textPath?: TextPath | null;
+  /** ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — fill alpha in `[0, 1]`
+   *  (default 1 = opaque). Used with {@link ShapeRun.textPath} to draw the
+   *  watermark semi-transparently. Absent ⇒ opaque. */
+  fillOpacity?: number | null;
+}
+
+/** ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt vector text path,
+ *  emitted by Word for text watermarks (the `PowerPlusWaterMarkObject` shape).
+ *  The text is stretched to fit the shape box (`fitshape`, the WordArt
+ *  `#_x0000_t136` shapetype default), so its drawn size derives from the shape
+ *  geometry rather than the nominal `font-size` in the textpath style. */
+export interface TextPath {
+  /** The `string` attribute — the watermark text (e.g. "DRAFT"). */
+  string: string;
+  /** `font-family` from the textpath style (quotes stripped). */
+  fontFamily?: string | null;
+  bold?: boolean;
+  italic?: boolean;
 }
 
 /** DrawingML line-end (arrow head). ECMA-376 §20.1.8.3 CT_LineEndProperties.

@@ -1,6 +1,6 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeFill, TextPath, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
@@ -6409,6 +6409,74 @@ function resolveShapeBox(
   return { x, y, w, h };
 }
 
+/** The solid fill colour of a shape as a CSS `#rrggbb` string, or `null` when
+ *  the shape has no solid fill (gradient / none). Used for watermark text. */
+function shapeFillColor(fill: ShapeFill | null | undefined): string | null {
+  if (fill && fill.fillType === 'solid') return `#${fill.color}`;
+  return null;
+}
+
+/**
+ * Draw a VML `<v:textpath>` text watermark (ECMA-376 Part 4 §19.1.2.23) into the
+ * box `(x, y, w, h)` (device px). Word emits watermarks with the WordArt
+ * `#_x0000_t136` shapetype, whose `fitshape` default STRETCHES the text to the
+ * edges of the shape box — so the drawn size is derived from the box geometry,
+ * not the nominal `font-size` in the textpath style (which Word writes as a
+ * placeholder `1pt`). The text is:
+ *   - measured once at a reference size to get its natural advance/height,
+ *   - non-uniformly scaled so it exactly fills `w × h` (fitshape),
+ *   - rotated by `rotationDeg` (clockwise, §19.1.2.19) about the box centre,
+ *   - filled with `color` at `opacity` alpha (§19.1.2.5 `<v:fill opacity>`).
+ *
+ * The transform is applied about the box centre and the text is drawn centred
+ * (`textAlign`/`textBaseline` = middle), so the watermark sits centred in its
+ * box regardless of rotation. Exported for unit testing the geometry.
+ */
+export function drawWatermarkTextPath(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  textPath: TextPath,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  rotationDeg: number,
+  color: string | null,
+  opacity: number,
+  fontFamilyClasses: Record<string, string> = {},
+): void {
+  const text = textPath.string;
+  if (!text || w <= 0 || h <= 0) return;
+
+  // Reference measurement at a fixed pixel size; the fitshape scale maps the
+  // natural text box onto the shape box. REF is arbitrary (cancels out in the
+  // scale ratio) but large enough to keep measureText precise.
+  const REF = 100;
+  ctx.save();
+  ctx.font = buildFont(textPath.bold ?? false, textPath.italic ?? false, REF, textPath.fontFamily ?? null, fontFamilyClasses);
+  const m = ctx.measureText(text);
+  const natW = m.width || REF;
+  // Prefer the font bounding box (cap-to-descender) for the natural height; fall
+  // back to the em size when the platform doesn't report it.
+  const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? REF * 0.8;
+  const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? REF * 0.2;
+  const natH = asc + desc || REF;
+
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  ctx.translate(cx, cy);
+  if (rotationDeg !== 0) ctx.rotate((rotationDeg * Math.PI) / 180);
+  // fitshape: stretch the text to the box edges (non-uniform). The reference
+  // font renders at REF px; scaling the axes by (w/natW, h/natH) lands the ink
+  // exactly on the box.
+  ctx.scale(w / natW, h / natH);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+  ctx.fillStyle = color ?? '#c0c0c0';
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
 function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
   const { ctx, scale } = state;
   const { x, y, w, h } = resolveShapeBox(shape, state, paragraphTopPx);
@@ -6432,6 +6500,22 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     preset.startsWith('bentconnector');
   if (w < 0 || h < 0) return;
   if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
+
+  // ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt text watermark. It
+  // draws stretched, rotated, semi-transparent text filling the shape box
+  // INSTEAD of a fill/stroke panel + body text, then returns.
+  if (shape.textPath && shape.textPath.string.length > 0) {
+    drawWatermarkTextPath(
+      ctx as CanvasRenderingContext2D,
+      shape.textPath,
+      x, y, w, h,
+      shape.rotation ?? 0,
+      shapeFillColor(shape.fill),
+      shape.fillOpacity ?? 1,
+      state.fontFamilyClasses,
+    );
+    return;
+  }
 
   const rot = shape.rotation ?? 0;
   const flipH = shape.flipH ?? false;

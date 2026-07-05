@@ -5193,23 +5193,23 @@ fn parse_vml_pict(
         return None;
     }
 
-    // VML colors: `fillcolor` / `strokecolor` are "#rrggbb" (or named); we keep
-    // the 6-hex form the renderer expects (no leading '#').
-    let hex6 = |c: &str| -> Option<String> {
-        let s = c.trim().trim_start_matches('#');
-        if s.len() == 6 && s.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            Some(s.to_ascii_lowercase())
-        } else {
-            None
-        }
-    };
+    // VML colors: `fillcolor` / `strokecolor` are "#rrggbb" or a named color; we
+    // keep the 6-hex form the renderer expects (no leading '#').
     let fill = shape
         .attribute("fillcolor")
-        .and_then(hex6)
+        .and_then(vml_color_hex6)
         .map(|color| ShapeFill::Solid { color });
-    let stroke = shape.attribute("strokecolor").and_then(hex6);
-    // VML default stroke weight is 0.75pt when a stroke color is present and no
-    // explicit weight is given (Part 4 §14.1.2.21 strokeweight default).
+    // `stroked="f"` (or "false") disables the stroke regardless of strokecolor
+    // (§19.1.2 shape stroked attribute). Otherwise a strokecolor implies a
+    // stroke; VML's default weight is 0.75pt (Part 4 §19.1.2.21 strokeweight).
+    let stroked_off = shape
+        .attribute("stroked")
+        .is_some_and(|v| matches!(v.trim(), "f" | "false" | "0"));
+    let stroke = if stroked_off {
+        None
+    } else {
+        shape.attribute("strokecolor").and_then(vml_color_hex6)
+    };
     let stroke_width = if stroke.is_some() {
         shape
             .descendants()
@@ -5226,17 +5226,72 @@ fn parse_vml_pict(
         0.0
     };
 
-    // Body text from <v:textbox><w:txbxContent>.
-    let text_blocks: Vec<ShapeText> = shape
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
-        .map(|content| {
-            children_w_flat(content, "p")
-                .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(style_map, p, theme, media_map))
-                .collect()
-        })
-        .unwrap_or_default();
+    // ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — fill alpha (default opaque).
+    let fill_opacity = shape
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "fill")
+        .and_then(|f| f.attribute("opacity"))
+        .and_then(parse_vml_opacity);
+
+    // §19.1.2.23 `<v:textpath>` — WordArt text (a watermark). When present this
+    // shape draws stretched rotated text instead of a fill/stroke panel + body.
+    let text_path = shape
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "textpath")
+        .and_then(parse_vml_textpath);
+
+    // §19.1.2.19 style `rotation` — degrees clockwise (default 0).
+    let rotation = vml_css_length_pt(style, "rotation").unwrap_or(0.0);
+
+    // §19.1.2.19 style positioning. `mso-position-horizontal/vertical` give the
+    // alignment (absolute|left|center|right|inside|outside); their `-relative`
+    // companions give the container (margin|page|text|char|line). Map them onto
+    // the shared anchor model the renderer already understands (align + relativeFrom).
+    let map_align = |v: &str| match v {
+        "center" => Some("center".to_string()),
+        "left" | "inside" => Some("left".to_string()),
+        "right" | "outside" => Some("right".to_string()),
+        _ => None, // "absolute" ⇒ use the numeric margin-left/top offset instead
+    };
+    let map_valign = |v: &str| match v {
+        "center" => Some("center".to_string()),
+        "top" | "inside" => Some("top".to_string()),
+        "bottom" | "outside" => Some("bottom".to_string()),
+        _ => None,
+    };
+    let anchor_x_align = vml_css_str(style, "mso-position-horizontal").and_then(map_align);
+    let anchor_y_align = vml_css_str(style, "mso-position-vertical").and_then(map_valign);
+    // `text` and `char`/`line` relative-froms map to paragraph-relative flow; we
+    // only forward the page/margin containers the watermark cares about.
+    let map_rel = |v: &str| match v {
+        "margin" => Some("margin".to_string()),
+        "page" => Some("page".to_string()),
+        _ => None,
+    };
+    let anchor_x_relative_from =
+        vml_css_str(style, "mso-position-horizontal-relative").and_then(map_rel);
+    let anchor_y_relative_from =
+        vml_css_str(style, "mso-position-vertical-relative").and_then(map_rel);
+
+    // §19.1.2.19 style `z-index` — a negative value places the shape BEHIND the
+    // document text (a watermark), matching wp:anchor behindDoc semantics.
+    let behind_doc = vml_css_length_pt(style, "z-index").is_some_and(|z| z < 0.0);
+
+    // Body text from <v:textbox><w:txbxContent> (none for a textpath watermark).
+    let text_blocks: Vec<ShapeText> = if text_path.is_some() {
+        Vec::new()
+    } else {
+        shape
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+            .map(|content| {
+                children_w_flat(content, "p")
+                    .into_iter()
+                    .filter_map(|p| extract_simple_paragraph_text(style_map, p, theme, media_map))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
 
     Some(ShapeRun {
         width_pt,
@@ -5244,16 +5299,22 @@ fn parse_vml_pict(
         anchor_x_pt: 0.0,
         anchor_y_pt: 0.0,
         anchor_x_from_margin: true,
-        anchor_y_from_para: true,
-        behind_doc: false,
+        anchor_y_from_para: !behind_doc,
+        anchor_x_align,
+        anchor_y_align,
+        anchor_x_relative_from,
+        anchor_y_relative_from,
+        behind_doc,
         z_order: 0,
         subpaths: Vec::new(),
         preset_geometry: Some("rect".to_string()),
         adj_values: Vec::new(),
         fill,
+        fill_opacity,
         stroke,
         stroke_width,
-        rotation: 0.0,
+        rotation,
+        text_path,
         // VML t202 text-box default insets are the OOXML defaults (§21.1.2.1.1).
         text_blocks,
         text_anchor: None,
@@ -5284,6 +5345,98 @@ fn vml_css_length_pt(style: &str, prop: &str) -> Option<f64> {
         }
     }
     None
+}
+
+/// Read a raw string property from a VML CSS `style` string (§19.1.2.19),
+/// case-insensitive on the property name, value trimmed. `None` when absent.
+fn vml_css_str<'a>(style: &'a str, prop: &str) -> Option<&'a str> {
+    for decl in style.split(';') {
+        let mut kv = decl.splitn(2, ':');
+        let k = kv.next()?.trim();
+        let v = match kv.next() {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if k.eq_ignore_ascii_case(prop) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Resolve a VML color value (ECMA-376 Part 4 §19.1.2 — `fillcolor` /
+/// `strokecolor`, or a CSS color word) to the renderer's 6-hex form WITHOUT a
+/// leading `#`. Accepts `#rrggbb` / `rrggbb` hex and the CSS/VML named colors
+/// (`silver`, `black`, `red`, …) resolved through the shared
+/// `ooxml_common::theme::preset_color` table. `None` for an unrecognized value
+/// (e.g. `windowText`, a palette-relative token we don't model here).
+fn vml_color_hex6(c: &str) -> Option<String> {
+    let s = c.trim().trim_start_matches('#');
+    if s.len() == 6 && s.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Some(s.to_ascii_lowercase());
+    }
+    ooxml_common::theme::preset_color(s.trim()).map(|hex| hex.to_ascii_lowercase())
+}
+
+/// Parse a VML `<v:fill opacity>` value (§19.1.2.5). The opacity is a number in
+/// [0.0, 1.0] (default 1.0). Per the spec it may ALSO be written in 1/65536-ths
+/// with a trailing `f` (e.g. `52429f` = 52429/65536 ≈ 0.8). Returns the decoded
+/// fraction, or `None` when unparseable.
+fn parse_vml_opacity(raw: &str) -> Option<f64> {
+    let raw = raw.trim();
+    if let Some(num) = raw.strip_suffix('f') {
+        return num.trim().parse::<f64>().ok().map(|n| n / 65536.0);
+    }
+    raw.parse::<f64>().ok()
+}
+
+/// Parse a `<v:textpath>` (§19.1.2.23) into a `TextPath`: its `string` (the
+/// WordArt text) plus the font family / weight / style extracted from the
+/// element's CSS `style` (`font-family`, `font-weight`, `font-style`, and the
+/// `bold`/`italic` keywords of the `font` shorthand). Quotes around the family
+/// are stripped. Returns `None` when the element carries no `string`.
+fn parse_vml_textpath(textpath: roxmltree::Node) -> Option<TextPath> {
+    let string = textpath.attribute("string")?.to_string();
+    let style = textpath.attribute("style").unwrap_or("");
+
+    // font-family: prefer the explicit property, else the last token of the
+    // `font` shorthand (`style variant weight size/line family`). Strip quotes.
+    let strip_quotes = |s: &str| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+    let font_family = vml_css_str(style, "font-family")
+        .map(strip_quotes)
+        .or_else(|| {
+            vml_css_str(style, "font").and_then(|shorthand| {
+                // The family is everything after the size token; a simple,
+                // robust take is the substring after the last size-like token.
+                // Fall back to the last whitespace-delimited token.
+                shorthand
+                    .rsplit(|c: char| c.is_whitespace())
+                    .find(|t| !t.is_empty())
+                    .map(strip_quotes)
+            })
+        })
+        .filter(|f| !f.is_empty());
+
+    let font_lc = vml_css_str(style, "font")
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let bold = vml_css_str(style, "font-weight")
+        .map(|w| w.eq_ignore_ascii_case("bold") || w.trim().parse::<u32>().is_ok_and(|n| n >= 600))
+        .unwrap_or(false)
+        || font_lc.split_whitespace().any(|t| t == "bold");
+    let italic = vml_css_str(style, "font-style")
+        .map(|s| s.eq_ignore_ascii_case("italic") || s.eq_ignore_ascii_case("oblique"))
+        .unwrap_or(false)
+        || font_lc
+            .split_whitespace()
+            .any(|t| t == "italic" || t == "oblique");
+
+    Some(TextPath {
+        string,
+        font_family,
+        bold,
+        italic,
+    })
 }
 
 /// Parse a bare legacy VML `<w:pict>` picture — a `<v:shape>` (or
@@ -13964,6 +14117,108 @@ mod vml_pict_tests {
             imgs.iter().all(|i| i.width_pt < 5000.0),
             "a grouped imagedata must not be sized from group units as pt: {:?}",
             imgs.iter().map(|i| i.width_pt).collect::<Vec<_>>()
+        );
+    }
+
+    /// §19.1.2.23 textpath — Word's canonical text watermark: a
+    /// `PowerPlusWaterMarkObject` `<v:shape type="#_x0000_t136">` positioned
+    /// absolute + centred in the margin box, rotated, `stroked="f"`, with a
+    /// `<v:fill opacity>` and a `<v:textpath string="…" style="font-family:…">`.
+    /// It must surface as a ShapeRun carrying the text_path (string + font),
+    /// rotation (§19.1.2.19), fill colour, and fill_opacity (§19.1.2.5) — the
+    /// renderer draws the stretched rotated semi-transparent text.
+    #[test]
+    fn watermark_textpath_shape_carries_text_rotation_and_opacity() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136"
+                  style="position:absolute;margin-left:0;margin-top:0;width:415pt;height:207.5pt;rotation:315;z-index:-251657216;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin"
+                  fillcolor="silver" stroked="f">
+                  <v:fill opacity=".5"/>
+                  <v:textpath style="font-family:&quot;Calibri&quot;;font-size:1pt"
+                    string="DRAFT"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1, "one watermark shape");
+        let s = &shapes[0];
+        let tp = s.text_path.as_ref().expect("text_path must be present");
+        assert_eq!(tp.string, "DRAFT");
+        assert_eq!(
+            tp.font_family.as_deref(),
+            Some("Calibri"),
+            "quotes stripped"
+        );
+        assert!((s.width_pt - 415.0).abs() < 1e-6, "w {}", s.width_pt);
+        assert!((s.height_pt - 207.5).abs() < 1e-6, "h {}", s.height_pt);
+        // rotation:315 deg (clockwise) from the shape style.
+        assert!((s.rotation - 315.0).abs() < 1e-6, "rotation {}", s.rotation);
+        // fillcolor silver → hex, opacity .5.
+        match &s.fill {
+            Some(ShapeFill::Solid { color }) => assert_eq!(color, "c0c0c0", "silver → c0c0c0"),
+            other => panic!("expected silver solid fill, got {other:?}"),
+        }
+        assert!(
+            (s.fill_opacity.unwrap() - 0.5).abs() < 1e-6,
+            "opacity {:?}",
+            s.fill_opacity
+        );
+        // It is a WordArt text path, not a text-box panel.
+        assert!(s.text_blocks.is_empty(), "no txbx body text");
+        // stroked="f" ⇒ no stroke.
+        assert_eq!(s.stroke_width, 0.0, "stroked=f ⇒ no stroke");
+        // Centred in the margin box (§19.1.2.19 mso-position-*).
+        assert_eq!(s.anchor_x_align.as_deref(), Some("center"));
+        assert_eq!(s.anchor_y_align.as_deref(), Some("center"));
+        assert_eq!(s.anchor_x_relative_from.as_deref(), Some("margin"));
+        assert_eq!(s.anchor_y_relative_from.as_deref(), Some("margin"));
+        // Negative z-index ⇒ behind the body text.
+        assert!(s.behind_doc, "negative z-index ⇒ behindDoc");
+    }
+
+    /// §19.1.2.5 opacity — the "52429f" form (1/65536-ths, trailing `f`) decodes
+    /// to 0.8; an absent `<v:fill opacity>` ⇒ fully opaque (`fill_opacity` =
+    /// None). Also checks an unquoted `font-family`.
+    #[test]
+    fn watermark_opacity_fraction_form_decodes() {
+        let mk = |fill: &str| {
+            format!(
+                r##"<w:document{ns}><w:body>
+                  <w:p><w:r><w:pict>
+                    <v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136"
+                      style="position:absolute;width:400pt;height:200pt" fillcolor="red" stroked="f">
+                      {fill}
+                      <v:textpath style="font-family:Arial" string="CONFIDENTIAL"/>
+                    </v:shape>
+                  </w:pict></w:r></w:p>
+                </w:body></w:document>"##,
+                ns = VML_NS,
+                fill = fill,
+            )
+        };
+        let f_form = shape_runs(&mk(r#"<v:fill opacity="52429f"/>"#), &HashMap::new());
+        assert!(
+            (f_form[0].fill_opacity.unwrap() - 0.8).abs() < 1e-3,
+            "52429f → 0.8, got {:?}",
+            f_form[0].fill_opacity
+        );
+        let no_fill = shape_runs(&mk(""), &HashMap::new());
+        assert!(
+            no_fill[0].fill_opacity.is_none(),
+            "no <v:fill opacity> ⇒ opaque (None)"
+        );
+        assert_eq!(
+            no_fill[0]
+                .text_path
+                .as_ref()
+                .unwrap()
+                .font_family
+                .as_deref(),
+            Some("Arial")
         );
     }
 }
