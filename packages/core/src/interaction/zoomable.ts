@@ -10,13 +10,27 @@
  * factor means" and "what the +/- steps are" across all five, so a host can drive
  * any viewer through the same six calls without special-casing the format.
  *
- * SCALE SEMANTICS (the contract): a scale of `1` means 100% — the natural /
- * fit-to-width baseline. `getScale()` and `setScale(n)` speak this user-facing
- * factor for EVERY viewer, even though the viewers store scale differently
- * internally (XlsxViewer's `cellScale` already is this factor; the single-canvas
- * viewers multiply the page's natural pt→px size; the scroll viewers multiply
- * their established fit-to-width base). Implementations translate to/from their
- * internal representation at the boundary so the contract stays uniform.
+ * SCALE SEMANTICS (the contract): a scale of `1` means 100% — the content at its
+ * natural size (a docx page at `widthPt × PT_TO_PX`, a pptx slide at
+ * `slideWidth / EMU_PER_PX`, an xlsx grid at `cellScale` 1). `getScale()` and
+ * `setScale(n)` speak this user-facing factor for EVERY viewer.
+ *
+ * KNOWN FAMILY DIFFERENCE — the INITIAL scale right after load (deliberate,
+ * documented rather than papered over): the single-canvas viewers (DocxViewer /
+ * PptxViewer) and XlsxViewer start at `1` (or the effective factor implied by an
+ * explicit `width` option); the continuous-scroll viewers (DocxScrollViewer /
+ * PptxScrollViewer) AUTO-FIT to the container on first layout, so their
+ * `getScale()` right after load reports the fit-to-width BASE factor (≠ 1 unless
+ * the container happens to match the natural width). The unit is identical — only
+ * the starting point differs, because fit-to-width is the natural resting state
+ * of a continuous document viewer.
+ *
+ * PRE-LOAD `setScale` (family-unified, IX9 F1): a `setScale` called before the
+ * content is loaded / before the layout is established is LATCHED — never
+ * silently dropped — and applied once the viewer establishes its scale (the
+ * single-canvas viewers honour it on the first render; the scroll viewers apply
+ * it right after the base fit establishes, firing `onScaleChange` at application
+ * time). `getScale()` reports the latched factor while it is pending.
  *
  * API SHAPE (idiomatic default — the integrator MAY veto; see the IX9 PR): a
  * six-method surface plus one change notification (`onScaleChange`). Deliberately
@@ -31,11 +45,15 @@
  */
 export interface ZoomableViewer {
   /** The current zoom factor (`1` = 100%). Never throws — returns the default
-   *  (`1`) before anything is loaded. */
+   *  (`1`) before anything is loaded, or the latched pending factor when a
+   *  pre-load `setScale` is waiting to be applied (see the module note). */
   getScale(): number;
   /** Set the absolute zoom factor (`1` = 100%), clamped to the viewer's
    *  `[zoomMin, zoomMax]`. Re-renders at the new scale and fires `onScaleChange`
-   *  when the clamped value actually changes. */
+   *  when the clamped value actually changes. Called BEFORE the content is
+   *  loaded / the layout is established, the (clamped) factor is LATCHED and
+   *  applied once the viewer establishes its scale — family-unified semantics
+   *  (IX9 F1): never silently dropped by any viewer. */
   setScale(scale: number): void | Promise<void>;
   /** Step up to the next larger rung of the shared zoom ladder (25 %→400 %),
    *  clamped to `zoomMax`. Equivalent to `setScale(nextZoomStep(getScale()))`. */
@@ -44,11 +62,26 @@ export interface ZoomableViewer {
   zoomOut(): void | Promise<void>;
   /** Fit the content's WIDTH to the container (the common "fit width" / "fit
    *  page width" verb). Sets the scale so one page/slide/sheet-column-run spans
-   *  the available width, then re-renders. Resolves once the fit render settles. */
+   *  the available width, then re-renders. Resolves once the fit render settles.
+   *
+   *  PERSISTENCE is viewer-implementation-dependent (deliberate, by family): the
+   *  single-canvas viewers (DocxViewer / PptxViewer) and XlsxViewer apply the fit
+   *  ONE-SHOT — they observe no container resizes, so a later resize does NOT
+   *  re-fit (call `fitWidth()` again after a layout change). The continuous-
+   *  scroll viewers (DocxScrollViewer / PptxScrollViewer) re-fit their width-fit
+   *  base on every container resize, so a `fitWidth()` there effectively
+   *  PERSISTS across resizes (the resize re-fit preserves the width-fit state). */
   fitWidth(): void | Promise<void>;
   /** Fit the WHOLE content (width AND height) inside the container, so an entire
    *  page/slide is visible without scrolling. Sets the scale to the smaller of the
-   *  width- and height-fit factors, then re-renders. */
+   *  width- and height-fit factors, then re-renders.
+   *
+   *  PERSISTENCE is viewer-implementation-dependent, and — unlike `fitWidth` —
+   *  a page fit does NOT persist across container resizes on ANY viewer: the
+   *  single-canvas viewers and XlsxViewer observe no resizes at all (one-shot),
+   *  and the continuous-scroll viewers' resize handler re-applies the WIDTH fit
+   *  (preserving the zoom multiplier), not the page fit. Re-invoke `fitPage()`
+   *  after a layout change to re-fit. */
   fitPage(): void | Promise<void>;
 }
 
