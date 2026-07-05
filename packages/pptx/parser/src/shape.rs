@@ -1869,8 +1869,15 @@ pub(crate) fn parse_sp_tree_node(
                 return;
             }
 
-            // SmartArt: render the PowerPoint-prebaked fallback drawing1.xml when present.
-            // Layout-engine reconstruction is not implemented; we rely on the cached dsp:spTree.
+            // SmartArt (ECMA-376 §21.4). Preferred path: replay the
+            // PowerPoint-prebaked drawing (`drawingN.xml` / `dsp:spTree`) when
+            // Office persisted one — that carries the true layout geometry.
+            //
+            // Fallback (PP3): when no drawing part exists, recover the diagram's
+            // *content* from its data model (`dataN.xml`) — every node's text,
+            // indented by its parent/child depth — as a bulleted list filling the
+            // frame. Layout-engine reconstruction (hierarchy/cycle geometry) is
+            // still not implemented; see `smartart_fallback`.
             if let Some(gd) = node
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
@@ -1883,6 +1890,15 @@ pub(crate) fn parse_sp_tree_node(
                                 parse_smartart_drawing(drawing_xml, &t, theme, out, zip);
                                 return;
                             }
+                            // No prebaked drawing → data-model fallback. `rels` are
+                            // the slide's, so `rels[dm_rid]` is the data part
+                            // (§21.4.2.22 relIds `r:dm`). Emits M (content list) or
+                            // S (placeholder); either way this graphicData is a
+                            // diagram, so we return regardless of the outcome.
+                            crate::smartart_fallback::emit_smartart_fallback(
+                                &dm_rid, &t, rels, theme, zip, out,
+                            );
+                            return;
                         }
                     }
                 }

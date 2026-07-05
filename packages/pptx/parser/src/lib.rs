@@ -26,6 +26,8 @@ use text::*;
 mod shape;
 use shape::*;
 
+mod smartart_fallback;
+
 mod master;
 use master::*;
 
