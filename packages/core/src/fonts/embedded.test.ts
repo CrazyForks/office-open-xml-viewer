@@ -341,4 +341,46 @@ describe('registerEmbeddedFonts — dedup + unregisterEmbeddedFonts (#762)', () 
     const stray = { family: 'Stray' } as unknown as FontFace;
     expect(() => unregisterEmbeddedFonts([stray])).not.toThrow();
   });
+
+  // Double-release safety: a stray double-release of one document's faces must
+  // never evict a font a SECOND document is still using (no over-decrement).
+  it('the same face passed twice in ONE call is decremented at most once (no over-decrement)', async () => {
+    const { added } = installFontFaceSet();
+    const a = await registerEmbeddedFonts([font()]); // document A
+    const b = await registerEmbeddedFonts([font()]); // document B (shares the face)
+    expect(added).toHaveLength(1);
+    expect(a[0]).toBe(b[0]); // same shared FontFace, refs === 2
+
+    // Document A releases, but its held list mistakenly contains the face twice.
+    // Naively that decrements refs 2 → 0 and evicts the shared face while B still
+    // uses it. The per-call `seen` guard must collapse the duplicate to a single
+    // decrement (refs 2 → 1), so the face STAYS in the set.
+    unregisterEmbeddedFonts([a[0], a[0]]);
+    expect(added).toHaveLength(1); // survived — B still holds it
+
+    // B releasing once now drops the last reference and removes the face.
+    unregisterEmbeddedFonts(b);
+    expect(added).toHaveLength(0);
+  });
+
+  it('re-releasing a FULLY-released face does not disturb a fresh re-registration of the same font', async () => {
+    const { added } = installFontFaceSet();
+    const a = await registerEmbeddedFonts([font()]); // document A, refs === 1
+    expect(added).toHaveLength(1);
+
+    unregisterEmbeddedFonts(a); // last (only) holder releases → face removed, entry gone
+    expect(added).toHaveLength(0);
+
+    // A different document opens the same font again — a BRAND-NEW FontFace object
+    // and registry entry (refs === 1).
+    const b = await registerEmbeddedFonts([font()]);
+    expect(added).toHaveLength(1);
+    expect(b[0]).not.toBe(a[0]); // distinct FontFace object (a's was deleted)
+
+    // A stray second release of A's OLD, already-removed face must be a no-op —
+    // it must NOT find and decrement the new registration (different identity) and
+    // so must not evict B's font.
+    unregisterEmbeddedFonts(a);
+    expect(added).toHaveLength(1); // B's fresh registration untouched
+  });
 });

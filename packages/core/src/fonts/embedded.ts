@@ -232,14 +232,39 @@ export async function registerEmbeddedFonts(
  * returned by {@link registerEmbeddedFonts}). Each face's refcount is
  * decremented; the face is removed from its FontFaceSet only when the last
  * holder releases it, so a font shared by two open documents survives until both
- * are destroyed. Idempotent and safe to call with faces from a context without a
- * FontFaceSet (no-op). Prevents the SPA leak where every opened document left
- * its FontFace objects in `document.fonts` forever.
+ * are destroyed. Safe to call with faces from a context without a FontFaceSet
+ * (no-op). Prevents the SPA leak where every opened document left its FontFace
+ * objects in `document.fonts` forever.
+ *
+ * **Idempotent / double-release safe (refs are never over-decremented).** Two
+ * independent guards protect a font another document is still using from being
+ * evicted by a stray double-release:
+ *
+ * - *Within one call*: the same `FontFace` appearing twice in `faces` (a caller
+ *   passing a list with duplicates) is decremented AT MOST ONCE — a per-call
+ *   `seen` set skips repeats. Without this, `unregister([F, F])` would drop refs
+ *   by 2 and could delete `F` while a second holder still references it.
+ * - *Across calls*: once a face's refcount reaches 0 its registry entry is
+ *   removed, so a later call that passes the same (now-unregistered) face finds
+ *   no entry and is a no-op — it can never push another registration's refs
+ *   negative.
+ *
+ * These make releasing the exact same face list twice harmless. Callers should
+ * still drop their reference after releasing (e.g. `DocxDocument.destroy()`
+ * clears its held array), but a mistaken double `destroy()` no longer corrupts
+ * the shared refcount.
  */
 export function unregisterEmbeddedFonts(faces: Iterable<FontFace>): void {
+  // Guard against the same face appearing more than once in THIS call so a
+  // duplicate cannot decrement a shared registration's refcount twice.
+  const seen = new Set<FontFace>();
   for (const face of faces) {
+    if (seen.has(face)) continue;
+    seen.add(face);
     // Find the registration for this face (identity match). The registry is
     // small (one entry per distinct embedded face), so a linear scan is fine.
+    // A face that was already fully released has no entry → this loop finds
+    // nothing and the release is a no-op (cross-call idempotency).
     for (const [sig, reg] of embeddedRegistry) {
       if (reg.face !== face) continue;
       reg.refs--;
