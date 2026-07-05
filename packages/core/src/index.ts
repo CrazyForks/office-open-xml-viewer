@@ -335,6 +335,16 @@ export { computeVisibleRange, type VisibleRange, type VisibleRangePad } from './
 // Shared exponential wheel/pinch zoom step (Ctrl/⌘+wheel). Pure — the caller
 // clamps to its own [zoomMin, zoomMax]. Used by XlsxViewer + the scroll viewers.
 export { zoomStepScale } from './interaction/zoom';
+// Shared hyperlink model + URL scheme-allowlist sanitiser (IX1). One
+// HyperlinkTarget shape + one sanitizeHyperlinkUrl predicate for docx / pptx /
+// xlsx so the external-URL safety policy is defined once, not per format.
+export {
+  type HyperlinkTarget,
+  DEFAULT_ALLOWED_HYPERLINK_SCHEMES,
+  hyperlinkUrlScheme,
+  sanitizeHyperlinkUrl,
+  openExternalHyperlink,
+} from './interaction/hyperlink';
 // Format-agnostic font design line-metrics (OS/2 win / hhea sums) for faces the
 // browser substitutes with different metrics — shared so docx (Word's design
 // line box), pptx and xlsx can size line boxes / floor single-line height

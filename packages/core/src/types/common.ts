@@ -358,10 +358,19 @@ export interface TextRunData {
   /** Set for OOXML field runs (e.g. "slidenum"). When set, renderer replaces text with field value. */
   fieldType?: string;
   /**
-   * Hyperlink target URL resolved from rPr > a:hlinkClick @r:id via the slide's _rels.
-   * Undefined for runs without a hyperlink. ECMA-376 §21.1.2.3.5 (CT_Hyperlink).
+   * Hyperlink target resolved from rPr > a:hlinkClick @r:id via the slide's _rels.
+   * For an external link this is the URL; for an internal slide jump it is the
+   * resolved internal part name (e.g. "../slides/slide3.xml"). Undefined for runs
+   * without a hyperlink. ECMA-376 §21.1.2.3.5 (CT_Hyperlink).
    */
   hyperlink?: string;
+  /**
+   * Raw `<a:hlinkClick @action>` string (e.g. "ppaction://hlinksldjump") when
+   * present — its presence marks {@link hyperlink} as an INTERNAL PowerPoint
+   * action (slide jump / first / last …) rather than an external URL. Undefined
+   * when the hlinkClick has no @action. ECMA-376 §21.1.2.3.5. (IX1)
+   */
+  hyperlinkAction?: string;
   /**
    * Run-level drop shadow on glyphs (`<a:rPr><a:effectLst><a:outerShdw>`),
    * ECMA-376 §20.1.8.45. Independent of the shape-level shadow on `spPr`.
