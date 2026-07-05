@@ -17,7 +17,32 @@ function cellValueText(value: CellValue): string {
   }
 }
 
+/**
+ * A formatted cell value together with any text colour the number-format code
+ * asked for (§18.8.30 "Specify colors"). `color` is a `#RRGGBB` hex when the
+ * matched section began with a `[Red]`/…/`[ColorN]` token, otherwise absent.
+ */
+export interface FormattedCell {
+  text: string;
+  color?: string;
+}
+
+/**
+ * Backward-compatible string entry point. Returns exactly the display string
+ * (colour discarded). Kept as the primary export so existing call sites
+ * (find, validation-list, workbook.cellText) are unaffected — the renderer,
+ * which needs the colour, calls {@link formatCellValueWithColor} instead.
+ */
 export function formatCellValue(
+  cell: Cell,
+  styles: Styles,
+  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  date1904 = false,
+): string {
+  return formatCellValueWithColor(cell, styles, cfNumFmt, date1904).text;
+}
+
+export function formatCellValueWithColor(
   cell: Cell,
   styles: Styles,
   cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
@@ -25,7 +50,7 @@ export function formatCellValue(
    *  serial dates against the 1904 epoch (§18.17.4.1). Defaults to false (1900
    *  date system) so callers that don't thread the flag are unaffected. */
   date1904 = false,
-): string {
+): FormattedCell {
   // Resolve the effective format once so both the numeric and text paths
   // honour the same precedence: CF dxf numFmt > style numFmt (§18.8.17).
   const xf = styles.cellXfs[cell.styleIndex ?? 0];
@@ -41,7 +66,7 @@ export function formatCellValue(
   // original text. Cells without a 4-section format pass through unchanged.
   if (cell.value.type !== 'number') {
     const text = cellValueText(cell.value);
-    return effectiveFmt ? applyTextSection(text, effectiveFmt) : text;
+    return { text: effectiveFmt ? applyTextSection(text, effectiveFmt) : text };
   }
 
   // Volatile builtins: TODAY()/NOW() cells have a cached `<v>` from the last
@@ -61,18 +86,29 @@ export function formatCellValue(
 }
 
 /**
- * Apply the 4th section (text section) of an Excel number format to a text
- * value. ECMA-376 §18.8.30:
- *   - Fewer than 4 sections → text passes through unchanged (Excel default).
- *   - Empty text section   → the value is hidden.
- *   - `@` in the section   → substituted by the original text.
- *   - Quoted / escaped literals are emitted; `[...]` metadata and
- *     `_`/`*` pad pairs are dropped (same conventions as the numeric path).
+ * Apply the text section of an Excel number format to a text value.
+ * ECMA-376 §18.8.30 "Include a section for text entry":
+ *   - The text section, if present, is the *last* section.
+ *   - With four sections, section[3] is unconditionally the text section (so
+ *     the `;;;` "hide everything" idiom hides text via an empty 4th section).
+ *   - With fewer sections, the format has a text section only if its last
+ *     section contains `@`; otherwise "text entered in a cell is not affected
+ *     by the format code" and passes through unchanged.
+ *   - `@` substitutes the original text; quoted / escaped literals are emitted;
+ *     `[...]` metadata and `_`/`*` pad pairs follow the numeric conventions.
  */
 function applyTextSection(text: string, formatCode: string): string {
-  const sections = formatCode.split(';');
-  if (sections.length < 4) return text;
-  const section = sections[3];
+  const sections = splitSections(formatCode);
+  let section: string;
+  if (sections.length >= 4) {
+    section = sections[3];
+  } else {
+    const last = sections[sections.length - 1];
+    // A text section is one that contains an `@` placeholder. Without one, the
+    // format has no text section and text is unaffected.
+    if (!last.includes('@')) return text;
+    section = last;
+  }
   if (section === '') return '';
   let out = '';
   let i = 0;
@@ -465,168 +501,637 @@ function formatGeneralNumber(num: number): string {
   return negative ? `-${body}` : body;
 }
 
-function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): string {
+function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): FormattedCell {
   // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
-  if (builtinFmt) return formatExcelDateCode(num, builtinFmt, date1904);
+  if (builtinFmt) return { text: formatExcelDateCode(num, builtinFmt, date1904) };
   // ECMA-376 §18.8.30: "General" is the reserved General number format regardless
   // of numFmtId. LibreOffice writes a custom numFmt (id ≥ 164) with
   // formatCode="General"; tokenizing it as a literal pattern would render the
   // word "General" instead of the value (issue #358).
-  if (formatCode && formatCode.trim().toLowerCase() === 'general') return formatGeneralNumber(num);
+  if (formatCode && formatCode.trim().toLowerCase() === 'general') return { text: formatGeneralNumber(num) };
   if (formatCode) {
-    if (isDateFormatCode(formatCode)) return formatExcelDateCode(num, formatCode, date1904);
+    if (isDateFormatCode(formatCode)) return { text: formatExcelDateCode(num, formatCode, date1904) };
     return applyFormatCode(num, formatCode);
   }
   switch (numFmtId) {
-    case 0: return formatGeneralNumber(num);
-    case 1: return Math.round(num).toString();
-    case 2: return num.toFixed(2);
-    case 3: return formatThousands(num, 0);
-    case 4: return formatThousands(num, 2);
-    case 9: return Math.round(num * 100) + '%';
-    case 10: return (num * 100).toFixed(2) + '%';
-    case 11: return num.toExponential(2);
-    case 37: case 38: return formatThousands(num, 0);
-    case 39: case 40: return formatThousands(num, 2);
-    case 49: return String(num);
-    default: return formatGeneralNumber(num);
+    // Built-in numeric numFmtIds without an explicit formatCode. Route the ones
+    // that have a well-defined pattern (§18.8.30 p.1776 "All Languages" table)
+    // through the same grammar engine as custom codes so their placeholder /
+    // sign-section semantics match exactly.
+    case 0: return { text: formatGeneralNumber(num) };
+    case 1: return applyFormatCode(num, '0');
+    case 2: return applyFormatCode(num, '0.00');
+    case 3: return applyFormatCode(num, '#,##0');
+    case 4: return applyFormatCode(num, '#,##0.00');
+    case 9: return applyFormatCode(num, '0%');
+    case 10: return applyFormatCode(num, '0.00%');
+    case 11: return applyFormatCode(num, '0.00E+00');
+    case 37: return applyFormatCode(num, '#,##0 ;(#,##0)');
+    case 38: return applyFormatCode(num, '#,##0 ;[Red](#,##0)');
+    case 39: return applyFormatCode(num, '#,##0.00;(#,##0.00)');
+    case 40: return applyFormatCode(num, '#,##0.00;[Red](#,##0.00)');
+    case 48: return applyFormatCode(num, '##0.0E+0');
+    case 49: return { text: String(num) };
+    default: return { text: formatGeneralNumber(num) };
   }
-}
-
-function formatThousands(num: number, decimals: number): string {
-  return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
 // (formatExcelDate removed; all date formatting now goes through formatExcelDateCode)
 
-function countDecimalPlaces(fmt: string): number {
-  const m = fmt.match(/\.([0#]+)/);
-  return m ? m[1].length : 0;
+// ════════════════════════════════════════════════════════════════════════════
+// Number-format grammar engine (ECMA-376 §18.8.30 / §18.8.31)
+//
+// A number format is up to four `;`-separated sections (positive;negative;zero;
+// text). Each numeric section is a token stream mixing literal text with a
+// single numeric placeholder run built from `0` / `#` / `?` (and `.` , `E±`).
+// Modifiers attached to a section: a leading colour `[Red]`/`[ColorN]`, a
+// condition `[>=100]`, a `%` multiplier, and trailing `,` scaling. The engine
+// is a tokenizer → AST → renderer, replacing the old regex-driven `.toFixed`
+// approximation so `#`/`?` placeholder semantics, fractions, comma-scaling and
+// conditional/coloured sections all follow the spec exactly.
+// ════════════════════════════════════════════════════════════════════════════
+
+/** §18.8.30 "Specify colors": the eight named section colours (p.1787). */
+const NAMED_COLORS: Record<string, string> = {
+  black: '#000000', blue: '#0000FF', cyan: '#00FFFF', green: '#008000',
+  magenta: '#FF00FF', red: '#FF0000', white: '#FFFFFF', yellow: '#FFFF00',
+};
+
+// Legacy indexed colour palette (§18.8.27, indices 0-63). `[ColorN]` maps N→
+// indexed=(N+7): the spec note says "[Color1] refers to indexed=8 ... [Color3]
+// for Red". Kept in sync with the Rust parser's INDEXED_COLORS.
+const INDEXED_COLORS: readonly string[] = [
+  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 0-7
+  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 8-15
+  '#800000', '#008000', '#000080', '#808000', '#800080', '#008080', '#C0C0C0', '#808080', // 16-23
+  '#9999FF', '#993366', '#FFFFCC', '#CCFFFF', '#660066', '#FF8080', '#0066CC', '#CCCCFF', // 24-31
+  '#000080', '#FF00FF', '#FFFF00', '#00FFFF', '#800080', '#800000', '#008080', '#0000FF', // 32-39
+  '#00CCFF', '#CCFFFF', '#CCFFCC', '#FFFF99', '#99CCFF', '#FF99CC', '#CC99FF', '#FFCC99', // 40-47
+  '#3366FF', '#33CCCC', '#99CC00', '#FFCC00', '#FF9900', '#FF6600', '#666699', '#969696', // 48-55
+  '#003366', '#339966', '#003300', '#333300', '#993300', '#993366', '#333399', '#333333', // 56-63
+];
+
+interface SectionCondition {
+  op: '<' | '<=' | '>' | '>=' | '=' | '<>';
+  value: number;
+}
+
+interface ParsedSection {
+  /** Raw section body with `[...]` modifiers stripped out. */
+  body: string;
+  color?: string;
+  condition?: SectionCondition;
 }
 
 /**
- * Split a format section into an ordered list of tokens, preserving the exact
- * literal surroundings (quoted strings, backslash escapes, non-placeholder
- * characters like `$`, `€`, `¥` when unquoted) so they can be reassembled
- * around the formatted number. Drops bracket metadata (`[Red]`, `[>0]`),
- * underscore-pad pairs and `*`-fill pairs, per ECMA-376 §18.8.30.
+ * Split a whole format code into its `;`-separated sections. `;` never appears
+ * inside quotes, escapes or `[...]` in a valid code, but we scan structurally
+ * so a stray one inside those never splits the section (defensive; matches how
+ * Excel lexes).
  */
-type FmtToken =
-  | { kind: 'lit'; text: string }
-  | { kind: 'num' }
-  | { kind: 'percent' }
-  | { kind: 'sci'; expSign: boolean };
+function splitSections(code: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let i = 0;
+  while (i < code.length) {
+    const ch = code[i];
+    if (ch === '"') {
+      cur += ch; i++;
+      while (i < code.length && code[i] !== '"') cur += code[i++];
+      if (i < code.length) cur += code[i++];
+    } else if (ch === '\\') {
+      cur += ch;
+      if (i + 1 < code.length) cur += code[i + 1];
+      i += 2;
+    } else if (ch === '[') {
+      cur += ch; i++;
+      while (i < code.length && code[i] !== ']') cur += code[i++];
+      if (i < code.length) cur += code[i++];
+    } else if (ch === ';') {
+      out.push(cur); cur = ''; i++;
+    } else {
+      cur += ch; i++;
+    }
+  }
+  out.push(cur);
+  return out;
+}
 
-function tokenizeNumberFormat(section: string): { tokens: FmtToken[]; numSpec: string } {
-  const tokens: FmtToken[] = [];
-  let numSpec = '';
-  let numPushed = false;
-  let sciPushed = false;
-  const pushLit = (s: string) => {
-    if (!s) return;
-    const last = tokens[tokens.length - 1];
-    if (last && last.kind === 'lit') last.text += s;
-    else tokens.push({ kind: 'lit', text: s });
-  };
-  const ensureNum = () => {
-    if (!numPushed) { tokens.push({ kind: 'num' }); numPushed = true; }
-  };
-
+/** Parse a section's leading `[...]` modifiers (colour, condition, currency).
+ *  Currency `[$sym-LCID]` is left *in* the body (its `$sym` is emitted as a
+ *  literal by the tokenizer); only colour and condition brackets are consumed
+ *  here. */
+function parseSection(section: string): ParsedSection {
+  let body = '';
+  let color: string | undefined;
+  let condition: SectionCondition | undefined;
   let i = 0;
   while (i < section.length) {
     const ch = section[i];
+    if (ch === '"') { // pass a quoted literal straight through
+      body += ch; i++;
+      while (i < section.length && section[i] !== '"') body += section[i++];
+      if (i < section.length) body += section[i++];
+    } else if (ch === '\\') {
+      body += ch;
+      if (i + 1 < section.length) body += section[i + 1];
+      i += 2;
+    } else if (ch === '[') {
+      const end = section.indexOf(']', i);
+      if (end < 0) { body += ch; i++; continue; }
+      const inner = section.slice(i + 1, end);
+      const lower = inner.toLowerCase();
+      const idxMatch = lower.match(/^color(\d{1,2})$/);
+      const condMatch = inner.match(/^(<=|>=|<>|<|>|=)\s*(-?[0-9.]+(?:[eE][-+]?\d+)?)$/);
+      if (lower in NAMED_COLORS) {
+        color = NAMED_COLORS[lower];
+      } else if (idxMatch) {
+        const n = parseInt(idxMatch[1], 10);
+        // §18.8.30: [ColorN] → indexed=(N+7); valid N is 1..56.
+        if (n >= 1 && n <= 56) color = INDEXED_COLORS[n + 7] ?? color;
+      } else if (condMatch) {
+        condition = { op: condMatch[1] as SectionCondition['op'], value: Number(condMatch[2]) };
+      } else {
+        // Currency / locale / elapsed brackets stay in the body for the
+        // tokenizer to interpret (`[$sym-LCID]`), so re-emit them verbatim.
+        body += section.slice(i, end + 1);
+      }
+      i = end + 1;
+    } else {
+      body += ch; i++;
+    }
+  }
+  return { body, color, condition };
+}
+
+function testCondition(cond: SectionCondition, num: number): boolean {
+  switch (cond.op) {
+    case '<': return num < cond.value;
+    case '<=': return num <= cond.value;
+    case '>': return num > cond.value;
+    case '>=': return num >= cond.value;
+    case '=': return num === cond.value;
+    case '<>': return num !== cond.value;
+  }
+}
+
+/**
+ * The lexed pieces of one numeric section. Literal text and placeholder runs
+ * are kept in order (`parts`) so digits can be substituted into placeholder
+ * positions *in place* — this is what lets embedded literals such as the `-` in
+ * a phone mask (`000\-00`) or the parentheses in `(000)` survive at their
+ * original spot. `intSpec` / `fracSpec` are the placeholder-only strings (for
+ * digit/decimal counting); `exp`, `hasPercent`, `commaScale`, `grouping`,
+ * `fraction` are section-wide modifiers.
+ */
+interface LexedSection {
+  parts: SecPart[];
+  intSpec: string;    // integer placeholder chars only (0/#/?)
+  fracSpec: string;   // fraction placeholder chars only (0/#/?)
+  hasPercent: boolean;
+  commaScale: number; // trailing commas after the last integer placeholder
+  grouping: boolean;  // a grouping comma inside the integer placeholders
+  exp?: { plus: boolean; width: number };
+  fraction?: {
+    /** Placeholder run for the whole-number part (`#` in `# ?/?`), or '' when
+     *  the format is a pure fraction (`?/?` with no leading whole group). */
+    wholeSpec: string;
+    /** Placeholder run for the numerator (the group just before `/`). */
+    numSpec: string;
+    denSpec: string;
+    fixedDen: number | null;
+  };
+}
+
+type SecPart =
+  | { kind: 'lit'; text: string }         // verbatim literal (quoted / escaped / symbol / space)
+  | { kind: 'intph'; ph: string }          // one integer placeholder char (0/#/?) — positional fill
+  | { kind: 'dot' }                        // the decimal point
+  | { kind: 'fracph'; ph: string }         // one fraction placeholder char
+  | { kind: 'percent' }
+  | { kind: 'exp' }                        // marker: emit the exponent block here
+  | { kind: 'fraction' };                  // marker: emit the whole `n/d` block here
+
+/**
+ * Lex one numeric section body (already stripped of `[...]` colour/condition
+ * modifiers) into a `LexedSection`. Currency `[$sym-LCID]` brackets that
+ * survived `parseSection` are expanded here to their literal symbol.
+ */
+function lexSection(body: string): LexedSection {
+  const parts: SecPart[] = [];
+  let intSpec = '';
+  let fracSpec = '';
+  let hasPercent = false;
+  let inFrac = false;   // past the decimal point
+  let exp: LexedSection['exp'];
+  let sawSlash = false;
+  // For fractions: the length of `intSpec` at the most recent gap (a literal
+  // between integer placeholders). The numerator run is everything after it, so
+  // `# ?/?` splits into whole `#` and numerator `?`.
+  let intGapLen = 0;
+  // Commas trailing the last placeholder (in int or frac position). Each scales
+  // the value by 1000 (§18.8.30 comma-scaling rule). Reset by any placeholder.
+  let trailingCommas = 0;
+
+  const pushLit = (s: string) => {
+    if (!s) return;
+    if (!inFrac && !sawSlash) intGapLen = intSpec.replace(/,/g, '').length;
+    const last = parts[parts.length - 1];
+    if (last && last.kind === 'lit') last.text += s;
+    else parts.push({ kind: 'lit', text: s });
+  };
+
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
     if (ch === '"') {
       i++;
       let s = '';
-      while (i < section.length && section[i] !== '"') s += section[i++];
-      if (i < section.length) i++;
+      while (i < body.length && body[i] !== '"') s += body[i++];
+      if (i < body.length) i++;
       pushLit(s);
     } else if (ch === '\\') {
-      if (i + 1 < section.length) pushLit(section[i + 1]);
+      if (i + 1 < body.length) pushLit(body[i + 1]);
       i += 2;
     } else if (ch === '[') {
-      while (i < section.length && section[i] !== ']') i++;
-      if (i < section.length) i++;
+      const end = body.indexOf(']', i);
+      const inner = end > i ? body.slice(i + 1, end) : '';
+      // Currency: `[$sym-LCID]` → emit `sym` (between `$` and `-`), drop LCID.
+      if (inner.startsWith('$')) {
+        const rest = inner.slice(1);
+        const dash = rest.indexOf('-');
+        pushLit(dash >= 0 ? rest.slice(0, dash) : rest);
+      }
+      i = end < 0 ? body.length : end + 1;
     } else if (ch === '_') {
+      // `_x` — a space the width of x (§18.8.30 p.1786). Render as one space.
+      pushLit(' ');
       i += 2;
     } else if (ch === '*') {
+      // `*x` — repeat x to fill the column width (§18.8.30 p.1784). No column
+      // width is available in this pure formatter, so emit a single x (Excel's
+      // minimum). Layout-driven fill is out of scope for the display string.
+      pushLit(body[i + 1] ?? '');
       i += 2;
-    } else if (ch === '#' || ch === '0' || ch === '?' || ch === '.' || ch === ',') {
-      ensureNum();
-      numSpec += ch;
+    } else if (ch === '#' || ch === '0' || ch === '?') {
+      if (inFrac) { fracSpec += ch; parts.push({ kind: 'fracph', ph: ch }); }
+      else { intSpec += ch; parts.push({ kind: 'intph', ph: ch }); }
+      trailingCommas = 0; // a placeholder after commas cancels trailing scaling
       i++;
+    } else if (ch === '.') {
+      inFrac = true;
+      parts.push({ kind: 'dot' });
+      i++;
+    } else if (ch === ',') {
+      // A comma between integer placeholders is a grouping (thousands) comma;
+      // a comma trailing the last placeholder scales the value by 1000 each.
+      if (!inFrac) intSpec += ',';
+      trailingCommas++;
+      i++;
+    } else if (ch === '/' && (intSpec.replace(/,/g, '').length > 0)) {
+      sawSlash = true;
+      parts.push({ kind: 'fraction' });
+      // Consume the denominator placeholders / literal.
+      i++;
+      let den = '';
+      while (i < body.length && /[0-9#?]/.test(body[i])) den += body[i++];
+      // Store on a temporary marker via closure vars (handled below).
+      (parts[parts.length - 1] as { den?: string }).den = den;
     } else if (ch === '%') {
-      tokens.push({ kind: 'percent' });
+      hasPercent = true;
+      parts.push({ kind: 'percent' });
       i++;
-    } else if ((ch === 'E' || ch === 'e') && (section[i + 1] === '+' || section[i + 1] === '-')) {
-      if (!sciPushed) {
-        tokens.push({ kind: 'sci', expSign: section[i + 1] === '+' });
-        sciPushed = true;
-      }
+    } else if ((ch === 'E' || ch === 'e') && (body[i + 1] === '+' || body[i + 1] === '-')) {
+      const plus = body[i + 1] === '+';
       i += 2;
-      while (i < section.length && section[i] === '0') i++;
+      let width = 0;
+      while (i < body.length && (body[i] === '0' || body[i] === '#' || body[i] === '?')) { width++; i++; }
+      exp = { plus, width: Math.max(width, 1) };
+      parts.push({ kind: 'exp' });
     } else {
       pushLit(ch);
       i++;
     }
   }
-  return { tokens, numSpec };
-}
 
-function formatNumberSpec(value: number, numSpec: string): string {
-  const hasThousands = numSpec.includes(',') && /[#0]/.test(numSpec);
-  const dec = countDecimalPlaces(numSpec);
-  if (hasThousands) return formatThousands(value, dec);
-  if (numSpec.includes('.')) return value.toFixed(dec);
-  if (/[#0?]/.test(numSpec)) return Math.round(value).toString();
-  return String(value);
-}
+  // Trailing scaling commas (recorded during the scan, covering both the
+  // integer-tail `#,##0,` and the fraction-tail `0.0,,` forms).
+  const commaScale = trailingCommas;
+  const grouping = /,(?=[#0?])/.test(intSpec);
+  const intPlaceholders = intSpec.replace(/,/g, '');
 
-function applyFormatCode(num: number, formatCode: string): string {
-  const sections = formatCode.split(';');
-  // Excel number formats have up to 4 sections: positive;negative;zero;text
-  // (§18.8.30). Pick the section matching `num`, falling back to the positive
-  // section when the target one is absent.
-  let section: string;
-  // When a dedicated negative section is present, Excel formats the negative
-  // value's *magnitude* in it — the minus is conveyed by the section's own
-  // literals (e.g. parentheses). `0;(0)` renders -5 as "(5)", not "(-5)".
-  let useMagnitude = false;
-  if (num > 0) section = sections[0];
-  else if (num < 0) {
-    if (sections.length > 1) { section = sections[1]; useMagnitude = true; }
-    else section = sections[0];
+  let fraction: LexedSection['fraction'];
+  if (sawSlash) {
+    const fracPart = parts.find(p => p.kind === 'fraction') as (SecPart & { den?: string }) | undefined;
+    const denRaw = fracPart?.den ?? '?';
+    const denLit = denRaw.match(/[0-9]+/);
+    // Split the integer placeholders into whole (before the last gap) and
+    // numerator (after it): `# ?/?` → whole `#`, numerator `?`.
+    const wholeSpec = intPlaceholders.slice(0, intGapLen);
+    const numSpec = intPlaceholders.slice(intGapLen) || '?';
+    fraction = {
+      wholeSpec,
+      numSpec,
+      denSpec: denRaw.replace(/[^0#?]/g, ''),
+      fixedDen: denLit ? parseInt(denLit[0], 10) : null,
+    };
   }
-  else section = sections.length > 2 ? sections[2] : sections[0];
-  const { tokens, numSpec } = tokenizeNumberFormat(section);
-  const hasPercent = tokens.some(t => t.kind === 'percent');
-  const sciTok = tokens.find(t => t.kind === 'sci') as Extract<FmtToken, { kind: 'sci' }> | undefined;
+
+  return { parts, intSpec: intPlaceholders, fracSpec, hasPercent, commaScale, grouping, exp, fraction };
+}
+
+// ── Numeric rendering primitives ────────────────────────────────────────────
+
+/** Group an integer digit string in threes with commas (thousands separator). */
+function groupThousands(intDigits: string): string {
+  return intDigits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/**
+ * Fill an integer digit string into an integer placeholder template, right to
+ * left, per §18.8.30 `0`/`#`/`?` semantics:
+ *  - every actual digit is shown (extra digits beyond the placeholders spill
+ *    out on the left);
+ *  - `0` positions with no digit show `0`; `?` positions show a space; `#`
+ *    positions show nothing.
+ * Grouping commas are applied to the emitted digit run when `grouping` is set.
+ */
+function fillIntegerTemplate(intDigits: string, phString: string, grouping: boolean): string {
+  const placeholders = phString.split('');
+  const digits = intDigits.split('');
+  const out: string[] = [];
+  let di = digits.length - 1;
+  let emitted: string[] = []; // collected actual digits (for grouping)
+
+  // Walk placeholders right→left.
+  for (let p = placeholders.length - 1; p >= 0; p--) {
+    if (di >= 0) { out.unshift(digits[di]); emitted.unshift(digits[di]); di--; }
+    else if (placeholders[p] === '0') { out.unshift('0'); emitted.unshift('0'); }
+    else if (placeholders[p] === '?') { out.unshift(' '); }
+    // '#' with no digit → nothing.
+  }
+  // Any remaining (higher-order) digits spill out to the left.
+  while (di >= 0) { out.unshift(digits[di]); emitted.unshift(digits[di]); di--; }
+
+  if (grouping) {
+    const grouped = groupThousands(emitted.join(''));
+    // Re-attach any leading `?` spaces that preceded the digit run.
+    const leadSpaces = out.length - emitted.length > 0 ? out.slice(0, out.length - emitted.length).join('') : '';
+    return leadSpaces + grouped;
+  }
+  return out.join('');
+}
+
+/** Render the fraction digits into a `fracph` template, keeping `0`, dropping
+ *  trailing `#`, and padding trailing `?` with spaces (§18.8.30). */
+function fillFractionText(fracDigits: string, fracSpec: string): string {
+  const decCount = fracSpec.length;
+  if (decCount === 0) return '';
+  const chars = fracDigits.padEnd(decCount, '0').slice(0, decCount).split('');
+  for (let k = decCount - 1; k >= 0; k--) {
+    const ph = fracSpec[k] ?? '#';
+    if (chars[k] === '0' && ph === '#') chars[k] = '';
+    else if (chars[k] === '0' && ph === '?') chars[k] = ' ';
+    else break;
+  }
+  return chars.join('');
+}
+
+/** Best rational approximation of `frac` (0<=frac<1) with a denominator of at
+ *  most `maxDenDigits` digits, or an exact fixed denominator. Uses a
+ *  Stern-Brocot mediant search (Excel's fraction display algorithm). */
+function approximateFraction(frac: number, maxDenDigits: number, fixedDen: number | null): [number, number] {
+  if (fixedDen !== null) return [Math.round(frac * fixedDen), fixedDen];
+  const maxDen = Math.pow(10, Math.max(maxDenDigits, 1)) - 1;
+  let bestN = 0, bestD = 1, bestErr = Math.abs(frac);
+  let lo: [number, number] = [0, 1];
+  let hi: [number, number] = [1, 1];
+  for (let iter = 0; iter < 100; iter++) {
+    const mN = lo[0] + hi[0];
+    const mD = lo[1] + hi[1];
+    if (mD > maxDen) break;
+    const val = mN / mD;
+    const err = Math.abs(val - frac);
+    if (err < bestErr) { bestErr = err; bestN = mN; bestD = mD; }
+    if (val < frac) lo = [mN, mD];
+    else if (val > frac) hi = [mN, mD];
+    else break;
+  }
+  return [bestN, bestD];
+}
+
+/**
+ * Format `num` against one already-parsed numeric section. `useMagnitude`
+ * strips the sign (the negative section supplies its own minus / parentheses).
+ */
+function renderNumericSection(num: number, body: string, useMagnitude: boolean): string {
+  const lex = lexSection(body);
 
   let value = useMagnitude ? Math.abs(num) : num;
-  if (hasPercent) value = value * 100;
+  if (lex.hasPercent) value = value * 100;
+  if (lex.commaScale > 0) value = value / Math.pow(1000, lex.commaScale);
 
-  let numberText: string;
-  let expText = '';
-  if (sciTok) {
-    const dec = countDecimalPlaces(numSpec);
-    const [mantissa, exp] = value.toExponential(dec).split('e');
-    numberText = mantissa;
-    const e = parseInt(exp, 10);
-    const sign = e < 0 ? '-' : (sciTok.expSign ? '+' : '');
-    expText = sign + String(Math.abs(e)).padStart(2, '0');
+  const negative = value < 0;
+  const sign = negative ? '-' : '';
+  const abs = Math.abs(value);
+
+  // ── Fraction section (`# ?/?`, `?/8`, …) ──────────────────────────────────
+  if (lex.fraction) {
+    const whole = Math.floor(abs);
+    const frac = abs - whole;
+    const { wholeSpec, numSpec, denSpec, fixedDen } = lex.fraction;
+    const hasWholePart = wholeSpec.length > 0; // e.g. `# ?/?` has a `#` whole part
+    const [numr, den] = approximateFraction(frac, denSpec.length, fixedDen);
+
+    // §18.8.30: `?` pads insignificant positions with spaces so fractions align
+    // on the slash — the numerator right-aligns (pad left), the denominator
+    // left-aligns (pad right). `0` would zero-pad instead.
+    const padNum = (n: number, ph: string): string => {
+      let s = String(n);
+      const pad = ph.includes('0') ? '0' : ' ';
+      while (s.length < ph.length) s = pad + s;
+      return s;
+    };
+    const padDen = (n: number, ph: string): string => {
+      let s = String(n);
+      const pad = ph.includes('0') ? '0' : ' ';
+      while (s.length < ph.length) s = s + pad;
+      return s;
+    };
+
+    let out = sign;
+    if (hasWholePart) {
+      const wholeText = whole > 0 ? String(whole) : (wholeSpec.includes('0') ? '0' : '');
+      if (numr === 0) {
+        // Integral value: Excel blanks the whole " n/d" group (including the
+        // slash) with spaces so the whole number lines up with fractional
+        // neighbours in the column. Width = space + numerator + slash + denom.
+        const denWidth = fixedDen !== null ? String(fixedDen).length : (denSpec.length || 1);
+        out += wholeText + ' '.repeat(1 + numSpec.length + 1 + denWidth);
+      } else {
+        const denText = fixedDen !== null ? String(fixedDen) : padDen(den, denSpec);
+        out += wholeText + ' ' + padNum(numr, numSpec) + '/' + denText;
+      }
+    } else {
+      // Pure fraction: fold the whole part back into the numerator.
+      const totalNumr = numr + whole * den;
+      const denText = fixedDen !== null ? String(fixedDen) : padDen(den, denSpec);
+      out += padNum(totalNumr, numSpec) + '/' + denText;
+    }
+    return out;
+  }
+
+  // ── Scientific section ────────────────────────────────────────────────────
+  if (lex.exp) {
+    const intPlaceCount = Math.max(lex.intSpec.length, 1);
+    const decCount = lex.fracSpec.length;
+    let mantissa = 0, e = 0;
+    if (abs !== 0) {
+      e = Math.floor(Math.log10(abs));
+      // Engineering grouping: exponent shifts to a multiple of the integer
+      // placeholder count so `#0.0E+0` on 1.22e7 → `12.2E+6`.
+      e = Math.floor(e / intPlaceCount) * intPlaceCount;
+      mantissa = abs / Math.pow(10, e);
+      if (parseFloat(mantissa.toFixed(decCount)) >= Math.pow(10, intPlaceCount)) {
+        e += intPlaceCount;
+        mantissa = abs / Math.pow(10, e);
+      }
+    }
+    const mantStr = mantissa.toFixed(decCount);
+    const [mInt, mFrac = ''] = mantStr.split('.');
+    const intText = fillIntegerTemplate(mInt, lex.intSpec, false);
+    const fracText = fillFractionText(mFrac, lex.fracSpec);
+    const expSign = e < 0 ? '-' : (lex.exp.plus ? '+' : '');
+    const expText = 'E' + expSign + String(Math.abs(e)).padStart(lex.exp.width, '0');
+    return sign + assembleFixed(lex, intText, fracText, expText);
+  }
+
+  // ── Plain fixed-point section ─────────────────────────────────────────────
+  const decCount = lex.fracSpec.length;
+  const rounded = abs.toFixed(decCount);
+  const [intDigitsRaw, fracDigits = ''] = rounded.split('.');
+  let intDigits = intDigitsRaw.replace(/^0+/, '');
+  // Keep a leading zero when a `0`/`?` placeholder forces the units digit, or
+  // when there is no fraction to lead with a bare dot.
+  const forcesLeadingZero = /[0]/.test(lex.intSpec) || (lex.intSpec === '' && false);
+  if (intDigits === '' && forcesLeadingZero) intDigits = '0';
+  const intText = fillIntegerTemplate(intDigits, lex.intSpec, lex.grouping);
+  const fracText = fillFractionText(fracDigits, lex.fracSpec);
+
+  return sign + assembleFixed(lex, intText, fracText, '');
+}
+
+/**
+ * Reassemble a section's literal parts around the rendered integer and fraction
+ * blocks, filling `intph`/`fracph` placeholders positionally so embedded
+ * literals (the `-` in a phone mask, the `(` `)` around accounting negatives)
+ * land at their original positions.
+ */
+function assembleFixed(lex: LexedSection, intText: string, fracText: string, expText: string): string {
+  // Split the pre-rendered integer text back across the intph placeholder
+  // positions. We fill from the right: the last intph gets the last char of
+  // intText, earlier ones the preceding chars, and the very first intph
+  // absorbs all remaining (overflow) characters.
+  const intChars = intText.split('');
+  const intPhIndices: number[] = [];
+  lex.parts.forEach((p, idx) => { if (p.kind === 'intph') intPhIndices.push(idx); });
+  const fracChars = fracText.split('');
+  const fracPhIndices: number[] = [];
+  lex.parts.forEach((p, idx) => { if (p.kind === 'fracph') fracPhIndices.push(idx); });
+
+  const intAssign = new Map<number, string>();
+  let ci = intChars.length - 1;
+  for (let k = intPhIndices.length - 1; k >= 0; k--) {
+    if (k === 0) {
+      // First placeholder absorbs everything remaining (overflow digits).
+      let s = '';
+      while (ci >= 0) s = intChars[ci--] + s;
+      intAssign.set(intPhIndices[k], s);
+    } else if (ci >= 0) {
+      intAssign.set(intPhIndices[k], intChars[ci--]);
+    } else {
+      intAssign.set(intPhIndices[k], '');
+    }
+  }
+  const fracAssign = new Map<number, string>();
+  for (let k = 0; k < fracPhIndices.length; k++) {
+    fracAssign.set(fracPhIndices[k], fracChars[k] ?? '');
+  }
+
+  // A dot is only shown when there is fraction content or a forced `0`/`?`.
+  const showDot = lex.fracSpec.length > 0 && (fracText.length > 0 || /[0?]/.test(lex.fracSpec));
+
+  let out = '';
+  for (let idx = 0; idx < lex.parts.length; idx++) {
+    const p = lex.parts[idx];
+    if (p.kind === 'lit') out += p.text;
+    else if (p.kind === 'intph') out += intAssign.get(idx) ?? '';
+    else if (p.kind === 'fracph') out += fracAssign.get(idx) ?? '';
+    else if (p.kind === 'dot') out += showDot ? '.' : '';
+    else if (p.kind === 'percent') out += '%';
+    else if (p.kind === 'exp') out += expText;
+  }
+  return out;
+}
+
+
+/**
+ * Apply a full custom number-format code (§18.8.30) to a numeric value.
+ * Handles section selection (positive/negative/zero + conditional overrides),
+ * per-section colour, and the numeric grammar. Returns the display string and
+ * any section colour.
+ */
+function applyFormatCode(num: number, formatCode: string): FormattedCell {
+  const rawSections = splitSections(formatCode);
+  const parsed = rawSections.map(parseSection);
+
+  // Conditional sections (§18.8.30 "Specify conditions"): if any section
+  // carries a `[cond]`, section selection is condition-driven — the first
+  // section whose condition matches wins; a trailing section without a
+  // condition is the "else". This overrides the positional pos/neg/zero rule.
+  const hasConditions = parsed.some(s => s.condition);
+  let chosen: ParsedSection | undefined;
+  let useMagnitude = false;
+
+  if (hasConditions) {
+    let matchedByCondition = false;
+    for (const sec of parsed) {
+      if (sec.condition) {
+        if (testCondition(sec.condition, num)) { chosen = sec; matchedByCondition = true; break; }
+      } else {
+        // Unconditional section acts as the default/else clause.
+        chosen = chosen ?? sec;
+        if (chosen === sec) break;
+      }
+    }
+    if (!chosen) {
+      // No criterion met and no else → Excel shows "#" across the cell.
+      return { text: '#' };
+    }
+    // Sign semantics (§18.8.30 / §18.8.31): a section selected by its own
+    // matching condition formats the value's *magnitude* — the section's
+    // literals carry the sign presentation, exactly like the positional
+    // negative section (the spec's `$0.00" Surplus";$-0.00" Shortage"` example
+    // on p.1785 shows -125.74 as "$-125.74 Shortage": magnitude plus the
+    // section's own literal `-`; built-ins 37-40 use parentheses the same way).
+    // Prepending the sign on top would double it: `[<0]\-0.0` @ -5 would print
+    // "--5.0". The unconditional "else" section, by contrast, mirrors the
+    // positional fallback rule (a negative formatted by the only/positive
+    // section keeps its sign, e.g. `0.0` @ -5 → "-5.0"), so a value that no
+    // condition claimed keeps its sign there.
+    useMagnitude = matchedByCondition && num < 0;
   } else {
-    numberText = formatNumberSpec(value, numSpec);
+    // Positional selection: positive;negative;zero (§18.8.31 p.1783).
+    if (num > 0) chosen = parsed[0];
+    else if (num < 0) {
+      if (parsed.length > 1) { chosen = parsed[1]; useMagnitude = true; }
+      else chosen = parsed[0];
+    } else {
+      chosen = parsed.length > 2 ? parsed[2] : parsed[0];
+    }
   }
 
-  let result = '';
-  let numberEmitted = false;
-  for (const t of tokens) {
-    if (t.kind === 'lit') result += t.text;
-    else if (t.kind === 'percent') result += '%';
-    else if (t.kind === 'num') { result += numberText; numberEmitted = true; }
-    else if (t.kind === 'sci') result += 'E' + expText;
-  }
-  if (!numberEmitted && (numSpec.length > 0 || sciTok)) result += numberText;
-  return result;
+  const text = renderNumericSection(num, chosen.body, useMagnitude);
+  return chosen.color ? { text, color: chosen.color } : { text };
 }
