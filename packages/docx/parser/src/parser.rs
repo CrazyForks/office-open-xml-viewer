@@ -3583,6 +3583,64 @@ fn parse_inline_drawing(
         shp.wrap_side = anchor_meta.wrap_side.clone();
     };
 
+    // ECMA-376 §20.4.2.3 (`<wp:anchor>`) + §21.2 (chart) — a floating chart.
+    // Wired identically to the inline chart path above (`<a:graphicData
+    // uri=".../chart">` wrapping a `<c:chart r:id>` child; the modern chartex
+    // uri `.../2014/chartex` is accepted the same way), only the enclosing
+    // container is `<wp:anchor>`. Detect it BEFORE the wgp/wsp/blip fallbacks —
+    // a chart graphicData has no `<a:blip>`, so without this it would fall all
+    // the way through to `resolve_inline_blip` and silently drop (issue #752).
+    // The parsed `pos_x`/`pos_y` + `x_from_margin`/`y_from_para` are carried on
+    // the ChartRun exactly like the anchor ImageRun path, so the renderer draws
+    // the chart at the same absolute page coordinates a floating picture uses.
+    if let Some(graphic_data) = container
+        .descendants()
+        .find(|n| n.tag_name().name() == "graphicData")
+    {
+        let is_chart = graphic_data.attribute("uri").is_some_and(|uri| {
+            uri.contains("drawingml/2006/chart")
+                || uri.contains("chartex")
+                || uri.contains("chartEx")
+        });
+        if is_chart {
+            if let Some(chart_node) = container
+                .descendants()
+                .find(|n| n.tag_name().name() == "chart")
+            {
+                let rid = attr_ns(
+                    &chart_node,
+                    relationships::TRANSITIONAL,
+                    relationships::STRICT,
+                    "id",
+                );
+                if let Some(chart) = rid.and_then(|rid| chart_map.get(rid)) {
+                    // Same `<wp:extent>` (cx/cy EMU → pt) contract as the inline
+                    // chart path: a chart without a parseable extent falls
+                    // through to the blip path (which also drops it).
+                    if let Some(extent) = container
+                        .descendants()
+                        .find(|n| n.tag_name().name() == "extent")
+                    {
+                        let cx: Option<f64> = extent.attribute("cx").and_then(|v| v.parse().ok());
+                        let cy: Option<f64> = extent.attribute("cy").and_then(|v| v.parse().ok());
+                        if let (Some(cx), Some(cy)) = (cx, cy) {
+                            return vec![DocRun::Chart(Box::new(ChartRun {
+                                chart: chart.clone(),
+                                width_pt: cx / 12700.0,
+                                height_pt: cy / 12700.0,
+                                anchor: true,
+                                anchor_x_pt: pos_x,
+                                anchor_y_pt: pos_y,
+                                anchor_x_from_margin: x_from_margin,
+                                anchor_y_from_para: y_from_para,
+                            }))];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Check for wgp (Word Graphics Group) — expands to multiple per-element entries
     if let Some(wgp) = container
         .descendants()
@@ -10294,6 +10352,100 @@ mod anchor_image_relative_from_tests {
             }
             other => panic!("expected DocRun::Chart, got {other:?}"),
         }
+    }
+
+    /// ECMA-376 §20.4.2.3 (`<wp:anchor>`) + §21.2 (chart) — a floating chart is
+    /// wired exactly like an inline chart (`<a:graphicData uri=".../chart">`
+    /// wrapping `<c:chart r:id>`), only the enclosing `<wp:inline>` is a
+    /// `<wp:anchor>` carrying `<wp:positionH>`/`<wp:positionV>`. Before this fix
+    /// the anchor branch of `parse_inline_drawing` had no chart detection (only
+    /// wgp/wsp/blip), so a floating chart fell through to `resolve_inline_blip`
+    /// (no blip present) and emitted nothing. It must now emit a `ChartRun` with
+    /// `anchor == true` and the parsed anchor offsets — mirroring the anchor
+    /// ImageRun path — so the renderer can draw it at absolute page coordinates.
+    /// The legacy `<a:graphicData uri=".../2006/chart">` and the modern chartex
+    /// uri are both accepted (same gate as the inline path).
+    #[test]
+    fn anchor_chart_drawing_emits_anchor_chart_run() {
+        // pos H/V posOffset in EMU: 914400 EMU = 72pt, 457200 EMU = 36pt.
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:r><w:drawing>
+            <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                       xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                       behindDoc="0" distT="0" distB="0" distL="0" distR="0"
+                       allowOverlap="1" relativeHeight="1">
+              <wp:positionH relativeFrom="column"><wp:posOffset>914400</wp:posOffset></wp:positionH>
+              <wp:positionV relativeFrom="paragraph"><wp:posOffset>457200</wp:posOffset></wp:positionV>
+              <wp:extent cx="5029200" cy="2743200"/>
+              <wp:wrapNone/>
+              <wp:docPr id="1" name="Chart 1"/>
+              <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+                <c:chart r:id="rIdChart"/>
+              </a:graphicData></a:graphic>
+            </wp:anchor>
+          </w:drawing></w:r>
+        </w:p>"#;
+        let doc = XmlDoc::parse(xml).unwrap();
+        let drawing = doc
+            .descendants()
+            .find(|n| n.tag_name().name() == "drawing")
+            .unwrap();
+        let style_map = StyleMap::parse("");
+        let media: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+
+        let model = parse_docx_chart(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <c:chart><c:plotArea><c:barChart>
+                <c:barDir val="col"/><c:grouping val="clustered"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:val><c:numRef><c:numCache><c:ptCount val="1"/>
+                    <c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+                </c:ser><c:axId val="1"/><c:axId val="2"/>
+              </c:barChart></c:plotArea></c:chart></c:chartSpace>"#,
+            None,
+            &theme,
+        )
+        .expect("model");
+        let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        chart_map.insert("rIdChart".to_string(), model);
+
+        let runs = parse_inline_drawing(&style_map, drawing, &media, &chart_map, &theme);
+        assert_eq!(runs.len(), 1, "one anchored chart run expected");
+        match &runs[0] {
+            DocRun::Chart(c) => {
+                assert!(c.anchor, "anchored chart must carry anchor == true");
+                assert_eq!(c.chart.chart_type, "clusteredBar");
+                assert!((c.width_pt - 396.0).abs() < 1e-6, "width_pt={}", c.width_pt);
+                assert!(
+                    (c.height_pt - 216.0).abs() < 1e-6,
+                    "height_pt={}",
+                    c.height_pt
+                );
+                assert!(
+                    (c.anchor_x_pt - 72.0).abs() < 1e-6,
+                    "anchor_x_pt={}",
+                    c.anchor_x_pt
+                );
+                assert!(
+                    (c.anchor_y_pt - 36.0).abs() < 1e-6,
+                    "anchor_y_pt={}",
+                    c.anchor_y_pt
+                );
+            }
+            other => panic!("expected DocRun::Chart, got {other:?}"),
+        }
+
+        // Unresolvable rId (empty map) → no run (chart fell through, no blip).
+        let empty: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
+        let none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
+        assert!(
+            none.is_empty(),
+            "unresolvable anchored chart rId must emit nothing"
+        );
     }
 
     /// CH14 end-to-end — `private/sample-24.docx` has 6 `<w:drawing>` chart

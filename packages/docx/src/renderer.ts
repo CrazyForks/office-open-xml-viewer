@@ -1,6 +1,6 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
@@ -6203,6 +6203,40 @@ function renderAnchorImages(
       const s = run as unknown as ShapeRun;
       if (s.behindDoc) continue;
       renderAnchorShape(s, state, paragraphTopPx);
+      continue;
+    }
+    if (run.type === 'chart') {
+      // ECMA-376 §20.4.2.3 (`<wp:anchor>`) + §21.2 (chart) — a floating chart is
+      // placed at the same absolute page box a floating picture uses, then
+      // painted with the shared core `renderChart` (identical to the inline
+      // chart draw at renderInlineImage). Only `anchor === true` charts reach
+      // here; inline charts flow as segments and are drawn during line layout.
+      const chartRun = run as unknown as ChartRun & { type: 'chart' };
+      if (!chartRun.anchor) continue;
+      // resolveAnchorBox reads only the box + anchor-placement fields, all of
+      // which the ChartRun carries (widthPt/heightPt/anchorXPt/anchorYPt/
+      // anchorXFromMargin/anchorYFromPara). The image-specific fields
+      // (align/relativeFrom/dist*/srcRect) are absent → the `?? 0`/`?? null`
+      // defaults inside resolveAnchorBox fall back to the plain offset path,
+      // matching how the parser emits an anchored chart (posOffset only).
+      const boxSrc = {
+        widthPt: chartRun.widthPt,
+        heightPt: chartRun.heightPt,
+        anchorXPt: chartRun.anchorXPt,
+        anchorYPt: chartRun.anchorYPt,
+        anchorXFromMargin: chartRun.anchorXFromMargin,
+        anchorYFromPara: chartRun.anchorYFromPara,
+      } as unknown as ImageRun;
+      const { x: pageX, y: pageY, w, h } = resolveAnchorBox(boxSrc, state, paragraphTopPx);
+      const chart = chartRun.chart;
+      if (state.verticalCJK) {
+        // §17.6.20 (tbRl) — a chart is a graphic, not text: keep it upright.
+        drawUprightBox(state.ctx, pageX, pageY, w, h, (dx, dy, dw, dh) =>
+          renderChart(state.ctx as CanvasRenderingContext2D, chart, { x: dx, y: dy, w: dw, h: dh }, state.scale),
+        );
+      } else {
+        renderChart(state.ctx as CanvasRenderingContext2D, chart, { x: pageX, y: pageY, w, h }, state.scale);
+      }
       continue;
     }
     if (run.type !== 'image') continue;
