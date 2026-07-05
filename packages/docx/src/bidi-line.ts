@@ -35,6 +35,11 @@ const segRtl = (s: unknown): boolean => (s as { rtl?: unknown }).rtl === true;
 const segDigitsAsAN = (s: unknown): boolean =>
   (s as { digitsAsAN?: unknown }).digitsAsAN === true;
 
+/** Is this a laid-out TAB segment (ECMA-376 §17.3.1.37)? A tab character is
+ *  Unicode Bidi_Class S (Segment Separator), NOT a neutral object — see
+ *  {@link computeLineVisualOrder}. */
+const segIsTab = (s: unknown): boolean => 'isTab' in (s as object);
+
 /**
  * Cheap gate: does this run of segments need the bidi pass? True when any
  * segment contains a strong-RTL character OR carries a run-level `<w:rtl>`
@@ -99,6 +104,13 @@ export function computeLineVisualOrder(
   //    reorders to Word's "2026-02-28" under an RTL base (§17.3.2.20).
   //  - rtl-marked segments (§17.3.2.30): punctuation/symbols → R, so the run's
   //    ambiguous characters resolve RTL at the base level (see doc above).
+  //  - TAB segments (§17.3.1.37): the placeholder is forced to S (Segment
+  //    Separator) — a tab character's real Bidi_Class. Rules L1/L2 then reset it
+  //    to the paragraph level and reorder each tab-delimited CELL independently,
+  //    so an RTL paragraph's tab-aligned cells appear in mirrored (leading-cell-
+  //    at-the-right) order, matching Word. Modelled as a class override rather
+  //    than by emitting a literal "\t" so the segment↔code-unit mapping stays
+  //    1:1 (every non-text inline object is one code unit).
   // `undefined` until any segment opts in, so the pure algorithm runs for
   // ordinary lines.
   let classOverride: (BidiClass | null)[] | undefined;
@@ -113,7 +125,10 @@ export function computeLineVisualOrder(
     full += t.length > 0 ? t : OBJECT_PLACEHOLDER;
     segEnd[i] = full.length;
 
-    if (t.length > 0 && (segDigitsAsAN(segments[i]) || segRtl(segments[i]))) {
+    if (segIsTab(segments[i])) {
+      // Single placeholder code unit at segStart[i]; classify it S.
+      ensureOverride()[segStart[i]] = 'S';
+    } else if (t.length > 0 && (segDigitsAsAN(segments[i]) || segRtl(segments[i]))) {
       const ov = ensureOverride();
       const digitsAN = segDigitsAsAN(segments[i]);
       const rtlMarked = segRtl(segments[i]);
