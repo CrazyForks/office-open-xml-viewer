@@ -542,6 +542,194 @@ describe('playEmf — window/viewport mapping (page → device)', () => {
   });
 });
 
+// ── playEmf: metric map modes + MM_ISOTROPIC ([MS-EMF] 2.1.21) ───────────────
+//
+// The five metric map modes (LOMETRIC/HIMETRIC/LOENGLISH/HIENGLISH/TWIPS) impose
+// a fixed physical size per logical unit, derived from the EMR_HEADER reference-
+// device resolution (px per mm). MM_ISOTROPIC additionally forces both axes to
+// the SMALLER |vpExt/winExt| ratio so the picture keeps its aspect ratio.
+//
+// A shared header maps device→target 1:1 so the metric page→device scale is the
+// only factor under test: dev 1000px / mm 100 ⇒ 10 px/mm; a 1000×1000 .01-mm
+// frame ⇒ boundsW/H = 1000·(1000/(100·100)) = 100 on a 100×100 raster.
+describe('playEmf — metric map modes + MM_ISOTROPIC ([MS-EMF] 2.1.21)', () => {
+  /** Header whose device→target mapping is exactly 1:1 on a 100×100 target and
+   *  whose reference device is 10 px/mm (drives the metric-mode extents). */
+  const metricHeader = () =>
+    emfHeader(0, 0, 100, 100, {
+      frame: { l: 0, t: 0, r: 1000, b: 1000 }, // .01 mm → 10 mm square
+      dev: { cx: 1000, cy: 1000 }, // px
+      mm: { cx: 100, cy: 100 }, // mm ⇒ 10 px/mm, sx = 1000/(100·100) = 0.1
+    });
+
+  // Each metric mode: one logical unit is a fixed physical length. At 10 px/mm
+  // the expected page→device (= target, since device→target is 1:1) px-per-unit
+  // is `unitMm · 10`. A viewport origin lifts the y-UP metric axis back on-canvas.
+  const MM_PER_INCH = 25.4;
+  const cases: Array<{ name: string; mode: number; unitMm: number }> = [
+    { name: 'MM_LOMETRIC (0.1 mm/unit)', mode: 2, unitMm: 0.1 },
+    { name: 'MM_HIMETRIC (0.01 mm/unit)', mode: 3, unitMm: 0.01 },
+    { name: 'MM_LOENGLISH (0.01 in/unit)', mode: 4, unitMm: 0.01 * MM_PER_INCH },
+    { name: 'MM_HIENGLISH (0.001 in/unit)', mode: 5, unitMm: 0.001 * MM_PER_INCH },
+    { name: 'MM_TWIPS (1/1440 in/unit)', mode: 6, unitMm: MM_PER_INCH / 1440 },
+  ];
+
+  for (const { name, mode, unitMm } of cases) {
+    it(`${name}: scales logical units to px via the reference-device resolution`, () => {
+      const pxPerUnit = unitMm * 10; // 10 px/mm reference device
+      // A viewport origin of (0,100) cancels the y-UP flip so the drawn point
+      // lands on-canvas: device Y = -yl·pxPerUnit + 100.
+      const yl = 40;
+      const xl = 60;
+      const file = concat(
+        metricHeader(),
+        record(EMR.SETMAPMODE, (w) => w.u32(mode)),
+        record(EMR.SETVIEWPORTORGEX, (w) => w.i32(0).i32(100)),
+        record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+        record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+        record(EMR.POLYLINE16, (w) =>
+          w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(xl).i16(yl).i16(0).i16(0),
+        ),
+        record(EMR.EOF, () => {}),
+      );
+      const m = makeRecordingCtx();
+      expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+      const move = m.calls.find((c) => c.op === 'moveTo');
+      // X: xl·pxPerUnit (x viewport origin 0). Y: y-UP ⇒ -yl·pxPerUnit + 100.
+      expect(move?.args[0] as number).toBeCloseTo(xl * pxPerUnit, 3);
+      expect(move?.args[1] as number).toBeCloseTo(-yl * pxPerUnit + 100, 3);
+    });
+  }
+
+  it('metric mode with a viewport origin brings the y-UP axis on-canvas', () => {
+    // Without a viewport origin, MM_LOMETRIC's y-UP flip drives y negative
+    // (off-canvas, above the top); with a viewport origin the same point lands
+    // inside the raster. Assert the sign flips as the origin is introduced.
+    const withoutOrg = concat(
+      metricHeader(),
+      record(EMR.SETMAPMODE, (w) => w.u32(2)),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(50).i16(50).i16(0).i16(0),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const a = makeRecordingCtx();
+    playEmf(withoutOrg, a.ctx, 100, 100);
+    const yNoOrg = a.calls.find((c) => c.op === 'moveTo')?.args[1] as number;
+    expect(yNoOrg).toBeLessThan(0); // y-UP ⇒ above the canvas top
+
+    const withOrg = concat(
+      metricHeader(),
+      record(EMR.SETMAPMODE, (w) => w.u32(2)),
+      record(EMR.SETVIEWPORTORGEX, (w) => w.i32(0).i32(100)),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(50).i16(50).i16(0).i16(0),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const b = makeRecordingCtx();
+    playEmf(withOrg, b.ctx, 100, 100);
+    const yOrg = b.calls.find((c) => c.op === 'moveTo')?.args[1] as number;
+    expect(yOrg).toBeGreaterThan(0); // origin lifts it back on-canvas
+    expect(yOrg).toBeCloseTo(yNoOrg + 100, 3); // shifted by exactly the origin
+  });
+
+  it('MM_ISOTROPIC forces both axes to the SMALLER |vpExt/winExt| ratio (equal aspect)', () => {
+    // Window 1000×1000, viewport 500×100 ⇒ raw ratios x=0.5, y=0.1. ANISOTROPIC
+    // would use those independently; ISOTROPIC forces BOTH to the smaller (0.1),
+    // so a square logical box stays square (no x/y distortion). Compare the two
+    // modes on the same geometry to prove the correction only applies to 7.
+    const geom = (mode: number) =>
+      concat(
+        emfHeader(0, 0, 100, 100),
+        record(EMR.SETMAPMODE, (w) => w.u32(mode)),
+        record(EMR.SETWINDOWEXTEX, (w) => w.i32(1000).i32(1000)),
+        record(EMR.SETVIEWPORTEXTEX, (w) => w.i32(500).i32(100)),
+        record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+        record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+        record(EMR.POLYLINE16, (w) =>
+          w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(200).i16(200).i16(0).i16(0),
+        ),
+        record(EMR.EOF, () => {}),
+      );
+
+    const aniso = makeRecordingCtx();
+    playEmf(geom(8), aniso.ctx, 100, 100); // MM_ANISOTROPIC
+    const anisoMove = aniso.calls.find((c) => c.op === 'moveTo');
+    // Independent axes: x = 200·0.5 = 100, y = 200·0.1 = 20 (distorted).
+    expect(anisoMove?.args[0] as number).toBeCloseTo(100, 3);
+    expect(anisoMove?.args[1] as number).toBeCloseTo(20, 3);
+
+    const iso = makeRecordingCtx();
+    playEmf(geom(7), iso.ctx, 100, 100); // MM_ISOTROPIC
+    const isoMove = iso.calls.find((c) => c.op === 'moveTo');
+    // Both axes use min(0.5, 0.1) = 0.1 ⇒ x = y = 200·0.1 = 20 (square kept).
+    expect(isoMove?.args[0] as number).toBeCloseTo(20, 3);
+    expect(isoMove?.args[1] as number).toBeCloseTo(20, 3);
+  });
+
+  it('MM_ISOTROPIC preserves the viewport y-flip sign while equalizing magnitude', () => {
+    // Negative viewport Y extent (y-UP) with unequal magnitudes: the shared
+    // isotropic |scale| is the smaller magnitude, but Y keeps its negative sign.
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.SETMAPMODE, (w) => w.u32(7)), // MM_ISOTROPIC
+      record(EMR.SETWINDOWEXTEX, (w) => w.i32(1000).i32(1000)),
+      record(EMR.SETVIEWPORTEXTEX, (w) => w.i32(500).i32(-100)), // y-UP, |0.1| < 0.5
+      record(EMR.SETVIEWPORTORGEX, (w) => w.i32(0).i32(50)),
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(200).i16(200).i16(0).i16(0),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    playEmf(file, m.ctx, 100, 100);
+    const move = m.calls.find((c) => c.op === 'moveTo');
+    // x = 200·0.1 = 20; y = 200·(−0.1) + 50 = 30 (magnitude equalized, sign kept).
+    expect(move?.args[0] as number).toBeCloseTo(20, 3);
+    expect(move?.args[1] as number).toBeCloseTo(30, 3);
+  });
+
+  it('composes the world transform with the window/viewport mapping (pin the order)', () => {
+    // world → PAGE (world transform) THEN page → DEVICE (window/viewport), per
+    // [MS-EMF] 2.3.11/2.3.12. World scales ×2 + translates (+10,+20); the mapping
+    // then scales ×0.5 (window 1000 → viewport 500). The ORDER matters: applying
+    // the device scale to the translation too (0.5·(2·xl+10)) differs from
+    // translating in device space. Pin the world-then-device composition.
+    const xl = 30;
+    const yl = 40;
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      // world transform: m11=m22=2, dx=10, dy=20 (MWT_SET).
+      record(EMR.MODIFYWORLDTRANSFORM, (w) =>
+        w.f32(2).f32(0).f32(0).f32(2).f32(10).f32(20).u32(4),
+      ),
+      record(EMR.SETMAPMODE, (w) => w.u32(8)), // MM_ANISOTROPIC
+      record(EMR.SETWINDOWEXTEX, (w) => w.i32(1000).i32(1000)),
+      record(EMR.SETVIEWPORTEXTEX, (w) => w.i32(500).i32(500)), // ×0.5
+      record(EMR.CREATEPEN, (w) => w.u32(1).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(1000).i32(1000).u32(2).i16(xl).i16(yl).i16(0).i16(0),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+    expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+    const move = m.calls.find((c) => c.op === 'moveTo');
+    // page = world(xl,yl) = (2·30+10, 2·40+20) = (70,100).
+    // device = page·0.5 = (35,50). device→target is 1:1 (bounds==target).
+    expect(move?.args[0] as number).toBeCloseTo((2 * xl + 10) * 0.5, 3);
+    expect(move?.args[1] as number).toBeCloseTo((2 * yl + 20) * 0.5, 3);
+  });
+});
+
 // ── playEmf: polygon fill + object table ─────────────────────────────────────
 
 describe('playEmf — polygon16 fill + brush/pen select', () => {
