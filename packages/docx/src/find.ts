@@ -51,8 +51,6 @@ export class DocxFindController {
   private _matches: DocxResolvedMatch[] = [];
   /** Active-match index into {@link _matches}, or -1 for none. */
   private _active = -1;
-  /** The current query (empty = no active find). */
-  private _query = '';
 
   constructor(
     private readonly _pageCount: () => number,
@@ -64,7 +62,6 @@ export class DocxFindController {
     this._pageRuns.clear();
     this._matches = [];
     this._active = -1;
-    this._query = '';
   }
 
   /** The runs for a page, if it has been scanned (used by the highlight overlay
@@ -113,7 +110,6 @@ export class DocxFindController {
   /** Run a fresh query across every page, resetting the cursor. Returns the
    *  public match list. An empty query clears matches. */
   async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<DocxMatchLocation>[]> {
-    this._query = query;
     this._matches = [];
     this._active = -1;
     if (query.length === 0) return [];
