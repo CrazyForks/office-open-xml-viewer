@@ -793,7 +793,9 @@ function computeSecondaryAxis(
   }
   const dMin = secVals.length ? Math.min(...secVals) : 0;
   const dMax = secVals.length ? Math.max(...secVals) : 1;
-  const { min, max, step } = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, plotHeightPt);
+  // An explicit `<c:valAx><c:majorUnit>` on the secondary axis (§21.2.2.103)
+  // overrides the auto step, mirroring the primary axis. null ⇒ auto.
+  const { min, max, step } = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max, plotHeightPt, sec.majorUnit);
   const range = (max - min) || 1;
   return {
     min,
@@ -2352,8 +2354,9 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
   // Area anchors the value axis at 0; ignore the returned min. Value axis is
-  // vertical → length = plot height (axis-length-aware auto major unit).
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, ph / ptToPx);
+  // vertical → length = plot height (axis-length-aware auto major unit). An
+  // explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step.
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, ph / ptToPx, chart.valAxisMajorUnit);
 
   // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
   // default application-defined) gives each category a band of width pw/n and
@@ -3102,16 +3105,27 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   for (const s of chart.series) for (const v of s.values) dataMax = Math.max(dataMax, v ?? 0);
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
-  // Radar anchors the value axis at 0; ignore the returned min.
-  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
+  // Radar anchors the value axis at 0; ignore the returned min. An explicit
+  // `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto ring step. The
+  // axis-length-aware auto density (GRIDLINE_SPACING_PT) is calibrated against
+  // Cartesian bar/line/area axes, not the radial spoke, so radar keeps the
+  // legacy fixed auto target (axisLenPt undefined) — only the explicit majorUnit
+  // path is new (byte-stable auto rings).
+  const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax, undefined, chart.valAxisMajorUnit);
 
   const angle0 = -Math.PI / 2;
   const spoke  = (i: number) => angle0 + (i / n) * Math.PI * 2;
 
+  // Rings sit on the value-axis MAJOR ticks — i.e. at value `ri * step`, whose
+  // radius is proportional to the value (`v / axMax`). Deriving the radius from
+  // the value (not `ri / rings`) keeps the rings on the major-unit multiples
+  // even when `axMax` is not an exact multiple of `step` (e.g. an explicit
+  // `<c:majorUnit>` §21.2.2.103 that doesn't divide the auto-rounded max).
   const rings = Math.round(axMax / step);
+  const ringValue = (ri: number): number => Math.min(ri * step, axMax);
   ctx.strokeStyle = '#ddd'; ctx.lineWidth = 0.5;
   for (let ri = 1; ri <= rings; ri++) {
-    const rr = (ri / rings) * rd;
+    const rr = (ringValue(ri) / axMax) * rd;
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
       const a = spoke(i);
@@ -3139,8 +3153,8 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (let ri = 1; ri <= rings; ri++) {
-      const v = (ri / rings) * axMax;
-      const rr = (ri / rings) * rd;
+      const v = ringValue(ri);
+      const rr = (v / axMax) * rd;
       ctx.fillText(formatChartVal(v), cx2 - 3, cy2 - rr);
     }
   }
@@ -3334,9 +3348,14 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // chart.valMin/valMax as the explicit args reproduces the prior `?? niceAxis…`
   // behavior exactly. Explicit <c:valAx><c:scaling> wins. NB: the auto major
   // unit is not specified by ECMA-376 (Excel-proprietary); niceStep approximates
-  // it and may differ from Excel by one step on some ranges.
+  // it and may differ from Excel by one step on some ranges. An explicit
+  // `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step. The
+  // axis-length-aware auto density (GRIDLINE_SPACING_PT) is calibrated against
+  // the bar/line/area value axes; scatter/bubble keep the legacy fixed auto
+  // target (axisLenPt undefined) so their auto gridlines stay byte-stable —
+  // only the explicit majorUnit path is new here.
   const { min: niceYMin, max: niceYMax, step: yAxisStep } =
-    valueAxisScale(yMin, yMax, chart.valMin, chart.valMax);
+    valueAxisScale(yMin, yMax, chart.valMin, chart.valMax, undefined, chart.valAxisMajorUnit);
   yMin = niceYMin; yMax = niceYMax;
   if (chart.catAxisMin != null) xMin = chart.catAxisMin;
   if (chart.catAxisMax != null) xMax = chart.catAxisMax;

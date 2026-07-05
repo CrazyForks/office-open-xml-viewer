@@ -2067,6 +2067,101 @@ describe('#744 — category-axis (vertical) major gridlines', () => {
   });
 });
 
+// #738: an explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) must be honored on
+// EVERY chart type's value axis, not just the primary bar/line axis. The area,
+// radar and scatter renderers ignored `chart.valAxisMajorUnit`; the secondary
+// (combo) axis had no majorUnit surface at all.
+describe('#738 — explicit majorUnit honored on every value axis (§21.2.2.103)', () => {
+  /** Numeric value-axis tick labels drawn by a chart, as numbers. */
+  function valTickNumbers(over: Partial<ChartModel>): number[] {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel(over), RECT, 1);
+    return rec.texts
+      .map(t => t.text)
+      .filter(t => /^\d+(\.\d+)?$/.test(t))
+      .map(Number);
+  }
+
+  it('area: majorUnit widens the value-axis step (labels land on multiples of it)', () => {
+    // Data 0..100. Auto step is fine-grained; majorUnit 50 → coarse ticks
+    // 0,50,100 and NOTHING at 25/75.
+    const auto = valTickNumbers({
+      chartType: 'area', categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [20, 60, 100] })],
+    });
+    const coarse = valTickNumbers({
+      chartType: 'area', categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [20, 60, 100] })],
+      valAxisMajorUnit: 50,
+    });
+    expect(coarse).toContain(50);
+    expect(coarse).not.toContain(25);
+    // Coarser than auto: strictly fewer distinct tick labels.
+    expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
+  });
+
+  it('scatter: majorUnit widens the Y (value) axis step', () => {
+    const auto = valTickNumbers({
+      chartType: 'scatter',
+      series: [series({ name: 'S', values: [10, 40, 70, 100] })],
+    });
+    const coarse = valTickNumbers({
+      chartType: 'scatter',
+      series: [series({ name: 'S', values: [10, 40, 70, 100] })],
+      valAxisMajorUnit: 50,
+    });
+    expect(coarse).toContain(50);
+    expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
+  });
+
+  it('radar: majorUnit widens the ring step (fewer radial ticks)', () => {
+    const auto = valTickNumbers({
+      chartType: 'radar', categories: ['A', 'B', 'C', 'D'],
+      series: [series({ name: 'S', values: [20, 60, 80, 100] })],
+    });
+    const coarse = valTickNumbers({
+      chartType: 'radar', categories: ['A', 'B', 'C', 'D'],
+      series: [series({ name: 'S', values: [20, 60, 80, 100] })],
+      valAxisMajorUnit: 50,
+    });
+    // Radar skips the center 0-label, so labels are the ring values.
+    expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
+    expect(coarse).toContain(50);
+  });
+
+  it('secondary (combo) axis: majorUnit widens its independent step', () => {
+    // A line chart whose secondary series rides an independent right-edge axis
+    // (the shared computeSecondaryAxis path, used by line/area and the bar-combo
+    // line series). Secondary data 0..100; an explicit majorUnit 50 → right-side
+    // ticks land on multiples of 50 (0,50,100) and NOTHING at 25.
+    const secModel = (majorUnit: number | null): ChartModel => baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({ name: 'Big', values: [10, 20, 30] }),
+        series({ name: 'Small', values: [20, 60, 100], useSecondaryAxis: true }),
+      ],
+      secondaryValAxis: {
+        min: null, max: null, title: 'Rate', hidden: false,
+        majorTickMark: 'out', lineHidden: false, majorUnit,
+      },
+    });
+    const rightTicks = (m: ChartModel): number[] => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, m, RECT, 1);
+      return rec.texts
+        .filter(t => t.x > RECT.x + RECT.w * 0.75 && /^\d+(\.\d+)?$/.test(t.text))
+        .map(t => Number(t.text));
+    };
+    const auto = rightTicks(secModel(null));
+    const coarse = rightTicks(secModel(50));
+    expect(auto.length).toBeGreaterThan(0); // guard: right-edge ticks exist
+    expect(coarse).toContain(50);
+    expect(coarse).not.toContain(25);
+    expect(new Set(coarse).size).toBeLessThan(new Set(auto).size);
+  });
+});
+
 /** Recording context that counts rotate() calls and captures fillText, for the
  *  category-label rotation / tickLblPos tests. */
 function rotateRecordingCtx(): { ctx: CanvasRenderingContext2D; rotates: number[]; texts: string[] } {
