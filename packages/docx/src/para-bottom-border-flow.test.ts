@@ -3,6 +3,9 @@ import { renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement,
   DocParagraph,
+  DocTable,
+  DocTableCell,
+  DocTableRow,
   DocxDocumentModel,
   ParagraphBorders,
   SectionProps,
@@ -31,21 +34,26 @@ const WIDTH_PT = 1.5; // sz12 = 12 eighths of a point → 1.5 pt
 const EXPECTED_EXTENT = SPACE_PT + WIDTH_PT / 2; // 1.75 pt
 
 interface HStroke { y: number; strokeStyle: string; }
+interface FillRectCall { x: number; y: number; w: number; h: number; fillStyle: string; }
 
 function makeRecordingCanvas(): {
   canvas: HTMLCanvasElement;
   hStrokes: HStroke[];
   textBaselines: number[];
+  fillRects: FillRectCall[];
 } {
   let font = '10px serif';
   let strokeStyle = '#000';
+  let fillStyle = '#000';
   const hStrokes: HStroke[] = [];
   const textBaselines: number[] = [];
+  const fillRects: FillRectCall[] = [];
   let path: { x: number; y: number }[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
-    fillStyle: '#000',
+    get fillStyle() { return fillStyle; },
+    set fillStyle(v: string) { fillStyle = v; },
     get strokeStyle() { return strokeStyle; },
     set strokeStyle(v: string) { strokeStyle = v; },
     letterSpacing: '0px',
@@ -68,7 +76,9 @@ function makeRecordingCanvas(): {
       }
     },
     fill() {},
-    fillRect() {},
+    fillRect(x: number, y: number, w: number, h: number) {
+      fillRects.push({ x, y, w, h, fillStyle });
+    },
     strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
@@ -80,7 +90,10 @@ function makeRecordingCanvas(): {
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
   };
   const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
-  return { canvas: canvas as unknown as HTMLCanvasElement, hStrokes, textBaselines };
+  // Real CanvasRenderingContext2D has a `.canvas` back-reference; the renderer
+  // reads it on some table paths (e.g. the §17.4.80 Y-axis clip).
+  (ctx as unknown as { canvas: unknown }).canvas = canvas;
+  return { canvas: canvas as unknown as HTMLCanvasElement, hStrokes, textBaselines, fillRects };
 }
 
 function bottomBorderOnly(): ParagraphBorders {
@@ -160,5 +173,81 @@ describe('a bottom paragraph border reserves flow so following content clears it
     // below the border edge = borderY + width/2.
     const boxTop = withBorder.baseline - 8;
     expect(boxTop).toBeGreaterThanOrEqual((withBorder.borderY as number) + WIDTH_PT / 2 - 1e-6);
+  });
+
+  it('a bordered paragraph inside a table cell measures as tall as it paints (B2 single measurer)', async () => {
+    // measureCellElementHeight must mirror the paint pass's trailing advance
+    // max(spaceAfter, bottom-border extent) — renderCellContent → renderParagraph
+    // advances by the border extent, so a cell measured without it sizes its row
+    // SHORT and the painted content pokes past the cell band (clipped under an
+    // `exact` row rule, bleeding otherwise). A LARGE extent (space=6, sz48 → 6 pt
+    // stroke → extent 9 pt) makes the pre-fix shortfall far exceed the line box's
+    // internal leading, so the assertion discriminates cleanly.
+    const CELL_SPACE_PT = 6;
+    const CELL_WIDTH_PT = 6; // sz48 = 48 eighths of a point → 6 pt stroke
+    const CELL_BG = 'ffeecc';
+    const ruled: DocParagraph = {
+      ...para('Ruled', null),
+      borders: {
+        top: null,
+        bottom: { style: 'single', color: BORDER_COLOR, width: CELL_WIDTH_PT, space: CELL_SPACE_PT } as NonNullable<ParagraphBorders['bottom']>,
+        left: null, right: null, between: null,
+      },
+    } as DocParagraph;
+    const cell: DocTableCell = {
+      content: [
+        { type: 'paragraph', ...ruled },
+        { type: 'paragraph', ...para('Below', null) },
+      ],
+      colSpan: 1, vMerge: null,
+      borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+      background: CELL_BG,
+      vAlign: 'top',
+      widthPt: 300,
+    } as unknown as DocTableCell;
+    const row: DocTableRow = {
+      cells: [cell], rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+    } as unknown as DocTableRow;
+    const table: DocTable = {
+      colWidths: [300], rows: [row],
+      borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+      cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+      jc: 'left',
+    } as unknown as DocTable;
+    const doc = {
+      section: {
+        pageWidth: PAGE_WIDTH, pageHeight: 4000,
+        marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
+        headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+      } as SectionProps,
+      body: [{ type: 'table', ...table } as unknown as BodyElement],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: { 'Times New Roman': 'roman' },
+    } as unknown as DocxDocumentModel;
+
+    const { canvas, hStrokes, textBaselines, fillRects } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, canvas, 0, {
+      dpr: 1, width: PAGE_WIDTH, // scale = 1 px per pt
+      fetchImage: async (_p: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    });
+
+    // The cell background fillRect's height IS the measured row band (auto row =
+    // measureCellContentHeightPx). The painted content must fit inside it.
+    const bg = fillRects.filter((r) => r.fillStyle === `#${CELL_BG}`);
+    expect(bg.length).toBe(1);
+    const bandBottom = bg[0].y + bg[0].h;
+
+    // Both paragraphs drew; "Below" is the lowest baseline. Its line box bottom
+    // (baseline + 0.2 em descent with the mock metrics) must not poke past the
+    // measured band — pre-fix the band was `space + width/2` (9 pt) short.
+    expect(textBaselines.length).toBeGreaterThanOrEqual(2);
+    const lastBaseline = Math.max(...textBaselines);
+    expect(lastBaseline + 2).toBeLessThanOrEqual(bandBottom + 1e-6);
+
+    // Sanity: the rule itself was drawn, inside the band.
+    const rule = hStrokes.filter((s) => s.strokeStyle === `#${BORDER_COLOR}`);
+    expect(rule.length).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...rule.map((s) => s.y))).toBeLessThanOrEqual(bandBottom + CELL_WIDTH_PT / 2 + 1e-6);
   });
 });

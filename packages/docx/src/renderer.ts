@@ -2584,7 +2584,7 @@ export function computePages(
       // sectionBreak / table / any non-paragraph breaks the run → not shared).
       const nextEl = body[i + 1];
       const nextShares = nextEl?.type === 'paragraph'
-        && parasShareBorderBox(para, nextEl as unknown as DocParagraph);
+        && parasShareBorderBox(para, nextEl);
       const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX(), nextShares);
 
       // ECMA-376 §17.11: a footnote shares the page with its reference, so the
@@ -8164,10 +8164,11 @@ function measureCellContentHeightPx(
   // The mark itself is still painted by renderCellContent; being empty it adds no
   // visible content, so excluding it from sizing cannot hide anything.
   const measured = trimTrailingStructuralMarker(cell.content);
-  // measureCellElementHeight always includes paragraph spaceBefore+spaceAfter;
-  // sumCellContentHeight folds in contextualSuppressed (§17.3.1.33) and the
-  // prevSpaceAfter/spaceBefore overlap collapse to match the paint pass's
-  // renderCellContent. Spacing is converted from pt to px with `scale`.
+  // measureCellElementHeight always includes paragraph spaceBefore plus
+  // max(spaceAfter, bottom-border extent) — the same trailing advance the paint
+  // pass emits (§17.3.1.7); sumCellContentHeight folds in contextualSuppressed
+  // (§17.3.1.33) and the prevSpaceAfter/spaceBefore overlap collapse to match the
+  // paint pass's renderCellContent. Spacing is converted from pt to px with `scale`.
   return (cm.top + cm.bottom) * scale + sumCellContentHeight(
     measured,
     (ce) => measureCellElementHeight(state, ce, contentW, scale),
@@ -8743,8 +8744,13 @@ function measureCellElementHeight(
 ): number {
   if (ce.type === 'paragraph') {
     const para = ce as unknown as DocParagraph;
+    // §17.3.1.7: the paint pass (renderCellContent → renderParagraph) advances
+    // `max(spaceAfter, bottomBorderExtentPt)` below the text box so following
+    // content clears a drawn bottom border. Mirror it here, or a bordered cell
+    // paragraph paints taller than the cell measures (B2: single measurer).
+    // renderCellContent never passes a borderMerge, so no suppression term.
     return measureParaHeight(state, para, innerWPx, scale)
-      + (para.spaceBefore + para.spaceAfter) * scale;
+      + (para.spaceBefore + Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders))) * scale;
   }
   // Nested table — estimateTableHeight works in pt; convert to px.
   const tbl = ce as unknown as DocTable;
