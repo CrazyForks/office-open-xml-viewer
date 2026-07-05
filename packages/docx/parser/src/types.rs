@@ -1046,6 +1046,13 @@ pub struct TextRun {
     pub vert_align: Option<String>,
     /// Target URL for hyperlinks (from relationships.xml), None if not a link or no URL
     pub hyperlink: Option<String>,
+    /// ECMA-376 §17.16.23 `<w:hyperlink w:anchor>` — internal bookmark name this
+    /// link jumps to (a `<w:bookmarkStart w:name>` in the same document). Set for
+    /// an internal cross-reference / TOC entry. When a `<w:hyperlink>` carries
+    /// BOTH `r:id` and `w:anchor`, the external URL wins for `hyperlink` while the
+    /// anchor is still recorded here. `None` when the link has no anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hyperlink_anchor: Option<String>,
     /// Transform all characters to uppercase (w:caps)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub all_caps: bool,

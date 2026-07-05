@@ -3,6 +3,8 @@ import type { LoadOptions } from './document';
 import type { RenderPageOptions } from './types';
 import type { DocxTextRunInfo } from './renderer';
 import { buildDocxTextLayer } from './text-layer';
+import { openExternalHyperlink } from '@silurus/ooxml-core';
+import type { HyperlinkTarget } from '@silurus/ooxml-core';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -13,6 +15,11 @@ export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   enableTextSelection?: boolean;
   /** Called when a page finishes rendering. */
   onPageChange?: (index: number, total: number) => void;
+  /** IX1 (design decision — NOT user-confirmed, integrator may veto). Called when
+   *  a hyperlink run is clicked. When omitted, the default is: external → open in a
+   *  new tab via core `openExternalHyperlink` (sanitised, noopener,noreferrer);
+   *  internal → jump to the page whose text contains the bookmark (best-effort). */
+  onHyperlinkClick?: (target: HyperlinkTarget) => void;
   /** Called on parse or render errors. */
   onError?: (err: Error) => void;
 }
@@ -289,6 +296,30 @@ export class DocxViewer {
       runs,
       this._canvas.style.width || this._canvas.width + 'px',
       this._canvas.style.height || this._canvas.height + 'px',
+      this._hyperlinkHandler(),
     );
+  }
+
+  /**
+   * IX1 — the click handler passed to the text-layer overlay. When the caller
+   * supplied `onHyperlinkClick`, it fully owns the behaviour (the default is
+   * suppressed). Otherwise the built-in default is: an external link opens in a
+   * new tab through core `openExternalHyperlink` (URL sanitised against the safe
+   * scheme allowlist, `noopener,noreferrer`); an internal `w:anchor` link is a
+   * no-op for now — jumping to a bookmark needs a bookmark→page index that the
+   * docx pipeline does not yet expose, and faking it would land on the wrong
+   * page.
+   */
+  private _hyperlinkHandler(): (target: HyperlinkTarget) => void {
+    const custom = this._opts.onHyperlinkClick;
+    if (custom) return custom;
+    return (target: HyperlinkTarget): void => {
+      if (target.kind === 'external') {
+        openExternalHyperlink(target.url);
+      }
+      // TODO IX1: resolve bookmark -> page (needs a bookmarkStart → page map from
+      // the paginator) and call goToPage(); until then an internal anchor click
+      // is intentionally inert rather than jumping to a guessed page.
+    };
   }
 }

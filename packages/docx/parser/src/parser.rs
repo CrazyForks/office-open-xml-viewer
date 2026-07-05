@@ -2262,11 +2262,11 @@ fn parse_para_content(
             "r" => {
                 handle_run_in_para(
                     child, base_run, style_map, media_map, chart_map, theme, runs, field, None,
-                    revision,
+                    None, revision,
                 );
             }
             "hyperlink" => {
-                // Resolve URL from r:id via relationships
+                // Resolve URL from r:id via relationships (§17.16.22, external).
                 let href = attr_ns(
                     &child,
                     relationships::TRANSITIONAL,
@@ -2274,6 +2274,12 @@ fn parse_para_content(
                     "id",
                 )
                 .and_then(|rid| rel_map.get(rid).cloned());
+                // ECMA-376 §17.16.23 `w:anchor` — the internal bookmark target.
+                // Recorded independently of `r:id`; when both are present the
+                // external URL still wins for `hyperlink` (see parse_run_inner),
+                // but the anchor is threaded through so an anchor-only link (no
+                // r:id) is captured as an internal target.
+                let anchor = attr_w(child, "anchor");
                 for r in child
                     .children()
                     .filter(|n| n.is_element() && n.tag_name().name() == "r")
@@ -2288,6 +2294,7 @@ fn parse_para_content(
                         runs,
                         field,
                         Some(href.clone()),
+                        anchor.clone(),
                         revision,
                     );
                 }
@@ -2402,6 +2409,10 @@ fn handle_run_in_para(
     field: &mut FieldState,
     // Outer None = not inside a hyperlink. Some(None) = hyperlink without URL. Some(Some(url)) = hyperlink with URL.
     link_href: Option<Option<String>>,
+    // §17.16.23 `w:anchor` — internal bookmark target, threaded alongside
+    // `link_href`. `None` when the enclosing `<w:hyperlink>` has no anchor (or
+    // the run is not inside a hyperlink at all).
+    link_anchor: Option<String>,
     revision: Option<&RunRevision>,
 ) {
     // Inspect this run for field control characters or instruction text first.
@@ -2510,7 +2521,17 @@ fn handle_run_in_para(
     // Normal run
     let in_toc = field.in_toc();
     parse_run_inner(
-        r_node, base_run, style_map, media_map, chart_map, theme, runs, link_href, revision, in_toc,
+        r_node,
+        base_run,
+        style_map,
+        media_map,
+        chart_map,
+        theme,
+        runs,
+        link_href,
+        link_anchor,
+        revision,
+        in_toc,
     );
 }
 
@@ -2636,6 +2657,9 @@ fn parse_run_inner(
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     link_href: Option<Option<String>>,
+    // §17.16.23 `w:anchor` — internal bookmark target, threaded alongside
+    // `link_href`. `None` when the link has no anchor / this is not a link run.
+    link_anchor: Option<String>,
     revision: Option<&RunRevision>,
     // True when this run is part of a TOC field's result (§17.16.5.69). Used to
     // suppress the Hyperlink character style's blue/underline on TOC entries.
@@ -2689,6 +2713,10 @@ fn parse_run_inner(
     // the renderer can hit-test, and `hyperlink` carries the resolved href.
     let is_link = link_href.is_some();
     let hyperlink = link_href.clone().flatten();
+    // §17.16.23 — internal bookmark target. Recorded independently of the
+    // external URL: when a link has both, `hyperlink` (external) wins downstream
+    // but the anchor is preserved here; an anchor-only link surfaces here alone.
+    let hyperlink_anchor = link_anchor.clone();
 
     let bold = fmt.bold.unwrap_or(false);
     let italic = fmt.italic.unwrap_or(false);
@@ -2789,6 +2817,7 @@ fn parse_run_inner(
                         border: border.clone(),
                         vert_align: vert_align.clone(),
                         hyperlink: hyperlink.clone(),
+                        hyperlink_anchor: hyperlink_anchor.clone(),
                         all_caps,
                         small_caps,
                         double_strikethrough,
@@ -2857,6 +2886,7 @@ fn parse_run_inner(
                         border: border.clone(),
                         vert_align: vert_align.clone(),
                         hyperlink: hyperlink.clone(),
+                        hyperlink_anchor: hyperlink_anchor.clone(),
                         all_caps,
                         small_caps,
                         double_strikethrough,
@@ -2895,6 +2925,7 @@ fn parse_run_inner(
                     border: border.clone(),
                     vert_align: vert_align.clone(),
                     hyperlink: hyperlink.clone(),
+                    hyperlink_anchor: hyperlink_anchor.clone(),
                     all_caps,
                     small_caps,
                     double_strikethrough,
@@ -2978,6 +3009,7 @@ fn parse_run_inner(
                     border: border.clone(),
                     vert_align: vert_align.clone(),
                     hyperlink: hyperlink.clone(),
+                    hyperlink_anchor: hyperlink_anchor.clone(),
                     all_caps,
                     small_caps,
                     double_strikethrough,
@@ -3096,6 +3128,7 @@ fn parse_run_inner(
                             theme,
                             runs,
                             link_href.clone(),
+                            link_anchor.clone(),
                             revision,
                             in_toc,
                         );
@@ -3159,6 +3192,7 @@ fn parse_run_inner(
                     // baseline for that exact token.
                     vert_align: Some("super".to_string()),
                     hyperlink: hyperlink.clone(),
+                    hyperlink_anchor: hyperlink_anchor.clone(),
                     all_caps,
                     small_caps,
                     double_strikethrough,
@@ -12964,6 +12998,58 @@ mod strict_namespace_tests {
             runs[0].hyperlink.as_deref(),
             Some("https://example.com/"),
             "Strict r:id must resolve via relationships"
+        );
+        assert_eq!(
+            runs[0].hyperlink_anchor, None,
+            "an r:id-only link has no internal anchor"
+        );
+    }
+
+    // ECMA-376 §17.16.23 — an anchor-only `<w:hyperlink w:anchor>` (internal
+    // cross-reference / bookmark jump, no r:id) records the bookmark name in
+    // `hyperlink_anchor` and leaves the external `hyperlink` URL unset.
+    #[test]
+    fn hyperlink_anchor_only_captured() {
+        let p = parse_strict_p(
+            r#"<w:hyperlink w:anchor="_Bookmark1"><w:r><w:t>jump</w:t></w:r></w:hyperlink>"#,
+            &HashMap::new(),
+        );
+        let runs = text_runs(&p);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "jump");
+        assert!(runs[0].is_link, "an anchor-only link is still a link");
+        assert_eq!(
+            runs[0].hyperlink, None,
+            "anchor-only link carries no external URL"
+        );
+        assert_eq!(
+            runs[0].hyperlink_anchor.as_deref(),
+            Some("_Bookmark1"),
+            "w:anchor must be captured as the internal target"
+        );
+    }
+
+    // When a `<w:hyperlink>` carries BOTH r:id and w:anchor, the external URL
+    // wins for `hyperlink` while the anchor is still recorded independently.
+    #[test]
+    fn hyperlink_rid_and_anchor_both_recorded() {
+        let mut rels = HashMap::new();
+        rels.insert("rId1".to_string(), "https://example.com/".to_string());
+        let p = parse_strict_p(
+            r#"<w:hyperlink r:id="rId1" w:anchor="_Bookmark1"><w:r><w:t>both</w:t></w:r></w:hyperlink>"#,
+            &rels,
+        );
+        let runs = text_runs(&p);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].hyperlink.as_deref(),
+            Some("https://example.com/"),
+            "r:id (external) still wins for the URL"
+        );
+        assert_eq!(
+            runs[0].hyperlink_anchor.as_deref(),
+            Some("_Bookmark1"),
+            "the anchor is recorded even when r:id is present"
         );
     }
 

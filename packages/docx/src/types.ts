@@ -906,6 +906,12 @@ export interface DocxTextRun {
   vertAlign: 'super' | 'sub' | null;
   /** Target URL for hyperlinks (resolved from relationships.xml) */
   hyperlink: string | null;
+  /** ECMA-376 §17.16.23 `<w:hyperlink w:anchor>` — internal bookmark name this
+   *  link jumps to (a `<w:bookmarkStart w:name>` in the same document). Set for an
+   *  internal cross-reference / TOC entry. When a link carries both `r:id` and
+   *  `w:anchor`, {@link DocxTextRun.hyperlink} (external) wins and this still
+   *  records the anchor. Absent when the link has no anchor. */
+  hyperlinkAnchor?: string | null;
   allCaps?: boolean;
   smallCaps?: boolean;
   doubleStrikethrough?: boolean;

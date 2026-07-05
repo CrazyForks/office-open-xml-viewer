@@ -1,4 +1,5 @@
-import { computeVisibleRange, PT_TO_PX, zoomStepScale, type VisibleRange } from '@silurus/ooxml-core';
+import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, type VisibleRange } from '@silurus/ooxml-core';
+import type { HyperlinkTarget } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -111,6 +112,11 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  `computeVisibleRange` (the first page intersecting the viewport top,
    *  EXCLUDING overscan). */
   onVisiblePageChange?: (topIndex: number, total: number) => void;
+  /** IX1 (design decision — NOT user-confirmed, integrator may veto). Called when
+   *  a hyperlink run is clicked. When omitted, the default is: external → open in a
+   *  new tab via core `openExternalHyperlink` (sanitised, noopener,noreferrer);
+   *  internal → jump to the page whose text contains the bookmark (best-effort). */
+  onHyperlinkClick?: (target: HyperlinkTarget) => void;
   /** Error callback. When set, `load()` invokes it and resolves (otherwise the
    *  error is rethrown — shared viewer error contract). It ALSO fires for async
    *  per-slot render failures (both main `renderPage` and worker
@@ -745,6 +751,7 @@ export class DocxScrollViewer {
             runs,
             slot.canvas.style.width || `${slot.canvas.width}px`,
             slot.canvas.style.height || `${slot.canvas.height}px`,
+            this._hyperlinkHandler(),
           );
         }
       })
@@ -763,6 +770,29 @@ export class DocxScrollViewer {
         "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
       );
     }
+  }
+
+  /**
+   * IX1 — the click handler passed to the text-layer overlay. When the caller
+   * supplied `onHyperlinkClick`, it fully owns the behaviour (the default is
+   * suppressed). Otherwise the built-in default is: an external link opens in a
+   * new tab through core `openExternalHyperlink` (URL sanitised against the safe
+   * scheme allowlist, `noopener,noreferrer`); an internal `w:anchor` link is a
+   * no-op for now — jumping to a bookmark needs a bookmark→page/offset map that
+   * the docx pipeline does not yet expose, and faking it would scroll to the
+   * wrong place.
+   */
+  private _hyperlinkHandler(): (target: HyperlinkTarget) => void {
+    const custom = this._opts.onHyperlinkClick;
+    if (custom) return custom;
+    return (target: HyperlinkTarget): void => {
+      if (target.kind === 'external') {
+        openExternalHyperlink(target.url);
+      }
+      // TODO IX1: resolve bookmark -> page/offset (needs a bookmarkStart → page
+      // map from the paginator) and scroll to it; until then an internal anchor
+      // click is intentionally inert rather than scrolling to a guessed page.
+    };
   }
 
   /** Route an async render failure to `onError`, or `console.error` when none is
@@ -1137,6 +1167,7 @@ export class DocxScrollViewer {
               runs,
               spare.style.width || `${spare.width}px`,
               spare.style.height || `${spare.height}px`,
+              this._hyperlinkHandler(),
             );
           }
         }

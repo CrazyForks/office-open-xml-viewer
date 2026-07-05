@@ -1,4 +1,5 @@
 import type { DocxTextRunInfo } from './renderer';
+import type { HyperlinkTarget } from '@silurus/ooxml-core';
 
 /**
  * Build the transparent text-selection overlay for a rendered docx page: one
@@ -10,17 +11,28 @@ import type { DocxTextRunInfo } from './renderer';
  * overlay (design §10). MAIN render mode only — `onTextRun` cannot cross the
  * worker boundary.
  *
- * @param layer           the overlay div (position:relative parent expected).
- * @param runs            per-run geometry from `renderPage({ onTextRun })`.
- * @param canvasCssWidth  the rendered canvas's CSS width (e.g. `"700px"`), used
- *                        to size the overlay to match the canvas.
- * @param canvasCssHeight the rendered canvas's CSS height.
+ * @param layer            the overlay div (position:relative parent expected).
+ * @param runs             per-run geometry from `renderPage({ onTextRun })`.
+ * @param canvasCssWidth   the rendered canvas's CSS width (e.g. `"700px"`), used
+ *                         to size the overlay to match the canvas.
+ * @param canvasCssHeight  the rendered canvas's CSS height.
+ * @param onHyperlinkClick IX1 — invoked when a run carrying a resolved
+ *                         {@link HyperlinkTarget} is clicked. A hyperlink run's
+ *                         span keeps its transparent glyphs (the visible link
+ *                         colour/underline is already drawn on the canvas) but
+ *                         gains `cursor:pointer`, a `title` tooltip (the URL or
+ *                         bookmark ref) and this click handler. A plain
+ *                         `<span>` — not an `<a href>` — is used deliberately so
+ *                         the browser's own navigation can never bypass the
+ *                         caller's URL sanitisation. When omitted, link runs are
+ *                         rendered exactly like plain runs (no click affordance).
  */
 export function buildDocxTextLayer(
   layer: HTMLDivElement,
   runs: DocxTextRunInfo[],
   canvasCssWidth: string,
   canvasCssHeight: string,
+  onHyperlinkClick?: (target: HyperlinkTarget) => void,
 ): void {
   layer.innerHTML = '';
   layer.style.width = canvasCssWidth;
@@ -43,12 +55,23 @@ export function buildDocxTextLayer(
     const transform = run.transform
       ? `transform:${run.transform};transform-origin:top left;`
       : '';
+    // IX1 — a run with a resolved hyperlink target becomes a clickable region.
+    // Only the cursor changes to a pointer and a title tooltip is added; the
+    // glyphs stay `color:transparent` (the link's blue/underline is already
+    // painted on the canvas), so a link run's selection behaviour is otherwise
+    // identical to a plain run. A non-link run is byte-identical to before.
+    const link = onHyperlinkClick ? run.hyperlink : undefined;
+    const cursor = link ? 'pointer' : 'text';
     span.style.cssText =
       `position:absolute;` +
       `left:${run.x}px;top:${run.y}px;` +
       `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
       transform +
-      `white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
+      `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;
+    if (link && onHyperlinkClick) {
+      span.title = link.kind === 'external' ? link.url : link.ref;
+      span.addEventListener('click', () => onHyperlinkClick(link));
+    }
     layer.appendChild(span);
   }
 }

@@ -50,7 +50,7 @@ import {
   drawUnderline,
   renderChart,
 } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget } from '@silurus/ooxml-core';
 import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import {
@@ -379,6 +379,11 @@ export interface DocxTextRunInfo {
    *  horizontal DOM span along the drawn (rotated) glyph run. Absent for
    *  horizontal pages (the span is placed at `x`/`y` untransformed). */
   transform?: string;
+  /** IX1 — the resolved hyperlink target of this run (ECMA-376 §17.16.22
+   *  external URL / §17.16.23 internal `w:anchor` bookmark), or absent for a
+   *  non-link run. The text-layer overlay turns a run carrying this into a
+   *  clickable region; the drawn glyphs are unaffected. */
+  hyperlink?: HyperlinkTarget;
 }
 
 export interface RenderDocumentOptions {
@@ -5870,6 +5875,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             fontSize: effSizePx,
             font: ctx.font,
             transform: place?.transform,
+            // IX1 — hand the resolved hyperlink target to the overlay so a link
+            // run becomes clickable. Undefined for non-link runs (no payload
+            // change). Does not touch any drawing above.
+            hyperlink: s.hyperlink,
           });
         }
 

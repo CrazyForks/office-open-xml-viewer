@@ -19,7 +19,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { MathNode, KinsokuRules, ChartModel } from '@silurus/ooxml-core';
+import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
@@ -105,6 +105,12 @@ export interface LayoutTextSeg {
    *  per segment, so body behaviour is unchanged); the TEXT-BOX metrics
    *  (`lineMetricsFor`) floor on it so a text box matches PR #640/#646/#648. */
   eaFloorFamily?: string | null;
+  /** IX1 — the resolved hyperlink target of the originating run (ECMA-376
+   *  §17.16.22 external `r:id` URL / §17.16.23 internal `w:anchor` bookmark),
+   *  computed once per run in `buildSegments`. Carried purely so the text-layer
+   *  overlay can build a clickable region; it does NOT affect measurement, line
+   *  breaking, or the drawn glyphs. Absent for a non-link run. */
+  hyperlink?: HyperlinkTarget;
 }
 
 /**
@@ -1232,6 +1238,17 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     const r = base as DocxTextRun;
     const rtl = r.rtl === true ? true : undefined;
 
+    // IX1 — resolve the run's hyperlink target ONCE (§17.16.22 external URL /
+    // §17.16.23 internal anchor). An external URL (`r.hyperlink`) wins over the
+    // internal `w:anchor` when both are present, matching the parser's rule. A
+    // FieldRun carries neither field, so the `as DocxTextRun` guards yield
+    // undefined. Purely a callback payload — it does not touch measurement.
+    const hyperlink: HyperlinkTarget | undefined = r.hyperlink
+      ? { kind: 'external', url: r.hyperlink }
+      : r.hyperlinkAnchor
+        ? { kind: 'internal', ref: r.hyperlinkAnchor }
+        : undefined;
+
     // ECMA-376 §17.3.2.26 content classification. A run with `w:rtl`
     // (§17.3.2.30) or the `<w:cs/>` toggle (§17.3.2.7) applies complex-script
     // formatting to ALL of its characters; otherwise each character is routed by
@@ -1309,6 +1326,9 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         // §17.3.2.26 declared eastAsia axis — recorded for the text-box line-box
         // floor only (see LayoutTextSeg.eaFloorFamily). Inert for the body path.
         eaFloorFamily: eaFontFamily,
+        // IX1 — resolved hyperlink target of the originating run, for the
+        // text-layer clickable overlay. Does not affect layout or drawing.
+        hyperlink,
       });
       firstSeg = false;
       gluePending = false; // glue applies only to a piece's FIRST segment

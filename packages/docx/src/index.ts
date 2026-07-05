@@ -4,6 +4,10 @@ export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 export { buildDocxTextLayer } from './text-layer';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
+// IX1 — the shared hyperlink target shape surfaced by `DocxViewerOptions.
+// onHyperlinkClick`, `DocxTextRunInfo.hyperlink`, and the 5th arg of
+// `buildDocxTextLayer`, plus the default "open in a new tab, sanitised" helper.
+export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
 // Typed load-time error surfaced by DocxDocument.load (e.g. a password-protected
 // or legacy-binary .doc file). Re-exported so `@silurus/ooxml/docx` consumers can
 // narrow on `err.code`.
