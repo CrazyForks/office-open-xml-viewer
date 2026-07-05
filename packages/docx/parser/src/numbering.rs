@@ -516,9 +516,31 @@ fn format_counter(n: u32, format: &str) -> String {
         "ideographLegalTraditional" => to_myriad_grouped(n, &MYRIAD_TRAD_LEGAL),
         "japaneseLegal" => to_myriad_grouped(n, &MYRIAD_JAPANESE_LEGAL),
         "koreanCounting" => to_myriad_grouped(n, &MYRIAD_KOREAN),
+        "koreanLegal" => to_korean_legal(n),
         // Documented residual (language spell-outs / unimplemented) → decimal.
         _ => n.to_string(),
     }
+}
+
+// §17.18.59 koreanLegal — native-Korean tens-word + ones-word, tabled for 1–99
+// (≥100 undefined by the spec → decimal fallback). Mirrors TS `toKoreanLegal`.
+const KOREAN_LEGAL_ONES: &[&str] = &[
+    "", "하나", "둘", "셋", "넷", "다섯", "여섯", "일곱", "여덟", "아홉",
+];
+const KOREAN_LEGAL_TENS: &[&str] = &[
+    "", "열", "스물", "서른", "마흔", "쉰", "예순", "일흔", "여든", "아흔",
+];
+
+fn to_korean_legal(n: u32) -> String {
+    if n >= 100 {
+        return n.to_string();
+    }
+    let tens = n / 10;
+    let ones = n % 10;
+    format!(
+        "{}{}",
+        KOREAN_LEGAL_TENS[tens as usize], KOREAN_LEGAL_ONES[ones as usize]
+    )
 }
 
 fn to_roman(n: u32) -> String {
@@ -1194,6 +1216,17 @@ mod tests {
             (
                 "koreanCounting",
                 &[(10, "십"), (11, "십일"), (2024, "이천이십사")],
+            ),
+            (
+                "koreanLegal",
+                &[
+                    (1, "하나"),
+                    (10, "열"),
+                    (11, "열하나"),
+                    (21, "스물하나"),
+                    (99, "아흔아홉"),
+                    (100, "100"),
+                ],
             ),
             // Repeat-letter non-Latin alphabets.
             ("arabicAlpha", &[(1, "أ"), (12, "س"), (28, "ي"), (29, "أأ")]),

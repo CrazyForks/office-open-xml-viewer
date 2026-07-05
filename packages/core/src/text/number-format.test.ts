@@ -165,6 +165,12 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
         [1, '일'], [10, '십'], [11, '십일'], [20, '이십'], [100, '백'],
         [2024, '이천이십사'],
       ]],
+      // koreanLegal: native-Korean words, tens-word + ones-word (§17.18.59
+      // example: 하나, 열, 열하나, 스물, 스물하나). ≥100 undefined → decimal.
+      ['koreanLegal', [
+        [1, '하나'], [9, '아홉'], [10, '열'], [11, '열하나'], [20, '스물'],
+        [21, '스물하나'], [90, '아흔'], [99, '아흔아홉'], [100, '100'],
+      ]],
 
       // ── Repeat-letter alphabets ─────────────────────────────────────────
       // arabicAlpha (28): §17.16.4.3.1 ARABICALPHA example 12 -> س.

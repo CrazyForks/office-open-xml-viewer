@@ -56,6 +56,7 @@ export type NumberFormat =
   | 'japaneseCounting'
   | 'japaneseLegal'
   | 'koreanCounting'
+  | 'koreanLegal'
   | 'taiwaneseCountingThousand'
   | 'ideographLegalTraditional'
   // Repeat-letter alphabets (subtract set size, repeat the glyph).
@@ -369,6 +370,8 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
       return n >= 1 ? toMyriadGrouped(n, MYRIAD_JAPANESE_LEGAL) : String(n);
     case 'koreanCounting':
       return n >= 1 ? toMyriadGrouped(n, MYRIAD_KOREAN) : String(n);
+    case 'koreanLegal':
+      return n >= 1 ? toKoreanLegal(n) : String(n);
     case 'decimal':
     default:
       return String(n);
@@ -587,4 +590,27 @@ function toMyriadGrouped(n: number, t: MyriadTable): string {
     out += renderMyriadGroup(lowerGroup, t, t.elideOne);
   }
   return out;
+}
+
+// ── koreanLegal (native-Korean numerals) ────────────────────────────────────
+// §17.18.59 koreanLegal: NOT the myriad system — native Korean number words
+// concatenated tens-word + ones-word. The spec tables ones 1–9 and tens 10..90
+// explicitly (하나/둘/…, 열/스물/…), and its example shows the concatenation
+// (11 → 열하나, 21 → 스물하나). The spec does NOT define values ≥ 100, so we
+// render the fully-specified 1–99 range and fall back to decimal above it
+// (rendering only what §17.18.59 tables — no invented composition).
+const KOREAN_LEGAL_ONES: readonly string[] = [
+  '', '하나', '둘', '셋', '넷', '다섯', '여섯', '일곱', '여덟', '아홉',
+];
+const KOREAN_LEGAL_TENS: readonly string[] = [
+  '', '열', '스물', '서른', '마흔', '쉰', '예순', '일흔', '여든', '아흔',
+];
+
+/** koreanLegal for 1–99 (§17.18.59); ≥ 100 is undefined by the spec, so the
+ *  caller's decimal fallback applies. Caller guarantees n ≥ 1. */
+function toKoreanLegal(n: number): string {
+  if (n >= 100) return String(n); // spec tables only 1–99.
+  const tens = Math.floor(n / 10);
+  const ones = n % 10;
+  return KOREAN_LEGAL_TENS[tens] + KOREAN_LEGAL_ONES[ones];
 }
