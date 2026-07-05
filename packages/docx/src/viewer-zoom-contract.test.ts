@@ -134,3 +134,33 @@ describe('DocxViewer IX9 zoom contract — fitWidth / fitPage', () => {
     expect(onScaleChange).not.toHaveBeenCalled();
   });
 });
+
+// IX9 F1 — family-unified pre-load setScale semantics (pinned across all five
+// viewers): a setScale before load is LATCHED and applied to the first render.
+describe('DocxViewer IX9 zoom contract — pre-load setScale latch (F1)', () => {
+  it('setScale before load/layout is latched and applied once established (IX9 F1)', async () => {
+    installDom();
+    const canvas = makeEl('canvas');
+    const engine = new FakeDocxEngine(3, PAGE);
+    vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, {});
+    await v.setScale(1.5); // nothing loaded yet — latched, render no-ops
+    expect(v.getScale()).toBe(1.5); // getScale reports the latched factor
+    await v.load('x.docx');
+    // The first real render already honours the latched factor.
+    expect(lastRenderWidth(engine)).toBe(Math.round(NATURAL_W * 1.5));
+    expect(v.getScale()).toBe(1.5);
+    v.destroy();
+  });
+
+  it('a pre-load setScale latch is clamped to [zoomMin, zoomMax] (IX9 F1)', async () => {
+    installDom();
+    const canvas = makeEl('canvas');
+    const engine = new FakeDocxEngine(3, PAGE);
+    vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, { zoomMin: 0.5, zoomMax: 3 });
+    await v.setScale(100);
+    expect(v.getScale()).toBe(3); // latched pre-clamped
+    v.destroy();
+  });
+});

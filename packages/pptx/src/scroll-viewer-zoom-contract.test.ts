@@ -110,4 +110,54 @@ describe('PptxScrollViewer IX9 zoom contract', () => {
     expect(onScaleChange.mock.calls[0][0]).toBeGreaterThan(1.0);
     v.destroy();
   });
+
+  // IX9 F1 — family-unified pre-load setScale semantics: a setScale before the
+  // layout establishes must be LATCHED and applied once it does (the
+  // single-canvas viewers honour a pre-load setScale on their first render; the
+  // scroll viewers used to silently drop it).
+  it('setScale before load/layout is latched and applied once established (IX9 F1)', () => {
+    installDom();
+    const container = makeContainer(0, 0); // zero-width ⇒ fit deferred, nothing established
+    const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU);
+    const onScaleChange = vi.fn();
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 10,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+      onScaleChange,
+    });
+    v.setScale(2); // pre-establishment: latched, not dropped
+    expect(v.getScale()).toBe(2); // getScale reports the pending factor
+    expect(onScaleChange).not.toHaveBeenCalled(); // fires at APPLICATION time
+    // Container gains width ⇒ the next relayout establishes and applies the latch.
+    container.clientWidth = 200;
+    container.clientHeight = 400;
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    expect(v.scaleForTest()).toBeCloseTo(2, 6); // applied over the 1.0 base fit
+    expect(v.getScale()).toBeCloseTo(2, 6);
+    expect(onScaleChange).toHaveBeenCalledTimes(1);
+    expect(onScaleChange).toHaveBeenCalledWith(2);
+    // The base fit itself is still the true base (resize re-fit multiplier intact).
+    expect(v.baseScaleForTest()).toBeCloseTo(1.0, 6);
+    v.destroy();
+  });
+
+  it('a pre-establishment setScale latch is clamped to [zoomMin, zoomMax] (IX9 F1)', () => {
+    installDom();
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    const v = new PptxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      zoomMin: 0.5,
+      zoomMax: 3,
+    });
+    v.setScale(100);
+    expect(v.getScale()).toBe(3); // latched pre-clamped
+    v.destroy();
+  });
 });

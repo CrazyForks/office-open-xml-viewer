@@ -174,6 +174,24 @@ describe('XlsxViewer IX9 zoom contract', () => {
     expect(b.v.getScale()).toBe(1);
     expect(onScaleChange).not.toHaveBeenCalled();
   });
+
+  // IX9 F1 — family-unified pre-load setScale semantics (pinned across all five
+  // viewers): a setScale before load is LATCHED and applied to the first render
+  // (cellScale is read by every subsequent sheet render).
+  it('setScale before load/layout is latched and applied once established (IX9 F1)', () => {
+    installDom();
+    // No worksheet loaded yet — setScale must latch (renderCurrentSheet no-ops).
+    const v = new XlsxViewer(makeContainer() as unknown as HTMLElement, {});
+    v.setScale(1.5);
+    expect(v.getScale()).toBe(1.5); // latched; the first showSheet renders at it
+  });
+
+  it('a pre-load setScale latch is clamped to [zoomMin, zoomMax] (IX9 F1)', () => {
+    installDom();
+    const v = new XlsxViewer(makeContainer() as unknown as HTMLElement, { zoomMin: 0.5, zoomMax: 3 });
+    v.setScale(100);
+    expect(v.getScale()).toBe(3); // latched pre-clamped
+  });
 });
 
 /**
