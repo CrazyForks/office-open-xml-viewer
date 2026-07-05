@@ -5927,24 +5927,43 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         const revActive = state.showTrackChanges && !!s.revision;
         const revColor = revActive ? authorColor(s.revision!.author) : null;
         let glyphColor: string;
+        // ECMA-376 §17.3.2.6 — effective background behind the glyphs, most-
+        // specific first: the RUN shading (§17.3.2.32 `<w:shd>`, immediately
+        // behind the glyphs — inverse-video), else the paragraph shading
+        // (§17.3.1.31 `<w:pPr><w:shd>`), else the enclosing container background
+        // (`state.containerShading` — the table cell fill §17.4.33, threaded by
+        // renderCell). The parser filters `fill="auto"`/non-hex at every level,
+        // so a non-null value here is a real paint.
+        const effBg = s.background ?? para.shading ?? state.containerShading ?? null;
         if (revColor) {
           glyphColor = revColor;
         } else if (s.color) {
           glyphColor = `#${s.color}`;
-        } else if (s.colorAuto) {
-          // ECMA-376 §17.3.2.6 (w:color) / ST_HexColorAuto §17.18.39: automatic
-          // color picks black/white for contrast against the effective
-          // background. The black/white pick is implementation-defined (no
-          // normative algorithm) — delegated to core's autoContrastColor.
-          //
-          // Effective background, most-specific first: the RUN shading (§17.3.2.32
-          // `<w:shd>`, immediately behind the glyphs — inverse-video), else the
-          // paragraph shading (§17.3.1.31 `<w:pPr><w:shd>`), else the enclosing
-          // container background (`state.containerShading` — the table cell fill
-          // §17.4.33, threaded by renderCell). This is what flips a color-less run
-          // WHITE inside a near-black cell (sample-28 p.17 `w:fill="0C0C0C"`) while
-          // keeping it black on a light fill.
-          const effBg = s.background ?? para.shading ?? state.containerShading ?? null;
+        } else if (s.colorAuto || effBg != null) {
+          // §17.3.2.6 (w:color) / ST_HexColorAuto §17.18.39: the automatic color
+          // picks black/white for contrast against the effective background (the
+          // pick is implementation-defined — delegated to core's autoContrastColor).
+          // TWO states reach it:
+          //   • explicit `<w:color w:val="auto"/>` (s.colorAuto — the parser's
+          //     only colorAuto producer, styles.rs);
+          //   • color NEVER APPLIED in the style hierarchy: §17.3.2.6 "If this
+          //     element is never applied in the style hierarchy, then the
+          //     characters are set to allow the consumer to automatically choose
+          //     an appropriate color based on the background color behind the
+          //     run's content." The parser flattens docDefaults → styles → direct
+          //     rPr into the resolved `s.color`, so `s.color == null && !colorAuto`
+          //     here IS exactly that never-applied state (sample-28 p.17: the
+          //     `w:fill="0C0C0C"` header cells' runs carry no w:color at any
+          //     level — Word paints them white).
+          // The never-applied state is gated on a NON-NULL effective background:
+          // with no shading anywhere the "appropriate color against the page
+          // background" is the application default text color, i.e. the public
+          // `defaultTextColor` render option below — rerouting it through the
+          // hard black/white pick would silently break that option (and change
+          // nothing for the default black). This decision is deliberately made at
+          // PAINT time, not in the parser: marking every color-less run as auto
+          // there would lose the resolved-vs-defaulted distinction the option
+          // depends on, while the background composition only exists here.
           glyphColor = autoContrastColor(effBg);
         } else {
           glyphColor = defaultColor;

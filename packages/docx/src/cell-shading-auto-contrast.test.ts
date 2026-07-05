@@ -119,28 +119,62 @@ async function renderGlyphs(cells: DocTableCell[]): Promise<DrawnGlyph[]> {
 }
 
 describe('auto text color folds in table-cell shading (§17.3.2.6, sample-28 p.17)', () => {
-  it('paints an auto-color run WHITE inside a near-black cell (fill=0C0C0C)', async () => {
-    // The sample-28 shape: a `w:color`-less run (colorAuto) inside a cell whose
-    // only shading is the near-black `<w:tcPr><w:shd w:fill="0C0C0C"/>`. Without
-    // folding the cell fill into the effective background the run stayed black
-    // (invisible). It must resolve to white.
+  it('paints a COLOR-LESS run WHITE inside a near-black cell (fill=0C0C0C) — the real sample-28 shape', async () => {
+    // sample-28's black cells: the run has NO `<w:color>` element anywhere in the
+    // style hierarchy, so the parser resolves color=null AND colorAuto=false
+    // (styles.rs: an absent element is pure inherit; explicit w:val="auto" is the
+    // only colorAuto producer). §17.3.2.6: "If this element is never applied in
+    // the style hierarchy, then the characters are set to allow the consumer to
+    // automatically choose an appropriate color based on the background color
+    // behind the run's content" — the never-applied state IS auto. A resolved-null
+    // run on a dark cell fill must therefore paint white.
+    // (An earlier revision of this test hardcoded colorAuto: true — a state the
+    // real fixture never produces — which validated the renderer branch while
+    // hiding that it was unreachable for the actual document. Keep this case on
+    // the parser-realistic shape: color null, colorAuto absent.)
     const glyphs = await renderGlyphs([
-      cell([cellPara(textRun('X', { colorAuto: true }))], '0C0C0C'),
+      cell([cellPara(textRun('X'))], '0C0C0C'),
     ]);
     const g = glyphs.find((x) => x.text.includes('X'));
     expect(g).toBeDefined();
     expect(g?.style).toBe('#FFFFFF');
   });
 
-  it('keeps an auto-color run BLACK inside a light cell (fill=D9D9D9)', async () => {
-    // The neighbouring light-grey header cells: auto stays black against a light
-    // fill (contrast pick is a no-flip). Guards against over-inverting.
+  it('paints an EXPLICIT `w:color w:val="auto"` run WHITE inside a near-black cell', async () => {
+    // The explicit-auto spelling (parser: color=null + colorAuto=true) takes the
+    // same contrast path as the never-applied state.
     const glyphs = await renderGlyphs([
-      cell([cellPara(textRun('Y', { colorAuto: true }))], 'D9D9D9'),
+      cell([cellPara(textRun('A', { colorAuto: true }))], '0C0C0C'),
+    ]);
+    const g = glyphs.find((x) => x.text.includes('A'));
+    expect(g).toBeDefined();
+    expect(g?.style).toBe('#FFFFFF');
+  });
+
+  it('keeps a color-less run BLACK inside a light cell (fill=D9D9D9)', async () => {
+    // The neighbouring light-grey header cells: the contrast pick against a light
+    // fill stays black (no inversion) — pixel-identical to the previous default.
+    const glyphs = await renderGlyphs([
+      cell([cellPara(textRun('Y'))], 'D9D9D9'),
     ]);
     const g = glyphs.find((x) => x.text.includes('Y'));
     expect(g).toBeDefined();
     expect(g?.style).toBe('#000000');
+  });
+
+  it('keeps a color-less UN-shaded run on the defaultTextColor option (no contrast rerouting)', async () => {
+    // A run with no color AND no background anywhere must NOT be rerouted through
+    // the contrast pick (which hard-codes black): it stays on the public
+    // `defaultTextColor` render option. §17.3.2.6's "appropriate color against the
+    // page background" for an unshaded run IS the application default text color.
+    const { canvas, glyphs } = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      tableDoc([cell([cellPara(textRun('D'))], null)]), canvas, 0,
+      { dpr: 1, width: 400, defaultTextColor: '#123456' },
+    );
+    const g = glyphs.find((x) => x.text.includes('D'));
+    expect(g).toBeDefined();
+    expect(g?.style.toUpperCase()).toBe('#123456');
   });
 
   it('lets an EXPLICIT run color win over the cell-shading contrast pick', async () => {
