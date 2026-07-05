@@ -128,6 +128,16 @@ export interface ChartSeries {
    * series that never declare one).
    */
   trendLines?: ChartTrendline[] | null;
+  /**
+   * `<c:ser><c:spPr><a:ln><a:noFill/>` (ECMA-376 §21.2.2.198 CT_ShapeProperties
+   * → DrawingML §20.1.2.2.24 CT_LineProperties). true when the series connecting
+   * line is explicitly turned OFF. For a scatter/line series this OVERRIDES the
+   * chart-group `<c:scatterStyle>` (§21.2.2.42) / line default — Excel and
+   * PowerPoint draw markers only (no connecting line) even when the group style
+   * is `lineMarker`. null/undefined = no explicit line-off, so the group default
+   * governs (byte-stable for series that carry a paintable line).
+   */
+  lineHidden?: boolean | null;
 }
 
 /**
@@ -198,6 +208,27 @@ export interface ChartDataLabelOverride {
   /** Per-point callout box (`<c:dLbl><c:spPr>`, ECMA-376 §21.2.2.47/§21.2.2.197):
    *  overrides the series-default box for this one slice. */
   labelBox?: ChartLabelBox;
+  /**
+   * Per-point label-content flags (`<c:dLbl>` §21.2.2.47 carries the same
+   * show-flag group as the series `<c:dLbls>` §21.2.2.49: §21.2.2.189
+   * `<c:showVal>`, §21.2.2.177 `<c:showCatName>`, §21.2.2.180 `<c:showSerName>`,
+   * §21.2.2.187 `<c:showPercent>`). When present they OVERRIDE the series-level
+   * defaults for that one point (e.g. sample-14 slide-7's pie sets
+   * `showCatName=0 showPercent=1` per slice while the series default is
+   * `showCatName=1`, so each label is percent only). undefined = inherit the
+   * series default for that flag.
+   */
+  showVal?: boolean;
+  showCatName?: boolean;
+  showSerName?: boolean;
+  showPercent?: boolean;
+  /**
+   * `<c:dLbl><c:delete val="1"/>` (ECMA-376 §21.2.2.43) — the point's label is
+   * removed. Distinguishes a genuine delete from a `<c:dLbl>` that only carries
+   * style / flag overrides with no `<c:tx>` (both otherwise present as
+   * `text === ''`). true = skip the label; undefined/absent = not deleted.
+   */
+  deleted?: boolean;
 }
 
 /** Callout-box style for a pie/doughnut data label — the white (or themed)

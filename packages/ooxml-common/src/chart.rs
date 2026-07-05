@@ -375,6 +375,15 @@ pub struct ChartSeries {
     /// when the series declares none (byte-stable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trend_lines: Option<Vec<ChartTrendline>>,
+    /// `<c:ser><c:spPr><a:ln><a:noFill/>` (§21.2.2.198 CT_ShapeProperties →
+    /// DrawingML §20.1.2.2.24 CT_LineProperties). `Some(true)` when the series'
+    /// connecting line is explicitly turned OFF. For a scatter/line series this
+    /// overrides the chart-group `<c:scatterStyle>` (§21.2.2.42) / line default:
+    /// Excel/PowerPoint draw NO connecting line when the series line is
+    /// `<a:noFill/>`, even if the group style is `lineMarker`. `None` (omitted)
+    /// = the series carries no explicit line-off, so the group default governs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_hidden: Option<bool>,
 }
 
 /// Mirror of TS `ChartTrendline` — `<c:ser><c:trendline>` (§21.2.2.211).
@@ -449,6 +458,31 @@ pub struct ChartDataLabelOverride {
     /// (e.g. a differently tinted callout for one slice). See [`ChartLabelBox`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_box: Option<ChartLabelBox>,
+    /// Per-point label-content flags (`<c:dLbl>` §21.2.2.47 carries the full
+    /// `CT_DLbl` show-flag group: §21.2.2.189 `<c:showVal>`, §21.2.2.177
+    /// `<c:showCatName>`, §21.2.2.180 `<c:showSerName>`, §21.2.2.187
+    /// `<c:showPercent>`). When a `<c:dLbl>` sets these they OVERRIDE the
+    /// series-level `<c:dLbls>` defaults (§21.2.2.49) for that one point — e.g.
+    /// sample-14 slide-7's pie sets `showCatName=0 showPercent=1` per slice even
+    /// though the series default is `showCatName=1`, so each label is percent
+    /// only. `None` = the point declared no such flag, so the series default
+    /// governs (byte-stable for points that carry none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_val: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_cat_name: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_ser_name: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_percent: Option<bool>,
+    /// `<c:dLbl><c:delete val="1"/>` (§21.2.2.43) — this point's label is
+    /// removed. Distinguishes a genuinely deleted label from a `<c:dLbl>` that
+    /// merely carries style/flag overrides with no `<c:tx>` (both formerly
+    /// collapsed to `text == ""`). `Some(true)` = skip the label entirely;
+    /// `None`/absent = not deleted (compose from flags / text). Byte-stable for
+    /// points that carry no `<c:delete>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
 }
 
 /// Callout-box style for a pie/doughnut data label — the white (or themed)
@@ -2081,6 +2115,8 @@ pub fn parse_chartex_part(
         smooth: None,
         // chartEx series carry no classic `<c:trendline>`.
         trend_lines: None,
+        // chartEx has no scatter connecting line to suppress.
+        line_hidden: None,
     }];
 
     // ChartEx axis visibility — shared helper that pairs each `<cx:axis hidden>`
@@ -2813,6 +2849,14 @@ pub fn parse_series_data_labels(
                 .find(|n| n.is_element() && n.tag_name().name() == "spPr"),
             resolver,
         );
+        // Per-point show-flags (§21.2.2.47 CT_DLbl carries the same show-flag
+        // group as CT_DLbls). Read as `Option` so an absent flag falls through
+        // to the series default; a present flag overrides it for this point.
+        let opt_bool_flag = |name: &str| -> Option<bool> {
+            child(dl, name)
+                .and_then(|c| c.attribute("val"))
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        };
         overrides.push(ChartDataLabelOverride {
             idx,
             text,
@@ -2821,6 +2865,14 @@ pub fn parse_series_data_labels(
             font_size_hpt,
             font_bold,
             label_box,
+            show_val: opt_bool_flag("showVal"),
+            show_cat_name: opt_bool_flag("showCatName"),
+            show_ser_name: opt_bool_flag("showSerName"),
+            show_percent: opt_bool_flag("showPercent"),
+            // §21.2.2.43 `<c:delete>` — record genuine deletes distinctly from a
+            // style-only `<c:dLbl>` so the renderer never mistakes an empty tx
+            // (compose-from-flags) for a removed label.
+            deleted: if deleted { Some(true) } else { None },
         });
     }
 
@@ -3625,6 +3677,15 @@ pub fn parse_chart_part(
                 .and_then(|fill| color_resolver.resolve_solid_fill(fill))
                 .or_else(|| color_resolver.resolve_series_accent(series_idx));
 
+            // §21.2.2.198 series-level `<c:spPr><a:ln>`: an explicit `<a:noFill/>`
+            // turns the connecting line OFF, overriding the chart-group
+            // `<c:scatterStyle>` (§21.2.2.42) / line-group default. Excel draws a
+            // markers-only scatter when the series line is `<a:noFill/>` even
+            // though `<c:scatterStyle val="lineMarker">` sets the group default to
+            // connect points. Only the noFill flag matters here (color/width ride
+            // on `color` above), so discard the other two tuple fields.
+            let (_, _, line_no_fill) = extract_sp_pr_ln_style(*ser, color_resolver);
+
             // Per-data-point colors from <c:dPt> (§21.2.2.52; important for
             // pie charts). The point index is the CHILD element `<c:idx val>`
             // (ECMA-376 §21.2.2.84, CT_UnsignedInt), not an attribute on
@@ -3818,6 +3879,10 @@ pub fn parse_chart_part(
                 // `<c:ser><c:trendline>` (§21.2.2.211) — regression lines. Shared
                 // extractor; the line color resolves through the pptx theme.
                 trend_lines: extract_series_trendlines(*ser, color_resolver),
+                // §21.2.2.198 `<c:spPr><a:ln><a:noFill/>` — series connecting line
+                // explicitly off. Only serialized when set, so byte-stable for
+                // series that carry no line-off (the common case).
+                line_hidden: if line_no_fill { Some(true) } else { None },
             }
         })
         .collect();
@@ -4443,6 +4508,7 @@ mod tests {
                 bubble_sizes: None,
                 smooth: None,
                 trend_lines: None,
+                line_hidden: None,
             }],
             show_data_labels: false,
             val_min: None,
@@ -5788,6 +5854,119 @@ mod tests {
             &FixtureResolver
         )
         .is_none());
+    }
+
+    /// §21.2.2.198: a scatter series whose `<c:spPr><a:ln>` is `<a:noFill/>`
+    /// has its connecting line turned OFF, overriding the group-level
+    /// `<c:scatterStyle val="lineMarker">` (§21.2.2.42). The parser must set
+    /// `line_hidden = Some(true)` so the renderer draws markers only — the
+    /// sample-30 sheet-1 scatter shape. A series with a paintable line leaves
+    /// `line_hidden = None`.
+    #[test]
+    fn parse_chart_part_scatter_series_line_nofill_sets_line_hidden() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea>
+                <c:scatterChart>
+                  <c:scatterStyle val="lineMarker"/>
+                  <c:ser>
+                    <c:idx val="0"/>
+                    <c:spPr><a:ln w="25400"><a:noFill/></a:ln></c:spPr>
+                    <c:xVal><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:xVal>
+                    <c:yVal><c:numCache><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:yVal>
+                  </c:ser>
+                  <c:ser>
+                    <c:idx val="1"/>
+                    <c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="ED7D31"/></a:solidFill></a:ln></c:spPr>
+                    <c:xVal><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:xVal>
+                    <c:yVal><c:numCache><c:pt idx="0"><c:v>5</c:v></c:pt><c:pt idx="1"><c:v>8</c:v></c:pt></c:numCache></c:yVal>
+                  </c:ser>
+                  <c:axId val="1"/><c:axId val="2"/>
+                </c:scatterChart>
+                <c:valAx><c:axId val="1"/><c:crossAx val="2"/></c:valAx>
+                <c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>
+              </c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let m = parse_chart_part(chart_space_of(&xml).root_element(), &FixtureResolver)
+            .expect("scatter chart parses");
+        assert_eq!(m.chart_type, "scatter");
+        assert_eq!(m.scatter_style.as_deref(), Some("lineMarker"));
+        // Series 0: explicit `<a:noFill/>` line → line_hidden set.
+        assert_eq!(
+            m.series[0].line_hidden,
+            Some(true),
+            "a `<a:ln><a:noFill/>` series line must record line_hidden"
+        );
+        // Series 1: a paintable line → line_hidden stays None (group style governs).
+        assert_eq!(
+            m.series[1].line_hidden, None,
+            "a series with a solid line must NOT set line_hidden"
+        );
+    }
+
+    /// §21.2.2.47: a per-point `<c:dLbl>` carries its own show-flag group and
+    /// text style, overriding the series-level `<c:dLbls>` (§21.2.2.49) for that
+    /// point. sample-14 slide-7's pie sets `showCatName=0 showPercent=1` + white
+    /// per slice while the series default is `showCatName=1` black. The parser
+    /// must surface both the series default AND the per-point flag / color
+    /// overrides, and mark a genuine `<c:delete>` distinctly from a style-only
+    /// `<c:dLbl>` (which has an empty `text`).
+    #[test]
+    fn parse_chart_part_pie_per_point_dlbl_overrides_series_defaults() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea>
+                <c:pieChart>
+                  <c:ser>
+                    <c:idx val="0"/>
+                    <c:dLbls>
+                      <c:dLbl>
+                        <c:idx val="0"/>
+                        <c:txPr><a:p><a:pPr><a:defRPr b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:defRPr></a:pPr></a:p></c:txPr>
+                        <c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="1"/>
+                      </c:dLbl>
+                      <c:dLbl>
+                        <c:idx val="1"/>
+                        <c:delete val="1"/>
+                      </c:dLbl>
+                      <c:txPr><a:p><a:pPr><a:defRPr b="1"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:defRPr></a:pPr></a:p></c:txPr>
+                      <c:showVal val="0"/><c:showCatName val="1"/><c:showSerName val="0"/><c:showPercent val="1"/>
+                    </c:dLbls>
+                    <c:cat><c:strCache><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strCache></c:cat>
+                    <c:val><c:numCache><c:pt idx="0"><c:v>60</c:v></c:pt><c:pt idx="1"><c:v>40</c:v></c:pt></c:numCache></c:val>
+                  </c:ser>
+                </c:pieChart>
+              </c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let m = parse_chart_part(chart_space_of(&xml).root_element(), &FixtureResolver)
+            .expect("pie chart parses");
+        assert_eq!(m.chart_type, "pie");
+        let def = m.series[0]
+            .series_data_labels
+            .as_ref()
+            .expect("series-level dLbls present");
+        // Series default: category name ON, black text.
+        assert!(def.show_cat_name, "series default shows category name");
+        assert!(def.show_percent);
+        assert_eq!(def.font_color.as_deref(), Some("000000"));
+
+        let ovs = m.series[0]
+            .data_label_overrides
+            .as_ref()
+            .expect("per-point overrides present");
+        let ov0 = ovs.iter().find(|o| o.idx == 0).expect("idx 0 override");
+        // Per-point idx 0: category name OFF, percent ON, white — overrides the
+        // series default so this slice renders as white percent-only.
+        assert_eq!(ov0.show_cat_name, Some(false));
+        assert_eq!(ov0.show_percent, Some(true));
+        assert_eq!(ov0.font_color.as_deref(), Some("FFFFFF"));
+        assert_ne!(ov0.deleted, Some(true), "a style-only dLbl is not a delete");
+
+        let ov1 = ovs.iter().find(|o| o.idx == 1).expect("idx 1 override");
+        // Per-point idx 1: a genuine `<c:delete>` → flagged so the renderer skips it.
+        assert_eq!(ov1.deleted, Some(true));
     }
 
     // ─────────────────────────────────────────────────────────────────────

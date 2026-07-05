@@ -2783,31 +2783,59 @@ function drawPieRichLabels(
     return;
   }
 
+  const overrides = s.dataLabelOverrides ?? [];
   let angle = startAngle;
   for (let i = 0; i < vals.length; i++) {
     const slice = (vals[i] / total) * Math.PI * 2;
     const midAngle = angle + slice / 2;
     angle += slice;
-    // §21.2.2.35 label composition. dLblPos: "outEnd" places the label just
-    // beyond the rim; "inEnd"/"ctr" (and default) sit inside the slice at the
-    // radial midpoint. Percent is derived from the slice's share of the total.
-    const parts: string[] = [];
-    if (def.showCatName) parts.push((cats[i] ?? '').toString());
-    if (def.showSerName) parts.push(s.name);
-    if (def.showVal) parts.push(formatChartValWithCode(vals[i], def.formatCode ?? null, chart.date1904 ?? false));
-    if (def.showPercent) parts.push(`${Math.round((vals[i] / total) * 100)}%`);
-    const text = parts.filter(Boolean).join(' ');
+    // A per-point `<c:dLbl idx>` (§21.2.2.47) overrides the series-level
+    // `<c:dLbls>` (§21.2.2.49) for this one slice. Its show-flags, font color /
+    // size / bold, and position each fall back to the series default when the
+    // point declares none. sample-14 slide-7's pie sets `showCatName=0
+    // showPercent=1` + white text per slice while the series default is
+    // `showCatName=1` black — so honoring the per-point flags is what makes the
+    // labels render as white percent-only (matching PowerPoint / the PDF).
+    const ov = overrides.find(o => o.idx === i);
+    // A genuinely deleted label (`<c:delete val="1">`, §21.2.2.43) is skipped.
+    // A style/flag-only `<c:dLbl>` (no `<c:tx>`) is NOT a delete — sample-14's
+    // pie slices carry `text: ""` with white/percent-only flag overrides, so we
+    // key off the explicit `deleted` flag, never the empty text.
+    if (ov?.deleted) continue;
+    const showCatName = ov?.showCatName ?? def.showCatName;
+    const showSerName = ov?.showSerName ?? def.showSerName;
+    const showVal     = ov?.showVal ?? def.showVal;
+    const showPercent = ov?.showPercent ?? def.showPercent;
+    // §21.2.2.35 label composition. A per-point custom `<c:tx>` (non-empty
+    // override text) wins outright; otherwise compose from the resolved flags.
+    // dLblPos: "outEnd" places the label just beyond the rim; "inEnd"/"ctr"
+    // (and default) sit inside the slice at the radial midpoint. Percent is the
+    // slice's share of the total.
+    let text: string;
+    if (ov && ov.text) {
+      text = ov.text;
+    } else {
+      const parts: string[] = [];
+      if (showCatName) parts.push((cats[i] ?? '').toString());
+      if (showSerName) parts.push(s.name);
+      if (showVal) parts.push(formatChartValWithCode(vals[i], def.formatCode ?? null, chart.date1904 ?? false));
+      if (showPercent) parts.push(`${Math.round((vals[i] / total) * 100)}%`);
+      text = parts.filter(Boolean).join(' ');
+    }
     if (!text) continue;
-    const pos = def.position ?? 'bestFit';
+    const pos = ov?.position ?? def.position ?? 'bestFit';
     const outside = pos === 'outEnd';
     const labelR = outside
       ? outerR + Math.max(10, outerR * 0.12)
       : (innerR + outerR) / 2;
     const lx2 = cx2 + Math.cos(midAngle) * labelR;
     const ly2 = cy2 + Math.sin(midAngle) * labelR;
-    const sizePx = def.fontSizeHpt ? def.fontSizeHpt / 100 : Math.max(8, outerR * 0.1);
-    ctx.font = `${def.fontBold ? 'bold ' : ''}${sizePx}px ${font}`;
-    ctx.fillStyle = def.fontColor ? `#${def.fontColor}` : (outside ? '#333' : '#fff');
+    const sizeHpt = ov?.fontSizeHpt ?? def.fontSizeHpt;
+    const sizePx = sizeHpt ? sizeHpt / 100 : Math.max(8, outerR * 0.1);
+    const bold = ov?.fontBold ?? def.fontBold;
+    const fontColor = ov?.fontColor ?? def.fontColor;
+    ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${font}`;
+    ctx.fillStyle = fontColor ? `#${fontColor}` : (outside ? '#333' : '#fff');
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(text, lx2, ly2);
   }
@@ -2884,23 +2912,28 @@ function drawPieCalloutLabels(
     if (slice <= 0) continue;
 
     const ov = findOverride(i);
-    // A `<c:delete val="1"/>` label carries an empty override text and NO
-    // styling — skip it entirely. A per-point *styling* override (sample-25's
-    // idx 0) also has text==="" but carries position/fontColor/box, in which
-    // case the label is still drawn using the composed cat/percent text.
-    const isDeleted = ov != null && ov.text === '' && ov.position === undefined
-      && ov.fontColor === undefined && ov.fontSizeHpt === undefined
-      && ov.fontBold === undefined && ov.labelBox === undefined;
-    if (isDeleted) continue;
+    // A genuine `<c:delete val="1"/>` (§21.2.2.43) skips the label; a per-point
+    // *styling / flag* override (sample-25's idx 0) is NOT a delete even though
+    // it also has `text === ""` — key off the explicit `deleted` flag.
+    if (ov?.deleted) continue;
 
-    // §21.2.2.35 composition. Word stacks category name and percent on
-    // SEPARATE lines (see sample-25.pdf), so each `show*` part is its own line
-    // rather than space-joined.
+    // §21.2.2.35 composition, with per-point `<c:dLbl>` show-flags (§21.2.2.47)
+    // overriding the series defaults for this slice. Word stacks category name
+    // and percent on SEPARATE lines (see sample-25.pdf), so each `show*` part is
+    // its own line rather than space-joined.
+    const showCatName = ov?.showCatName ?? def.showCatName;
+    const showSerName = ov?.showSerName ?? def.showSerName;
+    const showVal     = ov?.showVal ?? def.showVal;
+    const showPercent = ov?.showPercent ?? def.showPercent;
     const lines: string[] = [];
-    if (def.showCatName) { const c = (cats[i] ?? '').toString(); if (c) lines.push(c); }
-    if (def.showSerName && s.name) lines.push(s.name);
-    if (def.showVal) lines.push(formatChartValWithCode(vals[i], def.formatCode ?? null, chart.date1904 ?? false));
-    if (def.showPercent) lines.push(`${Math.round((vals[i] / total) * 100)}%`);
+    if (ov && ov.text) {
+      lines.push(ov.text);
+    } else {
+      if (showCatName) { const c = (cats[i] ?? '').toString(); if (c) lines.push(c); }
+      if (showSerName && s.name) lines.push(s.name);
+      if (showVal) lines.push(formatChartValWithCode(vals[i], def.formatCode ?? null, chart.date1904 ?? false));
+      if (showPercent) lines.push(`${Math.round((vals[i] / total) * 100)}%`);
+    }
     if (lines.length === 0) continue;
 
     // Per-point overrides (font colour/size/bold + box), else series defaults.
@@ -3491,7 +3524,11 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
 
     // Connecting lines (scatterStyle = line / smooth / lineMarker / smoothMarker).
-    if (drawLines || drawSmooth) {
+    // A series-level `<c:spPr><a:ln><a:noFill/>` (§21.2.2.198) OVERRIDES the
+    // group `<c:scatterStyle>` and suppresses the connecting line — Excel draws
+    // a markers-only scatter even when the group style is `lineMarker`. Guard the
+    // whole line pass on it so `lineHidden` series show markers only.
+    if ((drawLines || drawSmooth) && s.lineHidden !== true) {
       const pts: Array<{ x: number; y: number }> = [];
       for (let ci = 0; ci < s.values.length; ci++) {
         const yv = s.values[ci]; if (yv == null) continue;
@@ -3789,17 +3826,23 @@ function drawSeriesDataLabels(
     const xv = useIndexX ? i : parseFloat(cats[i] ?? '0');
     if (isNaN(xv)) continue;
     const ovr = overrides.find(o => o.idx === i);
+    // A genuine `<c:delete val="1"/>` (§21.2.2.43) skips the point; a per-point
+    // `<c:dLbl>` that only carries style / flag overrides (empty `<c:tx>`) is NOT
+    // a delete — key off the explicit `deleted` flag, then honor per-point
+    // show-flags (§21.2.2.47) over the series defaults.
+    if (ovr?.deleted) continue;
+    const showCatName = ovr?.showCatName ?? seriesDef?.showCatName;
+    const showSerName = ovr?.showSerName ?? seriesDef?.showSerName;
+    const showVal     = ovr?.showVal ?? seriesDef?.showVal;
     let text: string;
-    if (ovr) {
-      // `<c:delete val="1"/>` produced an empty text — skip drawing.
-      if (ovr.text === '') continue;
+    if (ovr?.text) {
       text = ovr.text;
-    } else if (seriesDef && (seriesDef.showVal || seriesDef.showSerName || seriesDef.showCatName)) {
+    } else if (showVal || showSerName || showCatName) {
       const parts: string[] = [];
-      if (seriesDef.showCatName && !useIndexX) parts.push(cats[i] ?? '');
-      if (seriesDef.showSerName) parts.push(s.name);
-      if (seriesDef.showVal) {
-        parts.push(formatChartValWithCode(yv, seriesDef.formatCode ?? null, date1904));
+      if (showCatName && !useIndexX) parts.push(cats[i] ?? '');
+      if (showSerName) parts.push(s.name);
+      if (showVal) {
+        parts.push(formatChartValWithCode(yv, seriesDef?.formatCode ?? null, date1904));
       }
       text = parts.filter(Boolean).join(' ');
       if (!text) continue;
@@ -4025,15 +4068,21 @@ function drawCategoryDataLabels(
     if (s.values[ci] == null && !plotNullAsZero) continue;
     const pv = plotted(ci);
     const ovr = overrides.find(o => o.idx === ci);
+    // Genuine `<c:delete val="1"/>` (§21.2.2.43) skips; a style/flag-only
+    // override is not a delete. Per-point show-flags (§21.2.2.47) win over the
+    // series defaults.
+    if (ovr?.deleted) continue;
+    const showCatName = ovr?.showCatName ?? seriesDef?.showCatName;
+    const showSerName = ovr?.showSerName ?? seriesDef?.showSerName;
+    const showVal     = ovr?.showVal ?? seriesDef?.showVal;
     let text: string;
-    if (ovr) {
-      if (ovr.text === '') continue; // `<c:delete val="1"/>` — deleted label
+    if (ovr?.text) {
       text = ovr.text;
-    } else if (seriesDef && (seriesDef.showVal || seriesDef.showSerName || seriesDef.showCatName)) {
+    } else if (showVal || showSerName || showCatName) {
       const parts: string[] = [];
-      if (seriesDef.showCatName) parts.push(cats[ci] ?? '');
-      if (seriesDef.showSerName) parts.push(s.name);
-      if (seriesDef.showVal) parts.push(formatChartValWithCode(pv, seriesDef.formatCode ?? null, date1904));
+      if (showCatName) parts.push(cats[ci] ?? '');
+      if (showSerName) parts.push(s.name);
+      if (showVal) parts.push(formatChartValWithCode(pv, seriesDef?.formatCode ?? null, date1904));
       text = parts.filter(Boolean).join(' ');
       if (!text) continue;
     } else {

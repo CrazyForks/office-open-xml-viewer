@@ -1,0 +1,139 @@
+// End-to-end verification of the two chart regressions against the REAL
+// private fixtures, rendered through the actual WASM parser + core renderer on
+// skia. Gated on skia + the git-ignored fixtures, so it skips cleanly where
+// either is absent (CI has no private samples). This is a local acceptance
+// probe, not a committed regression guard — the parse/render logic is pinned by
+// the ooxml-common `parse_chart_part_*` tests and the core
+// `renderer-scatter-line-and-pie-labels` unit tests.
+
+import { describe, it, expect } from 'vitest';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadSkiaForTests, importForTests } from './test-imports';
+import type { ChartModel } from '../../core/src/types/chart.ts';
+
+const skia = await loadSkiaForTests();
+type Skia = typeof import('skia-canvas');
+const { Canvas } = (skia ?? {}) as Skia;
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(HERE, '../../..');
+const SAMPLE_14 = resolve(ROOT, 'packages/pptx/public/private/sample-14.pptx');
+const SAMPLE_30 = resolve(ROOT, 'packages/xlsx/public/private/sample-30.xlsx');
+
+const pptxMod = skia && existsSync(SAMPLE_14)
+  ? await importForTests(() => import('./pptx.ts'), './pptx.ts (pptx WASM)')
+  : null;
+const xlsxMod = skia && existsSync(SAMPLE_30)
+  ? await importForTests(() => import('./xlsx.ts'), './xlsx.ts (xlsx WASM)')
+  : null;
+const CORE_RENDERER = resolve(ROOT, 'packages/core/src/chart/renderer.ts');
+const coreMod = skia
+  ? await importForTests(() => import(CORE_RENDERER), 'packages/core/src/chart/renderer.ts')
+  : null;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Any = any;
+
+/** Depth-first collect every `type:'chart'` element's ChartModel from a slide. */
+function collectCharts(node: Any, out: ChartModel[]): void {
+  if (!node || typeof node !== 'object') return;
+  if (node.type === 'chart' && node.chart) out.push(node.chart as ChartModel);
+  for (const k of Object.keys(node)) {
+    const v = (node as Any)[k];
+    if (Array.isArray(v)) v.forEach(c => collectCharts(c, out));
+    else if (v && typeof v === 'object') collectCharts(v, out);
+  }
+}
+
+/** Render a chart, capturing fillText calls with the fillStyle in effect and a
+ *  count of series-colored (matchColor) connecting-line strokes. */
+function renderCapture(
+  chart: ChartModel,
+  renderChart: (ctx: unknown, c: ChartModel, r: unknown, p?: number) => void,
+  matchColor: string,
+): { texts: Array<{ text: string; fill: string }>; seriesStrokes: number } {
+  const canvas = new Canvas(640, 400);
+  const raw = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+  const texts: Array<{ text: string; fill: string }> = [];
+  let verts = 0;
+  let seriesStrokes = 0;
+  const proxy = new Proxy(raw, {
+    get(t, p: string) {
+      if (p === 'fillText') {
+        return (text: string, x: number, y: number) => {
+          texts.push({ text, fill: String((raw as Any).fillStyle) });
+          return (raw.fillText as Any)(text, x, y);
+        };
+      }
+      if (p === 'beginPath') return () => { verts = 0; (raw.beginPath as Any)(); };
+      if (p === 'moveTo' || p === 'lineTo' || p === 'bezierCurveTo') {
+        return (...a: number[]) => { verts += 1; return (raw as Any)[p](...a); };
+      }
+      if (p === 'stroke') {
+        return () => {
+          // A genuine data connecting line spans ≥3 vertices (≥3 data points);
+          // a 2-vertex series-colored segment is the legend line-key swatch,
+          // not a plot connecting line, so require ≥3 to isolate the plot line.
+          if (verts >= 3 && String((raw as Any).strokeStyle).toLowerCase() === matchColor.toLowerCase()) {
+            seriesStrokes += 1;
+          }
+          return (raw.stroke as Any)();
+        };
+      }
+      const v = (t as Any)[p];
+      return typeof v === 'function' ? v.bind(t) : v;
+    },
+    set(t, p: string, v) { (t as Any)[p] = v; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  renderChart(proxy, chart, { x: 0, y: 0, w: 640, h: 400 }, 1.05);
+  return { texts, seriesStrokes };
+}
+
+describe.skipIf(!pptxMod || !coreMod)('sample-14 slide-7 pie: white percent-only labels', () => {
+  it('renders bare percentages in white (no black category names)', () => {
+    const { parsePptx } = pptxMod as Any;
+    const { renderChart } = coreMod as Any;
+    const pres = parsePptx(readFileSync(SAMPLE_14));
+    const slide7 = pres.slides[6];
+    const charts: ChartModel[] = [];
+    collectCharts(slide7, charts);
+    const pie = charts.find(c => c.chartType === 'pie');
+    expect(pie, 'slide 7 has a pie chart').toBeTruthy();
+
+    const { texts } = renderCapture(pie as ChartModel, renderChart, '#000000');
+    // The slice DATA LABELS are the ones drawn in the per-point white; the
+    // category names appear only in the LEGEND (drawn in the neutral legend
+    // grey, not white). Isolate the white labels — those are the slice labels.
+    const whiteLabels = texts.filter(t => t.fill.toLowerCase() === '#ffffff');
+    expect(whiteLabels.length, 'pie draws white slice labels').toBeGreaterThan(0);
+    for (const l of whiteLabels) {
+      // Every white slice label is a bare percentage — no category name, no
+      // black text (the pre-fix regression drew black "category + percent").
+      expect(l.text).toMatch(/^\d+%$/);
+    }
+    // No slice label is drawn in black (the overridden series-default color).
+    const catNames = (pie as ChartModel).categories ?? [];
+    const blackSliceLabels = texts.filter(t =>
+      t.fill.toLowerCase() === '#000000' && catNames.some(cn => cn && t.text.includes(cn)));
+    expect(blackSliceLabels.length, 'no black category-name slice labels').toBe(0);
+  });
+});
+
+describe.skipIf(!xlsxMod || !coreMod)('sample-30 sheet-1 scatter: markers only (no lines)', () => {
+  it('draws no series connecting line for the noFill scatter series', () => {
+    const { parseSheet } = xlsxMod as Any;
+    const { renderChart } = coreMod as Any;
+    // Sheet 1 (index 0). parseSheet returns a Worksheet with `charts`.
+    const ws = parseSheet(readFileSync(SAMPLE_30), 0, 'Sheet1');
+    const anchors = (ws.charts ?? []) as Any[];
+    const scatters = anchors.map(a => a.chart as ChartModel).filter(c => c.chartType === 'scatter');
+    expect(scatters.length, 'sheet 1 has scatter charts').toBeGreaterThan(0);
+    for (const sc of scatters) {
+      const color = sc.series[0]?.color ? `#${sc.series[0].color}` : '#4f81bd';
+      const { seriesStrokes } = renderCapture(sc, renderChart, color);
+      expect(seriesStrokes, 'noFill scatter draws zero connecting lines').toBe(0);
+    }
+  });
+});
