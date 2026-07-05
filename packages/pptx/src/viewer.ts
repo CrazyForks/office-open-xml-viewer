@@ -1,10 +1,17 @@
 import type { RenderOptions, PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
+import { buildPptxHighlightLayer, type PptxHighlightMatch } from './find-highlight-layer';
+import { PptxFindController, type PptxMatchLocation } from './find';
 import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './hidden';
 import type { DimOptions } from './types';
-import { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core';
+import {
+  type HyperlinkTarget,
+  type FindMatch,
+  type FindMatchesOptions,
+  openExternalHyperlink,
+} from '@silurus/ooxml-core';
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
 export type HiddenSlideMode = 'show' | 'skip' | 'dim';
@@ -84,6 +91,15 @@ export class PptxViewer {
    *  (empty string if it was unset), restored on {@link destroy}. */
   private readonly _originalDisplay: string;
   private textLayer: HTMLDivElement | null = null;
+  /** IX2 — the find-highlight overlay layer (always created, above the text
+   *  layer, `pointer-events:none`). */
+  private highlightLayer: HTMLDivElement | null = null;
+  /** IX2 — find state (per-slide runs, matches, active cursor). */
+  private _find: PptxFindController;
+  /** Private 2d context for measuring highlight text (own 1×1 canvas). */
+  private _measureCtx: CanvasRenderingContext2D | null = null;
+  /** One-shot guard for the worker-mode findText warning. */
+  private _warnedNoFind = false;
   private engine: PptxPresentation | null = null;
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
@@ -156,6 +172,19 @@ export class PptxViewer {
         'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
       this.wrapper.appendChild(this.textLayer);
     }
+
+    // IX2 — find-highlight overlay layer, appended last (stacks above the text
+    // layer). `pointer-events:none` keeps selection + link clicks working
+    // through it. Empty in worker mode (onTextRun can't fire there).
+    this.highlightLayer = document.createElement('div');
+    this.highlightLayer.style.cssText =
+      'position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
+    this.wrapper.appendChild(this.highlightLayer);
+
+    this._find = new PptxFindController(
+      () => this.slideCount,
+      (slide) => this._collectSlideRuns(slide),
+    );
   }
 
   /**
@@ -205,6 +234,8 @@ export class PptxViewer {
       this.engine = engine;
       previous?.destroy();
       this.currentSlide = this._initialSlide();
+      // A new presentation invalidates any prior find state.
+      this._find.invalidate();
       await this.renderCurrentSlide();
     } catch (err) {
       // Superseded loads own no error reporting — the winning load (or destroy())
@@ -326,8 +357,11 @@ export class PptxViewer {
         "[ooxml] text selection is unavailable in mode: 'worker'; the overlay will be empty. Use mode: 'main' for selectable text.",
       );
     }
+    // Collect runs unconditionally in main mode (not just when a text layer
+    // exists): the find-highlight overlay needs the current slide's run geometry
+    // too, and caching them lets find() reuse the visible render for this slide.
     const runs: PptxTextRunInfo[] = [];
-    const onTextRun = !isWorker && this.textLayer ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
+    const onTextRun = !isWorker ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
     try {
       if (this.opts.enableMediaPlayback) {
@@ -354,6 +388,127 @@ export class PptxViewer {
     if (this.textLayer && !isWorker) {
       this._buildTextLayer(this.textLayer, runs, targetWidth, cssHeight);
     }
+    if (!isWorker) {
+      // Feed the just-rendered slide's runs to the find controller (geometry
+      // matches what was drawn) and (re)draw its highlights.
+      this._find.setSlideRuns(this.currentSlide, runs);
+      this._buildHighlightLayer(runs, targetWidth, cssHeight);
+    }
+  }
+
+  /** Draw the find-highlight boxes for the current slide from its runs. */
+  private _buildHighlightLayer(runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
+    const layer = this.highlightLayer;
+    if (!layer) return;
+    const highlights: PptxHighlightMatch[] = this._find.slideHighlights(this.currentSlide);
+    buildPptxHighlightLayer(layer, runs, highlights, cssWidth, cssHeight, (font) =>
+      this._measureForFont(font),
+    );
+  }
+
+  /** A width-measurer primed with `font`, backed by a private 1×1 canvas. */
+  private _measureForFont(font: string): (s: string) => number {
+    if (!this._measureCtx) {
+      const c = document.createElement('canvas');
+      this._measureCtx = c.getContext('2d');
+    }
+    const ctx = this._measureCtx;
+    if (!ctx) return (s) => s.length;
+    ctx.font = font;
+    return (s) => ctx.measureText(s).width;
+  }
+
+  /** Render a slide to a throwaway offscreen canvas to collect its runs for
+   *  search, without touching the visible canvas. Used for slides other than the
+   *  one on screen. */
+  private async _collectSlideRuns(slide: number): Promise<PptxTextRunInfo[]> {
+    if (!this.engine || this._mode === 'worker') return [];
+    const runs: PptxTextRunInfo[] = [];
+    const off =
+      typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(1, 1)
+        : (document.createElement('canvas') as HTMLCanvasElement);
+    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
+    await this.engine.renderSlide(off, slide, {
+      width: targetWidth,
+      onTextRun: (r: PptxTextRunInfo) => runs.push(r),
+    });
+    return runs;
+  }
+
+  /**
+   * IX2 — find every occurrence of `query` across all slides and highlight them
+   * (a soft box per match on the highlight overlay). Returns every match in
+   * document order, each tagged with its `{ slide }` (0-based). Case-insensitive
+   * by default; pass `{ caseSensitive: true }` for an exact match.
+   *
+   * Scans all slides (each rendered once offscreen to read its text; the visible
+   * slide reuses its on-screen render). Not available in `mode: 'worker'` —
+   * returns `[]` there after a one-time warning. An empty query clears the find.
+   */
+  async findText(
+    query: string,
+    opts: FindMatchesOptions = {},
+  ): Promise<FindMatch<PptxMatchLocation>[]> {
+    if (!this.engine) return [];
+    if (this._mode === 'worker') {
+      if (!this._warnedNoFind) {
+        this._warnedNoFind = true;
+        console.warn(
+          "[ooxml] findText is unavailable in mode: 'worker' (text runs can't cross the worker boundary). Use mode: 'main'.",
+        );
+      }
+      return [];
+    }
+    const matches = await this._find.find(query, opts);
+    this._redrawHighlights();
+    return matches;
+  }
+
+  /**
+   * IX2 — move to the next match (wrap-around), navigating to its slide if
+   * needed, and draw it in the active-match colour. Returns the now-active
+   * match, or `null` when there are none. Call {@link findText} first.
+   */
+  async findNext(): Promise<FindMatch<PptxMatchLocation> | null> {
+    return this._activateMatch(this._find.next());
+  }
+
+  /** IX2 — move to the previous match (wrap-around). */
+  async findPrev(): Promise<FindMatch<PptxMatchLocation> | null> {
+    return this._activateMatch(this._find.prev());
+  }
+
+  /** IX2 — clear all highlights and reset the find state. */
+  clearFind(): void {
+    this._find.invalidate();
+    this._redrawHighlights();
+  }
+
+  private async _activateMatch(
+    match: FindMatch<PptxMatchLocation> | null,
+  ): Promise<FindMatch<PptxMatchLocation> | null> {
+    if (!match) {
+      this._redrawHighlights();
+      return null;
+    }
+    if (match.location.slide !== this.currentSlide) {
+      // goToSlide re-renders, rebuilding the highlight layer for the new slide.
+      await this.goToSlide(match.location.slide);
+    } else {
+      this._redrawHighlights();
+    }
+    return match;
+  }
+
+  /** Rebuild the highlight overlay for the current slide from cached runs. */
+  private _redrawHighlights(): void {
+    const runs = this._find.slideRuns(this.currentSlide) ?? [];
+    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const cssHeight = this.engine
+      ? Math.round(this.engine.slideHeight * (targetWidth / this.engine.slideWidth))
+      : 0;
+    this._buildHighlightLayer(runs, targetWidth, cssHeight);
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
