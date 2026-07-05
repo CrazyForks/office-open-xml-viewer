@@ -45,6 +45,11 @@ import {
   resolveLineFloatWindow,
   wordMinLineStartPx,
 } from './float-layout.js';
+// Pure UAX#9 per-line reorder helper. `bidi-line.ts` imports only from
+// `@silurus/ooxml-core` (never from this module), so this is a one-directional
+// value import — no runtime cycle (same rule as the renderer.ts → line-layout.ts
+// split documented above).
+import { computeLineVisualOrder } from './bidi-line.js';
 
 export interface LayoutTextSeg {
   text: string;
@@ -1288,6 +1293,179 @@ export function nextTabStop(
   return custom ?? auto;
 }
 
+/** ECMA-376 §17.3.1.37 / §17.15.1.25 in a BIDI paragraph — the RTL twin of
+ *  {@link nextTabStop}. In a right-to-left paragraph the tab-stop coordinate
+ *  system is anchored at the LEADING (right) text edge: a stop's `pos` is the
+ *  distance from that right edge, and the pen advances LEFTWARD (decreasing
+ *  margin position). This finds the nearest stop strictly BELOW the pen — i.e.
+ *  the next stop to the left — using the same automatic-grid rule (§17.15.1.25:
+ *  automatic stops sit past all custom stops, here on the far LEFT of the line).
+ *
+ *  @param curMarginPx pen position measured from the right (leading) text edge.
+ *  @param customStopsPx custom stops in right-edge px (`pos * scale`).
+ *  @param intervalPx automatic-stop interval = `defaultTabPt * scale`.
+ *  @returns the chosen stop (custom keeps its alignment/leader; automatic is
+ *    `'left'`), or `null` when the pen is already at/left of every stop. */
+export function nextTabStopRtl(
+  curMarginPx: number,
+  customStopsPx: { pos: number; alignment: TabStop['alignment']; leader?: TabStop['leader'] }[],
+  intervalPx: number,
+): { pos: number; alignment: TabStop['alignment']; leader?: TabStop['leader'] } | null {
+  // Candidate 1 — the nearest custom stop strictly PAST the pen (greater pos =
+  // further from the right edge = further left). Symmetric to nextTabStop.
+  let custom: { pos: number; alignment: TabStop['alignment']; leader?: TabStop['leader'] } | null = null;
+  let maxCustomPx = 0;
+  for (const t of customStopsPx) {
+    if (t.pos > maxCustomPx) maxCustomPx = t.pos;
+    if (t.pos > curMarginPx && (custom === null || t.pos < custom.pos)) custom = t;
+  }
+  // Candidate 2 — nearest automatic multiple past BOTH the pen and the last
+  // custom stop (§17.15.1.25). Identical grid to nextTabStop; the mirror is
+  // entirely in how `pos` is interpreted (distance from the right edge).
+  let auto: { pos: number; alignment: TabStop['alignment'] } | null = null;
+  if (intervalPx > 0) {
+    const EPS = 1e-6;
+    const from = Math.max(curMarginPx, maxCustomPx);
+    let pos = Math.ceil((from + EPS) / intervalPx) * intervalPx;
+    if (pos <= curMarginPx) pos += intervalPx;
+    auto = { pos, alignment: 'left' };
+  }
+  if (custom && auto) return custom.pos <= auto.pos ? custom : auto;
+  return custom ?? auto;
+}
+
+/** One entry in a bidi line's LOGICAL-order sequence, for {@link layoutBidiTabStops}. */
+export interface BidiTabItem {
+  /** True for a tab segment (its width is (re)computed); false for content. */
+  isTab: boolean;
+  /** Content width in px (ignored for tabs). Set by the LTR layout pass. */
+  width: number;
+}
+
+/** Per-segment result of {@link layoutBidiTabStops}. */
+export interface BidiTabResult {
+  /** New measuredWidth for the tab at this LOGICAL index (non-tabs: unchanged). */
+  width: number;
+  /** Leader to paint across this tab's span (`'none'`/undefined ⇒ blank). */
+  leader?: TabStop['leader'];
+  /** Visual x (px, from the line's LEFT text edge) of this segment's left edge —
+   *  where the draw walk should paint it. */
+  visualX: number;
+}
+
+/**
+ * ECMA-376 §17.3.1.37 / §17.15.1.25 / §17.18.84 — lay out ONE line of a BIDI
+ * (RTL-base) paragraph's tab-aligned cells, returning each segment's tab width
+ * and its final VISUAL x.
+ *
+ * The LTR layout pass ({@link layoutLines}) resolves tab widths against the pen
+ * in LOGICAL order but in a LEFT-to-right frame, which is wrong for a bidi
+ * paragraph: a tab advances the pen in READING order, which under an RTL base
+ * runs RIGHT-to-LEFT, and the tab-delimited cells then reorder visually. The LTR
+ * result lands the trailing content (a TOC page number, a footer field) on the
+ * wrong visual side — often overflowing and wrapping to a new line (the "leaders
+ * appear/disappear" and "page number on its own row" symptoms of issue #820).
+ *
+ * This lays the line out in the RTL reading frame: the pen starts at the LEADING
+ * (right) text edge and moves LEFT. A tab stop's `pos` is its distance from that
+ * leading edge; the Nth tab in reading order advances to the next stop further
+ * left (larger `pos`), exactly like the LTR pen advances rightward through
+ * stops. Alignment is logical (Part 4 §14.11.2): physical `left` = `start`
+ * (leading ⇒ following content's leading/RIGHT edge on the stop), physical
+ * `right` = `end` (trailing ⇒ its trailing/LEFT edge on the stop); `center` is
+ * unchanged; `bar`/`clear` advance like `start`. Automatic stops fall on the
+ * §17.15.1.25 grid from the leading edge, after all custom stops. A stop past
+ * the left margin pins its content to the margin (Word never pushes it off the
+ * page). The reading-frame positions are converted to the draw loop's visual
+ * L→R x at the end.
+ *
+ * @param items line segments in LOGICAL order (as `line.segments`).
+ * @param customStopsPx custom tab stops in leading-edge px (`pos * scale`).
+ * @param availWidthPx the line's available content width in px.
+ * @param intervalPx automatic-stop interval = `defaultTabPt * scale`.
+ * @returns one {@link BidiTabResult} per LOGICAL index (1:1 with `items`).
+ */
+export function layoutBidiTabStops(
+  items: BidiTabItem[],
+  customStopsPx: { pos: number; alignment: TabStop['alignment']; leader?: TabStop['leader'] }[],
+  availWidthPx: number,
+  intervalPx: number,
+): BidiTabResult[] {
+  const n = items.length;
+  const width = items.map((it) => it.width);
+  const leader: (TabStop['leader'] | undefined)[] = new Array(n).fill(undefined);
+
+  // Width of the content run immediately FOLLOWING index `i` in reading order
+  // (up to the next tab / line end) — the trailing/centered stop needs it.
+  const followW = (from: number): number => {
+    let w = 0;
+    for (let j = from; j < n; j++) {
+      if (items[j].isTab) break;
+      w += width[j];
+    }
+    return w;
+  };
+
+  // Reading-frame layout. `pen` = distance from the LEADING (right) edge; content
+  // and tabs push it further LEFT (increasing). `leftEdge[i]` / `rightEdge[i]` are
+  // each segment's edges in this frame (leftEdge = larger margin = further left).
+  const leftMargin = availWidthPx; // pen value at the physical LEFT text edge
+  let pen = 0;
+  const rightEdge = new Array(n).fill(0);
+  const leftEdge = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    const it = items[i];
+    if (!it.isTab) {
+      rightEdge[i] = pen;
+      pen += width[i];
+      leftEdge[i] = pen;
+      continue;
+    }
+    const stop = nextTabStopRtl(pen, customStopsPx, intervalPx);
+    if (!stop) {
+      // No stop further left: the tab collapses (following content continues).
+      rightEdge[i] = pen;
+      leftEdge[i] = pen;
+      continue;
+    }
+    // Where the tab's OWN leading (right) edge sits: at the pen. Its trailing
+    // (left) edge is the stop-aligned target, giving the gap it fills.
+    const fw = followW(i + 1);
+    let target: number; // pen value after the tab (its trailing/left edge)
+    if (stop.alignment === 'right') {
+      // end/trailing: following content's TRAILING (left) edge on the stop, i.e.
+      // its right edge sits fw to the RIGHT (smaller margin) of the stop.
+      target = stop.pos - fw;
+    } else if (stop.alignment === 'center') {
+      target = stop.pos - fw / 2;
+    } else {
+      // start/leading (or bar/clear/left): following content's LEADING (right)
+      // edge on the stop.
+      target = stop.pos;
+    }
+    // Pin content that would fall past the left margin onto the margin: the
+    // following cell spans [target, target + fw] in reading-frame margins, so its
+    // far (left) edge must stay ≤ leftMargin (Word never pushes it off the page).
+    if (target + fw > leftMargin) target = leftMargin - fw;
+    // Never let a tab move the pen backwards (right).
+    if (target < pen) target = pen;
+    rightEdge[i] = pen;
+    width[i] = target - pen;
+    leftEdge[i] = target;
+    leader[i] = stop.leader;
+    pen = target;
+  }
+
+  // Convert reading-frame margins to visual (L→R from the left text edge) x:
+  // visualX = availWidthPx − leftEdge (the segment's LEFT visual edge is the
+  // FURTHEST-left reading-frame edge = its largest margin value).
+  return items.map((_, i) => ({
+    width: width[i],
+    leader: leader[i],
+    visualX: availWidthPx - leftEdge[i],
+  }));
+}
+
 /** Value equivalence of two resolved kinsoku rule sets, with a reference fast
  *  path. The reuse gate cannot rely on `===` alone: `resolveKinsokuRules` builds
  *  a FRESH object (fresh Sets) on every call, and the prebuiltPages production
@@ -1712,6 +1890,13 @@ export function layoutLines(
   // edge is `-tabOriginPx`. `relativeTo="indent"` uses the content box
   // (`[0, maxWidth]`) and needs neither.
   marginRightPx: number = maxWidth,
+  // ECMA-376 §17.3.1.6 `<w:bidi>` — the paragraph's base direction is RTL. Tab
+  // stops mirror to the leading (right) edge in this case (§17.18.84 start/end
+  // are logical edges): the tab widths are computed in the VISUAL frame by a
+  // per-line post-pass (`layoutBidiTabStops`) instead of the LTR pen math, and
+  // tabs do not trigger the LTR right/center/overflow wrap paths. Default false
+  // ⇒ the LTR tab paths run unchanged (byte-identical output).
+  baseRtl = false,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
@@ -1788,8 +1973,42 @@ export function layoutLines(
 
   const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);
 
+  // ECMA-376 §17.3.1.37 tab stops in leading-edge px, for the bidi post-pass.
+  const bidiCustomStopsPx = baseRtl
+    ? tabStops.map((t) => ({ pos: t.pos * scale, alignment: t.alignment, leader: t.leader }))
+    : [];
+  const bidiIntervalPx = defaultTabPt * scale;
+
+  // Rewrite a finalized bidi line's tab widths (+ leaders) in the VISUAL frame
+  // (§17.3.1.6 base RTL). The line's tabs were laid out with provisional width 0
+  // by the tab block below (the LTR pen math does not apply under an RTL base);
+  // here we place each tab-delimited cell at its mirrored stop. No-op for a line
+  // without tabs (LTR paragraphs skip this entirely — `baseRtl` is false).
+  const applyBidiTabs = (): void => {
+    if (!baseRtl) return;
+    if (!currentLine.some((s) => 'isTab' in s)) return;
+    const order = computeLineVisualOrder(currentLine, true).order;
+    const items: BidiTabItem[] = order.map((li) => {
+      const s = currentLine[li];
+      return { isTab: 'isTab' in s, width: s.measuredWidth };
+    });
+    const availW = lineMaxWidth - (isFirst ? firstIndent : 0);
+    const res = layoutBidiTabStops(items, bidiCustomStopsPx, availW, bidiIntervalPx);
+    // Map visual results back to the logical segments (order[vi] = logical idx).
+    let delta = 0;
+    for (let vi = 0; vi < order.length; vi++) {
+      const s = currentLine[order[vi]];
+      if (!('isTab' in s)) continue;
+      delta += res[vi].width - s.measuredWidth;
+      s.measuredWidth = res[vi].width;
+      (s as LayoutTabSeg).leader = res[vi].leader;
+    }
+    currentWidth += delta;
+  };
+
   let lineHasRuby = false;
   const flush = (forceHeight?: number, brTerminated = false) => {
+    applyBidiTabs();
     const h = forceHeight !== undefined ? forceHeight : (lineHeight || 10);
     // If the line has no measured content (empty/line-break line), synthesize
     // stable ascent/descent from the effective font size so wrap/baseline math
@@ -1959,6 +2178,20 @@ export function layoutLines(
 
     // ── Tab segment ──────────────────────────────────────
     if ('isTab' in seg) {
+      // ── ECMA-376 §17.3.1.6 base-RTL ordinary tab ─────────────────────────
+      // The LTR pen math below resolves stops in LOGICAL order, which mis-places
+      // a bidi paragraph's tab-delimited cells (they reorder visually — see
+      // `layoutBidiTabStops`). Add the tab with a PROVISIONAL width of 0 and do
+      // NOT wrap on it; the per-line post-pass (`applyBidiTabs`, run in `flush`)
+      // recomputes every tab width in the visual frame once the line's content
+      // is known. A `<w:ptab>` (absolute-position tab) keeps the LTR path for
+      // now (no bidi ptab fixture; its own NOTE flags the gap).
+      if (baseRtl && !seg.ptab) {
+        seg.measuredWidth = 0;
+        addToLine(seg, 0, seg.fontSize, seg.fontSize * scale * 0.8, seg.fontSize * scale * 0.2);
+        continue;
+      }
+
       // Absolute position on the line measured from paraX (line origin for continuation lines)
       const absFromParaX = currentWidth + (isFirst ? firstIndent : 0);
 

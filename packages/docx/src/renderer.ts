@@ -3299,7 +3299,7 @@ function estimateParagraphHeight(
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
       pageH: state.pageH,
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt, paraW + indRight);
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt, paraW + indRight, para.bidi === true);
     if (lines.length === 0) {
       // Anchor-only paragraph: no inline content, but the paragraph mark still
       // occupies one (possibly flowed) line (§17.3.1.29).
@@ -3516,7 +3516,7 @@ function splitParagraphAcrossPages(
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0, paragraphIsEastAsian(para)),
     pageH: measureState.pageH,
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt, paraW + indRight);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt, paraW + indRight, para.bidi === true);
   if (lines.length === 0) {
     // Anchor-only paragraph: no inline lines, but the paragraph mark still
     // occupies one (possibly relocated) line (§17.3.1.29).
@@ -5276,9 +5276,9 @@ function renderParagraph(
   const lines = reuse
     ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
     : wrapCtx
-      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx)
+      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx, baseRtl)
       : rescaleLayoutLines(
-          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1),
+          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1, baseRtl),
           scale, ctx, state.fontFamilyClasses, paintGridDeltaPx,
         );
 
@@ -7243,6 +7243,12 @@ export function renderShapeText(
           } as ShapeTextRun];
     const docRuns = runs.map(shapeRunToDocRun);
     const segs = buildSegments(docRuns, effState);
+    // Base direction (§17.3.1.6): honor an explicit `<w:bidi>` on the block, else
+    // first-strong of the concatenated block text (the pre-change per-line probe
+    // used the same auto rule; a set flag now overrides it as Word does).
+    // Resolved BEFORE layout so a base-RTL block's tab stops mirror in layout
+    // (§17.3.1.37 / §17.18.84 — see layoutBidiTabStops).
+    const baseRtl = resolveBaseDirection(b.bidi, b.text) === 'rtl';
     const lines = layoutLines(
       ctx,
       segs,
@@ -7256,12 +7262,10 @@ export function renderShapeText(
       effState.kinsoku,
       0,
       effState.defaultTabPt,
+      ind.paraW, // marginRightPx: block text has no separate right-indent origin
+      baseRtl,
     );
     const metrics = lines.map((line) => lineMetricsFor(b, line));
-    // Base direction (§17.3.1.6): honor an explicit `<w:bidi>` on the block, else
-    // first-strong of the concatenated block text (the pre-change per-line probe
-    // used the same auto rule; a set flag now overrides it as Word does).
-    const baseRtl = resolveBaseDirection(b.bidi, b.text) === 'rtl';
     return {
       kind: 'text',
       lines,
@@ -8528,7 +8532,7 @@ function measureParaHeight(
   // to the margin rather than the indent), so it's deferred rather than
   // threaded through opportunistically. Revisit together with any other
   // measure/paint mismatch cleanup in this area.
-  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt);
+  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt, paraW, para.bidi === true);
   // Phase 4-1 B2 T2 — compute-once for TABLE-CELL paragraphs. This is the ONLY
   // point a cell paragraph's lines are laid out at scale 1: the paginator sizes
   // every table row through computeTablePtLayout → resolveTableRowHeights →
