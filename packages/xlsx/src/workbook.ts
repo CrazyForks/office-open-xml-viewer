@@ -363,6 +363,20 @@ export class XlsxWorkbook {
     });
   }
 
+  /**
+   * IX2 — the display string a cell shows on the grid, i.e. exactly what
+   * {@link renderViewport} would draw (number formats, dates, booleans, rich
+   * text flattened). Used by {@link XlsxViewer.findText} to search the *rendered*
+   * text rather than the raw stored value, so a search matches what the user
+   * sees. Threads the workbook styles + the sheet's date system through the
+   * shared {@link formatCellValue} (the same call the renderer and
+   * validation-list expansion use). Returns `''` before the workbook is loaded.
+   */
+  cellText(ws: Worksheet, cell: Cell): string {
+    if (!this.parsedWorkbook) return '';
+    return formatCellValue(cell, this.parsedWorkbook.styles, null, ws.date1904);
+  }
+
   async renderViewport(
     target: HTMLCanvasElement | OffscreenCanvas,
     sheetIndex: number,

@@ -367,3 +367,21 @@ export {
   intendedSingleLinePx,
   correctLineMetrics,
 } from './text/line-metrics';
+// IX2 in-document text search (findText). Format-agnostic index + match →
+// run-slice resolution (buildTextIndex/findMatches), the pure highlight-extent
+// helper (sliceHorizontalExtent), the active-match cursor arithmetic behind
+// findNext/findPrev (nextActive/prevActive/clampActive), and the shared public
+// FindMatch result shape. Each viewer supplies the run stream + turns a slice
+// into a pixel rect / DOM box in its own geometry; core owns the string math.
+export {
+  buildTextIndex,
+  findMatches,
+  type SearchRun,
+  type TextIndex,
+  type MatchRunSlice,
+  type TextMatch,
+  type FindMatchesOptions,
+} from './search/text-index';
+export { sliceHorizontalExtent } from './search/highlight-rect';
+export { nextActive, prevActive, clampActive } from './search/find-cursor';
+export type { FindMatch } from './search/find-match';

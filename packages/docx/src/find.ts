@@ -1,0 +1,162 @@
+/**
+ * IX2 docx find-in-document controller.
+ *
+ * Owns the search state for a {@link DocxViewer}: the per-page run lists (the
+ * same `onTextRun` stream the selection / hyperlink overlay consumes), the
+ * matches for the current query, and the active-match cursor `findNext` /
+ * `findPrev` walk. All the string/index math is core (`buildTextIndex`,
+ * `findMatches`, `nextActive`/`prevActive`); this class just threads a docx run
+ * list per page through it and maps each hit to a `{ page }` location.
+ *
+ * The viewer supplies `collectPageRuns(page)` — render page `page` (to an
+ * offscreen canvas, without disturbing the visible one) and return its
+ * `DocxTextRunInfo[]`. The controller calls it once per page on `find()` and
+ * caches the result until `invalidate()` (a reload / width change). The active
+ * page's cached runs are what the viewer's highlight overlay is drawn from, so
+ * the geometry the highlight boxes use is exactly the geometry the page was
+ * drawn with.
+ */
+import {
+  buildTextIndex,
+  findMatches,
+  nextActive,
+  prevActive,
+  type FindMatch,
+  type FindMatchesOptions,
+  type TextMatch,
+} from '@silurus/ooxml-core';
+import type { DocxTextRunInfo } from './renderer';
+
+/** Where a docx match lives: its 0-based page index. */
+export interface DocxMatchLocation {
+  page: number;
+}
+
+/** One resolved docx match: a page-located {@link FindMatch} plus the run-slices
+ *  (in that page's run list) it covers, kept internally so the highlight overlay
+ *  can turn them into pixel boxes. */
+interface DocxResolvedMatch {
+  /** 0-based page the match is on. */
+  page: number;
+  /** The matched text. */
+  text: string;
+  /** Run-slices within `pageRuns[page]`, from core `findMatches`. */
+  slices: TextMatch['slices'];
+}
+
+export class DocxFindController {
+  /** page index → that page's runs (from a render), or undefined = not scanned. */
+  private _pageRuns = new Map<number, DocxTextRunInfo[]>();
+  /** All matches for the current query, in document order (page asc, then within-page). */
+  private _matches: DocxResolvedMatch[] = [];
+  /** Active-match index into {@link _matches}, or -1 for none. */
+  private _active = -1;
+
+  constructor(
+    private readonly _pageCount: () => number,
+    private readonly _collectPageRuns: (page: number) => Promise<DocxTextRunInfo[]>,
+  ) {}
+
+  /** Drop all cached runs + matches (call on reload / render-width change). */
+  invalidate(): void {
+    this._pageRuns.clear();
+    this._matches = [];
+    this._active = -1;
+  }
+
+  /** The runs for a page, if it has been scanned (used by the highlight overlay
+   *  for the currently displayed page). */
+  pageRuns(page: number): DocxTextRunInfo[] | undefined {
+    return this._pageRuns.get(page);
+  }
+
+  /** Cache a page's runs captured from the visible render, so find() reuses
+   *  them instead of re-rendering that page offscreen. */
+  setPageRuns(page: number, runs: DocxTextRunInfo[]): void {
+    this._pageRuns.set(page, runs);
+  }
+
+  /** The resolved match at the given global index (for the highlight overlay). */
+  private _matchAt(index: number): DocxResolvedMatch | undefined {
+    return this._matches[index];
+  }
+
+  /** All match slices that fall on a given page, tagged with whether each is the
+   *  active match — the exact input the highlight overlay needs. */
+  pageHighlights(page: number): { slices: TextMatch['slices']; active: boolean }[] {
+    const out: { slices: TextMatch['slices']; active: boolean }[] = [];
+    for (let i = 0; i < this._matches.length; i++) {
+      const m = this._matches[i];
+      if (m.page === page) out.push({ slices: m.slices, active: i === this._active });
+    }
+    return out;
+  }
+
+  /** The active match's page, or null when there is no active match. */
+  activePage(): number | null {
+    const m = this._matchAt(this._active);
+    return m ? m.page : null;
+  }
+
+  /** The public match list for the current query. */
+  matches(): FindMatch<DocxMatchLocation>[] {
+    return this._matches.map((m, i) => ({
+      matchIndex: i,
+      text: m.text,
+      location: { page: m.page },
+    }));
+  }
+
+  /** Run a fresh query across every page, resetting the cursor. Returns the
+   *  public match list. An empty query clears matches. */
+  async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<DocxMatchLocation>[]> {
+    this._matches = [];
+    this._active = -1;
+    if (query.length === 0) return [];
+
+    const pages = this._pageCount();
+    for (let page = 0; page < pages; page++) {
+      const runs = await this._ensurePageRuns(page);
+      const index = buildTextIndex(runs);
+      for (const tm of findMatches(index, query, opts)) {
+        // The matched text as it appears in the document: read it back from the
+        // run slices so it carries the document's original case (not the folded
+        // query). Slices are in run order, so concatenating their run text
+        // reconstructs the match.
+        const text = tm.slices
+          .map((s) => runs[s.runIndex].text.slice(s.start, s.end))
+          .join('');
+        this._matches.push({ page, text, slices: tm.slices });
+      }
+    }
+    return this.matches();
+  }
+
+  /** Advance the active match (wrap-around) and return its public form, or null
+   *  when there are no matches. */
+  next(): FindMatch<DocxMatchLocation> | null {
+    this._active = nextActive(this._active, this._matches.length);
+    return this._activePublic();
+  }
+
+  /** Step the active match back (wrap-around). */
+  prev(): FindMatch<DocxMatchLocation> | null {
+    this._active = prevActive(this._active, this._matches.length);
+    return this._activePublic();
+  }
+
+  private _activePublic(): FindMatch<DocxMatchLocation> | null {
+    const m = this._matchAt(this._active);
+    if (!m) return null;
+    return { matchIndex: this._active, text: m.text, location: { page: m.page } };
+  }
+
+  /** Get (scanning + caching if needed) the runs for a page. */
+  private async _ensurePageRuns(page: number): Promise<DocxTextRunInfo[]> {
+    const cached = this._pageRuns.get(page);
+    if (cached) return cached;
+    const runs = await this._collectPageRuns(page);
+    this._pageRuns.set(page, runs);
+    return runs;
+  }
+}

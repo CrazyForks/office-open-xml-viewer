@@ -1,10 +1,11 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.js';
-import type { HyperlinkTarget, LoadOptions } from '@silurus/ooxml-core';
+import type { HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, openExternalHyperlink } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
+import { XlsxFindController, type FindCell, type XlsxMatchLocation } from './find.js';
 import { computeCommentPopupPosition } from './comment-popup.js';
 import {
   computeValidationPanelPosition,
@@ -422,6 +423,10 @@ export class XlsxViewer {
   private selectionMode: SelectionMode = 'cells';
   private isSelecting = false;
   private selectionOverlay: HTMLDivElement;
+  /** IX2 — find-highlight overlay (matched-cell boxes). */
+  private findOverlay!: HTMLDivElement;
+  /** IX2 — find state (matches + active cursor). */
+  private _find!: XlsxFindController;
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
   // Deferred selection press: committed on pointerup only if the pointer
   // neither moved beyond the tap threshold nor caused a scroll. Used for
@@ -505,6 +510,15 @@ export class XlsxViewer {
     this.selectionOverlay.style.cssText =
       `position:absolute;top:0;left:0;z-index:1;pointer-events:none;overflow:hidden;width:100%;height:100%;`;
 
+    // IX2 — find-highlight overlay: a sibling of the selection overlay, drawn
+    // on the same DOM-overlay mechanism (absolutely-positioned boxes over the
+    // canvas) rather than a new canvas pass. z-index 1 like the selection
+    // overlay; `pointer-events:none` keeps the grid interactive underneath. A
+    // matched cell gets a translucent box; the active match a stronger one.
+    this.findOverlay = document.createElement('div');
+    this.findOverlay.style.cssText =
+      `position:absolute;top:0;left:0;z-index:1;pointer-events:none;overflow:hidden;width:100%;height:100%;`;
+
     this.scrollHost = document.createElement('div');
     this.scrollHost.style.cssText = `position:absolute;inset:0;overflow:auto;z-index:2;background:transparent;`;
 
@@ -543,6 +557,7 @@ export class XlsxViewer {
 
     this.canvasArea.appendChild(this.canvas);
     this.canvasArea.appendChild(this.selectionOverlay);
+    this.canvasArea.appendChild(this.findOverlay);
     this.canvasArea.appendChild(this.scrollHost);
     this.canvasArea.appendChild(this.commentPopup);
     this.canvasArea.appendChild(this.validationPanel);
@@ -620,6 +635,7 @@ export class XlsxViewer {
       // track the scroll immediately, so it stays synchronous.
       this.scheduleRender();
       this.updateSelectionOverlay();
+      this.updateFindOverlay();
     });
 
     // Re-render whenever the canvas area changes size. Re-anchor first: a
@@ -633,11 +649,35 @@ export class XlsxViewer {
       // cheap and must reflect the new size at once, so they stay synchronous.
       this.scheduleRender();
       this.updateSelectionOverlay();
+      this.updateFindOverlay();
       this.updateNavButtons();
     });
     this.resizeObserver.observe(this.canvasArea);
 
     this.setupSelectionEvents();
+
+    this._find = new XlsxFindController(
+      () => this.sheetCount,
+      (sheet) => this.wb?.sheetNames[sheet] ?? '',
+      (sheet) => this._collectSheetCells(sheet),
+    );
+  }
+
+  /** Every non-empty cell of a sheet with its rendered display text (IX2 find
+   *  source). Reads the parsed worksheet model directly — no render — so search
+   *  covers the whole sheet, not just the on-screen viewport. */
+  private async _collectSheetCells(sheet: number): Promise<FindCell[]> {
+    const wb = this.wb;
+    if (!wb) return [];
+    const ws = await wb.getWorksheet(sheet);
+    const cells: FindCell[] = [];
+    for (const row of ws.rows) {
+      for (const cell of row.cells) {
+        const text = wb.cellText(ws, cell);
+        if (text !== '') cells.push({ row: cell.row, col: cell.col, text });
+      }
+    }
+    return cells;
   }
 
   /**
@@ -682,6 +722,8 @@ export class XlsxViewer {
       }
       this.wb = wb;
       previous?.destroy();
+      // A new workbook invalidates any prior find state.
+      this._find.invalidate();
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(this._initialSheet());
@@ -725,6 +767,9 @@ export class XlsxViewer {
     // so scrollWidth reflects the new sheet before we read the max offset.
     this.resetHorizontalScroll();
     await this.renderCurrentSheet();
+    // Redraw find highlights for the newly shown sheet (the find state survives
+    // a sheet switch; only the visible sheet's boxes are drawn).
+    this.updateFindOverlay();
     this.opts.onSheetChange?.(index, this.workbook.sheetNames.length);
   }
 
@@ -1445,6 +1490,186 @@ export class XlsxViewer {
       } else {
         this.hideValidationPanel();
       }
+    }
+  }
+
+  // ─── IX2 find-highlight overlay ──────────────────────────────────────────
+
+  /**
+   * Redraw the find-highlight overlay: one translucent box per matched cell on
+   * the current sheet, the active match in a stronger colour. Uses the SAME
+   * `getCellRect` + `screenX` + header/frozen clamp the selection overlay uses,
+   * so a box lands exactly on the drawn cell at any scroll offset / zoom / RTL.
+   * Rebuilt on every render and scroll (cheap DOM geometry, no canvas paint).
+   */
+  private updateFindOverlay(): void {
+    this.findOverlay.innerHTML = '';
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const cs = this.opts.cellScale ?? 1;
+    const sp = (px: number) => Math.round(px * cs);
+    const headerW = sp(HEADER_W);
+    const headerH = sp(HEADER_H);
+    const freezeRows = ws.freezeRows ?? 0;
+    const freezeCols = ws.freezeCols ?? 0;
+    let frozenW = 0;
+    for (let c = 1; c <= freezeCols; c++)
+      frozenW += sp(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws)));
+    let frozenH = 0;
+    for (let r = 1; r <= freezeRows; r++)
+      frozenH += sp(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight));
+    const frozenBoundX = headerW + frozenW;
+    const frozenBoundY = headerH + frozenH;
+
+    // A match accent: same single-color → border + translucent fill derivation
+    // the selection overlay uses. The active match uses a warm accent so it is
+    // distinguishable from other hits and from the (blue) selection box.
+    const other = selectionOverlayStyle('#ffb300'); // amber for all matches
+    const active = selectionOverlayStyle('#fb8c00'); // stronger orange for active
+
+    for (const hl of this._find.sheetHighlights(this.currentSheet)) {
+      const rect = this.getCellRect(hl.row, hl.col);
+      if (!rect) continue;
+      let { x, y, w, h } = rect;
+      // Clamp against headers + the frozen-pane boundary (scrollable cells that
+      // scrolled behind the frozen area are clipped there), mirroring the
+      // selection overlay so a highlight never spills over fixed regions.
+      if (x < headerW) { w -= headerW - x; x = headerW; }
+      if (y < headerH) { h -= headerH - y; y = headerH; }
+      if (hl.col > freezeCols && x < frozenBoundX) { w -= frozenBoundX - x; x = frozenBoundX; }
+      if (hl.row > freezeRows && y < frozenBoundY) { h -= frozenBoundY - y; y = frozenBoundY; }
+      if (w <= 0 || h <= 0) continue;
+      const screenLeft = this.screenX(x, w);
+      const { border, background } = hl.active ? active : other;
+      const box = document.createElement('div');
+      box.style.cssText =
+        `position:absolute;` +
+        `left:${screenLeft}px;top:${y}px;width:${w}px;height:${h}px;` +
+        `box-sizing:border-box;border:${border};background:${background};pointer-events:none;`;
+      this.findOverlay.appendChild(box);
+    }
+  }
+
+  /**
+   * IX2 — find every occurrence of `query` across every sheet and highlight the
+   * matched cells. Returns every match in document order (sheet ascending, then
+   * row-major within a sheet), each tagged with its
+   * `{ sheet, sheetName, ref, row, col }`. A cell is the search unit: search
+   * runs over each cell's *rendered* display text (number formats, dates, rich
+   * text flattened), so a query matches what the grid shows. Case-insensitive by
+   * default; pass `{ caseSensitive: true }` for an exact match. An empty query
+   * clears the find.
+   */
+  async findText(
+    query: string,
+    opts: FindMatchesOptions = {},
+  ): Promise<FindMatch<XlsxMatchLocation>[]> {
+    if (!this.wb) return [];
+    const matches = await this._find.find(query, opts);
+    this.updateFindOverlay();
+    return matches;
+  }
+
+  /**
+   * IX2 — move to the next match (wrap-around), switching sheets and scrolling
+   * the matched cell into view as needed, and highlight it as the active match.
+   * Returns the now-active match, or `null` when there are none. Call
+   * {@link findText} first.
+   */
+  async findNext(): Promise<FindMatch<XlsxMatchLocation> | null> {
+    return this._activateMatch(this._find.next());
+  }
+
+  /** IX2 — move to the previous match (wrap-around). */
+  async findPrev(): Promise<FindMatch<XlsxMatchLocation> | null> {
+    return this._activateMatch(this._find.prev());
+  }
+
+  /** IX2 — clear all highlights and reset the find state. */
+  clearFind(): void {
+    this._find.invalidate();
+    this.updateFindOverlay();
+  }
+
+  private async _activateMatch(
+    match: FindMatch<XlsxMatchLocation> | null,
+  ): Promise<FindMatch<XlsxMatchLocation> | null> {
+    if (!match) {
+      this.updateFindOverlay();
+      return null;
+    }
+    const { sheet, row, col } = match.location;
+    if (sheet !== this.currentSheet) {
+      // showSheet resets scroll/selection and re-renders; the find state (and so
+      // the highlights) survive because they live on the controller, not the
+      // sheet. updateFindOverlay runs after the sheet switch below.
+      await this.goToSheet(sheet);
+    }
+    this._scrollCellIntoView(row, col);
+    // Scrolling schedules a coalesced render; draw the highlights now so the
+    // active box is visible immediately without waiting a frame.
+    this.updateFindOverlay();
+    return match;
+  }
+
+  /**
+   * Scroll the grid so cell (row, col) is comfortably in view. Computes the
+   * cell's absolute logical offset from the axis metrics (the same the renderer
+   * uses) and nudges `scrollHost.scrollTop` / start-anchored horizontal scroll
+   * only when the cell is outside the scrollable viewport — an in-view cell is
+   * left where it is (Excel's find behaviour). Frozen cells are always visible,
+   * so they need no scroll.
+   */
+  private _scrollCellIntoView(row: number, col: number): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const cs = this.opts.cellScale ?? 1;
+    const mdw = getMdwForWorksheet(ws);
+    const axes = getSheetAxes(ws, mdw);
+    const freezeRows = ws.freezeRows ?? 0;
+    const freezeCols = ws.freezeCols ?? 0;
+
+    // Vertical: only scroll for a scrollable-region row.
+    if (row > freezeRows) {
+      const headerH = Math.round(HEADER_H * cs);
+      let frozenH = 0;
+      for (let r = 1; r <= freezeRows; r++) frozenH += Math.round(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight) * cs);
+      const viewTop = headerH + frozenH; // top of the scrollable region (canvasArea px)
+      const viewH = this.canvasArea.clientHeight;
+      // Cell offset from the first scrollable row, in logical px, → scaled px.
+      const cellTopLogical = axes.row.offsetOf(row) - axes.row.offsetOf(freezeRows + 1);
+      const cellHLogical = rowHeightToPx(ws.rowHeights[row] ?? ws.defaultRowHeight);
+      const cellTop = viewTop + (cellTopLogical * cs - this.scrollHost.scrollTop);
+      const cellBot = cellTop + cellHLogical * cs;
+      if (cellTop < viewTop) {
+        this.scrollHost.scrollTop = cellTopLogical * cs;
+      } else if (cellBot > viewH) {
+        this.scrollHost.scrollTop = cellTopLogical * cs - (viewH - viewTop - cellHLogical * cs);
+      }
+    }
+
+    // Horizontal: only scroll for a scrollable-region column. Work in the
+    // start-anchored logical space, then re-derive the native scrollLeft (RTL
+    // safe) via the existing anchor path.
+    if (col > freezeCols) {
+      const headerW = Math.round(HEADER_W * cs);
+      let frozenW = 0;
+      for (let c = 1; c <= freezeCols; c++) frozenW += Math.round(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw) * cs);
+      const viewLeft = headerW + frozenW;
+      const viewW = this.canvasArea.clientWidth;
+      const cellLeftLogical = axes.col.offsetOf(col) - axes.col.offsetOf(freezeCols + 1);
+      const cellWLogical = colWidthToPx(ws.colWidths[col] ?? ws.defaultColWidth, mdw);
+      const cellLeft = viewLeft + (cellLeftLogical * cs - this.effectiveScrollLeft);
+      const cellRight = cellLeft + cellWLogical * cs;
+      let wantEff = this.effectiveScrollLeft;
+      if (cellLeft < viewLeft) {
+        wantEff = cellLeftLogical * cs;
+      } else if (cellRight > viewW) {
+        wantEff = cellLeftLogical * cs - (viewW - viewLeft - cellWLogical * cs);
+      }
+      wantEff = Math.max(0, wantEff);
+      this.effectiveH = wantEff;
+      this.scrollHost.scrollLeft = this.isRtl ? Math.max(0, this.maxScrollLeft - wantEff) : wantEff;
     }
   }
 
@@ -2310,6 +2535,7 @@ export class XlsxViewer {
     }
     void this.renderCurrentSheet();
     this.updateSelectionOverlay();
+    this.updateFindOverlay();
     this.updateNavButtons();
   }
 
@@ -2591,6 +2817,10 @@ export class XlsxViewer {
     if (this.keydownHandler) {
       document.removeEventListener('keydown', this.keydownHandler);
     }
+    // IX2 — drop the find state (matches + cursor) so a stale
+    // findNext()/findPrev() after teardown returns null instead of a match
+    // pointing into a dead viewer (same fix as DocxViewer/PptxViewer.destroy).
+    this._find.invalidate();
     this.wb?.destroy();
     // Remove the whole UI subtree so the container is empty again. This also
     // detaches every listener bound to elements within it (scrollHost pointer/

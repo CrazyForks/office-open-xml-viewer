@@ -15,3 +15,20 @@ export function parseA1(ref: string): { row: number; col: number } | null {
   }
   return { row: parseInt(m[2], 10), col };
 }
+
+/**
+ * Inverse of {@link parseA1}: format a 1-based (row, col) as an A1 reference
+ * (e.g. `(7, 2)` → `"B7"`). Used by IX2 findText to report a match's cell in the
+ * A1 notation users know. The column runs the bijective base-26 the spreadsheet
+ * grid uses (1→A, 26→Z, 27→AA). `col`/`row` are assumed ≥ 1.
+ */
+export function formatA1(row: number, col: number): string {
+  let letters = '';
+  let c = col;
+  while (c > 0) {
+    const rem = (c - 1) % 26;
+    letters = String.fromCharCode(65 + rem) + letters;
+    c = Math.floor((c - 1) / 26);
+  }
+  return `${letters}${row}`;
+}

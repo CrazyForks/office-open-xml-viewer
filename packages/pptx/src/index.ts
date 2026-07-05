@@ -8,6 +8,15 @@ export {
 } from './presentation';
 export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
 export { buildPptxTextLayer } from './text-layer';
+// IX2 find-in-document: the highlight overlay builder + the pptx match-location
+// shape. `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
+export {
+  buildPptxHighlightLayer,
+  type PptxHighlightMatch,
+  type PptxHighlightColors,
+} from './find-highlight-layer';
+export type { PptxMatchLocation } from './find';
+export type { FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 export type { PresentationHandle } from './presentation-handle';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 // IX1 — the shared hyperlink target shape surfaced by `PptxViewerOptions.

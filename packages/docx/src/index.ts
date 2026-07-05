@@ -3,6 +3,15 @@ export type { WireRenderPageOptions } from './worker-protocol';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 export { buildDocxTextLayer } from './text-layer';
+// IX2 find-in-document: the highlight overlay builder + the docx match-location
+// shape. `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
+export {
+  buildDocxHighlightLayer,
+  type DocxHighlightMatch,
+  type DocxHighlightColors,
+} from './find-highlight-layer';
+export type { DocxMatchLocation } from './find';
+export type { FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 // IX1 — the shared hyperlink target shape surfaced by `DocxViewerOptions.
 // onHyperlinkClick`, `DocxTextRunInfo.hyperlink`, and the 5th arg of

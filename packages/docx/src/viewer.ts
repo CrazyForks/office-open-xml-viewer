@@ -3,8 +3,10 @@ import type { LoadOptions } from './document';
 import type { RenderPageOptions } from './types';
 import type { DocxTextRunInfo } from './renderer';
 import { buildDocxTextLayer } from './text-layer';
+import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
+import { DocxFindController, type DocxMatchLocation } from './find';
 import { openExternalHyperlink } from '@silurus/ooxml-core';
-import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import type { HyperlinkTarget, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 
 export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
@@ -39,6 +41,17 @@ export class DocxViewer {
    *  (empty string if it was unset), restored on {@link destroy}. */
   private _originalDisplay = '';
   private _textLayer: HTMLDivElement | null = null;
+  /** IX2 — the find-highlight overlay layer. Always created (independent of
+   *  `enableTextSelection`): highlights ride the same positioned-DOM overlay
+   *  mechanism as the selection layer but are visible boxes, not transparent
+   *  spans. Sits above the text layer so a highlight shows over a link's hit
+   *  region without stealing its clicks (`pointer-events:none`). */
+  private _highlightLayer: HTMLDivElement | null = null;
+  /** IX2 — find state (per-page runs, matches, active cursor). */
+  private _find: DocxFindController;
+  /** A 2d context used only to measure text for highlight geometry (its own
+   *  1×1 offscreen canvas, so measuring never touches the visible canvas). */
+  private _measureCtx: CanvasRenderingContext2D | null = null;
   private _opts: DocxViewerOptions;
   private readonly _mode: 'main' | 'worker';
   /** The canvas's bitmaprenderer context, used only in worker mode (a canvas
@@ -46,6 +59,8 @@ export class DocxViewer {
    *  never used on the same canvas). */
   private _bitmapCtx: ImageBitmapRenderingContext | null = null;
   private _warnedNoTextSelection = false;
+  /** One-shot guard so the worker-mode findText warning prints once. */
+  private _warnedNoFind = false;
   /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
    *  render rejection that lands AFTER teardown is swallowed rather than surfaced
    *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
@@ -107,6 +122,21 @@ export class DocxViewer {
         'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
       this._wrapper.appendChild(this._textLayer);
     }
+
+    // IX2 — the find-highlight overlay layer. Appended last so it stacks above
+    // the text/selection layer; `pointer-events:none` keeps selection + link
+    // clicks working through it. In worker mode `onTextRun` can't fire, so it
+    // stays empty (find is main-mode only, warned at find() time).
+    this._highlightLayer = document.createElement('div');
+    this._highlightLayer.style.cssText =
+      'position:absolute;top:0;left:0;width:100%;height:100%;' +
+      'overflow:hidden;pointer-events:none;';
+    this._wrapper.appendChild(this._highlightLayer);
+
+    this._find = new DocxFindController(
+      () => this.pageCount,
+      (page) => this._collectPageRuns(page),
+    );
   }
 
   /**
@@ -152,6 +182,8 @@ export class DocxViewer {
       this._doc = doc;
       previous?.destroy();
       this._currentPage = 0;
+      // A new document invalidates any prior find state (cached runs / matches).
+      this._find.invalidate();
       await this._render();
     } catch (err) {
       // Superseded loads own no error reporting — the winning load (or destroy())
@@ -190,6 +222,86 @@ export class DocxViewer {
   async prevPage(): Promise<void> { await this.goToPage(this._currentPage - 1); }
 
   /**
+   * IX2 — find every occurrence of `query` in the document and highlight them
+   * all (a soft box per match, drawn on the highlight overlay over the drawn
+   * glyphs). Returns every match in document order, each tagged with its
+   * `{ page }` (0-based). Case-insensitive by default (browser find-in-page);
+   * pass `{ caseSensitive: true }` to match case exactly.
+   *
+   * Scans all pages, so a large document renders each page once offscreen to
+   * read its text (the visible page reuses its on-screen render). Not available
+   * in `mode: 'worker'` (the `onTextRun` stream can't cross the worker boundary)
+   * — returns `[]` there after a one-time warning. An empty query clears the
+   * find and returns `[]`.
+   */
+  async findText(
+    query: string,
+    opts: FindMatchesOptions = {},
+  ): Promise<FindMatch<DocxMatchLocation>[]> {
+    if (!this._doc) return [];
+    if (this._mode === 'worker') {
+      if (!this._warnedNoFind) {
+        this._warnedNoFind = true;
+        console.warn(
+          "[ooxml] findText is unavailable in mode: 'worker' (text runs can't cross the worker boundary). Use mode: 'main'.",
+        );
+      }
+      return [];
+    }
+    const matches = await this._find.find(query, opts);
+    // Redraw the current page's highlights (matches on it become visible without
+    // navigating). Cheap DOM geometry — no page re-render.
+    this._redrawHighlights();
+    return matches;
+  }
+
+  /**
+   * IX2 — move to the next match (wrap-around from last to first), navigating to
+   * its page if needed, and draw it in the distinct active-match colour. Returns
+   * the now-active match, or `null` when there are no matches. Call
+   * {@link findText} first.
+   */
+  async findNext(): Promise<FindMatch<DocxMatchLocation> | null> {
+    return this._activateMatch(this._find.next());
+  }
+
+  /** IX2 — move to the previous match (wrap-around from first to last). */
+  async findPrev(): Promise<FindMatch<DocxMatchLocation> | null> {
+    return this._activateMatch(this._find.prev());
+  }
+
+  /** IX2 — clear all highlights and reset the find state. */
+  clearFind(): void {
+    this._find.invalidate();
+    this._redrawHighlights();
+  }
+
+  /** Navigate to the active match's page (if not already there) and redraw the
+   *  highlights so the active box shows in the emphasis colour. */
+  private async _activateMatch(
+    match: FindMatch<DocxMatchLocation> | null,
+  ): Promise<FindMatch<DocxMatchLocation> | null> {
+    if (!match) {
+      this._redrawHighlights();
+      return null;
+    }
+    if (match.location.page !== this._currentPage) {
+      // goToPage re-renders, which rebuilds the highlight layer for the new page.
+      await this.goToPage(match.location.page);
+    } else {
+      this._redrawHighlights();
+    }
+    return match;
+  }
+
+  /** Rebuild the highlight overlay for the current page from cached runs
+   *  (no page re-render). */
+  private _redrawHighlights(): void {
+    const runs = this._find.pageRuns(this._currentPage) ?? [];
+    this._buildHighlightLayer(runs);
+  }
+
+  /**
    * Terminate the parser worker and release resources.
    *
    * The caller-owned `<canvas>` is returned to the DOM position it held before
@@ -207,6 +319,10 @@ export class DocxViewer {
     this._loadGen++;
     this._doc?.destroy();
     this._doc = null;
+    // IX2 — drop the find state (matches + cached runs) so a stale
+    // findNext()/findPrev() after teardown returns null instead of a match
+    // pointing into a dead viewer.
+    this._find.invalidate();
     // Return the caller-owned canvas to its original DOM slot before discarding
     // the wrapper. insertBefore still works if the original parent was itself
     // detached; when there was no original parent the canvas is left detached
@@ -280,14 +396,72 @@ export class DocxViewer {
       this._canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
       this._bitmapCtx?.transferFromImageBitmap(bmp);
     } else {
+      // Collect runs unconditionally (not just when a text layer exists): the
+      // find-highlight overlay needs the current page's run geometry too, and
+      // caching them here means find() reuses the visible render for this page
+      // instead of re-rendering it offscreen.
       const runs: DocxTextRunInfo[] = [];
-      const onTextRun = this._textLayer ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
+      const onTextRun = (r: DocxTextRunInfo) => runs.push(r);
       await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, onTextRun });
       if (this._textLayer) {
         this._buildTextLayer(this._textLayer, runs);
       }
+      // Feed the just-rendered page's runs to the find controller so highlight
+      // geometry matches exactly what was drawn, then (re)draw the highlights.
+      this._find.setPageRuns(this._currentPage, runs);
+      this._buildHighlightLayer(runs);
     }
     this._opts.onPageChange?.(this._currentPage, this.pageCount);
+  }
+
+  /** Draw the find-highlight boxes for the current page from its runs. Clears
+   *  the overlay when there is no active find. */
+  private _buildHighlightLayer(runs: DocxTextRunInfo[]): void {
+    const layer = this._highlightLayer;
+    if (!layer) return;
+    const cssWidth = this._canvas.style.width || this._canvas.width + 'px';
+    const cssHeight = this._canvas.style.height || this._canvas.height + 'px';
+    const highlights: DocxHighlightMatch[] = this._find.pageHighlights(this._currentPage);
+    buildDocxHighlightLayer(
+      layer,
+      runs,
+      highlights,
+      cssWidth,
+      cssHeight,
+      (font) => this._measureForFont(font),
+    );
+  }
+
+  /** A width-measurer primed with `font`, backed by a private 1×1 canvas so it
+   *  never disturbs the visible canvas's context state. */
+  private _measureForFont(font: string): (s: string) => number {
+    if (!this._measureCtx) {
+      const c = document.createElement('canvas');
+      this._measureCtx = c.getContext('2d');
+    }
+    const ctx = this._measureCtx;
+    if (!ctx) return (s) => s.length; // measurement unavailable (headless w/o canvas)
+    ctx.font = font;
+    return (s) => ctx.measureText(s).width;
+  }
+
+  /** Render a page to a throwaway offscreen canvas purely to collect its runs
+   *  (text + geometry) for search, without touching the visible canvas. Used by
+   *  the find controller for pages other than the one on screen. */
+  private async _collectPageRuns(page: number): Promise<DocxTextRunInfo[]> {
+    if (!this._doc || this._mode === 'worker') return [];
+    // The currently displayed page's runs are already cached by _renderPage; the
+    // controller only calls this for other pages.
+    const runs: DocxTextRunInfo[] = [];
+    const off =
+      typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(1, 1)
+        : (document.createElement('canvas') as HTMLCanvasElement);
+    await this._doc.renderPage(off, page, {
+      ...this._opts,
+      onTextRun: (r: DocxTextRunInfo) => runs.push(r),
+    });
+    return runs;
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {

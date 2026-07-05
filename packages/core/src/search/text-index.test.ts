@@ -1,0 +1,179 @@
+import { describe, it, expect } from 'vitest';
+import { buildTextIndex, findMatches, type SearchRun } from './text-index.js';
+
+/**
+ * IX2 core search index. `buildTextIndex` joins an ordered run list; `findMatches`
+ * locates a query in the joined text and maps each hit back to the run-slices it
+ * covers so a viewer can highlight the right glyphs — including a match that
+ * straddles a run boundary (the sole subtle case). Case-insensitive by default.
+ */
+const runs = (...texts: string[]): SearchRun[] => texts.map((text) => ({ text }));
+
+describe('buildTextIndex', () => {
+  it('joins runs in order and records each run start offset', () => {
+    const index = buildTextIndex(runs('Hello ', 'World'));
+    expect(index.text).toBe('Hello World');
+    expect(index.folded).toBe('hello world');
+    expect(index.runStart).toEqual([0, 6]);
+    expect(index.runCount).toBe(2);
+  });
+
+  it('handles an empty run list', () => {
+    const index = buildTextIndex([]);
+    expect(index.text).toBe('');
+    expect(index.runCount).toBe(0);
+    expect(index.runStart).toEqual([]);
+  });
+});
+
+describe('findMatches — single-run matches', () => {
+  it('finds a substring wholly inside one run', () => {
+    const index = buildTextIndex(runs('the quick brown fox'));
+    const m = findMatches(index, 'quick');
+    expect(m).toHaveLength(1);
+    expect(m[0].matchIndex).toBe(0);
+    expect(m[0].slices).toEqual([{ runIndex: 0, start: 4, end: 9 }]);
+  });
+
+  it('returns non-overlapping matches in document order with ascending matchIndex', () => {
+    const index = buildTextIndex(runs('abababab'));
+    const m = findMatches(index, 'ab');
+    expect(m.map((x) => x.matchIndex)).toEqual([0, 1, 2, 3]);
+    expect(m.map((x) => x.slices[0].start)).toEqual([0, 2, 4, 6]);
+  });
+
+  it('advances past each match so overlapping occurrences are not double-counted', () => {
+    const index = buildTextIndex(runs('aaaa'));
+    const m = findMatches(index, 'aa');
+    // Browser find-in-page semantics: matches at 0 and 2 (not 0,1,2,3).
+    expect(m.map((x) => x.slices[0].start)).toEqual([0, 2]);
+  });
+});
+
+describe('findMatches — case sensitivity', () => {
+  it('is case-insensitive by default', () => {
+    const index = buildTextIndex(runs('Hello HELLO hello'));
+    const m = findMatches(index, 'hello');
+    expect(m).toHaveLength(3);
+  });
+
+  it('honors caseSensitive: true', () => {
+    const index = buildTextIndex(runs('Hello HELLO hello'));
+    const m = findMatches(index, 'hello', { caseSensitive: true });
+    expect(m).toHaveLength(1);
+    expect(m[0].slices[0].start).toBe(12);
+  });
+});
+
+describe('findMatches — cross-run matches', () => {
+  it('resolves a match split across two runs into two slices', () => {
+    // "Hello" split as "Hel" | "lo".
+    const index = buildTextIndex(runs('Hel', 'lo World'));
+    const m = findMatches(index, 'Hello');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([
+      { runIndex: 0, start: 0, end: 3 },
+      { runIndex: 1, start: 0, end: 2 },
+    ]);
+  });
+
+  it('resolves a match spanning three runs (whole middle run)', () => {
+    // "abcdef" as "ab" | "cd" | "ef".
+    const index = buildTextIndex(runs('ab', 'cd', 'ef'));
+    const m = findMatches(index, 'bcde');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([
+      { runIndex: 0, start: 1, end: 2 },
+      { runIndex: 1, start: 0, end: 2 },
+      { runIndex: 2, start: 0, end: 1 },
+    ]);
+  });
+
+  it('skips zero-length runs that fall inside a match range', () => {
+    // Empty run between two text runs must not produce an empty slice.
+    const index = buildTextIndex(runs('ab', '', 'cd'));
+    const m = findMatches(index, 'abcd');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([
+      { runIndex: 0, start: 0, end: 2 },
+      { runIndex: 2, start: 0, end: 2 },
+    ]);
+  });
+
+  it('matches case-insensitively across a run boundary', () => {
+    const index = buildTextIndex(runs('FIND', 'text'));
+    const m = findMatches(index, 'dt');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([
+      { runIndex: 0, start: 3, end: 4 },
+      { runIndex: 1, start: 0, end: 1 },
+    ]);
+  });
+});
+
+describe('findMatches — length-changing case folds must not shift offsets', () => {
+  // U+0130 (İ, LATIN CAPITAL LETTER I WITH DOT ABOVE) lowercases to "i" +
+  // U+0307 (combining dot above): 1 → 2 UTF-16 code units. A whole-string
+  // toLowerCase() therefore de-syncs `folded` offsets from `text` offsets and
+  // shifts every later match right by the length delta (reviewer repro:
+  // "İstanbul" + "bul" sliced "ul"). The fold must preserve length — such code
+  // points stay unfolded — so a match offset always indexes `text` correctly.
+  it('finds a match after İ at the correct text offset', () => {
+    const index = buildTextIndex(runs('İstanbul'));
+    expect(index.folded.length).toBe(index.text.length);
+    const m = findMatches(index, 'bul');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([{ runIndex: 0, start: 5, end: 8 }]);
+    // The slice must select the actual matched glyphs in the original text.
+    expect('İstanbul'.slice(m[0].slices[0].start, m[0].slices[0].end)).toBe('bul');
+  });
+
+  it('keeps offsets aligned across a run boundary after İ', () => {
+    const index = buildTextIndex(runs('İst', 'anbul'));
+    const m = findMatches(index, 'STAN');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([
+      { runIndex: 0, start: 1, end: 3 },
+      { runIndex: 1, start: 0, end: 2 },
+    ]);
+  });
+
+  it('matches İ by identity (query İ ↔ text İ, both kept unfolded)', () => {
+    const index = buildTextIndex(runs('İstanbul'));
+    const m = findMatches(index, 'İstan');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([{ runIndex: 0, start: 0, end: 5 }]);
+  });
+
+  it('ordinary folding still applies around the preserved code point', () => {
+    const index = buildTextIndex(runs('İSTANBUL and istanbul'));
+    // The İ variant's trailing letters and the plain-I word both fold normally.
+    const m = findMatches(index, 'stanbul');
+    expect(m).toHaveLength(2);
+    expect(m.map((x) => x.slices[0].start)).toEqual([1, 14]);
+  });
+});
+
+describe('findMatches — edge cases', () => {
+  it('returns [] for an empty query', () => {
+    const index = buildTextIndex(runs('anything'));
+    expect(findMatches(index, '')).toEqual([]);
+  });
+
+  it('returns [] when the query is absent', () => {
+    const index = buildTextIndex(runs('hello world'));
+    expect(findMatches(index, 'zzz')).toEqual([]);
+  });
+
+  it('returns [] over an empty document', () => {
+    const index = buildTextIndex([]);
+    expect(findMatches(index, 'x')).toEqual([]);
+  });
+
+  it('matches a query that equals the whole text', () => {
+    const index = buildTextIndex(runs('exact'));
+    const m = findMatches(index, 'exact');
+    expect(m).toHaveLength(1);
+    expect(m[0].slices).toEqual([{ runIndex: 0, start: 0, end: 5 }]);
+  });
+});

@@ -4,6 +4,10 @@ export { XlsxViewer } from './viewer.js';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
 export type { XlsxViewerOptions, HiddenSheetMode, CellAddress, CellRange, SelectionMode } from './viewer.js';
+// IX2 find-in-document: the xlsx match-location shape (sheet + A1 cell ref).
+// `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
+export type { XlsxMatchLocation } from './find.js';
+export type { FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 // IX1 — the shared hyperlink target shape surfaced by `XlsxViewerOptions.
 // onHyperlinkClick`, plus the default "open in a new tab, sanitised" helper.
