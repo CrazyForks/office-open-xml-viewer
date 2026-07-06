@@ -1104,8 +1104,9 @@ export class DocxScrollViewer implements ZoomableViewer {
     // HORIZONTAL anchor (gesture only — a non-gesture setScale leaves scrollLeft
     // untouched, matching the historical behaviour). The page's left edge sits at
     // the scale-INVARIANT left gutter `padL` when it overflows the viewport (see
-    // `_positionSlot`), so the scaling region starts at `padL`; feed the pointer's
-    // offset PAST that lead-in to the pure anchored-offset helper.
+    // `_positionSlot`): screen-x of content pixel c is `padL + c − scrollLeft`,
+    // so the pointer's offset INTO the scaling region is `x − padL` and the
+    // scroll offset itself already lives in the region's own px.
     const padL = this._padH().left;
     const scrollLeft0 = this._scrollHost.scrollLeft || 0;
 
@@ -1135,16 +1136,23 @@ export class DocxScrollViewer implements ZoomableViewer {
     const newContentY = (r1.offsets[top] ?? 0) + intraFrac * (this._heights[top] || 0);
     this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, newContentY - anchorY));
 
-    // Re-anchor horizontally for a gesture zoom (past the fixed `padL` lead-in),
-    // clamped to the new horizontal extent. Skipped entirely for a non-gesture
-    // setScale so slider/stepper/API/resize behaviour is byte-for-byte unchanged.
+    // Re-anchor horizontally for a gesture zoom. `padL` is a FIXED (non-scaling)
+    // gutter, so it is subtracted from the ANCHOR only — the scroll offset stays
+    // in NATIVE space with the browser's own [0, maxLeft] clamp. (Shifting the
+    // scroll by ±padL as well would run the fixed gutter through the zoom ratio
+    // and over-compensate by padL·(ratio−1) per step: with `screen = padL + c −
+    // scrollLeft`, pinning c·ratio under the pointer x gives exactly
+    // `scrollLeft' = ratio·(scrollLeft + (x−padL)) − (x−padL)`.) Skipped entirely
+    // for a non-gesture setScale so slider/stepper/API/resize is unchanged.
     if (gestureAnchor) {
       const maxLeft = Math.max(0, (this._spacer.offsetWidth || 0) - this._scrollHost.clientWidth);
-      this._scrollHost.scrollLeft =
-        padL +
-        anchoredZoomOffset(scrollLeft0 - padL, gestureAnchor.x - padL, prevScale, next, {
-          maxScroll: maxLeft - padL,
-        });
+      this._scrollHost.scrollLeft = anchoredZoomOffset(
+        scrollLeft0,
+        gestureAnchor.x - padL,
+        prevScale,
+        next,
+        { maxScroll: maxLeft },
+      );
     }
 
     // FLICKER-FREE ZOOM (design §7). Do NOT recycle + re-render in-window slots

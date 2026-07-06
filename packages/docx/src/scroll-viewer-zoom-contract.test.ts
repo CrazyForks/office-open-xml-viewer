@@ -217,4 +217,36 @@ describe('DocxScrollViewer IX9 zoom contract', () => {
     expect(v.viewportYOfForTest(topContent.page, topContent.frac)).toBeCloseTo(0, 4);
     v.destroy();
   });
+
+  // HORIZONTAL pointer anchor with a non-zero left gutter. The gutter `padL` is
+  // FIXED (does not scale), so the invariant is on the LOGICAL content-x under
+  // the pointer: screen-x of content pixel c is `padL + c − scrollLeft`, hence
+  // logicalX = (scrollLeft + x − padL) / scale must not move across the zoom.
+  // Regression pin: subtracting/adding padL around the SCROLL as well (instead of
+  // subtracting it from the anchor only) over-compensates by padL·(ratio−1).
+  it('a Ctrl+wheel zoom keeps the content under the pointer fixed horizontally (padL > 0)', () => {
+    const padL = 24;
+    const { v, scrollHost } = setup({ paddingLeft: padL, paddingRight: padL });
+    v.setScale(3); // page 133.33 × 3 = 400px wide > the 200px viewport ⇒ h-scrollable
+    // The fake DOM derives no layout from style; give the spacer a generous
+    // laid-out width so the [0, maxLeft] clamp does not bind.
+    const spacer = scrollHost.children[0] as FakeEl;
+    spacer.offsetWidth = 100_000;
+    scrollHost.scrollLeft = 120;
+    const ax = 130; // pointer x in viewport px (over the page, right of the gutter)
+    const scaleBefore = v.getScale();
+    const logicalXBefore = (scrollHost.scrollLeft + ax - padL) / scaleBefore;
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: -20, // ratio e^0.2 ≈ 1.221 ⇒ 3 → ≈3.66, inside zoomMax 4 (unclamped)
+      clientX: ax,
+      clientY: 200,
+      preventDefault() {},
+    });
+    const scaleAfter = v.getScale();
+    expect(scaleAfter).toBeGreaterThan(scaleBefore);
+    const logicalXAfter = (scrollHost.scrollLeft + ax - padL) / scaleAfter;
+    expect(logicalXAfter).toBeCloseTo(logicalXBefore, 6);
+    v.destroy();
+  });
 });
