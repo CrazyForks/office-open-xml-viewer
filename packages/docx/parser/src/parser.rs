@@ -9738,6 +9738,116 @@ mod footnote_tests {
         panic!("no paragraph parsed");
     }
 
+    /// Like `first_para_with`, but returns EVERY body paragraph (in order) so a
+    /// numbering SEQUENCE across several paragraphs can be exercised end-to-end
+    /// (the running counter lives in `NumberingMap`, so a single-paragraph helper
+    /// cannot observe how level advances/resets compose).
+    fn paras_with(
+        body_inner: &str,
+        styles_xml: &str,
+        numbering_xml: &str,
+    ) -> Vec<crate::types::DocParagraph> {
+        let xml = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
+            ns = W_NS,
+            inner = body_inner,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body_node = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let style_map = StyleMap::parse(styles_xml);
+        let mut num_map = if numbering_xml.is_empty() {
+            NumberingMap::default()
+        } else {
+            NumberingMap::parse(numbering_xml, &HashMap::new())
+        };
+        parse_body_elements(
+            body_node,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .filter_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        })
+        .collect()
+    }
+
+    /// ECMA-376 §17.9.2/§17.9.22/§17.9.11 — MULTILEVEL heading numbering resolved
+    /// PURELY through the paragraph-style chain, the way real templates (e.g. the
+    /// MSR journal template, sample-13) author it: the heading paragraphs carry
+    /// ONLY `<w:pStyle>` (no direct `<w:numPr>`), each heading style's `pPr/numPr`
+    /// supplies `<w:ilvl>` + `<w:numId>` (Heading3 inherits the numId from its
+    /// `basedOn` Heading2), and the shared abstractNum composes cross-level markers
+    /// with `%1.%2`. The running counter must therefore: (a) pick up the ilvl from
+    /// the STYLE (not default to 0 for a paragraph that lacks a direct numPr),
+    /// (b) NOT advance the level-0 counter when a level-1 heading appears, and
+    /// (c) reset the deeper counter when the parent advances. A regression here
+    /// renders the classic "1 / 1.1 / 1.2 / 2 / 2.1" outline as a flat "1 / 2 / 3
+    /// / 4 / 5".
+    #[test]
+    fn multilevel_headings_via_pstyle_chain_resolve_hierarchically() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="H1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="6"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="6"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H3"><w:name w:val="heading 3"/><w:basedOn w:val="H2"/><w:pPr><w:numPr><w:ilvl w:val="2"/></w:numPr></w:pPr></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="20">
+                <w:multiLevelType w:val="multilevel"/>
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H1"/><w:lvlText w:val="%1."/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H2"/><w:lvlText w:val="%1.%2"/></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H3"/><w:lvlText w:val="%1.%2.%3"/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="6"><w:abstractNumId w:val="20"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        // Sequence: H1, H2, H2, H3, H1, H2 — the canonical outline the user reported.
+        let body = r#"
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>C</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H3"/></w:pPr><w:r><w:t>D</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>E</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>F</w:t></w:r></w:p>"#;
+        let paras = paras_with(body, &styles, &numbering);
+        let markers: Vec<(u32, &str)> = paras
+            .iter()
+            .map(|p| {
+                let n = p.numbering.as_ref().expect("heading is numbered");
+                (n.level, n.text.as_str())
+            })
+            .collect();
+        assert_eq!(
+            markers,
+            vec![
+                (0, "1."),
+                (1, "1.1"),
+                (1, "1.2"),
+                (2, "1.2.1"),
+                (0, "2."),
+                (1, "2.1"),
+            ],
+            "multilevel headings authored via the pStyle chain must resolve \
+             hierarchically, not flatten to 1/2/3/4/5/6"
+        );
+    }
+
     /// ECMA-376 §17.3.1.19 — `numId=0` explicitly removes numbering, so the paragraph
     /// is not a list item and drops the indent it would otherwise inherit from a
     /// numbered-heading style's basedOn chain (List Paragraph, ind left=720). Word
