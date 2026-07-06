@@ -6,7 +6,9 @@ use ooxml_common::zip::read_zip_string;
 // `.svg ⇒ image/svg+xml`; `svg_blip_rid` resolves the vector original nested in
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
-use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::blip::{
+    blip_embed_rid, mime_from_ext, parse_blip_alpha, parse_src_rect, svg_blip_rid,
+};
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
 use ooxml_common::units::EMU_PER_PX_96DPI;
@@ -76,6 +78,8 @@ pub(crate) fn parse_drawing_anchors(
         let mut native_ext_cy: i64 = 0;
         // ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop (None ⇒ uncropped).
         let mut src_rect: Option<SrcRect> = None;
+        // ECMA-376 §20.1.8.6 `<a:alphaModFix>` opacity (None ⇒ opaque).
+        let mut alpha: Option<f64> = None;
         // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs`. Possible values:
         // "twoCell" (default), "oneCell", "absolute". With "oneCell" Excel
         // preserves the picture's saved size from <xdr:spPr><a:xfrm><a:ext>
@@ -139,6 +143,8 @@ pub(crate) fn parse_drawing_anchors(
                         }
                         // `<a:srcRect>` is a sibling of `<a:blip>` inside blipFill.
                         src_rect = parse_src_rect(bf);
+                        // §20.1.8.6 `<a:alphaModFix>` overall opacity.
+                        alpha = parse_blip_alpha(bf);
                     }
                     // <xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>: the picture's
                     // own saved EMU extent. Authoritative when editAs="oneCell".
@@ -206,6 +212,7 @@ pub(crate) fn parse_drawing_anchors(
             mime_type,
             svg_image_path,
             src_rect,
+            alpha,
         });
     }
     anchors
@@ -1160,11 +1167,13 @@ pub(crate) fn collect_shapes(
             let svg_image_path = svg_rid.as_deref().and_then(|r| rid_urls.get(r)).cloned();
             let raster_path = pic_rid.as_deref().and_then(|r| rid_urls.get(r)).cloned();
 
-            // `<a:srcRect>` crop lives in the leaf's `<xdr:blipFill>` (§20.1.8.55).
-            let src_rect = child
+            // `<a:srcRect>` crop and `<a:alphaModFix>` opacity live in the leaf's
+            // `<xdr:blipFill>` (§20.1.8.55 / §20.1.8.6).
+            let leaf_blip_fill = child
                 .descendants()
-                .find(|n| n.is_element() && n.tag_name().name() == "blipFill")
-                .and_then(parse_src_rect);
+                .find(|n| n.is_element() && n.tag_name().name() == "blipFill");
+            let src_rect = leaf_blip_fill.and_then(parse_src_rect);
+            let alpha = leaf_blip_fill.and_then(parse_blip_alpha);
 
             // Prefer the raster as `image_path`; fall back to the SVG when no
             // raster is embedded so an svg-only leaf is never dropped. Drop only
@@ -1205,6 +1214,7 @@ pub(crate) fn collect_shapes(
                     mime_type,
                     svg_image_path,
                     src_rect,
+                    alpha,
                 },
                 text: None,
             });
@@ -1934,6 +1944,8 @@ pub(crate) fn parse_ole_object_anchors(
             mime_type,
             svg_image_path: None,
             src_rect: None,
+            // OLE object previews carry no blip effects.
+            alpha: None,
         });
     }
     anchors
@@ -3159,6 +3171,7 @@ mod blip_svg_tests {
             mime_type: "image/png".to_string(),
             svg_image_path: Some("xl/media/image2.svg".to_string()),
             src_rect: None,
+            alpha: None,
         };
         let json = serde_json::to_string(&anchor).unwrap();
         assert!(json.contains("\"imagePath\":\"xl/media/image1.png\""));
@@ -3179,6 +3192,7 @@ mod blip_svg_tests {
             mime_type: "image/png".to_string(),
             svg_image_path: None,
             src_rect: None,
+            alpha: None,
         };
         let json = serde_json::to_string(&geom).unwrap();
         assert!(json.contains("\"type\":\"image\""));

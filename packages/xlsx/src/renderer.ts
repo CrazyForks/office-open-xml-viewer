@@ -3364,7 +3364,17 @@ function renderImages(
     if (canvasX + imgW < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
     if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
 
-    drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+    // ECMA-376 §20.1.8.6 `<a:alphaModFix>`: scale the picture's opacity so it
+    // composites over the cells beneath it. Saved/restored so it never leaks
+    // into a later anchor's draw.
+    if (anchor.alpha != null && anchor.alpha < 1) {
+      ctx.save();
+      ctx.globalAlpha = anchor.alpha;
+      drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+      ctx.restore();
+    } else {
+      drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+    }
   }
 
   ctx.restore();
@@ -3563,8 +3573,17 @@ function drawShape(
     const img = loadedImages?.get(shape.geom.imagePath);
     if (img) {
       // Honor an `<a:srcRect>` crop on the leaf pic (oneCellAnchor / grpSp leaf),
-      // same as the top-level anchor path (ECMA-376 §20.1.8.55).
-      drawImageCropped(ctx, img, shape.geom.srcRect, 0, 0, sw, sh);
+      // same as the top-level anchor path (ECMA-376 §20.1.8.55). Apply the leaf's
+      // `<a:alphaModFix>` opacity (§20.1.8.6) via globalAlpha, saved/restored.
+      const leafAlpha = shape.geom.alpha;
+      if (leafAlpha != null && leafAlpha < 1) {
+        ctx.save();
+        ctx.globalAlpha = leafAlpha;
+        drawImageCropped(ctx, img, shape.geom.srcRect, 0, 0, sw, sh);
+        ctx.restore();
+      } else {
+        drawImageCropped(ctx, img, shape.geom.srcRect, 0, 0, sw, sh);
+      }
     }
   }
   // Shape text body (ECMA-376 §20.5.2.34 `<xdr:txBody>`). Drawn after

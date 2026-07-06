@@ -139,6 +139,33 @@ pub fn parse_src_rect(blip_fill: Node<'_, '_>) -> Option<SrcRect> {
     }
 }
 
+/// Parse `<a:blip><a:alphaModFix amt="…"/></a:blip>` from a `<*:blipFill>` node
+/// (ECMA-376 §20.1.8.6 CT_AlphaModulateFixedEffect). `amt` is an
+/// ST_PositivePercentage in 1000ths of a percent, so `amt/100000` is the alpha
+/// scale fraction (0.0–1.0). The effect multiplies the picture's opacity by that
+/// fraction — the renderer applies it via `globalAlpha`.
+///
+/// Returns `None` when there is no `alphaModFix` OR when the amount is ≥ ~100%
+/// (fully opaque = nothing to apply), so an unaffected picture never forces the
+/// renderer onto the alpha path. Negative amounts clamp to 0. Shared by the
+/// pptx and xlsx parsers (docx can carry it too) so the three formats read the
+/// blip alpha identically.
+pub fn parse_blip_alpha(blip_fill: Node<'_, '_>) -> Option<f64> {
+    let blip = blip_fill
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "blip")?;
+    let amf = blip
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "alphaModFix")?;
+    let amt: f64 = amf.attribute("amt")?.parse().ok()?;
+    let frac = amt / 100_000.0;
+    if frac >= 0.9999 {
+        None
+    } else {
+        Some(frac.max(0.0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +274,27 @@ mod tests {
         // Case-insensitive, like the raster entries.
         assert_eq!(mime_from_ext("a/b/CHART.WMF"), "image/wmf");
         assert_eq!(mime_from_ext("x.EMF"), "image/emf");
+    }
+
+    #[test]
+    fn parse_blip_alpha_reads_amt_fraction() {
+        // amt=70000 → 0.70 (the sample-9.xlsx alphaModFix).
+        let xml = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:blip r:embed="rId1" xmlns:r="{R_NS}"><a:alphaModFix amt="70000"/></a:blip></a:blipFill>"#
+        );
+        let doc = Document::parse(&xml).unwrap();
+        let a = parse_blip_alpha(doc.root_element()).expect("alpha present");
+        assert!((a - 0.70).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_blip_alpha_none_when_absent_or_fully_opaque() {
+        let none = format!(r#"<a:blipFill xmlns:a="{A_NS}"><a:blip/></a:blipFill>"#);
+        assert!(parse_blip_alpha(Document::parse(&none).unwrap().root_element()).is_none());
+        // amt=100000 (100%) ⇒ nothing to apply.
+        let opaque = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:blip><a:alphaModFix amt="100000"/></a:blip></a:blipFill>"#
+        );
+        assert!(parse_blip_alpha(Document::parse(&opaque).unwrap().root_element()).is_none());
     }
 }

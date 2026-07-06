@@ -514,6 +514,9 @@ export type ShapeGeom =
        *  1-b]`). Absent ⇒ the whole blip fills the leaf rect. Honored identically
        *  to the top-level {@link ImageAnchor.srcRect} (raster only). */
       srcRect?: { l: number; t: number; r: number; b: number };
+      /** ECMA-376 §20.1.8.6 `<a:alphaModFix@amt>` opacity fraction (0..1) on the
+       *  leaf pic. Absent ⇒ opaque. Applied via `globalAlpha`. */
+      alpha?: number;
     };
 
 export interface PathInfo {
@@ -575,6 +578,11 @@ export interface ImageAnchor {
    *  cropped sub-rectangle (raster only — a metafile is rasterized to the
    *  display box, so its crop can't be honored faithfully and is skipped). */
   srcRect?: { l: number; t: number; r: number; b: number };
+  /** ECMA-376 §20.1.8.6 `<a:alphaModFix@amt>` — the blip's overall opacity as a
+   *  fraction (0..1). Absent ⇒ opaque. The renderer sets `ctx.globalAlpha` so the
+   *  picture composites over the cells beneath it (e.g. a pink translucent photo
+   *  over a matching cell fill). */
+  alpha?: number;
 }
 
 export interface CellRange {
