@@ -74,6 +74,14 @@ pub struct LevelDef {
     /// parse time to the bullet image's zip path (+ MIME + pt size from the
     /// `<v:shape style>`). `None` ⇒ ordinary text/glyph marker.
     pub pic_bullet: Option<PicBullet>,
+    /// ECMA-376 §17.9.23 `<w:lvl><w:pStyle w:val>` — the styleId of the
+    /// paragraph style ASSOCIATED with this level. Paragraphs of that style
+    /// "shall automatically utilize this numbering level", and the ilvl carried
+    /// by the STYLE's own `numPr` "shall be ignored" in its favor. Resolved via
+    /// [`NumberingMap::level_for_style`] into each style's numbering level after
+    /// both parts are parsed (see `StyleMap::resolve_numbering_level_backlinks`).
+    /// `None` ⇒ no style association on this level.
+    pub p_style: Option<String>,
 }
 
 /// ECMA-376 §17.9.20 `<w:numPicBullet>` — an image used as a list marker. The
@@ -112,6 +120,7 @@ impl Default for LevelDef {
             start: 1,
             rpr: RunFmt::default(),
             pic_bullet: None,
+            p_style: None,
         }
     }
 }
@@ -136,6 +145,14 @@ pub struct NumberingMap {
     num_to_abstract: HashMap<u32, u32>,
     /// numId → level override starts
     num_overrides: HashMap<u32, HashMap<u32, u32>>,
+    /// ECMA-376 §17.9.7 — numId → per-level FULL `<w:lvl>` replacements from
+    /// `<w:num><w:lvlOverride><w:lvl>`: "the numbering level formatting which
+    /// shall be substituted for the given numbering level of the abstract
+    /// definition". Formatting only — the abstract's shared running counter is
+    /// untouched (a restart needs `<w:startOverride>`, §17.9.27, tracked in
+    /// `num_overrides`). Consulted before the abstract's levels in `get_level`,
+    /// so lvlText/numFmt/indents/rPr/pStyle all substitute per-numId.
+    num_level_overrides: HashMap<u32, HashMap<u32, LevelDef>>,
     /// per-**abstractNumId** per-level counter. ECMA-376 §17.9: the running
     /// count belongs to the abstract numbering definition, so every `<w:num>`
     /// (numId) that references the same `<w:abstractNum>` shares one counter —
@@ -151,6 +168,98 @@ pub struct NumberingMap {
     /// only on its FIRST appearance at that level (§17.9.6 / §17.9.7); afterward
     /// it increments the shared counter like any other num on the abstract.
     started: HashSet<(u32, u32)>,
+}
+
+/// Parse one `<w:lvl>` element (ECMA-376 §17.9.6) into a [`LevelDef`].
+///
+/// Shared by the two places a level definition may appear: inside
+/// `<w:abstractNum>` (§17.9.1) and as the FULL replacement inside a
+/// `<w:num><w:lvlOverride>` (§17.9.7 — "the numbering level formatting which
+/// shall be substituted for the given numbering level"). `depth` is the level's
+/// 0-based position, used only for the spec-less fallback indent when the level
+/// carries no `w:ind` at all.
+fn parse_level_def(
+    lvl_node: roxmltree::Node,
+    depth: usize,
+    pic_bullets: &HashMap<u32, PicBullet>,
+) -> LevelDef {
+    let start = child_w(lvl_node, "start")
+        .and_then(|n| attr_w(n, "val"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let format = child_w(lvl_node, "numFmt")
+        .and_then(|n| attr_w(n, "val"))
+        .unwrap_or_else(|| "decimal".to_string());
+    let text = child_w(lvl_node, "lvlText")
+        .and_then(|n| attr_w(n, "val"))
+        .unwrap_or_else(|| "%1.".to_string());
+    let ind_node = child_w(lvl_node, "pPr").and_then(|p| child_w(p, "ind"));
+    // When the level defines a w:ind, a missing @left means "no
+    // start indent from this source" (an RTL level carries its
+    // indent in @right ≡ end instead); the per-level depth default
+    // applies only when no w:ind exists at all.
+    let indent_left = ind_node
+        .and_then(|i| attr_w(i, "left"))
+        .map(|v| twips_to_pt(&v))
+        .unwrap_or(if ind_node.is_some() {
+            0.0
+        } else {
+            720.0 / 20.0 * (depth as f64 + 1.0)
+        });
+    let indent_right = ind_node
+        .and_then(|i| attr_w(i, "right"))
+        .map(|v| twips_to_pt(&v));
+    // §17.3.1.12: a first-line indent is EITHER `w:hanging` (negative —
+    // the marker hangs left of the body) OR `w:firstLine` (positive — an
+    // additional first-line indent); `hanging` wins when both appear, the
+    // same precedence `styles.rs` applies to a direct `w:ind`. Keep the
+    // SIGN in `indent_first`; `tab` keeps the positive magnitude for the
+    // marker's tab-advance.
+    let indent_first = ind_node
+        .and_then(|i| {
+            attr_w(i, "hanging")
+                .map(|v| -twips_to_pt(&v))
+                .or_else(|| attr_w(i, "firstLine").map(|v| twips_to_pt(&v)))
+        })
+        .unwrap_or(-36.0);
+    let tab = indent_first.abs();
+    // §17.9.28: absent <w:suff> means "tab".
+    let suff = child_w(lvl_node, "suff")
+        .and_then(|n| attr_w(n, "val"))
+        .unwrap_or_else(|| "tab".to_string());
+    // §17.9.8 `<w:lvlJc>` — marker justification; absent ⇒ "left".
+    let lvl_jc = child_w(lvl_node, "lvlJc")
+        .and_then(|n| attr_w(n, "val"))
+        .unwrap_or_else(|| "left".to_string());
+    // §17.9.6 — the level's run properties for the marker glyph.
+    // Parsed with the SAME `parse_run_fmt` body runs use; theme refs
+    // stay as "@theme:<ref>" markers and are resolved at use-site once
+    // merged over the paragraph's run formatting.
+    let rpr = child_w(lvl_node, "rPr")
+        .map(parse_run_fmt)
+        .unwrap_or_default();
+    // §17.9.9 — resolve the level's picture bullet (if any) against
+    // the `<w:numPicBullet>` definitions collected by the caller.
+    let pic_bullet = child_w(lvl_node, "lvlPicBulletId")
+        .and_then(|n| attr_w(n, "val"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .and_then(|id| pic_bullets.get(&id).cloned());
+    // §17.9.23 — the paragraph style this level is associated with.
+    let p_style = child_w(lvl_node, "pStyle").and_then(|n| attr_w(n, "val"));
+    LevelDef {
+        format,
+        text,
+        indent_left,
+        indent_right,
+        indent_first,
+        tab,
+        suff,
+        lvl_jc,
+        start,
+        rpr,
+        pic_bullet,
+        p_style,
+    }
 }
 
 impl NumberingMap {
@@ -228,80 +337,8 @@ impl NumberingMap {
             let abs_id: u32 = abs_id_s.parse().unwrap_or(0);
             let mut levels = vec![];
             for lvl_node in children_w(abs_node, "lvl") {
-                let start = child_w(lvl_node, "start")
-                    .and_then(|n| attr_w(n, "val"))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1);
-                let format = child_w(lvl_node, "numFmt")
-                    .and_then(|n| attr_w(n, "val"))
-                    .unwrap_or_else(|| "decimal".to_string());
-                let text = child_w(lvl_node, "lvlText")
-                    .and_then(|n| attr_w(n, "val"))
-                    .unwrap_or_else(|| "%1.".to_string());
-                let ind_node = child_w(lvl_node, "pPr").and_then(|p| child_w(p, "ind"));
-                // When the level defines a w:ind, a missing @left means "no
-                // start indent from this source" (an RTL level carries its
-                // indent in @right ≡ end instead); the per-level depth default
-                // applies only when no w:ind exists at all.
-                let indent_left = ind_node
-                    .and_then(|i| attr_w(i, "left"))
-                    .map(|v| twips_to_pt(&v))
-                    .unwrap_or(if ind_node.is_some() {
-                        0.0
-                    } else {
-                        720.0 / 20.0 * (levels.len() as f64 + 1.0)
-                    });
-                let indent_right = ind_node
-                    .and_then(|i| attr_w(i, "right"))
-                    .map(|v| twips_to_pt(&v));
-                // §17.3.1.12: a first-line indent is EITHER `w:hanging` (negative —
-                // the marker hangs left of the body) OR `w:firstLine` (positive — an
-                // additional first-line indent); `hanging` wins when both appear, the
-                // same precedence `styles.rs` applies to a direct `w:ind`. Keep the
-                // SIGN in `indent_first`; `tab` keeps the positive magnitude for the
-                // marker's tab-advance.
-                let indent_first = ind_node
-                    .and_then(|i| {
-                        attr_w(i, "hanging")
-                            .map(|v| -twips_to_pt(&v))
-                            .or_else(|| attr_w(i, "firstLine").map(|v| twips_to_pt(&v)))
-                    })
-                    .unwrap_or(-36.0);
-                let tab = indent_first.abs();
-                // §17.9.28: absent <w:suff> means "tab".
-                let suff = child_w(lvl_node, "suff")
-                    .and_then(|n| attr_w(n, "val"))
-                    .unwrap_or_else(|| "tab".to_string());
-                // §17.9.8 `<w:lvlJc>` — marker justification; absent ⇒ "left".
-                let lvl_jc = child_w(lvl_node, "lvlJc")
-                    .and_then(|n| attr_w(n, "val"))
-                    .unwrap_or_else(|| "left".to_string());
-                // §17.9.6 — the level's run properties for the marker glyph.
-                // Parsed with the SAME `parse_run_fmt` body runs use; theme refs
-                // stay as "@theme:<ref>" markers and are resolved at use-site once
-                // merged over the paragraph's run formatting.
-                let rpr = child_w(lvl_node, "rPr")
-                    .map(parse_run_fmt)
-                    .unwrap_or_default();
-                // §17.9.9 — resolve the level's picture bullet (if any) against
-                // the `<w:numPicBullet>` definitions collected above.
-                let pic_bullet = child_w(lvl_node, "lvlPicBulletId")
-                    .and_then(|n| attr_w(n, "val"))
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .and_then(|id| pic_bullets.get(&id).cloned());
-                levels.push(LevelDef {
-                    format,
-                    text,
-                    indent_left,
-                    indent_right,
-                    indent_first,
-                    tab,
-                    suff,
-                    lvl_jc,
-                    start,
-                    rpr,
-                    pic_bullet,
-                });
+                let depth = levels.len();
+                levels.push(parse_level_def(lvl_node, depth, &pic_bullets));
             }
             map.abstract_nums.insert(abs_id, levels);
         }
@@ -319,6 +356,7 @@ impl NumberingMap {
             }
             // Level overrides
             let mut overrides = HashMap::new();
+            let mut level_overrides = HashMap::new();
             for lvl_ov in children_w(num_node, "lvlOverride") {
                 let ilvl: u32 = attr_w(lvl_ov, "ilvl")
                     .and_then(|v| v.parse().ok())
@@ -328,19 +366,54 @@ impl NumberingMap {
                 {
                     overrides.insert(ilvl, start_ov.parse().unwrap_or(1));
                 }
+                // §17.9.7 — a FULL <w:lvl> child substitutes the level's
+                // definition for this numId (formatting only; no restart).
+                if let Some(lvl_node) = child_w(lvl_ov, "lvl") {
+                    level_overrides
+                        .insert(ilvl, parse_level_def(lvl_node, ilvl as usize, &pic_bullets));
+                }
             }
             if !overrides.is_empty() {
                 map.num_overrides.insert(num_id, overrides);
+            }
+            if !level_overrides.is_empty() {
+                map.num_level_overrides.insert(num_id, level_overrides);
             }
         }
 
         map
     }
 
+    /// The EFFECTIVE level definition for (numId, level): the numId's own
+    /// `<w:lvlOverride><w:lvl>` substitution when present (§17.9.7), else the
+    /// abstract definition's level (§17.9.6).
     pub fn get_level(&self, num_id: u32, level: u32) -> Option<&LevelDef> {
+        if let Some(ov) = self
+            .num_level_overrides
+            .get(&num_id)
+            .and_then(|m| m.get(&level))
+        {
+            return Some(ov);
+        }
         let abs_id = self.num_to_abstract.get(&num_id)?;
         let levels = self.abstract_nums.get(abs_id)?;
         levels.get(level as usize)
+    }
+
+    /// ECMA-376 §17.9.23 — the numbering level ASSOCIATED with a paragraph
+    /// style inside the numbering definition that `num_id` references: the
+    /// first level whose `<w:pStyle w:val>` equals `style_id`. Paragraphs of
+    /// that style "shall automatically utilize this numbering level"; the ilvl
+    /// in the STYLE's own `numPr` "shall be ignored" in its favor. Goes through
+    /// [`Self::get_level`] so a backlink carried by a per-numId `<w:lvlOverride>`
+    /// substitution (§17.9.7) participates too. `None` ⇒ the list has no
+    /// association for this style (or the numId dangles). WordprocessingML caps
+    /// lists at 9 levels (ST_Ilvl, §17.18.38).
+    pub fn level_for_style(&self, num_id: u32, style_id: &str) -> Option<u32> {
+        (0..9).find(|&l| {
+            self.get_level(num_id, l)
+                .is_some_and(|def| def.p_style.as_deref() == Some(style_id))
+        })
     }
 
     pub fn get_start(&self, num_id: u32, level: u32) -> u32 {
