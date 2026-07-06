@@ -111,8 +111,12 @@ describe('textArchUp — single arc baseline', () => {
     const gl = warpGlyphTransform(env, 0.5, boxH, 0.8);
     const gr = warpGlyphTransform(env, 0.85, boxH, 0.8);
     const glft = warpGlyphTransform(env, 0.15, boxH, 0.8);
-    // Single-edge presets never compress the glyph height.
+    // Single-edge presets never compress the glyph height…
     expect(gl.vScale).toBe(1);
+    // …and never shear: Follow Path glyphs rigidly rotate along the arc.
+    expect(gl.shear).toBe(0);
+    expect(gr.shear).toBe(0);
+    expect(glft.shear).toBe(0);
     // At the apex the axis is horizontal; toward the right end it tilts down
     // (positive angle), toward the left end it tilts up (negative angle), and
     // the tilt grows monotonically away from the apex.
@@ -131,6 +135,77 @@ describe('textInflate — per-glyph vertical scale', () => {
     const mid = warpGlyphTransform(env, 0.5, boxH, 0.8);
     const end = warpGlyphTransform(env, 0.02, boxH, 0.8);
     expect(mid.vScale).toBeGreaterThan(end.vScale);
+  });
+});
+
+describe('local envelope shear (§20.1.9.19) — paired-edge slope skews the glyph', () => {
+  // Reconstruct the per-glyph linear map the renderer applies:
+  //   rotate(angle) · [[1, shear],[0, 1]] · scale(1, vScale)
+  // Its VERTICAL column must equal the true envelope gap vector (B(u)−T(u))
+  // per unit box height — that is what makes vertical strokes track the gap
+  // while the baseline follows the slope (the glyph leans, not rigidly rotates).
+  function verticalColumn(g: {
+    angle: number;
+    shear: number;
+    vScale: number;
+  }): { x: number; y: number } {
+    const c = Math.cos(g.angle);
+    const s = Math.sin(g.angle);
+    // column_y of rotate·shear·scale = rotate · (shear·vScale, vScale)
+    const lx = g.shear * g.vScale;
+    const ly = g.vScale;
+    return { x: c * lx - s * ly, y: s * lx + c * ly };
+  }
+
+  it('flat edges (textPlain) produce zero shear', () => {
+    const env = buildWarpEnvelope('textPlain', [], W, H)!;
+    for (const u of [0, 0.25, 0.5, 0.75, 1]) {
+      const g = warpGlyphTransform(env, u, H, 0.75);
+      expect(g.shear).toBeCloseTo(0, 6);
+    }
+  });
+
+  it('textWave1 shears where the wave slopes and is flat at the crest/troughs', () => {
+    // 320×160 matches the warp fixture's Wave One shape; default adj.
+    const env = buildWarpEnvelope('textWave1', [], 320, 160)!;
+    const box = 100;
+    // The wave's zero-slope points sit at the quarter marks (u≈0.25, 0.75)
+    // where the cubic turns; the steepest slope is at the mid-band (u≈0.5) and
+    // the ends (u≈0,1). At the flat quarter marks shear ≈ 0.
+    const flatish = warpGlyphTransform(env, 0.25, box, 0.8);
+    expect(Math.abs(flatish.shear)).toBeLessThan(0.12);
+    // At the mid-band the edge slopes ~17°, so the glyph must shear noticeably.
+    const sloped = warpGlyphTransform(env, 0.5, box, 0.8);
+    expect(Math.abs(sloped.shear)).toBeGreaterThan(0.2);
+    // The end of the wave slopes the OTHER way → opposite-sign shear.
+    const end = warpGlyphTransform(env, 0.98, box, 0.8);
+    expect(Math.sign(end.shear)).toBe(-Math.sign(sloped.shear));
+  });
+
+  it('reconstructed vertical column equals the true gap vector B(u)−T(u)/box', () => {
+    const env = buildWarpEnvelope('textWave1', [], 320, 160)!;
+    const box = 100;
+    for (const u of [0.1, 0.35, 0.5, 0.65, 0.9]) {
+      const g = warpGlyphTransform(env, u, box, 0.8);
+      const t = samplePolyline(env.top, env.topLen, u);
+      const b = samplePolyline(env.bottom, env.bottomLen, u);
+      const col = verticalColumn(g);
+      expect(col.x).toBeCloseTo((b.x - t.x) / box, 4);
+      expect(col.y).toBeCloseTo((b.y - t.y) / box, 4);
+    }
+  });
+
+  it('keeps vertical strokes near-vertical on a wave (unlike a rigid rotation)', () => {
+    // On textWave1 the two edges are parallel, so the gap vector is vertical
+    // everywhere → the transform's vertical column stays vertical and only the
+    // horizontal (advance) axis tilts. A rigid rotate would tilt BOTH.
+    const env = buildWarpEnvelope('textWave1', [], 320, 160)!;
+    const g = warpGlyphTransform(env, 0.5, 100, 0.8);
+    const col = verticalColumn(g);
+    const devFromVertical = Math.abs(Math.atan2(col.x, col.y));
+    expect(devFromVertical).toBeLessThan(0.02); // ≈0 rad: stays vertical
+    // …while the advance axis is clearly tilted (the source of the lean).
+    expect(Math.abs(g.angle)).toBeGreaterThan(0.15);
   });
 });
 
