@@ -336,18 +336,37 @@ export function followPathUScale(env: WarpEnvelope, naturalWidth: number): numbe
 
 /**
  * A per-glyph placement in warped space. The renderer draws the glyph with
- * `ctx.translate(x, y); ctx.rotate(angle); ctx.scale(1, vScale)` and then paints
- * at the glyph's local baseline (`fillText(g, 0, 0)`), so the flat glyph em-box
- * is bent onto the envelope.
+ * `ctx.translate(x, y); ctx.rotate(angle); ctx.transform(1, 0, shear, 1, 0, 0);
+ * ctx.scale(hScale, vScale)` and then paints at the glyph's local baseline
+ * (`fillText(g, 0, 0)`), so the flat glyph em-box is bent onto the envelope.
+ *
+ * The four linear terms together reproduce the LOCAL JACOBIAN of the envelope
+ * map `P(u, v) = (1−v)·T(u) + v·B(u)` at the glyph centre — see
+ * {@link warpGlyphTransform}. `angle` + `hScale` orient/scale the horizontal
+ * (advance) axis to the mean edge tangent; `shear` + `vScale` bend the vertical
+ * (em-height) axis onto the true gap vector `B(u)−T(u)`. On a sloped envelope
+ * edge (a wave crest, a taper) these two axes are NOT orthogonal, so `shear`
+ * is what tilts the glyph into a parallelogram — vertical strokes stay aligned
+ * with the gap while the baseline follows the slope, matching PowerPoint's
+ * WordArt (the glyph "leans" along the wave rather than rigidly rotating).
  */
 export interface WarpGlyphTransform {
   /** Canvas-space baseline origin (shape-local; caller adds the shape offset). */
   x: number;
   y: number;
-  /** Rotation of the local text axis, radians (envelope slope). */
+  /** Rotation of the local text (advance) axis, radians (mean edge slope). */
   angle: number;
-  /** Vertical scale of the glyph em-box (1 = unchanged). */
+  /** Vertical scale of the glyph em-box along the (post-shear) up-axis. */
   vScale: number;
+  /**
+   * Horizontal skew of the em-box in the rotated frame (0 = no shear). Applied
+   * as `ctx.transform(1, 0, shear, 1, 0, 0)` AFTER `rotate(angle)` and BEFORE
+   * `scale(hScale, vScale)`: it slides the top of the glyph forward/back along
+   * the advance axis so the vertical column of the transform lands on the true
+   * envelope gap vector `B(u)−T(u)`. Zero for single-edge (arch/circle) presets
+   * and for flat (unsloped) envelope points; nonzero on sloped paired edges.
+   */
+  shear: number;
 }
 
 /**
@@ -360,14 +379,22 @@ export interface WarpGlyphTransform {
  *
  * Two regimes:
  * - **Paired-edge** (waves, inflate/deflate, cascade, …): the glyph em-box is
- *   fitted between `T(u)` and `B(u)`. The baseline lands at `baselineFrac` of the
- *   top→bottom span, the axis rotates to the mean edge tangent, and `vScale`
- *   compresses/stretches the glyph so its box exactly spans the gap.
+ *   fitted between `T(u)` and `B(u)` by the LOCAL JACOBIAN of the envelope map
+ *   `P(u, v) = (1−v)·T(u) + v·B(u)`. Its two columns are `∂P/∂u ≈ mean edge
+ *   tangent` (the advance axis → `angle`) and `∂P/∂v = B(u)−T(u)` (the em-height
+ *   axis → the gap vector). Because these columns are generally NOT orthogonal on
+ *   a sloped edge, the transform is a rotate + shear + non-uniform scale, not a
+ *   plain rotate+scale: `angle` orients the advance axis, `shear`+`vScale` bend
+ *   the vertical column onto the true gap vector so vertical strokes track the
+ *   gap while the baseline follows the slope (the glyph LEANS, matching
+ *   PowerPoint WordArt — cf. ECMA-376 §20.1.9.19). The baseline lands at
+ *   `baselineFrac` of the top→bottom span.
  * - **Single-edge** (arch/circle): the one curve IS the baseline. The glyph sits
  *   ON the curve, its up-axis is the curve NORMAL (so letters stand perpendicular
- *   to the arc), `vScale` stays 1 (glyphs keep their height), and the baseline is
- *   nudged along the normal by the box's descent so the arc passes through the
- *   glyph baseline rather than its top.
+ *   to the arc), `vScale` stays 1 (glyphs keep their height), `shear` is 0, and
+ *   the baseline is nudged along the normal by the box's descent so the arc
+ *   passes through the glyph baseline rather than its top. Follow Path presets
+ *   deliberately keep a rigid per-glyph rotation (no shear).
  */
 export function warpGlyphTransform(
   env: WarpEnvelope,
@@ -390,6 +417,7 @@ export function warpGlyphTransform(
       y: c.y - ny * descent,
       angle,
       vScale: 1,
+      shear: 0,
     };
   }
 
@@ -397,17 +425,31 @@ export function warpGlyphTransform(
   const b = samplePolyline(env.bottom, env.bottomLen, u);
   const gapx = b.x - t.x;
   const gapy = b.y - t.y;
-  const gap = Math.hypot(gapx, gapy);
   const bx = t.x + gapx * baselineFrac;
   const by = t.y + gapy * baselineFrac;
-  // Average the two edges' unit tangents for the local axis rotation.
+  // Advance axis: mean of the two edges' unit tangents (∂P/∂u direction).
   const sumTx = t.tx + b.tx;
   const sumTy = t.ty + b.ty;
   const angle = Math.atan2(sumTy, sumTx);
+
+  // Em-height axis: the TRUE gap vector ∂P/∂v = B(u)−T(u), per unit box height.
+  // Decompose it in the rotated (advance-axis) frame. Its component ALONG the
+  // advance axis is the shear (skews the glyph top forward/back on a slope); its
+  // component PERPENDICULAR is the vertical scale. When the edge is flat this
+  // gap vector is already perpendicular to the tangent → shear≈0, vScale=gap/box,
+  // recovering the old rotate+scale behaviour exactly.
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const gapAlong = (c * gapx + s * gapy) / (boxHeight > 0 ? boxHeight : 1);
+  const gapPerp = (-s * gapx + c * gapy) / (boxHeight > 0 ? boxHeight : 1);
+  const vScale = gapPerp !== 0 ? gapPerp : boxHeight > 0 ? Math.hypot(gapx, gapy) / boxHeight : 1;
+  const shear = gapPerp !== 0 ? gapAlong / gapPerp : 0;
+
   return {
     x: bx,
     y: by,
     angle,
-    vScale: boxHeight > 0 ? gap / boxHeight : 1,
+    vScale,
+    shear,
   };
 }
