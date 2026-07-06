@@ -15572,3 +15572,141 @@ mod lvl_pstyle_backlink_tests {
         );
     }
 }
+
+// ===== ECMA-376 §17.9.7: <w:lvlOverride> with a FULL <w:lvl> replacement =====
+//
+// Shares the zip-level harness style with `lvl_pstyle_backlink_tests` above —
+// both exercise numbering-definition wiring through the production
+// `parse_from_bytes` path.
+#[cfg(test)]
+mod lvl_override_full_lvl_tests {
+    use super::*;
+    use crate::types::BodyElement;
+    use crate::xml_util::W_NS;
+
+    fn build_docx_with_parts(body_inner: &str, numbering_xml: &str) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let document = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{body_inner}</w:body></w:document>"#,
+            ns = W_NS,
+        );
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+            </w:styles>"#,
+            ns = W_NS,
+        );
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            zw.start_file("word/document.xml", opts).unwrap();
+            zw.write_all(document.as_bytes()).unwrap();
+            zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
+            zw.write_all(rels_xml.as_bytes()).unwrap();
+            zw.start_file("word/styles.xml", opts).unwrap();
+            zw.write_all(styles.as_bytes()).unwrap();
+            zw.start_file("word/numbering.xml", opts).unwrap();
+            zw.write_all(numbering_xml.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn markers(data: &[u8]) -> Vec<String> {
+        let doc = parse_from_bytes(data).expect("synthetic docx parses");
+        doc.body
+            .iter()
+            .filter_map(|e| match e {
+                BodyElement::Paragraph(p) => {
+                    Some(p.numbering.as_ref().expect("numbered").text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn p(ilvl: u32, num_id: u32) -> String {
+        format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/></w:numPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#
+        )
+    }
+
+    /// §17.9.7 — "the numbering level formatting which shall be substituted":
+    /// a full `<w:lvl>` inside `<w:lvlOverride>` REPLACES that level's
+    /// definition (lvlText / numFmt / indents) for THAT numId only. sample-28's
+    /// numId 76 overrides every level of an abstract whose lvlText are
+    /// single-token ("%1." / "%2." / "%3.") with cross-level compositions
+    /// ("%1." / "%1.%2." / "%1.%2.%3."); after four lvl-0 and two lvl-1 hidden
+    /// primer paragraphs, Word renders the deliverables heading as "4.2.1."
+    /// (sample-28 PDF p.12). Ignoring the override yields a flat "1.".
+    #[test]
+    fn full_lvl_override_replaces_level_definition() {
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="64">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="76">
+                <w:abstractNumId w:val="64"/>
+                <w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/></w:lvl></w:lvlOverride>
+                <w:lvlOverride w:ilvl="2"><w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2.%3."/></w:lvl></w:lvlOverride>
+              </w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        let body: String = [
+            p(0, 76),
+            p(0, 76),
+            p(0, 76),
+            p(0, 76),
+            p(1, 76),
+            p(1, 76),
+            p(2, 76),
+        ]
+        .concat();
+        let data = build_docx_with_parts(&body, &numbering);
+        assert_eq!(
+            markers(&data),
+            vec!["1.", "2.", "3.", "4.", "4.1.", "4.2.", "4.2.1."],
+            "a full <w:lvl> inside <w:lvlOverride> substitutes the level definition (§17.9.7)"
+        );
+    }
+
+    /// §17.9.7 vs §17.9.27 — a full-lvl override WITHOUT `<w:startOverride>`
+    /// substitutes FORMATTING only; it must NOT restart the abstract's shared
+    /// running counter the way a startOverride does on first use.
+    #[test]
+    fn full_lvl_override_does_not_restart_shared_counter() {
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="1">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="1"/></w:num>
+              <w:num w:numId="6">
+                <w:abstractNumId w:val="1"/>
+                <w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="[%1]"/></w:lvl></w:lvlOverride>
+              </w:num>
+              <w:num w:numId="7">
+                <w:abstractNumId w:val="1"/>
+                <w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>
+              </w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        let body: String = [p(0, 5), p(0, 5), p(0, 6), p(0, 7)].concat();
+        let data = build_docx_with_parts(&body, &numbering);
+        assert_eq!(
+            markers(&data),
+            vec!["1.", "2.", "[3]", "1."],
+            "formatting-only override continues the shared count (its lvlText applies); \
+             only startOverride restarts (§17.9.27)"
+        );
+    }
+}
