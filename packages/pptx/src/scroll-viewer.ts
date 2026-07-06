@@ -1030,6 +1030,14 @@ export class PptxScrollViewer implements ZoomableViewer {
     const zoomMin = this._opts.zoomMin ?? 0.1;
     const zoomMax = this._opts.zoomMax ?? 4;
     const next = Math.min(zoomMax, Math.max(zoomMin, scale));
+    // Consume the gesture-only pointer anchor (Ctrl/⌘+wheel set it just above)
+    // FIRST — before every early return — so a gesture whose setScale ends up a
+    // NO-OP (already pinned at zoomMin/zoomMax) or latches pre-establishment can
+    // never leak a stale anchor into a later non-gesture setScale (slider,
+    // steppers, fitWidth/fitPage, resize re-fit, public API), which must keep
+    // the historical viewport-TOP anchoring. `null` for every non-gesture source.
+    const gestureAnchor = this._pendingZoomAnchor;
+    this._pendingZoomAnchor = null;
     if (!this._pres || this._pres.slideCount === 0 || !this._scaleEstablished) {
       // IX9 F1 (family-unified pre-load semantics): a setScale before the deck is
       // loaded / before the base fit is established is LATCHED, not dropped —
@@ -1041,13 +1049,6 @@ export class PptxScrollViewer implements ZoomableViewer {
     }
     if (next === this._scale) return;
     const prevScale = this._scale;
-
-    // Consume the gesture-only pointer anchor (Ctrl/⌘+wheel set it just above).
-    // `null` for every non-gesture source, which anchors on the viewport TOP as
-    // before (anchorY 0). Clear immediately so a subsequent non-gesture setScale
-    // never inherits a stale anchor.
-    const gestureAnchor = this._pendingZoomAnchor;
-    this._pendingZoomAnchor = null;
     const anchorY = gestureAnchor ? gestureAnchor.y : 0;
 
     // Capture the VERTICAL anchor from the CURRENT layout, before rescale, as a

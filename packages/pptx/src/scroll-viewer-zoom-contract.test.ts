@@ -240,4 +240,26 @@ describe('PptxScrollViewer IX9 zoom contract', () => {
     expect(logicalXAfter).toBeCloseTo(logicalXBefore, 6);
     v.destroy();
   });
+
+  // A wheel gesture whose setScale is a NO-OP (already clamped at zoomMax) must
+  // NOT leak its pointer anchor into the next non-gesture setScale: the stepper
+  // right after it still anchors on the viewport TOP.
+  it('a no-op gesture (clamped at zoomMax) does not leak its anchor into the next setScale', () => {
+    const { v, scrollHost } = setup();
+    v.setScale(4); // pinned at zoomMax
+    scrollHost.scrollTop = 600;
+    // Ctrl+wheel zoom-IN at zoomMax ⇒ clamped to 4 ⇒ no-op; its anchor must be dropped.
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: -60,
+      clientX: 100,
+      clientY: 250,
+      preventDefault() {},
+    });
+    expect(v.getScale()).toBe(4); // confirmed no-op
+    const topContent = v.contentAtViewportYForTest(0);
+    v.zoomOut(); // non-gesture stepper — must keep the viewport-TOP anchor
+    expect(v.viewportYOfForTest(topContent.slide, topContent.frac)).toBeCloseTo(0, 4);
+    v.destroy();
+  });
 });

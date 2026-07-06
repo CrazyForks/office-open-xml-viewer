@@ -258,6 +258,29 @@ describe('XlsxViewer IX9 zoom contract', () => {
     v.setScale(1.5);
     expect(priv.scrollHost.scrollLeft).toBe(600);
   });
+
+  // A gesture whose setScale is a NO-OP (the whole-percent snap swallows a small
+  // deltaY, or the scale is pinned at zoomMin/zoomMax) must NOT leak its pointer
+  // anchor into the next non-gesture setScale: the stepper right after it still
+  // preserves the START-anchored (top-left) position.
+  it('a no-op gesture (percent-snap) does not leak its anchor into the next setScale', () => {
+    installDom();
+    const ws = makeSheet();
+    const { v, priv } = mount(ws, { cellScale: 1 });
+    priv.scrollHost.clientWidth = 400;
+    priv.scrollHost.clientHeight = 300;
+    priv.scrollHost.scrollWidth = 100000;
+    priv.scrollHost.scrollHeight = 100000;
+    priv.scrollHost.scrollLeft = 600;
+    // Inject the anchor exactly as the wheel handler would, then a setScale that
+    // snaps to the SAME whole percent (1.004 → 100%) ⇒ no-op; anchor must drop.
+    priv._pendingZoomAnchor = { x: 260, y: 180 };
+    v.setScale(1.004);
+    expect(v.getScale()).toBe(1); // confirmed no-op
+    v.zoomIn(); // non-gesture stepper (1 → 1.1) — must run the START-anchored branch
+    expect(v.getScale()).toBe(1.1);
+    expect(priv.scrollHost.scrollLeft).toBe(600); // unchanged for an LTR sheet
+  });
 });
 
 /**

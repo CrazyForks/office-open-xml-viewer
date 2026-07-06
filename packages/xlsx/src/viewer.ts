@@ -3135,15 +3135,17 @@ export class XlsxViewer implements ZoomableViewer {
     );
     const next = pct / 100;
     const prevScale = this.opts.cellScale ?? 1;
-    if (next === prevScale) return;
-    this.opts.cellScale = next;
-
-    // Consume the gesture-only pointer anchor (Ctrl/⌘+wheel set it just above).
-    // `null` for every non-gesture source, which keeps the START-anchored
-    // (top-left) preservation below. Cleared immediately so a subsequent
-    // non-gesture setScale never inherits a stale anchor.
+    // Consume the gesture-only pointer anchor (Ctrl/⌘+wheel set it just above)
+    // FIRST — before the no-op early return — so a gesture whose setScale ends
+    // up a NO-OP (pinned at zoomMin/zoomMax, or a small deltaY swallowed by the
+    // whole-percent snap) can never leak a stale anchor into a later non-gesture
+    // setScale (slider, steppers, fitWidth/fitPage, public API), which must keep
+    // the historical START-anchored (top-left) preservation. `null` for every
+    // non-gesture source.
     const gestureAnchor = this._pendingZoomAnchor;
     this._pendingZoomAnchor = null;
+    if (next === prevScale) return;
+    this.opts.cellScale = next;
 
     if (this.zoomSlider) this.zoomSlider.value = String(this.zoomScaleToPos(next, zoomMin, zoomMax));
     if (this.zoomLabel) this.zoomLabel.textContent = `${pct}%`;
