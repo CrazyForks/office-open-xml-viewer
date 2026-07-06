@@ -625,6 +625,9 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Page size and margins | ✅ |
 | | Headers / footers (default / first / even) | ✅ |
 | | Section breaks (continuous / nextPage / oddPage / evenPage) | ✅ |
+| | Page borders (`w:pgBorders`, §17.6.10 — standard line styles, offsetFrom / display / zOrder; art borders not yet supported) | ✅ |
+| | Line numbering (`w:lnNumType`, §17.6.8) | ✅ |
+| | Section vertical alignment (`w:vAlign`, §17.6.22) | ✅ |
 | **Text** | Paragraphs | ✅ |
 | | Bold, italic, underline, strikethrough | ✅ |
 | | Font family, size, color | ✅ |
@@ -645,9 +648,12 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | keepNext / keepLines / widowControl | ✅ |
 | | Right-to-left text — UAX#9 bidi, `w:bidi` / `w:rtl`, complex-script formatting (`w:szCs` / `w:bCs` / `rFonts@cs`, §17.3.2.26), RTL lists and indents | ✅ |
 | | Japanese kinsoku line breaking (`w:kinsoku`, §17.15.1.58 — 行頭/行末禁則) | ✅ |
+| | Vertical writing (縦書き — UAX#50 vertical glyph forms, 縦中横 tate-chu-yoko runs, 、。 upper-right positioning; §17.3.2 vertical text) | ✅ |
 | **Elements** | Tables (with borders, fills, merges, banding, alignment) | ✅ |
 | | Table auto-layout by preferred widths (`w:tblLayout` autofit, §17.4.52; min content width) | ✅ |
+| | Table indent (`w:tblInd`, §17.4.50) | ✅ |
 | | Right-to-left table column order (`w:bidiVisual`, §17.4.1) | ✅ |
+| | Charts (embedded DrawingML `c:chart` — bar / line / area / pie / doughnut / radar / scatter, via the shared core chart renderer; data labels honour `dLblPos`, §21.2.2.48) | ✅ |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
@@ -656,12 +662,17 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | OLE embedded objects (`w:object` — the baked VML `v:imagedata` preview is drawn; the embedded app is not run) | ✅ |
 | **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
 | | Endnotes — reference markers + bodies at document end (`w:endnoteReference`, §17.11) | ✅ |
+| | Page-number formats (`w:pgNumType` restart / format §17.6.12; PAGE `\*` switches — decimal / roman / letter / hex / ordinal-dash / hebrew2 / koreanLegal, §17.18.59) | ✅ |
+| | Field date/time pictures (`TIME` / `DATE` field `\@` format, §17.16.5.72 / .16) | ✅ |
 | | `w:snapToGrid` opt-out of the document grid (§17.3.1.32) | ✅ |
 | | Track changes (`w:ins` / `w:del` — author-coloured underline / strikethrough) | ✅ |
 | | Comments — author / date / text via the document model (`doc.comments`, §17.13.4; not drawn on the page) | ✅ |
 | | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, footnotes / comments; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — full-text search, all hits highlighted, each match tagged with its page) | ✅ |
+| | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
+| | Clickable hyperlinks (overlay hit-test, `onHyperlinkClick`; internal bookmark / anchor navigation) | ✅ |
 | | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
 | **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
@@ -677,6 +688,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Formula results (from cached `<v>`) | ✅ |
 | | Dates (ECMA-376 date format codes) | ✅ |
 | | Rich text (per-run formatting) | ✅ |
+| | East-Asian furigana (`<rPh>` §18.4.6 + `<phoneticPr>` §18.4.3 — drawn when a cell opts in via `ph="1"`; row-level `<row ph>` inheritance) | ✅ |
 | **Formatting** | Bold, italic, underline (`single` / `double` / `singleAccounting` / `doubleAccounting`), strikethrough | ✅ |
 | | Superscript / subscript (`vertAlign`) | ✅ |
 | | Font family, size, color | ✅ |
@@ -693,13 +705,14 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Frozen panes | ✅ |
 | | Row / column sizing (custom widths and heights) | ✅ |
 | | Hidden rows / columns | ✅ |
+| | Row / column outline grouping (`outlineLevel` / `collapsed` §18.3.1.73 / .13, `<outlinePr>` — gutter brackets, +/− collapse, numbered level buttons; view-only) | ✅ |
 | **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
 | | OLE embedded objects (`<oleObjects>` — the legacy VML `v:imagedata` preview keyed by `oleObject@shapeId` is drawn; an image-typed `objectPr` target is preferred when present, and the embedded app is not run) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Drawing shapes / text boxes (`xdr:sp`, `xdr:txBody` — 186 preset geometries via the shared engine, with `avLst` adjust handles) | ✅ |
 | | Math equations in shapes (OMML `m:oMath` / `m:oMathPara` in `xdr:txBody`, incl. `a14:m` / `mc:AlternateContent`; rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Charts (bar, line, area, pie, doughnut, radar, scatter / bubble) | ✅ |
-| | Chart markers (circle / square / diamond / triangle / x / plus / star / dot / dash, per-point `<c:dPt>` overrides) | ✅ |
+| | Chart markers (circle / square / diamond / triangle / x / plus / star / dot / dash, per-point `<c:dPt>` overrides; markers-only scatter series draw a marker legend key) | ✅ |
 | | Chart data labels (`<c:dLbl>` per-point with CELLRANGE / VALUE / SERIESNAME / CATEGORYNAME field references, position `l`/`r`/`t`/`b`/`ctr`/`outEnd`) | ✅ |
 | | Chart error bars (`<c:errBars>` X/Y direction, `cust` / `fixedVal` / `stdErr` / `stdDev` / `percentage`, dashed/styled lines) | ✅ |
 | | Chart manual layout (`<c:title><c:layout>` and `<c:plotArea><c:layout>`) | ✅ |
@@ -717,6 +730,9 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
 | | Zoom slider (Excel-style, right of the tab bar, 10–400% with 100% centered; `showZoomSlider` option) | ✅ |
 | | Ctrl/⌘ + mouse-wheel and trackpad-pinch zoom (in addition to the slider) | ✅ |
+| | Runtime fit / zoom API (`fitWidth` / `fitPage` / `getScale` / `setScale`, in addition to the slider) | ✅ |
+| | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with sheet + cell) | ✅ |
+| | Clickable hyperlinks (`onHyperlinkClick`; internal defined-name / cell navigation) | ✅ |
 | | Drag-to-resize columns / rows by dragging header borders (`resizable` option, default on) — **view-only: changes the on-screen view only and never modifies the loaded file** | ✅ |
 | | Customizable cell-selection color (`selectionColor` option, `setSelectionColor()`) | ✅ |
 | **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
@@ -746,7 +762,9 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Charts (scatter — `scatterStyle` marker / line / smooth variants) | ✅ |
 | | Charts (bubble — `bubbleSize` per-point area scaling) | ✅ |
 | | Charts (combo — bar + line with a secondary value axis on the right) | ✅ |
-| | SmartArt (renders the PowerPoint-saved drawing layout `dsp:drawing`; no native diagram layout engine) | ✅ |
+| | Charts (chartEx — funnel / histogram / treemap / sunburst / box &amp; whisker) | ✅ |
+| | Charts (stock — high / low / close candlesticks) | ✅ |
+| | SmartArt (renders the PowerPoint-saved drawing layout `dsp:drawing`, or a staged fallback to a text list when no drawing part is present; no native diagram layout engine) | ✅ |
 | | OLE embedded objects (`p:oleObj` — the baked preview `p:pic` is drawn; the embedded app is not run) | ✅ |
 | | Video / audio (poster + interactive playback) | ✅ |
 | | Ink / handwriting (`p:contentPart`, raster fallback) | ✅ |
@@ -784,6 +802,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Hyperlinks (`hlinkClick` — theme `hlink` colour + auto underline) | ✅ |
 | | Text shadow (`rPr > effectLst > outerShdw`) | ✅ |
 | | Text outline (`rPr > a:ln`) | ✅ |
+| | WordArt text warps (`a:prstTxWarp`, §20.1.9.19 — all 40 presets, per-glyph envelope fit incl. Follow Path) | ✅ |
 | | Text highlight / marker (`a:highlight` — §21.1.2.3.4) | ✅ |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, incl. `a14:m` / `mc:AlternateContent`; STIX Two Math via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | **Text — paragraphs** | Horizontal alignment (left / center / right / justify) | ✅ |
@@ -812,6 +831,9 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
 | | lumMod / lumOff / alpha transforms | ✅ |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with slide) | ✅ |
+| | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
+| | Clickable hyperlinks (`onHyperlinkClick`; internal slide-jump navigation) | ✅ |
 | | Continuous scroll viewer (`PptxScrollViewer` — virtualized slide list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
 | **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
