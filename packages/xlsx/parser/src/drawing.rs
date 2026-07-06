@@ -1064,20 +1064,28 @@ pub(crate) fn collect_shapes(
                     s.children()
                         .find(|n| n.is_element() && n.tag_name().name() == "lnRef")
                 }) {
-                    if let Some(c) = parse_solid_fill(&ln_ref, theme_colors) {
-                        stroke_color = Some(c);
-                        let idx: usize = ln_ref
-                            .attribute("idx")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0);
-                        // Missing/out-of-range entries fall back to the
-                        // CT_LineProperties default width (§20.1.2.2.24,
-                        // 9525 EMU = 0.75 pt).
-                        stroke_width = if idx >= 1 {
-                            theme_ln_widths.get(idx - 1).copied().unwrap_or(9525)
-                        } else {
-                            9525
-                        };
+                    let idx: usize = ln_ref
+                        .attribute("idx")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    // ST_StyleMatrixColumnIndex (§20.1.10.57): the style-matrix
+                    // lists (`lnStyleLst` etc.) are 1-based, so `idx="0"`
+                    // references NO entry — the well-known DrawingML encoding for
+                    // "no line". Excel / PowerPoint write it when the shape
+                    // outline is set to "No Line" (e.g. sample-28's inserted
+                    // equation text boxes carry `<a:lnRef idx="0">`). The child
+                    // colour is only the phClr substitution that would apply IF a
+                    // line style were selected; with idx=0 none is, so we must not
+                    // draw an outline. Matches pptx `shape.rs` (idx==0 → None).
+                    // Only idx>=1 resolves a themed stroke.
+                    if idx >= 1 {
+                        if let Some(c) = parse_solid_fill(&ln_ref, theme_colors) {
+                            stroke_color = Some(c);
+                            // Missing/out-of-range entries fall back to the
+                            // CT_LineProperties default width (§20.1.2.2.24,
+                            // 9525 EMU = 0.75 pt).
+                            stroke_width = theme_ln_widths.get(idx - 1).copied().unwrap_or(9525);
+                        }
                     }
                 }
             }
@@ -2492,6 +2500,26 @@ mod style_lnref_tests {
         );
         assert_eq!(color.as_deref(), Some("#4472C4"));
         assert_eq!(width, 9_525);
+    }
+
+    /// §20.1.4.2.19 + ST_StyleMatrixColumnIndex (§20.1.10.57): the style-matrix
+    /// lists (`lnStyleLst` etc.) are 1-based, so `<a:lnRef idx="0">` references
+    /// NO entry — it is the well-known DrawingML encoding for "no line". Excel /
+    /// PowerPoint write exactly this when the user sets the shape outline to
+    /// "No Line" (e.g. an inserted equation text box in sample-28, which carries
+    /// `<a:lnRef idx="0"><a:scrgbClr r="0" g="0" b="0"/></a:lnRef>`). The child
+    /// colour is only the phClr substitution that WOULD apply if a line style
+    /// were selected; with idx=0 no style is selected, so no outline is drawn.
+    /// Must yield no stroke — matching pptx's `shape.rs` (idx==0 → None). Before
+    /// the fix xlsx read the colour and drew a spurious 0.75 pt black border.
+    #[test]
+    fn lnref_idx_zero_is_no_line() {
+        let (color, width) = shape_of(
+            "",
+            r#"<xdr:style><a:lnRef idx="0"><a:scrgbClr r="0" g="0" b="0"/></a:lnRef></xdr:style>"#,
+        );
+        assert!(color.is_none(), "lnRef idx=0 → no outline");
+        assert_eq!(width, 0);
     }
 
     /// A standalone `<xdr:pic>` directly under a `twoCellAnchor` is a plain image
