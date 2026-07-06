@@ -132,7 +132,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
             }
         })
         .unwrap_or_else(|| "word/styles.xml".to_string());
-    let style_map = read_zip_string(zip, &styles_path)
+    let mut style_map = read_zip_string(zip, &styles_path)
         .map(|s| StyleMap::parse(&s))
         .unwrap_or_else(|_| StyleMap::parse(""));
 
@@ -168,6 +168,9 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     let mut num_map = read_zip_string(zip, &numbering_path)
         .map(|s| NumberingMap::parse(&s, &numbering_media_map))
         .unwrap_or_default();
+    // §17.9.23 — fold each `<w:lvl><w:pStyle>` backlink into its style's
+    // numbering level, now that both parts exist (see the method doc).
+    style_map.resolve_numbering_level_backlinks(&num_map);
 
     // Theme is referenced by a relationship with Type ending in "/theme" — resolve
     // to word/<target> and parse the clrScheme.
@@ -1331,18 +1334,28 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     };
 
     let mut out: Vec<ParaPiece> = Vec::new();
-    let mut emitted_para = false;
     for (i, runs) in chunks.into_iter().enumerate() {
         // Drop the leading chunk when it carries no visible content — this
         // happens when the paragraph starts with <w:lastRenderedPageBreak/>
         // (Word's hint duplicating a paragraph-level break that the
-        // surrounding section break already covers).
+        // surrounding section break already covers), OR with a HARD
+        // `<w:br w:type="page"/>` (ECMA-376 §17.3.1.20): "this paragraph begins
+        // on a new page". The empty chunk carries no runs, but its trailing
+        // separator (seps[0], emitted below for chunk 1) is the hard break that
+        // MUST still advance the page — dropping it silently would let the
+        // paragraph's text overprint whatever ends this page (private/sample-28
+        // p.15: an "Annex 4" heading that opens with a page break, followed by a
+        // page-anchored floating table, was drawn on the preceding list's page).
+        // RenderedPage hints never reach `seps` (they are filtered above), so this
+        // never re-honors the ignored hint.
         if i == 0 && !has_visible(&runs) {
             continue;
         }
-        if emitted_para {
-            // seps[i-1] separates chunk[i-1] from chunk[i]; emit its kind
-            // (page vs column) so the boundary type is preserved.
+        // seps[i-1] separates chunk[i-1] from chunk[i]; emit its kind (page vs
+        // column) so the boundary type is preserved. Every chunk after the first
+        // is preceded by a real hard break — including chunk 1 when chunk 0 was an
+        // empty leading chunk (a paragraph that opens with a hard break).
+        if i > 0 {
             out.push(match seps.get(i - 1) {
                 Some(ParaPiece::ColumnBreak) => ParaPiece::ColumnBreak,
                 _ => ParaPiece::PageBreak,
@@ -1351,7 +1364,6 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         let mut chunk = para.clone();
         chunk.runs = runs;
         out.push(ParaPiece::Para(chunk));
-        emitted_para = true;
     }
     if out.is_empty() {
         out.push(ParaPiece::Para(para));
@@ -9714,12 +9726,14 @@ mod footnote_tests {
             .descendants()
             .find(|n| n.tag_name().name() == "body")
             .unwrap();
-        let style_map = StyleMap::parse(styles_xml);
+        let mut style_map = StyleMap::parse(styles_xml);
         let mut num_map = if numbering_xml.is_empty() {
             NumberingMap::default()
         } else {
             NumberingMap::parse(numbering_xml, &HashMap::new())
         };
+        // Mirror production `parse`: §17.9.23 backlinks resolve after both parts.
+        style_map.resolve_numbering_level_backlinks(&num_map);
         let elems = parse_body_elements(
             body_node,
             &style_map,
@@ -9736,6 +9750,118 @@ mod footnote_tests {
             }
         }
         panic!("no paragraph parsed");
+    }
+
+    /// Like `first_para_with`, but returns EVERY body paragraph (in order) so a
+    /// numbering SEQUENCE across several paragraphs can be exercised end-to-end
+    /// (the running counter lives in `NumberingMap`, so a single-paragraph helper
+    /// cannot observe how level advances/resets compose).
+    fn paras_with(
+        body_inner: &str,
+        styles_xml: &str,
+        numbering_xml: &str,
+    ) -> Vec<crate::types::DocParagraph> {
+        let xml = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
+            ns = W_NS,
+            inner = body_inner,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let body_node = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let mut style_map = StyleMap::parse(styles_xml);
+        let mut num_map = if numbering_xml.is_empty() {
+            NumberingMap::default()
+        } else {
+            NumberingMap::parse(numbering_xml, &HashMap::new())
+        };
+        // Mirror production `parse`: §17.9.23 backlinks resolve after both parts.
+        style_map.resolve_numbering_level_backlinks(&num_map);
+        parse_body_elements(
+            body_node,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .filter_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        })
+        .collect()
+    }
+
+    /// ECMA-376 §17.9.2/§17.9.22/§17.9.11 — MULTILEVEL heading numbering resolved
+    /// PURELY through the paragraph-style chain, the way real templates (e.g. the
+    /// MSR journal template, sample-13) author it: the heading paragraphs carry
+    /// ONLY `<w:pStyle>` (no direct `<w:numPr>`), each heading style's `pPr/numPr`
+    /// supplies `<w:ilvl>` + `<w:numId>` (Heading3 inherits the numId from its
+    /// `basedOn` Heading2), and the shared abstractNum composes cross-level markers
+    /// with `%1.%2`. The running counter must therefore: (a) pick up the ilvl from
+    /// the STYLE (not default to 0 for a paragraph that lacks a direct numPr),
+    /// (b) NOT advance the level-0 counter when a level-1 heading appears, and
+    /// (c) reset the deeper counter when the parent advances. A regression here
+    /// renders the classic "1 / 1.1 / 1.2 / 2 / 2.1" outline as a flat "1 / 2 / 3
+    /// / 4 / 5".
+    #[test]
+    fn multilevel_headings_via_pstyle_chain_resolve_hierarchically() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="H1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="6"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="6"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H3"><w:name w:val="heading 3"/><w:basedOn w:val="H2"/><w:pPr><w:numPr><w:ilvl w:val="2"/></w:numPr></w:pPr></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="20">
+                <w:multiLevelType w:val="multilevel"/>
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H1"/><w:lvlText w:val="%1."/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H2"/><w:lvlText w:val="%1.%2"/></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H3"/><w:lvlText w:val="%1.%2.%3"/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="6"><w:abstractNumId w:val="20"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        // Sequence: H1, H2, H2, H3, H1, H2 — the canonical outline the user reported.
+        let body = r#"
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>C</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H3"/></w:pPr><w:r><w:t>D</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>E</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>F</w:t></w:r></w:p>"#;
+        let paras = paras_with(body, &styles, &numbering);
+        let markers: Vec<(u32, &str)> = paras
+            .iter()
+            .map(|p| {
+                let n = p.numbering.as_ref().expect("heading is numbered");
+                (n.level, n.text.as_str())
+            })
+            .collect();
+        assert_eq!(
+            markers,
+            vec![
+                (0, "1."),
+                (1, "1.1"),
+                (1, "1.2"),
+                (2, "1.2.1"),
+                (0, "2."),
+                (1, "2.1"),
+            ],
+            "multilevel headings authored via the pStyle chain must resolve \
+             hierarchically, not flatten to 1/2/3/4/5/6"
+        );
     }
 
     /// ECMA-376 §17.3.1.19 — `numId=0` explicitly removes numbering, so the paragraph
@@ -12155,6 +12281,65 @@ mod column_tests {
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
         assert!(matches!(body[3], BodyElement::ColumnBreak));
         assert!(matches!(body[4], BodyElement::Paragraph(_)));
+    }
+
+    /// ECMA-376 §17.3.1.20 — a `<w:br w:type="page"/>` that is the FIRST run of a
+    /// paragraph (before any visible content) means "this paragraph begins on a new
+    /// page". The leading empty chunk (nothing precedes the break) must NOT swallow
+    /// the break: the body must be PageBreak, Para("annex"), so the paragraph is
+    /// pushed to the next page. Regression from private/sample-28 p.15, where an
+    /// "Annex 4" heading that starts with a page break — followed by a page-anchored
+    /// floating table — was drawn on the SAME page as the preceding list, letting the
+    /// list text overprint the table.
+    #[test]
+    fn leading_page_break_in_paragraph_still_advances_page() {
+        let body = body_from(
+            r#"<w:p><w:r><w:t>before</w:t></w:r></w:p>
+               <w:p>
+                 <w:r><w:br w:type="page"/></w:r>
+                 <w:r><w:t>annex</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para(before), PageBreak, Para(annex).
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[2], BodyElement::Paragraph(_)));
+    }
+
+    /// The leading-break rule preserves the break KIND: a paragraph that opens with a
+    /// `<w:br w:type="column"/>` yields ColumnBreak, Para(...) — not PageBreak.
+    #[test]
+    fn leading_column_break_in_paragraph_emits_column_break() {
+        let body = body_from(
+            r#"<w:p>
+                 <w:r><w:br w:type="column"/></w:r>
+                 <w:r><w:t>next-col</w:t></w:r>
+               </w:p>"#,
+        );
+        // ColumnBreak, Para(next-col).
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0], BodyElement::ColumnBreak));
+        assert!(matches!(body[1], BodyElement::Paragraph(_)));
+    }
+
+    /// A leading `<w:lastRenderedPageBreak/>` (Word's ignored layout hint, not a hard
+    /// break) must still be stripped WITHOUT injecting a body-level break — only a
+    /// hard `<w:br w:type="page"/>` advances the page. Guards the leading-break fix
+    /// against re-honoring the hint (package CLAUDE.md: never mix honoring/ignoring
+    /// `<w:lastRenderedPageBreak/>`).
+    #[test]
+    fn leading_rendered_page_break_hint_does_not_advance_page() {
+        let body = body_from(
+            r#"<w:p><w:r><w:t>before</w:t></w:r></w:p>
+               <w:p>
+                 <w:r><w:lastRenderedPageBreak/><w:t>heading</w:t></w:r>
+               </w:p>"#,
+        );
+        // Para(before), Para(heading) — the rendered-page hint is dropped, no break.
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[0], BodyElement::Paragraph(_)));
+        assert!(matches!(body[1], BodyElement::Paragraph(_)));
     }
 
     /// ECMA-376 §17.5.2 — a "Cover Pages" building block (sdt with
@@ -15289,6 +15474,307 @@ mod embedded_font_tests {
             garbage_err.matches("zip container").count(),
             1,
             "the container tag must not be doubled; got {garbage_err:?}"
+        );
+    }
+}
+
+// ===== ECMA-376 §17.9.23: <w:lvl><w:pStyle> paragraph-style ↔ level association =====
+//
+// End-to-end (zip → parse_from_bytes) tests for the lvl/pStyle BACKLINK: an
+// abstractNum level names a paragraph style, and paragraphs of that style must
+// use THAT level — even when the style's own numPr carries no <w:ilvl> (the
+// authoring Word's "Define Multilevel List → Link level to style" UI emits,
+// e.g. sample-28's KPMGHeading1/2/3 → abstractNum 67 levels 0/1/2).
+#[cfg(test)]
+mod lvl_pstyle_backlink_tests {
+    use super::*;
+    use crate::types::BodyElement;
+    use crate::xml_util::W_NS;
+
+    /// Build a docx zip carrying document + styles + numbering parts. The rels
+    /// part is empty: the production parser falls back to `word/styles.xml` /
+    /// `word/numbering.xml` when the relationships omit them, so this exercises
+    /// the REAL `parse` wiring (StyleMap + NumberingMap construction order and
+    /// any cross-map resolution), not a test-local reimplementation.
+    fn build_docx_with_parts(body_inner: &str, styles_xml: &str, numbering_xml: &str) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let document = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{body_inner}</w:body></w:document>"#,
+            ns = W_NS,
+        );
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            zw.start_file("word/document.xml", opts).unwrap();
+            zw.write_all(document.as_bytes()).unwrap();
+            zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
+            zw.write_all(rels_xml.as_bytes()).unwrap();
+            zw.start_file("word/styles.xml", opts).unwrap();
+            zw.write_all(styles_xml.as_bytes()).unwrap();
+            zw.start_file("word/numbering.xml", opts).unwrap();
+            zw.write_all(numbering_xml.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// Parse and collect every body paragraph's resolved (level, marker text).
+    fn heading_markers(data: &[u8]) -> Vec<(u32, String)> {
+        let doc = parse_from_bytes(data).expect("synthetic docx parses");
+        doc.body
+            .iter()
+            .filter_map(|e| match e {
+                BodyElement::Paragraph(p) => {
+                    let n = p.numbering.as_ref().expect("heading is numbered");
+                    Some((n.level, n.text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// sample-28's authoring shape: the heading styles carry ONLY
+    /// `<w:numPr><w:numId/></w:numPr>` (no <w:ilvl>), and the level ↔ style
+    /// association lives in the abstractNum's `<w:lvl><w:pStyle>` (§17.9.23).
+    fn styles_numid_only() -> String {
+        format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="H1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="19"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="19"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H3"><w:name w:val="heading 3"/><w:basedOn w:val="H2"/></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        )
+    }
+
+    /// abstractNum 67 shape (sample-28): every level backlinks its style via
+    /// `<w:pStyle>` and composes ancestors with `%1.%2` (§17.9.11). H3 has NO
+    /// numPr of its own anywhere — its numId arrives via basedOn=H2 and its
+    /// LEVEL arrives purely from the backlink.
+    fn numbering_with_backlinks() -> String {
+        format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="67">
+                <w:multiLevelType w:val="multilevel"/>
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H1"/><w:lvlText w:val="%1"/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H2"/><w:lvlText w:val="%1.%2"/></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="H3"/><w:lvlText w:val="%1.%2.%3"/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="19"><w:abstractNumId w:val="67"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        )
+    }
+
+    /// §17.9.23 — the reported sample-28 failure: heading styles whose numPr has
+    /// numId but NO ilvl must still land on their pStyle-linked levels. A
+    /// regression flattens the outline to "1 / 2 / 3 / 4 / 5 / 6" (every heading
+    /// advancing level 0) — exactly the user-visible "2, 3, 4" bug.
+    #[test]
+    fn lvl_pstyle_backlink_resolves_style_linked_levels() {
+        let body = r#"
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>C</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H3"/></w:pPr><w:r><w:t>D</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>E</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>F</w:t></w:r></w:p>"#;
+        let data = build_docx_with_parts(body, &styles_numid_only(), &numbering_with_backlinks());
+        assert_eq!(
+            heading_markers(&data),
+            vec![
+                (0, "1".to_string()),
+                (1, "1.1".to_string()),
+                (1, "1.2".to_string()),
+                (2, "1.2.1".to_string()),
+                (0, "2".to_string()),
+                (1, "2.1".to_string()),
+            ],
+            "styles with numId-only numPr must use their §17.9.23 pStyle-linked levels"
+        );
+    }
+
+    /// §17.7.2 — a DIRECT `<w:ilvl>` on the paragraph itself (what Word writes
+    /// when the user Tab-demotes a heading) is the most specific layer and wins
+    /// over the style's §17.9.23 association.
+    #[test]
+    fn direct_ilvl_overrides_lvl_pstyle_backlink() {
+        // An H1 paragraph (backlinked to level 0) demoted to level 1 directly.
+        let body = r#"
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H1"/><w:numPr><w:ilvl w:val="1"/></w:numPr></w:pPr><w:r><w:t>B</w:t></w:r></w:p>"#;
+        let data = build_docx_with_parts(body, &styles_numid_only(), &numbering_with_backlinks());
+        assert_eq!(
+            heading_markers(&data),
+            vec![(0, "1".to_string()), (1, "1.1".to_string())],
+            "a direct <w:ilvl> outranks the style's pStyle-linked level"
+        );
+    }
+
+    /// §17.9.23 sentence 2: "any numbering level defined by the numPr element
+    /// shall be ignored" — a style whose numPr carries a WRONG explicit ilvl
+    /// still lands on its pStyle-linked level.
+    #[test]
+    fn style_explicit_ilvl_is_ignored_when_backlink_exists() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="H1"><w:name w:val="heading 1"/><w:pPr><w:numPr><w:numId w:val="19"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="H2"><w:name w:val="heading 2"/><w:pPr><w:numPr><w:ilvl w:val="5"/><w:numId w:val="19"/></w:numPr></w:pPr></w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let body = r#"
+            <w:p><w:pPr><w:pStyle w:val="H1"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="H2"/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>"#;
+        let data = build_docx_with_parts(body, &styles, &numbering_with_backlinks());
+        assert_eq!(
+            heading_markers(&data),
+            vec![(0, "1".to_string()), (1, "1.1".to_string())],
+            "the style's own explicit ilvl is ignored in favor of the §17.9.23 association"
+        );
+    }
+}
+
+// ===== ECMA-376 §17.9.7: <w:lvlOverride> with a FULL <w:lvl> replacement =====
+//
+// Shares the zip-level harness style with `lvl_pstyle_backlink_tests` above —
+// both exercise numbering-definition wiring through the production
+// `parse_from_bytes` path.
+#[cfg(test)]
+mod lvl_override_full_lvl_tests {
+    use super::*;
+    use crate::types::BodyElement;
+    use crate::xml_util::W_NS;
+
+    fn build_docx_with_parts(body_inner: &str, numbering_xml: &str) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let document = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{body_inner}</w:body></w:document>"#,
+            ns = W_NS,
+        );
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+            </w:styles>"#,
+            ns = W_NS,
+        );
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            zw.start_file("word/document.xml", opts).unwrap();
+            zw.write_all(document.as_bytes()).unwrap();
+            zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
+            zw.write_all(rels_xml.as_bytes()).unwrap();
+            zw.start_file("word/styles.xml", opts).unwrap();
+            zw.write_all(styles.as_bytes()).unwrap();
+            zw.start_file("word/numbering.xml", opts).unwrap();
+            zw.write_all(numbering_xml.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn markers(data: &[u8]) -> Vec<String> {
+        let doc = parse_from_bytes(data).expect("synthetic docx parses");
+        doc.body
+            .iter()
+            .filter_map(|e| match e {
+                BodyElement::Paragraph(p) => {
+                    Some(p.numbering.as_ref().expect("numbered").text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn p(ilvl: u32, num_id: u32) -> String {
+        format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/></w:numPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#
+        )
+    }
+
+    /// §17.9.7 — "the numbering level formatting which shall be substituted":
+    /// a full `<w:lvl>` inside `<w:lvlOverride>` REPLACES that level's
+    /// definition (lvlText / numFmt / indents) for THAT numId only. sample-28's
+    /// numId 76 overrides every level of an abstract whose lvlText are
+    /// single-token ("%1." / "%2." / "%3.") with cross-level compositions
+    /// ("%1." / "%1.%2." / "%1.%2.%3."); after four lvl-0 and two lvl-1 hidden
+    /// primer paragraphs, Word renders the deliverables heading as "4.2.1."
+    /// (sample-28 PDF p.12). Ignoring the override yields a flat "1.".
+    #[test]
+    fn full_lvl_override_replaces_level_definition() {
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="64">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="76">
+                <w:abstractNumId w:val="64"/>
+                <w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/></w:lvl></w:lvlOverride>
+                <w:lvlOverride w:ilvl="2"><w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2.%3."/></w:lvl></w:lvlOverride>
+              </w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        let body: String = [
+            p(0, 76),
+            p(0, 76),
+            p(0, 76),
+            p(0, 76),
+            p(1, 76),
+            p(1, 76),
+            p(2, 76),
+        ]
+        .concat();
+        let data = build_docx_with_parts(&body, &numbering);
+        assert_eq!(
+            markers(&data),
+            vec!["1.", "2.", "3.", "4.", "4.1.", "4.2.", "4.2.1."],
+            "a full <w:lvl> inside <w:lvlOverride> substitutes the level definition (§17.9.7)"
+        );
+    }
+
+    /// §17.9.7 vs §17.9.27 — a full-lvl override WITHOUT `<w:startOverride>`
+    /// substitutes FORMATTING only; it must NOT restart the abstract's shared
+    /// running counter the way a startOverride does on first use.
+    #[test]
+    fn full_lvl_override_does_not_restart_shared_counter() {
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="1">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="1"/></w:num>
+              <w:num w:numId="6">
+                <w:abstractNumId w:val="1"/>
+                <w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="[%1]"/></w:lvl></w:lvlOverride>
+              </w:num>
+              <w:num w:numId="7">
+                <w:abstractNumId w:val="1"/>
+                <w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>
+              </w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        let body: String = [p(0, 5), p(0, 5), p(0, 6), p(0, 7)].concat();
+        let data = build_docx_with_parts(&body, &numbering);
+        assert_eq!(
+            markers(&data),
+            vec!["1.", "2.", "[3]", "1."],
+            "formatting-only override continues the shared count (its lvlText applies); \
+             only startOverride restarts (§17.9.27)"
         );
     }
 }
