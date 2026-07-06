@@ -37,12 +37,11 @@ const { Canvas, loadImage } = (skia ?? {}) as Skia;
 const renderMod = await importForTests(() => import('./render.ts'), './render.ts');
 const { renderSlideNode } = (renderMod ?? {}) as typeof import('./render.ts');
 type NodeCanvasFactory = import('./render.ts').NodeCanvasFactory;
-// A canvas factory so renderSlideNode installs the OffscreenCanvas shim: the
-// paired-edge warp path renders each glyph to an auxiliary canvas and blits it in
-// strips (piecewise-affine envelope), which needs `createAuxCanvas` to succeed.
-// Without the factory that allocation returns null and the renderer falls back to
-// the single-affine per-glyph draw — so passing it here is what exercises the
-// real strip code in CI.
+// A canvas factory so renderSlideNode installs the OffscreenCanvas shim. The
+// paired-edge strip draw itself no longer needs it (each strip is a clipped
+// vector fillText — no auxiliary canvas anywhere), but the factory keeps the
+// rest of the renderer's aux-canvas paths (effects, patterns) live, matching
+// how the browser runs.
 const warpFactory: NodeCanvasFactory | undefined = skia
   ? {
       createCanvas: (w, h) => new Canvas(w, h) as unknown as ReturnType<NodeCanvasFactory['createCanvas']>,
