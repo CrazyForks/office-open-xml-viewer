@@ -160,4 +160,52 @@ describe('PptxScrollViewer IX9 zoom contract', () => {
     expect(v.getScale()).toBe(3); // latched pre-clamped
     v.destroy();
   });
+
+  // Pointer-anchored ("zoom toward the cursor") Ctrl/⌘+wheel zoom: the content
+  // point under the pointer before the zoom must be under the SAME viewport-y
+  // after. getBoundingClientRect().top = 0 in the fake DOM, so clientY == the
+  // scrollHost-viewport y.
+  it('a Ctrl+wheel zoom keeps the content under the pointer fixed (zoom in)', () => {
+    const { v, scrollHost } = setup();
+    scrollHost.scrollTop = 600;
+    const pointerY = 250;
+    const before = v.contentAtViewportYForTest(pointerY);
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: -60,
+      clientX: 100,
+      clientY: pointerY,
+      preventDefault() {},
+    });
+    expect(v.getScale()).toBeGreaterThan(1);
+    expect(v.viewportYOfForTest(before.slide, before.frac)).toBeCloseTo(pointerY, 4);
+    v.destroy();
+  });
+
+  it('a Ctrl+wheel zoom keeps the content under the pointer fixed (zoom out)', () => {
+    const { v, scrollHost } = setup();
+    v.setScale(3);
+    scrollHost.scrollTop = 500;
+    const pointerY = 140;
+    const before = v.contentAtViewportYForTest(pointerY);
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: 60,
+      clientX: 80,
+      clientY: pointerY,
+      preventDefault() {},
+    });
+    expect(v.getScale()).toBeLessThan(3);
+    expect(v.viewportYOfForTest(before.slide, before.frac)).toBeCloseTo(pointerY, 4);
+    v.destroy();
+  });
+
+  it('a non-gesture setScale still anchors on the viewport top (unchanged)', () => {
+    const { v, scrollHost } = setup();
+    scrollHost.scrollTop = 600;
+    const topContent = v.contentAtViewportYForTest(0);
+    v.setScale(3);
+    expect(v.viewportYOfForTest(topContent.slide, topContent.frac)).toBeCloseTo(0, 4);
+    v.destroy();
+  });
 });

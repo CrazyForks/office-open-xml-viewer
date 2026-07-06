@@ -41,9 +41,20 @@ function makeSheet(): Worksheet {
   } as unknown as Worksheet;
 }
 
+interface FakeScrollHost {
+  scrollTop: number;
+  scrollLeft: number;
+  clientWidth: number;
+  clientHeight: number;
+  scrollWidth: number;
+  scrollHeight: number;
+}
 interface Priv {
   currentWorksheet: Worksheet | null;
-  canvasArea: { clientWidth: number; clientHeight: number };
+  canvasArea: { clientWidth: number; clientHeight: number; getBoundingClientRect(): DOMRect };
+  scrollHost: FakeScrollHost;
+  _pendingZoomAnchor: { x: number; y: number } | null;
+  frozenExtent(ws: Worksheet): { frozenW: number; frozenH: number };
 }
 
 /** Construct a viewer, inject `ws`, and size the canvas area so fit math has a
@@ -191,6 +202,61 @@ describe('XlsxViewer IX9 zoom contract', () => {
     const v = new XlsxViewer(makeContainer() as unknown as HTMLElement, { zoomMin: 0.5, zoomMax: 3 });
     v.setScale(100);
     expect(v.getScale()).toBe(3); // latched pre-clamped
+  });
+
+  // Pointer-anchored ("zoom toward the cursor") zoom, both axes, past the fixed
+  // header + frozen band. The logical cell under the pointer is invariant across
+  // the zoom. From getCellAt: logical content-Y under screen-y `py` is
+  // `(py + scrollTop)/cs − (HEADER_H + frozenH)`; the x mirror-image holds via the
+  // effective (start-anchored) scrollLeft. We drive setScale with an injected
+  // gesture anchor and a generously-sized scroll host so the clamps do not bind.
+  it('a gesture-anchored zoom keeps the logical cell under the pointer fixed', () => {
+    installDom();
+    const ws = makeSheet(); // no frozen panes ⇒ frozen extent 0
+    const { v, priv } = mount(ws, { cellScale: 1 });
+    // A roomy scroll host so neither axis clamps at an edge.
+    priv.scrollHost.clientWidth = 400;
+    priv.scrollHost.clientHeight = 300;
+    priv.scrollHost.scrollWidth = 100000;
+    priv.scrollHost.scrollHeight = 100000;
+    priv.scrollHost.scrollTop = 800;
+    priv.scrollHost.scrollLeft = 600;
+
+    const { frozenW, frozenH } = priv.frozenExtent(ws);
+    const py = 180; // pointer screen-y within the grid
+    const px = 260; // pointer screen-x
+    const csOld = 1;
+    // Logical content coordinate under the pointer BEFORE the zoom.
+    const logicalYBefore = (py + priv.scrollHost.scrollTop) / csOld - (HEADER_H + frozenH);
+    const logicalXBefore = (px + priv.scrollHost.scrollLeft) / csOld - (HEADER_W + frozenW);
+
+    // Inject the gesture anchor exactly as the Ctrl/⌘+wheel handler would, then
+    // zoom in via setScale (the same path the handler calls).
+    priv._pendingZoomAnchor = { x: px, y: py };
+    v.setScale(1.5);
+    const csNew = v.getScale();
+    expect(csNew).toBe(1.5);
+
+    const logicalYAfter = (py + priv.scrollHost.scrollTop) / csNew - (HEADER_H + frozenH);
+    const logicalXAfter = (px + priv.scrollHost.scrollLeft) / csNew - (HEADER_W + frozenW);
+    expect(logicalYAfter).toBeCloseTo(logicalYBefore, 2);
+    expect(logicalXAfter).toBeCloseTo(logicalXBefore, 2);
+  });
+
+  it('a non-gesture setScale preserves the START-anchored top-left (unchanged)', () => {
+    installDom();
+    const ws = makeSheet();
+    const { v, priv } = mount(ws, { cellScale: 1 });
+    priv.scrollHost.clientWidth = 400;
+    priv.scrollHost.clientHeight = 300;
+    priv.scrollHost.scrollWidth = 100000;
+    priv.scrollHost.scrollHeight = 100000;
+    priv.scrollHost.scrollLeft = 600;
+    // No _pendingZoomAnchor ⇒ the historical start-anchored branch runs; the
+    // effective (LTR) scroll position is preserved verbatim (scrollLeft unchanged
+    // for an LTR sheet).
+    v.setScale(1.5);
+    expect(priv.scrollHost.scrollLeft).toBe(600);
   });
 });
 
