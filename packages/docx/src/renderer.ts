@@ -66,6 +66,7 @@ import {
 } from './bidi-line.js';
 import {
   type FloatRect,
+  FLOAT_OVERLAP_EPS,
   isWrapFloat,
   resolveLineFloatWindow,
   skipPastTopAndBottom,
@@ -2858,7 +2859,65 @@ export function computePages(
             const rawBox = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH, true);
             return { box, rawBox, layout, contentWPt: cW / measureState.scale };
           });
-        const first = measureFloat();
+        let first = measureFloat();
+        const isTextAnchored = tp.vertAnchor !== 'page' && tp.vertAnchor !== 'margin';
+
+        // ── Page/margin-anchored deferral on table-float band collision ──────────
+        // (§17.4.56 tblOverlap / Word ground truth, sample-28 pp.16→17) ───────────
+        // §17.4.56's NOMINAL default (tblOverlap="overlap") lets a floating table
+        // overlap other floats, but Word's ACTUAL layout of a page/margin-anchored
+        // table whose ABSOLUTE tblpY band would land ON TOP of another floating
+        // table already placed on this page is to DEFER the whole table to the next
+        // page, where its same absolute tblpY no longer collides. Measured from
+        // sample-28: the previous-projects experience form (vertAnchor="page",
+        // tblpY≈2174 twips) begins on a FRESH page after the competitor-info form's
+        // continuation band — it is never stacked over that band even though its raw
+        // tblpY falls inside it. (Its absolute in-page position is then identical on
+        // the deferred page, so nothing about the table's own geometry changes; only
+        // which page hosts it.) This is the page/margin-anchored analogue of the
+        // "not even the first row fits ⇒ advancePage first" mirror inside
+        // splitFloatTableAcrossPages: a fresh page clears page-scoped floats
+        // (measureState.floats reset in newPage), so the collision can only push the
+        // table forward ONE page and never loops. Gated to page/margin anchors: a
+        // vertAnchor="text" table rides the flow cursor and is placed by the row-
+        // split path, which already sequences it after the preceding float.
+        if (!isTextAnchored) {
+          // Absolute-px band the table's RAW box (un-clamped tblpY) would occupy on
+          // whatever page hosts it (scale is 1 in the paginator; rawBox.y is the
+          // absolute page-y, independent of the flow cursor). Compared against the
+          // exclusion rects of the table floats ALREADY on this page — using the
+          // padded exclusion range Word wraps text around — with the shared
+          // FLOAT_OVERLAP_EPS slack so a coincident/touching edge is not a clash.
+          const collidesWithTableFloat = (): boolean => {
+            const top = first.rawBox.y;
+            const bottom = first.rawBox.y + first.rawBox.h;
+            const left = first.rawBox.x;
+            const right = first.rawBox.x + first.rawBox.w;
+            return measureState.floats.some(
+              (f) =>
+                f.kind === 'table' &&
+                bottom - f.yTop > FLOAT_OVERLAP_EPS &&
+                f.yBottom - top > FLOAT_OVERLAP_EPS &&
+                right - f.xLeft > FLOAT_OVERLAP_EPS &&
+                f.xRight - left > FLOAT_OVERLAP_EPS,
+            );
+          };
+          // Only defer when a fuller/cleaner band exists on a fresh page — i.e. the
+          // current page is non-empty (newPage is a no-op on an empty page, so a
+          // deferral there would loop). prescanFloatsFrom on the fresh page could in
+          // principle re-introduce a page-level float, but a page-anchored TABLE
+          // float is only ever registered by THIS branch, so the fresh page starts
+          // with none of kind==='table' and the loop terminates in one step.
+          if (
+            collidesWithTableFloat() &&
+            pages[pages.length - 1].length > 0
+          ) {
+            nextColumnOrPage(i);
+            y = colTopY;
+            first = measureFloat();
+          }
+        }
+
         // Distance from the table's in-flow top (measureState.y == paraTop) down
         // to its body-box bottom — the table analogue of the frame's
         // frameBottomOff. The bottom is vSpace-exclusive (box.h is the bare table
@@ -2867,7 +2926,6 @@ export function computePages(
         // offset + its height; for page/margin it mixes an absolute box.y with the
         // flow cursor and is not a keep signal, so it is gated out below.
         const tableBottomOff = first.box.y + first.box.h - measureState.y;
-        const isTextAnchored = tp.vertAnchor !== 'page' && tp.vertAnchor !== 'margin';
         const tableOverflowsHere =
           isTextAnchored && tableBottomOff > 0 && y + tableBottomOff > effContentH();
 
@@ -8949,6 +9007,20 @@ function renderCell(
     // background (e.g. a nested table). renderParagraph narrows this to the
     // paragraph shading when the paragraph declares its own.
     containerShading: cell.background ?? state.containerShading,
+    // ECMA-376 §17.4.57 / §20.4.2.x — a table cell is its own text container: the
+    // page's floating objects (anchor images, text frames, and floating TABLES)
+    // exclude MAIN-STORY text, NOT text inside a table cell. Word never flows cell
+    // content around a page float that happens to overlap the cell's box. Spreading
+    // `state.floats` into the cell made a cell paragraph's line layout skip past an
+    // OUTER float's wrap band (skipPastTopAndBottom / resolveLineFloatWindow read
+    // `state.floats`), pushing the cell's first line down — measured on sample-28
+    // p.17, where a vAlign="center" header cell's text was displaced ~17 px below
+    // its centred slot by the projects float's band overlapping the cell. Give the
+    // cell an isolated (empty) float set so its content lays out only against the
+    // cell box; an in-cell anchor float then also stays scoped to the cell instead
+    // of leaking onto the page. floatParaSeq restarts at 0 for the same isolation.
+    floats: [],
+    floatParaSeq: 0,
   };
 
   if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
