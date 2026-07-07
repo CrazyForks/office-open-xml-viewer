@@ -17,8 +17,8 @@ declare function acquireVsCodeApi(): {
 };
 
 import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
-import { DocxDocument, type DocxTextRunInfo } from '@silurus/ooxml-docx';
-import { PptxPresentation, type PptxTextRunInfo } from '@silurus/ooxml-pptx';
+import { DocxDocument, buildDocxTextLayer, type DocxTextRunInfo } from '@silurus/ooxml-docx';
+import { PptxPresentation, buildPptxTextLayer, type PptxTextRunInfo } from '@silurus/ooxml-pptx';
 import { svgExtents } from '@silurus/ooxml-core';
 // Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
 // into the webview and sets globalThis.__ooxmlStix2. The library renders OMML
@@ -121,23 +121,17 @@ async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
 }
 
 // ── DOCX (scroll view) ───────────────────────────────────────────────────────
-
-function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {
-  layer.replaceChildren();
-  for (const run of runs) {
-    const span = document.createElement('span');
-    span.textContent = run.text;
-    // Mirror the canvas font (incl. weight / style / family) so glyph widths
-    // line up. `letter-spacing` is reset so parent CSS cannot drift the
-    // selection edge. Kerning / ligatures are left at the browser default
-    // because canvas applies them by default too.
-    span.style.cssText =
-      `position:absolute;left:${run.x}px;top:${run.y}px;` +
-      `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
-      `white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
-    layer.appendChild(span);
-  }
-}
+//
+// The text-selection overlay is built by the shared, public buildDocxTextLayer
+// (imported above) rather than a local duplicate: this webview's `.page-canvas`
+// is `width:100%` of `.page-wrapper` (itself capped by an inline `max-width`),
+// so it IS responsively scaled by the editor pane's width, exactly the pattern
+// the shared builder now guards (an overlay pinned to literal px would overflow
+// `.page-wrapper` under a narrow pane, pushing scroll onto an ancestor — the same
+// bug fixed for PptxViewer/DocxViewer). buildDocxTextLayer takes the page's
+// intended CSS box (px, numbers) as the `%` denominators and leaves the
+// `.text-layer` container's own `width:100%;height:100%` (set by CSS class)
+// untouched.
 
 async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
   const doc = await DocxDocument.load(buffer, { math, useGoogleFonts });
@@ -164,51 +158,21 @@ async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
 
     const runs: DocxTextRunInfo[] = [];
     await doc.renderPage(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
-    buildDocxTextLayer(textLayer, runs);
+    const cssHeight = parseFloat(canvas.style.height) || canvas.height;
+    buildDocxTextLayer(textLayer, runs, widthPx, cssHeight);
   }
 
   hideStatus();
 }
 
 // ── PPTX (scroll view) ───────────────────────────────────────────────────────
-
-function buildPptxTextLayer(
-  layer: HTMLDivElement,
-  runs: PptxTextRunInfo[],
-  cssWidth: number,
-  cssHeight: number,
-): void {
-  layer.replaceChildren();
-  layer.style.width = `${cssWidth}px`;
-  layer.style.height = `${cssHeight}px`;
-
-  const shapeMap = new Map<string, HTMLDivElement>();
-  for (const run of runs) {
-    const totalRot = run.rotation + (run.textBodyRotation ?? 0);
-    const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
-    let shape = shapeMap.get(key);
-    if (!shape) {
-      shape = document.createElement('div');
-      shape.style.cssText =
-        `position:absolute;left:${run.shapeX}px;top:${run.shapeY}px;` +
-        `width:${run.shapeW}px;height:${run.shapeH}px;pointer-events:all;overflow:hidden;`;
-      if (totalRot !== 0) {
-        shape.style.transformOrigin = 'center center';
-        shape.style.transform = `rotate(${totalRot}deg)`;
-      }
-      shapeMap.set(key, shape);
-      layer.appendChild(shape);
-    }
-    const span = document.createElement('span');
-    span.textContent = run.text;
-    // See buildDocxTextLayer: mirror canvas font, only reset letter-spacing.
-    span.style.cssText =
-      `position:absolute;left:${run.inShapeX}px;top:${run.inShapeY}px;` +
-      `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
-      `white-space:pre;color:transparent;cursor:text;`;
-    shape.appendChild(span);
-  }
-}
+//
+// Same rationale as the docx section above: the shared, public
+// buildPptxTextLayer (imported above) replaces the former local duplicate,
+// which pinned `.text-layer`'s width/height and every shape frame / span to
+// literal px — the same responsive-overflow bug fixed for PptxViewer, and a
+// live one here too (`.page-canvas` is `width:100%` of `.page-wrapper`, capped
+// by an inline `max-width`, so it IS responsively scaled by the editor pane).
 
 async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
   const pres = await PptxPresentation.load(buffer, { math, useGoogleFonts });
