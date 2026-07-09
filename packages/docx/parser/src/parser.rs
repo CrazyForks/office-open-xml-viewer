@@ -955,12 +955,9 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     let compat = root
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "compat");
-    let compat_bool = |name: &str| -> Option<bool> {
-        bool_prop(compat?, name)
-    };
+    let compat_bool = |name: &str| -> Option<bool> { bool_prop(compat?, name) };
     let use_fe_layout = compat_bool("useFELayout");
-    let balance_single_byte_double_byte_width =
-        compat_bool("balanceSingleByteDoubleByteWidth");
+    let balance_single_byte_double_byte_width = compat_bool("balanceSingleByteDoubleByteWidth");
 
     // ECMA-376 §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
     // justification (math namespace, bare `val` fallback).
@@ -2487,7 +2484,8 @@ fn parse_paragraph_cond(
         default_font_family: theme
             .resolve_font_ref(mark_run.font_family_ascii.clone())
             .or_else(|| theme.resolve_font_ref(mark_run.font_family_east_asia.clone())),
-        default_font_family_east_asia: theme.resolve_font_ref(mark_run.font_family_east_asia.clone()),
+        default_font_family_east_asia: theme
+            .resolve_font_ref(mark_run.font_family_east_asia.clone()),
         outline_level: base_para.outline_level,
         // ECMA-376 §17.3.1.6 — RTL paragraph flag resolved through the style
         // chain + direct pPr. The renderer reads it as the paragraph base
@@ -5045,8 +5043,16 @@ fn parse_wsp_shape(
 
     let width_pt = cx * sx / 12700.0;
     let height_pt = cy * sy / 12700.0;
-    let local_x_pt = if include_xfrm_offset { ox * sx / 12700.0 } else { 0.0 };
-    let local_y_pt = if include_xfrm_offset { oy * sy / 12700.0 } else { 0.0 };
+    let local_x_pt = if include_xfrm_offset {
+        ox * sx / 12700.0
+    } else {
+        0.0
+    };
+    let local_y_pt = if include_xfrm_offset {
+        oy * sy / 12700.0
+    } else {
+        0.0
+    };
     let anchor_x_pt = anchor_pos_x + group_off_pt_x + local_x_pt;
     let anchor_y_pt = anchor_pos_y + group_off_pt_y + local_y_pt;
 
@@ -7272,7 +7278,9 @@ fn parse_table_row(
         .and_then(|h| attr_w(h, "hRule"))
         .unwrap_or_else(|| "auto".to_string());
     let is_header = tr_pr.and_then(|p| child_w(p, "tblHeader")).is_some();
-    let cant_split = tr_pr.and_then(|p| bool_prop(p, "cantSplit")).unwrap_or(false);
+    let cant_split = tr_pr
+        .and_then(|p| bool_prop(p, "cantSplit"))
+        .unwrap_or(false);
 
     let mut cells = vec![];
     for (i, tc_node) in children_w_flat(node, "tc").into_iter().enumerate() {
@@ -11733,9 +11741,20 @@ mod anchor_image_relative_from_tests {
         let data = build_docx(body);
         let doc = parse_from_bytes(&data).expect("parse must succeed");
         let shape = first_shape(&doc);
-        assert!((shape.anchor_x_pt - 2.0).abs() < 1e-6, "anchor_x_pt={}", shape.anchor_x_pt);
-        assert!((shape.anchor_y_pt - 1.6).abs() < 1e-6, "anchor_y_pt={}", shape.anchor_y_pt);
-        assert!(shape.anchor_y_from_para, "positionV relativeFrom=paragraph must survive");
+        assert!(
+            (shape.anchor_x_pt - 2.0).abs() < 1e-6,
+            "anchor_x_pt={}",
+            shape.anchor_x_pt
+        );
+        assert!(
+            (shape.anchor_y_pt - 1.6).abs() < 1e-6,
+            "anchor_y_pt={}",
+            shape.anchor_y_pt
+        );
+        assert!(
+            shape.anchor_y_from_para,
+            "positionV relativeFrom=paragraph must survive"
+        );
     }
 
     /// Inline images carry no positionH/V at all — both relativeFrom fields
