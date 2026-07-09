@@ -4489,6 +4489,54 @@ function paragraphLineSliceElement(
   return slice;
 }
 
+function tableCellElementSliceByRows(table: DocTable, start: number, end: number): CellElement {
+  return {
+    ...(table as object),
+    type: 'table',
+    rows: table.rows.slice(start, end),
+  } as unknown as CellElement;
+}
+
+function splitNestedTableByHeight(
+  table: DocTable,
+  contentWPt: number,
+  maxHeightPt: number,
+  state: RenderState,
+): { before: CellElement; after: CellElement; beforeHeight: number; afterHeight: number } | null {
+  const { rowHeightsPt } = computeTablePtLayout(state, table, contentWPt);
+  if (rowHeightsPt.length <= 1) return null;
+
+  let used = 0;
+  let end = 0;
+  let lastSafeEnd = 0;
+  let lastSafeUsed = 0;
+  while (end < rowHeightsPt.length) {
+    const h = rowHeightsPt[end];
+    if (end > 0 && used + h > maxHeightPt) {
+      if (tableBreakAllowedBefore(table, end)) break;
+      if (lastSafeEnd > 0) {
+        end = lastSafeEnd;
+        used = lastSafeUsed;
+        break;
+      }
+    }
+    if (end > 0 && tableBreakAllowedBefore(table, end)) {
+      lastSafeEnd = end;
+      lastSafeUsed = used;
+    }
+    used += h;
+    end++;
+  }
+  if (end <= 0 || end >= table.rows.length || !tableBreakAllowedBefore(table, end)) return null;
+
+  return {
+    before: tableCellElementSliceByRows(table, 0, end),
+    after: tableCellElementSliceByRows(table, end, table.rows.length),
+    beforeHeight: used,
+    afterHeight: rowHeightsPt.slice(end).reduce((sum, h) => sum + h, 0),
+  };
+}
+
 function splitCellContentByHeight(
   content: CellElement[],
   innerWPt: number,
@@ -4595,6 +4643,17 @@ function splitCellContentByHeight(
     }
 
     if (ce.type !== 'paragraph') {
+      if (ce.type === 'table') {
+        const remaining = maxContentHeightPt - beforeHeight;
+        const nestedSplit = splitNestedTableByHeight(ce as unknown as DocTable, innerWPt, remaining, state);
+        if (nestedSplit) {
+          before.push(nestedSplit.before);
+          beforeHeight += nestedSplit.beforeHeight;
+          const after = [nestedSplit.after, ...content.slice(i + 1)];
+          const afterHeight = nestedSplit.afterHeight + sumContentHeightForSplit(content.slice(i + 1));
+          return { before, after, beforeHeight, afterHeight };
+        }
+      }
       const after = content.slice(i);
       const afterHeight = sumContentHeightForSplit(after);
       return before.length > 0 ? { before, after, beforeHeight, afterHeight } : null;

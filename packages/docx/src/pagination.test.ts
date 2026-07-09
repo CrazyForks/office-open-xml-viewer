@@ -273,6 +273,34 @@ function autoTableWithIntroRowThenSpacedWrappedParagraph(): BodyElement {
   return { type: 'table', ...t } as BodyElement;
 }
 
+function autoTableWithNestedFixedTable(rowHeightsPt: number[]): BodyElement {
+  const nested = fixedTable(rowHeightsPt) as unknown as DocTable;
+  const row: DocTableRow = {
+    cells: [
+      {
+        content: [{ type: 'table', ...nested } as unknown as CellElement],
+        colSpan: 1,
+        vMerge: null,
+        borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+        background: null,
+        vAlign: 'top',
+        widthPt: null,
+      },
+    ],
+    rowHeight: null,
+    rowHeightRule: 'auto',
+    isHeader: false,
+  };
+  const t: DocTable = {
+    colWidths: [160],
+    rows: [row],
+    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    jc: 'left',
+  };
+  return { type: 'table', ...t } as BodyElement;
+}
+
 const sliceOf = (el: PaginatedBodyElement) =>
   (el as { lineSlice?: { start: number; end: number } }).lineSlice;
 
@@ -412,6 +440,20 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
       .map((el) => el?.lineSlice);
     expect(splitPara?.lineSlice).toEqual({ start: 0, end: 1 });
     expect(restSlices).toEqual([{ start: 1, end: 3 }, { start: 3, end: 4 }]);
+  });
+
+  it('splits a nested table inside a cell at inner row boundaries', () => {
+    const pages = computePages([autoTableWithNestedFixedTable([30, 30, 30, 30])], section(), makeCtx());
+    expect(pages.length).toBe(2);
+    const firstPageTable = pages[0].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+    const secondPageTable = pages[1].find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+
+    const firstNested = firstPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & DocTable) | undefined;
+    const secondNested = secondPageTable?.rows[0]?.cells[0]?.content[0] as (CellElement & DocTable) | undefined;
+    expect(firstNested?.type).toBe('table');
+    expect(secondNested?.type).toBe('table');
+    expect(firstNested?.rows.length).toBe(3);
+    expect(secondNested?.rows.length).toBe(1);
   });
 });
 
