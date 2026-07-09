@@ -4840,36 +4840,49 @@ export function splitTableAcrossPages(
     }
     let used = isContinuation ? headerH : 0;
     let end = start;
+    let lastSafeEnd = start;
+    let lastSafeUsed = used;
     // Always place at least one row to guarantee forward progress.
     while (end < n) {
       const h = workRowHs[end];
-      if (end > start && used + h > avail && tableBreakAllowedBefore(workTable, end)) {
-        const remainingForNextRow = avail - used;
-        if (rowSplit && remainingForNextRow > 0 && end >= headerCount) {
-          const split = splitRowForHeight(
-            workTable,
-            workRows[end],
-            rowSplit.colWidthsPt,
-            remainingForNextRow,
-            rowSplit.state,
-          );
-          if (split && split.heights[0] <= remainingForNextRow) {
-            workRows = [
-              ...workRows.slice(0, end),
-              ...split.rows,
-              ...workRows.slice(end + 1),
-            ];
-            workRowHs = [
-              ...workRowHs.slice(0, end),
-              ...split.heights,
-              ...workRowHs.slice(end + 1),
-            ];
-            workTable = { ...workTable, rows: workRows };
-            n = workRows.length;
-            continue;
+      if (end > start && used + h > avail) {
+        if (tableBreakAllowedBefore(workTable, end)) {
+          const remainingForNextRow = avail - used;
+          if (rowSplit && remainingForNextRow > 0 && end >= headerCount) {
+            const split = splitRowForHeight(
+              workTable,
+              workRows[end],
+              rowSplit.colWidthsPt,
+              remainingForNextRow,
+              rowSplit.state,
+            );
+            if (split && split.heights[0] <= remainingForNextRow) {
+              workRows = [
+                ...workRows.slice(0, end),
+                ...split.rows,
+                ...workRows.slice(end + 1),
+              ];
+              workRowHs = [
+                ...workRowHs.slice(0, end),
+                ...split.heights,
+                ...workRowHs.slice(end + 1),
+              ];
+              workTable = { ...workTable, rows: workRows };
+              n = workRows.length;
+              continue;
+            }
           }
+          break;
         }
-        break;
+        if (lastSafeEnd > start) {
+          end = lastSafeEnd;
+          used = lastSafeUsed;
+          break;
+        }
+      }
+      if (end > start && tableBreakAllowedBefore(workTable, end)) {
+        lastSafeEnd = end;
+        lastSafeUsed = used;
       }
       used += h;
       end++;

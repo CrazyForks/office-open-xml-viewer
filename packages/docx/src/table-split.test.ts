@@ -118,4 +118,16 @@ describe('splitTableAcrossPages', () => {
       expect(firstRow.cells.some((c) => c.vMerge === false)).toBe(false);
     }
   });
+
+  it('backs up to the previous safe boundary instead of overflowing before a vMerge continuation', () => {
+    // Row 2 starts a vertical merge and row 3 continues it. A 350pt page can fit
+    // rows 0..2 but cannot also fit row 3. ECMA-376 §17.4.85 makes a break before
+    // row 3 unsafe, so the paginator must break earlier, before the merged span.
+    const rows = [row(), row(), row(), row({ vMergeContinue: true }), row()];
+    const t = table(rows);
+    const rowHs = Array(5).fill(100);
+    const { pages } = run(t, rowHs, 0, 350);
+
+    expect(pages.map((p) => rowsOf(p[0]).length)).toEqual([2, 3]);
+  });
 });
