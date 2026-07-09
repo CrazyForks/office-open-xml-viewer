@@ -5032,10 +5032,12 @@ function renderEmptyMarkParagraph(
   // wrapNone anchor images anchor relative to the paragraph (ayFromPara); when
   // the mark line flowed below a float band the paragraph (and its wrapNone
   // image) drops by the same amount, so shift the anchor base by flowShift while
-  // keeping the un-flowed base (paragraphStartY) otherwise unchanged. Only the
-  // first slice draws them (a continuation slice already did on its page).
+  // keeping the un-flowed base (paragraphStartY) otherwise unchanged. Wrap
+  // shapes are themselves the float band, so they stay anchored to the original
+  // paragraph top (§20.4.3.5) instead of following the paragraph mark's flow.
+  // Only the first slice draws them (a continuation slice already did on its page).
   if (!lineSlice || lineSlice.start === 0) {
-    renderAnchorImages(para, state, paragraphStartY + flowShift);
+    renderAnchorImages(para, state, paragraphStartY + flowShift, 'front', paragraphStartY);
   }
 }
 
@@ -6879,6 +6881,7 @@ function renderAnchorImages(
   state: RenderState,
   paragraphTopPx: number,
   phase: 'behind' | 'front' = 'front',
+  wrapFloatParagraphTopPx = paragraphTopPx,
 ): void {
   if (state.dryRun) return;
   if (phase === 'behind') {
@@ -6888,7 +6891,11 @@ function renderAnchorImages(
       .slice()
       .sort((a, b) =>
         ((a as unknown as ShapeRun).zOrder ?? 0) - ((b as unknown as ShapeRun).zOrder ?? 0));
-    for (const s of shapes) renderAnchorShape(s as unknown as ShapeRun, state, paragraphTopPx);
+    for (const s of shapes) {
+      const shape = s as unknown as ShapeRun;
+      const top = isWrapFloat(shape.wrapMode) ? wrapFloatParagraphTopPx : paragraphTopPx;
+      renderAnchorShape(shape, state, top);
+    }
     return;
   }
   // Front floats (behindDoc="0"): defer to the page's top layer so a later inline
@@ -6904,7 +6911,7 @@ function renderAnchorImages(
       state.contentX = cx;
       state.contentW = cw;
       state.deferFront = null; // draw in place this time
-      renderAnchorImages(para, state, paragraphTopPx, 'front');
+      renderAnchorImages(para, state, paragraphTopPx, 'front', wrapFloatParagraphTopPx);
       state.contentX = sx;
       state.contentW = sw;
       state.deferFront = sd;
@@ -6915,7 +6922,8 @@ function renderAnchorImages(
     if (run.type === 'shape') {
       const s = run as unknown as ShapeRun;
       if (s.behindDoc) continue;
-      renderAnchorShape(s, state, paragraphTopPx);
+      const top = isWrapFloat(s.wrapMode) ? wrapFloatParagraphTopPx : paragraphTopPx;
+      renderAnchorShape(s, state, top);
       continue;
     }
     if (run.type === 'chart') {
@@ -9623,4 +9631,3 @@ function paragraphMarkEmPx(para: DocParagraph, scale: number): number {
 // from `measuredWidth` by construction — there is no separate per-glyph sum to
 // drift against the whole-string measure (約物半角 contextual collapse stays
 // honoured). See packages/core/src/text/justify-positions.ts.
-
