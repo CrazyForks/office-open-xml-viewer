@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderDocumentToCanvas } from './renderer.js';
-import type { BodyElement, DocParagraph, DocxDocumentModel, ImageRun, SectionProps } from './types';
+import type { BodyElement, DocParagraph, DocxDocumentModel, ImageRun, SectionProps, ShapeRun } from './types';
 
 // ECMA-376 §20.4.3.5 ST_RelFromV "paragraph": a `<wp:positionV relativeFrom=
 // "paragraph">` float is positioned "relative to the paragraph which contains the
@@ -14,10 +14,12 @@ import type { BodyElement, DocParagraph, DocxDocumentModel, ImageRun, SectionPro
 // drawn float Y at the paragraph's pre-spaceBefore top for a wrapSquare image.
 
 interface DrawCall { y: number; }
+interface TextCall { text: string; y: number; }
 
-function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: DrawCall[] } {
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: DrawCall[]; texts: TextCall[] } {
   let font = '10px serif';
   const draws: DrawCall[] = [];
+  const texts: TextCall[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
@@ -37,13 +39,15 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; draws: DrawCall[] }
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     // No srcRect ⇒ 5-arg form drawImage(img, dx, dy, dw, dh): dy is the 3rd arg.
     drawImage(_img: unknown, _dx: number, dy: number) { draws.push({ y: dy }); },
-    fillText() {}, strokeText() {},
+    fillText(text: string, _x: number, y: number) { texts.push({ text, y }); },
+    strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+    textBaseline: 'alphabetic' as CanvasTextBaseline,
   };
   const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
-  return { canvas: canvas as unknown as HTMLCanvasElement, draws };
+  return { canvas: canvas as unknown as HTMLCanvasElement, draws, texts };
 }
 
 function squareFloat(): ImageRun {
@@ -67,6 +71,57 @@ function paraWithFloat(spaceBefore: number): DocParagraph {
              strikethrough: false, fontSize: 11, color: null, fontFamily: 'Times New Roman',
              fontFamilyEastAsia: '', isLink: false, background: null, vertAlign: null,
              hyperlink: null } as DocParagraph['runs'][number]],
+    defaultFontSize: 11, defaultFontFamily: 'Times New Roman', widowControl: false,
+  } as unknown as DocParagraph;
+}
+
+function squareTextBox(text: string, y: number, height: number): ShapeRun & { type: 'shape' } {
+  return {
+    type: 'shape',
+    widthPt: 400,
+    heightPt: height,
+    anchorXPt: 0,
+    anchorYPt: y,
+    anchorXFromMargin: false,
+    anchorYFromPara: true,
+    anchorXRelativeFrom: 'column',
+    anchorYRelativeFrom: 'paragraph',
+    zOrder: 0,
+    subpaths: [],
+    presetGeometry: 'rect',
+    fill: { fillType: 'solid', color: '4F2683' },
+    stroke: null,
+    wrapMode: 'square',
+    wrapSide: 'bothSides',
+    distTop: 0,
+    distBottom: 0,
+    distLeft: 0,
+    distRight: 0,
+    textBlocks: [{
+      text,
+      fontSizePt: 10,
+      color: 'FFFFFF',
+      fontFamily: 'Times New Roman',
+      alignment: 'left',
+      runs: [{ text, fontSizePt: 10, color: 'FFFFFF', fontFamily: 'Times New Roman' }],
+    }],
+    textInsetL: 0,
+    textInsetT: 0,
+    textInsetR: 0,
+    textInsetB: 0,
+  } as unknown as ShapeRun & { type: 'shape' };
+}
+
+function anchorOnlyParaWithStackedTextBoxes(): DocParagraph {
+  return {
+    type: 'paragraph', alignment: 'left',
+    indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+    numbering: null, tabStops: [],
+    runs: [
+      squareTextBox('LOWER', 40, 120),
+      squareTextBox('TITLE', 6, 20),
+    ] as unknown as DocParagraph['runs'],
     defaultFontSize: 11, defaultFontFamily: 'Times New Roman', widowControl: false,
   } as unknown as DocParagraph;
 }
@@ -104,5 +159,20 @@ describe('paragraph-anchored wrap float Y (§20.4.3.5)', () => {
     // float must draw at y≈0, NOT y≈24 (the post-spaceBefore text area).
     expect(draws.length).toBeGreaterThan(0);
     expect(draws[0].y).toBeCloseTo(0, 2);
+  });
+
+  it('does not shift wrapSquare text boxes when an anchor-only mark flows below another same-paragraph float', async () => {
+    const { canvas, texts } = makeRecordingCanvas();
+    await renderDocumentToCanvas(docOf(anchorOnlyParaWithStackedTextBoxes()), canvas, 0, {
+      dpr: 1, width: 400,
+      fetchImage: async (path: string, mime: string) => new Blob([new Uint8Array([1])], { type: mime }),
+    });
+
+    const title = texts.find((call) => call.text === 'TITLE');
+    expect(title).toBeDefined();
+    // ECMA-376 §20.4.3.5: the wrapSquare text box stays relative to its anchor
+    // paragraph's original top. The empty paragraph mark may flow below a float,
+    // but that flow shift applies to wrapNone anchors, not to wrap floats.
+    expect(title!.y).toBeLessThan(40);
   });
 });
