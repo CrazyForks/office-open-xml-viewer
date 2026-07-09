@@ -8041,25 +8041,11 @@ function fitShapeImage(
   return { w: innerW, h: natH * s };
 }
 
-const WORD_DEFAULT_TEXTBOX_INSET_PT = 7.2;
-
-function isWordDefaultTextboxInset(v: number | undefined): boolean {
-  return v != null && Math.abs(v - WORD_DEFAULT_TEXTBOX_INSET_PT) < 0.01;
-}
-
 function shapeTextHorizontalInsetsPx(shape: ShapeRun, scale: number): { lIns: number; rIns: number } {
-  const baseL = (shape.textInsetL ?? 0) * scale;
-  const baseR = (shape.textInsetR ?? 0) * scale;
-  // Word wraps spAutoFit text boxes with the serialized DrawingML default
-  // lIns/rIns (0.1in) plus the legacy text-box default margin. This only applies
-  // to the emitted default; zero/custom insets keep their literal OOXML width.
-  const extraL = shape.textAutofit === 'sp' && isWordDefaultTextboxInset(shape.textInsetL)
-    ? WORD_DEFAULT_TEXTBOX_INSET_PT * scale
-    : 0;
-  const extraR = shape.textAutofit === 'sp' && isWordDefaultTextboxInset(shape.textInsetR)
-    ? WORD_DEFAULT_TEXTBOX_INSET_PT * scale
-    : 0;
-  return { lIns: baseL + extraL, rIns: baseR + extraR };
+  return {
+    lIns: (shape.textInsetL ?? 0) * scale,
+    rIns: (shape.textInsetR ?? 0) * scale,
+  };
 }
 
 /** Measure a shape text body's fitted height for `<a:spAutoFit/>`.

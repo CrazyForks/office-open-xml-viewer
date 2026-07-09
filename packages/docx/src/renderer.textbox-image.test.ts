@@ -221,18 +221,18 @@ describe('textbox inline images — rendering', () => {
     expect(ink).toBe('aaaabbbbccccddddeeee');
   });
 
-  it('spAutoFit text boxes keep Word default horizontal margins when wrapping', () => {
+  it('spAutoFit text boxes use serialized bodyPr horizontal insets once', () => {
     const { ctx, fillTextCalls } = makeRecordingCtx();
     const shape = {
       type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
-      textBlocks: [{ text: 'aaaaaaaaa bbbbbbbb', fontSizePt: 10, alignment: 'left' }],
+      textBlocks: [{ text: 'fit', fontSizePt: 10, alignment: 'left' }],
       textAnchor: 't', textInsetL: 7.2, textInsetT: 0, textInsetR: 7.2, textInsetB: 0,
       textAutofit: 'sp',
     } as unknown as ShapeRun;
 
-    renderShapeText(shape, 0, 0, 200, 400, ctx, 1, {}, new Map());
+    renderShapeText(shape, 10, 0, 200, 400, ctx, 1, {}, new Map());
 
-    expect(fillTextCalls.map((c) => c.text)).toEqual(['aaaaaaaaa ', 'bbbbbbbb']);
+    expect(fillTextCalls[0]?.x).toBeCloseTo(17.2, 5);
   });
 
   it('measureShapeTextAutoFitHeight returns content height plus bodyPr insets', () => {
