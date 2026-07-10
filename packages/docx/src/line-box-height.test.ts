@@ -61,6 +61,7 @@ describe('lineBoxHeight — snapToChars line-grid participation', () => {
 });
 
 describe('lineBoxHeight — atLeast with an active line grid', () => {
+  const grid18 = { type: 'lines', linePitchPt: 18 } as const;
   const grid20 = { type: 'lines', linePitchPt: 20 } as const;
 
   it('retains the active grid minimum when the authored minimum is smaller', () => {
@@ -69,6 +70,28 @@ describe('lineBoxHeight — atLeast with an active line grid', () => {
 
   it('retains the authored minimum when it is larger than the grid minimum', () => {
     expect(lineBoxHeight(atLeast(24), 10, 2, 1, grid20)).toBe(24);
+  });
+
+  // BEHAVIOUR PIN, not Word-verified ground truth. For an East Asian atLeast
+  // line the grid-minimum term is the em-based single cell (docGridLineCells),
+  // no longer the glyph-box cell rounding: a 12pt line whose substituted glyph
+  // box is 19.22px on an 18pt pitch resolves to its natural 19.22px (max of
+  // natural / authored 18 / em cell 18) — previously 36px (glyph box rounded to
+  // 2 cells). No corpus sample exercises atLeast inside an active line grid and
+  // a Word fixture export could not be captured when this was pinned, so Word's
+  // exact atLeast-on-grid height is UNVERIFIED; the pin makes any future change
+  // to this resolution deliberate rather than accidental. Ruby lines keep the
+  // measured-glyph-box minimum (they reserve real furigana height).
+  it('[pin] EA atLeast takes max(natural, authored, em single cell) — unverified vs Word', () => {
+    expect(lineBoxHeight(atLeast(18), 15.38, 3.84, 1, grid18, false, 0, true, 12)).toBeCloseTo(19.22, 6);
+  });
+  it('[pin] EA atLeast still snaps to the em cell when it exceeds natural and authored', () => {
+    // em 20 on pitch 18 → 2 cells = 36 > natural 12 and authored 18.
+    expect(lineBoxHeight(atLeast(18), 10, 2, 1, grid18, false, 0, true, 20)).toBe(36);
+  });
+  it('[pin] a RUBY EA atLeast line keeps the measured glyph-box minimum', () => {
+    // glyph box 41px (base + furigana reserve) → ceil(41/18) = 3 cells = 54.
+    expect(lineBoxHeight(atLeast(18), 33, 8, 1, grid18, true, 0, true, 13.5)).toBe(54);
   });
 });
 
