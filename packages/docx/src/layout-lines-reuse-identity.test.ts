@@ -176,6 +176,33 @@ async function renderVariant(
   }
 }
 
+/** Render every page at the DEFAULT CSS scale (PT_TO_PX = 4/3, `width` OMITTED so
+ *  scale = 4/3 ≠ 1) under an explicit (fragmentPaint, reuse) configuration; restore
+ *  the flags after. At this scale the fragment path and the legacy reuse path both
+ *  RESCALE their stored scale-1 partition (rescaleLayoutLines re-measures each line at
+ *  the paint scale), so their streams must be byte-identical. */
+async function renderVariantScaled(
+  model: DocxDocumentModel,
+  pages: PaginatedBodyElement[][],
+  cfg: { fragmentPaint: boolean; reuse: boolean },
+): Promise<Call[][]> {
+  const prevFragment = __test_setFragmentPaintEnabled(cfg.fragmentPaint);
+  const prevReuse = __test_setLineReuseEnabled(cfg.reuse);
+  try {
+    const perPage: Call[][] = [];
+    for (let p = 0; p < pages.length; p++) {
+      const rec = makeRecordingCanvas();
+      // No `width` → cssWidth = pageWidth · PT_TO_PX (4/3), so the paint scale is 4/3.
+      await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, prebuiltPages: pages });
+      perPage.push(rec.calls);
+    }
+    return perPage;
+  } finally {
+    __test_setLineReuseEnabled(prevReuse);
+    __test_setFragmentPaintEnabled(prevFragment);
+  }
+}
+
 /** Assert the production paint (fragment ON, reuse ON) is byte-identical to the
  *  legacy paint (fragment OFF) both with reuse ON and with reuse OFF, on every page.
  *  Reports measureText counts so the caller can pin non-vacuity (a fast path really
@@ -292,6 +319,81 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
       { kinsoku: true, noLineBreaksBefore: '、。！' , noLineBreaksAfter: '（「' });
     const r = await assertPaintIdentical(model);
     expect(r.pages).toBeGreaterThan(1);
+    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
+  });
+
+  it('zoom (default 4/3 scale): fragment paint === legacy stamp-reuse over the same scale-1 partition', async () => {
+    // A long paragraph that SPLITS: pagination stamps its scale-1 line partition
+    // (stampParagraphLines) AND builds the fragment from the SAME measured result, so
+    // the legacy reuse path genuinely rescales the STAMP. At a paint scale ≠ 1 the
+    // production fragment path and the legacy reuse path both rescale that one scale-1
+    // partition, so their paint streams must be byte-identical (design invariant:
+    // "paint scales measured geometry; it does not repeat text layout"). Identity vs
+    // the full-RECOMPUTE path is intentionally NOT asserted here — recompute measures
+    // at the paint scale (a documented pre-existing property), not this PR's concern.
+    const text = Array.from({ length: 120 }, () => 'w').join(' ');
+    const model = doc([para(text) as unknown as BodyElement]); // pageHeight 60 → splits
+    const pages = paginateDocument(model);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice))).toBe(true);
+
+    const production = await renderVariantScaled(model, pages, { fragmentPaint: true, reuse: true });
+    const reuse = await renderVariantScaled(model, pages, { fragmentPaint: false, reuse: true });
+    expect(production.length).toBe(reuse.length);
+    for (let p = 0; p < production.length; p++) {
+      expect(production[p]).toEqual(reuse[p]);
+    }
+    // Non-vacuity: the paint really ran at scale 4/3 — a fractional glyph px size in
+    // the recorded font proves the geometry was rescaled off scale 1 (a scale-1 paint
+    // would only ever show the integer '10px').
+    const scaled = production.flat().some((c) => c.op !== 'img' && /\d+\.\d+px/.test(c.font));
+    expect(scaled).toBe(true);
+    expect(production.some((pg) => pg.length > 0)).toBe(true);
+  });
+
+  it('first-line AND hanging indents: fragment paint === legacy (3-way)', async () => {
+    const text = Array.from({ length: 120 }, () => 'w').join(' ');
+    // First-line indent (positive indentFirst) with left + right indents.
+    const firstLine = await assertPaintIdentical(
+      doc([para(text, { indentLeft: 24, indentRight: 12, indentFirst: 18 }) as unknown as BodyElement]),
+    );
+    expect(firstLine.drawn).toBeGreaterThan(0);
+    expect(firstLine.measuresProduction).toBeLessThan(firstLine.measuresRecompute); // fragment paint fired
+    // Hanging indent (negative first-line) WITHOUT numbering — still fragment-paintable
+    // (the numbering exclusion is about numBodyOffset, not a bare hanging indent).
+    const hanging = await assertPaintIdentical(
+      doc([para(text, { indentLeft: 36, indentFirst: -18 }) as unknown as BodyElement]),
+    );
+    expect(hanging.drawn).toBeGreaterThan(0);
+    expect(hanging.measuresProduction).toBeLessThan(hanging.measuresRecompute);
+  });
+
+  it('explicit tab stops + tab runs: fragment paint === legacy (3-way)', async () => {
+    // A run with embedded tab characters (\t) and custom tab stops. layoutLines splits
+    // on '\t' and advances to the stops (left + right-aligned with a dot leader); the
+    // fragment's stored lines carry the tabbed geometry, painted without re-tabbing.
+    const cell = Array.from({ length: 6 }, () => 'w').join(' ');
+    const tabbed = `${cell}\t${cell}\t${cell}`;
+    const tabStops = [
+      { pos: 60, alignment: 'left', leader: 'none' },
+      { pos: 130, alignment: 'right', leader: 'dot' },
+    ] as unknown as DocParagraph['tabStops'];
+    const p = para(Array.from({ length: 16 }, () => tabbed).join(' '), { tabStops });
+    const r = await assertPaintIdentical(doc([p as unknown as BodyElement]));
+    expect(r.drawn).toBeGreaterThan(0);
+    expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
+  });
+
+  it('two-column section: fragment paint === legacy (3-way)', async () => {
+    // ECMA-376 §17.6.4 newspaper columns — the body flows through 2 equal columns.
+    // Each column-slice fragment records its column band width; paint sets contentW
+    // per column, and the placement guard's width check passes (equal columns).
+    const columns = { count: 2, spacePt: 12, equalWidth: true, sep: false, cols: [] } as unknown as SectionProps['columns'];
+    const text = Array.from({ length: 200 }, () => 'w').join(' ');
+    const model = doc([para(text) as unknown as BodyElement]);
+    (model.section as SectionProps).columns = columns;
+    const r = await assertPaintIdentical(model);
+    expect(r.drawn).toBeGreaterThan(0);
     expect(r.measuresProduction).toBeLessThan(r.measuresRecompute); // fragment paint fired
   });
 
