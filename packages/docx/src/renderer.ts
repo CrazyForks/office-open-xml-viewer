@@ -125,6 +125,7 @@ export { computeColumns };
 // a TYPE only (erased), so there is no runtime cycle.
 import {
   DEFAULT_TAB_PT,
+  EAST_ASIAN_RE,
   buildFont,
   buildSegments,
   calcEffectiveFontPx,
@@ -8573,9 +8574,11 @@ export function measureShapeTextAutoFitHeight(
   const lineHeightFor = (b: ShapeText, line: LayoutLine): number => {
     let tallest: LayoutTextSeg | null = null;
     let floorPx = 0;
+    let lineText = '';
     for (const seg of line.segments) {
       if (!('text' in seg)) continue;
       const ts = seg as LayoutTextSeg;
+      lineText += ts.text;
       if (!tallest || ts.fontSize > tallest.fontSize) tallest = ts;
       const segPx = ts.fontSize * scale;
       floorPx = Math.max(
@@ -8605,7 +8608,8 @@ export function measureShapeTextAutoFitHeight(
     const ls: LineSpacing | null = b.lineSpacingRule
       ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
       : null;
-    return lineBoxHeight(ls, c.ascent, c.descent, scale, undefined, false, floorPx, false);
+    const eastAsian = EAST_ASIAN_RE.test(lineText);
+    return lineBoxHeight(ls, c.ascent, c.descent, scale, effState.docGrid, false, floorPx, eastAsian);
   };
 
   const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
@@ -8787,6 +8791,8 @@ export function renderShapeText(
     // floor falls back to this run's own ascii+eastAsia faces. Either way it is a
     // FLOOR (0 for all-untabled lines ⇒ unchanged).
     lineFloorPx?: number,
+    grid?: DocGridCtx,
+    eastAsian = false,
   ): { lineH: number; baselineOffset: number } => {
     // Floor the single-line box by the TALLEST design line among the run's
     // declared faces (ascii §17.3.2.26 + eastAsia). The common Japanese encoding
@@ -8827,7 +8833,7 @@ export function renderShapeText(
     const ls: LineSpacing | null = b.lineSpacingRule
       ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
       : null;
-    const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, undefined, false, intended, false);
+    const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, grid, false, intended, eastAsian);
     // Word centers the font's GLYPH box within the (possibly expanded) line box
     // (half-leading): when line-spacing or the design-line floor grows the box
     // the extra space is split above and below the glyph box, so the baseline is
@@ -8849,9 +8855,11 @@ export function renderShapeText(
   const lineMetricsFor = (b: ShapeText, line: LayoutLine): { lineH: number; baselineOffset: number } => {
     let tallest: LayoutTextSeg | null = null;
     let floorPx = 0;
+    let lineText = '';
     for (const seg of line.segments) {
       if (!('text' in seg)) continue;
       const ts = seg as LayoutTextSeg;
+      lineText += ts.text;
       if (!tallest || ts.fontSize > tallest.fontSize) tallest = ts;
       // Design-line FLOOR is the MAX intendedSingleLinePx over EVERY segment's
       // ascii AND declared eastAsia face (§17.3.2.26), at that segment's size —
@@ -8867,6 +8875,7 @@ export function renderShapeText(
       );
     }
     const fontPx = (tallest?.fontSize ?? b.fontSizePt) * scale;
+    const eastAsian = EAST_ASIAN_RE.test(lineText);
     return shapeLineMetrics(
       tallest?.fontFamily ?? b.fontFamily,
       tallest?.bold ?? b.bold ?? false,
@@ -8879,6 +8888,8 @@ export function renderShapeText(
       // passed explicitly, so a shorter tabled segment still raises the box.
       tallest?.eaFloorFamily ?? b.fontFamily,
       floorPx,
+      effState.docGrid,
+      eastAsian,
     );
   };
 
