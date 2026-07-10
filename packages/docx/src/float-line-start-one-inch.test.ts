@@ -141,6 +141,35 @@ describe('resolveLineFloatWindow — Word 1-inch line-start gate (issue #676)', 
     expect(placeLine(71.9, 1).beside).toBe(false);
     expect(placeLine(72.0, 1).beside).toBe(true);
   });
+
+  it('ignores square wrap rectangles wholly outside either side of the paragraph column', () => {
+    const outsideRanges = [
+      { xLeft: 20, xRight: 100 },
+      { xLeft: 190, xRight: 270 },
+    ];
+
+    for (const side of ['bothSides', 'left', 'right', 'largest']) {
+      for (const range of outsideRanges) {
+        const outsideColumn = {
+          ...leftBand(80, 120),
+          ...range,
+          imageX: range.xLeft,
+          imageW: range.xRight - range.xLeft,
+          side,
+        };
+        const win = resolveLineFloatWindow(
+          20,
+          wordMinLineStartPx(1),
+          10,
+          110,
+          70,
+          [outsideColumn],
+        );
+
+        expect(win).toEqual({ topY: 20, xOffset: 0, maxWidth: 70 });
+      }
+    }
+  });
 });
 
 // ── layoutLines integration ──────────────────────────────────────────────────

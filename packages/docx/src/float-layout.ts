@@ -264,6 +264,14 @@ export function resolveLineFloatWindow(
     for (const f of floats) {
       if (f.mode !== 'square') continue;
       if (lineBot <= f.yTop || topY >= f.yBottom) continue;
+      // §20.4.2.17 excludes text only where the square wrap rectangle overlaps
+      // its line area. A page-scoped float in another newspaper column must not
+      // turn this column's full width into a sub-inch "side gap" and push the
+      // line below an unrelated vertical band.
+      if (
+        f.xRight <= paraXLeft + FLOAT_OVERLAP_EPS ||
+        f.xLeft >= paraXRight - FLOAT_OVERLAP_EPS
+      ) continue;
       intersecting.push(f);
       switch (f.side) {
         // Text may sit only on the LEFT of the float ⇒ everything from the
