@@ -3411,6 +3411,12 @@ export function renderTextBody(
           // cell's TRAILING (left) edge sits on the stop, cell extends rightward.
           tabPenX = tabAbsX;
         }
+        // A stop past the trailing (left) text edge pins the cell AT that edge —
+        // the docx layoutBidiTabStops clamp (#835: Word never pushes the cell
+        // off the text area). Unclamped, a mirrored stop with pos > the text
+        // width would land at a negative x, drawing outside the shape.
+        const trailingEdgePx = bx + lPad;
+        if (tabPenX < trailingEdgePx) tabPenX = trailingEdgePx;
       } else {
         const tabAbsX = bx + lPad + line.tabStop.px;
         if (line.tabStop.algn === 'r') {

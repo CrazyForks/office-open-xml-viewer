@@ -203,7 +203,21 @@ describe('pptx RTL tab stops resolve in the reading frame (issue #831, mirrors d
     expect(cell!.inShapeX).toBeCloseTo(BOX_W - 140, 6); // 460
   });
 
-  // (6) REGRESSION GUARD — the LTR path is byte-identical: an LTR right tab still
+  // (6) A stop past the TRAILING (left) text edge pins the cell at that edge —
+  //     the docx layoutBidiTabStops clamp (#835: Word never pushes the cell off
+  //     the text area). Unclamped, the mirrored stop 600−700 = −100 would draw
+  //     the cell at a NEGATIVE x, outside the shape.
+  it('pins the cell at the trailing text edge when the stop overflows the text area', () => {
+    const { runs } = render(
+      bodyWithTab([{ pos: 700 * 12700, algn: 'r' }], [run(`\t${CELL}`)], { rtl: true }),
+      BOX_W,
+    );
+    const cell = runs.find((r) => r.text === CELL)!;
+    expect(cell, 'cell run reported').toBeTruthy();
+    expect(cell.inShapeX).toBeCloseTo(0, 6); // bx + lPad = 0 — never negative
+  });
+
+  // (7) REGRESSION GUARD — the LTR path is byte-identical: an LTR right tab still
   //     anchors at the LTR stop with the cell's RIGHT edge on it (x = 400 − 40).
   it('leaves the LTR right-tab path unchanged (cell right edge on the LTR stop)', () => {
     const { texts, runs } = render(
