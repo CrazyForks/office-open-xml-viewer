@@ -99,39 +99,9 @@ jobs:
           npm i "$GITHUB_WORKSPACE"/silurus-ooxml-*.tgz
           node --input-type=module -e "const m = await import('@silurus/ooxml/docx'); if (!m.DocxViewer) throw new Error('DocxViewer missing'); const p = await import('@silurus/ooxml/pptx'); if (!p.PptxViewer) throw new Error('PptxViewer missing'); const x = await import('@silurus/ooxml/xlsx'); if (!x.XlsxViewer) throw new Error('XlsxViewer missing'); console.log('pack smoke OK');"
 
-      # ── Build the standalone install set ─────────────────────────────────────
-      # `pnpm build` above only builds the root bundle. The parser packages ship
-      # their own `dist/` (their `.` entry) plus the wasm glue under `src/`, and
-      # `@silurus/ooxml-markdown` compiles its `src/index.ts` to `dist/index.js`
-      # (Node refuses to strip types from `.ts` under node_modules, so the
-      # standalone package must expose compiled JS). Build them all before
-      # publishing. `@silurus/ooxml-core` is bundled into each parser's dist at
-      # build time (it is a devDependency, not shipped), so it is built
-      # transitively here via the parsers' `tsc --build` project references.
-      - name: Build parser + markdown packages for standalone publish
-        run: >-
-          pnpm
-          --filter @silurus/ooxml-docx
-          --filter @silurus/ooxml-xlsx
-          --filter @silurus/ooxml-pptx
-          --filter @silurus/ooxml-markdown
-          build
-
       # ── Publish ──────────────────────────────────────────────────────────────
-      # Publish the root bundle plus the standalone install set: the three parser
-      # packages (now public) and the markdown converter, which depends on them.
-      # `@silurus/ooxml-core` and `@silurus/ooxml-node` stay private and are skipped
-      # by pnpm; the unscoped VS Code extension package is excluded by the filters.
-      # pnpm publishes in dependency order and skips versions already on the
-      # registry, so re-running a tag is safe.
       - name: Publish to npm
-        run: >-
-          pnpm publish --recursive --no-git-checks
-          --filter @silurus/ooxml
-          --filter @silurus/ooxml-docx
-          --filter @silurus/ooxml-xlsx
-          --filter @silurus/ooxml-pptx
-          --filter @silurus/ooxml-markdown
+        run: pnpm publish --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # access / provenance are set via publishConfig in package.json
