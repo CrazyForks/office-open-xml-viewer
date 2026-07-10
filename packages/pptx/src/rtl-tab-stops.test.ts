@@ -68,20 +68,25 @@ function run(text: string, color = '000000'): TextRunData {
   } as TextRunData;
 }
 
-/** A paragraph carrying one tab stop at `tabPosEmu` EMU with alignment `algn`.
- *  `rtl` sets `<a:pPr rtl="1">` and (mirroring the parser) flips the default
- *  paragraph alignment l→r. The run text must contain a leading `\t` so layout
- *  switches into tab-stop accumulation mode. */
+/** A paragraph carrying `tabStops`. The run text must contain a `\t` so layout
+ *  switches into tab-stop accumulation mode.
+ *
+ *  `alignment` follows the PARSER's resolution order (parser/src/text.rs:617):
+ *  explicit `pPr@algn` → inherited body/layout/master default (not modelled
+ *  here) → fallback `"r"` when `rtl="1"`, else `"l"`. Pass `opts.algn` to model
+ *  an EXPLICIT paragraph alignment; omit it for the parser fallback. Tab-stop
+ *  mirroring must follow the BASE DIRECTION (`rtl`), never the visual
+ *  alignment. `opts.marR` (EMU) is the paragraph's logical-leading (physical
+ *  RIGHT) margin under an RTL base. */
 function bodyWithTab(
-  tabPosEmu: number,
-  algn: string,
+  tabStops: TabStop[],
   runs: TextRunData[],
-  rtl: boolean,
+  opts: { rtl?: boolean; algn?: string; marR?: number } = {},
 ): TextBody {
-  const tabStops: TabStop[] = [{ pos: tabPosEmu, algn }];
+  const rtl = opts.rtl ?? false;
   const para: Paragraph = {
-    alignment: rtl ? 'r' : 'l',
-    marL: 0, marR: 0, indent: 0,
+    alignment: opts.algn ?? (rtl ? 'r' : 'l'),
+    marL: 0, marR: opts.marR ?? 0, indent: 0,
     spaceBefore: null, spaceAfter: null, spaceLine: null, lvl: 0,
     bullet: { type: 'none' }, defFontSize: null, defColor: null, defBold: null, defItalic: null,
     defFontFamily: null, tabStops, rtl, runs,
@@ -127,7 +132,10 @@ describe('pptx RTL tab stops resolve in the reading frame (issue #831, mirrors d
   //     ON the mirrored stop and the cell extends rightward. The LTR path put the
   //     cell's RIGHT edge on the LTR stop (x = 400 − 40 = 360) — the wrong side.
   it('places a right-aligned tab cell at the mirrored stop (trailing edge on the stop)', () => {
-    const { runs } = render(bodyWithTab(TAB_POS_EMU, 'r', [run(`\t${CELL}`)], true), BOX_W);
+    const { runs } = render(
+      bodyWithTab([{ pos: TAB_POS_EMU, algn: 'r' }], [run(`\t${CELL}`)], { rtl: true }),
+      BOX_W,
+    );
     const cell = runs.find((r) => r.text === CELL)!;
     expect(cell, 'cell run reported').toBeTruthy();
     // RTL: trailing(left) edge on the stop ⇒ pen = stopX = 200.
@@ -138,7 +146,10 @@ describe('pptx RTL tab stops resolve in the reading frame (issue #831, mirrors d
 
   // (2) @algn="ctr" in an RTL paragraph: the cell centres on the mirrored stop.
   it('centres a centre-aligned tab cell on the mirrored stop', () => {
-    const { runs } = render(bodyWithTab(TAB_POS_EMU, 'ctr', [run(`\t${CELL}`)], true), BOX_W);
+    const { runs } = render(
+      bodyWithTab([{ pos: TAB_POS_EMU, algn: 'ctr' }], [run(`\t${CELL}`)], { rtl: true }),
+      BOX_W,
+    );
     const cell = runs.find((r) => r.text === CELL)!;
     expect(cell.inShapeX).toBeCloseTo(RTL_STOP_X - CELL_W / 2, 6); // 200 − 20 = 180
   });
@@ -147,15 +158,34 @@ describe('pptx RTL tab stops resolve in the reading frame (issue #831, mirrors d
   //     the cell shapes in reading order (textAlign stays 'left', so the pen X is
   //     unchanged — only glyph shaping/joining differs).
   it('draws the RTL tab cell with ctx.direction = rtl', () => {
-    const { texts } = render(bodyWithTab(TAB_POS_EMU, 'r', [run(`\t${CELL}`)], true), BOX_W);
+    const { texts } = render(
+      bodyWithTab([{ pos: TAB_POS_EMU, algn: 'r' }], [run(`\t${CELL}`)], { rtl: true }),
+      BOX_W,
+    );
     const cellDraw = texts.find((t) => t.text === CELL)!;
     expect(cellDraw.direction).toBe('rtl');
   });
 
-  // (4) REGRESSION GUARD — the LTR path is byte-identical: an LTR right tab still
+  // (4) An EXPLICIT `pPr@algn="l"` on an rtl="1" paragraph (the parser resolution
+  //     keeps the explicit value; the r-fallback applies only when algn is absent)
+  //     must NOT turn off the mirroring: the stop frame follows the BASE
+  //     DIRECTION, not the visual alignment.
+  it('mirrors the stop under rtl even when the paragraph alignment is explicitly "l"', () => {
+    const { runs } = render(
+      bodyWithTab([{ pos: TAB_POS_EMU, algn: 'r' }], [run(`\t${CELL}`)], { rtl: true, algn: 'l' }),
+      BOX_W,
+    );
+    const cell = runs.find((r) => r.text === CELL)!;
+    expect(cell.inShapeX).toBeCloseTo(RTL_STOP_X, 6);
+  });
+
+  // (5) REGRESSION GUARD — the LTR path is byte-identical: an LTR right tab still
   //     anchors at the LTR stop with the cell's RIGHT edge on it (x = 400 − 40).
   it('leaves the LTR right-tab path unchanged (cell right edge on the LTR stop)', () => {
-    const { texts, runs } = render(bodyWithTab(TAB_POS_EMU, 'r', [run(`\t${CELL}`)], false), BOX_W);
+    const { texts, runs } = render(
+      bodyWithTab([{ pos: TAB_POS_EMU, algn: 'r' }], [run(`\t${CELL}`)]),
+      BOX_W,
+    );
     const cell = runs.find((r) => r.text === CELL)!;
     expect(cell.inShapeX).toBeCloseTo(LTR_STOP_X - CELL_W, 6); // 360
     const cellDraw = texts.find((t) => t.text === CELL)!;
