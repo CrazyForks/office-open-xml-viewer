@@ -131,6 +131,10 @@ pub struct DocumentSettings {
     /// single-byte and double-byte character widths in East Asian layout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance_single_byte_double_byte_width: Option<bool>,
+    /// §17.15.3.1 `w:compat` / `w:adjustLineHeightInTable` — apply the section
+    /// document-grid line pitch to text in table cells.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjust_line_height_in_table: Option<bool>,
 }
 
 /// Single track-changes event extracted from a body `<w:ins>` / `<w:del>`.

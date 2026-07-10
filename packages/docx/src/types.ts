@@ -88,6 +88,9 @@ export interface DocSettings {
   /** §17.15.3.1 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
    *  single-byte and double-byte widths for East Asian layout. */
   balanceSingleByteDoubleByteWidth?: boolean;
+  /** §17.15.3.1 `w:compat/w:adjustLineHeightInTable` — apply the section
+   *  document-grid line pitch to text in table cells. */
+  adjustLineHeightInTable?: boolean;
 }
 
 export interface DocRevision {
