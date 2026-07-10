@@ -12,6 +12,15 @@ note: |
   divergence the migration removes. Keep segment construction, line layout, paragraph
   measurement, text measurement and row measurement out of this file; consume the
   fragment's stored lines instead.
+
+  BOUNDARY SCOPE (PR 5): this rule enforces the measurement-free boundary for the
+  fragment-paint MODULE only. The shared draw path it delegates to (renderParagraph in
+  renderer.ts) still constructs segments (bidi / tab detection) and, at a paint scale
+  != 1, RE-MEASURES each stored line's glyph geometry via rescaleLayoutLines — by
+  design: the fragment stores the scale-1 line PARTITION (break decisions), and only
+  glyph metrics are re-derived at the display scale, never the wrap points. Full static
+  enforcement across the whole body-paint path lands when body paint is separated into
+  its own module (PR 6+ scope).
 rule:
   any:
     # Segment construction / line layout / paragraph measurement.

@@ -14,6 +14,15 @@
  * `no-docx-measurement-in-fragment-paint` forbids importing or calling `buildSegments`,
  * `layoutLines`, `measureParagraph`, `measureText`, or row measurement from this file.
  *
+ * BOUNDARY SCOPE (PR 5): the rule enforces the measurement-free boundary for THIS
+ * module only. The shared draw path this delegates to (`renderBodyParagraphLines` →
+ * `renderParagraph` in renderer.ts) still constructs segments (bidi/tab detection) and,
+ * at a paint scale ≠ 1, re-measures each stored line's glyph geometry via
+ * `rescaleLayoutLines` — by design (the fragment stores the scale-1 line PARTITION; only
+ * glyph metrics are re-derived at the display scale, never the wrap points). Full static
+ * enforcement across the whole body-paint path lands when body paint is separated into
+ * its own module (PR 6+ scope).
+ *
  * See docs/docx-layout-context-fragments-design.md §"Measured Fragment Model".
  */
 import { renderBodyParagraphLines, type ParaBorderMerge, type RenderState } from './renderer.js';
