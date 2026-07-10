@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { bodyFragmentFor, computePages, computeColumns } from './renderer.js';
 import type {
-  BodyElement, CellElement, DocParagraph, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement, DocTable, DocTableRow,
+  BodyElement, CellElement, DocParagraph, DocTableCell, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement, DocTable, DocTableRow,
 } from './types';
 
 // Unit tests for computePages pagination behaviour that the renderer-path VRT
@@ -880,6 +880,139 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
     expect(secondNested?.type).toBe('table');
     expect(firstNested?.rows.length).toBe(3);
     expect(secondNested?.rows.length).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mid-page splitting of a row whose cells START a vertical merge (§17.4.85 +
+// §17.4.6). A `restart` cell begins its span in THIS row: its content fits the
+// page band like any cell, the page-1 piece keeps `restart` (its truncated box
+// ends at the page cut) and the page-2 piece keeps `restart` too, so the
+// following `continue` rows chain onto it — the span re-opens on the next page
+// exactly as Word draws it. Only a `continue` cell (span owned by an EARLIER
+// row) forbids the split.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('computePages — mid-page split of rows with vMerge restart cells (§17.4.85 + §17.4.6)', () => {
+  const emptyBorders = () => ({ top: null, bottom: null, left: null, right: null, insideH: null, insideV: null });
+  const mkCell = (content: CellElement[], vMerge: boolean | null): DocTableCell => ({
+    content, colSpan: 1, vMerge, borders: emptyBorders(), background: null, vAlign: 'top', widthPt: null,
+  } as unknown as DocTableCell);
+  const shortPara = (text: string) => para({ text, fontSize: 20 }) as CellElement;
+  /** [40pt label col | 120pt content col]; row0 = restart label + wrapping
+   *  content (24 glyphs at 6/line ⇒ 4 lines = 80pt); rows 1-2 = continue label +
+   *  short cell (20pt each). */
+  const restartSpanTable = (labelParas: number): BodyElement => {
+    const label = mkCell(Array.from({ length: labelParas }, (_v, i) => shortPara(`L${i}`)), true);
+    const content = mkCell([para({ text: 'あ'.repeat(24), fontSize: 20 }) as CellElement], null);
+    const contRow = (t: string): DocTableRow => ({
+      cells: [mkCell([para({}) as CellElement], false), mkCell([shortPara(t)], null)],
+      rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+    } as unknown as DocTableRow);
+    const t: DocTable = {
+      colWidths: [40, 120],
+      rows: [
+        { cells: [label, content], rowHeight: null, rowHeightRule: 'auto', isHeader: false } as unknown as DocTableRow,
+        contRow('x'), contRow('y'),
+      ],
+      borders: emptyBorders(),
+      cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+      jc: 'left', layout: 'fixed',
+    } as unknown as DocTable;
+    return { type: 'table', ...t } as BodyElement;
+  };
+  const tblOn = (pg: PaginatedBodyElement[]) =>
+    pg.find((el) => el.type === 'table') as (PaginatedBodyElement & DocTable) | undefined;
+  const cellSlice = (t: (PaginatedBodyElement & DocTable) | undefined, ri: number, ci: number) =>
+    (t?.rows[ri]?.cells[ci]?.content[0] as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined)?.lineSlice;
+
+  it('splits a restart-cell row mid-page and re-opens the span on the next page', () => {
+    // 2 filler paragraphs (40pt) leave 60pt: the content cell fits 3 of its 4
+    // lines; the 2-paragraph label (40pt) fits page 1 entirely.
+    const pages = computePages([para(), para(), restartSpanTable(2)], section(), makeCtx());
+
+    const first = tblOn(pages[0]);
+    const second = tblOn(pages[1]);
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+
+    // Page 1: one piece row — restart label (whole) + content lines [0, 3).
+    expect(first?.rows).toHaveLength(1);
+    expect(first?.rows[0]?.cells[0]?.vMerge).toBe(true);
+    expect(first?.rows[0]?.cells[0]?.content).toHaveLength(2);
+    expect(cellSlice(first, 0, 1)).toEqual({ start: 0, end: 3 });
+
+    // Page 2: the continuation piece KEEPS restart (span re-opens) with the
+    // fully-consumed label continuing as EMPTY content, then the continue rows
+    // stay chained on the same page (§17.4.85 — no break before a continue row).
+    expect(second?.rows).toHaveLength(3);
+    expect(second?.rows[0]?.cells[0]?.vMerge).toBe(true);
+    expect(second?.rows[0]?.cells[0]?.content).toHaveLength(0);
+    expect(cellSlice(second, 0, 1)).toEqual({ start: 3, end: 4 });
+    expect(second?.rows[1]?.cells[0]?.vMerge).toBe(false);
+    expect(second?.rows[2]?.cells[0]?.vMerge).toBe(false);
+
+    // Fragment layer: pieces share sourceRowIndex 0; the continuation slice's
+    // roles are restart/continue/continue.
+    const placedFirst = bodyFragmentFor(first as PaginatedBodyElement);
+    const placedSecond = bodyFragmentFor(second as PaginatedBodyElement);
+    if (placedFirst?.fragment.kind === 'table' && placedSecond?.fragment.kind === 'table') {
+      expect(placedFirst.fragment.rows.map((r) => r.sourceRowIndex)).toEqual([0]);
+      expect(placedSecond.fragment.rows.map((r) => r.sourceRowIndex)).toEqual([0, 1, 2]);
+      expect(placedSecond.fragment.rows.map((r) => r.cells[0]?.verticalMerge)).toEqual([
+        'restart', 'continue', 'continue',
+      ]);
+    } else {
+      throw new Error('expected table fragments on both pages');
+    }
+  });
+
+  it('splits the restart cell content itself when it exceeds the page-1 band', () => {
+    // 6 label paragraphs (120pt) cannot fit the 60pt band: 3 land on page 1 and
+    // 3 continue inside the re-opened span — independently of the content cell.
+    const pages = computePages([para(), para(), restartSpanTable(6)], section(), makeCtx());
+
+    const first = tblOn(pages[0]);
+    const second = tblOn(pages[1]);
+    expect(first?.rows[0]?.cells[0]?.content).toHaveLength(3);
+    expect(second?.rows[0]?.cells[0]?.content).toHaveLength(3);
+    expect(cellSlice(first, 0, 1)).toEqual({ start: 0, end: 3 });
+    expect(cellSlice(second, 0, 1)).toEqual({ start: 3, end: 4 });
+  });
+
+  it('still refuses to split a row containing a CONTINUE cell', () => {
+    // Make the CONTINUE row overflow: its non-merge cell wraps to 4 lines. The
+    // row belongs to a span started ABOVE it, so it must move whole.
+    const label = mkCell([shortPara('L0')], true);
+    const content = mkCell([shortPara('c0')], null);
+    const tallContinue: DocTableRow = {
+      cells: [
+        mkCell([para({}) as CellElement], false),
+        mkCell([para({ text: 'あ'.repeat(24), fontSize: 20 }) as CellElement], null),
+      ],
+      rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+    } as unknown as DocTableRow;
+    const t: DocTable = {
+      colWidths: [40, 120],
+      rows: [
+        { cells: [label, content], rowHeight: null, rowHeightRule: 'auto', isHeader: false } as unknown as DocTableRow,
+        tallContinue,
+      ],
+      borders: emptyBorders(),
+      cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+      jc: 'left', layout: 'fixed',
+    } as unknown as DocTable;
+    const pages = computePages(
+      [para(), para(), para(), para(), { type: 'table', ...t } as BodyElement],
+      section(),
+      makeCtx(),
+    );
+    // The continue row never splits: no cell of any emitted slice of it carries
+    // a lineSlice.
+    const allRows = pages.flatMap((pg) => pg.filter((el) => el.type === 'table'))
+      .flatMap((el) => (el as unknown as DocTable).rows);
+    const sliced = allRows.some((r) => r.cells.some((c) =>
+      c.content.some((ce) => (ce as CellElement & { lineSlice?: unknown }).lineSlice !== undefined)));
+    expect(sliced).toBe(false);
   });
 });
 

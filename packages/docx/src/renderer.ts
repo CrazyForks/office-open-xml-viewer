@@ -5092,7 +5092,18 @@ function splitRowByCellBlocks(
   state: RenderState,
 ): { rows: DocTableRow[]; heights: number[] } | null {
   if (row.isHeader || row.cantSplit || row.rowHeightRule === 'exact') return null;
-  if (row.cells.some((cell) => cell.vMerge !== null)) return null;
+  // §17.4.85 — only a `continue` cell forbids the split: its box belongs to a
+  // span that STARTS in an earlier row, so cutting here would slice a box this
+  // row does not own. A RESTART cell starts its span in THIS row: its content
+  // fits the page band like any cell's, the page-1 piece keeps `restart` (its
+  // truncated box ends at the page cut), and the page-2 piece keeps `restart`
+  // too, so the following `continue` rows chain onto it via findMergeEndRow and
+  // the span re-opens on the next page exactly as Word draws it (the piece
+  // assembly below preserves `vMerge` through the cell spread). Accepted height
+  // deviation: the split decision fits a restart cell's content into the band
+  // like a normal cell, whereas §17.4.85 row sizing excludes restart content
+  // from its first row — the pieces are band-limited, so this cannot overflow.
+  if (row.cells.some((cell) => cell.vMerge === false)) return null;
   const blockCount = Math.max(0, ...row.cells.map((cell) => cell.content.length));
   if (blockCount <= 1) return null;
 
@@ -5420,7 +5431,18 @@ function splitRowByCellLines(
   state: RenderState,
 ): { rows: DocTableRow[]; heights: number[] } | null {
   if (row.isHeader || row.cantSplit || row.rowHeightRule === 'exact') return null;
-  if (row.cells.some((cell) => cell.vMerge !== null)) return null;
+  // §17.4.85 — only a `continue` cell forbids the split: its box belongs to a
+  // span that STARTS in an earlier row, so cutting here would slice a box this
+  // row does not own. A RESTART cell starts its span in THIS row: its content
+  // fits the page band like any cell's, the page-1 piece keeps `restart` (its
+  // truncated box ends at the page cut), and the page-2 piece keeps `restart`
+  // too, so the following `continue` rows chain onto it via findMergeEndRow and
+  // the span re-opens on the next page exactly as Word draws it (the piece
+  // assembly below preserves `vMerge` through the cell spread). Accepted height
+  // deviation: the split decision fits a restart cell's content into the band
+  // like a normal cell, whereas §17.4.85 row sizing excludes restart content
+  // from its first row — the pieces are band-limited, so this cannot overflow.
+  if (row.cells.some((cell) => cell.vMerge === false)) return null;
 
   const beforeCells: DocTableCell[] = [];
   const afterCells: DocTableCell[] = [];
