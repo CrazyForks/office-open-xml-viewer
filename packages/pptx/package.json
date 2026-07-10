@@ -1,8 +1,7 @@
 {
   "name": "@silurus/ooxml-pptx",
-  "private": true,
   "version": "0.71.0",
-  "description": "PPTX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
+  "description": "PPTX parser and Canvas renderer (part of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "repository": {
@@ -32,6 +31,10 @@
     "dist",
     "src"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --build && vite build",
@@ -42,6 +45,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@silurus/ooxml-core": "workspace:*",
     "@types/pngjs": "^6.0.5",
     "@vitest/coverage-v8": "^4.1.4",
     "pixelmatch": "^7.1.0",
@@ -54,7 +58,6 @@
     "vitest": "^4.1.4"
   },
   "dependencies": {
-    "@fontsource/nunito-sans": "^5.2.7",
-    "@silurus/ooxml-core": "workspace:*"
+    "@fontsource/nunito-sans": "^5.2.7"
   }
 }

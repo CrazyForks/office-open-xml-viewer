@@ -67,14 +67,13 @@ importers:
         version: 6.0.3
 
   packages/docx:
-    dependencies:
-      '@silurus/ooxml-core':
-        specifier: workspace:*
-        version: link:../core
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1
         version: 1.59.1
+      '@silurus/ooxml-core':
+        specifier: workspace:*
+        version: link:../core
       '@types/pngjs':
         specifier: ^6.0.5
         version: 6.0.5
@@ -146,13 +145,13 @@ importers:
       '@fontsource/nunito-sans':
         specifier: ^5.2.7
         version: 5.2.7
-      '@silurus/ooxml-core':
-        specifier: workspace:*
-        version: link:../core
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1
         version: 1.59.1
+      '@silurus/ooxml-core':
+        specifier: workspace:*
+        version: link:../core
       '@types/pngjs':
         specifier: ^6.0.5
         version: 6.0.5
@@ -216,14 +215,13 @@ importers:
         version: 5.9.3
 
   packages/xlsx:
-    dependencies:
-      '@silurus/ooxml-core':
-        specifier: workspace:*
-        version: link:../core
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1
         version: 1.59.1
+      '@silurus/ooxml-core':
+        specifier: workspace:*
+        version: link:../core
       '@types/pngjs':
         specifier: ^6.0.5
         version: 6.0.5

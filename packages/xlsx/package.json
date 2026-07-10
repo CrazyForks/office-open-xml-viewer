@@ -1,8 +1,7 @@
 {
   "name": "@silurus/ooxml-xlsx",
-  "private": true,
   "version": "0.71.0",
-  "description": "XLSX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
+  "description": "XLSX parser and Canvas renderer (part of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "repository": {
@@ -32,6 +31,10 @@
     "dist",
     "src"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -43,6 +46,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@silurus/ooxml-core": "workspace:*",
     "@types/pngjs": "^6.0.5",
     "pixelmatch": "^7.1.0",
     "playwright": "^1.59.1",
@@ -50,8 +54,5 @@
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
     "vite-plugin-wasm": "^3.6.0"
-  },
-  "dependencies": {
-    "@silurus/ooxml-core": "workspace:*"
   }
 }
