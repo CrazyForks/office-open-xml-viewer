@@ -280,6 +280,10 @@ export interface LayoutLine {
   /** Set when at least one segment on this line carries a ruby annotation —
    *  enables docGrid pitch snapping in lineBoxHeight. */
   hasRuby?: boolean;
+  /** §17.6.5 — a text segment on this line contains an East Asian code point
+   *  (EAST_ASIAN_RE), enabling docGrid line-cell rounding. Undefined/false for
+   *  synthesized textless lines. */
+  eastAsian?: boolean;
   /** ECMA-376 §17.3.3.1 — this line is terminated by a MANUAL line break
    *  (`<w:br w:type="textWrapping"/>`). In a justified (`both`) paragraph it is
    *  the end of a logical line and must be left-aligned, not stretched — exactly
@@ -317,7 +321,7 @@ export interface WrapLayoutCtx {
     maximumWidthPt: number;
   };
   /** Per-line box-height resolver (line natural ascent+descent → total px box height). */
-  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, emPx?: number) => number;
+  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, emPx?: number, eastAsian?: boolean) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -829,10 +833,18 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  * ECMA-376 §17.6.5 docGrid line grid — number of whole grid CELLS a
  * single-spaced East Asian line of em `emPx` occupies on a pitch of `pitchPx`.
  *
- * Word uses `cells = floor(emPx / pitchPx) + 1`: 10.5pt and 12pt lines on an
- * 18pt pitch occupy one cell, while a 20pt line on a 20pt pitch occupies two.
- * `ceil(em / pitch)` misses the exact boundary because an em square that fills
- * k pitches still needs inter-line leading and therefore spills into cell k+1.
+ * Measured in Word PDF output (`pdftotext -bbox`): 10.5pt and 12pt lines on an
+ * 18pt pitch occupy one cell (the sub-pitch region), while a 20pt line on a
+ * 20pt pitch occupies two (the em == pitch boundary). The k >= 2 region — for
+ * example an em of two pitches occupying three cells — extrapolates
+ * `floor(em / pitch) + 1` beyond the measured range because the boundary rule
+ * is scale-free: an em square that fills k pitches still needs inter-line
+ * leading and therefore spills into cell k+1. No Word measurement covers that
+ * region yet.
+ *
+ * For a mixed-size line, callers supply the tallest run's em. This conservative
+ * anti-clipping choice follows the tallest-run line-box rule (§17.3.1.33); it is
+ * not a Word-measured mixed-size grid behaviour.
  * ECMA-376 defines `linePitch` as one single-spaced line; rounding taller lines
  * to whole cells is Word runtime behaviour. Returns at least 1 for every finite
  * `emPx >= 0`.
@@ -2361,9 +2373,12 @@ export function layoutLines(
   };
 
   let lineHasRuby = false;
+  let lineEastAsian = false;
   const flush = (forceHeight?: number, brTerminated = false) => {
     applyBidiTabs();
-    const h = forceHeight !== undefined ? forceHeight : (lineHeight || 10);
+    // §17.3.3.1 — the break is one run among the line's runs: its own size
+    // participates in the line height but must not override a taller peer.
+    const h = forceHeight !== undefined ? Math.max(lineHeight, forceHeight) : (lineHeight || 10);
     // If the line has no measured content (empty/line-break line), synthesize
     // stable ascent/descent from the effective font size so wrap/baseline math
     // stays consistent with non-empty lines.
@@ -2380,10 +2395,11 @@ export function layoutLines(
       availWidth: lineMaxWidth,
       topY: wrapCtx ? currentLineTopY : undefined,
       hasRuby: lineHasRuby,
+      eastAsian: lineEastAsian,
       endsWithBreak: brTerminated,
     });
     if (wrapCtx) {
-      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle, h * scale);
+      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle, h * scale, lineEastAsian);
     }
     currentLine = [];
     currentWidth = 0;
@@ -2393,6 +2409,7 @@ export function layoutLines(
     lineDescent = 0;
     lineIntendedSingle = 0;
     lineHasRuby = false;
+    lineEastAsian = false;
     isFirst = false;
     startLine(minLineStartWidth());
   };
@@ -2414,6 +2431,7 @@ export function layoutLines(
     if (!('isTab' in s) && !('imagePath' in s) && !('mathNodes' in s)) {
       const ts = s as LayoutTextSeg;
       if (ts.ruby) lineHasRuby = true;
+      if (!lineEastAsian && EAST_ASIAN_RE.test(ts.text)) lineEastAsian = true;
       // Intended single-line height for fonts whose substituted Canvas metrics
       // understate Word's line spacing (font-metrics.ts). 0 for untabled fonts.
       // Small caps (non-super/sub) keep the FULL run size here so the line box
