@@ -396,9 +396,24 @@ type LayoutSegment = {
 
 interface LayoutLine {
   segments: LayoutSegment[];
-  /** Segments right-aligned at a tab stop (set when paragraph contains \t and a right-aligned tabStop) */
+  /** Segments aligned at a right/centre tab stop (set when the paragraph
+   *  contains a `\t` resolving to an `algn="r"|"ctr"` stop).
+   *
+   *  KNOWN MODEL LIMITS (pre-existing, LTR and RTL alike — follow-up #916):
+   *  - ONE cell slot per line: a second right/centre tab on the same line
+   *    re-assigns this object with empty `segments`, dropping the text
+   *    collected for the first cell.
+   *  - Cell segments bypass the UAX#9 visual reorder (`computeLineVisualOrder`
+   *    applies to `LayoutLine.segments` only): they are drawn sequentially in
+   *    logical order under a single ctx.direction, so mixed-direction cell
+   *    content does not reorder. docx instead models tabs as inline segments
+   *    classified Bidi_Class S — the shape a fix should take.
+   *  - Start ('l') / 'dec' tabs never populate this slot; they advance the
+   *    layout pen inline and the gap is not rendered. */
   tabStop?: {
-    /** Tab stop position in px from the left edge of the text area (bx + lPad + tabStop.px = canvas X) */
+    /** Stop position in px from the LEADING text-inset edge (logical,
+     *  §21.1.2.1): canvas X = bx + lPad + px under LTR, bx + bw − rPad − px
+     *  under an RTL base. */
     px: number;
     algn: string;
     segments: LayoutSegment[];
@@ -948,8 +963,15 @@ export function layoutParagraph(
 
       // ── Tab character ────────────────────────────────────────────────────
       if (/^\t+$/.test(token)) {
-        // Find first tab stop whose position (from text area left) is beyond the current pen
-        const currentAbsW = marLPx + lineW; // current position from text area left
+        // Pen position from the LEADING text-inset edge, measured in READING
+        // order: an LTR paragraph advances rightward from the left inset (leading
+        // indent = marL); a BIDI (RTL) paragraph advances leftward from the right
+        // inset (leading indent = marR). Tab stops (§21.1.2.1.x) are logical
+        // distances from that leading edge, so the same "first stop past the pen"
+        // rule selects the stop in either frame (mirrors docx #830 nextTabStopRtl;
+        // the draw pass then mirrors the chosen stop into the RTL frame).
+        const leadIndentPx = para.rtl ? emuToPx(para.marR, scale) : marLPx;
+        const currentAbsW = leadIndentPx + lineW;
         const ts = (para.tabStops ?? []).find(
           (t: TabStop) => emuToPx(t.pos, scale) > currentAbsW
         );
@@ -960,8 +982,16 @@ export function layoutParagraph(
             tabActive = true;
             currentLine.tabStop = { px: tabStopPx, algn: ts.algn, segments: [] };
           } else {
-            // Left-aligned tab: advance lineW to the tab stop
-            lineW = tabStopPx - marLPx;
+            // Start tab ('l'; 'dec' is treated as start — decimal alignment is
+            // unimplemented): advance the READING-order pen to the stop. The pen
+            // is the reading-frame distance from the leading indent, so the
+            // advance is `pos − leadIndentPx` under BOTH bases (LTR:
+            // leadIndentPx === marLPx, byte-identical). No cell group is opened
+            // for start tabs — the gap is not materialized as a drawn segment in
+            // either direction (pre-existing inline-advance model, see the
+            // LayoutLine.tabStop doc); the advance drives wrapping and later
+            // stop selection only.
+            lineW = tabStopPx - leadIndentPx;
           }
         } else {
           // No matching tab stop — treat as a single space
@@ -3367,21 +3397,58 @@ export function renderTextBody(
 
     // ── Tab-stop segments (right-aligned or centred at tab stop position) ──
     if (line.tabStop && line.tabStop.segments.length > 0) {
-      const tabAbsX = bx + lPad + line.tabStop.px;
       let totalTabW = 0;
       for (const seg of line.tabStop.segments) {
         ctx.font = seg.font;
         const ls = seg.letterSpacingPx ?? 0;
         totalTabW += ctx.measureText(seg.text).width + ls * codePointCount(seg.text);
       }
+      // ECMA-376 §21.1.2.1.x tab stops are LOGICAL: `pos` is the distance from the
+      // LEADING text-inset edge. LTR base ⇒ leading edge = left inset
+      // (`bx + lPad`), pen advances rightward; BIDI (RTL) base ⇒ leading edge =
+      // right inset (`bx + bw − rPad`), pen advances LEFT, so the stop mirrors and
+      // the trailing cell flips visual side. The LTR-frame math below dropped an
+      // RTL cell on the wrong side (issue #831). This mirrors the docx fix (#830 /
+      // #835: `layoutBidiTabStops` / `nextTabStopRtl` resolve stops against the
+      // leading text margin in the reading frame). DrawingML tabs carry no leader,
+      // so — unlike docx — there is nothing to paint across the gap. Known model
+      // limits (ONE cell per line; cell contents bypass the UAX#9 reorder): see
+      // the LayoutLine.tabStop doc — follow-up #916.
       let tabPenX: number;
-      if (line.tabStop.algn === 'r') {
-        tabPenX = tabAbsX - totalTabW;
-      } else if (line.tabStop.algn === 'ctr') {
-        tabPenX = tabAbsX - totalTabW / 2;
+      if (baseRtl) {
+        const tabAbsX = bx + bw - rPad - line.tabStop.px;
+        // Only 'r'/'ctr' stops reach this block — layoutParagraph opens a tab
+        // cell solely for those two; a start ('l') or 'dec' tab advances the pen
+        // inline (reading frame) and never builds a cell (see the tab token
+        // branch in layoutParagraph).
+        if (line.tabStop.algn === 'ctr') {
+          tabPenX = tabAbsX - totalTabW / 2;
+        } else {
+          // end/trailing (§21.1.2.1: physical `r` = logical end under RTL): the
+          // cell's TRAILING (left) edge sits on the stop, cell extends rightward.
+          tabPenX = tabAbsX;
+        }
+        // A stop past the trailing (left) text edge pins the cell AT that edge —
+        // the docx layoutBidiTabStops clamp (#835: Word never pushes the cell
+        // off the text area). Unclamped, a mirrored stop with pos > the text
+        // width would land at a negative x, drawing outside the shape.
+        const trailingEdgePx = bx + lPad;
+        if (tabPenX < trailingEdgePx) tabPenX = trailingEdgePx;
       } else {
-        tabPenX = tabAbsX;
+        const tabAbsX = bx + lPad + line.tabStop.px;
+        if (line.tabStop.algn === 'r') {
+          tabPenX = tabAbsX - totalTabW;
+        } else if (line.tabStop.algn === 'ctr') {
+          tabPenX = tabAbsX - totalTabW / 2;
+        } else {
+          tabPenX = tabAbsX;
+        }
       }
+      // Shape the cell's glyphs in reading order under an RTL base (Arabic
+      // joining, digit shaping). `ctx.textAlign` stays 'left' (set once for the
+      // whole body), so tabPenX remains the cell's left edge — only glyph shaping
+      // differs. Reset to 'ltr' after the cell so later lines are unaffected.
+      if (baseRtl) ctx.direction = 'rtl';
       for (const seg of line.tabStop.segments) {
         ctx.font = seg.font;
         ctx.fillStyle = seg.color;
@@ -3431,6 +3498,7 @@ export function renderTextBody(
         }
         tabPenX += tabSegW;
       }
+      if (baseRtl) ctx.direction = 'ltr';
     }
 
     cursorY += linePx;
