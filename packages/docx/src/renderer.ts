@@ -31,7 +31,6 @@ import {
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
-  resolveKinsokuRules,
   DEFAULT_KINSOKU_RULES,
   kinsokuAdjustedSplit,
   crossRunKinsokuRetract,
@@ -101,7 +100,20 @@ import {
   resolveTableRowHeights,
   resolveSingleRowHeight,
 } from './table-geometry.js';
+import {
+  computeSectionColumns as computeColumns,
+  resolveDocumentLayoutSettings,
+  resolveParagraphLayoutContext,
+  resolveSectionLayoutContext,
+  toLegacyDocGridContext,
+  type DocumentLayoutSettings,
+  type ParagraphLayoutContext,
+  type SectionLayoutContext,
+  type StoryContext,
+} from './layout-context.js';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
+
+export { computeColumns };
 
 // ── Line-layout engine (segmentation + line-breaking + measurement) ──────────
 // Lifted into ./line-layout.ts (verbatim, B2 phase boundary). renderer.ts is the
@@ -110,7 +122,6 @@ import { justifiedPiecePositions } from '@silurus/ooxml-core';
 // a TYPE only (erased), so there is no runtime cycle.
 import {
   DEFAULT_TAB_PT,
-  EAST_ASIAN_RE,
   buildFont,
   buildSegments,
   calcEffectiveFontPx,
@@ -126,7 +137,6 @@ import {
   paragraphMarkLineHeight,
   paragraphSegsStateSensitive,
   rescaleLayoutLines,
-  resolveDefaultTabPt,
   shapeRenderState,
   shapeRunToDocRun,
   splitTextForLayout,
@@ -280,6 +290,10 @@ export interface RenderState {
   floatParaSeq: number;
   /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
   docGrid: DocGridCtx;
+  /** Document-wide OOXML layout policy normalized once at renderer entry. */
+  layoutSettings: DocumentLayoutSettings;
+  /** Active section geometry and grid policy normalized for this state. */
+  sectionLayout: SectionLayoutContext;
   /** True when the document body contains East Asian text. Gates docGrid line-
    *  cell rounding of empty / anchor-only paragraph marks (see
    *  paragraphMarkLineHeight), which carry no text to classify themselves. */
@@ -411,6 +425,24 @@ export interface RenderState {
    *  Only the auto-contrast decision reads it — it does NOT paint any rect (cell /
    *  paragraph shading rects are painted by their own passes). */
   containerShading?: string | null;
+}
+
+const BODY_STORY_CONTEXT: StoryContext = {
+  story: 'body',
+  containers: [],
+  lineNumberingEligible: true,
+};
+
+export function resolveBodyParagraphLayoutContext(
+  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout'>,
+  paragraph: DocParagraph,
+): ParagraphLayoutContext {
+  return resolveParagraphLayoutContext(
+    state.layoutSettings,
+    state.sectionLayout,
+    BODY_STORY_CONTEXT,
+    paragraph,
+  );
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -1072,7 +1104,6 @@ export async function renderDocumentToCanvas(
   // its drawing state, and the ctx.scale/fill below run AFTER canvas.width/height.
   // The pagination fallback (paginateWithHeaderFooterReserve) needs this ctx.
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-  const kinsoku = resolveKinsokuRules(doc.settings);
   // ECMA-376 §17.6.20 — for a vertical (tbRl) section the page is laid out in a
   // SWAPPED logical space (logical width = physical page height) and rotated +90°
   // into physical space at paint. `layoutDoc` carries the swapped geometry through
@@ -1081,7 +1112,15 @@ export async function renderDocumentToCanvas(
   // ORIGINAL section (the swap preserves textDirection).
   const vertical = isVerticalSection(doc.section);
   const layoutDoc = verticalLayoutDoc(doc);
-  const pages = opts.prebuiltPages ?? paginateWithHeaderFooterReserve(layoutDoc, ctx, layoutDoc.fontFamilyClasses ?? {}, kinsoku, layoutDoc.footnotes ?? []);
+  const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
+  const kinsoku = layoutSettings.kinsoku;
+  const pages = opts.prebuiltPages ?? paginateWithHeaderFooterReserve(
+    layoutDoc,
+    ctx,
+    layoutDoc.fontFamilyClasses ?? {},
+    layoutSettings,
+    layoutDoc.footnotes ?? [],
+  );
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
@@ -1109,6 +1148,7 @@ export async function renderDocumentToCanvas(
   // in logical coordinates and the page transform maps it to physical space.
   const pageGeom = resolvePageSection(pages, pageIndex, layoutDoc).geom;
   const sec: SectionProps = { ...layoutDoc.section, ...pageGeom };
+  const sectionLayout = resolveSectionLayoutContext(layoutSettings, sec);
 
   // The CANVAS is sized to the PHYSICAL page (visible landscape page for tbRl):
   // physical width = logical height, physical height = logical width. `scale`
@@ -1185,7 +1225,6 @@ export async function renderDocumentToCanvas(
   for (const [id, n] of footnoteNums) noteNumbers.set(`footnote:${id}`, n);
   for (const [id, n] of endnoteNums) noteNumbers.set(`endnote:${id}`, n);
 
-  const docEA = documentHasEastAsian(doc.body);
   // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
   // (a negative margin places the body |margin| inside the edge, overlapping the
   // header/footer — see bodyMarginInsetPt). Identity for the non-negative common case.
@@ -1226,21 +1265,20 @@ export async function renderDocumentToCanvas(
     pageWidth: sec.pageWidth,
     floats: [],
     floatParaSeq: 0,
-    docGrid: {
-      type: sec.docGridType ?? null,
-      linePitchPt: sec.docGridLinePitch ?? null,
-      charSpacePt: sec.docGridCharSpace != null ? sec.docGridCharSpace / 4096 : null,
-    },
-    docEastAsian: docEA,
+    docGrid: toLegacyDocGridContext(sectionLayout),
+    layoutSettings,
+    sectionLayout,
+    docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses: doc.fontFamilyClasses ?? {},
     kinsoku,
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
-    defaultTabPt: resolveDefaultTabPt(doc.settings),
-    characterSpacingControl: doc.settings?.characterSpacingControl,
-    useFeLayout: doc.settings?.useFeLayout,
-    balanceSingleByteDoubleByteWidth: doc.settings?.balanceSingleByteDoubleByteWidth,
-    mathDefJc: doc.settings?.mathDefJc,
+    defaultTabPt: layoutSettings.defaultTabPt,
+    characterSpacingControl: layoutSettings.characterSpacingControl,
+    useFeLayout: layoutSettings.compat.useFeLayout,
+    balanceSingleByteDoubleByteWidth:
+      layoutSettings.compat.balanceSingleByteDoubleByteWidth,
+    mathDefJc: layoutSettings.mathDefJc,
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
     // §17.16.4.1 — the instant DATE/TIME fields format against (default real time).
@@ -1440,13 +1478,9 @@ function measureNoteBlockForDraw(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   sec: SectionProps,
   fontFamilyClasses: Record<string, string>,
-  kinsoku: KinsokuRules,
-  docEastAsian: boolean,
-  // §17.15.1.25 — keep the note measure pass on the same automatic tab interval.
-  defaultTabPt: number = DEFAULT_TAB_PT,
-  settings?: DocSettings,
+  layoutSettings: DocumentLayoutSettings,
 ): { total: number; trailingSpaceAfter: number } {
-  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, kinsoku, docEastAsian, defaultTabPt, settings);
+  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, layoutSettings);
   const contentWPt = sec.pageWidth - sec.marginLeft - sec.marginRight;
   return measureFootnoteBlockPt(note, measure, contentWPt);
 }
@@ -1488,7 +1522,13 @@ function drawPageFootnotes(
   for (const id of ids) {
     const note = noteById.get(id);
     if (!note) continue;
-    const m = measureNoteBlockForDraw(note, baseState.ctx, sec, baseState.fontFamilyClasses, baseState.kinsoku, baseState.docEastAsian, baseState.defaultTabPt, doc.settings);
+    const m = measureNoteBlockForDraw(
+      note,
+      baseState.ctx,
+      sec,
+      baseState.fontFamilyClasses,
+      baseState.layoutSettings,
+    );
     totalPt += m.total;
     lastTrailingPt = m.trailingSpaceAfter;
   }
@@ -1704,51 +1744,8 @@ function footnoteReserveHeightPt(
 // for callers that import it from the renderer.
 export type { ColumnGeom } from './types';
 
-/**
- * ECMA-376 §17.6.4 — resolve a section's newspaper columns to page-absolute
- * left-x / width pairs (pt). The content band is `[marginLeft, pageWidth -
- * marginRight]`; columns tile it left-to-right.
- *
- * - No columns (or count <= 1): one full-width column spanning the content band
- *   (unchanged single-column behavior).
- * - Equal width (`equalWidth`): `colW = (contentW - (count-1)*space) / count`;
- *   column i sits at `marginLeft + i*(colW + space)`.
- * - Explicit `<w:col>` widths: walk the columns, advancing x by each column's
- *   own width + trailing space. The per-column widths/spaces are used verbatim
- *   (Word writes them to sum to the content band).
- *
- * `colW` is clamped to a positive minimum so a malformed/over-wide spec never
- * yields a zero/negative text width that would wedge line layout.
- */
-export function computeColumns(section: SectionProps): ColumnGeom[] {
-  const contentW = section.pageWidth - section.marginLeft - section.marginRight;
-  const cols = section.columns;
-  if (!cols || cols.count <= 1) {
-    return [{ xPt: section.marginLeft, wPt: Math.max(1, contentW) }];
-  }
-
-  // Explicit per-column geometry (unequal widths).
-  if (!cols.equalWidth && cols.cols.length > 0) {
-    const out: ColumnGeom[] = [];
-    let x = section.marginLeft;
-    for (const c of cols.cols) {
-      out.push({ xPt: x, wPt: Math.max(1, c.widthPt) });
-      x += c.widthPt + c.spacePt;
-    }
-    return out;
-  }
-
-  // Equal-width columns separated by `space`.
-  const count = cols.count;
-  const space = cols.spacePt;
-  const colW = Math.max(1, (contentW - (count - 1) * space) / count);
-  const out: ColumnGeom[] = [];
-  for (let i = 0; i < count; i++) {
-    out.push({ xPt: section.marginLeft + i * (colW + space), wPt: colW });
-  }
-  return out;
-}
-
+// `computeColumns` is the shared pure implementation imported from
+// layout-context.ts and re-exported above for existing renderer callers.
 /** ECMA-376 §17.6.8 — default gap (pt) between the text margin and the line-number
  *  glyphs when `<w:lnNumType w:distance>` is absent (the spec says the positioning
  *  is then implementation-defined). Word's default is ~1/4" (≈18pt). */
@@ -1844,6 +1841,8 @@ export function computePages(
   defaultTabPt: number = DEFAULT_TAB_PT,
   /** ECMA-376 §17.15.1.* — document-wide layout settings. */
   settings?: DocSettings,
+  /** Pre-resolved policy supplied by production entry points. */
+  resolvedLayoutSettings?: DocumentLayoutSettings,
 ): PaginatedBodyElement[][] {
   // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
   // (a negative margin measures the body |margin| from the edge and overlaps the
@@ -1858,7 +1857,23 @@ export function computePages(
   const bodyTopPt = () => bodyMarginInsetPt(currentSectionGeom.marginTop);
   const bodyBottomPt = () => bodyMarginInsetPt(currentSectionGeom.marginBottom);
   const fullContentH = () => currentSectionGeom.pageHeight - bodyTopPt() - bodyBottomPt();
-  const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body), defaultTabPt, settings);
+  const documentSettings = resolvedLayoutSettings ?? {
+    ...resolveDocumentLayoutSettings({
+      section,
+      body,
+      headers: EMPTY_HEADERS_FOOTERS,
+      footers: EMPTY_HEADERS_FOOTERS,
+      settings,
+    }),
+    kinsoku,
+    defaultTabPt,
+  };
+  const measureState = buildMeasureState(
+    ctx,
+    section,
+    fontFamilyClasses,
+    documentSettings,
+  );
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -3431,14 +3446,24 @@ function paginateWithHeaderFooterReserve(
   doc: DocxDocumentModel,
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string>,
-  kinsoku: KinsokuRules,
+  layoutSettings: DocumentLayoutSettings,
   footnotes: DocNote[],
 ): PaginatedBodyElement[][] {
   // §17.15.1.25 — resolve once here so both pagination passes and the
   // reserve-measure state share the document's automatic tab interval.
-  const defaultTabPt = resolveDefaultTabPt(doc.settings);
-  const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, [], defaultTabPt, doc.settings);
-  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body), defaultTabPt, doc.settings);
+  const pass1 = computePages(
+    doc.body,
+    doc.section,
+    ctx,
+    fontFamilyClasses,
+    layoutSettings.kinsoku,
+    footnotes,
+    [],
+    layoutSettings.defaultTabPt,
+    doc.settings,
+    layoutSettings,
+  );
+  const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, layoutSettings);
   const footerReserves = computeFooterReserves(pass1, doc, measure);
   const headerReserves = computeHeaderReserves(pass1, doc, measure);
   const overflows = (rs: number[]): boolean => rs.some((r) => r > MIN_MARGIN_OVERFLOW_PT);
@@ -3447,7 +3472,18 @@ function paginateWithHeaderFooterReserve(
     top: headerReserves[i] ?? 0,
     bottom: footerReserves[i] ?? 0,
   }));
-  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, pageReserves, defaultTabPt, doc.settings);
+  return computePages(
+    doc.body,
+    doc.section,
+    ctx,
+    fontFamilyClasses,
+    layoutSettings.kinsoku,
+    footnotes,
+    pageReserves,
+    layoutSettings.defaultTabPt,
+    doc.settings,
+    layoutSettings,
+  );
 }
 
 /** Paginate with a throwaway measure context (a fresh OffscreenCanvas, scale 1).
@@ -3479,11 +3515,12 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
   // prebuilt (this path) or paginated inline. Horizontal docs are unchanged
   // (referential identity).
   const layoutDoc = verticalLayoutDoc(doc);
+  const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   return paginateWithHeaderFooterReserve(
     layoutDoc,
     ctx,
     layoutDoc.fontFamilyClasses ?? {},
-    resolveKinsokuRules(layoutDoc.settings),
+    layoutSettings,
     layoutDoc.footnotes ?? [],
   );
 }
@@ -3492,13 +3529,9 @@ function buildMeasureState(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   section: SectionProps,
   fontFamilyClasses: Record<string, string> = {},
-  kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
-  docEastAsian = false,
-  // §17.15.1.25 — threaded so the measure pass uses the SAME automatic tab
-  // interval as the draw pass; defaults to the spec absent value when no doc.
-  defaultTabPt: number = DEFAULT_TAB_PT,
-  settings?: DocSettings,
+  layoutSettings: DocumentLayoutSettings,
 ): RenderState {
+  const sectionLayout = resolveSectionLayoutContext(layoutSettings, section);
   return {
     ctx,
     scale: 1,
@@ -3534,18 +3567,17 @@ function buildMeasureState(
     pageWidth: section.pageWidth,
     floats: [],
     floatParaSeq: 0,
-    docGrid: {
-      type: section.docGridType ?? null,
-      linePitchPt: section.docGridLinePitch ?? null,
-      charSpacePt: section.docGridCharSpace != null ? section.docGridCharSpace / 4096 : null,
-    },
-    docEastAsian,
+    docGrid: toLegacyDocGridContext(sectionLayout),
+    layoutSettings,
+    sectionLayout,
+    docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
-    kinsoku,
-    defaultTabPt,
-    characterSpacingControl: settings?.characterSpacingControl,
-    useFeLayout: settings?.useFeLayout,
-    balanceSingleByteDoubleByteWidth: settings?.balanceSingleByteDoubleByteWidth,
+    kinsoku: layoutSettings.kinsoku,
+    defaultTabPt: layoutSettings.defaultTabPt,
+    characterSpacingControl: layoutSettings.characterSpacingControl,
+    useFeLayout: layoutSettings.compat.useFeLayout,
+    balanceSingleByteDoubleByteWidth:
+      layoutSettings.compat.balanceSingleByteDoubleByteWidth,
     showTrackChanges: false,
   };
 }
@@ -3567,15 +3599,16 @@ function estimateParagraphHeight(
   // this measure pass agrees with renderParagraph's paint pass (a bidi
   // paragraph's tab stops anchor at the text margin — layoutBidiTabStops —
   // and a mismatched tabOrigin/marginRight here would wrap differently).
-  const indLeft = para.bidi === true ? para.indentRight : para.indentLeft;
-  const indRight = para.bidi === true ? para.indentLeft : para.indentRight;
+  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const indLeft = paragraphContext.physicalIndentLeftPt;
+  const indRight = paragraphContext.physicalIndentRightPt;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
   const paraX = paraXPt + indLeft;
   const segs = buildSegments(para.runs, state);
   // Word renders ruby paragraphs with consistent line spacing — every line
   // in a paragraph that carries ANY furigana snaps to the same pitch
   // multiple, otherwise mixed-ruby paragraphs jitter and pagination drifts.
-  const paraHasRuby = paragraphHasRuby(para);
+  const paraHasRuby = paragraphContext.hasRuby;
   const grid = paraGrid(para, state);
   // Mirror renderParagraph's vertical advancement EXACTLY so the paginator's
   // page-fill tracker matches where the renderer actually draws each line. With
@@ -3620,7 +3653,7 @@ function estimateParagraphHeight(
       startPageY: cursor,
       paraX,
       floats: state.floats,
-      lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
+      lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0, paragraphContext.hasEastAsianText),
       pageH: state.pageH,
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt, paraW + indRight, para.bidi === true);
@@ -3632,7 +3665,7 @@ function estimateParagraphHeight(
       // Word uses the same line height for every line in a ruby paragraph,
       // snapped to an integer docGrid pitch.
       const uniform = snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, true, l.intendedSingle, paragraphIsEastAsian(para)))),
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText))),
         grid,
         1,
       );
@@ -3643,7 +3676,7 @@ function estimateParagraphHeight(
     } else {
       for (const l of lines) {
         if (l.topY !== undefined && l.topY > cursor) cursor = l.topY;
-        cursor += lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, false, l.intendedSingle, paragraphIsEastAsian(para));
+        cursor += lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, false, l.intendedSingle, paragraphContext.hasEastAsianText);
       }
     }
   }
@@ -3675,45 +3708,6 @@ function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: numb
  *  Used to apply paragraph-wide line-height snapping to docGrid pitch — Word
  *  renders the entire ruby paragraph with consistent line spacing so that
  *  ruby-bearing and ruby-free lines line up on the same baseline grid. */
-function paragraphHasRuby(para: DocParagraph): boolean {
-  for (const run of para.runs) {
-    if (run.type === 'text' && (run as unknown as DocxTextRun).ruby) return true;
-  }
-  return false;
-}
-
-/** ECMA-376 §17.6.5 docGrid line-cell rounding (see lineBoxHeight) applies to
- *  East Asian lines. A paragraph counts as East Asian when any of its text runs
- *  carries East Asian characters. (Empty / anchor-only paragraphs carry no text;
- *  their mark line is handled separately by paragraphMarkLineHeight.) */
-function paragraphIsEastAsian(para: DocParagraph): boolean {
-  for (const run of para.runs) {
-    if (run.type === 'text' && EAST_ASIAN_RE.test((run as unknown as DocxTextRun).text)) return true;
-  }
-  return false;
-}
-
-/** Whether the document body contains any East Asian text. An empty / anchor-
- *  only paragraph mark carries no text to classify, so its docGrid cell rounding
- *  (paragraphMarkLineHeight) is gated on this document-level signal: in an East
- *  Asian document the paragraph default is an East Asian font and its mark snaps
- *  to whole grid cells; a purely Latin document (e.g. demo/sample-1) keeps the
- *  natural single-cell mark. Recurses into table cells. */
-function documentHasEastAsian(body: BodyElement[]): boolean {
-  for (const el of body) {
-    if (el.type === 'paragraph') {
-      if (paragraphIsEastAsian(el as unknown as DocParagraph)) return true;
-    } else if (el.type === 'table') {
-      for (const row of (el as unknown as DocTable).rows) {
-        for (const cell of row.cells) {
-          if (documentHasEastAsian(cell.content)) return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
 /** The docGrid that governs a paragraph's line heights. ECMA-376 §17.3.1.32:
  *  a paragraph with `w:snapToGrid` explicitly off ignores the section grid, so
  *  its lines use natural font metrics / the spacing multiplier directly. */
@@ -3816,8 +3810,9 @@ function splitParagraphAcrossPages(
   // mismatch there would anchor a bidi paragraph's tab stops differently from
   // the paint pass (layoutBidiTabStops measures stops from the text margin)
   // and re-introduce a paginate/render disagreement.
-  const indLeft = para.bidi === true ? para.indentRight : para.indentLeft;
-  const indRight = para.bidi === true ? para.indentLeft : para.indentRight;
+  const paragraphContext = resolveBodyParagraphLayoutContext(measureState, para);
+  const indLeft = paragraphContext.physicalIndentLeftPt;
+  const indRight = paragraphContext.physicalIndentRightPt;
   const paraW = Math.max(1, contentWPt - indLeft - indRight);
   const paraX = marginLeftPt + indLeft;
   // A paragraph with no layoutable inline lines (literally empty, or only
@@ -3845,7 +3840,7 @@ function splitParagraphAcrossPages(
     startPageY: measureState.y,
     paraX,
     floats: measureState.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0, paragraphIsEastAsian(para)),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphContext.hasRuby, is ?? 0, paragraphContext.hasEastAsianText),
     pageH: measureState.pageH,
   } : undefined;
   const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt, paraW + indRight, para.bidi === true);
@@ -3854,7 +3849,7 @@ function splitParagraphAcrossPages(
     // occupies one (possibly relocated) line (§17.3.1.29).
     return placeMarkOnly();
   }
-  const paraHasRuby = paragraphHasRuby(para);
+  const paraHasRuby = paragraphContext.hasRuby;
 
   // Compute-once eligibility, once per paragraph: a paragraph whose segment
   // TEXT depends on the paint state (page/numPages fields, note references)
@@ -3862,7 +3857,7 @@ function splitParagraphAcrossPages(
   // See paragraphSegsStateSensitive.
   const stampLines = !paragraphSegsStateSensitive(para);
 
-  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para));
+  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText);
   const uniformH = paraHasRuby
     ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), measureState.docGrid, 1)
     : 0;
@@ -4409,9 +4404,10 @@ function layoutCellParagraphForRowSplit(
   const segs = buildSegments(para.runs, state);
   if (segs.length === 0) return null;
   const grid = paraGrid(para, state);
-  const paraHasRuby = paragraphHasRuby(para);
-  const indLeft = para.bidi === true ? para.indentRight : para.indentLeft;
-  const indRight = para.bidi === true ? para.indentLeft : para.indentRight;
+  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paraHasRuby = paragraphContext.hasRuby;
+  const indLeft = paragraphContext.physicalIndentLeftPt;
+  const indRight = paragraphContext.physicalIndentRightPt;
   const paraW = Math.max(1, innerWPt - indLeft - indRight);
   const gridDeltaPx = gridCharDeltaPx(grid, 1);
   const lines = layoutLines(
@@ -4440,7 +4436,7 @@ function layoutCellParagraphForRowSplit(
       grid,
       paraHasRuby,
       l.intendedSingle,
-      paragraphIsEastAsian(para),
+      paragraphContext.hasEastAsianText,
     );
   const uniformH = paraHasRuby
     ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), grid, 1)
@@ -5711,7 +5707,7 @@ function frameAnchorLineHeightPx(
       p,
       state.scale,
       paraGrid(p, state),
-      paragraphHasRuby(p),
+      resolveBodyParagraphLayoutContext(state, p).hasRuby,
       state.docEastAsian,
       state.ctx,
       state.fontFamilyClasses,
@@ -5722,7 +5718,7 @@ function frameAnchorLineHeightPx(
     fp,
     state.scale,
     paraGrid(fp, state),
-    paragraphHasRuby(fp),
+    resolveBodyParagraphLayoutContext(state, fp).hasRuby,
     state.docEastAsian,
     state.ctx,
     state.fontFamilyClasses,
@@ -5761,7 +5757,8 @@ function resolveFrameBox(
   const { scale } = state;
   const paraTop = state.y;
   const grid = paraGrid(para, state);
-  const paraHasRuby = paragraphHasRuby(para);
+  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paraHasRuby = paragraphContext.hasRuby;
   const segments = buildSegments(para.runs, state);
 
   // Measure the frame's natural content size at a wide width (single-line frame
@@ -5792,7 +5789,7 @@ function resolveFrameBox(
   const contentH = lines.reduce(
     (s, l) =>
       s +
-      lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)),
+      lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText),
     0,
   );
 
@@ -5975,6 +5972,7 @@ function renderParagraph(
   borderMerge?: ParaBorderMerge,
 ): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
+  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
   const paragraphStartY = state.y;
 
@@ -6011,9 +6009,9 @@ function renderParagraph(
   // is built from that same left edge (§17.3.1.11). Honoring the indent here
   // would shift the cap glyph right of the exclusion band and let body text
   // overlap it, so zero the indents in the frame-draw recursion.
-  const baseRtl = para.bidi === true;
-  const indLeft = inFrame ? 0 : (baseRtl ? para.indentRight : para.indentLeft) * scale;
-  const indRight = inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight) * scale;
+  const baseRtl = paragraphContext.baseRtl;
+  const indLeft = inFrame ? 0 : paragraphContext.physicalIndentLeftPt * scale;
+  const indRight = inFrame ? 0 : paragraphContext.physicalIndentRightPt * scale;
   const indFirst = inFrame ? 0 : para.indentFirst * scale;
 
   // Numbering marker layout (§17.9.x): see resolveNumberingMarker.
@@ -6029,7 +6027,7 @@ function renderParagraph(
   // Word renders ruby paragraphs with consistent line spacing — every line
   // in a paragraph that carries ANY furigana snaps to the same pitch
   // multiple. Compute once at paragraph scope and share with the line loop.
-  const paraHasRuby = paragraphHasRuby(para);
+  const paraHasRuby = paragraphContext.hasRuby;
   const grid = paraGrid(para, state);
 
   // A paragraph with no inline content (literally empty, or anchor-only) still
@@ -6081,7 +6079,7 @@ function renderParagraph(
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, grid, paraHasRuby, is ?? 0, paragraphContext.hasEastAsianText),
     pageH: state.pageH,
   } : undefined;
 
@@ -6138,8 +6136,10 @@ function renderParagraph(
   // see inside the stamped segments.
   const stamped = para as unknown as PaginatedElementWithLines;
   // Reconstruct THIS paint's layout inputs in the paginator's scale-1 pt space.
-  const paraW1 = contentW / scale - (inFrame ? 0 : (baseRtl ? para.indentRight : para.indentLeft)) - (inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight));
-  const indLeft1 = inFrame ? 0 : (baseRtl ? para.indentRight : para.indentLeft);
+  const paraW1 = contentW / scale
+    - (inFrame ? 0 : paragraphContext.physicalIndentLeftPt)
+    - (inFrame ? 0 : paragraphContext.physicalIndentRightPt);
+  const indLeft1 = inFrame ? 0 : paragraphContext.physicalIndentLeftPt;
   const firstIndent1 = hasMarker && !baseRtl ? numBodyOffset / scale : para.indentFirst;
   const gridDelta1 = gridCharDeltaPx(grid, 1);
   const reuse =
@@ -6180,7 +6180,7 @@ function renderParagraph(
   // ECMA-376 §17.3.3.23 — paraX-relative X of the text-margin right edge, for
   // resolving a `<w:ptab w:relativeTo="margin">` (paraW is the content box; add
   // the right indent to reach the margin). Scale and scale-1 mirrors kept in sync.
-  const indRight1 = inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight);
+  const indRight1 = inFrame ? 0 : paragraphContext.physicalIndentRightPt;
   const marginRightPx = paraW + indRight;
   const marginRightPx1 = paraW1 + indRight1;
   const lines = reuse
@@ -6249,7 +6249,7 @@ function renderParagraph(
   // else just the max natural.
   const uniformLineH = paraHasRuby
     ? snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphIsEastAsian(para)))),
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText))),
         grid,
         scale,
       )
@@ -6257,7 +6257,7 @@ function renderParagraph(
   const lineHForLine = (l: typeof lines[number]): number =>
     paraHasRuby
       ? uniformLineH
-      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphIsEastAsian(para));
+      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphContext.hasEastAsianText);
 
   // Slice bounds — when the paginator split this paragraph across pages,
   // only render lines in [sliceStart, sliceEnd). The first line we paint
@@ -7372,8 +7372,8 @@ type PaginatedElementWithLines = PaginatedBodyElement & {
     /** The kinsoku rules the paginator laid out with (§17.3.1.16 / §17.15.1.58–.59).
      *  Compared by {@link kinsokuRulesEquivalent} in the paint gate. NOTE this is
      *  usually NOT reference-identical to the paint state's rules: the production
-     *  path resolves `resolveKinsokuRules(doc.settings)` once in paginateDocument
-     *  and again in renderDocumentToCanvas, and the resolver builds fresh Set
+     *  path resolves document layout settings once in paginateDocument and
+     *  again in renderDocumentToCanvas, and the resolver builds fresh Set
      *  objects per call — so the gate needs value equivalence, not `===` alone. */
     kinsoku: KinsokuRules;
   };
@@ -9697,7 +9697,8 @@ function measureParaHeight(
   scale: number,
 ): number {
   const segs = buildSegments(para.runs, state);
-  const paraHasRuby = paragraphHasRuby(para);
+  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
+  const paraHasRuby = paragraphContext.hasRuby;
   const grid = paraGrid(para, state);
   if (segs.length === 0) {
     // ECMA-376 §17.3.1.29: an empty (or anchor-only) paragraph still produces one
@@ -9743,8 +9744,8 @@ function measureParaHeight(
   // sides under a bidi paragraph), matching renderParagraph's paint pass so a
   // bidi cell paragraph's tab origin / text-margin edge agree between the row
   // measurer and the paint (LTR values are untouched).
-  const indLeftPx = (para.bidi === true ? para.indentRight : para.indentLeft) * scale;
-  const indRightPx = (para.bidi === true ? para.indentLeft : para.indentRight) * scale;
+  const indLeftPx = paragraphContext.physicalIndentLeftPt * scale;
+  const indRightPx = paragraphContext.physicalIndentRightPt * scale;
   const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
   // RESERVATION: no `marginRightPx` argument is passed here, so a
   // `<w:ptab w:relativeTo="margin">` inside a table cell resolves its target
@@ -9819,13 +9820,13 @@ function measureParaHeight(
     // (the row measurer previously summed each line's independent box, which
     // under/over-measured a wrapped ruby cell relative to what it paints).
     const uniform = snapParaLineToGrid(
-      Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphIsEastAsian(para)))),
+      Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText))),
       grid,
       scale,
     );
     return lines.length * uniform;
   }
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphIsEastAsian(para)), 0);
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphContext.hasEastAsianText), 0);
 }
 
 /** Effective cell margins (pt). Per-cell `<w:tcMar>` overrides (ECMA-376
