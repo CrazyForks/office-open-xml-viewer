@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer.js';
+import { paginateDocument, renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
 // ECMA-376 §17.6.4 (newspaper columns) + the renderer's scale-independent
@@ -63,6 +63,10 @@ function makeNonLinearCanvas(): { canvas: HTMLCanvasElement; calls: Call[] } {
   return { canvas: canvas as unknown as HTMLCanvasElement, calls };
 }
 
+(globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas = class {
+  getContext() { return makeNonLinearCanvas().canvas.getContext('2d'); }
+};
+
 function longPara(text: string): DocParagraph {
   return {
     type: 'paragraph', alignment: 'left',
@@ -95,6 +99,29 @@ function doc(body: BodyElement[], pageHeight: number): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
+async function paintedParagraphGeometry() {
+  const paragraph = longPara(Array.from({ length: 180 }, () => 'w').join(' '));
+  paragraph.spaceBefore = 6;
+  paragraph.spaceAfter = 4;
+  const model = doc([paragraph as unknown as BodyElement], 80);
+  const pages = paginateDocument(model);
+  const paintedPages: Array<{ lineCount: number; topYPx: number | null }> = [];
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+    const { canvas, calls } = makeNonLinearCanvas();
+    await renderDocumentToCanvas(model, canvas, pageIndex, {
+      dpr: 1,
+      width: 200,
+      prebuiltPages: pages,
+    });
+    const textCalls = calls.filter((call) => call.text.includes('w'));
+    paintedPages.push({
+      lineCount: textCalls.length,
+      topYPx: textCalls.length > 0 ? textCalls[0].y : null,
+    });
+  }
+  return { pageCount: pages.length, paintedPages };
+}
+
 describe('paginate/paint line-count divergence — paint never indexes a phantom line (ECMA-376 §17.6.4)', () => {
   // A long paragraph of single-letter "words" (each followed by a space so the
   // line breaker has wrap opportunities). Narrow page + short page height force
@@ -103,6 +130,18 @@ describe('paginate/paint line-count divergence — paint never indexes a phantom
   // line count.
   const text = Array.from({ length: 400 }, () => 'w').join(' ');
   const body = (): BodyElement[] => [longPara(text) as unknown as BodyElement];
+
+  it('preserves page count, painted line counts, and continuation top positions', async () => {
+    const geometry = await paintedParagraphGeometry();
+
+    expect(geometry).toEqual({
+      pageCount: 2,
+      paintedPages: [
+        { lineCount: 84, topYPx: 24.74951171875 },
+        { lineCount: 96, topYPx: 18.74951171875 },
+      ],
+    });
+  });
 
   it('renders the final continuation slice without throwing when the paint scale wraps to fewer lines', async () => {
     // Render at width 400 over a 200pt page → scale 2. The non-linear mock fits

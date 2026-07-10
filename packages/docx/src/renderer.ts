@@ -158,6 +158,11 @@ import {
   emphasisMarkGeometry,
 } from './emphasis-mark.js';
 import {
+  createFloatWrapOracle,
+  measureParagraph,
+  type ParagraphMeasurementEnvironment,
+} from './paragraph-measure.js';
+import {
   drawVerticalRun,
   drawTateChuYokoRun,
   drawUprightBox,
@@ -2904,7 +2909,7 @@ export function computePages(
       const remainingH = columnBottomLimit() - y;
       if (fitHeight > remainingH && splittable) {
         const placed = splitParagraphAcrossPages(
-          measureState, para, colW(), suppressBefore, colX(),
+          measureState, para, colW, suppressBefore, colX,
           y, pageContentH, pages,
           // Overflow during the split advances to the next column first, then a
           // new page (newspaper fill). The just-filled column's bottom is folded
@@ -3610,6 +3615,33 @@ function buildMeasureState(
   };
 }
 
+function paragraphMeasurementEnvironment(
+  state: Pick<
+    RenderState,
+    | 'pageIndex'
+    | 'totalPages'
+    | 'displayPageNumber'
+    | 'pageNumberFormat'
+    | 'currentDateMs'
+    | 'noteNumbers'
+    | 'currentNoteNumber'
+    | 'verticalCJK'
+    | 'docEastAsian'
+  >,
+): ParagraphMeasurementEnvironment {
+  return {
+    pageIndex: state.pageIndex,
+    totalPages: state.totalPages,
+    displayPageNumber: state.displayPageNumber,
+    pageNumberFormat: state.pageNumberFormat,
+    currentDateMs: state.currentDateMs,
+    noteNumbers: state.noteNumbers,
+    currentNoteNumber: state.currentNoteNumber,
+    verticalCJK: state.verticalCJK,
+    documentHasEastAsianText: state.docEastAsian,
+  };
+}
+
 function estimateParagraphHeight(
   state: RenderState,
   para: DocParagraph,
@@ -3620,103 +3652,30 @@ function estimateParagraphHeight(
    *  its bottom edge is suppressed (the box continues) and reserves no extent. */
   nextSharesBottomBorder = false,
 ): number {
-  // ECMA-376 §17.3.1.12 / Part 4 §14.11.2 — the transitional left/right indent
-  // attributes are logical start/end, so they swap physical sides in a bidi
-  // paragraph. Resolve the PHYSICAL indents once and use them for the float
-  // window (paraX), the tab origin and the text-margin right edge below, so
-  // this measure pass agrees with renderParagraph's paint pass (a bidi
-  // paragraph's tab stops anchor at the text margin — layoutBidiTabStops —
-  // and a mismatched tabOrigin/marginRight here would wrap differently).
   const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
-  const indLeft = paragraphContext.physicalIndentLeftPt;
-  const indRight = paragraphContext.physicalIndentRightPt;
-  const paraW = Math.max(1, contentWPt - indLeft - indRight);
-  const paraX = paraXPt + indLeft;
-  const segs = buildSegments(para.runs, state);
-  // Word renders ruby paragraphs with consistent line spacing — every line
-  // in a paragraph that carries ANY furigana snaps to the same pitch
-  // multiple, otherwise mixed-ruby paragraphs jitter and pagination drifts.
-  const paraHasRuby = paragraphContext.hasRuby;
-  const grid = paraGrid(para, state);
-  // Mirror renderParagraph's vertical advancement EXACTLY so the paginator's
-  // page-fill tracker matches where the renderer actually draws each line. With
-  // anchor floats active a paragraph's text (and even an empty paragraph mark)
-  // is pushed BELOW the float band (ECMA-376 §20.4.2.x; resolveLineFloatWindow /
-  // skipPastTopAndBottom), and that vertical displacement — not just the line
-  // heights — consumes page space. The previous estimate summed only the line
-  // heights, so the paginator under-counted full-width-float pages and packed
-  // far too much onto them (sample-9 page-4: the photo block displaced the body
-  // text, but the paginator ignored the gap and let the bullet list spill past
-  // the bottom margin). Reproduce the renderer's cursor walk:
-  //   spaceBefore → skipPastTopAndBottom → per line: max(topY) then += lineH
-  //   (empty/anchor-only: flow the mark line below the band) → spaceAfter.
-  // When no floats are active skipPastTopAndBottom is a no-op and no line carries
-  // a topY, so this collapses to spaceBefore + Σ lineHeights + spaceAfter — the
-  // exact previous value, leaving float-free documents unchanged.
-  const hasFloats = state.floats.length > 0;
-  const startY = state.y;
-  let cursor = startY + (suppressSpaceBefore ? 0 : para.spaceBefore);
-  if (hasFloats) cursor = skipPastTopAndBottom(cursor, state.floats);
-  const flowMarkLine = (): void => {
-    // Empty / anchor-only paragraph: one paragraph-mark line box, flowed below a
-    // full-width float band exactly like renderEmptyMarkParagraph. An empty mark
-    // uses the pilcrow-em threshold (paragraphMarkEmPx; scale 1 here in the
-    // paginator's pt-space mirror), NOT the 1-inch content-line rule — Word keeps
-    // the mark beside the float whenever the gap holds the pilcrow and drops it
-    // below only for a full-width band (sample-9 p.4 / sample-12 p.2, the #676 regression).
-    // Mirrors the paint pass's resolveEmptyMarkTop so the two agree.
-    if (hasFloats) {
-      const win = resolveLineFloatWindow(cursor, paragraphMarkEmPx(para, 1), 10, paraX, paraW, state.floats);
-      if (win.topY > cursor) cursor = win.topY;
-    }
-    cursor += paragraphMarkLineHeight(para, 1, grid, paraHasRuby, state.docEastAsian, state.ctx, state.fontFamilyClasses);
-  };
-  if (segs.length === 0) {
-    flowMarkLine();
-  } else {
-    // Same WrapLayoutCtx the renderer uses (startPageY is the post-spaceBefore,
-    // post-skip top — matching renderParagraph) so the laid-out line `topY`s
-    // and line count agree with the paint pass.
-    const wrapCtx: WrapLayoutCtx | undefined = hasFloats ? {
-      startPageY: cursor,
-      paraX,
-      floats: state.floats,
-      lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0, paragraphContext.hasEastAsianText),
-      pageH: state.pageH,
-    } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt, paraW + indRight, para.bidi === true);
-    if (lines.length === 0) {
-      // Anchor-only paragraph: no inline content, but the paragraph mark still
-      // occupies one (possibly flowed) line (§17.3.1.29).
-      flowMarkLine();
-    } else if (paraHasRuby) {
-      // Word uses the same line height for every line in a ruby paragraph,
-      // snapped to an integer docGrid pitch.
-      const uniform = snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText))),
-        grid,
-        1,
-      );
-      for (const l of lines) {
-        if (l.topY !== undefined && l.topY > cursor) cursor = l.topY;
-        cursor += uniform;
-      }
-    } else {
-      for (const l of lines) {
-        if (l.topY !== undefined && l.topY > cursor) cursor = l.topY;
-        cursor += lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, false, l.intendedSingle, paragraphContext.hasEastAsianText);
-      }
-    }
-  }
-  // §17.3.1.7: a BOTTOM border extends `space + width/2` below the text box; the
-  // next paragraph must clear it (bottomBorderExtentPt). spaceAfter (trailing
-  // whitespace) already pushes content down, so reserve only the amount by which
-  // the border pokes PAST spaceAfter — MAX, not SUM — matching Word (which does not
-  // stack the border extent on top of a larger spaceAfter). Suppressed when a
-  // same-border paragraph follows (the box continues; no bottom edge is drawn).
+  const startYPt = state.y;
+  const measured = measureParagraph(
+    para,
+    paragraphContext,
+    {
+      startYPt,
+      paragraphXPt: paraXPt,
+      availableWidthPt: contentWPt,
+      maximumYPt: state.pageH,
+      suppressSpaceBefore,
+      wrap: state.floats.length > 0
+        ? createFloatWrapOracle(state.floats)
+        : undefined,
+    },
+    {
+      context: state.ctx,
+      fontFamilyClasses: state.fontFamilyClasses,
+    },
+    paragraphMeasurementEnvironment(state),
+  );
   const bottomExtent = nextSharesBottomBorder ? 0 : bottomBorderExtentPt(para.borders);
-  cursor += Math.max(para.spaceAfter, bottomExtent);
-  return cursor - startY;
+  return measured.contentEndYPt - startYPt
+    + Math.max(measured.requestedSpaceAfterPt, bottomExtent);
 }
 
 /** Snap a paragraph's uniform line height up to an integer multiple of the
@@ -3770,9 +3729,9 @@ function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
 function splitParagraphAcrossPages(
   measureState: RenderState,
   para: DocParagraph,
-  contentWPt: number,
+  contentWPt: () => number,
   suppressSpaceBefore: boolean,
-  marginLeftPt: number,
+  paragraphXPt: () => number,
   initialY: number,
   contentH: number,
   pages: PaginatedBodyElement[][],
@@ -3845,162 +3804,138 @@ function splitParagraphAcrossPages(
     if (tagSectionPageNumType) el.sectionPageNumType = tagSectionPageNumType();
     return el;
   };
-  // Mirror renderParagraph's PHYSICAL indents (ECMA-376 §17.3.1.12; the
-  // left/right indents swap to physical sides in a bidi paragraph, Part 4
-  // §14.11.2). They feed the float-window X (paraX), the tab origin and the
-  // text-margin right edge passed to layoutLines below — a logical/physical
-  // mismatch there would anchor a bidi paragraph's tab stops differently from
-  // the paint pass (layoutBidiTabStops measures stops from the text margin)
-  // and re-introduce a paginate/render disagreement.
-  const paragraphContext = resolveBodyParagraphLayoutContext(measureState, para);
-  const grid = paraGrid(para, measureState);
-  const indLeft = paragraphContext.physicalIndentLeftPt;
-  const indRight = paragraphContext.physicalIndentRightPt;
-  const paraW = Math.max(1, contentWPt - indLeft - indRight);
-  const paraX = marginLeftPt + indLeft;
-  // A paragraph with no layoutable inline lines (literally empty, or only
-  // wrap-float anchors) is a single paragraph-mark line (§17.3.1.29) that cannot
-  // be split. If it doesn't fit in the space left on this page, relocate it
-  // whole to the next page — matching the wholesale break the paginator applies
-  // to unsplittable paragraphs — instead of letting the mark overflow the bottom
-  // margin (which the prior unconditional break never allowed).
-  const placeMarkOnly = (): { endY: number } => {
-    let markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
-    let top = initialY;
-    if (initialY > 0 && initialY + markH - para.spaceAfter > colBot()) {
-      newPage(initialY);
-      top = colTop();
-      markH = estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt);
-    }
-    pages[pages.length - 1].push(stamp(para as PaginatedBodyElement));
-    return { endY: top + markH };
-  };
-  const segs = buildSegments(para.runs, measureState);
-  if (segs.length === 0) {
-    return placeMarkOnly();
-  }
-  const wrapCtx: WrapLayoutCtx | undefined = measureState.floats.length > 0 ? {
-    startPageY: measureState.y,
-    paraX,
-    floats: measureState.floats,
-    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paragraphContext.hasRuby, is ?? 0, paragraphContext.hasEastAsianText),
-    pageH: measureState.pageH,
-  } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(grid, 1), measureState.defaultTabPt, paraW + indRight, para.bidi === true);
-  if (lines.length === 0) {
-    // Anchor-only paragraph: no inline lines, but the paragraph mark still
-    // occupies one (possibly relocated) line (§17.3.1.29).
-    return placeMarkOnly();
-  }
-  const paraHasRuby = paragraphContext.hasRuby;
+  {
+    const paragraphContext = resolveBodyParagraphLayoutContext(measureState, para);
+    const grid = gridForParagraphContext(measureState, paragraphContext);
+    const indLeft = paragraphContext.physicalIndentLeftPt;
+    const indRight = paragraphContext.physicalIndentRightPt;
+    let paraW = Math.max(1, contentWPt() - indLeft - indRight);
+    const measureAtCurrentPlacement = (suppressLeadingSpace: boolean) => measureParagraph(
+      para,
+      paragraphContext,
+      {
+        startYPt: measureState.y,
+        paragraphXPt: paragraphXPt(),
+        availableWidthPt: contentWPt(),
+        maximumYPt: measureState.pageH,
+        suppressSpaceBefore: suppressLeadingSpace,
+        wrap: measureState.floats.length > 0
+          ? createFloatWrapOracle(measureState.floats)
+          : undefined,
+      },
+      {
+        context: measureState.ctx,
+        fontFamilyClasses: measureState.fontFamilyClasses,
+      },
+      paragraphMeasurementEnvironment(measureState),
+    );
+    let measured = measureAtCurrentPlacement(suppressSpaceBefore);
+    const placeMarkOnly = (): { endY: number } => {
+      // Reuse the entry measurement: nothing that measureAtCurrentPlacement reads
+      // (measureState.y, floats, width, pageH, suppressSpaceBefore) changes between
+      // it and the single call site below, and measurement is deterministic for
+      // identical inputs — so a re-measure here would return the same result. The
+      // page-overflow branch re-measures because newPage() changes the placement.
+      const measuredHeight = () => measured.contentEndYPt - measured.placement.startYPt
+        + Math.max(
+          measured.requestedSpaceAfterPt,
+          bottomBorderExtentPt(para.borders),
+        );
+      let markH = measuredHeight();
+      let top = initialY;
+      if (initialY > 0 && initialY + markH - measured.requestedSpaceAfterPt > colBot()) {
+        newPage(initialY);
+        top = colTop();
+        measured = measureAtCurrentPlacement(suppressSpaceBefore);
+        markH = measuredHeight();
+      }
+      pages[pages.length - 1].push(stamp(para as PaginatedBodyElement));
+      return { endY: top + markH };
+    };
+    if (measured.markOnly || measured.lines.length === 0) return placeMarkOnly();
 
-  // Compute-once eligibility, once per paragraph: a paragraph whose segment
-  // TEXT depends on the paint state (page/numPages fields, note references)
-  // must not ship its measure-time lines — the stamped text would be stale.
-  // See paragraphSegsStateSensitive.
-  const stampLines = !paragraphSegsStateSensitive(para);
+    const measuredLineExtents = (): number[] => measured.lines.map((line, index) => {
+      if (index === 0) {
+        return line.topYPt - measured.placement.startYPt + line.advancePt;
+      }
+      const previous = measured.lines[index - 1];
+      const previousBottomYPt = previous.topYPt + previous.advancePt;
+      return Math.max(0, line.topYPt - previousBottomYPt) + line.advancePt;
+    });
+    let lines = measured.lines.map((line) => line.layout);
+    let lineExtents = measuredLineExtents();
+    const remeasureBeforeFirstLine = (): void => {
+      measured = measureAtCurrentPlacement(suppressSpaceBefore);
+      paraW = Math.max(1, measured.placement.availableWidthPt - indLeft - indRight);
+      lines = measured.lines.map((line) => line.layout);
+      lineExtents = measuredLineExtents();
+    };
+    const stampLines = !paragraphSegsStateSensitive(para);
+    const trailingExtent = Math.max(
+      measured.requestedSpaceAfterPt,
+      bottomBorderExtentPt(para.borders),
+    );
 
-  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, grid, paraHasRuby, l.intendedSingle, paragraphContext.hasEastAsianText);
-  const uniformH = paraHasRuby
-    ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), grid, 1)
-    : 0;
-  const lineHeights = lines.map(l => paraHasRuby ? uniformH : perLineH(l));
-  const spaceBefore = suppressSpaceBefore ? 0 : para.spaceBefore;
-  const spaceAfter = para.spaceAfter;
-
-  let lineIdx = 0;
-  let cursorY = initialY;
-  let isFirstSliceOnPage = true; // first slice carries spaceBefore
-  while (lineIdx < lines.length) {
-    // Available space in the current column from cursorY downward (balance target
-    // for a non-last balanced column; the page bottom otherwise).
-    const remaining = colBot() - cursorY;
-    // First slice on a page reserves spaceBefore; the LAST slice (covering
-    // the final line) reserves spaceAfter.
-    const sliceLeading = isFirstSliceOnPage ? spaceBefore : 0;
-    let usedH = sliceLeading;
-    let firstFitting = lineIdx;
-    let lastFitting = lineIdx;
-    while (lastFitting < lines.length && usedH + lineHeights[lastFitting] <= remaining) {
-      usedH += lineHeights[lastFitting];
-      lastFitting++;
-    }
-    if (lastFitting === firstFitting) {
-      // Not even one line fits on this page — flush to a new page and retry.
-      // Guard against infinite loop: if we're already at the start of a
-      // fresh page (cursorY ≈ 0) and still don't fit, force-emit one line.
-      if (cursorY > 0) {
+    let lineIdx = 0;
+    let cursorY = initialY;
+    while (lineIdx < lines.length) {
+      const remaining = colBot() - cursorY;
+      let usedH = 0;
+      const firstFitting = lineIdx;
+      let lastFitting = lineIdx;
+      while (lastFitting < lines.length && usedH + lineExtents[lastFitting] <= remaining) {
+        usedH += lineExtents[lastFitting];
+        lastFitting++;
+      }
+      if (lastFitting === firstFitting) {
+        if (cursorY > 0) {
+          newPage(cursorY);
+          cursorY = colTop();
+          if (lineIdx === 0) remeasureBeforeFirstLine();
+          continue;
+        }
+        lastFitting = firstFitting + 1;
+        usedH += lineExtents[firstFitting];
+      }
+      if (para.widowControl !== false && lastFitting < lines.length) {
+        if (lines.length - lastFitting === 1 && lastFitting - firstFitting >= 2) {
+          lastFitting--;
+          usedH -= lineExtents[lastFitting];
+        }
+        if (firstFitting === 0 && lastFitting - firstFitting === 1 && cursorY > 0) {
+          newPage(cursorY);
+          cursorY = colTop();
+          remeasureBeforeFirstLine();
+          continue;
+        }
+      }
+      const isFinalSlice = lastFitting === lines.length;
+      if (isFinalSlice) usedH += trailingExtent;
+      const sliceEl = {
+        ...(para as object),
+        type: 'paragraph',
+        lineSlice: { start: firstFitting, end: lastFitting },
+      } as PaginatedElementWithLines;
+      if (stampLines) {
+        stampParagraphLines(sliceEl, lines, {
+          paraW,
+          firstIndent: para.indentFirst,
+          tabOriginPx: indLeft,
+          gridDeltaPx: gridCharDeltaPx(grid, 1),
+          hasFloats: measured.placement.wrap !== undefined,
+          kinsoku: measureState.kinsoku,
+        });
+      }
+      pages[pages.length - 1].push(stamp(sliceEl));
+      lineIdx = lastFitting;
+      cursorY += usedH;
+      if (!isFinalSlice) {
         newPage(cursorY);
         cursorY = colTop();
-        isFirstSliceOnPage = true;
-        continue;
-      }
-      // First page, first line doesn't fit — force-emit it and let it overflow.
-      lastFitting = firstFitting + 1;
-      usedH += lineHeights[firstFitting];
-    }
-    // ECMA-376 §17.3.1.44 widowControl (default ON): keep at least two lines of
-    // the paragraph together across a page break — never strand a single trailing
-    // line on a later page (widow) nor a single leading line at a page bottom
-    // (orphan). Skipped when w:widowControl is explicitly off
-    // (para.widowControl === false). Only applies when lines actually carry over
-    // (lastFitting < lines.length); the final slice can legally be one line.
-    if (para.widowControl !== false && lastFitting < lines.length) {
-      // Widow: this slice would leave exactly one line for a later page. Pull one
-      // line down with it so ≥2 carry over — provided this slice keeps ≥1 line.
-      if (lines.length - lastFitting === 1 && lastFitting - firstFitting >= 2) {
-        lastFitting--;
-        usedH -= lineHeights[lastFitting];
-      }
-      // Orphan: the paragraph's first line would sit alone at this page's bottom
-      // (more lines follow). Relocate the paragraph start to the next page so it
-      // begins with ≥2 lines — only when there is room above to break from
-      // (cursorY > 0); a lone line at a fresh page top cannot be helped. Also
-      // catches the case the widow pull above just reduced to a single line.
-      if (firstFitting === 0 && lastFitting - firstFitting === 1 && cursorY > 0) {
-        newPage(cursorY);
-        cursorY = colTop();
-        isFirstSliceOnPage = true;
-        continue;
       }
     }
-    const isFinalSlice = lastFitting === lines.length;
-    if (isFinalSlice) usedH += spaceAfter;
-    const sliceEl = {
-      ...(para as object),
-      type: 'paragraph',
-      lineSlice: { start: firstFitting, end: lastFitting },
-    } as PaginatedElementWithLines;
-    // Phase 4-1 B2 Stage 1 — hand the paint pass the scale-1 lines this split
-    // already computed so it can skip re-running layoutLines (compute-once).
-    // The FULL array is stamped on every slice (not `lines.slice(...)`) because
-    // the paint loop indexes by absolute line number; `lineSlice` still selects
-    // the sub-range to paint. The same immutable array is shared across slices
-    // and across repeated renderPage calls — the draw path only reads it. The
-    // recorded inputs let the paint pass verify its own layout would be
-    // identical before reusing (see renderParagraph's reuse gate). Skipped for
-    // state-sensitive segments (stampLines above): those keep the recompute
-    // path so field text resolves against the real page context.
-    if (stampLines) {
-      stampParagraphLines(sliceEl, lines, {
-        paraW,
-        firstIndent: para.indentFirst,
-        tabOriginPx: indLeft,
-        gridDeltaPx: gridCharDeltaPx(paraGrid(para, measureState), 1),
-        hasFloats: wrapCtx !== undefined,
-        kinsoku: measureState.kinsoku,
-      });
-    }
-    pages[pages.length - 1].push(stamp(sliceEl));
-    lineIdx = lastFitting;
-    cursorY += usedH;
-    if (!isFinalSlice) {
-      newPage(cursorY);
-      cursorY = colTop();
-      isFirstSliceOnPage = true;
-    }
+    return { endY: cursorY };
   }
-  return { endY: cursorY };
 }
 
 /** Per-row heights (pt) used by both pagination and the keep-with-next height
@@ -4444,58 +4379,42 @@ function layoutCellParagraphForRowSplit(
   innerWPt: number,
   state: RenderState,
 ): { lines: LayoutLine[]; lineHeights: number[]; inputs: Parameters<typeof stampParagraphLines>[2] } | null {
-  const segs = buildSegments(para.runs, state);
-  if (segs.length === 0) return null;
-  const paragraphContext = resolveStateParagraphLayoutContext(state, para);
-  const grid = gridForParagraphContext(state, paragraphContext);
-  const paraHasRuby = paragraphContext.hasRuby;
-  const indLeft = paragraphContext.physicalIndentLeftPt;
-  const indRight = paragraphContext.physicalIndentRightPt;
-  const paraW = Math.max(1, innerWPt - indLeft - indRight);
-  const gridDeltaPx = gridCharDeltaPx(grid, 1);
-  const lines = layoutLines(
-    state.ctx,
-    segs,
-    paraW,
-    para.indentFirst,
-    1,
-    para.tabStops,
-    undefined,
-    state.fontFamilyClasses,
-    indLeft,
-    state.kinsoku,
-    gridDeltaPx,
-    state.defaultTabPt,
-    para.bidi === true ? paraW + indRight : paraW,
-    para.bidi === true,
-  );
-  if (lines.length === 0) return null;
-  const perLineH = (l: LayoutLine) =>
-    lineBoxHeight(
-      para.lineSpacing,
-      l.ascent,
-      l.descent,
-      1,
-      grid,
-      paraHasRuby,
-      l.intendedSingle,
-      paragraphContext.hasEastAsianText,
+  {
+    const paragraphContext = resolveStateParagraphLayoutContext(state, para);
+    const grid = gridForParagraphContext(state, paragraphContext);
+    const indLeft = paragraphContext.physicalIndentLeftPt;
+    const indRight = paragraphContext.physicalIndentRightPt;
+    const paraW = Math.max(1, innerWPt - indLeft - indRight);
+    const measured = measureParagraph(
+      para,
+      paragraphContext,
+      {
+        startYPt: 0,
+        paragraphXPt: 0,
+        availableWidthPt: innerWPt,
+        maximumYPt: state.pageH,
+        suppressSpaceBefore: true,
+      },
+      {
+        context: state.ctx,
+        fontFamilyClasses: state.fontFamilyClasses,
+      },
+      paragraphMeasurementEnvironment(state),
     );
-  const uniformH = paraHasRuby
-    ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), grid, 1)
-    : 0;
-  return {
-    lines,
-    lineHeights: lines.map((l) => (paraHasRuby ? uniformH : perLineH(l))),
-    inputs: {
-      paraW,
-      firstIndent: para.indentFirst,
-      tabOriginPx: indLeft,
-      gridDeltaPx,
-      hasFloats: false,
-      kinsoku: state.kinsoku,
-    },
-  };
+    if (measured.markOnly || measured.lines.length === 0) return null;
+    return {
+      lines: measured.lines.map((line) => line.layout),
+      lineHeights: measured.lines.map((line) => line.advancePt),
+      inputs: {
+        paraW,
+        firstIndent: para.indentFirst,
+        tabOriginPx: indLeft,
+        gridDeltaPx: gridCharDeltaPx(grid, 1),
+        hasFloats: false,
+        kinsoku: state.kinsoku,
+      },
+    };
+  }
 }
 
 function paragraphLineSliceHeight(
@@ -9742,137 +9661,97 @@ function measureCellParagraphHeight(
   maxWidth: number,
   scale: number,
 ): number {
-  const segs = buildSegments(para.runs, state);
-  const paragraphContext = resolveStateParagraphLayoutContext(state, para);
-  const paraHasRuby = paragraphContext.hasRuby;
-  const grid = gridForParagraphContext(state, paragraphContext);
-  if (segs.length === 0) {
-    // ECMA-376 §17.3.1.29: an empty (or anchor-only) paragraph still produces one
-    // paragraph-mark line box. Size it with the SAME `paragraphMarkLineHeight`
-    // (ctx-based, correctedLineMetrics) the paint pass draws with
-    // (renderEmptyMarkParagraph) — NOT the synthetic 0.8/0.2-em `emptyLineNaturalPx`,
-    // which under-measures every substituted (e.g. Latin ~1.15em) mark font and so
-    // reserved a shorter row than the mark actually paints. Using the drawn height
-    // makes this row measurer measure == draw for empty cell paragraphs, closing
-    // the measure/paint gap that the paginator's `estimateParagraphHeight` (which
-    // already used `paragraphMarkLineHeight`) did not share with the paint side.
-    return paragraphMarkLineHeight(
+  {
+    const paragraphContext = resolveStateParagraphLayoutContext(state, para);
+    const grid = gridForParagraphContext(state, paragraphContext);
+    const availableWidthPt = maxWidth / scale;
+    const measured = measureParagraph(
       para,
+      paragraphContext,
+      {
+        startYPt: 0,
+        paragraphXPt: 0,
+        availableWidthPt,
+        maximumYPt: state.pageH / scale,
+        suppressSpaceBefore: true,
+      },
+      {
+        context: state.ctx,
+        fontFamilyClasses: state.fontFamilyClasses,
+      },
+      paragraphMeasurementEnvironment(state),
+    );
+    if (scale === 1 && !measured.markOnly && !paragraphSegsStateSensitive(para)) {
+      const indLeft = paragraphContext.physicalIndentLeftPt;
+      const indRight = paragraphContext.physicalIndentRightPt;
+      stampParagraphLines(
+        para,
+        measured.lines.map((line) => line.layout),
+        {
+          paraW: Math.max(1, availableWidthPt - indLeft - indRight),
+          firstIndent: para.indentFirst,
+          tabOriginPx: indLeft,
+          gridDeltaPx: gridCharDeltaPx(grid, 1),
+          hasFloats: false,
+          kinsoku: state.kinsoku,
+        },
+      );
+    }
+    // measureParagraph works in scale-1 points (its contract). A geometric
+    // `× scale` of that height is the exact anti-pattern rescaleLayoutLines
+    // exists to avoid: a real (hinted) font's Canvas metrics are NOT scale-linear
+    // (`metric(pt·s) ≠ s·metric(pt)`; see rescaleLayoutLines' header and
+    // layout-lines-scale-invariance.test.ts), so `scale1Height × scale` drifts
+    // from the height the paint pass (renderParagraph) actually draws. Reproduce
+    // the SAME scale-1-partition → paint-scale bridge paint uses, so the measured
+    // cell height equals the painted height at `scale` — the height that feeds
+    // vAlign centring (renderCell) and the content-driven row-height fallback
+    // (computeTableLayout → resolveTableRowHeights).
+    const scale1ContentHeight = measured.contentEndYPt - measured.placement.startYPt;
+    if (scale === 1) return scale1ContentHeight;
+    const paraHasRuby = paragraphContext.hasRuby;
+    const eastAsian = paragraphContext.hasEastAsianText;
+    if (measured.markOnly || measured.lines.length === 0) {
+      // Empty / anchor-only paragraph mark (§17.3.1.29): renderEmptyMarkParagraph
+      // reserves the mark-line height at the PAINT scale, not scale-1 × scale.
+      return paragraphMarkLineHeight(
+        para,
+        scale,
+        grid,
+        paraHasRuby,
+        state.docEastAsian,
+        state.ctx,
+        state.fontFamilyClasses,
+      );
+    }
+    // Rehydrate the scale-1 line PARTITION to the paint scale exactly as
+    // renderParagraph does (re-measure every line's glyph geometry), then advance
+    // by the per-line box height with the SAME ruby/docGrid/lineSpacing resolver
+    // (§17.3.1.33). A table cell carries no page-level float wrap oracle, so no
+    // line has a topY jump; the painted content height is Σ lineHForLine over the
+    // whole, unsliced paragraph.
+    const paintLines = rescaleLayoutLines(
+      measured.lines.map((line) => line.layout),
       scale,
-      grid,
-      paraHasRuby,
-      state.docEastAsian,
       state.ctx,
       state.fontFamilyClasses,
+      gridCharDeltaPx(grid, scale),
     );
+    const uniformLineH = paraHasRuby
+      ? snapParaLineToGrid(
+          Math.max(0, ...paintLines.map((l) => lineBoxHeight(
+            para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, eastAsian,
+          ))),
+          grid,
+          scale,
+        )
+      : 0;
+    const lineHForLine = (l: LayoutLine): number =>
+      paraHasRuby
+        ? uniformLineH
+        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, eastAsian);
+    return paintedParagraphHeight(paintLines, 0, paintLines.length, 0, lineHForLine);
   }
-  // ECMA-376 §17.3.1.12 (`<w:ind>`): the paragraph's own left/right indent
-  // narrows the wrap width and `firstLine` insets the first line — exactly as
-  // the paint pass (renderParagraph) and the paginator (estimateParagraphHeight)
-  // lay it out. The row-height measurer MUST honor them too: without the indent,
-  // a cell paragraph that carries a first-line/left indent (e.g. sample-11's
-  // table cells, firstLine=21.6 pt) is measured for fewer wrapped lines than it
-  // paints, so the row is sized too short and the overflow ("Town" /
-  // "University") bleeds into the next row. `maxWidth` is the cell's inner width
-  // (cell margins already removed by the caller); the paragraph indents come off
-  // it here. `tabOriginPx = indentLeft` mirrors layoutLines' tab origin in the
-  // paint/paginate paths.
-  //
-  // NOTE: like `estimateParagraphHeight` (the paginator), this passes the raw
-  // `indentFirst` and does NOT model a numbering marker's `numBodyOffset` (the
-  // hanging-indent first-line geometry `renderParagraph` applies for a numbered
-  // paragraph). The two non-paint measurers therefore stay consistent with each
-  // other, but a NUMBERED paragraph inside a cell that wraps can still measure
-  // slightly differently from the paint pass. No such cell exists in the covered
-  // samples; revisit together with estimateParagraphHeight if list-in-cell
-  // fidelity is needed.
-  // PHYSICAL indents (§17.3.1.12 / Part 4 §14.11.2 — logical start/end swap
-  // sides under a bidi paragraph), matching renderParagraph's paint pass so a
-  // bidi cell paragraph's tab origin / text-margin edge agree between the row
-  // measurer and the paint (LTR values are untouched).
-  const indLeftPx = paragraphContext.physicalIndentLeftPt * scale;
-  const indRightPx = paragraphContext.physicalIndentRightPt * scale;
-  const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
-  // RESERVATION: no `marginRightPx` argument is passed here, so a
-  // `<w:ptab w:relativeTo="margin">` inside a table cell resolves its target
-  // against the DEFAULT (`= paraW`, the cell's INNER content box after
-  // margins/indents) rather than the true text-margin right edge
-  // (`paraW + indRightPx`, matching how `renderParagraph`'s paint pass
-  // computes `marginRightPx`/`marginRightPx1` — see its "§17.3.3.23" comment
-  // a few hundred lines up). Left unwired deliberately: this scale-1 call is
-  // also where `stampParagraphLines` below caches the partition for
-  // `renderParagraph`'s paint-time reuse gate, and that gate's
-  // `layoutLinesInputs` (types + comparison, ~L4667–4689/L5632–5644) does NOT
-  // track `marginRightPx` at all — adding it correctly here means widening
-  // both the stamp payload and the reuse-equality check, not just this call
-  // site, to keep the two in sync. That's a real change to the Phase 4-1 B2
-  // compute-once mechanism for a narrow case (a ptab inside a cell, relative
-  // to the margin rather than the indent), so it's deferred rather than
-  // threaded through opportunistically. Revisit together with any other
-  // measure/paint mismatch cleanup in this area.
-  // marginRightPx: LTR keeps the deliberate `paraW` reservation above (ptab in a
-  // cell). A BIDI cell paragraph needs the true text-margin edge — its tab stops
-  // anchor there (layoutBidiTabStops) — so pass `paraW + indRightPx` only then;
-  // LTR cell layout is byte-identical.
-  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale), state.defaultTabPt, para.bidi === true ? paraW + indRightPx : paraW, para.bidi === true);
-  // Phase 4-1 B2 T2 — compute-once for TABLE-CELL paragraphs. This is the ONLY
-  // point a cell paragraph's lines are laid out at scale 1: the paginator sizes
-  // every table row through computeTablePtLayout → resolveTableRowHeights →
-  // measureCellContentHeightPx → measureCellElementHeight → here (scale 1). Stamp
-  // those lines + inputs onto the paragraph so `renderParagraph`'s existing reuse
-  // gate (Stage 2) skips re-running layoutLines at paint. A cell paragraph is a
-  // PaginatedBodyElement in nothing but name (it is never split across pages), yet
-  // it IS a DocParagraph, so the same private line stamp rides on it and the same
-  // gate consumes it — no renderer-side change beyond this stamp is needed.
-  //
-  // Only at scale 1: the gate requires `layoutLinesInputs.scale === 1`, and the
-  // stamped numbers are the paginator's pt values that the paint gate reconstructs
-  // as `contentW/scale − ind…`. The paint-scale calls of this function
-  // (vAlign-centering measure in renderCell, and the dryRun measureCellContent
-  // path) MUST NOT overwrite the scale-1 stamp with paint-scale lines, so they are
-  // skipped here. `hasFloats` is always false: measureCellParagraphHeight passes `undefined`
-  // for the layoutLines wrap context (cell paragraphs are never wrapped around
-  // floats in the measure), and when a cell is painted inside a live float band
-  // renderParagraph takes its float path (case 3) and ignores this no-float stamp.
-  //
-  // Multiple scale-1 measures of the SAME cell (keepNext lookahead's
-  // estimateTableHeight, column-balancing's measureSectionColumnHeight, and the
-  // authoritative computeTablePtLayout that places the table) all reach here;
-  // last-writer-wins and the authoritative placement measure runs LAST, so its
-  // stamp — resolved at the SAME column width the paint pass uses — is the one that
-  // survives. Correctness never depends on which won: the paint gate re-derives the
-  // paragraph's width in scale-1 space and reuses the stamp ONLY when its recorded
-  // `paraW`/indent/grid/kinsoku match, else it recomputes (case 2). State-sensitive
-  // paragraphs (page/numPages fields, note refs) are excluded exactly as the body
-  // stamp excludes them — their segment text resolves against the real paint page.
-  // Nested tables recurse through the same path (measureCellElementHeight →
-  // estimateTableHeight → measureCellParagraphHeight at scale 1), so their inner cell
-  // paragraphs get stamped and reused by the same mechanism.
-  if (scale === 1 && !paragraphSegsStateSensitive(para)) {
-    stampParagraphLines(para, lines, {
-      paraW,
-      firstIndent: para.indentFirst,
-      tabOriginPx: indLeftPx, // == the PHYSICAL left indent at scale 1 (bidi swaps sides)
-      gridDeltaPx: gridCharDeltaPx(grid, 1),
-      hasFloats: false,
-      kinsoku: state.kinsoku,
-    });
-  }
-  if (paraHasRuby) {
-    // Ruby paragraph (§17.3.3.25 / §17.6.5): the paint pass (renderParagraph) and
-    // the paginator (estimateParagraphHeight) give EVERY line the same height —
-    // the tallest line's natural box snapped up to an integer docGrid pitch — so
-    // ruby-bearing and ruby-free lines share one baseline grid. Mirror that here
-    // (the row measurer previously summed each line's independent box, which
-    // under/over-measured a wrapped ruby cell relative to what it paints).
-    const uniform = snapParaLineToGrid(
-      Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText))),
-      grid,
-      scale,
-    );
-    return lines.length * uniform;
-  }
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, paragraphContext.hasEastAsianText), 0);
 }
 
 /** Effective cell margins (pt). Per-cell `<w:tcMar>` overrides (ECMA-376

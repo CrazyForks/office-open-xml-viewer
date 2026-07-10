@@ -862,9 +862,13 @@ export interface LineLayoutEnvironment {
   readonly currentNoteNumber?: number;
   readonly verticalCJK?: boolean;
 }
+
+export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
+  readonly documentHasEastAsianText: boolean;
+}
 ```
 
-Change `buildSegments` and `resolveFieldText` to accept this interface. The current `buildSegments` implementation reads only `verticalCJK`, note numbering, and `resolveFieldText`'s page/date fields from state; keep font classes on `TextMeasurer` and grid, kinsoku, tabs, and spacing on `ParagraphLayoutContext`. Verify this boundary with a `state.` usage scan and typecheck. Because `verticalCJK` remains optional, existing `RenderState` is structurally compatible.
+Change `buildSegments` and `resolveFieldText` to accept `LineLayoutEnvironment`. The current `buildSegments` implementation reads only `verticalCJK`, note numbering, and `resolveFieldText`'s page/date fields from state; keep font classes on `TextMeasurer` and grid, kinsoku, tabs, and spacing on `ParagraphLayoutContext`. `ParagraphMeasurementEnvironment.documentHasEastAsianText` preserves the existing document-level font-axis choice for empty and anchor-only paragraph marks; content lines continue to use `ParagraphLayoutContext.hasEastAsianText`. Measurement callers must populate it from document layout settings. Verify this boundary with a `state.` usage scan and typecheck.
 
 Define the measurement boundary explicitly:
 
@@ -921,6 +925,7 @@ export function measureParagraph(
   context: ParagraphLayoutContext,
   placement: ParagraphPlacement,
   measurer: TextMeasurer,
+  environment: ParagraphMeasurementEnvironment,
 ): MeasuredParagraph;
 ```
 
@@ -949,9 +954,11 @@ refactor(docx): add placement-aware paragraph measurement
 
 **Files:**
 - Modify: `packages/docx/src/renderer.ts`
+- Modify: `packages/docx/src/float-layout.ts`
 - Modify: `packages/docx/src/pagination.test.ts`
 - Modify: `packages/docx/src/cell-paragraph-line-reuse.test.ts`
 - Modify: `packages/docx/src/paginate-paint-line-count.test.ts`
+- Modify: `packages/docx/src/float-line-start-one-inch.test.ts`
 
 **Interfaces:**
 - `estimateParagraphHeight`, `splitParagraphAcrossPages`, `measureParaHeight`, and `layoutCellParagraphForRowSplit` consume `measureParagraph`.
@@ -971,6 +978,8 @@ pnpm vitest run packages/docx/src/pagination.test.ts packages/docx/src/cell-para
 
 Body estimation passes the active wrap oracle and placement. Cell measurement passes the table-cell context with no page wrap oracle. Paragraph splitting slices `MeasuredLine[]` and applies `keepLines` and widow/orphan rules without recalculating line advances.
 
+Preserving the first line's measured top displacement can expose page-scoped square floats registered in another newspaper column. Per §20.4.2.17, apply square wrapping only when the virtual wrap rectangle intersects the paragraph's horizontal line area; `wrapText` then selects the permitted side within that intersecting area.
+
 - [ ] **Step 4: Remove the test-only legacy toggle after equality passes**
 
 Keep characterization assertions, remove the alternate production code path, and ensure only one line measurement implementation remains.
@@ -979,6 +988,8 @@ Keep characterization assertions, remove the alternate production code path, and
 
 ```bash
 pnpm vitest run packages/docx/src/paragraph-measure.test.ts packages/docx/src/pagination.test.ts packages/docx/src/cell-paragraph-line-reuse.test.ts packages/docx/src/paginate-paint-line-count.test.ts packages/docx/src/table-split.test.ts
+pnpm vitest run packages/docx/src/float-line-start-one-inch.test.ts packages/docx/src/float-table-page-fit.test.ts
+pnpm vitest run packages/docx/src
 pnpm --filter @silurus/ooxml-docx typecheck
 git diff --check
 ```

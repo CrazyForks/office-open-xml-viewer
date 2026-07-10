@@ -196,7 +196,41 @@ async function reuseVsRecompute(model: DocxDocumentModel, width = 300): Promise<
   return { pages: pages.length, drawn, on: on.measures, off: off.measures, streams: on.perPage };
 }
 
+function tableMeasurementGeometry() {
+  const pages = paginateDocument(doc([wrapTable(8) as unknown as BodyElement]));
+  const tables = pages.flatMap((page) => page.filter((el) => el.type === 'table'));
+  return {
+    pageCount: pages.length,
+    rowHeightsPt: tables.flatMap((table) => table.tableRowHeightsPt ?? []),
+    cellLineCounts: tables.flatMap((table) =>
+      (table as unknown as DocTable).rows.flatMap((tableRow) =>
+        tableRow.cells.flatMap((tableCell) => tableCell.content.map((element) =>
+          (element as unknown as { layoutLines?: unknown[] }).layoutLines?.length ?? null,
+        )),
+      ),
+    ),
+  };
+}
+
 describe('table-cell paragraph line reuse — B2 T2', () => {
+  it('preserves table-cell heights and reusable line counts', () => {
+    const geometry = tableMeasurementGeometry();
+
+    expect(geometry.pageCount).toBe(2);
+    expect(geometry.rowHeightsPt).toEqual([
+      22.998046875,
+      22.998046875,
+      22.998046875,
+      22.998046875,
+      22.998046875,
+      22.998046875,
+      22.998046875,
+      11.4990234375,
+      11.4990234375,
+    ]);
+    expect(geometry.cellLineCounts).toEqual(Array.from({ length: 18 }, () => 2));
+  });
+
   it('(a) cell paragraphs reuse the paginator stamp: fewer paint measures, identical stream', async () => {
     const r = await reuseVsRecompute(doc([wrapTable(16) as unknown as BodyElement]));
     expect(r.pages).toBeGreaterThan(1); // table split across pages

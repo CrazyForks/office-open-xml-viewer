@@ -326,6 +326,124 @@ const textOf = (el: PaginatedBodyElement): string =>
         .join('')
     : '';
 
+function bodyPaginationGeometry(pages: PaginatedBodyElement[][]) {
+  return {
+    pageCount: pages.length,
+    pages: pages.map((page) => page.map((el) => {
+      const runtime = el as PaginatedBodyElement & {
+        layoutLines?: Array<{ topY?: number }>;
+        layoutLinesInputs?: { hasFloats: boolean };
+      };
+      return {
+        type: el.type,
+        lineSlice: sliceOf(el) ?? null,
+        columnIndex: el.colIndex ?? null,
+        columnTopPt: el.colTopPt ?? null,
+        measuredLineTopsPt: runtime.layoutLines?.map((line) => line.topY ?? null) ?? null,
+        measuredWithFloats: runtime.layoutLinesInputs?.hasFloats ?? null,
+      };
+    })),
+  };
+}
+
+describe('computePages — shared paragraph measurement migration geometry', () => {
+  it('preserves body page count, line ranges, and measured float top placement', () => {
+    const longText = 'あ'.repeat(72);
+    const followingText = '終'.repeat(16);
+    const body = [
+      paraWith([
+        shapeRun({ widthPt: 160, heightPt: 35, anchorYPt: 0, wrapMode: 'topAndBottom' }),
+      ]),
+      para({
+        text: longText,
+        fontSize: 20,
+        widowControl: false,
+        spaceBefore: 5,
+        spaceAfter: 7,
+      }),
+      para({ text: followingText, fontSize: 20 }),
+    ];
+    const pages = computePages(body, section(), makeCtx());
+    const geometry = bodyPaginationGeometry(pages);
+
+    expect(geometry.pageCount).toBe(3);
+    expect(geometry.pages.map((page) => page.map((el) => el.lineSlice))).toEqual([
+      [null, { start: 0, end: 2 }],
+      [{ start: 2, end: 7 }],
+      [{ start: 7, end: 9 }, null],
+    ]);
+    const measuredTops = Array.from({ length: 9 }, (_, index) => 80 + index * 20);
+    expect(geometry.pages.flatMap((page) => page)
+      .filter((el) => el.lineSlice !== null)
+      .map((el) => el.measuredLineTopsPt)).toEqual([
+      measuredTops,
+      measuredTops,
+      measuredTops,
+    ]);
+    expect(pages.findIndex((page) => page.some((el) => textOf(el) === followingText))).toBe(2);
+  });
+
+  it('remeasures destination placement when the first line cannot fit beside a page float', () => {
+    const targetText = 'あ'.repeat(16);
+    const body = [
+      paraWith([
+        shapeRun({ widthPt: 160, heightPt: 35, anchorYPt: 0, wrapMode: 'topAndBottom' }),
+      ]),
+      para({
+        text: targetText,
+        fontSize: 20,
+        widowControl: false,
+        spaceBefore: 30,
+      }),
+    ];
+
+    const pages = computePages(body, section(), makeCtx());
+    const geometry = bodyPaginationGeometry(pages);
+    const target = geometry.pages[1]?.find((el) => el.lineSlice?.start === 0);
+
+    expect(geometry.pageCount).toBe(2);
+    expect(target?.lineSlice).toEqual({ start: 0, end: 2 });
+    expect(target?.measuredWithFloats).toBe(false);
+    expect(target?.measuredLineTopsPt).toEqual([null, null]);
+  });
+
+  it('remeasures an unplaced paragraph at the next unequal-width column', () => {
+    const targetText = 'あ'.repeat(4);
+    const unequalColumns = section({
+      columns: {
+        count: 2,
+        spacePt: 0,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 100, spacePt: 12 },
+          { widthPt: 48, spacePt: 0 },
+        ],
+      },
+    });
+    const body = [
+      ...Array.from({ length: 4 }, () => para({ text: 'a', fontSize: 20 })),
+      para({ text: 'b', fontSize: 10 }),
+      para({ text: targetText, fontSize: 20, widowControl: false }),
+    ];
+
+    const pages = computePages(body, unequalColumns, makeCtx());
+    const target = pages[0]?.find((el) => textOf(el) === targetText) as
+      | (PaginatedBodyElement & {
+          layoutLinesInputs?: { paraW: number };
+          layoutLines?: Array<{ topY?: number }>;
+        })
+      | undefined;
+
+    expect(pages).toHaveLength(1);
+    expect(target?.colIndex).toBe(1);
+    expect(target?.colTopPt).toBe(20);
+    expect(target?.lineSlice).toEqual({ start: 0, end: 2 });
+    expect(target?.layoutLinesInputs?.paraW).toBe(48);
+    expect(target?.layoutLines?.map((line) => line.topY ?? null)).toEqual([null, null]);
+  });
+});
+
 describe('computePages — empty-paragraph relocation (C2: §17.3.1.29)', () => {
   it('moves an unsplittable mark-only paragraph to the next page instead of overflowing the bottom margin', () => {
     // content height = 140 - 40 = 100; each empty mark = 20px → exactly 5 per page.
