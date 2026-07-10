@@ -243,7 +243,11 @@ function rangeChars(fromCp: number, toCp: number): string[] {
 // a copy/paste artifact from the half-width `aiueo` entry (which legitimately has
 // 46 because half-width forms of ヰ/ヱ do not exist); we follow the explicit
 // enumerated character list, which is the concrete normative data a consumer maps
-// "respectively". Only values ≥ 45 are affected by the choice.
+// "respectively". Only values ≥ 45 are affected by the choice. Katakana (not
+// hiragana) is also what Word emits: [MS-OE376] §2.1.580 note (b) records that
+// where the (1st-edition Part 4) standard said "hiragana characters", "Word uses
+// these numbering formats to specify sequences that will consist of Katakana
+// characters" — matching the 5th-edition code-point list implemented here.
 const KATAKANA_FULLWIDTH: readonly string[] = [
   '\u{30A2}', '\u{30A4}', '\u{30A6}', '\u{30A8}', '\u{30AA}', '\u{30AB}',
   '\u{30AD}', '\u{30AF}', '\u{30B1}', '\u{30B3}', '\u{30B5}', '\u{30B7}',
@@ -258,7 +262,8 @@ const KATAKANA_FULLWIDTH: readonly string[] = [
 // §17.18.59 aiueo "AIUEO Order Half-Width Katakana" — positions 1–46 =
 // U+FF71–U+FF9C (ｱ..ﾜ), then U+FF66 (ｦ wo), then U+FF9D (ﾝ n). No archaic ヰ/ヱ
 // (they have no half-width forms). Same repeat scheme; spec example ｱ, ｲ, …, ｦ,
-// ﾝ, ｱｱ confirms wo/n at 45/46 and the wrap at 47.
+// ﾝ, ｱｱ confirms wo/n at 45/46 and the wrap at 47. Katakana per [MS-OE376]
+// §2.1.580 note (b) — see KATAKANA_FULLWIDTH above.
 const KATAKANA_HALFWIDTH: readonly string[] = [
   ...rangeChars(0xff71, 0xff9c),
   '\u{FF66}',
@@ -266,21 +271,17 @@ const KATAKANA_HALFWIDTH: readonly string[] = [
 ];
 
 // §17.18.59 decimalEnclosedCircle "Decimal Numbers Enclosed in a Circle": the
-// spec tables ONLY 1–20 → U+2460–U+2473 (①..⑳) and says values past the set
-// "fall back to the decimal format". Word, however, continues the visual sequence
-// with Unicode's own enclosed-number blocks — 21–35 → U+3251–U+325F (㉑..㉟) and
-// 36–50 → U+32B1–U+32BF (㊱..㊿) — and only degrades to decimal at 51+. We
-// reproduce Word's behaviour: the ranges are contiguous in value and use
-// Unicode's dedicated "Circled Number Twenty One … Fifty" code points, so this is
-// a deterministic extension of the tabled 1–20, not a tuned heuristic. Caller
+// spec tables 1–20 → U+2460–U+2473 (①..⑳) and states that "for values greater
+// than the size of the set, the items fall back to the decimal format" (its
+// example: …, ⑲, ⑳, 21, …). Unicode does carry follow-on enclosed-number blocks
+// (㉑..㉟ U+3251–U+325F, ㊱..㊿ U+32B1–U+32BF), but neither §17.18.59 nor the
+// Word implementation notes ([MS-OE376] §2.1.580, which records this section's
+// sibling deviations in detail) documents Word continuing the circled sequence
+// past 20 — so we stay with the specified decimal fallback at 21+ until primary
+// evidence (real Word output or an implementation note) shows otherwise. Caller
 // guarantees n ≥ 1.
 function toEnclosedCircle(n: number): string {
-  let cp: number;
-  if (n <= 20) cp = 0x2460 + (n - 1);
-  else if (n <= 35) cp = 0x3251 + (n - 21);
-  else if (n <= 50) cp = 0x32b1 + (n - 36);
-  else return String(n); // 51+ : §17.18.59 decimal fallback.
-  return String.fromCodePoint(cp);
+  return n <= 20 ? String.fromCodePoint(0x2460 + (n - 1)) : String(n);
 }
 
 // ── Positional digit substitution ───────────────────────────────────────────

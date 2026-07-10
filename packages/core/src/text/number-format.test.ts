@@ -245,13 +245,11 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
 
       // ── Enclosed / CJK sequence formats ─────────────────────────────────
       // decimalEnclosedCircle: §17.18.59 tables 1–20 → U+2460–U+2473 (①..⑳);
-      // Word continues the sequence with Unicode's enclosed-number blocks
-      // (21–35 → U+3251–U+325F ㉑..㉟, 36–50 → U+32B1–U+32BF ㊱..㊿) and only
-      // then falls back to decimal (51+). Boundaries 20/21, 35/36, 50/51.
+      // "for values greater than the size of the set, the items fall back to
+      // the decimal format" (spec example: …, ⑲, ⑳, 21, …). Boundary 20/21.
       ['decimalEnclosedCircle', [
         [1, '①'], [2, '②'], [3, '③'], [10, '⑩'],
-        [20, '⑳'], [21, '㉑'], [35, '㉟'], [36, '㊱'],
-        [50, '㊿'], [51, '51'], [100, '100'],
+        [20, '⑳'], [21, '21'], [100, '100'],
       ]],
       // aiueoFullWidth: §17.18.59 full-width katakana in a-i-u-e-o order. The
       // spec's ENUMERATED 48-code-point list includes the archaic ヰ/ヱ (so wo/n

@@ -731,7 +731,10 @@ fn repeat_alphabet(n: u32, glyphs: &[&str]) -> String {
 // alphabets. §17.18.59 ENUMERATES these 48 code points (incl. the archaic ヰ
 // U+30F0 and ヱ U+30F1, so wo/n land at 47/48). The section's "positions 1–46"
 // prose is a copy/paste artifact from the half-width `aiueo` entry; we follow the
-// explicit enumerated character list. Mirrors TS `KATAKANA_FULLWIDTH`.
+// explicit enumerated character list. Katakana (not hiragana) is also what Word
+// emits: [MS-OE376] §2.1.580 note (b) records that where the (1st-edition Part 4)
+// standard said "hiragana characters", Word uses katakana — matching the
+// 5th-edition code-point list implemented here. Mirrors TS `KATAKANA_FULLWIDTH`.
 const KATAKANA_FULLWIDTH: &[&str] = &[
     "\u{30A2}", "\u{30A4}", "\u{30A6}", "\u{30A8}", "\u{30AA}", "\u{30AB}", "\u{30AD}", "\u{30AF}",
     "\u{30B1}", "\u{30B3}", "\u{30B5}", "\u{30B7}", "\u{30B9}", "\u{30BB}", "\u{30BD}", "\u{30BF}",
@@ -743,7 +746,8 @@ const KATAKANA_FULLWIDTH: &[&str] = &[
 
 // §17.18.59 aiueo "AIUEO Order Half-Width Katakana" — positions 1–46 =
 // U+FF71–U+FF9C (ｱ..ﾜ), then U+FF66 (ｦ), then U+FF9D (ﾝ). No archaic ヰ/ヱ (no
-// half-width forms). Mirrors TS `KATAKANA_HALFWIDTH`.
+// half-width forms). Katakana per [MS-OE376] §2.1.580 note (b) — see
+// `KATAKANA_FULLWIDTH` above. Mirrors TS `KATAKANA_HALFWIDTH`.
 const KATAKANA_HALFWIDTH: &[&str] = &[
     "\u{FF71}", "\u{FF72}", "\u{FF73}", "\u{FF74}", "\u{FF75}", "\u{FF76}", "\u{FF77}", "\u{FF78}",
     "\u{FF79}", "\u{FF7A}", "\u{FF7B}", "\u{FF7C}", "\u{FF7D}", "\u{FF7E}", "\u{FF7F}", "\u{FF80}",
@@ -753,23 +757,23 @@ const KATAKANA_HALFWIDTH: &[&str] = &[
     "\u{FF99}", "\u{FF9A}", "\u{FF9B}", "\u{FF9C}", "\u{FF66}", "\u{FF9D}",
 ];
 
-/// §17.18.59 decimalEnclosedCircle: the spec tables ONLY 1–20 → U+2460–U+2473
-/// (①..⑳) with a decimal fallback past the set, but Word continues the sequence
-/// with Unicode's enclosed-number blocks — 21–35 → U+3251–U+325F (㉑..㉟), 36–50 →
-/// U+32B1–U+32BF (㊱..㊿) — degrading to decimal only at 51+. Deterministic
-/// extension of the tabled range (Unicode's own code points, contiguous in
-/// value), not a tuned heuristic. Mirrors TS `toEnclosedCircle`. Caller guarantees
-/// n ≥ 1 (n = 0 is handled by the early return in `format_counter`).
+/// §17.18.59 decimalEnclosedCircle: the spec tables 1–20 → U+2460–U+2473 (①..⑳)
+/// and states that "for values greater than the size of the set, the items fall
+/// back to the decimal format" (its example: …, ⑲, ⑳, 21, …). Unicode does carry
+/// follow-on enclosed-number blocks (㉑..㉟ U+3251–U+325F, ㊱..㊿ U+32B1–U+32BF),
+/// but neither §17.18.59 nor the Word implementation notes ([MS-OE376] §2.1.580,
+/// which records this section's sibling deviations in detail) documents Word
+/// continuing the circled sequence past 20 — so we stay with the specified
+/// decimal fallback at 21+ until primary evidence (real Word output or an
+/// implementation note) shows otherwise. Mirrors TS `toEnclosedCircle`. Caller
+/// guarantees n ≥ 1 (n = 0 is handled by the early return in `format_counter`).
 fn to_enclosed_circle(n: u32) -> String {
-    let cp = match n {
-        1..=20 => 0x2460 + (n - 1),
-        21..=35 => 0x3251 + (n - 21),
-        36..=50 => 0x32B1 + (n - 36),
-        _ => return n.to_string(), // 51+ : §17.18.59 decimal fallback.
-    };
-    char::from_u32(cp)
-        .map(String::from)
-        .unwrap_or_else(|| n.to_string())
+    match n {
+        1..=20 => char::from_u32(0x2460 + (n - 1))
+            .map(String::from)
+            .unwrap_or_else(|| n.to_string()),
+        _ => n.to_string(), // 21+ : §17.18.59 decimal fallback.
+    }
 }
 
 // Positional digit sets, index 0 = zero glyph … index 9 (§17.18.59).
@@ -1429,20 +1433,11 @@ mod tests {
                 &[(1, "01"), (9, "09"), (10, "10"), (100, "100")],
             ),
             // Enclosed decimals + katakana a-i-u-e-o sequences (§17.18.59).
-            // decimalEnclosedCircle: boundaries 20/21, 35/36, 50/51 (Word extends
-            // the tabled 1–20 through U+3251–U+325F and U+32B1–U+32BF, then decimal).
+            // decimalEnclosedCircle: 1–20 tabled (①..⑳); 21+ falls back to
+            // decimal per the spec example "…, ⑲, ⑳, 21, …". Boundary 20/21.
             (
                 "decimalEnclosedCircle",
-                &[
-                    (1, "①"),
-                    (20, "⑳"),
-                    (21, "㉑"),
-                    (35, "㉟"),
-                    (36, "㊱"),
-                    (50, "㊿"),
-                    (51, "51"),
-                    (100, "100"),
-                ],
+                &[(1, "①"), (20, "⑳"), (21, "21"), (100, "100")],
             ),
             // aiueoFullWidth: 48-entry enumerated set incl. archaic ヰ/ヱ, so wo/n
             // sit at 47/48; repeat past 48.
