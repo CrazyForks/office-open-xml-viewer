@@ -9693,7 +9693,60 @@ function measureCellParagraphHeight(
         },
       );
     }
-    return (measured.contentEndYPt - measured.placement.startYPt) * scale;
+    // measureParagraph works in scale-1 points (its contract). A geometric
+    // `× scale` of that height is the exact anti-pattern rescaleLayoutLines
+    // exists to avoid: a real (hinted) font's Canvas metrics are NOT scale-linear
+    // (`metric(pt·s) ≠ s·metric(pt)`; see rescaleLayoutLines' header and
+    // layout-lines-scale-invariance.test.ts), so `scale1Height × scale` drifts
+    // from the height the paint pass (renderParagraph) actually draws. Reproduce
+    // the SAME scale-1-partition → paint-scale bridge paint uses, so the measured
+    // cell height equals the painted height at `scale` — the height that feeds
+    // vAlign centring (renderCell) and the content-driven row-height fallback
+    // (computeTableLayout → resolveTableRowHeights).
+    const scale1ContentHeight = measured.contentEndYPt - measured.placement.startYPt;
+    if (scale === 1) return scale1ContentHeight;
+    const paraHasRuby = paragraphContext.hasRuby;
+    const eastAsian = paragraphContext.hasEastAsianText;
+    if (measured.markOnly || measured.lines.length === 0) {
+      // Empty / anchor-only paragraph mark (§17.3.1.29): renderEmptyMarkParagraph
+      // reserves the mark-line height at the PAINT scale, not scale-1 × scale.
+      return paragraphMarkLineHeight(
+        para,
+        scale,
+        grid,
+        paraHasRuby,
+        state.docEastAsian,
+        state.ctx,
+        state.fontFamilyClasses,
+      );
+    }
+    // Rehydrate the scale-1 line PARTITION to the paint scale exactly as
+    // renderParagraph does (re-measure every line's glyph geometry), then advance
+    // by the per-line box height with the SAME ruby/docGrid/lineSpacing resolver
+    // (§17.3.1.33). A table cell carries no page-level float wrap oracle, so no
+    // line has a topY jump; the painted content height is Σ lineHForLine over the
+    // whole, unsliced paragraph.
+    const paintLines = rescaleLayoutLines(
+      measured.lines.map((line) => line.layout),
+      scale,
+      state.ctx,
+      state.fontFamilyClasses,
+      gridCharDeltaPx(grid, scale),
+    );
+    const uniformLineH = paraHasRuby
+      ? snapParaLineToGrid(
+          Math.max(0, ...paintLines.map((l) => lineBoxHeight(
+            para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, eastAsian,
+          ))),
+          grid,
+          scale,
+        )
+      : 0;
+    const lineHForLine = (l: LayoutLine): number =>
+      paraHasRuby
+        ? uniformLineH
+        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, eastAsian);
+    return paintedParagraphHeight(paintLines, 0, paintLines.length, 0, lineHForLine);
   }
 }
 
