@@ -160,8 +160,16 @@ import {
 import {
   createFloatWrapOracle,
   measureParagraph,
+  type MeasuredParagraph,
   type ParagraphMeasurementEnvironment,
 } from './paragraph-measure.js';
+import {
+  paragraphFragmentAdvancePt,
+  type DocumentLayout,
+  type LayoutPage,
+  type ParagraphFragment,
+  type PlacedFragment,
+} from './layout-fragments.js';
 import {
   drawVerticalRun,
   drawTateChuYokoRun,
@@ -2941,6 +2949,14 @@ export function computePages(
           addReservePt = sumReserve(newRefIds);
         }
       } else {
+        // PR 5 — attach the placement-aware fragment for this non-split paragraph
+        // (measured at its FINAL placement, `measureState.y`, after any relocation).
+        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {
+          paragraphXPt: colX(),
+          availableWidthPt: colW(),
+          suppressSpaceBefore: suppressBefore,
+          columnIndex: colIndex,
+        });
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
@@ -3557,6 +3573,60 @@ export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[]
   );
 }
 
+/**
+ * PR 5 — produce the immutable body {@link DocumentLayout}: pages of
+ * {@link PlacedFragment}s over body paragraphs. Pagination is the SAME engine
+ * `paginateDocument` runs (so page assignment, splitting, sections and columns are
+ * identical); this projects the fragments the paginator attached to each body
+ * paragraph element into a frozen result. Tables, headers/footers and floating
+ * content stay on the `PaginatedBodyElement[][]` path until PR 6, so a page's
+ * `fragments` cover its body PARAGRAPHS only (`FlowFragment` is paragraph-only in
+ * PR 5). The section context and page geometry come from each page's stamped section
+ * (a mid-document section break changes them), falling back to the body section.
+ */
+export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d');
+  if (!ctx) return Object.freeze({ pages: Object.freeze([]) });
+  const layoutDoc = verticalLayoutDoc(doc);
+  const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
+  const pages = paginateWithHeaderFooterReserve(
+    layoutDoc,
+    ctx,
+    layoutDoc.fontFamilyClasses ?? {},
+    layoutSettings,
+    layoutDoc.footnotes ?? [],
+  );
+  const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
+    const geomOverride = (elements[0] as PaginatedBodyElement | undefined)?.sectionGeom;
+    const sectionProps: SectionProps = geomOverride
+      ? { ...layoutDoc.section, ...geomOverride }
+      : layoutDoc.section;
+    const section = resolveSectionLayoutContext(layoutSettings, sectionProps);
+    const geometry: SectionGeom = {
+      pageWidth: sectionProps.pageWidth,
+      pageHeight: sectionProps.pageHeight,
+      marginTop: sectionProps.marginTop,
+      marginRight: sectionProps.marginRight,
+      marginBottom: sectionProps.marginBottom,
+      marginLeft: sectionProps.marginLeft,
+      headerDistance: sectionProps.headerDistance,
+      footerDistance: sectionProps.footerDistance,
+    };
+    const fragments: PlacedFragment[] = [];
+    for (const el of elements) {
+      const placed = bodyParagraphFragments.get(el as object);
+      if (placed) fragments.push(placed);
+    }
+    return Object.freeze({
+      pageIndex,
+      section,
+      geometry,
+      fragments: Object.freeze(fragments) as readonly PlacedFragment[],
+    });
+  });
+  return Object.freeze({ pages: Object.freeze(layoutPages) as readonly LayoutPage[] });
+}
+
 function buildMeasureState(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   section: SectionProps,
@@ -3640,6 +3710,134 @@ function paragraphMeasurementEnvironment(
     verticalCJK: state.verticalCJK,
     documentHasEastAsianText: state.docEastAsian,
   };
+}
+
+// ===== Body layout fragments (PR 5) =====
+//
+// The paginator associates an immutable {@link PlacedFragment} with each body
+// paragraph element it emits, keyed by the element object in a side table (never a
+// field on the element, because a NON-split paragraph element IS the parsed
+// `DocParagraph` — writing a field would mutate the source model). {@link layoutDocument}
+// assembles those into a {@link DocumentLayout}; body paint (PR 5 Task 13) consumes
+// the fragment's stored scale-1 geometry without re-laying-out the paragraph. This
+// leaves the existing `PaginatedBodyElement[][]` shape byte-identical, so every
+// unmigrated caller (tables, headers/footers, the vertical-text prebuilt-pages swap)
+// is unaffected.
+
+/** Side table: emitted body element -> its placed paragraph fragment. WeakMap so an
+ *  element that is garbage collected drops its entry, and so the parsed `DocParagraph`
+ *  is never mutated (a non-split paragraph element is the source object itself). */
+const bodyParagraphFragments = new WeakMap<object, PlacedFragment>();
+
+/** Read the placed fragment the paginator associated with an emitted body element,
+ *  if any (paragraph elements the fragment migration covers). */
+export function bodyFragmentFor(el: PaginatedBodyElement): PlacedFragment | undefined {
+  return bodyParagraphFragments.get(el as object);
+}
+
+/** Build an immutable body paragraph fragment. `source` is the PARSED paragraph
+ *  (never a slice clone); `measured` is its placement-aware measurement;
+ *  `[lineStart, lineEnd)` selects the painted lines. Leading spacing is charged only
+ *  on the first slice and trailing only on the final slice, so paragraph spacing is
+ *  owned by the fragment and counted exactly once (design §"Measured Fragment Model"). */
+function buildParagraphFragment(
+  source: DocParagraph,
+  measured: MeasuredParagraph,
+  lineStart: number,
+  lineEnd: number,
+  isFirstSlice: boolean,
+  isFinalSlice: boolean,
+  trailingExtentPt: number,
+): ParagraphFragment {
+  const leadingSpacePt = isFirstSlice
+    ? measured.contentStartYPt - measured.placement.startYPt
+    : 0;
+  const trailingSpacePt = isFinalSlice ? trailingExtentPt : 0;
+  return Object.freeze({
+    kind: 'paragraph',
+    source,
+    measured,
+    lineStart,
+    lineEnd,
+    leadingSpacePt,
+    trailingSpacePt,
+  });
+}
+
+/** Place a paragraph fragment at page-absolute scale-1 coordinates. `heightPt` is the
+ *  cursor advancement (leadingSpacePt + measured line advances + trailingSpacePt). */
+function placeParagraphFragment(
+  fragment: ParagraphFragment,
+  columnIndex: number,
+  xPt: number,
+  yPt: number,
+  widthPt: number,
+): PlacedFragment {
+  return Object.freeze({
+    fragment,
+    columnIndex,
+    xPt,
+    yPt,
+    widthPt,
+    heightPt: paragraphFragmentAdvancePt(fragment),
+  });
+}
+
+/** Measure a NON-split body paragraph at its final placement (the same measurement
+ *  {@link estimateParagraphHeight} makes for the fit decision) and attach its placed
+ *  fragment covering the whole line range. */
+function attachBodyParagraphFragment(
+  el: PaginatedElementWithLines,
+  source: DocParagraph,
+  measureState: RenderState,
+  placement: {
+    paragraphXPt: number;
+    availableWidthPt: number;
+    suppressSpaceBefore: boolean;
+    columnIndex: number;
+  },
+): void {
+  const paragraphContext = resolveBodyParagraphLayoutContext(measureState, source);
+  const measured = measureParagraph(
+    source,
+    paragraphContext,
+    {
+      startYPt: measureState.y,
+      paragraphXPt: placement.paragraphXPt,
+      availableWidthPt: placement.availableWidthPt,
+      maximumYPt: measureState.pageH,
+      suppressSpaceBefore: placement.suppressSpaceBefore,
+      wrap: measureState.floats.length > 0
+        ? createFloatWrapOracle(measureState.floats)
+        : undefined,
+    },
+    {
+      context: measureState.ctx,
+      fontFamilyClasses: measureState.fontFamilyClasses,
+    },
+    paragraphMeasurementEnvironment(measureState),
+  );
+  const trailingExtentPt = Math.max(
+    measured.requestedSpaceAfterPt,
+    bottomBorderExtentPt(source.borders),
+  );
+  const lineEnd = measured.markOnly ? 0 : measured.lines.length;
+  const fragment = buildParagraphFragment(
+    source,
+    measured,
+    0,
+    lineEnd,
+    true,
+    true,
+    trailingExtentPt,
+  );
+  bodyParagraphFragments.set(el, placeParagraphFragment(
+    fragment,
+    placement.columnIndex,
+    placement.paragraphXPt,
+    measured.placement.startYPt,
+    placement.availableWidthPt,
+  ));
 }
 
 function estimateParagraphHeight(
@@ -3925,6 +4123,32 @@ function splitParagraphAcrossPages(
           hasFloats: measured.placement.wrap !== undefined,
           kinsoku: measureState.kinsoku,
         });
+      }
+      // PR 5 — attach this slice's placement-aware fragment. All slices share the
+      // paragraph measurement; `[firstFitting, lastFitting)` selects the painted
+      // lines, leading spacing rides the first slice and trailing the last. The
+      // slice top is page-absolute: the section body inset plus the content-relative
+      // cursor (matching `stamp`'s `colTopPt` convention).
+      {
+        const topInset = tagSectionGeom
+          ? bodyMarginInsetPt(tagSectionGeom().marginTop)
+          : measureState.marginTop;
+        const fragment = buildParagraphFragment(
+          para,
+          measured,
+          firstFitting,
+          lastFitting,
+          firstFitting === 0,
+          isFinalSlice,
+          trailingExtent,
+        );
+        bodyParagraphFragments.set(sliceEl, placeParagraphFragment(
+          fragment,
+          tagColIndex ? tagColIndex() : 0,
+          paragraphXPt(),
+          topInset + cursorY,
+          contentWPt(),
+        ));
       }
       pages[pages.length - 1].push(stamp(sliceEl));
       lineIdx = lastFitting;
