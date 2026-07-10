@@ -396,9 +396,24 @@ type LayoutSegment = {
 
 interface LayoutLine {
   segments: LayoutSegment[];
-  /** Segments right-aligned at a tab stop (set when paragraph contains \t and a right-aligned tabStop) */
+  /** Segments aligned at a right/centre tab stop (set when the paragraph
+   *  contains a `\t` resolving to an `algn="r"|"ctr"` stop).
+   *
+   *  KNOWN MODEL LIMITS (pre-existing, LTR and RTL alike — follow-up #916):
+   *  - ONE cell slot per line: a second right/centre tab on the same line
+   *    re-assigns this object with empty `segments`, dropping the text
+   *    collected for the first cell.
+   *  - Cell segments bypass the UAX#9 visual reorder (`computeLineVisualOrder`
+   *    applies to `LayoutLine.segments` only): they are drawn sequentially in
+   *    logical order under a single ctx.direction, so mixed-direction cell
+   *    content does not reorder. docx instead models tabs as inline segments
+   *    classified Bidi_Class S — the shape a fix should take.
+   *  - Start ('l') / 'dec' tabs never populate this slot; they advance the
+   *    layout pen inline and the gap is not rendered. */
   tabStop?: {
-    /** Tab stop position in px from the left edge of the text area (bx + lPad + tabStop.px = canvas X) */
+    /** Stop position in px from the LEADING text-inset edge (logical,
+     *  §21.1.2.1): canvas X = bx + lPad + px under LTR, bx + bw − rPad − px
+     *  under an RTL base. */
     px: number;
     algn: string;
     segments: LayoutSegment[];
@@ -3396,7 +3411,9 @@ export function renderTextBody(
       // RTL cell on the wrong side (issue #831). This mirrors the docx fix (#830 /
       // #835: `layoutBidiTabStops` / `nextTabStopRtl` resolve stops against the
       // leading text margin in the reading frame). DrawingML tabs carry no leader,
-      // so — unlike docx — there is nothing to paint across the gap.
+      // so — unlike docx — there is nothing to paint across the gap. Known model
+      // limits (ONE cell per line; cell contents bypass the UAX#9 reorder): see
+      // the LayoutLine.tabStop doc — follow-up #916.
       let tabPenX: number;
       if (baseRtl) {
         const tabAbsX = bx + bw - rPad - line.tabStop.px;
