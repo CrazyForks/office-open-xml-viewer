@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   renderDocumentToCanvas,
   paginateDocument,
+  bodyFragmentFor,
+  __test_setBodyFragment,
   __test_setLineReuseEnabled,
   __test_setFragmentPaintEnabled,
 } from './renderer.js';
@@ -300,5 +302,50 @@ describe('body paint byte-identity — fragment paint and compute-once line reus
     const first = await renderAllPages(model, pages);
     const second = await renderAllPages(model, pages);
     for (let p = 0; p < first.perPage.length; p++) expect(second.perPage[p]).toEqual(first.perPage[p]);
+  });
+
+  it('stale-placement fragment (a NEWER narrower measurement) → placement guard falls back to legacy, output correct', async () => {
+    // Design invariant: "a measurement is valid only for its recorded placement".
+    // A fragment measured for one placement must never be painted at another. Here the
+    // width-180 prebuiltPages carry the paragraph p (its element stamps say the column
+    // is 180 pt wide), but the side table is poisoned with a fragment measured at
+    // width 100 (a 3-line partition) whose SOURCE is still p. Painting it would draw
+    // the wrong (narrower) line breaks; the placement guard in
+    // isFragmentPaintableParagraph detects the fragment's recorded availableWidthPt
+    // (100) ≠ the paint column width (180) and falls back to legacy renderParagraph,
+    // which reproduces the correct width-180 layout.
+    //
+    // The stale fragment is INJECTED rather than produced by a second pagination:
+    // re-paginating the same p rewrites its colGeom/section stamps too, so the paint
+    // width would track the stale fragment and no mismatch would be observable — a
+    // faithful reproduction of "a stale side-table entry from a newer re-pagination
+    // paints older prebuiltPages" without corrupting the element geometry.
+    const p = para(Array.from({ length: 30 }, () => 'w').join(' '));
+    const wideModel = doc([p as unknown as BodyElement], 600); // colW 180
+    // A narrow pagination of the SAME p yields a width-100 fragment whose source is p.
+    const narrowModel = doc([p as unknown as BodyElement], 600);
+    (narrowModel.section as SectionProps).pageWidth = 120; // colW 100
+    paginateDocument(narrowModel);
+    const stale = bodyFragmentFor(paginateDocument(narrowModel)[0][0]);
+    if (!stale) throw new Error('expected a narrow fragment to capture');
+    expect(stale.fragment.measured.placement.availableWidthPt).toBeCloseTo(100, 6);
+    expect(stale.fragment.source).toBe(p); // same source paragraph, different placement
+    // Re-paginate wide LAST so p's element stamps + prebuiltPages are the width-180 layout.
+    const pagesWide = paginateDocument(wideModel);
+    // Poison the side table for p's element with the stale width-100 fragment.
+    __test_setBodyFragment(pagesWide[0][0], stale);
+
+    const production = await renderVariant(wideModel, pagesWide, { fragmentPaint: true, reuse: true });
+    const legacy = await renderVariant(wideModel, pagesWide, { fragmentPaint: false, reuse: true });
+    expect(production.perPage.length).toBe(legacy.perPage.length);
+    for (let pg = 0; pg < production.perPage.length; pg++) {
+      // Guard falls back to legacy renderParagraph, so production === legacy (the
+      // correct width-180 layout). Without the guard, production paints the width-100
+      // fragment's 3-line partition and diverges — this is the Red case.
+      expect(production.perPage[pg]).toEqual(legacy.perPage[pg]);
+    }
+    // Non-vacuity: the paragraph wrapped (multiple painted lines), so the stale
+    // width-100 fragment would have been a visible divergence had the guard not fired.
+    expect(production.perPage[0].filter((c) => c.op !== 'img').length).toBeGreaterThan(1);
   });
 });

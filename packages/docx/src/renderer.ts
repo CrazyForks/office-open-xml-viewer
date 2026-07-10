@@ -3739,6 +3739,18 @@ export function bodyFragmentFor(el: PaginatedBodyElement): PlacedFragment | unde
   return bodyParagraphFragments.get(el as object);
 }
 
+/** TEST ONLY — inject a placed fragment into the body-fragment side table for an
+ *  emitted element, isolating a MISMATCHED (stale-placement) fragment to exercise the
+ *  placement guard. Re-paginating the same paragraph cannot isolate this: it rewrites
+ *  the element's colGeom/section stamps too, so the paint width tracks the stale
+ *  fragment and no mismatch is observable. */
+export const __test_setBodyFragment = (
+  el: PaginatedBodyElement,
+  placed: PlacedFragment,
+): void => {
+  bodyParagraphFragments.set(el as object, placed);
+};
+
 /** Build an immutable body paragraph fragment. `source` is the PARSED paragraph
  *  (never a slice clone); `measured` is its placement-aware measurement;
  *  `[lineStart, lineEnd)` selects the painted lines. Leading spacing is charged only
@@ -5732,7 +5744,7 @@ function renderBodyElements(
       // The fragment already carries this element's slice, so `slice` is not
       // re-passed; suppression and border-merge are paint-adjacency inputs.
       const placedFragment = bodyFragmentFor(el);
-      if (isFragmentPaintableParagraph(para, placedFragment, state)) {
+      if (isFragmentPaintableParagraph(para, placedFragment, state, slice === undefined)) {
         paintParagraphFragment(placedFragment, state, {
           suppressSpaceBefore: suppress || isContinuation,
           borderMerge,
@@ -6594,21 +6606,47 @@ let fragmentPaintEnabled = true;
  *  §17.3.2.10), whereas paint recomputes the lines vertically. Vertical text is
  *  migrated with the vertical-text follow-up.
  *  Excluded paragraphs stay on the legacy `renderParagraph` path; they are migrated
- *  with markers / floats / table cells in later work. */
+ *  with markers / floats / table cells in later work.
+ *
+ *  PLACEMENT SANITY GUARD (design §"Placement-Aware Paragraph Measurement": "a
+ *  measurement is valid only for its recorded placement"). The fragment is associated
+ *  through a WeakMap keyed by the emitted element; the paint pass trusts that
+ *  association. As a cheap safety net against a STALE entry (e.g. a newer
+ *  re-pagination overwrote the side table while these older prebuiltPages are being
+ *  painted), verify the fragment still matches THIS paint's placement before trusting
+ *  it: its recorded `availableWidthPt` must equal the current paint column width
+ *  (state.contentW rescaled to scale-1 pt), and — for a NON-split paragraph, whose
+ *  emitted element IS the parsed paragraph — its `source` must be this very paragraph
+ *  (a split slice's source is intentionally the ORIGINAL paragraph, not the slice
+ *  element, so that identity is skipped for slices). On any mismatch we fall through
+ *  to the correct-but-slower legacy `renderParagraph` path; we never throw. */
 function isFragmentPaintableParagraph(
   para: DocParagraph,
   placed: PlacedFragment | undefined,
   state: RenderState,
+  isNonSplitElement: boolean,
 ): placed is PlacedFragment {
-  return (
-    fragmentPaintEnabled &&
-    placed !== undefined &&
-    para.numbering == null &&
-    state.floats.length === 0 &&
-    !state.verticalCJK &&
-    placed.fragment.measured.placement.wrap === undefined &&
-    !paragraphSegsStateSensitive(para)
-  );
+  if (
+    !fragmentPaintEnabled ||
+    placed === undefined ||
+    para.numbering != null ||
+    state.floats.length !== 0 ||
+    state.verticalCJK ||
+    placed.fragment.measured.placement.wrap !== undefined ||
+    paragraphSegsStateSensitive(para)
+  ) {
+    return false;
+  }
+  // Placement guard: the fragment's recorded band width must equal this paint's
+  // column width (both in scale-1 pt; state.contentW = colW·scale). A magnitude-
+  // relative epsilon absorbs float round-off between the two derivations.
+  const paintAvailableWidthPt = state.contentW / state.scale;
+  const recordedWidthPt = placed.fragment.measured.placement.availableWidthPt;
+  const widthMatches =
+    Math.abs(recordedWidthPt - paintAvailableWidthPt) <=
+    1e-6 * Math.max(1, Math.abs(paintAvailableWidthPt));
+  const sourceMatches = !isNonSplitElement || placed.fragment.source === para;
+  return widthMatches && sourceMatches;
 }
 
 /**
