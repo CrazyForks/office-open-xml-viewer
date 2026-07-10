@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "declaration": true,
+    // No @types/node: the published entry must compile — and its emitted
+    // .d.ts must type-check — for browser consumers that do not install Node
+    // types. Referencing a Node global (e.g. `Buffer`) here is a build error
+    // by design.
+    "types": []
+  },
+  "include": ["src/index.ts"]
+}

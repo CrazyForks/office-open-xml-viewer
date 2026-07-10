@@ -38,9 +38,31 @@
  * matching `reinit` declaration so the workers can `import { reinit }` under
  * `tsc` without a `@ts-ignore`.
  *
+ * PACKAGING: wasm-pack also drops a `.gitignore` (`*`) into its `--out-dir`.
+ * Because that nested ignore lives *inside* the parser package's `src/` (which
+ * the package's `files` allowlist ships), `npm pack` honours it and silently
+ * drops the whole `src/wasm/` directory from the published tarball — so the
+ * `./wasm` and `./wasm-binary` subpath exports would resolve to files that are
+ * not in the package. (The workspace root `.gitignore` already ignores each
+ * parser package's `src/wasm/` dir, so removing the nested copy has no effect
+ * on git.)
+ * We delete that nested `.gitignore` on every build so the generated glue and
+ * `_bg.wasm` are actually included when the parser packages are published.
+ *
  * Usage: node scripts/append-wasm-reinit.mjs <path-to-glue.js> [...more]
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+/** Remove the wasm-pack-generated `.gitignore` (`*`) from the glue's directory
+ *  so `npm pack` does not exclude the wasm assets from the published tarball. */
+function dropWasmPackGitignore(jsPath) {
+  const ignorePath = join(dirname(jsPath), '.gitignore');
+  if (existsSync(ignorePath)) {
+    rmSync(ignorePath);
+    console.log(`append-wasm-reinit: removed ${ignorePath} so wasm assets ship in the package`);
+  }
+}
 
 const MARKER = '// --- RB6 reinit: forced fresh WebAssembly instance (appended by scripts/append-wasm-reinit.mjs) ---';
 
@@ -107,6 +129,10 @@ for (const path of process.argv.slice(2)) {
     failed = true;
     continue;
   }
+
+  // Runs regardless of whether the reinit marker is already present, so the
+  // wasm assets always ship even on an incremental rebuild.
+  dropWasmPackGitignore(path);
 
   if (src.includes(MARKER)) {
     console.log(`append-wasm-reinit: ${path} already has reinit, skipping .js`);
