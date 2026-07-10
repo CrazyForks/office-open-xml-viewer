@@ -2741,7 +2741,11 @@ export function computePages(
       const nextEl = body[i + 1];
       const nextShares = nextEl?.type === 'paragraph'
         && parasShareBorderBox(para, nextEl);
-      const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX(), nextShares);
+      // M-1 — take the fit-decision measurement ONCE and reuse it for the fragment
+      // when this paragraph is not relocated (attachBodyParagraphFragment re-checks
+      // placement equality before trusting it).
+      const fitMeasured = measureBodyParagraphAtCursor(measureState, para, colW(), suppressBefore, colX());
+      const h = paragraphHeightFromMeasured(fitMeasured, para, nextShares);
 
       // ECMA-376 §17.11: a footnote shares the page with its reference, so the
       // body must stop short of the footnote area. Measure the footnotes this
@@ -2955,12 +2959,14 @@ export function computePages(
       } else {
         // PR 5 — attach the placement-aware fragment for this non-split paragraph
         // (measured at its FINAL placement, `measureState.y`, after any relocation).
+        // M-1: hand it the fit-decision measurement; it is reused only if the final
+        // placement still matches (no relocation), else remeasured.
         attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {
           paragraphXPt: colX(),
           availableWidthPt: colW(),
           suppressSpaceBefore: suppressBefore,
           columnIndex: colIndex,
-        });
+        }, fitMeasured);
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
@@ -3799,9 +3805,24 @@ function placeParagraphFragment(
   });
 }
 
-/** Measure a NON-split body paragraph at its final placement (the same measurement
- *  {@link estimateParagraphHeight} makes for the fit decision) and attach its placed
- *  fragment covering the whole line range. */
+/** Master switch for the M-1 fit-check measurement reuse. Always ON in production; the
+ *  non-vacuity test flips it OFF to force a second measurement and assert the reuse
+ *  really avoided one (fewer measureText calls during pagination) with identical output.
+ *  Module-local. */
+let fitMeasureReuseEnabled = true;
+
+/** Measure a NON-split body paragraph at its final placement and attach its placed
+ *  fragment covering the whole line range.
+ *
+ *  M-1 — the fit decision already measured this paragraph at the cursor placement
+ *  ({@link measureBodyParagraphAtCursor}). When the paragraph was NOT relocated after
+ *  that estimate its final placement is identical, so `fitMeasured` is reused instead
+ *  of measuring a second time. The reuse is keyed on placement VALUE equality (start Y,
+ *  paragraph X, width, page limit, space-before suppression), never on paragraph
+ *  identity: a relocation to the next column/page changes `measureState.y` (and X), so
+ *  the gate rejects the stale estimate and remeasures at the new placement. Only the
+ *  float-free case is reused — a paragraph in a float context always remeasures, since
+ *  its wrap window depends on the live float set. */
 function attachBodyParagraphFragment(
   el: PaginatedElementWithLines,
   source: DocParagraph,
@@ -3812,27 +3833,39 @@ function attachBodyParagraphFragment(
     suppressSpaceBefore: boolean;
     columnIndex: number;
   },
+  fitMeasured?: MeasuredParagraph,
 ): void {
   const paragraphContext = resolveBodyParagraphLayoutContext(measureState, source);
-  const measured = measureParagraph(
-    source,
-    paragraphContext,
-    {
-      startYPt: measureState.y,
-      paragraphXPt: placement.paragraphXPt,
-      availableWidthPt: placement.availableWidthPt,
-      maximumYPt: measureState.pageH,
-      suppressSpaceBefore: placement.suppressSpaceBefore,
-      wrap: measureState.floats.length > 0
-        ? createFloatWrapOracle(measureState.floats)
-        : undefined,
-    },
-    {
-      context: measureState.ctx,
-      fontFamilyClasses: measureState.fontFamilyClasses,
-    },
-    paragraphMeasurementEnvironment(measureState),
-  );
+  const measured =
+    fitMeasured !== undefined &&
+    fitMeasureReuseEnabled &&
+    measureState.floats.length === 0 &&
+    fitMeasured.placement.wrap === undefined &&
+    fitMeasured.placement.startYPt === measureState.y &&
+    fitMeasured.placement.paragraphXPt === placement.paragraphXPt &&
+    fitMeasured.placement.availableWidthPt === placement.availableWidthPt &&
+    fitMeasured.placement.maximumYPt === measureState.pageH &&
+    fitMeasured.placement.suppressSpaceBefore === placement.suppressSpaceBefore
+      ? fitMeasured
+      : measureParagraph(
+          source,
+          paragraphContext,
+          {
+            startYPt: measureState.y,
+            paragraphXPt: placement.paragraphXPt,
+            availableWidthPt: placement.availableWidthPt,
+            maximumYPt: measureState.pageH,
+            suppressSpaceBefore: placement.suppressSpaceBefore,
+            wrap: measureState.floats.length > 0
+              ? createFloatWrapOracle(measureState.floats)
+              : undefined,
+          },
+          {
+            context: measureState.ctx,
+            fontFamilyClasses: measureState.fontFamilyClasses,
+          },
+          paragraphMeasurementEnvironment(measureState),
+        );
   const trailingExtentPt = Math.max(
     measured.requestedSpaceAfterPt,
     bottomBorderExtentPt(source.borders),
@@ -3856,23 +3889,24 @@ function attachBodyParagraphFragment(
   ));
 }
 
-function estimateParagraphHeight(
+/** Measure a body paragraph at the CURRENT cursor placement (`state.y`, `paraXPt`,
+ *  `contentWPt`) — the placement the fit decision walks. Returns the placement-aware
+ *  {@link MeasuredParagraph} so a NON-relocated non-split paragraph can hand this same
+ *  measurement to its fragment instead of measuring a second time (M-1). Pure over the
+ *  measurer; does not mutate `state`. */
+function measureBodyParagraphAtCursor(
   state: RenderState,
   para: DocParagraph,
   contentWPt: number,
-  suppressSpaceBefore = false,
-  paraXPt = 0,
-  /** §17.3.1.7: the next in-flow paragraph shares this paragraph's border box, so
-   *  its bottom edge is suppressed (the box continues) and reserves no extent. */
-  nextSharesBottomBorder = false,
-): number {
+  suppressSpaceBefore: boolean,
+  paraXPt: number,
+): MeasuredParagraph {
   const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
-  const startYPt = state.y;
-  const measured = measureParagraph(
+  return measureParagraph(
     para,
     paragraphContext,
     {
-      startYPt,
+      startYPt: state.y,
       paragraphXPt: paraXPt,
       availableWidthPt: contentWPt,
       maximumYPt: state.pageH,
@@ -3887,9 +3921,38 @@ function estimateParagraphHeight(
     },
     paragraphMeasurementEnvironment(state),
   );
+}
+
+/** The estimated flow height of an already-measured body paragraph: its content span
+ *  from the measurement's recorded start, plus trailing space (spaceAfter or the
+ *  §17.3.1.7 bottom-border extent, unless the next in-flow paragraph shares the border
+ *  box). `measured.placement.startYPt` equals the `state.y` the measurement was taken
+ *  at, so this reproduces the original `contentEndYPt − startYPt + …` formula. */
+function paragraphHeightFromMeasured(
+  measured: MeasuredParagraph,
+  para: DocParagraph,
+  nextSharesBottomBorder: boolean,
+): number {
   const bottomExtent = nextSharesBottomBorder ? 0 : bottomBorderExtentPt(para.borders);
-  return measured.contentEndYPt - startYPt
+  return measured.contentEndYPt - measured.placement.startYPt
     + Math.max(measured.requestedSpaceAfterPt, bottomExtent);
+}
+
+function estimateParagraphHeight(
+  state: RenderState,
+  para: DocParagraph,
+  contentWPt: number,
+  suppressSpaceBefore = false,
+  paraXPt = 0,
+  /** §17.3.1.7: the next in-flow paragraph shares this paragraph's border box, so
+   *  its bottom edge is suppressed (the box continues) and reserves no extent. */
+  nextSharesBottomBorder = false,
+): number {
+  return paragraphHeightFromMeasured(
+    measureBodyParagraphAtCursor(state, para, contentWPt, suppressSpaceBefore, paraXPt),
+    para,
+    nextSharesBottomBorder,
+  );
 }
 
 /** Snap a paragraph's uniform line height up to an integer multiple of the
@@ -9126,6 +9189,17 @@ export const __test_setLineReuseEnabled = (v: boolean): boolean => {
 export const __test_setFragmentPaintEnabled = (v: boolean): boolean => {
   const prev = fragmentPaintEnabled;
   fragmentPaintEnabled = v;
+  return prev;
+};
+
+/** Exported for the M-1 double-measurement non-vacuity test. Toggles whether a
+ *  non-relocated body paragraph's fragment reuses the fit-decision measurement or
+ *  measures again, so the test can paginate the SAME document both ways and assert the
+ *  reuse path makes fewer measureText calls with identical fragments. Returns the
+ *  previous value so the test can restore it. */
+export const __test_setFitMeasureReuseEnabled = (v: boolean): boolean => {
+  const prev = fitMeasureReuseEnabled;
+  fitMeasureReuseEnabled = v;
   return prev;
 };
 
