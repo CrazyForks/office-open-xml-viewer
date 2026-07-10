@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { layoutDocument } from './document-layout.js';
+import { bodyFragmentFor, computePages } from './renderer.js';
 import { buildTableFragment } from './table-fragments.js';
 import {
   tableFragmentHeightPt,
@@ -284,11 +285,12 @@ describe('buildTableFragment — pure recursion contract', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('layoutDocument — table fragments', () => {
-  it('emits a placed table fragment for a body table, referencing the SOURCE table', () => {
+  it('emits a placed table fragment from a clone that preserves parsed row identity', () => {
     const t = table([row([textCell('a'), textCell('b')])], [80, 80]);
     const tables = allTables(doc([t as unknown as BodyElement]));
     expect(tables).toHaveLength(1);
-    expect(tables[0].table.source).toBe(t);
+    expect(tables[0].table.source).not.toBe(t);
+    expect(tables[0].table.source.rows).toBe(t.rows);
     expect(tables[0].table.rows).toHaveLength(1);
     expect(tables[0].table.continuesFromPreviousPage).toBe(false);
     expect(tables[0].table.continuesOnNextPage).toBe(false);
@@ -300,9 +302,32 @@ describe('layoutDocument — table fragments', () => {
 
   it('keeps fragment state OFF the parsed table (no fragment fields on DocTable)', () => {
     const t = table([row([textCell('a')])], [120]);
+    const keysBeforePagination = Object.keys(t);
     allTables(doc([t as unknown as BodyElement]));
+    expect(Object.keys(t)).toEqual(keysBeforePagination);
     expect('kind' in (t as unknown as Record<string, unknown>)).toBe(false);
     expect('columnWidthsPt' in (t as unknown as Record<string, unknown>)).toBe(false);
+  });
+
+  it('keeps table fragment side-table entries isolated across pagination runs', () => {
+    const t = table([row([textCell('a')])], [200]);
+    const body = [t as unknown as BodyElement];
+    const wideSection = doc(body).section;
+    const narrowSection = { ...wideSection, pageWidth: 150 };
+
+    const widePages = computePages(body, wideSection, makeStubCtx());
+    const wideElement = widePages.flat().find((element) => element.type === 'table');
+    expect(wideElement).toBeDefined();
+
+    const narrowPages = computePages(body, narrowSection, makeStubCtx());
+    const narrowElement = narrowPages.flat().find((element) => element.type === 'table');
+    expect(narrowElement).toBeDefined();
+
+    expect(bodyFragmentFor(wideElement as NonNullable<typeof wideElement>)?.widthPt)
+      .toBeCloseTo(180, 6);
+    expect(bodyFragmentFor(narrowElement as NonNullable<typeof narrowElement>)?.widthPt)
+      .toBeCloseTo(130, 6);
+    expect(wideElement).not.toBe(narrowElement);
   });
 
   it('builds each cell paragraph as a ParagraphFragment referencing the source cell paragraph', () => {
@@ -333,6 +358,25 @@ describe('layoutDocument — table fragments', () => {
     expect(seen).toEqual(rows.map((_v, i) => i));
   });
 
+  it('keeps original row indices when a row taller than the page is split into pieces', () => {
+    const tallCell = cell([
+      { type: 'paragraph', ...para('あ'.repeat(400)) } as unknown as CellElement,
+    ]);
+    const t = table(
+      [row([tallCell]), row([textCell('following row')])],
+      [120],
+    );
+    const tables = allTables(doc([t as unknown as BodyElement], 120));
+    const fragmentRows = tables.flatMap(({ table: fragment }) => fragment.rows);
+
+    // Sanity: splitRowsTallerThanPage expanded the first parsed row into pieces.
+    expect(fragmentRows.length).toBeGreaterThan(t.rows.length);
+    expect(fragmentRows.at(-1)?.source).toBe(t.rows[1]);
+    expect(fragmentRows.slice(0, -1).map((fragment) => fragment.sourceRowIndex))
+      .toEqual(Array.from({ length: fragmentRows.length - 1 }, () => 0));
+    expect(fragmentRows.at(-1)?.sourceRowIndex).toBe(1);
+  });
+
   it('repeats a leading header row on every continuation slice (§17.4.78)', () => {
     const bodyRows = Array.from({ length: 12 }, (_v, i) => row([textCell(`b${i}`)]));
     const rows = [row([textCell('HEADER')], { isHeader: true }), ...bodyRows];
@@ -361,6 +405,35 @@ describe('layoutDocument — table fragments', () => {
       expect(block.rows).toHaveLength(1);
       expect(firstParagraphBlock(block.rows[0].cells[0]).source.runs[0]).toBeDefined();
     }
+  });
+
+  it('marks continuation on nested table fragments split at inner row boundaries', () => {
+    const inner = table(
+      Array.from({ length: 4 }, (_unused, index) =>
+        row([textCell(`inner ${index}`)], { rowHeight: 30, rowHeightRule: 'exact' }),
+      ),
+      [80],
+    );
+    const outerCell = cell([{ type: 'table', ...inner } as unknown as CellElement]);
+    const outer = table([row([outerCell])], [120]);
+    const outerFragments = allTables(doc([outer as unknown as BodyElement], 120));
+    const nestedFragments: TableFragment[] = [];
+    for (const { table: outerFragment } of outerFragments) {
+      for (const outerRow of outerFragment.rows) {
+        for (const cellFragment of outerRow.cells) {
+          for (const block of cellFragment.blocks) {
+            if (block.kind === 'table') nestedFragments.push(block);
+          }
+        }
+      }
+    }
+
+    expect(nestedFragments.length).toBeGreaterThan(1);
+    expect(nestedFragments[0].continuesFromPreviousPage).toBe(false);
+    expect(nestedFragments[0].continuesOnNextPage).toBe(true);
+    const last = nestedFragments.at(-1) as TableFragment;
+    expect(last.continuesFromPreviousPage).toBe(true);
+    expect(last.continuesOnNextPage).toBe(false);
   });
 
   it('carries vertical-merge roles across the merged span', () => {

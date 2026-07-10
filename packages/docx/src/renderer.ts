@@ -3265,7 +3265,8 @@ export function computePages(
       );
       const pageTable = splitRows?.table ?? tbl;
       const rowHs = splitRows?.rowHs ?? measuredRowHs;
-      const tableEl = (splitRows ? { ...pageTable, type: 'table' } : el) as PaginatedBodyElement;
+      const sourceRowIndexByRow = splitRows?.sourceRowIndexByRow;
+      const tableEl = { ...pageTable, type: 'table' } as PaginatedBodyElement;
       const h = rowHs.reduce((s, x) => s + x, 0);
       const commitTableReserve = () => {
         if (!haveFootnotes || tblNewRefIds.length === 0) return;
@@ -3303,6 +3304,7 @@ export function computePages(
           // widths + contentWPt are constant across the split.
           { colWidthsPt: tblColWidthsPt, contentWPt: tblContentWPt },
           { colWidthsPt: tblColWidthsPt, state: measureState },
+          sourceRowIndexByRow,
           // PR 6 — attach each slice's table fragment (byte-identical additive step:
           // paint is unmigrated in Task 15). The slice IS the table (its rows are the
           // slice's rows); column widths are constant across the split.
@@ -3332,11 +3334,11 @@ export function computePages(
         // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
         // the rest of this column ⇒ advance to the next column / page.
         if (wantsBalanceBreak(h) || y + h > tableContentH) nextColumnOrPage(i);
-        // PR 6 — a whole (non-split) block table paints from its fragment, so it is NOT
-        // stamped: `tableEl` is the PARSED DocTable when the table was not row-split, and
-        // stamping it would mutate the parsed model (the defect class this migration
-        // closes). A gate-rejected non-split table (e.g. negative `tblInd`) recomputes
-        // through the legacy `computeTableLayout`, byte-identical to the removed reuse.
+        // PR 6 — a whole block table paints from its fragment and is always emitted as
+        // a shallow clone. This gives each pagination run a unique side-table key and
+        // lets pushTagged add placement fields without mutating the parsed DocTable.
+        // A gate-rejected table (e.g. negative `tblInd`) recomputes through the legacy
+        // `computeTableLayout`, byte-identical to the removed reuse.
         attachTableFragment(
           tableEl,
           tableEl as unknown as DocTable,
@@ -3351,6 +3353,9 @@ export function computePages(
             continuesFromPreviousPage: false,
             continuesOnNextPage: false,
             repeatedHeaderRowCount: 0,
+            sourceRowIndexOf: sourceRowIndexByRow
+              ? (fragmentRowIndex) => sourceRowIndexByRow[fragmentRowIndex]
+              : undefined,
           },
         );
         pushTagged(tableEl);
@@ -3951,6 +3956,10 @@ function buildTableCellBlocks(
       );
     } else if (ce.type === 'table') {
       const inner = ce as unknown as DocTable;
+      const nestedSlice = ce as CellElement & {
+        nestedSliceContinuesFromPrevious?: boolean;
+        nestedSliceContinuesOnNext?: boolean;
+      };
       const innerCols = resolveColumnWidths(inner, contentWPt, cellState);
       const innerRowHs = resolveTableRowHeights(inner, innerCols, 1, (c, w) =>
         measureCellContentHeightPx(c, inner, w, 1, cellState),
@@ -3960,8 +3969,8 @@ function buildTableCellBlocks(
           table: inner,
           columnWidthsPt: innerCols,
           rowHeightsPt: innerRowHs,
-          continuesFromPreviousPage: false,
-          continuesOnNextPage: false,
+          continuesFromPreviousPage: nestedSlice.nestedSliceContinuesFromPrevious ?? false,
+          continuesOnNextPage: nestedSlice.nestedSliceContinuesOnNext ?? false,
           repeatedHeaderRowCount: 0,
           buildCellBlocks: (c, w) => buildTableCellBlocks(c, inner, w, cellState),
         }),
@@ -3980,9 +3989,9 @@ function buildTableCellBlocks(
 const tableFragmentBandPt = new WeakMap<object, number>();
 
 /** Build and attach the {@link TableFragment} for one placed table (whole table or one
- *  page slice) to the emitted element's side-table entry. `table` supplies the rows to
- *  fragment (the SOURCE table for a whole-table push; the slice for a split). Never
- *  mutates the parsed model. */
+ *  page slice) to the emitted element's side-table entry. `table` is the emitted clone
+ *  whose rows should be fragmented; its rows retain parsed identity unless pagination
+ *  sliced their content. Never mutates the parsed model. */
 function attachTableFragment(
   el: PaginatedBodyElement,
   table: DocTable,
@@ -5037,6 +5046,10 @@ function tableCellElementSliceByRows(table: DocTable, start: number, end: number
     ...(table as object),
     type: 'table',
     rows: table.rows.slice(start, end),
+    // Renderer-runtime provenance for nested-table cell slices. These flags live
+    // only on emitted clones; they are not fields of the parsed DocTable model.
+    nestedSliceContinuesFromPrevious: start > 0,
+    nestedSliceContinuesOnNext: end < table.rows.length,
   } as unknown as CellElement;
 }
 
@@ -5316,10 +5329,11 @@ function splitRowsTallerThanPage(
   colWidthsPt: number[],
   pageContentHeightPt: number,
   state: RenderState,
-): { table: DocTable; rowHs: number[] } | null {
+): { table: DocTable; rowHs: number[]; sourceRowIndexByRow: number[] } | null {
   let changed = false;
   const rows: DocTableRow[] = [];
   const heights: number[] = [];
+  const sourceRowIndexByRow: number[] = [];
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
     const rowH = rowHeightsPt[ri];
@@ -5328,14 +5342,18 @@ function splitRowsTallerThanPage(
       if (split) {
         rows.push(...split.rows);
         heights.push(...split.heights);
+        sourceRowIndexByRow.push(...split.rows.map(() => ri));
         changed = true;
         continue;
       }
     }
     rows.push(row);
     heights.push(rowH);
+    sourceRowIndexByRow.push(ri);
   }
-  return changed ? { table: { ...table, rows }, rowHs: heights } : null;
+  return changed
+    ? { table: { ...table, rows }, rowHs: heights, sourceRowIndexByRow }
+    : null;
 }
 
 /**
@@ -5394,6 +5412,9 @@ export function splitTableAcrossPages(
   /** Optional row-block splitter used by computePages. Direct unit tests can omit
    *  this and exercise only row-boundary splitting. */
   rowSplit?: { colWidthsPt: number[]; state: RenderState },
+  /** Original parsed-table row index for each incoming `table.rows` entry. Row
+   *  pieces created before this call share an index. Omitted ⇒ identity. */
+  sourceRowIndexByRow?: number[],
   /** PR 6 — invoked once per emitted slice to attach its {@link TableFragment}. The
    *  caller closes over the column widths / measure state and builds the fragment
    *  (the slice element carries the rows + `colIndex`); `meta` supplies the slice's
@@ -5414,11 +5435,14 @@ export function splitTableAcrossPages(
   let workTable = table;
   let workRows = table.rows;
   let workRowHs = rowHs;
+  let workSourceRowIndices = sourceRowIndexByRow?.slice()
+    ?? workRows.map((_row, index) => index);
   let n = workRows.length;
   // Leading tblHeader rows repeat on each continuation page.
   let headerCount = 0;
   while (headerCount < n && workRows[headerCount].isHeader) headerCount++;
   const headerRows = workRows.slice(0, headerCount);
+  const headerSourceRowIndices = workSourceRowIndices.slice(0, headerCount);
   const headerH = workRowHs.slice(0, headerCount).reduce((s, h) => s + h, 0);
   const headerHeightsPt = workRowHs.slice(0, headerCount);
 
@@ -5435,6 +5459,7 @@ export function splitTableAcrossPages(
     if (rowSplit && firstRowH > avail && rowAvail > 0 && start >= headerCount) {
       const split = splitRowForHeight(workTable, workRows[start], rowSplit.colWidthsPt, rowAvail, rowSplit.state);
       if (split && split.heights[0] <= rowAvail) {
+        const sourceRowIndex = workSourceRowIndices[start];
         workRows = [
           ...workRows.slice(0, start),
           ...split.rows,
@@ -5444,6 +5469,11 @@ export function splitTableAcrossPages(
           ...workRowHs.slice(0, start),
           ...split.heights,
           ...workRowHs.slice(start + 1),
+        ];
+        workSourceRowIndices = [
+          ...workSourceRowIndices.slice(0, start),
+          ...split.rows.map(() => sourceRowIndex),
+          ...workSourceRowIndices.slice(start + 1),
         ];
         workTable = { ...workTable, rows: workRows };
         n = workRows.length;
@@ -5475,6 +5505,7 @@ export function splitTableAcrossPages(
               rowSplit.state,
             );
             if (split && split.heights[0] <= remainingForNextRow) {
+              const sourceRowIndex = workSourceRowIndices[end];
               workRows = [
                 ...workRows.slice(0, end),
                 ...split.rows,
@@ -5484,6 +5515,11 @@ export function splitTableAcrossPages(
                 ...workRowHs.slice(0, end),
                 ...split.heights,
                 ...workRowHs.slice(end + 1),
+              ];
+              workSourceRowIndices = [
+                ...workSourceRowIndices.slice(0, end),
+                ...split.rows.map(() => sourceRowIndex),
+                ...workSourceRowIndices.slice(end + 1),
               ];
               workTable = { ...workTable, rows: workRows };
               n = workRows.length;
@@ -5529,11 +5565,11 @@ export function splitTableAcrossPages(
     if (emitTableFragment) {
       // §17.4.78 — a continuation slice prepends the repeated header rows; the body
       // rows begin at `start` in workRows. Map each fragment row back to its source
-      // index: a repeated header keeps its original 0-based header index; a body row
-      // is `start + (i − headerCount)` (workRows-relative, identity to the original
-      // table for a row-boundary split). Page continuation is derived from the slice
-      // window: it continues from a previous page whenever it does not start the
-      // table, and onto the next whenever rows remain.
+      // index: repeated headers read their saved original indices; body rows read the
+      // parallel workRows provenance map, whose entries are duplicated whenever a row
+      // is split. Page continuation is derived from the slice window: it continues
+      // from a previous page whenever it does not start the table, and onto the next
+      // whenever rows remain.
       const headerPrepend = isContinuation ? headerCount : 0;
       emitTableFragment(sliceEl, {
         heightsPt: sliceHeightsPt,
@@ -5541,7 +5577,9 @@ export function splitTableAcrossPages(
         continuesOnNextPage: end < n,
         repeatedHeaderRowCount: headerPrepend,
         sourceRowIndexOf: (i) =>
-          i < headerPrepend ? i : start + (i - headerPrepend),
+          i < headerPrepend
+            ? headerSourceRowIndices[i]
+            : workSourceRowIndices[start + (i - headerPrepend)],
       });
     }
     pages[pages.length - 1].push(sliceEl);
