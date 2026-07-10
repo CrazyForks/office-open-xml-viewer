@@ -188,6 +188,21 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     expect(optedOut.fillTextCalls[0].letterSpacing).toBe('0px');
   });
 
+  it('keeps every segment of an opted-out mixed-script run off the grid', async () => {
+    const rendered = await renderRun(
+      [para('あA本', { runSnapToGrid: false })],
+      section(charGrid(4096)),
+    );
+
+    expect(rendered.runs.map((run) => [run.text, run.w])).toEqual([
+      ['あ', FONT_PX],
+      ['A', FONT_PX],
+      ['本', FONT_PX],
+    ]);
+    expect(rendered.fillTextCalls.map((call) => call.letterSpacing))
+      .toEqual(['0px', '0px', '0px']);
+  });
+
   // THE core anti-corruption guard. For a CJK string under an active char grid,
   // the measured segment box (onTextRun.w) and the painted advance must be
   // derived from the SAME per-char cell width fontPx + Δpx. A no-justify pure-EA
@@ -309,6 +324,18 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     const seg = runs.find((r) => r.text === text)!;
     // charSpace present but type is "lines" ⇒ the CHARACTER grid is inactive.
     expect(seg.w).toBeCloseTo(n * FONT_PX, 6);
+  });
+
+  it('type="snapToChars" applies the character-grid delta', async () => {
+    const sec = section({
+      docGridType: 'snapToChars',
+      docGridLinePitch: 20,
+      docGridCharSpace: 4096,
+    });
+    const { runs, fillTextCalls } = await renderRun([para('あ')], sec);
+
+    expect(runs[0].w).toBe(FONT_PX + 1);
+    expect(fillTextCalls[0].letterSpacing).toBe('1px');
   });
 
   it('an absent charSpace leaves EA glyphs at natural advance even under linesAndChars', async () => {

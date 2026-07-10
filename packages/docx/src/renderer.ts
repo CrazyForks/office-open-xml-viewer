@@ -102,6 +102,7 @@ import {
 } from './table-geometry.js';
 import {
   computeSectionColumns as computeColumns,
+  enterTableCellStoryContext,
   resolveDocumentLayoutSettings,
   resolveParagraphLayoutContext,
   resolveSectionLayoutContext,
@@ -437,15 +438,6 @@ const BODY_STORY_CONTEXT: StoryContext = {
   lineNumberingEligible: true,
 };
 
-function tableCellStoryContext(state: Pick<RenderState, 'storyContext'>): StoryContext {
-  const parent = state.storyContext ?? BODY_STORY_CONTEXT;
-  return {
-    story: parent.story,
-    containers: [...parent.containers, { kind: 'tableCell' }],
-    lineNumberingEligible: false,
-  };
-}
-
 export function resolveBodyParagraphLayoutContext(
   state: Pick<RenderState, 'layoutSettings' | 'sectionLayout'>,
   paragraph: DocParagraph,
@@ -470,16 +462,13 @@ function resolveStateParagraphLayoutContext(
   );
 }
 
-function resolveTableCellParagraphLayoutContext(
-  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>,
-  paragraph: DocParagraph,
-): ParagraphLayoutContext {
-  return resolveParagraphLayoutContext(
-    state.layoutSettings,
-    state.sectionLayout,
-    tableCellStoryContext(state),
-    paragraph,
-  );
+function withTableCellStory(state: RenderState): RenderState {
+  return {
+    ...state,
+    storyContext: enterTableCellStoryContext(
+      state.storyContext ?? BODY_STORY_CONTEXT,
+    ),
+  };
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -4456,7 +4445,7 @@ function layoutCellParagraphForRowSplit(
 ): { lines: LayoutLine[]; lineHeights: number[]; inputs: Parameters<typeof stampParagraphLines>[2] } | null {
   const segs = buildSegments(para.runs, state);
   if (segs.length === 0) return null;
-  const paragraphContext = resolveTableCellParagraphLayoutContext(state, para);
+  const paragraphContext = resolveStateParagraphLayoutContext(state, para);
   const grid = gridForParagraphContext(state, paragraphContext);
   const paraHasRuby = paragraphContext.hasRuby;
   const indLeft = paragraphContext.physicalIndentLeftPt;
@@ -4768,6 +4757,7 @@ function splitRowByCellLines(
   let ci = 0;
 
   for (const cell of row.cells) {
+    const cellState = withTableCellStory(state);
     const span = Math.min(cell.colSpan, colWidthsPt.length - ci);
     const cellWPt = colWidthsPt.slice(ci, ci + span).reduce((s, w) => s + w, 0);
     ci += span;
@@ -4777,7 +4767,7 @@ function splitRowByCellLines(
       trimTrailingStructuralMarker(cell.content),
       cellWPt - margins.left - margins.right,
       maxContentH,
-      state,
+      cellState,
     );
     if (!split) return null;
     beforeCells.push({ ...cell, content: split.before });
@@ -7437,7 +7427,7 @@ type PaginatedElementWithLines = PaginatedBodyElement & {
  *  that produced them onto the paragraph object, so the paint pass can reuse the
  *  wrap partition instead of re-running {@link layoutLines} (compute-once). Used
  *  by both the BODY split path ({@link splitParagraphAcrossPages}, Stage 1) and
- *  the table-CELL measure path ({@link measureParaHeight}, T2). Only ever called
+ *  the table-CELL measure path ({@link measureCellParagraphHeight}, T2). Only ever called
  *  at scale 1 (the paginator's pt space), so every recorded number is already in
  *  pt and the paint gate compares against it without rescaling — see the
  *  self-verifying reuse gate in {@link renderParagraph}, which fires ONLY when its
@@ -9313,6 +9303,7 @@ function measureCellContentHeightPx(
   scale: number,
   state: RenderState,
 ): number {
+  const cellState = withTableCellStory(state);
   const cm = effCellMargins(cell, table);
   const contentW = cellW - (cm.left + cm.right) * scale;
   // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. When the cell's
@@ -9332,7 +9323,7 @@ function measureCellContentHeightPx(
   // paint pass's renderCellContent. Spacing is converted from pt to px with `scale`.
   return (cm.top + cm.bottom) * scale + sumCellContentHeight(
     measured,
-    (ce) => measureCellElementHeight(state, ce, contentW, scale),
+    (ce) => measureCellElementHeight(cellState, ce, contentW, scale),
     scale,
   );
 }
@@ -9744,14 +9735,14 @@ export function calculateRowHeight(
   );
 }
 
-function measureParaHeight(
+function measureCellParagraphHeight(
   state: RenderState,
   para: DocParagraph,
   maxWidth: number,
   scale: number,
 ): number {
   const segs = buildSegments(para.runs, state);
-  const paragraphContext = resolveTableCellParagraphLayoutContext(state, para);
+  const paragraphContext = resolveStateParagraphLayoutContext(state, para);
   const paraHasRuby = paragraphContext.hasRuby;
   const grid = gridForParagraphContext(state, paragraphContext);
   if (segs.length === 0) {
@@ -9838,7 +9829,7 @@ function measureParaHeight(
   // as `contentW/scale − ind…`. The paint-scale calls of this function
   // (vAlign-centering measure in renderCell, and the dryRun measureCellContent
   // path) MUST NOT overwrite the scale-1 stamp with paint-scale lines, so they are
-  // skipped here. `hasFloats` is always false: measureParaHeight passes `undefined`
+  // skipped here. `hasFloats` is always false: measureCellParagraphHeight passes `undefined`
   // for the layoutLines wrap context (cell paragraphs are never wrapped around
   // floats in the measure), and when a cell is painted inside a live float band
   // renderParagraph takes its float path (case 3) and ignores this no-float stamp.
@@ -9854,7 +9845,7 @@ function measureParaHeight(
   // paragraphs (page/numPages fields, note refs) are excluded exactly as the body
   // stamp excludes them — their segment text resolves against the real paint page.
   // Nested tables recurse through the same path (measureCellElementHeight →
-  // estimateTableHeight → measureParaHeight at scale 1), so their inner cell
+  // estimateTableHeight → measureCellParagraphHeight at scale 1), so their inner cell
   // paragraphs get stamped and reused by the same mechanism.
   if (scale === 1 && !paragraphSegsStateSensitive(para)) {
     stampParagraphLines(para, lines, {
@@ -9906,12 +9897,13 @@ function measureCellContent(
   scale: number,
   state: RenderState,
 ): void {
+  const cellState = withTableCellStory(state);
   const cm = effCellMargins(cell, table);
   const ml = cm.left * scale;
   const mr = cm.right * scale;
   const innerW = cellW - ml - mr;
   for (const ce of cell.content) {
-    measureCellElementHeight(state, ce, innerW, scale);
+    measureCellElementHeight(cellState, ce, innerW, scale);
   }
 }
 
@@ -9930,7 +9922,7 @@ function measureCellElementHeight(
     // content clears a drawn bottom border. Mirror it here, or a bordered cell
     // paragraph paints taller than the cell measures (B2: single measurer).
     // renderCellContent never passes a borderMerge, so no suppression term.
-    return measureParaHeight(state, para, innerWPx, scale)
+    return measureCellParagraphHeight(state, para, innerWPx, scale)
       + (para.spaceBefore + Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders))) * scale;
   }
   // Nested table — estimateTableHeight works in pt; convert to px.
@@ -9977,7 +9969,9 @@ function renderCell(
     contentX: x + ml,
     contentW: w - ml - mr,
     y: y + mt,
-    storyContext: tableCellStoryContext(state),
+    storyContext: enterTableCellStoryContext(
+      state.storyContext ?? BODY_STORY_CONTEXT,
+    ),
     // ECMA-376 §17.6.8 numbers the MAIN document story only — table-cell lines are
     // never numbered. Clear any inherited line-numbering config/counter.
     lineNumbering: undefined,
