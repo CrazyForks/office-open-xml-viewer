@@ -4513,6 +4513,16 @@ function splitParagraphAcrossPages(
     // band differs from the measured placement (unequal-width columns), re-measure the
     // REMAINDER from the last placed line's consumed boundary at the destination;
     // same-width continuations keep the single measurement, byte-identical.
+    //
+    // Placement-validity adjudication (PR #923 review): the gate compares the
+    // placement-DETERMINING inputs only. A measurement's line partition and per-line
+    // geometry are a function of (available width, wrap context, content); without a
+    // wrap oracle the X/Y origin is a pure translation, recorded per slice on its
+    // PlacedFragment — not a layout input. So a same-width, wrap-free column/page hop
+    // keeps the measurement valid (the design doc's fragment-continuation contract and
+    // the PR 5 shipped behavior), while a width or wrap change forces the remainder
+    // remeasure below. See docs/docx-layout-context-fragments-design.md
+    // §"Placement-Aware Paragraph Measurement" (validity definition).
     const maybeSwapToRemainder = (): void => {
       if (lineIdx === 0) return;
       // Numbered paint recomputes numBodyOffset and the marker, so a local suffix would redraw both.
