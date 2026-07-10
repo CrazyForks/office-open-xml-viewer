@@ -15,12 +15,19 @@
  *     `initFromBytes()`. Then call `*ToMarkdown` on a `File.arrayBuffer()`.
  */
 
+// Resolve each parser's wasm-bindgen glue through its package `exports` map
+// (`./wasm` → `src/wasm/<fmt>_parser.js`) rather than a monorepo-relative
+// sibling path. The relative form (`../../pptx/src/wasm/...`) only resolves
+// inside this checkout and breaks for anyone who installs
+// `@silurus/ooxml-markdown` standalone; the subpath export resolves both in the
+// workspace (pnpm symlinks) and after a plain `npm i`. This mirrors the CLI,
+// which reads the raw binary through the sibling `./wasm-binary` export.
 // @ts-ignore — wasm-pack JS shim, exports typed individually below
-import * as pptxWasm from '../../pptx/src/wasm/pptx_parser.js';
+import * as pptxWasm from '@silurus/ooxml-pptx/wasm';
 // @ts-ignore
-import * as docxWasm from '../../docx/src/wasm/docx_parser.js';
+import * as docxWasm from '@silurus/ooxml-docx/wasm';
 // @ts-ignore
-import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
+import * as xlsxWasm from '@silurus/ooxml-xlsx/wasm';
 
 type WasmModule = {
   initSync: (init: { module: WebAssembly.Module }) => unknown;
