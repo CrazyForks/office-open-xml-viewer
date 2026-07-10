@@ -242,6 +242,30 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
       ['decimalZero', [
         [1, '01'], [9, '09'], [10, '10'], [99, '99'], [100, '100'],
       ]],
+
+      // ── Enclosed / CJK sequence formats ─────────────────────────────────
+      // decimalEnclosedCircle: §17.18.59 tables 1–20 → U+2460–U+2473 (①..⑳);
+      // "for values greater than the size of the set, the items fall back to
+      // the decimal format" (spec example: …, ⑲, ⑳, 21, …). Boundary 20/21.
+      ['decimalEnclosedCircle', [
+        [1, '①'], [2, '②'], [3, '③'], [10, '⑩'],
+        [20, '⑳'], [21, '21'], [100, '100'],
+      ]],
+      // aiueoFullWidth: §17.18.59 full-width katakana in a-i-u-e-o order. The
+      // spec's ENUMERATED 48-code-point list includes the archaic ヰ/ヱ (so wo/n
+      // land at 47/48); repeat scheme past 48. Field example: 1 \* AIUEO -> ア.
+      ['aiueoFullWidth', [
+        [1, 'ア'], [2, 'イ'], [5, 'オ'], [16, 'タ'],
+        [44, 'ワ'], [45, 'ヰ'], [46, 'ヱ'], [47, 'ヲ'],
+        [48, 'ン'], [49, 'アア'], [96, 'ンン'],
+        [97, 'アアア'],
+      ]],
+      // aiueo: §17.18.59 half-width katakana, positions 1–46 (U+FF71–U+FF9C,
+      // U+FF66 ｦ, U+FF9D ﾝ — no archaic forms). Spec example: ｱ, ｲ, …, ｦ, ﾝ, ｱｱ.
+      ['aiueo', [
+        [1, 'ｱ'], [5, 'ｵ'], [44, 'ﾜ'], [45, 'ｦ'],
+        [46, 'ﾝ'], [47, 'ｱｱ'], [92, 'ﾝﾝ'],
+      ]],
     ];
 
     for (const [fmt, rows] of cases) {
