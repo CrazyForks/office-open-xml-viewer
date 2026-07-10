@@ -532,6 +532,77 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     }
   });
 
+  it('keeps state-sensitive continuations on the original partition', () => {
+    const unequalColumns = section({
+      columns: {
+        count: 2,
+        spacePt: 0,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 100, spacePt: 12 },
+          { widthPt: 48, spacePt: 0 },
+        ],
+      },
+    });
+    const fieldPara = para({
+      text: 'あ'.repeat(35),
+      fontSize: 20,
+      widowControl: false,
+    }) as unknown as DocParagraph;
+    (fieldPara.runs as unknown[]).push({
+      type: 'field', fieldType: 'numPages', instruction: 'NUMPAGES', fallbackText: '?',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
+    });
+
+    const slices = paragraphSlices(computePages(
+      [fieldPara as unknown as BodyElement],
+      unequalColumns,
+      makeCtx(),
+    ));
+    const col1Slices = slices.filter((slice) => slice.colIndex === 1);
+
+    expect(col1Slices.length).toBeGreaterThan(0);
+    expect.soft(slices.every((slice) => slice.lineSlice?.continues === undefined)).toBe(true);
+    expect.soft(col1Slices.every((slice) => (slice.lineSlice?.start ?? 0) > 0)).toBe(true);
+  });
+
+  it('keeps numbered continuations on the original partition', () => {
+    const unequalColumns = section({
+      columns: {
+        count: 2,
+        spacePt: 0,
+        equalWidth: false,
+        sep: false,
+        cols: [
+          { widthPt: 100, spacePt: 12 },
+          { widthPt: 48, spacePt: 0 },
+        ],
+      },
+    });
+    const numberedPara = para({
+      text: 'あ'.repeat(35),
+      fontSize: 20,
+      widowControl: false,
+    }) as unknown as DocParagraph;
+    numberedPara.numbering = {
+      numId: 1, level: 0, format: 'decimal', text: '1.',
+      indentLeft: 0, tab: 18, suff: 'tab', jc: 'left',
+    } as unknown as DocParagraph['numbering'];
+
+    const slices = paragraphSlices(computePages(
+      [numberedPara as unknown as BodyElement],
+      unequalColumns,
+      makeCtx(),
+    ));
+    const col1Slices = slices.filter((slice) => slice.colIndex === 1);
+
+    expect(col1Slices.length).toBeGreaterThan(0);
+    expect.soft(slices.every((slice) => slice.lineSlice?.continues === undefined)).toBe(true);
+    expect.soft(col1Slices.every((slice) => (slice.lineSlice?.start ?? 0) > 0)).toBe(true);
+  });
+
   type RuntimeLine = { segments: { measuredWidth?: number; text?: string }[] };
   type RuntimeSlice = PaginatedBodyElement & {
     lineSlice?: { start: number; end: number; continues?: boolean };

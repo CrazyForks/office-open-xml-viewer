@@ -4512,6 +4512,14 @@ function splitParagraphAcrossPages(
     // same-width continuations keep the single measurement, byte-identical.
     const maybeSwapToRemainder = (): void => {
       if (lineIdx === 0) return;
+      // Numbered paint recomputes numBodyOffset and the marker, so a local suffix would redraw both.
+      if (para.numbering != null) return;
+      // State-sensitive paragraphs have no line stamp; legacy paint would index the rebuilt full partition.
+      if (paragraphSegsStateSensitive(para)) return;
+      // Vertical text is outside fragment/reuse migration and must remain on its single partition.
+      if (measureState.verticalCJK) return;
+      // Accepted residual: these paint-excluded classes retain the pre-existing unequal-width
+      // overflow until marker-/state-aware remainder paint (and vertical migration) exists.
       if (measureState.floats.length > 0) return;
       if (measured.placement.wrap !== undefined) return;
       const destW = contentWPt();
@@ -6744,7 +6752,11 @@ function renderParagraph(
   if (!inFrame) registerAnchorFloats(para, state, paragraphStartY);
 
   // behindDoc shapes must render before text so they appear behind it.
-  renderAnchorImages(para, state, paragraphStartY, 'behind');
+  // Float registration above remains unconditional per-slice bookkeeping; only
+  // the paragraph-level anchor DRAW is restricted to the original first slice.
+  if (!lineSlice || (lineSlice.start === 0 && !lineSlice.continues)) {
+    renderAnchorImages(para, state, paragraphStartY, 'behind');
+  }
 
   // If any topAndBottom float already extends past state.y, skip past it before
   // text starts. Scoped to this paragraph's column band (§20.4.2.20 / §17.6.4):
@@ -7091,7 +7103,7 @@ function renderParagraph(
   // glyph lands on the box edge, so the painted advance equals measuredWidth by
   // construction. See the gridCharDeltaPx / gridSegDeltaPx header.
   const drawGridDeltaPx = gridCharDeltaPx(grid, scale);
-  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft, indFirst, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
+  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft, indFirst, continuesParagraph: lineSlice?.continues === true, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
   for (let li = sliceStart; li < paintEnd; li++) {
     drawParagraphLine(li, drawCtx);
   }
@@ -7233,6 +7245,7 @@ interface ParagraphLineDrawCtx {
   paraW: number;
   indLeft: number;
   indFirst: number;
+  continuesParagraph: boolean;
   baseRtl: boolean;
   hasMarker: boolean;
   numTab: number;
@@ -7255,14 +7268,14 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
   const {
     ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses,
     contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft,
-    indFirst, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx,
+    indFirst, continuesParagraph, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx,
     picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
     decimalAutoTabPx, drawGridDeltaPx, lineHForLine,
   } = c;
     const line = lines[li];
     // First-line indent and numbering prefix only apply to the paragraph's
     // ORIGINAL first line, not the first line of a continuation slice.
-    const firstLine = li === 0;
+    const firstLine = li === 0 && !continuesParagraph;
     // Last-line justification flips off only at the paragraph's true end —
     // mid-paragraph slices keep justifying through to the slice boundary.
     const isLastLine = li === lines.length - 1;
