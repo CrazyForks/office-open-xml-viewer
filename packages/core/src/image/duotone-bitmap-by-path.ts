@@ -19,7 +19,11 @@
 // so on destroy it must be closed (see `dropDuotoneBitmapCache`), the same
 // GPU-lifecycle discipline the base cache follows through its promise.
 
-import { getCachedBitmapByPath, type CachedBitmapOptions } from './bitmap-image-by-path';
+import {
+  getCachedBitmapByPath,
+  deferBitmapCloseWhileLeased,
+  type CachedBitmapOptions,
+} from './bitmap-image-by-path';
 import { applyDuotone, type Duotone, type OffscreenFactory } from './duotone';
 import { imageNaturalSize } from './crop';
 
@@ -114,11 +118,14 @@ export async function getCachedDuotoneBitmapByPath(
  * `dropBitmapCacheByPath`, but `ImageBitmap.close()` is idempotent, so closing
  * it a second time here is harmless. Closing through the promise (never a raw
  * reference) means a still-in-flight recolour is closed only once it resolves.
+ * While a render pass holds a lease on this document (`acquireBitmapCacheLease`),
+ * the closes are deferred to the last release — same contract as the base cache
+ * — so a drop racing an in-flight render never closes a bitmap mid-draw.
  */
 export function dropDuotoneBitmapCache(fetchImage: FetchImage): void {
   const cache = duotoneByFetch.get(fetchImage);
   if (!cache) return;
-  for (const p of cache.values()) p.then((b) => b?.close()).catch(() => {});
+  for (const p of cache.values()) deferBitmapCloseWhileLeased(fetchImage, p);
   cache.clear();
   duotoneByFetch.delete(fetchImage);
 }

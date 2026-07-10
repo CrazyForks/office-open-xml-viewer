@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { prefetchImages, decodeImageSource } from './render-orchestrator';
-import type { Worksheet } from './types';
+import { prefetchImages, decodeImageSource, renderWorksheetViewport } from './render-orchestrator';
+import type { Worksheet, ParsedWorkbook, ImageAnchor } from './types';
 import {
   dropBitmapCacheByPath,
   dropDuotoneBitmapCache,
@@ -509,5 +509,149 @@ describe('render-orchestrator duotone (§20.1.8.23)', () => {
     expect(cache.has('xl/media/image1.png')).toBe(true); // plain
     expect(cache.has('xl/media/image1.png|duo:000000:FFF3F4')).toBe(true); // recoloured
     expect(cache.size).toBe(2);
+  });
+});
+
+// ── Render-pass liveness: LRU eviction must never hand the draw a closed bitmap ─
+// The shared base cache is LRU-bounded (256): a single prefetch pass resolving
+// MORE images than the cap evicts — and GPU-closes — bitmaps decoded earlier in
+// the SAME pass, while the lookup map still references them for the synchronous
+// draw. renderWorksheetViewport therefore holds a core render-pass lease
+// (acquireBitmapCacheLease) across prefetch→draw: evictions still remove cache
+// entries (bounded size), but their closes are deferred until the pass ends. The
+// failure path is pinned too: a re-resolve that fails must DELETE the stale
+// lookup entry (the prior bitmap may have been evicted+closed), because the
+// renderer skips only a missing/falsy source, not a closed one.
+describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** A fake HTMLCanvas + proxy 2D context whose drawImage records the closed
+   *  state of every image it is handed AT DRAW TIME. All other context members
+   *  no-op (the resize-test pattern). */
+  function makeRecordingCanvas(drawn: { closedAtDraw: boolean[] }) {
+    const target: Record<string, unknown> = {
+      drawImage: (img: unknown) => {
+        drawn.closedAtDraw.push(Boolean((img as { closed?: boolean }).closed));
+      },
+      measureText: (s: string) => ({ width: [...String(s)].length * 7 }),
+      createLinearGradient: () => ({ addColorStop() {} }),
+      createPattern: () => null,
+      getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+      setTransform: () => undefined,
+    };
+    const ctx = new Proxy(target, {
+      get(t, prop: string) {
+        if (prop in t) return t[prop];
+        return () => undefined;
+      },
+      set(t, prop: string, value: unknown) {
+        t[prop] = value;
+        return true;
+      },
+    });
+    const canvas = {
+      width: 0,
+      height: 0,
+      clientWidth: 800,
+      clientHeight: 600,
+      style: {} as Record<string, string>,
+      getContext: () => ctx as unknown as CanvasRenderingContext2D,
+    };
+    return canvas as unknown as HTMLCanvasElement;
+  }
+
+  const STYLES = {
+    fonts: [], fills: [], borders: [], cellXfs: [], numFmts: {},
+  } as unknown as ParsedWorkbook['styles'];
+
+  it('draws 300 images (cap 256) in one pass with every bitmap still open; evicted ones close after the pass', async () => {
+    // Each decode yields a bitmap with a live `closed` flag the recording
+    // drawImage reads at draw time.
+    const bitmaps: Array<{ closed: boolean }> = [];
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => {
+      const bmp = {
+        width: 4,
+        height: 4,
+        closed: false,
+        close() { this.closed = true; },
+      };
+      bitmaps.push(bmp);
+      return bmp as unknown as ImageBitmap;
+    }));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+
+    const N = 300; // > IMAGE_BITMAP_CACHE_MAX (256) → forces mid-pass evictions
+    const images: ImageAnchor[] = [];
+    for (let i = 0; i < N; i++) {
+      images.push({
+        fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+        toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: `xl/media/lease-${i}.png`,
+        mimeType: 'image/png',
+      } as ImageAnchor);
+    }
+    const ws = {
+      name: 'S', rows: [], colWidths: {}, rowHeights: {},
+      defaultColWidth: 64, defaultRowHeight: 20,
+      mergeCells: [], freezeRows: 0, freezeCols: 0,
+      conditionalFormats: [], charts: [], images, shapeGroups: [],
+    } as unknown as Worksheet;
+
+    const drawn = { closedAtDraw: [] as boolean[] };
+    const canvas = makeRecordingCanvas(drawn);
+    const imageCache = new Map<string, CanvasImageSource | null>();
+
+    await renderWorksheetViewport(
+      { ws, styles: STYLES, imageCache },
+      canvas,
+      { row: 1, col: 1, rows: 10, cols: 10 },
+      { fetchImage, width: 800, height: 600, dpr: 1 },
+    );
+
+    // Sanity: the pass really decoded past the cap and really drew the anchors.
+    expect(bitmaps.length).toBe(N);
+    expect(drawn.closedAtDraw.length).toBe(N);
+    // The pinned property: NO bitmap handed to drawImage was closed at draw time.
+    expect(drawn.closedAtDraw.every((c) => c === false)).toBe(true);
+
+    // After the pass (lease released), the mid-pass evictions' deferred closes
+    // run: exactly N − cap bitmaps close, proving eviction did happen and was
+    // deferred (not suppressed).
+    await flush();
+    const closedAfter = bitmaps.filter((b) => b.closed).length;
+    expect(closedAfter).toBe(N - 256);
+
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('prefetchImages deletes the stale lookup entry when a re-resolve fails', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({
+      width: 4, height: 4, close() {},
+    }) as unknown as ImageBitmap));
+    let fail = false;
+    const fetchImage = vi.fn(async (path: string, mime: string) => {
+      if (fail) throw new Error('byte source unavailable');
+      return new Blob([new TextEncoder().encode(path)], { type: mime });
+    });
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    // Pass 1: healthy decode lands in the lookup map.
+    await prefetchImages(ws, cache, fetchImage);
+    expect(cache.has('xl/media/image1.png')).toBe(true);
+
+    // The shared entry is evicted+closed (LRU pressure / drop) …
+    dropBitmapCacheByPath(fetchImage);
+    await flush();
+    // … and the re-resolve on the next pass fails. The stale lookup entry MUST
+    // be deleted — its bitmap may be closed, and the renderer only skips a
+    // missing/falsy source.
+    fail = true;
+    await prefetchImages(ws, cache, fetchImage);
+    expect(cache.has('xl/media/image1.png')).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import {
   clampCanvasSize,
   getCachedSvgImageByPath,
   getCachedDuotoneBitmapByPath,
+  acquireBitmapCacheLease,
   preferVectorBlip,
   metafileRasterSize,
   EMU_PER_PT,
@@ -213,7 +214,12 @@ export async function prefetchImages(
         // metafile, so the renderer skips a falsy source without a re-fetch).
         imageCache.set(key, src);
       } catch {
-        /* transient failure: leave any prior entry; renderer skips a missing source */
+        // Transient failure: DELETE any prior lookup entry rather than leaving
+        // it. A prior entry is re-resolved precisely because its shared-cache
+        // backing may be gone (LRU-evicted and GPU-closed); when the re-resolve
+        // fails we cannot vouch for that bitmap's liveness, and the renderer
+        // skips only a missing/falsy source — it would draw a closed one.
+        imageCache.delete(key);
       }
     }),
   );
@@ -229,8 +235,33 @@ export interface RenderDeps {
 
 /** The full per-frame orchestration: preload uncached images, pre-rasterize
  *  equations, size the target, draw. Shared verbatim by the main-thread
- *  XlsxWorkbook and the render worker. */
+ *  XlsxWorkbook and the render worker.
+ *
+ *  The whole pass (prefetch → synchronous draw) runs under a core render-pass
+ *  lease ({@link acquireBitmapCacheLease}): the shared bitmap cache is
+ *  LRU-bounded, so a pass resolving more images than the cap — or a concurrent
+ *  pass on the same workbook — would otherwise evict AND GPU-close bitmaps this
+ *  pass's lookup map still references before the draw runs. Under the lease the
+ *  eviction still removes the cache entry (size stays bounded; the next pass
+ *  re-decodes), but the close is deferred until the lease is released after the
+ *  draw, so drawImage never receives a closed bitmap. */
 export async function renderWorksheetViewport(
+  deps: RenderDeps,
+  target: HTMLCanvasElement | OffscreenCanvas,
+  viewport: ViewportRange,
+  opts: RenderViewportOptions = {},
+): Promise<void> {
+  const releaseLease = opts.fetchImage ? acquireBitmapCacheLease(opts.fetchImage) : undefined;
+  try {
+    await renderWorksheetViewportLeased(deps, target, viewport, opts);
+  } finally {
+    releaseLease?.();
+  }
+}
+
+/** {@link renderWorksheetViewport}'s body, verbatim; runs under the caller's
+ *  render-pass lease. */
+async function renderWorksheetViewportLeased(
   deps: RenderDeps,
   target: HTMLCanvasElement | OffscreenCanvas,
   viewport: ViewportRange,

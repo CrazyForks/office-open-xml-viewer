@@ -39,6 +39,8 @@ import {
   isComplexScriptCodePoint,
   getCachedBitmapByPath,
   dropBitmapCacheByPath,
+  acquireBitmapCacheLease,
+  deferBitmapCloseWhileLeased,
   applyDuotone,
   imageNaturalSize,
   drawImageCropped,
@@ -655,12 +657,15 @@ function colorReplacedCacheFor(fetchImage: DocxFetchImage): Map<string, Promise<
  * forget the document. Call from `DocxDocument.destroy()` alongside
  * `dropBitmapCacheByPath` (base bitmaps) and `dropSvgImageCache` (SVG object
  * URLs) so all three per-document image caches release promptly. A no-op when no
- * clrChange image was decoded.
+ * clrChange image was decoded. While a render pass holds a lease on this
+ * document (core `acquireBitmapCacheLease`), the closes are deferred to the last
+ * release — the same contract as the shared base/duotone caches — so a drop
+ * racing an in-flight render never closes a bitmap mid-draw.
  */
 export function dropColorReplacedCache(fetchImage: DocxFetchImage): void {
   const cache = colorReplacedByFetch.get(fetchImage);
   if (!cache) return;
-  for (const p of cache.values()) p.then((b) => b.close()).catch(() => {});
+  for (const p of cache.values()) deferBitmapCloseWhileLeased(fetchImage, p);
   cache.clear();
   colorReplacedByFetch.delete(fetchImage);
 }
@@ -1124,6 +1129,31 @@ function drawParseErrorPlaceholder(
 }
 
 export async function renderDocumentToCanvas(
+  doc: DocxDocumentModel,
+  canvas: HTMLCanvasElement | OffscreenCanvas,
+  pageIndex: number,
+  opts: RenderDocumentOptions = {},
+): Promise<void> {
+  // Render-pass lease (core acquireBitmapCacheLease): `preloadImages` resolves
+  // EVERY image the document references into a non-owning lookup map and the
+  // page paint then draws from it synchronously. The shared bitmap cache is
+  // LRU-bounded, so a document referencing more images than the cap — or a
+  // concurrent render of another page of the same document — would otherwise
+  // evict AND GPU-close bitmaps this pass's map still holds before the paint.
+  // Under the lease the eviction still removes the cache entry (bounded size;
+  // the next pass re-decodes), but the close is deferred until this pass ends,
+  // so the paint never draws a closed bitmap.
+  const releaseLease = opts.fetchImage ? acquireBitmapCacheLease(opts.fetchImage) : undefined;
+  try {
+    await renderDocumentToCanvasLeased(doc, canvas, pageIndex, opts);
+  } finally {
+    releaseLease?.();
+  }
+}
+
+/** {@link renderDocumentToCanvas}'s body, verbatim; runs under the caller's
+ *  render-pass lease. */
+async function renderDocumentToCanvasLeased(
   doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
