@@ -379,6 +379,14 @@ export class XlsxWorkbook {
     return formatCellValue(cell, this.parsedWorkbook.styles, null, ws.date1904);
   }
 
+  /**
+   * Render a sheet viewport into `target`. Note: `opts.fetchImage` is ignored
+   * here — image bytes always come from this workbook's own archive through its
+   * stable per-instance loader, whose closure identity keys the shared decoded
+   * caches, the render-pass lease, and {@link destroy}'s cache drops. Callers
+   * needing a custom byte source should use the standalone
+   * `renderWorksheetViewport` orchestrator directly.
+   */
   async renderViewport(
     target: HTMLCanvasElement | OffscreenCanvas,
     sheetIndex: number,
@@ -399,9 +407,15 @@ export class XlsxWorkbook {
       { ws, styles: this.parsedWorkbook.styles, imageCache: this.imageCache, math: this.math },
       target,
       viewport,
-      // Supply the lazy byte loader so the orchestrator can decode embedded
-      // images on demand; an explicit caller-provided fetchImage still wins.
-      { fetchImage: this._fetchImage, ...opts },
+      // Always render with THIS instance's stable `_fetchImage` closure (placed
+      // after the spread so it wins over a caller-supplied one, matching
+      // docx/pptx). The closure's identity is the namespace key for the shared
+      // per-document caches AND the render-pass lease counter, and destroy()
+      // drops exactly `_fetchImage`'s namespaces — a per-call closure would
+      // split the cache/lease namespace every render and leave its bitmaps
+      // undropped at destroy(). Callers who need a custom byte source use the
+      // orchestrator's renderWorksheetViewport directly.
+      { ...opts, fetchImage: this._fetchImage },
     );
   }
 

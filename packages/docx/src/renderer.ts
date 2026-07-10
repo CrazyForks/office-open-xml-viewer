@@ -897,6 +897,19 @@ export async function decodeRaster(
     })();
     // Don't poison the cache if the recolor pass rejects; let the next call retry.
     hit.catch(() => cache.delete(key));
+    // A PASS-THROUGH result (duotone-only with a degenerate size or an
+    // unavailable pixel pipeline — `applyDuotone` returned the base unchanged)
+    // must not be memoized beyond its in-flight window: the resolved value IS
+    // the base bitmap, whose lifetime the shared base cache owns (its LRU may
+    // evict and GPU-close it later), and a lingering second-layer entry would
+    // keep serving the closed bitmap while bypassing the base layer's
+    // remove-on-evict → re-decode protection. Same rule as core's
+    // getCachedDuotoneBitmapByPath; a fresh recolour raster stays memoized.
+    void hit
+      .then((bmp) => {
+        if (bmp === base) cache.delete(key);
+      })
+      .catch(() => {});
     cache.set(key, hit);
   }
   return hit;

@@ -93,6 +93,21 @@ interface BitmapCacheLeaseState {
 
 const leasesByFetch = new WeakMap<FetchImage, BitmapCacheLeaseState>();
 
+// Every GPU close this module (and the sibling per-document caches routing
+// through {@link deferBitmapCloseWhileLeased}) performs is funneled through
+// here. The WeakSet deduplicates closes PER BITMAP: two cache layers can
+// resolve to the same bitmap (a second-layer pass-through entry still in its
+// in-flight window when both caches are dropped resolves to the base bitmap
+// the base cache also closes), and the dedup removes any reliance on
+// `ImageBitmap.close()` idempotence across engines.
+const closedBitmaps = new WeakSet<ImageBitmap>();
+
+function closeBitmapOnce(bmp: ImageBitmap | null | undefined): void {
+  if (!bmp || closedBitmaps.has(bmp)) return;
+  closedBitmaps.add(bmp);
+  bmp.close();
+}
+
 /**
  * Hold every decoded bitmap of one document (keyed by `fetchImage`) alive for
  * the duration of a render pass: while the returned release function has not
@@ -118,7 +133,7 @@ export function acquireBitmapCacheLease(fetchImage: FetchImage): () => void {
     if (s.count > 0) return;
     // Last lease out: run the deferred closes, through each promise (never a raw
     // bitmap reference) so a still-in-flight decode closes only once it resolves.
-    for (const p of s.deferred) p.then((b) => b?.close()).catch(() => {});
+    for (const p of s.deferred) p.then((b) => closeBitmapOnce(b)).catch(() => {});
     s.deferred = [];
     leasesByFetch.delete(fetchImage);
   };
@@ -129,8 +144,10 @@ export function acquireBitmapCacheLease(fetchImage: FetchImage): () => void {
  * pass currently holds a lease on the document (see
  * {@link acquireBitmapCacheLease}), defer the close to the last lease release so
  * the pass never draws a closed bitmap. Shared by this module's LRU eviction and
- * drop paths and by the sibling per-document duotone cache (whose drop is the
- * only close it performs).
+ * drop paths and by the sibling per-document caches (core duotone, docx
+ * clrChange) whose drops are the only closes they perform. Closes are
+ * deduplicated per bitmap (see {@link closeBitmapOnce}), so two layers that
+ * resolve to the same bitmap close it exactly once.
  */
 export function deferBitmapCloseWhileLeased(
   fetchImage: FetchImage,
@@ -141,7 +158,7 @@ export function deferBitmapCloseWhileLeased(
     lease.deferred.push(promise);
     return;
   }
-  promise.then((b) => b?.close()).catch(() => {});
+  promise.then((b) => closeBitmapOnce(b)).catch(() => {});
 }
 
 /** Options for {@link getCachedBitmapByPath}. `widthPt`/`heightPt` are the

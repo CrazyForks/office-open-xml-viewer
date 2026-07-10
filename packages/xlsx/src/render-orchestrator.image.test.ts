@@ -5,6 +5,7 @@ import {
   dropBitmapCacheByPath,
   dropDuotoneBitmapCache,
   dropSvgImageCache,
+  getCachedBitmapByPath,
   type OffscreenFactory,
 } from '@silurus/ooxml-core';
 
@@ -653,5 +654,53 @@ describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
     fail = true;
     await prefetchImages(ws, cache, fetchImage);
     expect(cache.has('xl/media/image1.png')).toBe(false);
+  });
+
+  it('replaces a duotone pass-through bitmap after base-cache eviction between passes', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => {
+      const bmp = {
+        width: 4,
+        height: 4,
+        closed: false,
+        close(): void { this.closed = true; },
+      };
+      return bmp as unknown as ImageBitmap;
+    }));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const ws = worksheetWithImages();
+    ws.images = [
+      {
+        fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+        toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: 'xl/media/image1.png',
+        mimeType: 'image/png',
+        duotone: { clr1: '000000', clr2: 'FFF3F4' },
+      },
+    ];
+    ws.shapeGroups = [];
+    const cache = new Map<string, CanvasImageSource | null>();
+    const key = 'xl/media/image1.png|duo:000000:FFF3F4';
+
+    await prefetchImages(ws, cache, fetchImage);
+    const pass1 = cache.get(key) as ImageBitmap & { closed: boolean };
+    expect(pass1).toBeDefined();
+    expect(pass1.closed).toBe(false);
+
+    for (let i = 0; i < 256; i++) {
+      await getCachedBitmapByPath(`xl/media/pressure-${i}.png`, 'image/png', fetchImage);
+    }
+    await flush();
+    expect(pass1.closed).toBe(true);
+
+    await prefetchImages(ws, cache, fetchImage);
+    const pass2 = cache.get(key) as ImageBitmap & { closed: boolean };
+    expect(pass2).toBeDefined();
+    expect(pass2.closed).toBe(false);
+
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
   });
 });
