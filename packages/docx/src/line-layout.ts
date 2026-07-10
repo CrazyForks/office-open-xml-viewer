@@ -744,7 +744,9 @@ export function segAdvanceWidth(
 
 export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
   if (!ctx || !ctx.linePitchPt || ctx.linePitchPt <= 0) return false;
-  return ctx.type === 'lines' || ctx.type === 'linesAndChars';
+  return ctx.type === 'lines'
+    || ctx.type === 'linesAndChars'
+    || ctx.type === 'snapToChars';
 }
 
 /**
@@ -752,7 +754,7 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  * (fontBoundingBoxAscent + fontBoundingBoxDescent) per ECMA-376 §17.3.1.33.
  *
  *   auto    → natural × value ("single" = 1 natural line, "double" = 2).
- *             When docGrid type=lines|linesAndChars is active, the
+ *             When the docGrid line axis is active, the
  *             multiplier applies against the grid pitch instead, with a
  *             floor of the natural line height.
  *   exact   → value in pt, converted to px (ignores font and grid).

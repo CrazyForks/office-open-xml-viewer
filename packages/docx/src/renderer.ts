@@ -129,6 +129,7 @@ import {
   gridCharDeltaPx,
   gridSegDeltaPx,
   hasCJKBreakOpportunity,
+  isGridLineRule,
   kinsokuRulesEquivalent,
   layoutLines,
   lineBoxHeight,
@@ -3734,9 +3735,8 @@ function estimateParagraphHeight(
  *  the grid pitch widens to accommodate the tallest required line, and
  *  every line in the paragraph then uses that widened pitch. */
 function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: number): number {
-  if (!grid || !grid.linePitchPt || grid.linePitchPt <= 0) return h;
-  if (grid.type !== 'lines' && grid.type !== 'linesAndChars') return h;
-  const pitchPx = grid.linePitchPt * scale;
+  if (!isGridLineRule(grid)) return h;
+  const pitchPx = grid!.linePitchPt! * scale;
   if (pitchPx <= 0) return h;
   if (h <= pitchPx) return pitchPx;
   return Math.ceil(h / pitchPx) * pitchPx;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { lineBoxHeight } from './line-layout.js';
+import { isGridLineRule, lineBoxHeight } from './line-layout.js';
 import type { LineSpacing } from './types.js';
 
 // Regression: some generators emit <w:spacing w:line="0" w:lineRule="exact"/> on
@@ -40,6 +40,18 @@ describe('lineBoxHeight — degenerate zero line spacing', () => {
   });
   it('unspecified spacing is single (natural)', () => {
     expect(lineBoxHeight(null, 12, 3, 1, undefined)).toBe(15);
+  });
+});
+
+describe('lineBoxHeight — snapToChars line-grid participation', () => {
+  const grid20 = { type: 'snapToChars', linePitchPt: 20 } as const;
+
+  it('recognizes snapToChars as an active line-grid rule', () => {
+    expect(isGridLineRule(grid20)).toBe(true);
+  });
+
+  it('applies the line pitch as well as the character-grid behavior', () => {
+    expect(lineBoxHeight(null, 8, 2, 1, grid20, false, 0, true)).toBe(20);
   });
 });
 
