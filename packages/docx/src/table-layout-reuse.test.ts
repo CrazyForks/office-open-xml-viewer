@@ -5,6 +5,10 @@ import {
   __test_setTableReuseEnabled,
 } from './renderer.js';
 import type { RenderState } from './renderer.js';
+import {
+  resolveSectionLayoutContext,
+  type DocumentLayoutSettings,
+} from './layout-context.js';
 import type {
   DocTable,
   DocTableRow,
@@ -64,6 +68,33 @@ function makeCtx(): CanvasRenderingContext2D {
 }
 
 function makeState(scale: number): RenderState {
+  const kinsoku = {
+    enabled: false,
+    lineStartForbidden: new Set<number>(),
+    lineEndForbidden: new Set<number>(),
+  };
+  const layoutSettings: DocumentLayoutSettings = {
+    kinsoku,
+    defaultTabPt: 36,
+    documentHasEastAsianText: false,
+    compat: {
+      adjustLineHeightInTable: false,
+      useFeLayout: false,
+      balanceSingleByteDoubleByteWidth: false,
+    },
+  };
+  const sectionLayout = resolveSectionLayoutContext(layoutSettings, {
+    pageWidth: 500,
+    pageHeight: 1000,
+    marginTop: 0,
+    marginRight: 0,
+    marginBottom: 0,
+    marginLeft: 0,
+    headerDistance: 0,
+    footerDistance: 0,
+    titlePage: false,
+    evenAndOddHeaders: false,
+  });
   return {
     ctx: makeCtx(),
     scale,
@@ -84,9 +115,11 @@ function makeState(scale: number): RenderState {
     floats: [],
     floatParaSeq: 0,
     docGrid: { type: null, linePitchPt: null, charSpacePt: null },
+    layoutSettings,
+    sectionLayout,
     docEastAsian: false,
     fontFamilyClasses: { 'Times New Roman': 'roman' },
-    kinsoku: { enabled: false, lineStartForbidden: new Set<number>(), lineEndForbidden: new Set<number>() },
+    kinsoku,
     defaultTabPt: 36,
     showTrackChanges: false,
   } as unknown as RenderState;

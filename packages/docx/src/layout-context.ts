@@ -142,7 +142,7 @@ export function resolveDocumentLayoutSettings(
   };
 }
 
-export function computeSectionColumns(section: SectionProps): readonly ColumnGeom[] {
+export function computeSectionColumns(section: SectionProps): ColumnGeom[] {
   const contentWidthPt = section.pageWidth - section.marginLeft - section.marginRight;
   const columns = section.columns;
   if (!columns || columns.count <= 1) {

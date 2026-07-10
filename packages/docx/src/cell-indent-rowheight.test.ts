@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { calculateRowHeight } from './renderer.js';
+import {
+  resolveSectionLayoutContext,
+  type DocumentLayoutSettings,
+} from './layout-context.js';
 import type { DocTable, DocTableRow, DocTableCell, DocParagraph } from './types.js';
 
 // The render/measure state type, taken from calculateRowHeight's signature so
@@ -53,12 +57,43 @@ function makeMeasureState(): MeasureState {
     restore() {},
     measureText2() {},
   };
+  const kinsoku = {
+    enabled: false,
+    lineStartForbidden: new Set<number>(),
+    lineEndForbidden: new Set<number>(),
+  };
+  const layoutSettings: DocumentLayoutSettings = {
+    kinsoku,
+    defaultTabPt: 36,
+    documentHasEastAsianText: false,
+    compat: {
+      adjustLineHeightInTable: false,
+      useFeLayout: false,
+      balanceSingleByteDoubleByteWidth: false,
+    },
+  };
+  const sectionLayout = resolveSectionLayoutContext(layoutSettings, {
+    pageWidth: 500,
+    pageHeight: 1000,
+    marginTop: 0,
+    marginRight: 0,
+    marginBottom: 0,
+    marginLeft: 0,
+    headerDistance: 0,
+    footerDistance: 0,
+    titlePage: false,
+    evenAndOddHeaders: false,
+  });
   return {
     ctx: ctx as unknown as CanvasRenderingContext2D,
     scale: 1,
     fontFamilyClasses: {},
     docGrid: { type: null, linePitchPt: null, charSpacePt: null },
+    layoutSettings,
+    sectionLayout,
     docEastAsian: false,
+    kinsoku,
+    defaultTabPt: 36,
   } as unknown as MeasureState;
 }
 
