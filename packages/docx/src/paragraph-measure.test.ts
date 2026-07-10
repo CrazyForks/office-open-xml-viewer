@@ -10,6 +10,7 @@ import {
   type WrapOracle,
 } from './paragraph-measure.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
+import type { LayoutTextSeg } from './line-layout.js';
 import type { DocParagraph, DocxTextRun, FieldRun, ImageRun } from './types.js';
 
 function makeContext(ascentRatio = 0.8, descentRatio = 0.2): CanvasRenderingContext2D {
@@ -104,6 +105,13 @@ const placement = (overrides: Partial<ParagraphPlacement> = {}): ParagraphPlacem
   suppressSpaceBefore: false,
   ...overrides,
 });
+
+const measuredTextSequence = (
+  measured: ReturnType<typeof measureParagraph>,
+): string[] => measured.lines.map((line) => line.layout.segments
+  .filter((segment): segment is LayoutTextSeg => 'text' in segment)
+  .map((segment) => segment.text)
+  .join(''));
 
 describe('measureParagraph', () => {
   it('measures a no-float paragraph and excludes trailing spacing from contentEndYPt', () => {
@@ -382,5 +390,120 @@ describe('measureParagraph', () => {
     expect(first.lines[0].layout.availWidth).toBe(20);
     expect(second.lines[0].layout.availWidth).toBe(100);
     expect(first.lines.length).toBeGreaterThan(second.lines.length);
+  });
+
+  it('reproduces the same-width suffix from a consumed line boundary', () => {
+    const doc = paragraph({
+      spaceBefore: 0,
+      runs: [{
+        type: 'text',
+        ...textRun('alpha bravo charlie delta echo foxtrot golf hotel india juliet'),
+      }],
+    });
+    const context = layoutContext({ spaceBeforePt: 0 });
+    const position = placement({ startYPt: 0, availableWidthPt: 45 });
+    const full = measureParagraph(doc, context, position, measurer, environment());
+    const boundary = full.lines[0].layout.consumedEnd!;
+
+    expect(full.lines.length).toBeGreaterThan(2);
+    const continuation = measureParagraph(
+      doc,
+      context,
+      position,
+      measurer,
+      environment(),
+      { boundary },
+    );
+
+    expect(measuredTextSequence(continuation)).toEqual(measuredTextSequence(full).slice(1));
+  });
+
+  it('suppresses first-line indent when measuring a continuation', () => {
+    const doc = paragraph({
+      indentFirst: 20,
+      spaceBefore: 0,
+      runs: [{ type: 'text', ...textRun('a a a a a a a a a a a a a a a a a a') }],
+    });
+    const context = layoutContext({ firstIndentPt: 20, spaceBeforePt: 0 });
+    const position = placement({ startYPt: 0, availableWidthPt: 50 });
+    const full = measureParagraph(doc, context, position, measurer, environment());
+    const boundary = full.lines[0].layout.consumedEnd!;
+    const continuation = measureParagraph(
+      doc,
+      context,
+      position,
+      measurer,
+      environment(),
+      { boundary },
+    );
+    const fullText = measuredTextSequence(full);
+    const continuationText = measuredTextSequence(continuation);
+
+    expect(continuationText[0]).toBe(fullText[1]);
+    expect(continuationText[0].length).toBeGreaterThan(fullText[0].length);
+  });
+
+  it('re-wraps a continuation at a narrower width without losing text', () => {
+    const doc = paragraph({
+      spaceBefore: 0,
+      runs: [{ type: 'text', ...textRun('あ'.repeat(32)) }],
+    });
+    const context = layoutContext({ spaceBeforePt: 0 });
+    const full = measureParagraph(
+      doc,
+      context,
+      placement({ startYPt: 0, availableWidthPt: 40 }),
+      measurer,
+      environment(),
+    );
+    const boundary = full.lines[0].layout.consumedEnd!;
+    const continuation = measureParagraph(
+      doc,
+      context,
+      placement({ startYPt: 0, availableWidthPt: 20 }),
+      measurer,
+      environment(),
+      { boundary },
+    );
+
+    for (const line of continuation.lines) {
+      expect(line.layout.segments.reduce((sum, segment) => sum + segment.measuredWidth, 0))
+        .toBeLessThanOrEqual(20);
+    }
+    expect(measuredTextSequence(continuation).join(''))
+      .toBe(measuredTextSequence(full).slice(1).join(''));
+    expect(continuation.lines.length).toBeGreaterThan(full.lines.length - 1);
+  });
+
+  it('composes continuation boundaries in original segment coordinates', () => {
+    const doc = paragraph({
+      spaceBefore: 0,
+      runs: [{
+        type: 'text',
+        ...textRun('alpha bravo charlie delta echo foxtrot golf hotel india juliet'),
+      }],
+    });
+    const context = layoutContext({ spaceBeforePt: 0 });
+    const position = placement({ startYPt: 0, availableWidthPt: 45 });
+    const full = measureParagraph(doc, context, position, measurer, environment());
+    const first = measureParagraph(
+      doc,
+      context,
+      position,
+      measurer,
+      environment(),
+      { boundary: full.lines[0].layout.consumedEnd! },
+    );
+    const second = measureParagraph(
+      doc,
+      context,
+      position,
+      measurer,
+      environment(),
+      { boundary: first.lines[0].layout.consumedEnd! },
+    );
+
+    expect(first.lines.length).toBeGreaterThan(1);
+    expect(measuredTextSequence(second)).toEqual(measuredTextSequence(first).slice(1));
   });
 });

@@ -12,6 +12,7 @@ import {
   lineBoxHeight,
   paragraphMarkLineHeight,
   type DocGridCtx,
+  type LineBoundary,
   type LayoutLine,
   type LineLayoutEnvironment,
   type WrapLayoutCtx,
@@ -142,6 +143,7 @@ export function measureParagraph(
   placement: ParagraphPlacement,
   measurer: TextMeasurer,
   environment: ParagraphMeasurementEnvironment,
+  continuation?: { readonly boundary: LineBoundary },
 ): MeasuredParagraph {
   const grid = paragraphGrid(context);
   const paragraphWidthPt = Math.max(
@@ -239,7 +241,9 @@ export function measureParagraph(
     measurer.context,
     segments,
     paragraphWidthPt,
-    context.firstIndentPt,
+    // ECMA-376 §17.3.1.12: first-line and hanging indents apply only to the
+    // paragraph's first line, not to a continuation measured in another column.
+    continuation ? 0 : context.firstIndentPt,
     1,
     [...context.tabStops],
     wrapContext,
@@ -250,6 +254,7 @@ export function measureParagraph(
     context.defaultTabPt,
     paragraphWidthPt + context.physicalIndentRightPt,
     context.baseRtl,
+    continuation?.boundary,
   );
   if (lines.length === 0) return measureMarkOnly();
 
