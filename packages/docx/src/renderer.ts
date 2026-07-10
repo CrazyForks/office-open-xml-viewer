@@ -139,6 +139,7 @@ import {
   paragraphMarkLineHeight,
   paragraphSegsStateSensitive,
   rescaleLayoutLines,
+  segLetterSpacingPx,
   shapeRenderState,
   shapeRunToDocRun,
   segmentCharacterGridDeltaPx,
@@ -7306,20 +7307,23 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           );
         } else if (state.verticalCJK) {
           // ECMA-376 §17.6.20 (tbRl) — the run flows DOWN the column (logical
-          // +x). Draw each glyph advancing by its measured horizontal width plus
-          // the per-cell grid delta, counter-rotating upright (CJK) glyphs so
-          // they stand up inside the +90°-rotated page while Latin/digits stay
-          // sideways. The docGrid cell delta (segGridDelta, non-zero only on a
-          // pure-EA segment) becomes the vertical inter-glyph pitch; the
-          // horizontal-only justify slicing (cases below) does not apply in
-          // vertical stage-1 (the sample's columns are start-aligned).
+          // +x). Draw each glyph advancing by its measured horizontal width
+          // (× the §17.3.2.43 `w:w` scale) plus the combined per-glyph pitch —
+          // the docGrid cell delta (non-zero only on a pure-EA segment) plus the
+          // §17.3.2.35 `w:spacing` pitch, the SAME `segLetterSpacingPx` value the
+          // measured advance folds in (measure==paint) — counter-rotating upright
+          // (CJK) glyphs so they stand up inside the +90°-rotated page while
+          // Latin/digits stay sideways. The horizontal-only justify slicing
+          // (cases below) does not apply in vertical stage-1 (the sample's
+          // columns are start-aligned).
           drawVerticalRun(
             ctx,
             s.text,
             x,
             baseline + yOffset,
             effSizePx,
-            segGridDelta !== 0 ? segmentGridDeltaPx : 0,
+            segLetterSpacingPx(s, drawGridDeltaPx, scale),
+            segCharScale,
           );
         } else if (segGridDelta !== 0) {
           const cps = [...s.text]; // code points (handles surrogate pairs)

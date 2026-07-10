@@ -250,8 +250,10 @@ function inkCenterAboveMiddlePx(ctx: Ctx2D, drawStr: string): number {
  * @param x                Logical left edge of the run (px).
  * @param baseline         Logical baseline y of the line (px).
  * @param fontPx           Effective font size in px (for cell centring).
- * @param letterSpacingPx  Per-glyph extra advance (docGrid cell delta or
- *                         justification pitch); 0 for the common path.
+ * @param letterSpacingPx  Per-glyph extra advance: the combined docGrid cell
+ *                         delta + §17.3.2.35 `w:spacing` pitch (the layout's
+ *                         `segLetterSpacingPx`); 0 for the common path.
+ * @param charScale        ECMA-376 §17.3.2.43 `w:w` fraction; 1 by default.
  */
 export function drawVerticalRun(
   ctx: Ctx2D,
@@ -260,6 +262,7 @@ export function drawVerticalRun(
   baseline: number,
   fontPx: number,
   letterSpacingPx: number,
+  charScale = 1,
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
@@ -268,13 +271,22 @@ export function drawVerticalRun(
   // per run (font-level, glyph-independent). Used to re-centre SIDEWAYS glyphs,
   // which are otherwise drawn on their baseline and so land off the centreline.
   const emBoxCenterPx = emBoxCenterAboveBaselinePx(ctx, text, fontPx);
+  // In this rotate-layout architecture the direction-independent layout kernel
+  // applies ECMA-376 §17.3.2.43 `w:w` to the line axis (`segAdvanceWidth`) even
+  // for tbRl; wrapping, selection, and run boxes already depend on that advance,
+  // so paint must follow measure. Sideways glyphs are rotated horizontal text,
+  // making their `w:w` width axis the vertical advance axis directly. Upright
+  // glyphs therefore scale the equivalent local y axis. Tate-chu-yoko is kept
+  // separate: ECMA-376 §17.3.2.10 fixes its advance to one em and uses `w:w` on
+  // the cross axis.
+  const scaled = charScale !== 1;
   let ax = 0; // cumulative advance from run left (logical +x)
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
     const mode = verticalDrawMode(cp);
     // Advance/width uses the ORIGINAL code point (measure == draw, and the text
     // model / selection / find keep the original character — see the module doc).
-    const adv = ctx.measureText(ch).width + letterSpacingPx;
+    const adv = ctx.measureText(ch).width * charScale + letterSpacingPx;
     // A vo=Tr bracket with a Unicode vertical presentation form (（）「」〈〉…) is
     // SUBSTITUTED and drawn upright, exactly like the upright cells — UAX#50 §5
     // Tr means "substitute a vertical glyph; rotate only as fallback". Only Tr
@@ -324,6 +336,7 @@ export function drawVerticalRun(
       ctx.save();
       ctx.translate(cx, baseline);
       ctx.rotate(-Math.PI / 2);
+      if (scaled) ctx.scale(1, charScale);
       // In the upright local frame: `center`/`middle` puts the em box on the cell
       // centre; local +x = cross axis, local +y = along-column. `off.dx` nudges
       // ． toward the cell's upper-right corner (cross axis); `alongEm + off.dy`
@@ -342,7 +355,15 @@ export function drawVerticalRun(
       const cx = x + ax + adv / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(ch, cx, baseline);
+      if (scaled) {
+        ctx.save();
+        ctx.translate(cx, baseline);
+        ctx.scale(charScale, 1);
+        ctx.fillText(ch, 0, 0);
+        ctx.restore();
+      } else {
+        ctx.fillText(ch, cx, baseline);
+      }
     } else {
       // vo=R (Latin/digit): drawn SIDEWAYS (rotated with the page). Keep the
       // caller's alphabetic baseline and position the glyph's left at the current
@@ -357,7 +378,15 @@ export function drawVerticalRun(
       // measured relative to the alphabetic baseline).
       ctx.textAlign = prevAlign;
       ctx.textBaseline = 'alphabetic';
-      ctx.fillText(ch, x + ax, baseline + emBoxCenterPx);
+      if (scaled) {
+        ctx.save();
+        ctx.translate(x + ax, 0);
+        ctx.scale(charScale, 1);
+        ctx.fillText(ch, 0, baseline + emBoxCenterPx);
+        ctx.restore();
+      } else {
+        ctx.fillText(ch, x + ax, baseline + emBoxCenterPx);
+      }
     }
     ax += adv;
   }
