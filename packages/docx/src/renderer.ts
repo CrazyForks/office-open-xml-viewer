@@ -8167,6 +8167,68 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         //   4. Neither: a single fillText (the common path).
         const segmentGridDeltaPx = segmentCharacterGridDeltaPx(s, drawGridDeltaPx);
         const segGridDelta = gridSegDeltaPx(drawText, segmentGridDeltaPx);
+        // ECMA-376 §17.3.1.6 `<w:bidi>` (issue #929) — a segment's TRAILING
+        // whitespace (an inter-word space at its logical end) must sit on the
+        // segment's physical LEFT under an RTL visual frame, toward the next
+        // reading word. Canvas is asked to do this via `ctx.direction='rtl'`, but
+        // that is BACKEND-DEPENDENT: Chrome reorders the trailing space to the
+        // left, whereas skia-canvas (the server/VRT/MCP rendering backend)
+        // left-anchors the logical string and leaves the space on the physical
+        // RIGHT — so the space lands on the wrong (outer) side and the word renders
+        // FLUSH against its reading-next neighbour (the gap collapses; most visible
+        // as a two-word label / table cell where the single inter-word gap is lost).
+        // Position the whitespace EXPLICITLY instead: draw the trailing-whitespace-
+        // TRIMMED glyphs (`glyphText`) shifted rightward by the whitespace advance
+        // (`rtlWsShiftPx`) so the space occupies the box's LEFT — identical output
+        // in both backends.
+        //
+        // The shift is derived from the SAME single advance authority the measure
+        // pass used for the segment box (`segAdvanceWidth`: natural glyph width ×
+        // §17.3.2.43 `w:w` scale + one per-code-point pitch — §17.3.2.35
+        // `w:spacing`, or the §17.3.2.14 fitText per-gap), NOT by re-measuring
+        // under a paint letterSpacing: the fixed pitch is per code point and does
+        // NOT stretch with `w:w`, so measuring with `letterSpacing=spacing` and
+        // multiplying by the scale would wrongly scale the pitch. With the
+        // authority, the anchored glyphs' right edge lands exactly on the box edge
+        // under every pitch combination (measure==paint).
+        //
+        // Consumers: the plain / §17.3.2.35 spacing / §17.3.2.43 w:w branches use
+        // `glyphText`/`glyphDrawX`; the §17.3.2.14 fitText branch composes
+        // `rtlWsShiftPx` with its region-end pad shift (`fitDrawX`). The docGrid
+        // branch (`segGridDelta !== 0`) and the justified split-piece branch are
+        // exempt: both require CJK content inside the segment (a pure-EA grid
+        // segment / inter-CJK split points), which resolves to an even (LTR) bidi
+        // level, so an RTL-direction segment cannot reach them outside the
+        // rtl-marked EA-punctuation corner (bidi justification is already
+        // approximate there — see the decoW note above). LTR segments and the
+        // non-bidi fast path keep `glyphText===drawText` / `glyphDrawX===x`
+        // (byte-identical). Decorations, `onTextRun`, and the pen advance stay on
+        // the untrimmed box (`x` / `spanW`).
+        let glyphText = drawText;
+        let glyphDrawX = x;
+        let rtlWsShiftPx = 0;
+        if (
+          visual &&
+          visual.rtl[si] === true &&
+          !state.verticalCJK &&
+          /\s$/u.test(drawText)
+        ) {
+          const trimmed = drawText.replace(/\s+$/u, '');
+          if (trimmed.length > 0) {
+            // Natural (pitch-free) advances, mirroring the layout measure pass
+            // (see modeledAdvance): the authority folds the pitch in itself.
+            const prevLetterSpacing = ctx.letterSpacing;
+            ctx.letterSpacing = '0px';
+            const naturalFull = ctx.measureText(drawText).width;
+            const naturalTrimmed = ctx.measureText(trimmed).width;
+            ctx.letterSpacing = prevLetterSpacing;
+            rtlWsShiftPx =
+              segAdvanceWidth({ ...s, text: drawText }, naturalFull, drawGridDeltaPx, scale) -
+              segAdvanceWidth({ ...s, text: trimmed }, naturalTrimmed, drawGridDeltaPx, scale);
+            glyphText = trimmed;
+            glyphDrawX = x + rtlWsShiftPx;
+          }
+        }
         if (state.verticalCJK && s.tateChuYoko) {
           // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): draw the whole run
           // horizontally, side by side, inside ONE cell of the vertical column.
@@ -8228,14 +8290,24 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // glyph sits at the leading (right) edge and the pad falls to its left.
           // (Non-end / multi-char segments carry trailingPad == 0 ⇒ no shift, and
           // every LTR segment keeps a zero offset ⇒ byte-identical.)
+          //
+          // Issue #929 composes here exactly like the sibling arms: an RTL
+          // segment's TRAILING whitespace (a run-boundary space kept inside the
+          // fit region) must also fall to the glyphs' LEFT, so the whitespace-
+          // trimmed `glyphText` draws at `fitDrawX + rtlWsShiftPx` — the pad AND
+          // the whitespace advance (its glyph width plus its per-gap share, per
+          // the segAdvanceWidth authority above) are both reserved on the left,
+          // and the trimmed glyphs' right edge stays on the box edge. LTR /
+          // whitespace-less segments have `rtlWsShiftPx === 0` and
+          // `glyphText === drawText` (byte-identical).
           const fitRtl = !!(visual && visual.rtl[si]);
           const fitPad = s.fitTextTrailingPadPx ?? 0;
-          const fitDrawX = x + (fitRtl ? fitPad : 0);
+          const fitDrawX = x + (fitRtl ? fitPad : 0) + rtlWsShiftPx;
           const scaled = segCharScale !== 1;
           const prevLetterSpacing = ctx.letterSpacing;
           if (scaled) { ctx.save(); ctx.translate(fitDrawX, 0); ctx.scale(segCharScale, 1); }
           ctx.letterSpacing = `${s.fitTextPerGapPx / segCharScale}px`;
-          ctx.fillText(drawText, scaled ? 0 : fitDrawX, baseline + yOffset);
+          ctx.fillText(glyphText, scaled ? 0 : fitDrawX, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
           if (scaled) ctx.restore();
         } else if (segGridDelta !== 0) {
@@ -8375,13 +8447,13 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // (The docGrid and justify arms above compose the SAME transform when a
           // grid / distributed run also carries w:w — issue #816.)
           ctx.save();
-          ctx.translate(x, 0);
+          ctx.translate(glyphDrawX, 0);
           ctx.scale(segCharScale, 1);
           const prevLetterSpacing = ctx.letterSpacing;
           if (segCharSpacingPx !== 0) {
             ctx.letterSpacing = `${segCharSpacingPx / segCharScale}px`;
           }
-          ctx.fillText(drawText, 0, baseline + yOffset);
+          ctx.fillText(glyphText, 0, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
           ctx.restore();
         } else if (segCharSpacingPx !== 0) {
@@ -8390,10 +8462,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // layout already folded into `s.measuredWidth` (measure==paint).
           const prevLetterSpacing = ctx.letterSpacing;
           ctx.letterSpacing = `${segCharSpacingPx}px`;
-          ctx.fillText(drawText, x, baseline + yOffset);
+          ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
           ctx.letterSpacing = prevLetterSpacing;
         } else {
-          ctx.fillText(drawText, x, baseline + yOffset);
+          ctx.fillText(glyphText, glyphDrawX, baseline + yOffset);
         }
         // §17.3.2.19 — restore the inherited font-kerning now the run's glyphs are
         // painted (the following ruby / emphasis-mark draws are separate glyphs at
