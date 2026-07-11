@@ -2337,18 +2337,6 @@ export function layoutLines(
   // tabs do not trigger the LTR right/center/overflow wrap paths. Default false
   // ⇒ the LTR tab paths run unchanged (byte-identical output).
   baseRtl = false,
-  // ECMA-376 §17.18.44 — whether the paragraph uses a fully justified mode.
-  // The shrink tolerance is gated per line below: lines paint will justify get
-  // no budget, while true-last/manual-break lines left non-justified keep it.
-  // `stretchLastLine` distinguishes those modes. See issue #698.
-  isJustified = false,
-  // ECMA-376 §17.18.44 — `distribute`/`thaiDistribute` stretch EVERY line
-  // including the paragraph's last (jcStretchesLastLine); `both`/kashida leave
-  // the last line and manual-break lines (§17.3.3.1) non-justified. Threaded so
-  // the per-candidate shrink gate below mirrors the paint predicate
-  // `applyJustify = isJustified && (!endsLogicalLine || stretchLastLine)`
-  // (renderer.ts) — measure and paint must classify each LINE identically.
-  stretchLastLine = false,
   startBoundary?: LineBoundary,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
@@ -2356,11 +2344,8 @@ export function layoutLines(
   let currentWidth = 0;
   // Sum of trailing-space widths of every text token on the current line.
   // Used for two things:
-  //   1. Knuth-Plass-style shrink tolerance: lines the paint pass leaves
-  //      non-justified may compress spaces by up to SPACE_SHRINK_RATIO. Per
-  //      §17.18.44 it is suppressed for lines the paint pass fully justifies:
-  //      non-final/non-manual-break lines of `both`/kashida, and every line of
-  //      `distribute`/`thaiDistribute` (measure == paint; issue #698).
+  //   1. Knuth-Plass-style shrink tolerance: every line may consume up to
+  //      SPACE_SHRINK_RATIO of its accumulated trailing-space width.
   //   2. Trailing-space collapse at line end — the last token's trailing
   //      space disappears when no further word is added, so when deciding
   //      whether a candidate word fits we treat it as if it would become the
@@ -3018,23 +3003,14 @@ export function layoutLines(
     // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
     const trailingSpaceW = s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
     const wForFit = w - trailingSpaceW;
-    // Shrink budget for a candidate whose admission would CLOSE the current line
-    // with `next` as the first following segment (the budget only matters for a
-    // MARGINAL candidate — one that fills the line past availW(), so nothing more
-    // fits after it). Mirrors the paint pass's per-line justify predicate
-    // (renderer.ts `applyJustify = isJustified && (!endsLogicalLine || stretchLastLine)`):
-    // a line the draw pass will JUSTIFY (§17.18.44 expands its inter-word spaces,
-    // never compresses below natural width) gets NO budget and breaks at natural
-    // fit (issue #698, Word PDF ground truth); a line the draw pass leaves
-    // non-justified — the paragraph's true last line (queue exhausted) or a manual
-    // `<w:br/>` line (§17.3.3.1) under `both`/kashida — keeps the measurement-bias
-    // budget, because paint draws it with the promised shrink-fit compression.
-    const shrinkBudgetFor = (next: LayoutSeg | undefined): number => {
-      const closesLogicalLine = next === undefined || 'lineBreak' in next;
-      const lineWillJustify = isJustified && (!closesLogicalLine || stretchLastLine);
-      return lineWillJustify ? 0 : lineTotalTrailingW * SPACE_SHRINK_RATIO;
-    };
-    const shrinkBudget = shrinkBudgetFor(queue[0]);
+    // INTERIM: use one uniform measurement-bias budget even when the paint pass
+    // fully justifies the line. ECMA-376 §17.18.44 and Word-verified issue #698
+    // say those lines should break at natural fit, but the gate cannot coexist
+    // with the tracked public demo under the current single-ratio font metrics.
+    // Re-enable it after issue #794 adds per-font advance-bias correction. The
+    // #934 `isJustified`/`stretchLastLine` layout plumbing is removed meanwhile
+    // to keep the live API minimal; #794 should re-thread it with the real model.
+    const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
 
     // Atomic glued group: when THIS segment starts a glued group (its followers
     // in the queue are `joinPrev` pieces — small-caps case-pieces of the SAME
@@ -3093,7 +3069,7 @@ export function layoutLines(
         const ft = f.text.replace(/ +$/, '');
         groupTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
       }
-      if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudgetFor(queue[groupEnd])) {
+      if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudget) {
         flush(undefined, false, s.src);
       }
     }

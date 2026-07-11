@@ -9,23 +9,30 @@ import type {
 } from './types';
 
 // ECMA-376 §17.18.44 (ST_Jc `both`/`distribute`) — the Knuth-Plass space-shrink
-// fit tolerance (`SPACE_SHRINK_RATIO`) must NOT admit an extra word onto a line
-// that the draw pass will JUSTIFY, and MUST keep doing so on a line the draw pass
-// treats as non-justified. The gate is per LINE, mirroring the paint predicate
-// (renderer.ts: `applyJustify = isJustified && (!endsLogicalLine || stretchLastLine)`):
+// fit tolerance (`SPACE_SHRINK_RATIO`) ideally must NOT admit an extra word onto
+// a line that the draw pass will JUSTIFY, and must remain available on a line the
+// draw pass treats as non-justified. The per-line gate that mirrored the paint
+// predicate is currently disabled as an interim measure:
 //
 // - A line that WILL justify (a non-final, non-manual-break line of a
 //   `both`/kashida paragraph, or ANY line of `distribute`/`thaiDistribute`)
 //   redistributes its slack by EXPANDING inter-word spaces — it is never drawn
 //   compressed below natural width, so a candidate word whose natural advance
 //   overflows the column must wrap. Observed Word behaviour (issue #698, PDF
-//   ground truth): in a narrow justified column the tolerance pulled one word up
-//   per affected line where Word breaks at natural fit.
+//   ground truth) still stands: in a narrow justified column Word breaks at
+//   natural fit rather than pulling up one more word.
 // - A line the draw pass does NOT justify — the paragraph's true last line and a
 //   line ending at a manual `<w:br/>` (§17.3.3.1) under `both`/kashida, and every
 //   line of a non-justified paragraph — is drawn with the shrink-fit compression
 //   the budget promises (`shrinkFitCompression`), so the measurement-bias
 //   tolerance stays: measure and paint spend the SAME budget (measure==paint).
+// - The current uniform tolerance also compensates for per-font advance bias
+//   between browser measurement and Word. The tracked public Latin demo, whose
+//   `docDefaults` use `w:jc="both"`, matches Word only with that tolerance. Until
+//   issue #794 supplies a per-font advance-bias model, that ground truth cannot
+//   coexist with #698 under one ratio, so the public demo takes interim priority.
+//   Once #794 lands, restore the §17.18.44 gate and the Word-verified expectations
+//   below (3 tokens on the first line, across 2 lines).
 
 const FONT_PX = 12; // linear stub: each code point advances FONT_PX at scale 1
 
@@ -144,14 +151,18 @@ const TEXT4 = 'AAAA AAAA AAAA AAAA';      // marginal word is the paragraph-FINA
 const TEXT5 = 'AAAA AAAA AAAA AAAA AAAA'; // marginal word is followed by more content
 const COLUMN = 225;
 
-describe('§17.18.44 — space-shrink fit tolerance is gated per justified LINE (issue #698)', () => {
-  it('wraps the marginal word off a line that WILL justify (more content follows)', async () => {
-    // Word PDF ground truth (issue #698, narrow justified column): the justified
-    // line breaks at natural fit — the marginal word is not pulled up. Line 1
-    // must hold exactly 3 tokens; the old paragraph-wide tolerance admitted a 4th.
+describe('§17.18.44 — interim uniform space-shrink fit tolerance (#794 pending)', () => {
+  it('INTERIM (#794 pending): admits the marginal word on a line that will justify', async () => {
+    // Word PDF ground truth for #698's narrow justified column still shows a
+    // natural-fit break (3 tokens). That cannot currently coexist with the
+    // tracked public Latin demo (`docDefaults w:jc="both"`), whose wrapping
+    // matches Word only with the uniform measurement-bias tolerance. The interim
+    // decision favors the public demo GT, so the tolerance admits token 4. Issue
+    // #794's per-font advance-bias correction will let the §17.18.44 gate return
+    // and this expectation flip back to Word's verified 3 tokens across 2 lines.
     const lines = await renderLines(textPara(TEXT5, 'both'), COLUMN);
     expect(lines.length).toBe(2);
-    expect(tokens(lines[0])).toBe(3);
+    expect(tokens(lines[0])).toBe(4);
   });
 
   it('keeps the SAME marginal word on a non-justified line (bias tolerance retained)', async () => {
@@ -193,12 +204,18 @@ describe('§17.18.44 — space-shrink fit tolerance is gated per justified LINE 
     expect(lines[1]).toContain('BBBB');
   });
 
-  it('suppresses the budget on EVERY `distribute` line, including the last (stretchLastLine)', async () => {
-    // §17.18.44 `distribute` stretches every line — the paragraph-final line is
-    // justified too (paint: stretchLastLine), so its marginal word must wrap.
+  it('INTERIM (#794 pending): keeps the uniform budget on a `distribute` last line', async () => {
+    // Word PDF ground truth for #698 still requires the natural-fit break here:
+    // §17.18.44 `distribute` stretches the final line, yielding 3 tokens across
+    // 2 lines. Under the current single-ratio model that conflicts with the
+    // tracked public Latin demo (`docDefaults w:jc="both"`), whose Word wrapping
+    // requires the uniform measurement-bias tolerance. The interim decision
+    // favors that public demo GT, so all 4 tokens fit on one line. Issue #794's
+    // per-font advance-bias correction is the principled fix; then the justified
+    // per-line gate returns and this flips back to Word's verified 3 / 2 result.
     const lines = await renderLines(textPara(TEXT4, 'distribute'), COLUMN);
-    expect(lines.length).toBe(2);
-    expect(tokens(lines[0])).toBe(3);
+    expect(lines.length).toBe(1);
+    expect(tokens(lines[0])).toBe(4);
   });
 
   it('does not force a wrap when the justified content genuinely fits at natural width', async () => {
