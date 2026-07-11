@@ -2960,7 +2960,7 @@ export function renderTextBody(
       // ECMA-376 §21.1.2.4.4 (buClr): an explicit `<a:buClr>` colours the
       // auto-number marker, mirroring the char-bullet branch above. Only when it
       // is absent does the marker fall back to the buClrTx default
-      // (§21.1.2.4.10 — the inherited first-run colour).
+      // (§21.1.2.4.5 — the inherited first-run colour).
       bulletColor = bullet.color ? hexToRgba(bullet.color) : bulletInheritedColor;
     } else if (bullet.type === 'blip') {
       // ECMA-376 §21.1.2.4.2 picture bullet. The bitmap is drawn as a square

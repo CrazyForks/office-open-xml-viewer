@@ -126,24 +126,179 @@ pub(crate) fn merge_level_indents(primary: &LevelIndents, fallback: &LevelIndent
     out
 }
 
-/// Per-list-level bullet definitions (index 0..=8 → lvl1pPr..lvl9pPr).
-/// `None` where the level's `<a:lvlNpPr>` declares no `buChar`/`buAutoNum`/`buNone`
-/// (so the value is still inherited from a lower-priority style tier).
-pub(crate) type LevelBullets = [Option<Bullet>; 9];
+/// The marker choice of a bullet (ECMA-376 §21.1.2.4 EG_TextBullet:
+/// `buNone`/`buAutoNum`/`buChar`/`buBlip`). Separate from the three decoration
+/// groups (colour/size/typeface) so each inherits independently across the
+/// style cascade — see [`BulletProps`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BuMarker {
+    /// `<a:buNone>` — explicitly no marker (§21.1.2.4.8).
+    None,
+    /// `<a:buChar char="…">` (§21.1.2.4.3).
+    Char(String),
+    /// `<a:buAutoNum type startAt>` (§21.1.2.4.1).
+    AutoNum {
+        num_type: String,
+        start_at: Option<u32>,
+    },
+    /// `<a:buBlip>` resolved to an embedded zip path + mime (§21.1.2.4.2).
+    Blip {
+        image_path: String,
+        mime_type: String,
+    },
+}
+
+/// Bullet colour group (ECMA-376 §21.1.2.4 EG_TextBulletColor): an explicit
+/// `<a:buClr>` colour or `<a:buClrTx>` "follow the run's text colour". Absence
+/// is modelled by the enclosing `Option` (inherit from a lower style tier).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BuColor {
+    /// `<a:buClrTx>` (§21.1.2.4.5) — follow the text run's colour.
+    FollowText,
+    /// `<a:buClr>` (§21.1.2.4.4) — explicit resolved colour (hex, no '#').
+    Color(String),
+}
+
+/// Bullet typeface group (EG_TextBulletTypeface): `<a:buFont>` explicit or
+/// `<a:buFontTx>` follow-text. Absence = inherit (enclosing `Option`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BuFont {
+    /// `<a:buFontTx>` (§21.1.2.4.7) — follow the text run's font.
+    FollowText,
+    /// `<a:buFont typeface>` (§21.1.2.4.6) — explicit resolved typeface.
+    Font(String),
+}
+
+/// Bullet size group (EG_TextBulletSize): `<a:buSzPct>` percent-of-text or
+/// `<a:buSzTx>` follow-text. Absence = inherit (enclosing `Option`).
+///
+/// `<a:buSzPts>` (§21.1.2.4.10, absolute point size) is deliberately NOT modelled
+/// here: the resolved [`Bullet`] contract carries only a percentage (`sizePct`),
+/// and an absolute point size cannot be expressed as a percentage without the run
+/// size (which the parser does not know). Rather than record `buSzPts` as an
+/// override that BLOCKS an inherited lower-tier `buSzPct` but then renders at the
+/// default 100% — a behaviour change from before this cascade existed — we leave
+/// `buSzPts` unparsed (identical to prior behaviour) so a lower-tier `buSzPct`
+/// still inherits. Honouring absolute-point bullet sizes needs a renderer +
+/// contract extension and is tracked as follow-up work.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BuSize {
+    /// `<a:buSzTx>` (§21.1.2.4.11) — follow the text run's size.
+    FollowText,
+    /// `<a:buSzPct val>` (§21.1.2.4.9) — percentage of text size (100.0 = 100%).
+    Pct(f64),
+}
+
+/// A paragraph's bullet as FOUR independent choice groups (ECMA-376 §21.1.2.4:
+/// `CT_TextParagraphProperties` carries EG_TextBulletColor, EG_TextBulletSize,
+/// EG_TextBulletTypeface and EG_TextBullet as separate optional children). Each
+/// group inherits per-property across the master → layout → txBody-lstStyle →
+/// paragraph-pPr cascade, so a decoration declared in one tier survives onto a
+/// marker declared in another (PowerPoint resolves each group independently).
+/// `None` on a field means "not specified here — inherit from a lower tier";
+/// this is the state that whole-`Bullet` merging could not represent, which is
+/// why cross-tier splits (e.g. master `buAutoNum` + slide `buClr`) lost the
+/// higher-priority colour/size/font. Collapsed into the serialized [`Bullet`]
+/// contract at the leaf via [`BulletProps::resolve`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct BulletProps {
+    pub(crate) marker: Option<BuMarker>,
+    pub(crate) color: Option<BuColor>,
+    pub(crate) font: Option<BuFont>,
+    pub(crate) size: Option<BuSize>,
+}
+
+impl BulletProps {
+    /// True when no group is specified (all inherit). A level with only a
+    /// decoration (e.g. `buClr` but no marker) is NOT inherit — it must survive
+    /// the cascade to reach an inherited marker.
+    pub(crate) fn is_inherit(&self) -> bool {
+        self.marker.is_none() && self.color.is_none() && self.font.is_none() && self.size.is_none()
+    }
+
+    /// Field-wise merge: for each group `primary` wins when it specifies that
+    /// group, else `fallback` supplies it. An explicit `*Tx` (follow-text) value
+    /// counts as "specified" and therefore BLOCKS a lower tier — that is the
+    /// whole point of e.g. `buClrTx` over an inherited `buClr`.
+    pub(crate) fn merge(primary: &BulletProps, fallback: &BulletProps) -> BulletProps {
+        BulletProps {
+            marker: primary.marker.clone().or_else(|| fallback.marker.clone()),
+            color: primary.color.clone().or_else(|| fallback.color.clone()),
+            font: primary.font.clone().or_else(|| fallback.font.clone()),
+            size: primary.size.clone().or_else(|| fallback.size.clone()),
+        }
+    }
+
+    /// Collapse the resolved groups into the serialized [`Bullet`] the renderer
+    /// consumes. Collapsing happens ONLY at the leaf (never mid-cascade), so the
+    /// follow-text-vs-inherit distinction is preserved while merging:
+    /// - colour: `Color(c)` → `Some(c)`; `FollowText`/inherit → `None` (the
+    ///   renderer already treats `None` as "follow the run's colour");
+    /// - size: `Pct(p)` → `Some(p)`; `FollowText`/inherit → `None`;
+    /// - font: `Font(f)` → `Some(f)`; `FollowText`/inherit → `None`.
+    ///   Auto-number and picture markers carry no font/size in the `Bullet`
+    ///   contract (the renderer draws numbers in the run font and pictures as a
+    ///   sized bitmap), so those groups only participate in cascade blocking.
+    pub(crate) fn resolve(&self) -> Bullet {
+        let color = match &self.color {
+            Some(BuColor::Color(c)) => Some(c.clone()),
+            _ => None,
+        };
+        let size_pct = match &self.size {
+            Some(BuSize::Pct(v)) => Some(*v),
+            _ => None,
+        };
+        let font_family = match &self.font {
+            Some(BuFont::Font(f)) => Some(f.clone()),
+            _ => None,
+        };
+        match &self.marker {
+            None => Bullet::Inherit,
+            Some(BuMarker::None) => Bullet::None,
+            Some(BuMarker::Char(ch)) => Bullet::Char {
+                ch: ch.clone(),
+                color,
+                size_pct,
+                font_family,
+            },
+            Some(BuMarker::AutoNum { num_type, start_at }) => Bullet::AutoNum {
+                num_type: num_type.clone(),
+                start_at: *start_at,
+                color,
+            },
+            Some(BuMarker::Blip {
+                image_path,
+                mime_type,
+            }) => Bullet::Blip {
+                image_path: image_path.clone(),
+                mime_type: mime_type.clone(),
+                size_pct,
+            },
+        }
+    }
+}
+
+/// Per-list-level bullet properties (index 0..=8 → lvl1pPr..lvl9pPr). Each level
+/// is a [`BulletProps`] whose groups are individually `None` when the level's
+/// `<a:lvlNpPr>` (or the paragraph's `<a:pPr>`) does not specify them, so lower
+/// style tiers can supply the missing groups per-property.
+pub(crate) type LevelBullets = [BulletProps; 9];
 
 pub(crate) fn empty_level_bullets() -> LevelBullets {
-    std::array::from_fn(|_| None)
+    std::array::from_fn(|_| BulletProps::default())
 }
 
-/// True when any level carries an explicit bullet (avoids storing all-None arrays).
+/// True when any level specifies any bullet group (avoids storing all-inherit
+/// arrays). Must be decoration-aware: a level carrying only a `buClr` (no
+/// marker) still has to be stored so the colour reaches an inherited marker.
 pub(crate) fn has_any_level_bullet(s: &LevelBullets) -> bool {
-    s.iter().any(|v| v.is_some())
+    s.iter().any(|b| !b.is_inherit())
 }
 
-/// Read `<a:lvlNpPr>` bullets for levels 1..9 from a node holding `<a:lvlNpPr>`
-/// children (a txBody `<a:lstStyle>` or a master `<p:txStyles>` style node).
-/// A level resolves to `Some` only when it explicitly sets `buChar`/`buAutoNum`/
-/// `buNone`; an absent bullet element stays `None` so lower tiers can supply it.
+/// Read `<a:lvlNpPr>` bullet groups for levels 1..9 from a node holding
+/// `<a:lvlNpPr>` children (a txBody `<a:lstStyle>` or a master `<p:txStyles>`
+/// style node). Each level captures whichever of the four choice groups it
+/// declares; absent groups stay `None` so lower tiers supply them.
 pub(crate) fn read_level_bullets<F: FnMut(&str) -> Option<String>>(
     list_style: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -154,10 +309,8 @@ pub(crate) fn read_level_bullets<F: FnMut(&str) -> Option<String>>(
         list_style
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == tag)
-            .and_then(|lp| match parse_bullet(Some(lp), theme, resolve_blip) {
-                Bullet::Inherit => None,
-                b => Some(b),
-            })
+            .map(|lp| parse_bullet_props(Some(lp), theme, resolve_blip))
+            .unwrap_or_default()
     })
 }
 
@@ -173,9 +326,10 @@ pub(crate) fn extract_level_bullets<F: FnMut(&str) -> Option<String>>(
         .unwrap_or_else(empty_level_bullets)
 }
 
-/// Per-edge merge: `primary[lvl]` wins, else `fallback[lvl]`.
+/// Per-level, per-group merge: `primary[lvl]` wins each group it specifies, else
+/// `fallback[lvl]` supplies it (see [`BulletProps::merge`]).
 pub(crate) fn merge_level_bullets(primary: &LevelBullets, fallback: &LevelBullets) -> LevelBullets {
-    std::array::from_fn(|lvl| primary[lvl].clone().or_else(|| fallback[lvl].clone()))
+    std::array::from_fn(|lvl| BulletProps::merge(&primary[lvl], &fallback[lvl]))
 }
 
 // ===========================
@@ -625,38 +779,37 @@ pub(crate) fn parse_paragraph(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    // Effective bullet: the paragraph's own
-    // `<a:buChar>`/`<a:buAutoNum>`/`<a:buBlip>`/`<a:buNone>`, else the inherited
-    // per-level bullet for this placeholder (ECMA-376 §19.7.10). A paragraph's
-    // own `<a:buBlip>` embed resolves against the slide rels + `ppt/slides`,
-    // the same base as the slide's picture fills (§21.1.2.4.2).
+    // Effective bullet: the paragraph's own bullet groups
+    // (`<a:buClr>`/`<a:buSz…>`/`<a:buFont>` + `<a:buChar>`/`<a:buAutoNum>`/
+    // `<a:buBlip>`/`<a:buNone>`) merged PER-GROUP over the inherited per-level
+    // bullet for this placeholder (ECMA-376 §19.7.10, §21.1.2.4). Each group
+    // resolves independently, so a paragraph that sets only `buClr` still
+    // inherits the level's marker (and vice versa). A paragraph's own `<a:buBlip>`
+    // embed resolves against the slide rels + `ppt/slides`, the same base as the
+    // slide's picture fills (§21.1.2.4.2).
     let mut resolve_para_blip = |rid: &str| -> Option<String> {
         let target = rels.get(rid)?;
         let path = resolve_path("ppt/slides", target);
         // Verify the part exists so a listed-but-missing rId yields None and the
-        // bullet falls through to Bullet::Inherit (matches the variant's doc
-        // comment), mirroring the slide picture-fill resolvers. `index_for_name`
-        // reads the central directory only (no inflate), unlike the former
-        // `read_zip_bytes` which decompressed the entry just to discard it.
+        // buBlip marker falls through (inherit), mirroring the slide picture-fill
+        // resolvers. `index_for_name` reads the central directory only (no
+        // inflate), unlike the former `read_zip_bytes` which decompressed the
+        // entry just to discard it.
         zip.index_for_name(&path)?;
         Some(path)
     };
-    let bullet = match parse_bullet(p_pr, theme, &mut resolve_para_blip) {
-        Bullet::Inherit => level_bullets
-            .get(lvl as usize)
-            .and_then(|o| o.clone())
-            .unwrap_or(Bullet::Inherit),
-        b => b,
-    };
-    // A paragraph is a list item (and gets a hanging indent) when its effective
-    // bullet is a char/number/picture — whether declared explicitly or
-    // inherited. An inherited bullet without an inherited marL/indent reuses
-    // PowerPoint's implicit list metrics, the same defaults explicit bullets
-    // already use.
+    let own_bullet = parse_bullet_props(p_pr, theme, &mut resolve_para_blip);
+    let inherited_bullet = level_bullets.get(lvl as usize).cloned().unwrap_or_default();
+    let bullet_props = BulletProps::merge(&own_bullet, &inherited_bullet);
+    // A paragraph is a list item (and gets a hanging indent) when its RESOLVED
+    // marker is a char/number/picture — whether declared explicitly or inherited.
+    // An inherited bullet without an inherited marL/indent reuses PowerPoint's
+    // implicit list metrics, the same defaults explicit bullets already use.
     let has_bullet = matches!(
-        bullet,
-        Bullet::Char { .. } | Bullet::AutoNum { .. } | Bullet::Blip { .. }
+        bullet_props.marker,
+        Some(BuMarker::Char(_)) | Some(BuMarker::AutoNum { .. }) | Some(BuMarker::Blip { .. })
     );
+    let bullet = bullet_props.resolve();
 
     // marL / marR / indent resolve per axis: direct `<a:pPr>` attribute wins,
     // else the authored list-style level cascade (`level_indents`, from the
@@ -854,82 +1007,144 @@ pub(crate) fn parse_paragraph(
     }
 }
 
-/// Parse bullet specification from pPr node.
+/// Parse the marker choice group (ECMA-376 §21.1.2.4 EG_TextBullet) from a pPr /
+/// lvlNpPr node. The four members are an `xsd:choice`; PowerPoint files carry at
+/// most one, but we keep the historical precedence `buNone > buBlip > buChar >
+/// buAutoNum` for robustness against malformed inputs.
 ///
 /// `resolve_blip` maps a `<a:buBlip><a:blip r:embed>` rId to the bullet image's
-/// embedded **zip path** (ECMA-376 §21.1.2.4.2), using the rels + part directory
-/// of whichever tier this `pPr` belongs to (slide paragraph / txBody lstStyle /
+/// embedded **zip path** (§21.1.2.4.2), using the rels + part directory of
+/// whichever tier this node belongs to (slide paragraph / txBody lstStyle /
 /// layout / master), mirroring how `parse_blip_fill` resolves image fills. A
-/// `buBlip` whose embed can't be resolved (dangling rId) falls through to the
-/// `Bullet::Inherit` default so a lower style tier can still supply a marker.
-pub(crate) fn parse_bullet<F: FnMut(&str) -> Option<String>>(
-    p_pr: Option<roxmltree::Node<'_, '_>>,
-    theme: &HashMap<String, String>,
+/// `buBlip` whose embed can't be resolved (dangling rId) yields `None` (no
+/// marker) so a lower style tier can still supply one.
+fn parse_bullet_marker<F: FnMut(&str) -> Option<String>>(
+    p_pr: roxmltree::Node<'_, '_>,
     resolve_blip: &mut F,
-) -> Bullet {
-    let p_pr = match p_pr {
-        Some(n) => n,
-        None => return Bullet::Inherit,
-    };
-
+) -> Option<BuMarker> {
     // Explicit "no bullet"
     if child(p_pr, "buNone").is_some() {
-        return Bullet::None;
+        return Some(BuMarker::None);
     }
 
-    // §21.1.2.4.3 buSzPct (val in thousandths of a percent: 100000 = 100%).
-    // Shared by char and picture bullets — read once.
-    let size_pct = child(p_pr, "buSzPct")
-        .and_then(|n| attr_f64(&n, "val"))
-        .map(|v| v / 1000.0);
-
-    // Picture bullet (buBlip) — ECMA-376 §21.1.2.4.2. The choice is mutually
-    // exclusive with buChar/buAutoNum, so resolve it before the char/number
-    // branches. Only emit a Blip when the embed resolves to a real part.
+    // Picture bullet (buBlip) — only a resolvable embed emits a marker.
     if let Some(bu_blip) = child(p_pr, "buBlip") {
         if let Some(image_path) = child(bu_blip, "blip")
             .and_then(|b| attr_r(&b, "embed"))
             .and_then(|rid| resolve_blip(&rid))
         {
             let mime_type = mime_from_ext(&image_path).to_owned();
-            return Bullet::Blip {
+            return Some(BuMarker::Blip {
                 image_path,
                 mime_type,
-                size_pct,
-            };
+            });
         }
+        // Dangling embed: fall through so a lower tier's marker can supply one.
     }
 
     // Character bullet
     if let Some(bu_char) = child(p_pr, "buChar") {
         let ch = attr(&bu_char, "char").unwrap_or_else(|| "\u{2022}".into()); // •
-        let color = child(p_pr, "buClr").and_then(|n| parse_color_node(n, theme));
-        let font_family = child(p_pr, "buFont")
-            .and_then(|n| attr(&n, "typeface"))
-            .map(|tf| resolve_theme_typeface(&tf, theme));
-        return Bullet::Char {
-            ch,
-            color,
-            size_pct,
-            font_family,
-        };
+        return Some(BuMarker::Char(ch));
     }
 
     // Auto-numbered bullet
     if let Some(bu_auto) = child(p_pr, "buAutoNum") {
         let num_type = attr(&bu_auto, "type").unwrap_or_else(|| "arabicPeriod".into());
         let start_at = attr(&bu_auto, "startAt").and_then(|v| v.parse().ok());
-        // §21.1.2.4.4 — a sibling `<a:buClr>` colours the auto-number marker,
-        // exactly as it does a `<a:buChar>` bullet above.
-        let color = child(p_pr, "buClr").and_then(|n| parse_color_node(n, theme));
-        return Bullet::AutoNum {
-            num_type,
-            start_at,
-            color,
-        };
+        return Some(BuMarker::AutoNum { num_type, start_at });
     }
 
-    Bullet::Inherit
+    None
+}
+
+/// Parse a `<a:buSzPct val>` value into a percentage of the text size (100.0 =
+/// 100%). ECMA-376's `ST_TextBulletSizePercent` has two lexical forms: the
+/// Transitional integer in thousandths of a percent (`"100000"` = 100%, what
+/// PowerPoint writes) and the Strict percentage string (`"111%"`, as in the
+/// spec's own example, §21.1.2.4.9). Accept both; a trailing `%` selects the
+/// direct-percentage reading.
+pub(crate) fn parse_bu_sz_pct(val: &str) -> Option<f64> {
+    let v = val.trim();
+    match v.strip_suffix('%') {
+        Some(pct) => pct.trim().parse::<f64>().ok(),
+        None => v.parse::<f64>().ok().map(|n| n / 1000.0),
+    }
+}
+
+/// Parse a paragraph's four bullet choice groups (ECMA-376 §21.1.2.4) from a
+/// `<a:pPr>` / `<a:lvlNpPr>` node into a [`BulletProps`]. Each group is read
+/// independently so the cascade can merge them per-property:
+/// - colour (EG_TextBulletColor): `<a:buClrTx>` (follow text) or `<a:buClr>`;
+/// - size (EG_TextBulletSize): `<a:buSzTx>` (follow text) or `<a:buSzPct>`
+///   (percent of text). `<a:buSzPts>` is intentionally not read — see [`BuSize`];
+/// - typeface (EG_TextBulletTypeface): `<a:buFontTx>` (follow text) or `<a:buFont>`;
+/// - marker (EG_TextBullet): see [`parse_bullet_marker`].
+///
+/// A `None` node (no `<a:pPr>`) yields all-inherit. Each group defaults to `None`
+/// (inherit) when its elements are absent, so a lower style tier supplies it.
+pub(crate) fn parse_bullet_props<F: FnMut(&str) -> Option<String>>(
+    p_pr: Option<roxmltree::Node<'_, '_>>,
+    theme: &HashMap<String, String>,
+    resolve_blip: &mut F,
+) -> BulletProps {
+    let p_pr = match p_pr {
+        Some(n) => n,
+        None => return BulletProps::default(),
+    };
+
+    // Colour group (EG_TextBulletColor): buClrTx (§21.1.2.4.5) breaks inheritance
+    // and follows the run colour; buClr (§21.1.2.4.4) is explicit.
+    let color = if child(p_pr, "buClrTx").is_some() {
+        Some(BuColor::FollowText)
+    } else {
+        child(p_pr, "buClr")
+            .and_then(|n| parse_color_node(n, theme))
+            .map(BuColor::Color)
+    };
+
+    // Size group (EG_TextBulletSize): buSzTx (§21.1.2.4.11) follow-text; buSzPct
+    // (§21.1.2.4.9) percent-of-text. buSzPts (§21.1.2.4.10) is intentionally
+    // ignored — see [`BuSize`].
+    let size = if child(p_pr, "buSzTx").is_some() {
+        Some(BuSize::FollowText)
+    } else {
+        child(p_pr, "buSzPct")
+            .and_then(|n| attr(&n, "val"))
+            .and_then(|v| parse_bu_sz_pct(&v))
+            .map(BuSize::Pct)
+    };
+
+    // Typeface group (EG_TextBulletTypeface): buFontTx (§21.1.2.4.7) follow-text;
+    // buFont (§21.1.2.4.6) explicit typeface.
+    let font = if child(p_pr, "buFontTx").is_some() {
+        Some(BuFont::FollowText)
+    } else {
+        child(p_pr, "buFont")
+            .and_then(|n| attr(&n, "typeface"))
+            .map(|tf| BuFont::Font(resolve_theme_typeface(&tf, theme)))
+    };
+
+    let marker = parse_bullet_marker(p_pr, resolve_blip);
+
+    BulletProps {
+        marker,
+        color,
+        font,
+        size,
+    }
+}
+
+/// Test helper: parse a single-tier `<a:pPr>` bullet and collapse it to the
+/// serialized [`Bullet`]. Production code cascades [`BulletProps`] across tiers
+/// and only collapses at the leaf ([`BulletProps::resolve`]).
+#[cfg(test)]
+pub(crate) fn parse_bullet<F: FnMut(&str) -> Option<String>>(
+    p_pr: Option<roxmltree::Node<'_, '_>>,
+    theme: &HashMap<String, String>,
+    resolve_blip: &mut F,
+) -> Bullet {
+    parse_bullet_props(p_pr, theme, resolve_blip).resolve()
 }
 
 pub(crate) fn parse_run(
