@@ -5,9 +5,12 @@ import {
   graphemeClusterOffsets,
   isSeaScriptCodePoint,
   resetSeaSegmenterForTest,
+  seaMixedBreakOffsets,
+  seaTransitionOffsets,
   seaWordBreakOffsets,
   setSeaWordSegmenterForTest,
 } from './sea-break.js';
+import { DEFAULT_KINSOKU_RULES } from './kinsoku/rules.js';
 
 afterEach(() => resetSeaSegmenterForTest());
 
@@ -133,6 +136,129 @@ describe('seaWordBreakOffsets — graceful fallback + filtering (injected segmen
     const text = 'ก'.repeat(9);
     // index 0 excluded (span-start); index 4 excluded (punctuation); index 5 kept.
     expect(seaWordBreakOffsets(text)).toEqual([5]);
+  });
+});
+
+describe('seaTransitionOffsets (issue #960 — no-space SEA↔non-SEA seams)', () => {
+  it('offsets each SEA↔Latin transition edge (both entering and leaving SEA)', () => {
+    const text = 'เมืองBangkokคือ'; // Thai | Latin | Thai
+    const bangkok = text.indexOf('B'); // Thai→Latin
+    const afterBangkok = bangkok + 'Bangkok'.length; // Latin→Thai
+    expect(seaTransitionOffsets(text)).toEqual([bangkok, afterBangkok]);
+  });
+
+  it('offsets Thai↔digit seams so a price like 1250 can break away from Thai', () => {
+    const text = 'ราคา1250บาท'; // Thai | 1250 | Thai
+    const d = text.indexOf('1');
+    const afterD = d + '1250'.length;
+    expect(seaTransitionOffsets(text)).toEqual([d, afterD]);
+  });
+
+  it('offsets Thai↔CJK seams', () => {
+    const text = 'อาหาร寿司ราเมง'; // Thai | CJK | Thai
+    const cjk = text.indexOf('寿');
+    const afterCjk = text.indexOf('ร', cjk);
+    expect(seaTransitionOffsets(text)).toEqual([cjk, afterCjk]);
+  });
+
+  it('never offsets a seam that touches whitespace (the space is the break)', () => {
+    const text = 'ทดสอบ ABC ภาษา'; // Thai SPACE Latin SPACE Thai
+    // The only SEA↔non-SEA changes are across spaces → no transition offsets.
+    expect(seaTransitionOffsets(text)).toEqual([]);
+  });
+
+  it('is empty for pure SEA and for non-SEA input', () => {
+    expect(seaTransitionOffsets('ภาษาไทย')).toEqual([]);
+    expect(seaTransitionOffsets('Hello123')).toEqual([]);
+    expect(seaTransitionOffsets('')).toEqual([]);
+  });
+
+  it('stays on UTF-16 boundaries after an astral non-SEA char', () => {
+    const text = '😀ภาษา'; // emoji (2 units) → Thai
+    expect(seaTransitionOffsets(text)).toEqual(['😀'.length]);
+  });
+
+  it('every offset is strictly interior and separates SEA from non-SEA', () => {
+    const text = 'เมืองBangkokคือ寿司ราคา1250บาท';
+    for (const o of seaTransitionOffsets(text)) {
+      expect(o).toBeGreaterThan(0);
+      expect(o).toBeLessThan(text.length);
+      const a = isSeaScriptCodePoint(text.codePointAt(o - 1)!);
+      const b = isSeaScriptCodePoint(text.codePointAt(o)!);
+      expect(a).not.toBe(b); // one side SEA, the other not
+    }
+  });
+});
+
+describe('seaMixedBreakOffsets (issue #960 — unified dict ∪ transition ∪ CJK)', () => {
+  it('equals seaWordBreakOffsets for a pure-SEA token (byte-identical wrap)', () => {
+    const text = 'ภาษาไทยเป็นภาษาที่สวยงามมาก';
+    expect(seaMixedBreakOffsets(text)).toEqual(seaWordBreakOffsets(text));
+    expect(seaMixedBreakOffsets(text, { cjk: true })).toEqual(seaWordBreakOffsets(text));
+  });
+
+  it('adds the transition seams on top of the dictionary boundaries (Thai↔Latin)', () => {
+    const text = 'เมืองBangkokคือเมืองหลวงของThailand';
+    const merged = seaMixedBreakOffsets(text);
+    for (const o of seaTransitionOffsets(text)) expect(merged).toContain(o);
+    for (const o of seaWordBreakOffsets(text)) expect(merged).toContain(o);
+    // Sorted, unique, interior.
+    for (let k = 1; k < merged.length; k++) expect(merged[k]).toBeGreaterThan(merged[k - 1]);
+  });
+
+  it('adds CJK per-character opportunities only when cjk:true (mixed CJK+SEA)', () => {
+    const text = '日本語のテキストとภาษาไทยが同じ';
+    const withoutCjk = seaMixedBreakOffsets(text);
+    const withCjk = seaMixedBreakOffsets(text, { cjk: true });
+    expect(withCjk.length).toBeGreaterThan(withoutCjk.length);
+    // A break BEFORE an interior ideograph (e.g. before 本 in 日本) is present.
+    const between = 1; // 日|本
+    expect(isSeaScriptCodePoint(text.codePointAt(0)!)).toBe(false);
+    expect(withCjk).toContain(between);
+    // The SEA span still breaks at its own dictionary boundaries, not mid-cluster.
+    for (const o of seaWordBreakOffsets(text)) expect(withCjk).toContain(o);
+  });
+
+  it('removes kinsoku-illegal positions (no line-start-forbidden char at a head)', () => {
+    // 。is line-start-forbidden: an offset BEFORE it must be dropped.
+    const text = 'ภาษา。日本'; // Thai | 。 | CJK
+    const dot = text.indexOf('。');
+    const withKinsoku = seaMixedBreakOffsets(text, { cjk: true, kinsoku: DEFAULT_KINSOKU_RULES });
+    expect(withKinsoku).not.toContain(dot); // never start a line with 。
+    const withoutKinsoku = seaMixedBreakOffsets(text, { cjk: true });
+    expect(withoutKinsoku).toContain(dot); // the raw seam existed before filtering
+  });
+
+  it('does NOT filter when kinsoku is disabled (§17.3.1.16 <w:kinsoku w:val="0"/>)', () => {
+    const text = 'ภาษา。日本';
+    const dot = text.indexOf('。');
+    const disabled = { ...DEFAULT_KINSOKU_RULES, enabled: false };
+    // enabled:false mirrors the CJK path's `if (!rules.enabled) return` — the
+    // 。 seam survives even though 。 is in the forbidden set.
+    expect(seaMixedBreakOffsets(text, { cjk: true, kinsoku: disabled })).toContain(dot);
+  });
+
+  it('keeps every offset on a grapheme-cluster boundary (no base+mark/VS/ZWJ tear)', () => {
+    // 漢 + VARIATION SELECTOR-1 (U+FE00) is ONE grapheme; the CJK enumerator would
+    // otherwise offer a break at index 1, inside the cluster.
+    const vs = '漢︀ภาษาไทย';
+    const graphemes = new Set(graphemeClusterOffsets(vs));
+    for (const o of seaMixedBreakOffsets(vs, { cjk: true })) expect(graphemes.has(o)).toBe(true);
+    expect(seaMixedBreakOffsets(vs, { cjk: true })).not.toContain(1); // never mid 漢︀
+    // Thai base + ZWJ + Thai: the ZWJ seam (index 1) must not be offered.
+    const zwj = 'ก‍า';
+    for (const o of seaMixedBreakOffsets(zwj, { cjk: true })) expect(new Set(graphemeClusterOffsets(zwj)).has(o)).toBe(true);
+  });
+
+  it('never breaks beside a non-breaking space (NBSP family)', () => {
+    // Thai NBSP Latin — the NBSP is non-breaking, so neither seam is offered.
+    expect(seaTransitionOffsets('ภาษา Bangkok')).toEqual([]);
+    expect(seaTransitionOffsets('ราคา 1250')).toEqual([]);
+  });
+
+  it('is empty for non-SEA input regardless of options', () => {
+    expect(seaMixedBreakOffsets('日本語ABC', { cjk: true })).toEqual([]);
+    expect(seaMixedBreakOffsets('')).toEqual([]);
   });
 });
 

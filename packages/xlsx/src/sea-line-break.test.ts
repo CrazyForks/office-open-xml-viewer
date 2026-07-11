@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { seaWordBreakOffsets } from '@silurus/ooxml-core';
+import { seaMixedBreakOffsets, seaTransitionOffsets, seaWordBreakOffsets } from '@silurus/ooxml-core';
 import { wrapParagraphLines, layoutRichTextLines } from './renderer.js';
 import type { CellFont, Run } from './types.js';
 
@@ -77,5 +77,33 @@ describe('xlsx layoutRichTextLines — SEA (Thai) dictionary breaking', () => {
   it('does not change non-SEA wrapping (plain CJK parity)', () => {
     const lines = layoutRichTextLines(ctx, [{ text: 'あいうえお' }] as Run[], baseFont, 1, 30);
     expect(richText(lines)).toEqual(['あいう', 'えお']);
+  });
+});
+
+// Issue #960 — no-space SEA↔Latin/digit transitions are break opportunities.
+// xlsx splits CJK into its own tokens, so only the transition (gap 1) applies.
+describe('xlsx SEA↔non-SEA no-space transitions (#960)', () => {
+  const A2 = 'ราคาสินค้า1250บาทลดเหลือ990บาทประหยัด260บาทหรือ21เปอร์เซ็นต์ต่อชิ้น';
+  const legalSet = new Set(seaMixedBreakOffsets(A2));
+  const transitions = new Set(seaTransitionOffsets(A2));
+
+  it('wrapParagraphLines breaks at the Thai↔digit seams, never mid-number', () => {
+    const out = wrapParagraphLines(ctx, A2, 120);
+    expect(out.join('')).toBe(A2);
+    expect(out.length).toBeGreaterThan(1);
+    for (const b of breakOffsets(out)) expect(legalSet.has(b)).toBe(true);
+    for (const b of breakOffsets(out)) {
+      const isDigit = (c: number) => c >= 0x30 && c <= 0x39;
+      expect(isDigit(A2.codePointAt(b - 1)!) && isDigit(A2.codePointAt(b)!)).toBe(false);
+    }
+    expect(breakOffsets(out).some((b) => transitions.has(b))).toBe(true);
+  });
+
+  it('layoutRichTextLines breaks at the transition seams too', () => {
+    const lines = layoutRichTextLines(ctx, [{ text: A2 }] as Run[], baseFont, 1, 120);
+    const texts = richText(lines);
+    expect(texts.join('')).toBe(A2);
+    for (const b of breakOffsets(texts)) expect(legalSet.has(b)).toBe(true);
+    expect(breakOffsets(texts).some((b) => transitions.has(b))).toBe(true);
   });
 });

@@ -6,7 +6,7 @@ import type {
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, seaWordBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -953,7 +953,12 @@ export function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: str
       // wraps it at legal points. Wrapped lines re-concatenate into one drawn
       // string, so this only ADDS break opportunities (measure==paint). Non-SEA
       // words and SEA words with no usable break stay a single token.
-      const seaBreaks = containsSeaScript(word) ? seaWordBreakOffsets(word) : null;
+      // Issue #797 / #960 — dictionary word boundaries UNIONED with the no-space
+      // SEA↔non-SEA script transitions (Thai↔Latin/digit), so a price like
+      // "…1250…" or an embedded Latin word can wrap away from the surrounding
+      // Thai. CJK is already its own token here (split above), so the mixed CJK
+      // path is not needed.
+      const seaBreaks = containsSeaScript(word) ? seaMixedBreakOffsets(word) : null;
       if (seaBreaks && seaBreaks.length > 0) {
         let s = 0;
         for (const b of seaBreaks) { tokens.push(word.slice(s, b)); s = b; }
@@ -1156,7 +1161,9 @@ export function layoutRichTextLines(
   // contiguous string (via `push`) to keep measure==paint. A single word wider
   // than the cell falls back to a grapheme-safe emergency split.
   const pushSeaToken = (text: string, font: CellFont): void => {
-    const seaBreaks = seaWordBreakOffsets(text);
+    // #797 dictionary boundaries ∪ #960 SEA↔non-SEA transitions (CJK is a
+    // separate token in this path, so no mixed-CJK offsets are needed here).
+    const seaBreaks = seaMixedBreakOffsets(text);
     if (seaBreaks.length === 0) { push(text, font); return; }
     ctx.font = buildFont(vertAlignDrawFont(font), cs);
     const measureSub = (sub: string): number => ctx.measureText(sub).width;

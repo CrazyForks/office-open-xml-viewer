@@ -63,7 +63,7 @@ import {
   isCjkBreakChar,
   isUax14NoBreakPair,
   containsSeaScript,
-  seaWordBreakOffsets,
+  seaMixedBreakOffsets,
   fitSeaWordPrefix,
   graphemeClusterOffsets,
   getCachedSvgImageByPath,
@@ -1021,7 +1021,16 @@ export function layoutParagraph(
       // declared an explicit East Asian typeface (rPr > ea); other characters
       // keep the Latin font so the latin/ea boundary mid-token stays clean.
       const hasCJK = tokenHasCjk(token);
-      if (hasCJK) {
+      // Issue #960 — a token that mixes CJK with SEA (Thai/Lao/Khmer) must NOT
+      // take the CJK-only path (which tears the SEA interior at arbitrary
+      // character boundaries): route it to the unified SEA branch below, whose
+      // offset set merges the CJK per-character opportunities with the SEA
+      // dictionary/transition ones so each script keeps its own break rule. The
+      // exception is `eaLnBrk=false` (§21.1.2.2.7), which forbids breaking the
+      // East Asian word at all — keep that on the CJK path so the token stays
+      // whole. A CJK token with no SEA is unchanged.
+      const routeCjk = hasCJK && (!containsSeaScript(token) || para.eaLnBrk === false);
+      if (routeCjk) {
         // Measure each grapheme with its per-char font (latin/ea boundary stays
         // clean), then place chars according to a:pPr@eaLnBrk (ECMA-376
         // §21.1.2.2.7, "East Asian Line Break"):
@@ -1076,21 +1085,61 @@ export function layoutParagraph(
         continue;
       }
 
-      // SEA (Thai/Lao/Khmer) dictionary line breaking (issue #797). These scripts
-      // have no inter-word spaces, so `token` is a whole run of words; break it
-      // only at a segmenter word boundary. Each fitted line-piece is pushed as
-      // ONE contiguous string — pptx's `push` sums per-call measured widths into
-      // `lineW`, so per-word pushes would drift the wrap width from the merged
-      // paint width (measure==paint). CJK is handled above; a mixed CJK+SEA token
-      // stays on the CJK path (no regression). A SEA token with no dictionary
-      // break (single over-long word / Segmenter unavailable) still routes here
-      // so its emergency split stays grapheme-safe.
+      // SEA (Thai/Lao/Khmer) line breaking (issue #797 / #960). These scripts have
+      // no inter-word spaces, so `token` is a whole run; break it only at a member
+      // of `seaBreaks` — the UNION of dictionary word boundaries, the no-space
+      // SEA↔non-SEA script transitions, and (for a mixed CJK+SEA token routed here
+      // from above) the CJK per-character opportunities, kinsoku-filtered. A SEA
+      // token with no boundary (single over-long word / Segmenter unavailable)
+      // still routes here so its emergency split stays grapheme-safe.
       if (containsSeaScript(token)) {
-        const seaBreaks = seaWordBreakOffsets(token);
-        ctx.font = font;
-        // Match push's advance model: it adds `lsPx * codePointCount` (a:spc), so
-        // the fit measure must too or a spaced run mis-wraps (measure==paint).
-        const measureSub = (sub: string): number => ctx.measureText(sub).width + lsPx * codePointCount(sub);
+        const seaBreaks = seaMixedBreakOffsets(token, { cjk: true, kinsoku: DEFAULT_KINSOKU_RULES });
+        // A line-piece may mix a Thai run (Latin/Thai `font`) with a CJK run
+        // (`fontEa` when an East Asian typeface is declared). Measure each maximal
+        // same-font sub-run WHOLE — per-char measurement would break Thai shaping —
+        // and push each with its own font so CJK glyphs get `fontEa`. For a
+        // pure-SEA piece (or `familyEa` absent / resolving to the SAME font) this
+        // is one run with `font`: whole-string measure + single push, i.e.
+        // byte-identical to the pre-#960 path. The split is taken ONLY when the
+        // EA font actually differs — otherwise measuring per-run and re-merging
+        // identical-font pushes could disagree on cross-boundary shaping.
+        const eaDiffers = familyEa != null && fontEa !== font;
+        const isEaCh = (ch: string): boolean => eaDiffers && isCjkBreakChar(ch.codePointAt(0) ?? 0);
+        const measureSub = (sub: string): number => {
+          let w = lsPx * codePointCount(sub);
+          let runText = '';
+          let runEa: boolean | null = null;
+          const flush = (): void => {
+            if (runText === '') return;
+            ctx.font = runEa ? (fontEa as string) : font;
+            w += ctx.measureText(runText).width;
+            runText = '';
+          };
+          for (const ch of sub) {
+            const ea = isEaCh(ch);
+            if (runEa === null || ea === runEa) { runText += ch; runEa = ea; }
+            else { flush(); runText = ch; runEa = ea; }
+          }
+          flush();
+          return w;
+        };
+        const pushPiece = (piece: string): void => {
+          let runText = '';
+          let runEa: boolean | null = null;
+          const flush = (): void => {
+            if (runText === '') return;
+            const pFont = runEa ? (fontEa as string) : font;
+            const pFamily = runEa ? (familyEa as string) : family;
+            push(runText, pFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: pFamily });
+            runText = '';
+          };
+          for (const ch of piece) {
+            const ea = isEaCh(ch);
+            if (runEa === null || ea === runEa) { runText += ch; runEa = ea; }
+            else { flush(); runText = ch; runEa = ea; }
+          }
+          flush();
+        };
         const N = token.length;
         let start = 0;
         while (start < N) {
@@ -1106,7 +1155,7 @@ export function layoutParagraph(
             if (g <= 0) g = graphemes.length > 0 ? graphemes[0] : firstWord.length;
             end = start + g;
           }
-          push(token.slice(start, end), font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+          pushPiece(token.slice(start, end));
           start = end;
           if (start < N) newLine();
         }
