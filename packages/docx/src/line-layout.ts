@@ -1447,13 +1447,17 @@ export const DEFAULT_TAB_PT = 36;
  *  ECMA-376 prescribes no line-breaking algorithm — tolerance-based fit is
  *  standard typography (TeX, InDesign, Word) and lets the layout absorb the
  *  canvas `measureText` vs Word advance-width discrepancy (~0.1–0.3 px/glyph)
- *  that would otherwise push a trailing word to the next line.
+ *  that would otherwise push a trailing word to the next line. Per ECMA-376
+ *  §17.18.44, this tolerance is suppressed for fully-justified paragraphs;
+ *  justification expands residual slack instead of shrinking below natural fit
+ *  to admit another word (issue #698).
  *
- *  This is the ONE budget shared by both sides of the fit contract: the wrap
- *  judgment below admits a word when the line's overflow Δ ≤ SPACE_SHRINK_RATIO ·
- *  Σ(trailing-space widths), and the renderer's draw pass squeezes the same
- *  spaces by the same fraction so the admitted line lands inside its box instead
- *  of overrunning the clip (see `shrinkFitCompression` in text-distribute.ts). */
+ *  For eligible non-justified lines this is the ONE budget shared by both sides
+ *  of the fit contract: the wrap judgment below admits a word when the line's
+ *  overflow Δ ≤ SPACE_SHRINK_RATIO · Σ(trailing-space widths), and the renderer's
+ *  draw pass squeezes the same spaces by the same fraction so the admitted line
+ *  lands inside its box instead of overrunning the clip (see
+ *  `shrinkFitCompression` in text-distribute.ts). */
 export const SPACE_SHRINK_RATIO = 0.25;
 
 /** ECMA-376 §17.15.1.25 — resolve the document's automatic tab-stop interval
@@ -2247,6 +2251,14 @@ export function layoutLines(
   // tabs do not trigger the LTR right/center/overflow wrap paths. Default false
   // ⇒ the LTR tab paths run unchanged (byte-identical output).
   baseRtl = false,
+  // ECMA-376 §17.18.44 — a fully-justified paragraph (`jc` both/distribute/…)
+  // redistributes slack by EXPANDING inter-word spaces; Word never compresses a
+  // line below its natural width to admit an extra word. So the Knuth-Plass
+  // space-shrink fit tolerance (SPACE_SHRINK_RATIO) is suppressed here — a
+  // justified line breaks at natural fit. The trailing-space-collapse allowance
+  // (the other role of lineTotalTrailingW) is unaffected. See issue #698
+  // (sample-15 p1 justified copyright column pulling "citation" up one line).
+  isJustified = false,
   startBoundary?: LineBoundary,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
@@ -2254,13 +2266,14 @@ export function layoutLines(
   let currentWidth = 0;
   // Sum of trailing-space widths of every text token on the current line.
   // Used for two things:
-  //   1. Knuth-Plass-style shrink tolerance: a justified line may compress
+  //   1. Knuth-Plass-style shrink tolerance: a non-justified line may compress
   //      inter-word spaces by up to SPACE_SHRINK_RATIO, so a candidate word
   //      whose "natural" width would overflow by less than that total shrink
   //      budget is allowed to fit. This is the standard typographic approach
   //      to line-breaking and lets us absorb the ~0.1–0.3 px/glyph advance
   //      bias between Chromium canvas and Word's internal text layout,
-  //      matching Word's wrap on long paragraphs.
+  //      matching Word's wrap on long paragraphs. Per ECMA-376 §17.18.44, the
+  //      tolerance is suppressed for fully-justified paragraphs (issue #698).
   //   2. Trailing-space collapse at line end — the last token's trailing
   //      space disappears when no further word is added, so when deciding
   //      whether a candidate word fits we treat it as if it would become the
@@ -2907,12 +2920,11 @@ export function layoutLines(
     //   1. Trailing-space collapse: if this word becomes the last on the
     //      line, its trailing space (if any) collapses. We subtract it from
     //      the width used to test fit.
-    //   2. Knuth-Plass shrink tolerance: a line may compress each inter-word
-    //      space by up to SPACE_SHRINK_RATIO (25%) of its natural width without
-    //      harming readability — the module constant, shared with the draw pass
-    //      so a line admitted here is squeezed by the same budget when painted
-    //      (shrinkFitCompression in text-distribute.ts) rather than overrunning
-    //      its box. See the SPACE_SHRINK_RATIO doc above.
+    //   2. Knuth-Plass shrink tolerance: a non-justified line may compress each
+    //      inter-word space by up to SPACE_SHRINK_RATIO (25%) of its natural
+    //      width. Per ECMA-376 §17.18.44 this tolerance is suppressed for a
+    //      fully-justified paragraph (issue #698); the trailing-space-collapse
+    //      allowance above remains unchanged. See the constant doc above.
     const trimmed = s.text.replace(/ +$/, '');
     // Subtract the full-model advance of the trimmed text (not the natural width)
     // so the grid delta, w:w scale and w:spacing pitch on the retained glyphs all
@@ -2920,7 +2932,7 @@ export function layoutLines(
     // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
     const trailingSpaceW = s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
     const wForFit = w - trailingSpaceW;
-    const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
+    const shrinkBudget = isJustified ? 0 : lineTotalTrailingW * SPACE_SHRINK_RATIO;
 
     // Atomic glued group: when THIS segment starts a glued group (its followers
     // in the queue are `joinPrev` pieces — small-caps case-pieces of the SAME

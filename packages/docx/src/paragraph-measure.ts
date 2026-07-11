@@ -264,6 +264,7 @@ export function measureParagraph(
     context.defaultTabPt,
     paragraphWidthPt + context.physicalIndentRightPt,
     context.baseRtl,
+    context.isJustified,
     continuation?.boundary,
   );
   if (lines.length === 0) return measureMarkOnly();
