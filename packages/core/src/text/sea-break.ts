@@ -19,8 +19,13 @@
 //     offsets and the caller keeps its current cluster/character behaviour.
 //
 // Scope: Thai U+0E00–0E7F, Lao U+0E80–0EFF, Khmer U+1780–17FF — exactly the
-// ranges named in the issue. Myanmar/Tibetan and the no-space Thai↔Latin/CJK
-// script-transition boundary are intentionally out of scope (follow-ups).
+// ranges named in the issue. Myanmar/Tibetan remain out of scope (follow-up
+// #961). The no-space SEA↔Latin/CJK/digit script-transition boundary (#960) is
+// added by {@link seaTransitionOffsets}; {@link seaMixedBreakOffsets} unions the
+// dictionary, transition and CJK per-character opportunities for a single run
+// that mixes SEA with Latin/digits/CJK.
+
+import { isCjkBreakChar } from './cjk-ranges.js';
 
 /** Southeast-Asian dictionary-break script tags used to pick the ICU dictionary.
  *  ICU dispatches the dictionary by the character's SCRIPT, not by this locale,
@@ -181,6 +186,156 @@ export function seaWordBreakOffsets(text: string): number[] {
     i = j;
   }
   return offsets;
+}
+
+// ── Script-transition break opportunities (issue #960) ───────────────────────
+
+/**
+ * Break-before offsets at the EDGES of every maximal SEA span — the SEA↔non-SEA
+ * script transitions that carry NO intervening whitespace (issue #960). Word
+ * treats these transitions as line-break opportunities (adjudicated against the
+ * Word-exported ground truth sample-45.pdf: a line broke exactly at the Thai→
+ * Latin boundary `…ของ | Thailand`, carrying the Latin word whole to the next
+ * line; digit groups `1250`/`990` break away from the surrounding Thai the same
+ * way). {@link seaWordBreakOffsets} deliberately restricts itself to boundaries
+ * INTERIOR to a SEA span, so the transition edges were previously unbreakable —
+ * a spaceless mix like `เมืองBangkok…Thailand` had no legal break at the script
+ * seam. This adds exactly those seams.
+ *
+ * Returns UTF-16 offsets `i` (a break is permitted immediately BEFORE `text[i]`),
+ * strictly interior (`0 < i < text.length`), ascending and unique. A transition
+ * where either side is whitespace is skipped — a space is already an inter-word
+ * break, so the seam beside it needs no extra opportunity. Returns `[]` when
+ * `text` has no SEA character (byte-identical non-SEA path).
+ */
+export function seaTransitionOffsets(text: string): number[] {
+  if (!containsSeaScript(text)) return [];
+  const offsets: number[] = [];
+  const len = text.length;
+  let prevCp = text.codePointAt(0)!;
+  let i = prevCp > 0xffff ? 2 : 1;
+  while (i < len) {
+    const cp = text.codePointAt(i)!;
+    const step = cp > 0xffff ? 2 : 1;
+    const prevSea = isSeaScriptCodePoint(prevCp);
+    const curSea = isSeaScriptCodePoint(cp);
+    // A SEA↔non-SEA change is a transition. Skip when either side is whitespace
+    // (the space itself is the break opportunity, handled by the caller).
+    if (prevSea !== curSea && !isBreakInertSpaceCp(prevCp) && !isBreakInertSpaceCp(cp)) {
+      offsets.push(i);
+    }
+    prevCp = cp;
+    i += step;
+  }
+  return offsets;
+}
+
+/** Code points beside which a SEA↔non-SEA seam must NOT gain a break: real
+ *  whitespace (the space itself already IS the break) and the non-breaking space
+ *  family (NBSP U+00A0, figure space U+2007, narrow NBSP U+202F, word joiner
+ *  U+2060, ZWNBSP/BOM U+FEFF), which are explicitly NON-breaking (UAX#14 GL/WJ). */
+function isBreakInertSpaceCp(cp: number): boolean {
+  return (
+    cp === 0x20 || cp === 0x09 || cp === 0x0a || cp === 0x0d || cp === 0x3000 ||
+    cp === 0x00a0 || cp === 0x2007 || cp === 0x202f || cp === 0x2060 || cp === 0xfeff
+  );
+}
+
+/** Kinsoku sets used to drop line-break positions that would leave a
+ *  line-start-forbidden char at a line head or a line-end-forbidden char at a
+ *  line tail (ECMA-376 §17.15.1.58–.60). Shape-compatible with the renderers'
+ *  `KinsokuRules`; only the two membership sets are consulted. */
+export interface SeaMixedKinsoku {
+  /** When `false`, the document turned kinsoku OFF (§17.3.1.16 `<w:kinsoku
+   *  w:val="0"/>`) and NO position is dropped — matching the CJK path's own
+   *  `if (!rules.enabled) return` short-circuit. Absent/`true` ⇒ filter. */
+  enabled?: boolean;
+  lineStartForbidden: ReadonlySet<number>;
+  lineEndForbidden: ReadonlySet<number>;
+}
+
+/**
+ * The UNIFIED break-before offset set for a single run/segment that contains SEA
+ * script but may also mix Latin, digits and CJK (issue #960). Unions three
+ * opportunity sources so each script keeps its own rule inside one contiguous
+ * token:
+ *   • SEA dictionary word boundaries — {@link seaWordBreakOffsets};
+ *   • SEA↔non-SEA transitions — {@link seaTransitionOffsets};
+ *   • CJK per-character boundaries when `opts.cjk` — every position whose char,
+ *     or the char before it, is a {@link isCjkBreakChar} ideograph, so the CJK
+ *     side breaks at each character exactly as its dedicated path does.
+ *
+ * When `opts.kinsoku` is supplied, positions that would orphan a
+ * line-start-forbidden char at a line head, or leave a line-end-forbidden char
+ * at a line tail, are removed (the offset-set equivalent of the CJK path's
+ * retract). This is what lets a mixed CJK+SEA token — which previously fell
+ * wholly onto the CJK path and so treated its SEA interior as unbreakable — wrap
+ * with BOTH the CJK per-char opportunities and the SEA dictionary/transition
+ * opportunities merged.
+ *
+ * Offsets are ascending, unique, strictly interior. For a pure-SEA token with no
+ * kinsoku char this equals {@link seaWordBreakOffsets} (byte-identical wrap).
+ */
+export function seaMixedBreakOffsets(
+  text: string,
+  opts?: { cjk?: boolean; kinsoku?: SeaMixedKinsoku },
+): number[] {
+  if (!containsSeaScript(text)) return [];
+  const len = text.length;
+  // Dictionary boundaries are ALWAYS grapheme-cluster boundaries (ICU never
+  // splits a base + mark), so seed the set with them directly.
+  const set = new Set<number>(seaWordBreakOffsets(text));
+  // The transition and CJK offsets are enumerated per code point, so they could
+  // land INSIDE a grapheme cluster (a base + variation selector / ZWJ / tone
+  // mark). Collect them separately and keep only those that coincide with a
+  // grapheme boundary — a code-point split there would tear the cluster.
+  const graphemeSafe = new Set<number>(graphemeClusterOffsets(text));
+  const addGraphemeSafe = (o: number): void => {
+    if (graphemeSafe.has(o)) set.add(o);
+  };
+  for (const o of seaTransitionOffsets(text)) addGraphemeSafe(o);
+  if (opts?.cjk) {
+    let prevCp = text.codePointAt(0)!;
+    let i = prevCp > 0xffff ? 2 : 1;
+    while (i < len) {
+      const cp = text.codePointAt(i)!;
+      // A break may fall before an ideograph or after one (CJK is break-eligible
+      // on both edges; the grapheme test above drops a variation-selector tear,
+      // and the kinsoku pass below removes the illegal ones).
+      if (isCjkBreakChar(cp) || isCjkBreakChar(prevCp)) addGraphemeSafe(i);
+      prevCp = cp;
+      i += cp > 0xffff ? 2 : 1;
+    }
+  }
+  const k = opts?.kinsoku;
+  // §17.3.1.16 — a document that turned kinsoku OFF drops NO position (mirrors
+  // the CJK split path's `if (!rules.enabled) return`).
+  const filterKinsoku = k != null && k.enabled !== false;
+  const out: number[] = [];
+  for (const o of set) {
+    if (o <= 0 || o >= len) continue;
+    if (filterKinsoku) {
+      const at = text.codePointAt(o)!;
+      const before = codePointEndingAt(text, o);
+      if (before !== undefined && k!.lineEndForbidden.has(before)) continue;
+      if (k!.lineStartForbidden.has(at)) continue;
+    }
+    out.push(o);
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
+
+/** The code point that ENDS immediately before UTF-16 offset `o` (handles a
+ *  trailing surrogate pair). `undefined` when `o` is at or before the start. */
+function codePointEndingAt(text: string, o: number): number | undefined {
+  if (o <= 0) return undefined;
+  const lo = text.charCodeAt(o - 1);
+  if (lo >= 0xdc00 && lo <= 0xdfff && o >= 2) {
+    const hi = text.charCodeAt(o - 2);
+    if (hi >= 0xd800 && hi <= 0xdbff) return text.codePointAt(o - 2)!;
+  }
+  return lo;
 }
 
 // ── Greedy whole-word line fit (shared kernel) ───────────────────────────────

@@ -32,7 +32,7 @@ import {
   isCjkBreakChar,
   isUax14NoBreakPair,
   containsSeaScript,
-  seaWordBreakOffsets,
+  seaMixedBreakOffsets,
   fitSeaWordPrefix,
   graphemeClusterOffsets,
   classifyFontGeneric,
@@ -2673,11 +2673,17 @@ export function layoutLines(
   const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0 };
   const sourcedSegs = segs.map((seg, segIndex) => {
     seg.src = { segIndex, charOffset: 0 };
-    // Issue #797 — attach the SEA (Thai/Lao/Khmer) dictionary word-break offsets
-    // ONCE per segment (perf: never per line/char). Only for SEA text; non-SEA
-    // segments keep `seaBreaks` absent so their wrap path is byte-identical.
+    // Issue #797 / #960 — attach the SEA (Thai/Lao/Khmer) break offsets ONCE per
+    // segment (perf: never per line/char). Only for SEA text; non-SEA segments
+    // keep `seaBreaks` absent so their wrap path is byte-identical. The set now
+    // UNIONS the dictionary word boundaries (#797) with the no-space SEA↔non-SEA
+    // script transitions and, for a mixed CJK+SEA run (a `<w:cs/>` run keeps CJK
+    // in the same cs segment), the CJK per-character opportunities — so each
+    // script keeps its own break rule inside one contiguous segment (#960). The
+    // layout kinsoku set (§17.15.1.58–.60) drops positions that would orphan a
+    // forbidden char at a line head/tail, replacing the CJK path's retract.
     if ('text' in seg && containsSeaScript(seg.text)) {
-      seg.seaBreaks = seaWordBreakOffsets(seg.text);
+      seg.seaBreaks = seaMixedBreakOffsets(seg.text, { cjk: true, kinsoku });
     }
     return seg;
   });
@@ -3162,8 +3168,12 @@ export function layoutLines(
       // Fits on current line as-is
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc, trailingSpaceW);
-    } else if (hasCJKBreakOpportunity(s.text)) {
+    } else if (hasCJKBreakOpportunity(s.text) && s.seaBreaks === undefined) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail.
+      // A segment that ALSO contains SEA (a mixed CJK+SEA `<w:cs/>` run) is routed
+      // to the SEA branch below instead — its `seaBreaks` already merges the CJK
+      // per-character opportunities with the SEA dictionary/transition ones
+      // (issue #960), so both scripts break by their own rule from one offset set.
       // (pptx's analogous CJK fit is cjk-wrap.ts `fitCjkLine`, kept intentionally
       //  separate: it sums per-char advances, whereas this path uses substring
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
@@ -3271,17 +3281,19 @@ export function layoutLines(
         }
       }
     } else if (s.seaBreaks !== undefined) {
-      // SEA (Thai/Lao/Khmer) dictionary line wrap (issue #797). These scripts
-      // have no inter-word spaces, so this ONE segment is a whole run of words;
-      // break it only at a segmenter word boundary (`s.seaBreaks`). Entered for
-      // ANY SEA segment (even one with no dictionary boundary — a single word
-      // wider than the column, or Segmenter unavailable) so the emergency split
-      // below stays GRAPHEME-safe instead of falling to the code-point path.
-      // No kinsoku runs here — SEA scripts have no 行頭/行末禁則 sets and a
-      // dictionary boundary is already a legal break (choosing an earlier legal
-      // offset is the only adjustment, which fitSeaWordPrefix already does). The
-      // run stays one contiguous draw per line (measure==paint); the tail
-      // re-queues with its offsets rebased.
+      // SEA (Thai/Lao/Khmer) line wrap (issue #797 / #960). These scripts have no
+      // inter-word spaces, so this ONE segment is a whole run; break it only at a
+      // member of `s.seaBreaks` — the UNION of dictionary word boundaries, the
+      // no-space SEA↔non-SEA script transitions, and (for a mixed CJK+SEA `<w:cs/>`
+      // run) the CJK per-character opportunities, already kinsoku-filtered by
+      // `seaMixedBreakOffsets`. Entered for ANY SEA segment (even one with no
+      // boundary — a single word wider than the column, or Segmenter unavailable)
+      // so the emergency split below stays GRAPHEME-safe instead of falling to the
+      // code-point path. Kinsoku 行頭/行末禁則 was applied when the offsets were
+      // built (so a forbidden CJK char never heads/tails a line); choosing an
+      // earlier legal offset is the only remaining adjustment, which
+      // fitSeaWordPrefix already does. The run stays one contiguous draw per line
+      // (measure==paint); the tail re-queues with its offsets rebased.
       const available = availW() - currentWidth;
       const measureSub = (sub: string): number => strAdvance(s, sub);
       const split = fitSeaWordPrefix(s.text, s.seaBreaks, 0, available, measureSub);
@@ -3300,10 +3312,47 @@ export function layoutLines(
           });
         }
       } else if (currentLine.length > 0) {
-        // No whole dictionary word fits the remaining band — move the run to a
-        // fresh line and re-process (Latin-word style).
-        flush(undefined, false, s.src);
+        // No whole word fits the remaining band — move the run to a fresh line and
+        // re-process (Latin-word style). If `s` would then LEAD the next line with
+        // a 行頭禁則 char (a mixed CJK+SEA run whose first glyph is a forbidden
+        // leader — #960 routes it here, where the offset set cannot fix a
+        // segment-initial char), pull trailing graphemes of the current line's
+        // last text segment down so they lead ahead of `s` — the same cross-run
+        // 追い出し (§17.3.1.16) the CJK branch does.
+        let retracted: LayoutTextSeg | null = null;
+        const sFirstCp = s.text.codePointAt(0);
+        const lastSeg = currentLine[currentLine.length - 1];
+        if (sFirstCp !== undefined && kinsoku.lineStartForbidden.has(sFirstCp) && 'text' in lastSeg) {
+          const lastText = lastSeg as LayoutTextSeg;
+          const chars = [...lastText.text];
+          const minKeep = currentLine.length > 1 ? 0 : 1;
+          const k = crossRunKinsokuRetract(chars, kinsoku, minKeep);
+          if (k > 0) {
+            const headText = chars.slice(0, chars.length - k).join('');
+            const tailText = chars.slice(chars.length - k).join('');
+            retracted = {
+              ...lastText,
+              text: tailText,
+              measuredWidth: strAdvance(lastText, tailText),
+              src: {
+                segIndex: lastText.src!.segIndex,
+                charOffset: lastText.src!.charOffset + headText.length,
+              },
+              seaBreaks: rebaseSeaBreaks(lastText.seaBreaks, headText.length),
+            };
+            if (headText) {
+              const headW = strAdvance(lastText, headText);
+              currentWidth -= lastText.measuredWidth - headW;
+              currentLine[currentLine.length - 1] = { ...lastText, text: headText, measuredWidth: headW };
+            } else {
+              currentWidth -= lastText.measuredWidth;
+              currentLine.pop();
+            }
+          }
+        }
+        flush(undefined, false, retracted?.src ?? s.src);
         queue.unshift(s);
+        if (retracted) queue.unshift(retracted);
       } else {
         // Empty line and the first dictionary word is wider than the whole
         // column: emergency GRAPHEME-safe split (a code-point split would tear a
