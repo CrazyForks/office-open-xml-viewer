@@ -12,6 +12,7 @@ import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { parseA1 } from './a1.js';
+import { drawStackedVerticalChar } from './vertical-text.js';
 
 /** Cache key for a decoded image in the shared `loadedImages` map. A plain
  *  picture is keyed by its zip `imagePath`; a picture carrying a `<a:duotone>`
@@ -2632,14 +2633,21 @@ function renderQuadrant(
       // Stacked text (textRotation=255): draw each character on its own line
       if (isStacked) {
         const charH = vMetricPx(font.size, cs, 1.1);
-        const totalH = text.length * charH;
+        // One stacked slot per CODE POINT (the draw loop iterates code points), so
+        // an astral character reserves one slot, keeping center/bottom anchoring
+        // correct (issue #790 codex review, finding 3).
+        const stackedCount = [...text].length;
+        const totalH = stackedCount * charH;
         let charY = alignV === 'top' ? cy + paddingY
           : alignV === 'center' ? cy + (cellH - totalH) / 2
           : cy + cellH - totalH - paddingY;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         for (const ch of text) {
-          ctx.fillText(ch, cx + cellW / 2, charY);
+          // UAX#50 per-glyph orientation (issue #790): CJK/Latin stay upright,
+          // 、。 substitute their vertical form, fullwidth brackets substitute
+          // their U+FE3x form, and ー rotates 90° to a vertical bar.
+          drawStackedVerticalChar(ctx, ch, cx + cellW / 2, charY, charH);
           charY += charH;
         }
         ctx.restore();
