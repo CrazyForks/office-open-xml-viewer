@@ -5666,7 +5666,9 @@ fn extract_simple_paragraph_text(
         out
     };
 
-    for child in p.children().filter(|n| n.is_element()) {
+    // ECMA-376 §17.5.2: SDTs transparently wrap inline content. Flattening restores
+    // pre-a183723 behavior after the direct-child scan dropped text-box SDT runs.
+    for child in element_children_flat(p) {
         match child.tag_name().name() {
             "r" => {
                 for (run_text, fmt, ruby) in collect_run_node(child) {
@@ -14650,6 +14652,35 @@ mod txbx_inline_image_tests {
         assert!(block.runs[0].bold);
         assert_eq!(block.runs[1].text, "This document describes.");
         assert!(!block.runs[1].bold);
+    }
+
+    /// ECMA-376 §17.5.2 — content-control runs inside a text box remain in
+    /// document order. This guards the sample-5 cover regression from a183723.
+    #[test]
+    fn extract_simple_paragraph_text_includes_content_control_runs() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:t>[</w:t></w:r>
+              <w:sdt><w:sdtContent><w:r><w:t>会社名</w:t></w:r></w:sdtContent></w:sdt>
+              <w:r><w:t>]</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let block = extract_simple_paragraph_text(
+            &StyleMap::default(),
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("content-control text yields a block");
+
+        assert_eq!(block.text, "[会社名]");
+        assert_eq!(
+            block
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["[", "会社名", "]"]
+        );
     }
 
     /// ECMA-376 §17.3.3.25 — ruby inside a legacy VML/text-box paragraph must
