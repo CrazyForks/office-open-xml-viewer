@@ -4853,14 +4853,18 @@ function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderStat
       // Resolve the complex-script (cs) axis the same way `buildSegments` does
       // (ECMA-376 §17.3.2.3/§17.3.2.17/§17.3.2.18): a run forcing cs (w:rtl or
       // the §17.3.2.7 <w:cs/> toggle) measures with the cs bold/italic/size/
-      // family, each falling back to its Latin counterpart when absent. We pick
+      // family. SIZE (szCs) and FAMILY (rFonts@cs) fall back to their Latin
+      // counterpart when absent, but BOLD (bCs) and ITALIC (iCs) are INDEPENDENT
+      // toggles that default OFF (issue #937), so an absent bCs/iCs must NOT
+      // inherit the Latin `w:b`/`w:i` — mirror buildSegments exactly or the
+      // measured min-content width would drift from the painted glyphs. We pick
       // the cs axis for the min-content estimate when the run forces cs so wide
       // Arabic/Hebrew tokens reserve enough column width; otherwise the Latin
       // axis. NOTE rFonts@cs alone is just a font SLOT — it must not force cs
       // (a Latin heading whose style defines cstheme would wrongly take szCs).
       const forceCs = t.rtl === true || t.cs === true;
-      const effBold = forceCs ? (t.boldCs ?? t.bold) : t.bold;
-      const effItalic = forceCs ? (t.italicCs ?? t.italic) : t.italic;
+      const effBold = forceCs ? (t.boldCs ?? false) : t.bold;
+      const effItalic = forceCs ? (t.italicCs ?? false) : t.italic;
       const effFontSize = forceCs ? (t.fontSizeCs ?? t.fontSize) : t.fontSize;
       const effFontFamily = forceCs ? (t.fontFamilyCs ?? t.fontFamily) : t.fontFamily;
       // Measure in pt-space (font size in pt, scale 1) so the result composes

@@ -10511,12 +10511,13 @@ mod rtl_tests {
     }
 
     /// ECMA-376 §17.3.2.4 w:bCs / §17.3.2.6 w:iCs are INDEPENDENT toggles from
-    /// §17.3.2.3 w:b / §17.3.2.5 w:i AT THE PARSER LEVEL: a run that sets only
-    /// `w:b` (no `w:bCs`) surfaces `bold_cs == None`. NOTE: the renderer's cs
-    /// axis intentionally MIRRORS the non-cs value when bCs is absent
-    /// (`csBold = boldCs ?? base.bold`) — PDF sample-7 page-1 headings carry
-    /// `w:b` without `w:bCs` and render BOLD in Word. So `None` here means
-    /// "not set on the cs axis at the parser level", not "renders non-bold".
+    /// §17.3.2.3 w:b / §17.3.2.5 w:i: a run that sets only `w:b` (no `w:bCs`)
+    /// surfaces `bold_cs == None`, and the renderer resolves the cs axis as
+    /// `csBold = boldCs ?? false` — an absent bCs defaults OFF and does NOT
+    /// inherit the Latin `w:b`. Adjudicated in issue #937 against Word: sample-7's
+    /// `w:rtl`+`w:cs`+`w:b` (no `w:bCs`) Arabic headings render at REGULAR weight
+    /// (not bold), and sample-41's cs-italic Case A/C render upright. So `None`
+    /// here means "not set on the cs axis", which the renderer paints non-bold.
     #[test]
     fn complex_script_bold_is_independent_of_non_cs_bold() {
         let body = body_from(
@@ -10543,8 +10544,9 @@ mod rtl_tests {
         // `w:b` sets the non-CS bold…
         assert!(run.bold, "w:b sets non-CS bold");
         // …and `w:bCs` is absent, so the parser leaves the CS bold axis None.
-        // The renderer mirrors it from `bold` (boldCs ?? bold) per the PDF-
-        // verified sample-7 page-1 behaviour; that fallback lives in renderer.ts.
+        // The renderer resolves an absent bCs as OFF (boldCs ?? false), an
+        // independent toggle per the #937 adjudication; that lives in
+        // line-layout.ts / renderer.ts.
         assert_eq!(
             run.bold_cs, None,
             "absent w:bCs stays None at the parser level"
