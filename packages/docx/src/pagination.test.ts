@@ -894,15 +894,15 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
 // ─────────────────────────────────────────────────────────────────────────────
 describe('computePages — mid-page split of rows with vMerge restart cells (§17.4.85 + §17.4.6)', () => {
   const emptyBorders = () => ({ top: null, bottom: null, left: null, right: null, insideH: null, insideV: null });
-  const mkCell = (content: CellElement[], vMerge: boolean | null): DocTableCell => ({
-    content, colSpan: 1, vMerge, borders: emptyBorders(), background: null, vAlign: 'top', widthPt: null,
+  const mkCell = (content: CellElement[], vMerge: boolean | null, vAlign: 'top' | 'center' | 'bottom' = 'top'): DocTableCell => ({
+    content, colSpan: 1, vMerge, borders: emptyBorders(), background: null, vAlign, widthPt: null,
   } as unknown as DocTableCell);
   const shortPara = (text: string) => para({ text, fontSize: 20 }) as CellElement;
   /** [40pt label col | 120pt content col]; row0 = restart label + wrapping
    *  content (24 glyphs at 6/line ⇒ 4 lines = 80pt); rows 1-2 = continue label +
    *  short cell (20pt each). */
-  const restartSpanTable = (labelParas: number): BodyElement => {
-    const label = mkCell(Array.from({ length: labelParas }, (_v, i) => shortPara(`L${i}`)), true);
+  const restartSpanTable = (labelParas: number, labelVAlign: 'top' | 'center' | 'bottom' = 'top'): BodyElement => {
+    const label = mkCell(Array.from({ length: labelParas }, (_v, i) => shortPara(`L${i}`)), true, labelVAlign);
     const content = mkCell([para({ text: 'あ'.repeat(24), fontSize: 20 }) as CellElement], null);
     const contRow = (t: string): DocTableRow => ({
       cells: [mkCell([para({}) as CellElement], false), mkCell([shortPara(t)], null)],
@@ -977,6 +977,95 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
     expect(second?.rows[0]?.cells[0]?.content).toHaveLength(3);
     expect(cellSlice(first, 0, 1)).toEqual({ start: 0, end: 3 });
     expect(cellSlice(second, 0, 1)).toEqual({ start: 3, end: 4 });
+    // Review note: this fixture's 120pt restart content coincidentally equals
+    // the base span height (extension zero). The band bound below keeps the
+    // case honest either way; the nonzero-extension regression lives in the
+    // dedicated double-counting test.
+    for (const pg of pages) {
+      const el = tblOn(pg);
+      if (!el) continue;
+      const placed = bodyFragmentFor(el as PaginatedBodyElement);
+      if (placed?.fragment.kind !== 'table') throw new Error('expected a table fragment');
+      expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+    }
+  });
+
+  it('re-derives the span extension once after the split (no double counting)', () => {
+    // Review repro (§17.4.85): restart content 200pt, normal cell 80pt (4
+    // lines), two 20pt continue rows, 100pt page body. The ORIGINAL heights
+    // resolver extended the merge-END row by 200 − (80+20+20) = 80pt; after
+    // the split that extension must be RE-DERIVED against the remaining
+    // restart content, not left in place while the pieces also carry the
+    // fitted content — the double count overflowed the body band and leaked
+    // an extra page.
+    const pages = computePages([restartSpanTable(10)], section(), makeCtx());
+
+    // Every page's table charges at most the 100pt body band.
+    for (const pg of pages) {
+      const el = tblOn(pg);
+      if (!el) continue;
+      const placed = bodyFragmentFor(el as PaginatedBodyElement);
+      if (placed?.fragment.kind !== 'table') throw new Error('expected a table fragment');
+      expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+    }
+
+    // Content appears exactly once: all 10 label paragraphs and the 4 content
+    // lines are placed with no duplication and no loss.
+    const labelTexts = pages.flatMap((pg) => pg.filter((el) => el.type === 'table'))
+      .flatMap((el) => (el as unknown as DocTable).rows)
+      .flatMap((r) => (r.cells[0]?.content ?? []))
+      .map((ce) => textOf(ce as unknown as PaginatedBodyElement));
+    expect(labelTexts.filter((t) => t.length > 0).sort()).toEqual(
+      Array.from({ length: 10 }, (_v, i) => `L${i}`).sort(),
+    );
+    const contentEls = pages.flatMap((pg) => pg.filter((el) => el.type === 'table'))
+      .flatMap((el) => (el as unknown as DocTable).rows)
+      .flatMap((r) => (r.cells[1]?.content ?? []))
+      .filter((ce) => textOf(ce as unknown as PaginatedBodyElement).startsWith('あ'));
+    const contentSlices = contentEls
+      .map((ce) => (ce as CellElement & { lineSlice?: { start: number; end: number } }).lineSlice)
+      .filter((s): s is { start: number; end: number } => s !== undefined);
+    if (contentSlices.length > 0) {
+      // Sliced: the 4 content lines cover [0,4) exactly once across all slices.
+      const covered = contentSlices
+        .flatMap((s) => Array.from({ length: s.end - s.start }, (_v, k) => s.start + k))
+        .sort();
+      expect(covered).toEqual([0, 1, 2, 3]);
+      expect(contentEls).toHaveLength(contentSlices.length);
+    } else {
+      // Whole: the content paragraph was placed exactly once.
+      expect(contentEls).toHaveLength(1);
+    }
+  });
+
+  it('splits a row whose restart label is vAlign=center (target-class shape; placement Word-unverified)', () => {
+    // The target document class centres its restart label cells. The split must
+    // still fire (excluding center/bottom would push the whole span to the next
+    // page and regress the class); each PIECE then re-centres its own fitted
+    // content within its page-local box. Word ground truth for the per-piece
+    // vertical placement is NOT available — this pins the STRUCTURE (split
+    // occurs, content once, band respected) and documents the placement as
+    // unverified rather than asserting unknown Y positions.
+    for (const labelParas of [2, 6]) {
+      const pages = computePages([para(), para(), restartSpanTable(labelParas, 'center')], section(), makeCtx());
+      const first = tblOn(pages[0]);
+      const second = tblOn(pages[1]);
+      expect(first?.rows[0]?.cells[0]?.vMerge).toBe(true);
+      expect(second?.rows[0]?.cells[0]?.vMerge).toBe(true);
+      const labels = pages.flatMap((pg) => pg.filter((el) => el.type === 'table'))
+        .flatMap((el) => (el as unknown as DocTable).rows)
+        .flatMap((r) => (r.cells[0]?.content ?? []))
+        .map((ce) => textOf(ce as unknown as PaginatedBodyElement))
+        .filter((t) => t.length > 0);
+      expect(labels.sort()).toEqual(Array.from({ length: labelParas }, (_v, i) => `L${i}`).sort());
+      for (const pg of pages) {
+        const el = tblOn(pg);
+        if (!el) continue;
+        const placed = bodyFragmentFor(el as PaginatedBodyElement);
+        if (placed?.fragment.kind !== 'table') throw new Error('expected a table fragment');
+        expect(placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+      }
+    }
   });
 
   it('still refuses to split a row containing a CONTINUE cell', () => {

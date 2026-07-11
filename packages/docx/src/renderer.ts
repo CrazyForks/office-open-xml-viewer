@@ -5103,6 +5103,12 @@ function splitRowByCellBlocks(
   // deviation: the split decision fits a restart cell's content into the band
   // like a normal cell, whereas §17.4.85 row sizing excludes restart content
   // from its first row — the pieces are band-limited, so this cannot overflow.
+  // vAlign note (PR #926 review): center/bottom cells re-centre their fitted
+  // content within each PIECE's page-local box. Word ground truth for the
+  // per-piece vertical placement is unavailable; the target document class
+  // centres its restart labels, so excluding center/bottom would regress the
+  // class — the structural behavior is pinned in tests and the placement is
+  // documented as Word-unverified rather than guessed.
   if (row.cells.some((cell) => cell.vMerge === false)) return null;
   const blockCount = Math.max(0, ...row.cells.map((cell) => cell.content.length));
   if (blockCount <= 1) return null;
@@ -5436,7 +5442,16 @@ function splitRowByCellLines(
   colWidthsPt: number[],
   maxHeightPt: number,
   state: RenderState,
-): { rows: DocTableRow[]; heights: number[] } | null {
+): {
+  rows: DocTableRow[];
+  heights: number[];
+  /** §17.4.85 — the FINAL piece's remaining restart-cell content heights
+   *  (margins included), keyed by GRID column. The final piece's own height
+   *  EXCLUDES restart remainders (they distribute over the re-opened span);
+   *  the caller re-derives the span extension once from these after splicing
+   *  (see repairSpanExtensionAfterRowSplit). */
+  restartRemainders?: Map<number, number>;
+} | null {
   if (row.isHeader || row.cantSplit || row.rowHeightRule === 'exact') return null;
   // §17.4.85 — only a `continue` cell forbids the split: its box belongs to a
   // span that STARTS in an earlier row, so cutting here would slice a box this
@@ -5449,12 +5464,19 @@ function splitRowByCellLines(
   // deviation: the split decision fits a restart cell's content into the band
   // like a normal cell, whereas §17.4.85 row sizing excludes restart content
   // from its first row — the pieces are band-limited, so this cannot overflow.
+  // vAlign note (PR #926 review): center/bottom cells re-centre their fitted
+  // content within each PIECE's page-local box. Word ground truth for the
+  // per-piece vertical placement is unavailable; the target document class
+  // centres its restart labels, so excluding center/bottom would regress the
+  // class — the structural behavior is pinned in tests and the placement is
+  // documented as Word-unverified rather than guessed.
   if (row.cells.some((cell) => cell.vMerge === false)) return null;
 
   const beforeCells: DocTableCell[] = [];
   const afterCells: DocTableCell[] = [];
   const beforeCellHeights: number[] = [];
   const afterCellHeights: number[] = [];
+  const restartRemainders = new Map<number, number>();
   let madeProgress = false;
   let hasRemainder = false;
   let ci = 0;
@@ -5463,6 +5485,7 @@ function splitRowByCellLines(
     const cellState = withTableCellStory(state);
     const span = Math.min(cell.colSpan, colWidthsPt.length - ci);
     const cellWPt = colWidthsPt.slice(ci, ci + span).reduce((s, w) => s + w, 0);
+    const gridCi = ci;
     ci += span;
     const margins = effCellMargins(cell, table);
     const maxContentH = Math.max(0, maxHeightPt - margins.top - margins.bottom);
@@ -5476,7 +5499,19 @@ function splitRowByCellLines(
     beforeCells.push({ ...cell, content: split.before });
     afterCells.push({ ...cell, content: split.after });
     beforeCellHeights.push(margins.top + margins.bottom + split.beforeHeight);
-    afterCellHeights.push(margins.top + margins.bottom + split.afterHeight);
+    if (cell.vMerge === true) {
+      // §17.4.85 — a RESTART cell's remainder distributes over the re-opened
+      // span (exactly like restart content in normal row sizing), so it does
+      // NOT drive the final piece's own height; report it for the caller's
+      // span-extension repair instead. (The LEADING piece keeps the fitted
+      // restart content in ITS height: it is the span's truncated last row on
+      // its page, so the fitted content is exactly its visible box.)
+      if (split.after.length > 0) {
+        restartRemainders.set(gridCi, margins.top + margins.bottom + split.afterHeight);
+      }
+    } else {
+      afterCellHeights.push(margins.top + margins.bottom + split.afterHeight);
+    }
     madeProgress ||= split.before.length > 0;
     hasRemainder ||= split.after.length > 0;
   }
@@ -5497,6 +5532,7 @@ function splitRowByCellLines(
       Math.max(floor, ...beforeCellHeights),
       Math.max(0, ...afterCellHeights),
     ],
+    restartRemainders: restartRemainders.size > 0 ? restartRemainders : undefined,
   };
 }
 
@@ -5506,9 +5542,87 @@ function splitRowForHeight(
   colWidthsPt: number[],
   maxHeightPt: number,
   state: RenderState,
-): { rows: DocTableRow[]; heights: number[] } | null {
+): { rows: DocTableRow[]; heights: number[]; restartRemainders?: Map<number, number> } | null {
   return splitRowByCellLines(table, row, colWidthsPt, maxHeightPt, state)
     ?? splitRowByCellBlocks(table, row, colWidthsPt, maxHeightPt, state);
+}
+
+/**
+ * §17.4.85 span-extension repair after a restart-row split. The ORIGINAL row
+ * heights carried the vMerge span extension computed for the UNSPLIT row (the
+ * resolver grew the span's LAST row by the restart content overflow,
+ * table-geometry.ts). After the split, the LEADING piece carries the fitted
+ * restart content in its own height (it is the span's truncated last row on
+ * its page), and the FINAL piece re-opens the span over the following
+ * `continue` rows — so the old extension left on the merge-end row would count
+ * the restart content a SECOND time (review of PR #926: a 100pt body produced
+ * a 160pt page). This pass re-derives the extension exactly once:
+ *   1. tail rows (after the final piece, through the deepest merge-end
+ *      reachable from it, fixpoint-extended) are reset to their BASE heights
+ *      via resolveSingleRowHeight — erasing the stale extension (tail rows are
+ *      original rows, never line-sliced pieces, so re-measuring is safe);
+ *   2. the §17.4.85 extension is re-applied in row-major order for every
+ *      restart cell of the final piece and the tail: the final piece's
+ *      remaining restart content uses the splitter-reported remainder heights
+ *      (its cell content is line-sliced and must not be re-measured whole);
+ *      tail restarts re-measure their full cells like the resolver does.
+ * A span with no following continue rows degenerates to growing the final
+ * piece itself (the span's last row), matching the resolver's semantics.
+ */
+function repairSpanExtensionAfterRowSplit(
+  workTable: DocTable,
+  workRowHs: number[],
+  finalPieceIdx: number,
+  colWidthsPt: number[],
+  state: RenderState,
+  restartRemainders: Map<number, number> | undefined,
+): void {
+  const rows = workTable.rows;
+  const finalPiece = rows[finalPieceIdx];
+  if (!finalPiece) return;
+  // Deepest merge-end reachable from the final piece, fixpoint-extended by
+  // restarts that START inside the tail (a span crossing INTO the split row is
+  // impossible: continue cells there would have refused the split).
+  let maxEnd = finalPieceIdx;
+  const scanRow = (ri: number): void => {
+    let ci = 0;
+    for (const cell of rows[ri].cells) {
+      const span = Math.min(cell.colSpan, colWidthsPt.length - ci);
+      if (cell.vMerge === true) {
+        const e = findMergeEndRow(workTable, ri, ci);
+        if (e > maxEnd) maxEnd = e;
+      }
+      ci += span;
+    }
+  };
+  scanRow(finalPieceIdx);
+  for (let ri = finalPieceIdx + 1; ri <= maxEnd && ri < rows.length; ri++) scanRow(ri);
+
+  // 1) Reset tail rows to base heights (erases the stale extension).
+  for (let ri = finalPieceIdx + 1; ri <= maxEnd && ri < rows.length; ri++) {
+    workRowHs[ri] = measureSingleTableRowPt(rows[ri], workTable, colWidthsPt, state);
+  }
+  // 2) Re-apply the extension per restart cell, row-major (resolver order).
+  for (let ri = finalPieceIdx; ri <= maxEnd && ri < rows.length; ri++) {
+    let ci = 0;
+    for (const cell of rows[ri].cells) {
+      const span = Math.min(cell.colSpan, colWidthsPt.length - ci);
+      if (cell.vMerge === true) {
+        const cellW = colWidthsPt.slice(ci, ci + span).reduce((s, w) => s + w, 0);
+        const contentH = ri === finalPieceIdx
+          ? (restartRemainders?.get(ci)
+              ?? measureCellContentHeightPx(cell, workTable, cellW, 1, state))
+          : measureCellContentHeightPx(cell, workTable, cellW, 1, state);
+        const endRi = findMergeEndRow(workTable, ri, ci);
+        let spanH = 0;
+        for (let rj = ri; rj <= endRi; rj++) spanH += workRowHs[rj] ?? 0;
+        if (contentH > spanH && endRi < workRowHs.length) {
+          workRowHs[endRi] += contentH - spanH;
+        }
+      }
+      ci += span;
+    }
+  }
 }
 
 function splitRowsTallerThanPage(
@@ -5522,6 +5636,7 @@ function splitRowsTallerThanPage(
   const rows: DocTableRow[] = [];
   const heights: number[] = [];
   const sourceRowIndexByRow: number[] = [];
+  const repairs: { finalPieceIdx: number; restartRemainders?: Map<number, number> }[] = [];
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
     const rowH = rowHeightsPt[ri];
@@ -5531,6 +5646,7 @@ function splitRowsTallerThanPage(
         rows.push(...split.rows);
         heights.push(...split.heights);
         sourceRowIndexByRow.push(...split.rows.map(() => ri));
+        repairs.push({ finalPieceIdx: rows.length - 1, restartRemainders: split.restartRemainders });
         changed = true;
         continue;
       }
@@ -5539,9 +5655,16 @@ function splitRowsTallerThanPage(
     heights.push(rowH);
     sourceRowIndexByRow.push(ri);
   }
-  return changed
-    ? { table: { ...table, rows }, rowHs: heights, sourceRowIndexByRow }
-    : null;
+  if (!changed) return null;
+  const outTable = { ...table, rows };
+  // §17.4.85 — re-derive the span extension once per split (the tail rows are
+  // appended after the loop, so the repair runs over the assembled arrays).
+  for (const repair of repairs) {
+    repairSpanExtensionAfterRowSplit(
+      outTable, heights, repair.finalPieceIdx, colWidthsPt, state, repair.restartRemainders,
+    );
+  }
+  return { table: outTable, rowHs: heights, sourceRowIndexByRow };
 }
 
 /**
@@ -5644,7 +5767,20 @@ export function splitTableAcrossPages(
     const firstRowH = (isContinuation ? headerH : 0) + workRowHs[start];
     const freshAvail = contentH - colTop();
     const rowAvail = avail - (isContinuation ? headerH : 0);
-    if (rowSplit && firstRowH > avail && rowAvail > 0 && start >= headerCount) {
+    // §17.4.85 + §17.4.6 — the UNBREAKABLE group starting at `start`: a restart
+    // row chained to its continue rows admits no internal break, so when the
+    // group as a whole overflows the band the only spec-faithful relief is
+    // splitting its (splittable) HEAD row — the group head is the restart row,
+    // which the relaxed splitter gate accepts; the remainder group then flows
+    // to the next page, where this same check re-splits the re-opened restart
+    // piece if the remaining span STILL exceeds a fresh page (the review's
+    // "re-split the restart piece" requirement). A single-row group reduces to
+    // the historical first-row check, so vMerge-free tables are byte-identical.
+    let groupEnd = start;
+    while (groupEnd + 1 < n && !tableBreakAllowedBefore(workTable, groupEnd + 1)) groupEnd++;
+    let groupH = isContinuation ? headerH : 0;
+    for (let r = start; r <= groupEnd; r++) groupH += workRowHs[r];
+    if (rowSplit && (firstRowH > avail || groupH > avail) && rowAvail > 0 && start >= headerCount) {
       const split = splitRowForHeight(workTable, workRows[start], rowSplit.colWidthsPt, rowAvail, rowSplit.state);
       if (split && split.heights[0] <= rowAvail) {
         const sourceRowIndex = workSourceRowIndices[start];
@@ -5665,6 +5801,12 @@ export function splitTableAcrossPages(
         ];
         workTable = { ...workTable, rows: workRows };
         n = workRows.length;
+        // §17.4.85 — re-derive the span extension once over the new structure
+        // (the original heights carried it for the UNSPLIT row).
+        repairSpanExtensionAfterRowSplit(
+          workTable, workRowHs, start + split.rows.length - 1,
+          rowSplit.colWidthsPt, rowSplit.state, split.restartRemainders,
+        );
         continue;
       }
     }
@@ -5711,6 +5853,11 @@ export function splitTableAcrossPages(
               ];
               workTable = { ...workTable, rows: workRows };
               n = workRows.length;
+              // §17.4.85 — re-derive the span extension once (see site above).
+              repairSpanExtensionAfterRowSplit(
+                workTable, workRowHs, end + split.rows.length - 1,
+                rowSplit.colWidthsPt, rowSplit.state, split.restartRemainders,
+              );
               continue;
             }
           }
