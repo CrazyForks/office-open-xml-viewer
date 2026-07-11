@@ -905,7 +905,7 @@ pub(crate) enum Bullet {
         start_at: Option<u32>,
         /// `<a:buClr>` (ECMA-376 §21.1.2.4.4) — the marker colour. `None` means
         /// no explicit buClr, so the renderer falls back to the buClrTx default
-        /// (§21.1.2.4.10 — the first run's colour). Always serialized (like the
+        /// (§21.1.2.4.5 — the first run's colour). Always serialized (like the
         /// `Char` variant's `color`) so the TS side sees a stable `color` key.
         color: Option<String>,
     },

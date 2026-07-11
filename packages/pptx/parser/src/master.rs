@@ -827,7 +827,13 @@ pub(crate) fn parse_master_level_bullets(
         }
     }
 
-    // txStyles fallback.
+    // txStyles fallback. Within the master tier the per-shape placeholder
+    // `lstStyle` (above) is MORE specific than the generic `txStyles`, but the
+    // two are still resolved per-group: a per-shape entry that declares only a
+    // marker inherits its colour/size/font from the matching `txStyles` level
+    // (ECMA-376 §21.1.2.4 — the four bullet groups inherit independently). So
+    // merge the existing per-shape entry (primary) over the txStyles bullets
+    // (fallback) rather than dropping txStyles wholesale.
     if let Some(tx_styles) = child(root, "txStyles") {
         let style_ph_map: &[(&str, &[&str])] = MASTER_TXSTYLE_PH_TYPES;
         for (style_name, ph_types) in style_ph_map {
@@ -836,6 +842,9 @@ pub(crate) fn parse_master_level_bullets(
                 if has_any_level_bullet(&bullets) {
                     for ph_type in *ph_types {
                         map.entry(ph_type.to_string())
+                            .and_modify(|existing| {
+                                *existing = merge_level_bullets(existing, &bullets)
+                            })
                             .or_insert_with(|| bullets.clone());
                     }
                 }

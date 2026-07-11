@@ -1928,6 +1928,267 @@ mod tests {
         );
     }
 
+    // --- Cross-tier bullet sub-property cascade (buClr/buFont/buSz vs marker) ---
+    //
+    // ECMA-376 §21.1.2.4: CT_TextParagraphProperties carries FOUR independent
+    // optional choice groups — bullet colour (buClr/buClrTx), size (buSzPct/
+    // buSzPts/buSzTx), typeface (buFont/buFontTx) and marker (buChar/buAutoNum/
+    // buBlip/buNone). Each inherits per-property across the master→layout→
+    // txBody-lstStyle→pPr cascade, so a decoration declared in one tier must
+    // survive onto a marker declared in another. These build a synthetic deck
+    // whose master `bodyStyle` and slide paragraph `pPr` split the marker from
+    // its decorations and assert the resolved paragraph bullet re-combines them.
+
+    fn txstyles_body_lvl1(lvl1_inner: &str) -> String {
+        format!(
+            r#"<p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr>{lvl1_inner}<a:defRPr sz="2800"/></a:lvl1pPr></p:bodyStyle></p:txStyles>"#
+        )
+    }
+
+    fn body_sp_with_ppr(ppr_inner: &str) -> String {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Text Placeholder 5"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:pPr>{ppr_inner}</a:pPr><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#
+        )
+    }
+
+    fn first_para_bullet(data: &[u8]) -> serde_json::Value {
+        let json = parse_pptx_native(data).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["slides"][0]["elements"][0]["textBody"]["paragraphs"][0]["bullet"].clone()
+    }
+
+    /// §21.1.2.4.4 (buClr) + §21.1.2.4.1 (buAutoNum): the master `bodyStyle`
+    /// declares the auto-number MARKER while the slide paragraph declares only
+    /// the COLOUR. PowerPoint resolves the two groups independently, so the
+    /// inherited number must render in the paragraph's red. Whole-`Bullet`
+    /// merging drops the colour (the pPr has no marker → `Bullet::Inherit`).
+    #[test]
+    fn bullet_cascade_slide_buclr_colours_inherited_autonum() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buClr><a:srgbClr val="C00000"/></a:buClr>"#),
+            "",
+            &txstyles_body_lvl1(r#"<a:buAutoNum type="arabicPeriod"/>"#),
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(
+            b["type"], "autoNum",
+            "marker inherited from master bodyStyle"
+        );
+        assert_eq!(
+            b["color"], "C00000",
+            "slide buClr must colour the inherited number"
+        );
+    }
+
+    /// §21.1.2.4.3 (buChar) + §21.1.2.4.4 (buClr): the master declares a bullet
+    /// char AND its red colour; the slide paragraph overrides only the char (no
+    /// buClr). The new char must inherit the master's red — decorations are not
+    /// bound to the tier that declared the marker.
+    #[test]
+    fn bullet_cascade_new_char_inherits_lower_tier_buclr() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buChar char="›"/>"#),
+            "",
+            &txstyles_body_lvl1(
+                r#"<a:buClr><a:srgbClr val="C00000"/></a:buClr><a:buChar char="•"/>"#,
+            ),
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "›", "slide overrides the marker");
+        assert_eq!(
+            b["color"], "C00000",
+            "colour inherited independently of the marker"
+        );
+    }
+
+    /// §21.1.2.4.5 (buClrTx): an explicit `<a:buClrTx/>` on the slide paragraph
+    /// BREAKS inheritance of the lower-tier buClr and makes the bullet follow
+    /// the run's text colour. The inherited char marker survives, but the colour
+    /// resolves to null (renderer follows run) — not the master's red.
+    #[test]
+    fn bullet_cascade_buclrtx_breaks_inherited_buclr() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buClrTx/>"#),
+            "",
+            &txstyles_body_lvl1(
+                r#"<a:buClr><a:srgbClr val="C00000"/></a:buClr><a:buChar char="•"/>"#,
+            ),
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "•", "marker still inherited");
+        assert_eq!(
+            b["color"],
+            serde_json::Value::Null,
+            "buClrTx must follow text, blocking the inherited red"
+        );
+    }
+
+    /// §21.1.2.4.6 (buFont) + §21.1.2.4.3 (buChar): the master declares the
+    /// bullet font while the slide paragraph declares only a new char. The new
+    /// char must inherit the master's font — the typeface group is independent
+    /// of the marker group.
+    #[test]
+    fn bullet_cascade_new_char_inherits_lower_tier_bufont() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buChar char="X"/>"#),
+            "",
+            &txstyles_body_lvl1(r#"<a:buFont typeface="Wingdings"/><a:buChar char="•"/>"#),
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "X");
+        assert_eq!(
+            b["fontFamily"], "Wingdings",
+            "font inherited independently of the marker"
+        );
+    }
+
+    /// §21.1.2.4.9 (buSzPct): the master declares the marker while the slide
+    /// paragraph overrides only the char — the inherited size percentage must
+    /// carry onto the new char (size group is independent of the marker group).
+    #[test]
+    fn bullet_cascade_new_char_inherits_lower_tier_buszpct() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buChar char="X"/>"#),
+            "",
+            &txstyles_body_lvl1(r#"<a:buSzPct val="50000"/><a:buChar char="•"/>"#),
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "X");
+        assert_eq!(
+            b["sizePct"], 50.0,
+            "size inherited independently of the marker"
+        );
+    }
+
+    /// §21.1.2.4.8 (buNone): an explicit `<a:buNone/>` on the slide paragraph
+    /// suppresses the inherited master marker — the marker group's explicit
+    /// "no bullet" value blocks a lower-tier char. Regression guard for the
+    /// property-wise cascade (buNone must still win the marker group).
+    #[test]
+    fn bullet_cascade_slide_bunone_suppresses_inherited_marker() {
+        let data = build_align_pptx(
+            &body_sp_with_ppr(r#"<a:buNone/>"#),
+            "",
+            &txstyles_body_lvl1(r#"<a:buChar char="•"/>"#),
+        );
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "none", "buNone blocks the inherited marker");
+    }
+
+    /// Unit test for the property-wise merge + leaf collapse ([`BulletProps`]).
+    /// Each of the four groups (marker/colour/font/size) inherits independently:
+    /// `primary` wins every group it specifies (including a follow-text value,
+    /// which BLOCKS the fallback), and the fallback supplies the rest.
+    #[test]
+    fn bullet_props_merge_and_resolve_field_wise() {
+        let primary = BulletProps {
+            marker: Some(BuMarker::Char("›".into())),
+            color: Some(BuColor::FollowText),
+            font: None,
+            size: None,
+        };
+        let fallback = BulletProps {
+            marker: Some(BuMarker::Char("•".into())),
+            color: Some(BuColor::Color("C00000".into())),
+            font: Some(BuFont::Font("Wingdings".into())),
+            size: Some(BuSize::Pct(80.0)),
+        };
+        let merged = BulletProps::merge(&primary, &fallback);
+        assert_eq!(merged.marker, Some(BuMarker::Char("›".into())));
+        assert_eq!(
+            merged.color,
+            Some(BuColor::FollowText),
+            "buClrTx blocks the fallback red"
+        );
+        assert_eq!(merged.font, Some(BuFont::Font("Wingdings".into())));
+        assert_eq!(merged.size, Some(BuSize::Pct(80.0)));
+        match merged.resolve() {
+            Bullet::Char {
+                ch,
+                color,
+                size_pct,
+                font_family,
+            } => {
+                assert_eq!(ch, "›");
+                assert_eq!(
+                    color, None,
+                    "buClrTx collapses to follow-text (None) at the leaf"
+                );
+                assert_eq!(size_pct, Some(80.0));
+                assert_eq!(font_family, Some("Wingdings".to_string()));
+            }
+            other => panic!("expected Char, got {other:?}"),
+        }
+
+        // A decoration-only props (no marker) is NOT inherit — it must survive
+        // the cascade to reach an inherited marker.
+        let dec_only = BulletProps {
+            size: Some(BuSize::Pct(50.0)),
+            ..Default::default()
+        };
+        assert!(!dec_only.is_inherit());
+        assert!(BulletProps::default().is_inherit());
+    }
+
+    /// §21.1.2.4.9 — `<a:buSzPct val>` accepts both the Transitional integer
+    /// (thousandths of a percent, `"100000"` = 100%, what PowerPoint writes) and
+    /// the Strict percentage string (`"111%"`, as in the spec example).
+    #[test]
+    fn parse_bu_sz_pct_accepts_both_lexical_forms() {
+        assert_eq!(parse_bu_sz_pct("100000"), Some(100.0));
+        assert_eq!(parse_bu_sz_pct("80000"), Some(80.0));
+        assert_eq!(parse_bu_sz_pct("111%"), Some(111.0));
+        assert_eq!(parse_bu_sz_pct(" 111% "), Some(111.0));
+        assert_eq!(parse_bu_sz_pct("62.5%"), Some(62.5));
+        assert_eq!(parse_bu_sz_pct("garbage"), None);
+    }
+
+    /// The master `or_insert` edge (codex review): a master body placeholder
+    /// shape's `lstStyle` declares only the MARKER (buChar) while the generic
+    /// `bodyStyle` txStyles declares only the COLOUR (buClr). Within the master
+    /// tier the per-shape source (primary) must MERGE per-group over txStyles
+    /// (fallback), not suppress it wholesale — so the marker inherits the colour.
+    #[test]
+    fn master_shape_lststyle_merges_txstyles_decoration() {
+        let master = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree>
+            <p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+              <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr><a:buChar char="•"/></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>
+          </p:spTree></p:cSld>
+          <p:txStyles>
+            <p:bodyStyle><a:lvl1pPr><a:buClr><a:srgbClr val="C00000"/></a:buClr><a:defRPr sz="2800"/></a:lvl1pPr></p:bodyStyle>
+          </p:txStyles>
+        </p:sldMaster>"#;
+        let theme = HashMap::new();
+        let master_rels = HashMap::new();
+        let bytes = empty_zip_bytes();
+        let cursor = Cursor::new(bytes.clone());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let doc = roxmltree::Document::parse(master).unwrap();
+        let m = parse_master_level_bullets(
+            doc.root_element(),
+            &theme,
+            &master_rels,
+            "ppt/slideMasters",
+            &mut zip,
+        );
+        match m.get("body").map(|b| b[0].resolve()) {
+            Some(Bullet::Char { ch, color, .. }) => {
+                assert_eq!(ch, "•", "marker from the per-shape lstStyle");
+                assert_eq!(
+                    color.as_deref(),
+                    Some("C00000"),
+                    "colour merged from the bodyStyle txStyles fallback"
+                );
+            }
+            other => panic!("expected merged char+colour, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_parse_chartex() {
         let Ok(data) = std::fs::read(LOCAL_SAMPLE_2) else {
@@ -2593,14 +2854,14 @@ mod tests {
             Some("ppt/media/image7.png".to_owned())
         };
         let levels = read_level_bullets(doc.root_element(), &theme, &mut resolve);
-        match &levels[0] {
-            Some(Bullet::Blip { image_path, .. }) => {
+        match levels[0].resolve() {
+            Bullet::Blip { image_path, .. } => {
                 assert_eq!(image_path, "ppt/media/image7.png")
             }
             other => panic!("expected lvl1 Bullet::Blip, got {other:?}"),
         }
-        assert!(matches!(&levels[1], Some(Bullet::Char { .. })));
-        assert!(levels[2].is_none());
+        assert!(matches!(levels[1].resolve(), Bullet::Char { .. }));
+        assert!(levels[2].is_inherit());
     }
 
     /// ECMA-376 §21.1.2.4.2 — a `<a:buBlip>` whose `r:embed` IS listed in the
@@ -2646,17 +2907,19 @@ mod tests {
             &mut zip,
         );
         // The listed-but-missing part must not produce a Blip anywhere. With only
-        // a buBlip (no char/auto) at lvl1 and the part absent, the level resolves
-        // to Inherit (None) and the bodyStyle contributes no usable bullet, so the
-        // "body" key is never inserted (has_any_level_bullet is false).
+        // a buBlip (no char/auto/decoration) at lvl1 and the part absent, the
+        // level resolves to Inherit and the bodyStyle contributes no usable
+        // bullet, so the "body" key is never inserted (has_any_level_bullet is
+        // false).
         if let Some(body) = m.get("body") {
             assert!(
-                !matches!(body[0], Some(Bullet::Blip { .. })),
+                !matches!(body[0].resolve(), Bullet::Blip { .. }),
                 "missing part must not yield Bullet::Blip; got {:?}",
                 body[0]
             );
             assert!(
-                body.iter().all(|b| !matches!(b, Some(Bullet::Blip { .. }))),
+                body.iter()
+                    .all(|b| !matches!(b.resolve(), Bullet::Blip { .. })),
                 "no level may carry a dangling Bullet::Blip; got {body:?}"
             );
         }
@@ -2674,7 +2937,7 @@ mod tests {
             "ppt/slideMasters",
             &mut zip_ok,
         );
-        match m_ok.get("body").and_then(|b| b[0].clone()) {
+        match m_ok.get("body").map(|b| b[0].resolve()) {
             Some(Bullet::Blip { image_path, .. }) => {
                 assert_eq!(image_path, "ppt/media/missing.png");
             }
@@ -3079,27 +3342,27 @@ mod tests {
             &mut zip,
         );
         let body = m.get("body").expect("body bullets");
-        match &body[0] {
-            Some(Bullet::Char { ch, .. }) => assert_eq!(ch, "•", "lvl1 bullet char"),
+        match body[0].resolve() {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "•", "lvl1 bullet char"),
             other => panic!("expected lvl1 char bullet, got {other:?}"),
         }
-        match &body[1] {
-            Some(Bullet::Char { ch, .. }) => assert_eq!(ch, "–", "lvl2 bullet char"),
+        match body[1].resolve() {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "–", "lvl2 bullet char"),
             other => panic!("expected lvl2 char bullet, got {other:?}"),
         }
-        assert!(body[2].is_none(), "lvl3 unspecified");
+        assert!(body[2].is_inherit(), "lvl3 unspecified");
         // body style also keys the empty placeholder type and "obj".
         assert!(matches!(
-            m.get("").and_then(|b| b[0].clone()),
+            m.get("").map(|b| b[0].resolve()),
             Some(Bullet::Char { .. })
         ));
         assert!(matches!(
-            m.get("obj").and_then(|b| b[0].clone()),
+            m.get("obj").map(|b| b[0].resolve()),
             Some(Bullet::Char { .. })
         ));
         // titleStyle's explicit buNone is captured (so titles don't inherit a bullet).
         assert!(matches!(
-            m.get("title").and_then(|b| b[0].clone()),
+            m.get("title").map(|b| b[0].resolve()),
             Some(Bullet::None)
         ));
     }
