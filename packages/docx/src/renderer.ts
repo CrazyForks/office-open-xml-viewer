@@ -4569,12 +4569,21 @@ function splitParagraphAcrossPages(
     while (lineIdx < lines.length) {
       const remaining = colBot() - cursorY;
       const firstFitting = lineIdx;
+      // O(n) running accumulation: the policy calls `fitAt` with strictly
+      // increasing `end` (its documented contract), so extending the previous
+      // sum by the newly covered extents reproduces the historical incremental
+      // loop's exact left-to-right float-addition order — bit-identical fit
+      // comparisons without re-summing from the start per candidate.
+      let accumulatedH = 0;
+      let accumulatedEnd = firstFitting;
       const fitting = selectLargestFittingEnd(firstFitting, lines.length, remaining, (end) => {
-        let height = 0;
-        for (let i = firstFitting; i < end; i++) height += lineExtents[i];
-        return height;
+        while (accumulatedEnd < end) {
+          accumulatedH += lineExtents[accumulatedEnd];
+          accumulatedEnd++;
+        }
+        return accumulatedH;
       });
-      let usedH = fitting.height;
+      let usedH = fitting.fitValue;
       let lastFitting = fitting.end;
       if (lastFitting === firstFitting) {
         if (cursorY > 0) {
@@ -4592,7 +4601,7 @@ function splitParagraphAcrossPages(
         start: firstFitting,
         end: lastFitting,
         totalLines: lines.length,
-        belowColumnTop: cursorY > 0,
+        canRelocate: cursorY > 0,
       });
       if (widowOrphan.kind === 'dropLastLine') {
         lastFitting--;
@@ -4602,7 +4611,7 @@ function splitParagraphAcrossPages(
           start: firstFitting,
           end: lastFitting,
           totalLines: lines.length,
-          belowColumnTop: cursorY > 0,
+          canRelocate: cursorY > 0,
         });
       }
       if (widowOrphan.kind === 'relocate') {
