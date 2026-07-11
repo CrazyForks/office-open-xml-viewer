@@ -102,6 +102,7 @@ import { justifiedPiecePositions } from '@silurus/ooxml-core';
 import { resolveTableBorderConflict } from './table-border-conflict.js';
 import { isSmartArtFallbackShape, smartArtFallbackTextColor } from './smartart-fallback-contrast';
 import { resolveTabWidths } from './tab-layout.js';
+import { drawEaVertRun } from './vertical-text.js';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -2698,6 +2699,13 @@ export function renderTextBody(
   onTextRun?: TextRunCallback,
   measureOnly = false,
   fetchImage?: FetchImage,
+  // ECMA-376 §20.1.10.83 `eaVert` ("East Asian Vertical"): CJK glyphs stand
+  // UPRIGHT while Latin rotates. Set true ONLY when re-entering horizontally
+  // inside the +90°-rotated `eaVert` frame (below), so the run-draw loop applies
+  // per-glyph UAX#50 orientation via `drawEaVertRun`. False for `horz` and for
+  // `vert`/`vert270` (whose spec meaning IS to rotate every glyph), keeping those
+  // paths byte-identical.
+  eaVertUpright = false,
 ): number | void {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
@@ -2745,8 +2753,11 @@ export function renderTextBody(
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
-    // After rotation the "width" direction of the new frame is the original height
-    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc, wrappedOnTextRun, false, fetchImage);
+    // After rotation the "width" direction of the new frame is the original height.
+    // `eaVert` re-enters with per-glyph uprighting (UAX#50): CJK stands up, Latin
+    // stays sideways. `vert`/`vert270` re-enter WITHOUT it — their spec meaning is
+    // to rotate every glyph — so those stay byte-identical to before.
+    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc, wrappedOnTextRun, false, fetchImage, body.vert === 'eaVert');
     ctx.restore();
     return;
   }
@@ -3540,6 +3551,22 @@ export function renderTextBody(
       const fullyDistributed =
         !!splitBefore && splitBefore.length === cps.length - 1 && cps.length > 1;
       const drawRun = (op: 'fill' | 'stroke'): void => {
+        if (eaVertUpright) {
+          // ECMA-376 §20.1.10.83 eaVert: paint each glyph with its UAX#50 vertical
+          // orientation (CJK/kana upright, Latin sideways, brackets/comma
+          // substituted, ー rotated). The segment's cell positions are already set
+          // by the horizontal layout (penX / segW), so only the glyph orientation
+          // changes. A FULLY-DISTRIBUTED line (algn just/dist opening a gap at every
+          // inter-glyph boundary — e.g. 均等割り付け of a pure-CJK column) carries its
+          // uniform justification pitch in `segPerGap`; fold it into the per-glyph
+          // advance so the column SPREADS to fill the length instead of bunching at
+          // the top (mirrors the horizontal fully-distributed fast-path below).
+          // Partial `just` distribution (mixed Latin/CJK pieces) is a rare eaVert
+          // edge and is not redistributed here.
+          const eaPitch = fullyDistributed ? ls + segPerGap : ls;
+          drawEaVertRun(ctx, seg.text, penX, segBaseline, seg.sizePx, eaPitch, op);
+          return;
+        }
         if (fullyDistributed) {
           const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
           const prev = lctx.letterSpacing;
