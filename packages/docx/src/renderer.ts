@@ -10727,14 +10727,30 @@ function drawTableRows(
       let x1 = x;
       let x2 = x + w;
       if (j.edges.bottomRow) {
-        // Stage D — a row piece created by a MID-ROW page cut has no bottom
-        // boundary: the row visually continues on the next page (or in the next
-        // stacked piece), so the cut edge draws nothing. Word's ground truth for
-        // the split-form class shows the page-1 piece open at the cut while the
-        // continuation draws its own top edge. Row-boundary cuts are unaffected
-        // (their rows carry no marker).
+        // Mid-row page cut (fidelity round, measured ground truth): the cut is
+        // a SHARED horizontal edge between this piece's cell bottom and the
+        // continuation piece's cell top on the next page — resolve it with the
+        // ordinary §17.4.66 conflict against a SYNTHETIC continuation sibling
+        // built from the SAME source-row cell specs, whose top resolves as the
+        // next slice-table's OUTER top (cell.top ?? table.top). This explains
+        // both measured classes: none ∨ single → single (the form label column
+        // with no bottom border still shows the full-width cut rule), and a
+        // borderless table draws nothing. The sibling exists only here — it is
+        // never inserted into pagination, fragments, or occupancy — and the
+        // continuation piece still draws its own outer top on its page.
+        // Row-boundary cuts carry no marker and keep the plain outer bottom.
         const cutRow = table.rows[j.lastRi] as DocTableRow & { pageCutBottom?: boolean };
-        spec = cutRow?.pageCutBottom === true ? null : paintable(own.bottom?.spec ?? null);
+        if (cutRow?.pageCutBottom === true) {
+          const siblingTop = resolveCellEdges(
+            j.cell.borders,
+            table.borders,
+            { ...j.edges, topRow: true },
+            mirror,
+          ).top;
+          spec = resolveSharedEdge(own.bottom, siblingTop);
+        } else {
+          spec = paintable(own.bottom?.spec ?? null);
+        }
       } else {
         const below = neighbourJob(jobs, occupancy, j.lastRi + 1, j.ci);
         const belowEdges = below ? resolveCellEdges(below.cell.borders, table.borders, below.edges, mirror) : null;
