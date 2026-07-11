@@ -378,6 +378,7 @@ export {
   type SeaScript,
   type SeaWordSegmenter,
   isSeaScriptCodePoint,
+  isSeaGraphemeExtend,
   containsSeaScript,
   seaWordBreakOffsets,
   fitSeaWordPrefix,
