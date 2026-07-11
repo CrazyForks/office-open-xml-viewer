@@ -1480,13 +1480,18 @@ export const DEFAULT_TAB_PT = 36;
  *  ECMA-376 prescribes no line-breaking algorithm — tolerance-based fit is
  *  standard typography (TeX, InDesign, Word) and lets the layout absorb the
  *  canvas `measureText` vs Word advance-width discrepancy (~0.1–0.3 px/glyph)
- *  that would otherwise push a trailing word to the next line.
+ *  that would otherwise push a trailing word to the next line. Per ECMA-376
+ *  §17.18.44, this tolerance is suppressed per line when the draw pass will
+ *  fully justify it: non-final/non-manual-break lines of `both`/kashida, and
+ *  every line of `distribute`/`thaiDistribute`. Lines the paint pass leaves
+ *  non-justified keep the budget so measurement and paint agree (issue #698).
  *
- *  This is the ONE budget shared by both sides of the fit contract: the wrap
- *  judgment below admits a word when the line's overflow Δ ≤ SPACE_SHRINK_RATIO ·
- *  Σ(trailing-space widths), and the renderer's draw pass squeezes the same
- *  spaces by the same fraction so the admitted line lands inside its box instead
- *  of overrunning the clip (see `shrinkFitCompression` in text-distribute.ts). */
+ *  For eligible non-justified lines this is the ONE budget shared by both sides
+ *  of the fit contract: the wrap judgment below admits a word when the line's
+ *  overflow Δ ≤ SPACE_SHRINK_RATIO · Σ(trailing-space widths), and the renderer's
+ *  draw pass squeezes the same spaces by the same fraction so the admitted line
+ *  lands inside its box instead of overrunning the clip (see
+ *  `shrinkFitCompression` in text-distribute.ts). */
 export const SPACE_SHRINK_RATIO = 0.25;
 
 /** ECMA-376 §17.15.1.25 — resolve the document's automatic tab-stop interval
@@ -2280,6 +2285,18 @@ export function layoutLines(
   // tabs do not trigger the LTR right/center/overflow wrap paths. Default false
   // ⇒ the LTR tab paths run unchanged (byte-identical output).
   baseRtl = false,
+  // ECMA-376 §17.18.44 — whether the paragraph uses a fully justified mode.
+  // The shrink tolerance is gated per line below: lines paint will justify get
+  // no budget, while true-last/manual-break lines left non-justified keep it.
+  // `stretchLastLine` distinguishes those modes. See issue #698.
+  isJustified = false,
+  // ECMA-376 §17.18.44 — `distribute`/`thaiDistribute` stretch EVERY line
+  // including the paragraph's last (jcStretchesLastLine); `both`/kashida leave
+  // the last line and manual-break lines (§17.3.3.1) non-justified. Threaded so
+  // the per-candidate shrink gate below mirrors the paint predicate
+  // `applyJustify = isJustified && (!endsLogicalLine || stretchLastLine)`
+  // (renderer.ts) — measure and paint must classify each LINE identically.
+  stretchLastLine = false,
   startBoundary?: LineBoundary,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
@@ -2287,13 +2304,11 @@ export function layoutLines(
   let currentWidth = 0;
   // Sum of trailing-space widths of every text token on the current line.
   // Used for two things:
-  //   1. Knuth-Plass-style shrink tolerance: a justified line may compress
-  //      inter-word spaces by up to SPACE_SHRINK_RATIO, so a candidate word
-  //      whose "natural" width would overflow by less than that total shrink
-  //      budget is allowed to fit. This is the standard typographic approach
-  //      to line-breaking and lets us absorb the ~0.1–0.3 px/glyph advance
-  //      bias between Chromium canvas and Word's internal text layout,
-  //      matching Word's wrap on long paragraphs.
+  //   1. Knuth-Plass-style shrink tolerance: lines the paint pass leaves
+  //      non-justified may compress spaces by up to SPACE_SHRINK_RATIO. Per
+  //      §17.18.44 it is suppressed for lines the paint pass fully justifies:
+  //      non-final/non-manual-break lines of `both`/kashida, and every line of
+  //      `distribute`/`thaiDistribute` (measure == paint; issue #698).
   //   2. Trailing-space collapse at line end — the last token's trailing
   //      space disappears when no further word is added, so when deciding
   //      whether a candidate word fits we treat it as if it would become the
@@ -2940,12 +2955,10 @@ export function layoutLines(
     //   1. Trailing-space collapse: if this word becomes the last on the
     //      line, its trailing space (if any) collapses. We subtract it from
     //      the width used to test fit.
-    //   2. Knuth-Plass shrink tolerance: a line may compress each inter-word
-    //      space by up to SPACE_SHRINK_RATIO (25%) of its natural width without
-    //      harming readability — the module constant, shared with the draw pass
-    //      so a line admitted here is squeezed by the same budget when painted
-    //      (shrinkFitCompression in text-distribute.ts) rather than overrunning
-    //      its box. See the SPACE_SHRINK_RATIO doc above.
+    //   2. Knuth-Plass shrink tolerance: lines the paint pass leaves
+    //      non-justified keep the budget. Per §17.18.44, lines the paint pass
+    //      fully justifies get no budget: non-final/non-manual-break `both`/kashida
+    //      lines, and every `distribute`/`thaiDistribute` line (issue #698).
     const trimmed = s.text.replace(/ +$/, '');
     // Subtract the full-model advance of the trimmed text (not the natural width)
     // so the grid delta, w:w scale and w:spacing pitch on the retained glyphs all
@@ -2953,7 +2966,23 @@ export function layoutLines(
     // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
     const trailingSpaceW = s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
     const wForFit = w - trailingSpaceW;
-    const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
+    // Shrink budget for a candidate whose admission would CLOSE the current line
+    // with `next` as the first following segment (the budget only matters for a
+    // MARGINAL candidate — one that fills the line past availW(), so nothing more
+    // fits after it). Mirrors the paint pass's per-line justify predicate
+    // (renderer.ts `applyJustify = isJustified && (!endsLogicalLine || stretchLastLine)`):
+    // a line the draw pass will JUSTIFY (§17.18.44 expands its inter-word spaces,
+    // never compresses below natural width) gets NO budget and breaks at natural
+    // fit (issue #698, Word PDF ground truth); a line the draw pass leaves
+    // non-justified — the paragraph's true last line (queue exhausted) or a manual
+    // `<w:br/>` line (§17.3.3.1) under `both`/kashida — keeps the measurement-bias
+    // budget, because paint draws it with the promised shrink-fit compression.
+    const shrinkBudgetFor = (next: LayoutSeg | undefined): number => {
+      const closesLogicalLine = next === undefined || 'lineBreak' in next;
+      const lineWillJustify = isJustified && (!closesLogicalLine || stretchLastLine);
+      return lineWillJustify ? 0 : lineTotalTrailingW * SPACE_SHRINK_RATIO;
+    };
+    const shrinkBudget = shrinkBudgetFor(queue[0]);
 
     // Atomic glued group: when THIS segment starts a glued group (its followers
     // in the queue are `joinPrev` pieces — small-caps case-pieces of the SAME
@@ -2980,8 +3009,9 @@ export function layoutLines(
     ) {
       let groupW = w;
       let groupTrail = trailingSpaceW;
-      for (let k = 0; k < queue.length && (queue[k] as LayoutTextSeg).joinPrev; k++) {
-        const f = queue[k] as LayoutTextSeg;
+      let groupEnd = 0;
+      for (; groupEnd < queue.length && (queue[groupEnd] as LayoutTextSeg).joinPrev; groupEnd++) {
+        const f = queue[groupEnd] as LayoutTextSeg;
         // A CJK-BREAKABLE follower (e.g. "Roman" + "、あるいは…用いる。") is NOT
         // atomic: only its LEADING run of line-start-forbidden chars would orphan
         // at a line head (UAX#14 LB13 / §17.3.1.16); the rest splits at an
@@ -3011,7 +3041,7 @@ export function layoutLines(
         const ft = f.text.replace(/ +$/, '');
         groupTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
       }
-      if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudget) {
+      if (currentWidth + (groupW - groupTrail) > availW() + shrinkBudgetFor(queue[groupEnd])) {
         flush(undefined, false, s.src);
       }
     }

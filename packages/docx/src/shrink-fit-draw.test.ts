@@ -152,27 +152,32 @@ describe('shrink-fit draw — text-box (shape) path', () => {
   });
 
   it('does NOT double-compress a justified (both) line — its own §17.18.44 path owns the slack', () => {
-    // A `both` paragraph that WRAPS: line 1 is a justify candidate (not the last
-    // line), so applyJustify is true and the shrink-fit branch (gated on
-    // !applyJustify) is SKIPPED — the justified path alone distributes its slack.
-    // "AAAA BBBB CCCC DDDD EEEE" at W=138 wraps with line 1 = "AAAA BBBB CCCC ".
-    const evs = renderShape([block('AAAA BBBB CCCC DDDD EEEE', { alignment: 'both' })], W, 400);
+    // ECMA-376 §17.18.44 (issue #698): a `both` line breaks at its NATURAL fit —
+    // the space-shrink tolerance is suppressed for justified paragraphs, so a
+    // justified line never overflows its box and is never admitted with negative
+    // slack. Line 1 is therefore a justify candidate with POSITIVE slack that the
+    // justify path alone EXPANDS evenly; the shrink-fit branch (gated on
+    // !applyJustify) stays off, so the gaps are single-application, not squeezed.
+    // "AAAA BBBB CCCC DDDD EEEE" at WJ=160 breaks with line 1 = "AAAA BBBB CCCC "
+    // (natural 140 ≤ 160), "DDDD" wrapping (140+40 > 160).
+    const WJ = 160;
+    const evs = renderShape([block('AAAA BBBB CCCC DDDD EEEE', { alignment: 'both' })], WJ, 400);
     const ys = [...new Set(evs.map((e) => e.y))].sort((a, b) => a - b);
     expect(ys.length).toBeGreaterThanOrEqual(2); // it wrapped
     const line1 = evs.filter((e) => e.y === ys[0]).sort((a, b) => a.x - b.x);
     expect(line1.map((e) => e.text.replace(/ +$/, '')).join(' ')).toBe('AAAA BBBB CCCC');
-    // Justify signature: the inter-word gaps are compressed by an EQUAL amount
-    // (Σ distributed evenly), so the two realised gaps match. If the shrink-fit
-    // path ALSO fired, this line would be compressed twice — either uneven or
-    // pulled well inside — so equal, single-budget gaps prove single application.
+    // Justify signature: the inter-word gaps are EXPANDED by an EQUAL amount
+    // (Σ slack distributed evenly), so the two realised gaps match. If the shrink-
+    // fit path ALSO fired it would compress the gaps below their natural width or
+    // distribute unevenly — so equal gaps WIDER than one space prove that only the
+    // justify pass ran.
     const [a, b, c] = line1; // "AAAA ", "BBBB ", "CCCC "
     const gap1 = b.x - (a.x + 4 * FONT_PX); // realised inter-word gap 1
     const gap2 = c.x - (b.x + 4 * FONT_PX); // realised inter-word gap 2
     expect(gap1).toBeCloseTo(gap2, 3);      // even distribution (justify)
-    // Compressed from the natural 10px but by a SINGLE justify pass — the gap is
-    // still positive (not squeezed twice below the floor) and within one space.
-    expect(gap1).toBeGreaterThan(0);
-    expect(gap1).toBeLessThan(FONT_PX);
+    // Expanded from the natural 10px by a SINGLE justify pass (positive slack),
+    // never squeezed by the shrink-fit branch.
+    expect(gap1).toBeGreaterThan(FONT_PX);
   });
 
   it('holds the squeeze at a non-unit zoom (scale = 0.75) — line stays inside the scaled box', () => {
