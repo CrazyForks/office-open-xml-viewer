@@ -5480,6 +5480,25 @@ fn extract_simple_paragraph_text(
             .or_else(|| theme.default_east_asia_font_ref())
     };
 
+    let style_id = child_w(p, "pPr")
+        .and_then(|ppr| child_w(ppr, "pStyle"))
+        .and_then(|s| attr_w(s, "val"));
+    // ECMA-376 §17.7.2 — resolve the paragraph style chain once. The
+    // paragraph half feeds layout below; the run half is the docDefaults +
+    // paragraph-style rPr baseline for every run in this paragraph.
+    let (style_para, base_run) = style_map.resolve_para(style_id.as_deref(), None);
+    let resolve_run_fmt = |rpr_node: Option<roxmltree::Node>| -> RunFmt {
+        let mut fmt = base_run.clone();
+        if let Some(rpr) = rpr_node {
+            // §17.3.2.29 character style, then direct rPr; direct values win.
+            if let Some(rs) = child_w(rpr, "rStyle").and_then(|n| attr_w(n, "val")) {
+                apply_direct_run(&mut fmt, &style_map.resolve_run_style(&rs));
+            }
+            apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
+        }
+        fmt
+    };
+
     let mut text = String::new();
     // Per-run formatting (one entry per `<w:r>` carrying text). Preserves mixed
     // bold/non-bold runs so the renderer can lay the paragraph out as rich text;
@@ -5545,11 +5564,7 @@ fn extract_simple_paragraph_text(
                         }
                     }
                     if base_fmt.is_none() {
-                        base_fmt = Some(
-                            child_w(rb_run, "rPr")
-                                .map(parse_run_fmt)
-                                .unwrap_or_default(),
-                        );
+                        base_fmt = Some(resolve_run_fmt(child_w(rb_run, "rPr")));
                     }
                 }
                 if base_text.is_empty() {
@@ -5584,7 +5599,7 @@ fn extract_simple_paragraph_text(
                 run_text.push_str(text_node);
             }
         }
-        let fmt = child_w(r, "rPr").map(parse_run_fmt).unwrap_or_default();
+        let fmt = resolve_run_fmt(child_w(r, "rPr"));
         out.push((run_text, fmt, None));
         out
     };
@@ -5609,7 +5624,7 @@ fn extract_simple_paragraph_text(
             "oMath" | "oMathPara" => {
                 let math_text = omml_plain_text(child);
                 if !math_text.is_empty() {
-                    push_text_run(math_text, RunFmt::default(), None);
+                    push_text_run(math_text, base_run.clone(), None);
                 }
             }
             _ => {}
@@ -5651,13 +5666,6 @@ fn extract_simple_paragraph_text(
     let direct_jc = child_w(p, "pPr")
         .and_then(|ppr| child_w(ppr, "jc"))
         .and_then(|jc| attr_w(jc, "val"));
-    let style_id = child_w(p, "pPr")
-        .and_then(|ppr| child_w(ppr, "pStyle"))
-        .and_then(|s| attr_w(s, "val"));
-    // Style-chain-resolved ParaFmt (incl. docDefaults) — reused for BOTH the
-    // alignment fallback and the indent resolution below (resolve_para is called
-    // once, not per attribute).
-    let style_para = style_map.resolve_para(style_id.as_deref(), None).0;
     let alignment = direct_jc
         .or_else(|| style_para.alignment.clone())
         .unwrap_or_else(|| "left".to_string());
@@ -13973,6 +13981,208 @@ mod txbx_inline_image_tests {
         assert_eq!(block.text, "Abstract");
         // Latin-first run with no explicit face → the default ascii font, NOT None.
         assert_eq!(block.font_family.as_deref(), Some("Century"));
+    }
+
+    /// ECMA-376 §17.7.2 — a text-box run inherits color from its paragraph
+    /// style's run properties, and the block-level fallback follows that run.
+    #[test]
+    fn extract_simple_paragraph_text_inherits_paragraph_style_run_color() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Red">
+                <w:rPr><w:color w:val="FF0000"/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Red"/></w:pPr>
+                 <w:r><w:t>x</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(block.runs[0].color.as_deref(), Some("ff0000"));
+        assert_eq!(block.color.as_deref(), Some("ff0000"));
+    }
+
+    /// ECMA-376 §17.7.2 and §17.3.2.29 — a text-box run resolves its
+    /// character style on top of the paragraph run-format baseline.
+    #[test]
+    fn extract_simple_paragraph_text_inherits_character_style_run_color() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="character" w:styleId="Green">
+                <w:rPr><w:color w:val="00FF00"/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:r><w:rPr><w:rStyle w:val="Green"/></w:rPr><w:t>x</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(block.runs[0].color.as_deref(), Some("00ff00"));
+    }
+
+    /// ECMA-376 §17.7.2 — a text-box run with no color inherits the
+    /// document's `rPrDefault` color.
+    #[test]
+    fn extract_simple_paragraph_text_inherits_doc_default_run_color() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:docDefaults><w:rPrDefault><w:rPr>
+                <w:color w:val="112233"/>
+              </w:rPr></w:rPrDefault></w:docDefaults>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:r><w:t>x</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(block.runs[0].color.as_deref(), Some("112233"));
+    }
+
+    /// ECMA-376 §17.7.2 — direct text-box run properties override the
+    /// paragraph style's inherited run properties.
+    #[test]
+    fn extract_simple_paragraph_text_direct_run_color_overrides_paragraph_style() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Red">
+                <w:rPr><w:color w:val="FF0000"/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Red"/></w:pPr>
+                 <w:r><w:rPr><w:color w:val="0000FF"/></w:rPr><w:t>x</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(block.runs[0].color.as_deref(), Some("0000ff"));
+    }
+
+    /// ECMA-376 §17.7.2 — a text-box run inherits its font size from the
+    /// paragraph style's run properties.
+    #[test]
+    fn extract_simple_paragraph_text_inherits_paragraph_style_run_size() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Large">
+                <w:rPr><w:sz w:val="48"/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Large"/></w:pPr>
+                 <w:r><w:t>x</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(block.runs[0].font_size_pt, 24.0);
+    }
+
+    /// ECMA-376 §17.7.2 — a text-box run inherits bold from the paragraph
+    /// style's run properties.
+    #[test]
+    fn extract_simple_paragraph_text_inherits_paragraph_style_run_bold() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Bold">
+                <w:rPr><w:b/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Bold"/></w:pPr>
+                 <w:r><w:t>x</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(block.runs[0].bold);
+    }
+
+    /// ECMA-376 §17.7.2 and §17.3.2.6 — direct `auto` color breaks
+    /// inheritance of a concrete paragraph-style color.
+    #[test]
+    fn extract_simple_paragraph_text_auto_run_color_breaks_style_inheritance() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Red">
+                <w:rPr><w:color w:val="FF0000"/></w:rPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Red"/></w:pPr>
+                 <w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:t>x</w:t></w:r>
+               </w:p>"#,
+        )
+        .unwrap();
+        let block = extract_simple_paragraph_text(
+            &styles,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(block.runs[0].color, None);
     }
 
     /// ECMA-376 §17.7.2 — a text-box paragraph's alignment resolves through its
