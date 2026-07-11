@@ -89,8 +89,6 @@ const layoutContext = (
   spaceBeforePt: 3,
   spaceAfterPt: 4,
   baseRtl: false,
-  isJustified: false,
-  stretchLastLine: false,
   tabStops: [],
   hasRuby: false,
   hasEastAsianText: false,

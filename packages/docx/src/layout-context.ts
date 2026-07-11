@@ -7,7 +7,6 @@ import {
   resolveDefaultTabPt,
   type DocGridCtx,
 } from './line-layout.js';
-import { jcIsFullyJustified, jcStretchesLastLine } from './bidi-line.js';
 import type {
   BodyElement,
   ColumnGeom,
@@ -94,8 +93,6 @@ export interface ParagraphLayoutContext {
   readonly spaceBeforePt: number;
   readonly spaceAfterPt: number;
   readonly baseRtl: boolean;
-  readonly isJustified: boolean;
-  readonly stretchLastLine: boolean;
   readonly tabStops: readonly TabStop[];
   readonly hasRuby: boolean;
   readonly hasEastAsianText: boolean;
@@ -276,8 +273,6 @@ export function resolveParagraphLayoutContext(
     spaceBeforePt: paragraph.spaceBefore,
     spaceAfterPt: paragraph.spaceAfter,
     baseRtl,
-    isJustified: jcIsFullyJustified(paragraph.alignment),
-    stretchLastLine: jcStretchesLastLine(paragraph.alignment),
     tabStops: [...paragraph.tabStops],
     hasRuby: paragraphHasRuby(paragraph),
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
