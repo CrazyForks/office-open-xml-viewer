@@ -3250,17 +3250,50 @@ export function renderTextBody(
     }
     const baseline = cursorY + maxAscent;
 
-    // Draw bullet. Under RTL the bullet hangs in the right gutter: mirror its
-    // LTR offset (textX − bulletX, i.e. the bullet→text gap) about the text
-    // column's right edge.
+    // Reading-frame marker placement under an RTL base (issue #930, same class as
+    // the docx #830 / pptx #913 leading-edge mirroring). PowerPoint seats a list
+    // marker's LEADING edge — the RIGHT edge in RTL — at the line's leading
+    // (right) edge and lays the text CONTIGUOUSLY to its left, so `text right =
+    // leadingEdge − markerAdvance` (verified on the sample PDF: the "1." and "•"
+    // markers share one right edge, each text right edge = that edge minus the
+    // marker's own width). The prior code mirrored the LTR hanging gutter about
+    // the text's right edge — `+ (textX − bulletX)` = `+|indent|` — which pushed
+    // the marker |indent| PAST the leading edge into the right margin (the
+    // far-frame over-indent this fixes), most visibly for a NARROW bullet whose
+    // gap to the text then equalled the whole hanging indent.
+    //
+    // `leadingEdgeX` is the RTL reading start (= the `algn:'r'` right edge). The
+    // marker advance is reserved so the pen below right-aligns the text to
+    // `leadingEdgeX − reserve`; 0 for LTR / marker-less lines keeps them
+    // byte-identical.
+    const leadingEdgeX = textX + textMaxW;
+    let rtlMarkerReservePx = 0;
+    let rtlBulletBmp: ReturnType<typeof peekCachedBitmapByPath> | null = null;
+    if (paraNeedsBidi && baseRtl) {
+      if (bulletLabel) {
+        ctx.font = bulletFont;
+        rtlMarkerReservePx = ctx.measureText(bulletLabel).width;
+      } else if (bulletImage && fetchImage) {
+        rtlBulletBmp = peekCachedBitmapByPath(bulletImage.imagePath, fetchImage);
+        if (rtlBulletBmp) {
+          const h = bulletImage.sizePx;
+          rtlMarkerReservePx = rtlBulletBmp.height > 0
+            ? h * (rtlBulletBmp.width / rtlBulletBmp.height)
+            : h;
+        }
+      }
+    }
+
+    // Draw bullet.
     if (bulletLabel) {
       ctx.font = bulletFont;
       ctx.fillStyle = bulletColor;
       if (paraNeedsBidi && baseRtl) {
         const prevDir = ctx.direction;
         ctx.direction = 'rtl';
-        const bulletW = ctx.measureText(bulletLabel).width;
-        ctx.fillText(bulletLabel, textX + textMaxW + (textX - bulletX) - bulletW, baseline);
+        // Marker RIGHT edge at the leading edge; its left edge tucks the text
+        // that the pen shifts left by `rtlMarkerReservePx` (= this width).
+        ctx.fillText(bulletLabel, leadingEdgeX - rtlMarkerReservePx, baseline);
         ctx.direction = prevDir;
       } else {
         ctx.fillText(bulletLabel, bulletX, baseline);
@@ -3284,9 +3317,9 @@ export function renderTextBody(
         const w = bmp.height > 0 ? h * (bmp.width / bmp.height) : h;
         const imgY = baseline - h; // bottom-aligned to the baseline
         if (paraNeedsBidi && baseRtl) {
-          // Mirror into the right gutter, matching the char-bullet RTL offset.
-          const imgX = textX + textMaxW + (textX - bulletX) - w;
-          ctx.drawImage(bmp, imgX, imgY, w, h);
+          // Marker RIGHT edge at the leading edge (matching the char-bullet
+          // reading-frame placement above); the text pen reserves this width.
+          ctx.drawImage(bmp, leadingEdgeX - w, imgY, w, h);
         } else {
           ctx.drawImage(bmp, bulletX, imgY, w, h);
         }
@@ -3298,7 +3331,11 @@ export function renderTextBody(
     if (alignment === 'ctr') {
       penX = effectiveTextX + (textMaxW - textXOffset - lineWidth) / 2;
     } else if (alignment === 'r') {
-      penX = textX + textMaxW - lineWidth;
+      // Reading-frame (#930): an RTL marker leads at the right edge, so the text
+      // right-aligns to `leadingEdge − markerAdvance` (contiguous with the
+      // marker). `rtlMarkerReservePx` is 0 for non-list / marker-less lines, so
+      // plain RTL paragraphs keep `leadingEdge − lineWidth` (byte-identical).
+      penX = textX + textMaxW - rtlMarkerReservePx - lineWidth;
     } else {
       penX = effectiveTextX;
     }
