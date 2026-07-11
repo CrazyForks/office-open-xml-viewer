@@ -1116,9 +1116,13 @@ export function paragraphMarkLineHeight(
  * `iCs` (italic), §17.3.2.26 `rFonts@cs` (typeface), §17.3.2.39 `szCs` (size) —
  * instead of the non-CS `b`/`i`/`rFonts@ascii`/`sz`, which apply to
  * non-complex (Latin/CJK) text. `bCs`/`iCs` are INDEPENDENT toggles: an absent
- * `bCs` does not inherit `b`'s value, so a complex-script run that carries only
- * `w:b` renders non-bold. (sample-7's date cells carry `b` without `bCs`, and
- * Word draws them at regular weight; the header carries both and is bold.)
+ * `bCs`/`iCs` does not inherit `b`/`i`'s value, so a complex-script run that
+ * carries only `w:b`/`w:i` renders non-bold/upright (`csBold = boldCs ?? false`,
+ * `csItalic = italicCs ?? false`). Adjudicated in issue #937 against Word: the
+ * numbered Arabic headings in sample-7 carry `w:rtl`+`w:cs`+`w:b` WITHOUT
+ * `w:bCs` and Word draws them at regular weight; sample-41's cs-italic Case A/C
+ * carry `w:i` without `w:iCs` and render upright, matching the explicit-OFF
+ * Case B (only Case D's plain Latin `w:i` renders italic).
  */
 /**
  * Split a `w:smallCaps` (§17.3.2.33) run into maximal pieces by character class
@@ -1966,14 +1970,20 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // renders at w:sz=24; forcing cs blew its size up to 26pt.
     const forceCs = r.rtl === true || r.cs === true;
 
-    // Complex-script (cs) formatting sources, each falling back to its Latin
-    // counterpart when the cs-specific property is absent (the parser already
-    // resolves szCs through the full style chain, mirroring a directly-set
-    // `w:sz` per §17.3.2.18; bCs/iCs per §17.3.2.3/§17.3.2.17).
+    // Complex-script (cs) formatting sources. SIZE (§17.3.2.39 szCs) and TYPEFACE
+    // (§17.3.2.26 rFonts@cs) fall back to their Latin counterpart when absent —
+    // the parser resolves szCs through the full style chain, mirroring a
+    // directly-set `w:sz` per §17.3.2.18. But BOLD (§17.3.2.3 bCs) and ITALIC
+    // (§17.3.2.17 iCs) are INDEPENDENT toggles: an absent `bCs`/`iCs` defaults
+    // OFF and must NOT inherit the Latin-axis `w:b`/`w:i` (which govern only
+    // non-complex content). Adjudicated in issue #937 against Word ground truth —
+    // sample-41 Case A/C (`w:i`, no `w:iCs`) render upright like the explicit-OFF
+    // Case B (contrast Case D's plain Latin `w:i` = italic); sample-7's
+    // `w:rtl`+`w:cs`+`w:b` (no `w:bCs`) Arabic headings render at regular weight.
     const csFontSize = r.fontSizeCs ?? base.fontSize;
     const csFontFamily = r.fontFamilyCs ?? base.fontFamily;
-    const csBold = r.boldCs ?? base.bold;
-    const csItalic = r.italicCs ?? base.italic;
+    const csBold = r.boldCs ?? false;
+    const csItalic = r.italicCs ?? false;
 
     // ECMA-376 §17.3.2.26 eastAsia axis. Within a non-complex-script slice, CJK
     // code points take the eastAsia face while Latin/digits keep the ascii face

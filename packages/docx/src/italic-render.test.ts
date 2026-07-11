@@ -24,13 +24,17 @@ import type {
 // whose `font` payload is the exact ctx.font the glyph draw used (buildFont
 // output: "<style> <weight> <size>px <family…>").
 //
-// DELIBERATELY NOT PINNED: a force-CS run carrying `w:i` with `w:iCs` ABSENT.
-// It currently inherits italic through the `italicCs ?? italic` fallback, but
-// §17.3.2.17 reads as an independent toggle (compare the adjudicated bold-side
-// note above buildSegments' axis docs: absent `bCs` does not inherit `b`), so
-// whether the fallback matches Word is pending adjudication in issue #937.
-// Pinning it here would pre-empt that adjudication. The `rtl` case below pins
-// CURRENT behavior for the same fallback and should be revisited with #937.
+// ADJUDICATED (issue #937): a force-CS run carrying `w:i`/`w:b` with `w:iCs`/
+// `w:bCs` ABSENT paints UPRIGHT / non-bold. §17.3.2.17 `w:iCs` and §17.3.2.3
+// `w:bCs` are INDEPENDENT toggles — the non-CS `w:i`/`w:b` value governs only
+// the Latin axis and does NOT inherit onto the complex-script axis. Word's
+// ground truth (fixture sample-41 cs-italic-toggle): Case A (`w:cs`+`w:i`, no
+// `w:iCs`, Latin) and Case C (`w:rtl`+`w:i`, no `w:iCs`, Arabic) both render
+// upright — identical to Case B (`w:iCs=0` explicit OFF) — while Case D (plain
+// `w:i`, Latin axis) renders italic. The bold side is the same: sample-7's
+// `w:rtl`+`w:cs`+`w:b` (no `w:bCs`) Arabic headings render at regular weight in
+// Word's PDF, not bold. The renderer therefore resolves the CS axis as
+// `italicCs ?? false` / `boldCs ?? false`, NOT `?? base.italic`/`?? base.bold`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const FONT_PX = 20;
@@ -149,13 +153,36 @@ describe('run italic axis at paint time (§17.3.2.16 w:i / §17.3.2.17 w:iCs)', 
     expect(fonts.get('курсив')).toMatch(/^normal normal /);
   });
 
-  it('w:rtl run with w:i and absent w:iCs paints italic (current fallback)', async () => {
-    // CURRENT behavior pin: the CS axis falls back `italicCs ?? italic` when
-    // w:iCs is absent. Whether Word agrees for an absent toggle is pending
-    // adjudication in issue #937; revisit this pin with that issue.
+  it('force-CS run (w:cs) with w:i and absent w:iCs paints upright (#937 Case A)', async () => {
+    // §17.3.2.7 <w:cs/> routes the run onto the CS axis; §17.3.2.17 `w:iCs` is
+    // an INDEPENDENT toggle, so an ABSENT `w:iCs` defaults OFF and `w:i` (Latin
+    // axis) does not leak through. Word ground truth: sample-41 Case A renders
+    // upright, identical to the explicit-OFF Case B above. Adjudicated in #937.
+    const fonts = await paintFonts([para([
+      textRun('курсив', { italic: true, cs: true, fontSizeCs: FONT_PX }),
+    ])]);
+    expect(fonts.get('курсив')).toMatch(/^normal normal /);
+  });
+
+  it('w:rtl run with w:i and absent w:iCs paints upright (#937 Case C)', async () => {
+    // The rtl (§17.3.2.30) sibling of Case A: same absent-`w:iCs` fallback.
+    // Word ground truth: sample-41 Case C (Arabic) renders upright, not oblique.
+    // Previously pinned to italic (`italicCs ?? italic`); flipped by the #937
+    // adjudication to the independent-toggle reading (`italicCs ?? false`).
     const fonts = await paintFonts([para([
       textRun('نص', { italic: true, rtl: true, fontSizeCs: FONT_PX, langBidi: 'ar-sa' }),
     ])]);
-    expect(fonts.get('نص')).toMatch(/^italic /);
+    expect(fonts.get('نص')).toMatch(/^normal /);
+  });
+
+  it('force-CS run with w:b and absent w:bCs paints non-bold (#937 bold symmetry)', async () => {
+    // §17.3.2.3 `w:bCs` mirrors §17.3.2.17 `w:iCs`: an INDEPENDENT toggle whose
+    // absence defaults OFF, so `w:b` (Latin axis) does not force CS bold. Word
+    // ground truth: sample-7's w:rtl+w:cs+w:b (no w:bCs) Arabic headings render
+    // at regular weight, not bold. `csBold = boldCs ?? false`. Adjudicated #937.
+    const fonts = await paintFonts([para([
+      textRun('نص', { bold: true, rtl: true, fontSizeCs: FONT_PX, langBidi: 'ar-sa' }),
+    ])]);
+    expect(fonts.get('نص')).toMatch(/^normal normal /);
   });
 });
