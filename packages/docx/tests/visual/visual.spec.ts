@@ -29,8 +29,11 @@ const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   { name: 'private/sample-27', pageCount: 2, width: 612 },
   // sample-28 = Arabic RTL long-form (A4).
   { name: 'private/sample-28', pageCount: 23, width: 595 },
-  // sample-29 = Thai script (A4).
-  { name: 'private/sample-29', pageCount: 14, width: 595 },
+  // sample-29 = Thai script (A4). 11 pages since the #989 baseline-grazing
+  // page fit (adjudicated best-fidelity state in the #981 follow-up); a stale
+  // higher count silently clamps out-of-range page requests back to page 0,
+  // snapshotting duplicate first pages.
+  { name: 'private/sample-29', pageCount: 11, width: 595 },
   // sample-30 = Korean script (A4).
   { name: 'private/sample-30', pageCount: 4, width: 595 },
   // sample-31 = Russian / Cyrillic (A4).
