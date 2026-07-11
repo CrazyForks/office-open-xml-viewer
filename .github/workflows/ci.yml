@@ -189,9 +189,36 @@ jobs:
       # catches engine-specific pipeline breakage a Chrome-only run would miss.
       # Chrome is handled by the guarded step above (system Google Chrome), so we
       # install only the two bundled engines here.
+      #
+      # `playwright install --with-deps` bundled the apt-based OS dependency
+      # install and the browser binary download into one step; the apt install
+      # against the Azure mirror is what intermittently stalls past a short
+      # timeout, and it isn't cacheable across runs. Split the two so the
+      # (cacheable) browser binaries can be restored from cache and skip the
+      # download entirely on a hit, while the apt step keeps its own generous
+      # timeout to absorb mirror slowness.
+      - name: Resolve Playwright version
+        id: playwright-version
+        run: |
+          version=$(grep -m1 "^  '@playwright/test@" pnpm-lock.yaml | sed -E "s/^  '@playwright\/test@([^']+)':$/\1/")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install WebKit + Firefox OS dependencies
+        timeout-minutes: 15
+        run: pnpm exec playwright install-deps webkit firefox
+
       - name: Install Playwright WebKit + Firefox
-        timeout-minutes: 5
-        run: pnpm exec playwright install webkit firefox --with-deps
+        timeout-minutes: 15
+        run: pnpm exec playwright install webkit firefox
       - name: Smoke tests
         run: pnpm smoke
 
