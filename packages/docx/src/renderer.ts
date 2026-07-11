@@ -11396,6 +11396,18 @@ function drawTableRows(
         spec = paintable(own.bottom?.spec ?? null);
       }
       if (spec) drawBorderLine(ctx, x, y + h, x + w, y + h, spec, scale, dpr);
+    } else if ((table.rows[j.lastRi] as DocTableRow & { pageCutBottom?: boolean })?.pageCutBottom === true) {
+      // Intra-row page cut whose CONTINUATION piece shares this page. When a tall
+      // row is split, the paginator can pack a leading piece and its continuation
+      // onto one page (measured private fixture sample-33 p.3: two consecutive
+      // tall rows each split, a continuation piece of each landing on one page).
+      // The leading piece's bottom is then an INTERIOR horizontal edge (not the
+      // table's outer bottom, which the `j.edges.bottomRow` branch above handles).
+      // The pieces are one continuous flow, so Word leaves the cut OPEN — draw
+      // NOTHING here, rather than resolving §17.4.66 against the piece below and
+      // painting the Table-Grid insideH. (The true page-end cut — the LAST piece
+      // on the page — keeps its rule via the outer-bottom branch, whose
+      // synthetic-sibling resolution is unchanged.)
     } else {
       // ECMA-376 §17.4.66 (#815) — the shared horizontal edge below this cell may
       // face SEVERAL finer below-cells (this cell is wider via gridSpan). Subdivide
