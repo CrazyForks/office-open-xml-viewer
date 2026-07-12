@@ -1491,6 +1491,10 @@ pub struct RubyAnnotation {
     pub text: String,
     /// pt
     pub font_size_pt: f64,
+    /// Distance “between the phonetic guide base text and the phonetic guide text”
+    /// in pt (ECMA-376 §17.3.3.12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hps_raise_pt: Option<f64>,
 }
 
 /// One formatting run (`<w:r>`) inside a shape-text paragraph. Mirrors the

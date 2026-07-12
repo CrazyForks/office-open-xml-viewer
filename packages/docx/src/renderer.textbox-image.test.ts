@@ -325,6 +325,25 @@ describe('textbox rich text — per-run formatting', () => {
     expect(fillTextCalls.map((c) => c.text).join('')).toBe('根号こんごうを含む式の加か減げん');
   });
 
+  it('uses hpsRaise for the horizontal text-box ruby baseline and preserves zero', () => {
+    const distance = (hpsRaisePt: number): number => {
+      const { ctx, fillTextCalls } = makeRecordingCtx();
+      const shape = richTextbox([{
+        text: '漢', fontSizePt: 12, fontFamily: 'NotInMetrics',
+        ruby: { text: 'かん', fontSizePt: 8, hpsRaisePt },
+      }]);
+      renderShapeText(shape, 0, 0, 200, 100, ctx, 2, {}, new Map());
+      const base = fillTextCalls.find((call) => call.text === '漢');
+      const ruby = fillTextCalls.find((call) => call.text === 'かん');
+      expect(base, 'base glyph drawn').toBeDefined();
+      expect(ruby, 'ruby glyph drawn').toBeDefined();
+      return base!.y - ruby!.y;
+    };
+
+    expect(distance(14)).toBeCloseTo(28, 8);
+    expect(distance(0)).toBe(0);
+  });
+
   it('draws a numbered marker for text-box paragraphs', () => {
     const { ctx, fillTextCalls } = makeRecordingCtx();
     const shape = richTextbox([{ text: '加法、減法の言葉に合った数式を生徒に考えさせる。', fontSizePt: 10, color: '000000' }]);

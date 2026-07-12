@@ -107,7 +107,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border (box) around the text. */
   border?: DocxRunBorder | null;
   /** Ruby annotation rendered in a small font directly above this segment. */
-  ruby?: { text: string; fontSizePt: number };
+  ruby?: { text: string; fontSizePt: number; hpsRaisePt?: number };
   /** Track-changes revision attached to this run (insertion / deletion). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };
   /** ECMA-376 §17.3.2.30 `<w:rtl>` — run carries right-to-left characteristics.
@@ -202,9 +202,16 @@ export interface LayoutTextSeg extends LayoutSegSource {
   seaBreaks?: readonly number[];
 }
 
-/** ECMA-376 §17.3.3.25 ruby annotation ascent reserved above its base text. */
-export function rubyAscentReservePx(rubySizePt: number, scale: number): number {
-  return rubySizePt * scale * 1.5;
+/** ECMA-376 §17.3.3.12 defines `hpsRaise` as the “distance [...] between the
+ *  phonetic guide base text and the phonetic guide text.” Use that distance as
+ *  the ruby ascent reservation when present; preserve the existing 1.5×
+ *  ruby-size fallback when it is absent because the property has no default. */
+export function rubyAscentReservePx(
+  rubySizePt: number,
+  hpsRaisePt: number | undefined,
+  scale: number,
+): number {
+  return hpsRaisePt != null ? hpsRaisePt * scale : rubySizePt * scale * 1.5;
 }
 
 /**
@@ -2064,7 +2071,11 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // the annotation only to the first emitted segment.
     const baseRuby = (base as DocxTextRun).ruby;
     const ruby = baseRuby
-      ? { text: baseRuby.text, fontSizePt: baseRuby.fontSizePt }
+      ? {
+          text: baseRuby.text,
+          fontSizePt: baseRuby.fontSizePt,
+          ...(baseRuby.hpsRaisePt != null ? { hpsRaisePt: baseRuby.hpsRaisePt } : {}),
+        }
       : undefined;
     const revision = (base as DocxTextRun).revision;
     const r = base as DocxTextRun;
@@ -3223,7 +3234,7 @@ export function layoutLines(
     // snap actually picks the next pitch slot. 1.5× rt-size is enough for
     // any rt size that fits in one extra pitch above the base.
     if (s.ruby) {
-      asc = asc + rubyAscentReservePx(s.ruby.fontSizePt, scale);
+      asc = asc + rubyAscentReservePx(s.ruby.fontSizePt, s.ruby.hpsRaisePt, scale);
     }
 
     // ECMA-376 §17.3.2.14: a fit region is an atomic fixed-width cell. The
@@ -3777,9 +3788,9 @@ export function rescaleLayoutLines(
     // (see addToLine's segScriptHint note).
     const segScriptHint = EAST_ASIAN_RE.test(s.text) && !s.ruby;
     const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, segScriptHint);
-    // §17.3.3.25 — ruby reserves extra ascent room (rt size × 1.5), same as layoutLines.
+    // §17.3.3.12 — ruby reserves hpsRaise when present, same as layoutLines.
     const asc = s.ruby
-      ? corrected.ascent + rubyAscentReservePx(s.ruby.fontSizePt, scale)
+      ? corrected.ascent + rubyAscentReservePx(s.ruby.fontSizePt, s.ruby.hpsRaisePt, scale)
       : corrected.ascent;
     // Intended single-line floor (font-metrics.ts) — small caps keep the FULL run
     // size here too (addToLine's intendedEm).
