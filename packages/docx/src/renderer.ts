@@ -1142,12 +1142,15 @@ function verticalLayoutSection(phys: SectionProps): SectionProps {
   };
 }
 
-/** Return a shallow copy of `doc` with its body-level section (and any per-body
- *  sectionBreak geometry) swapped to the vertical LOGICAL geometry, so the
- *  pagination + layout engine — which reads `doc.section` and per-element
- *  `sectionGeom` — organises the page as a rotated horizontal page. Only invoked
- *  when the body section is vertical; horizontal docs are returned untouched
- *  (referential identity), keeping the horizontal path byte-identical. */
+/** Return a shallow copy of `doc` with its BODY-LEVEL section swapped to the
+ *  vertical LOGICAL geometry, so the pagination + layout engine — which reads
+ *  `doc.section` — organises the page as a rotated horizontal page. Per-body
+ *  SectionBreak `geom`s are NOT swapped: per-section geometry/text-direction
+ *  inside a vertical document is the #988 ① per-section follow-up, so vertical
+ *  layout is body-section uniform today and consumers must not mix a mid-body
+ *  section geom into the swapped frame. Only invoked when the body section is
+ *  vertical; horizontal docs are returned untouched (referential identity),
+ *  keeping the horizontal path byte-identical. */
 function verticalLayoutDoc(doc: DocxDocumentModel): DocxDocumentModel {
   if (!isVerticalSection(doc.section)) return doc;
   return { ...doc, section: verticalLayoutSection(doc.section) };
@@ -2123,6 +2126,25 @@ export function computePages(
     fontFamilyClasses,
     documentSettings,
   );
+  // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): in a
+  // vertical (tbRl) section — `section` here is the SWAPPED logical geometry,
+  // textDirection preserved — a block table is an UPRIGHT block: its cells lay
+  // out horizontally at the PHYSICAL content width, and it advances the flow by
+  // its PHYSICAL WIDTH (the paint pass's renderTable vertical branch). The
+  // paginator must charge that same footprint, so resolve the physical content
+  // band from the BODY-LEVEL swapped section — the one frame-consistent source
+  // today: `verticalLayoutDoc` swaps only `doc.section`, so a mid-body
+  // SectionBreak's `geom` still carries PHYSICAL page geometry and must not be
+  // fed through `physicalLayoutSection` (it would double-invert). Per-section
+  // geometry/text-direction inside a vertical document is the #988 ①
+  // per-section follow-up; until it lands, vertical layout is body-section
+  // uniform (measure `verticalPhys` in buildMeasureState is seeded from the
+  // same body-level section, and the paint pass resolves the same geometry for
+  // every page). Horizontal sections are untouched (`verticalUpright` false).
+  const verticalUpright = isVerticalSection(section);
+  const uprightPhysSection = verticalUpright ? physicalLayoutSection(section) : section;
+  const uprightTableBandPt = (): number =>
+    uprightPhysSection.pageWidth - uprightPhysSection.marginLeft - uprightPhysSection.marginRight;
   const noteById = indexNotes(footnotes);
   const haveFootnotes = noteById.size > 0;
   // Per-page reserved footnote height (pt). Index 0 = first page. Grows as
@@ -2570,6 +2592,13 @@ export function computePages(
   // are pinned regardless of which page the anchor lands on, so they never
   // trigger a break). Measured at scale 1 (pt), matching the paginator's `y`.
   const anchoredFloatBottomOffset = (para: DocParagraph): number => {
+    // §17.6.20 + #988 ② — in a vertical section positionV offsets live on the
+    // PHYSICAL vertical axis (the column-length axis), not the flow axis: a
+    // paragraph-anchored float never extends the logical flow by its offset,
+    // so the horizontal keep-on-page displacement below does not map. (The
+    // physical-axis analogue — a float overflowing the physical bottom — is
+    // un-adjudicated and left to the anchor clamp.)
+    if (verticalUpright) return 0;
     let maxBottom = 0;
     for (const run of para.runs) {
       if (run.type === 'image') {
@@ -2618,6 +2647,13 @@ export function computePages(
       return estimateParagraphHeight(measureState, nxt as unknown as DocParagraph, colW(), false);
     }
     if (nxt.type === 'table') {
+      // §17.6.20 + #988 ④ — an upright vertical-section table's flow footprint
+      // is its PHYSICAL WIDTH, not the sum of its row heights.
+      if (verticalUpright) {
+        return resolveColumnWidths(
+          nxt as unknown as DocTable, uprightTableBandPt(), measureState,
+        ).reduce((s, w) => s + w, 0);
+      }
       return estimateTableHeight(measureState, nxt as unknown as DocTable, colW());
     }
     return 0;
@@ -3510,12 +3546,6 @@ export function computePages(
         continue;
       }
 
-      // Tables in a multi-column section are sized to the column width, not the
-      // full content band. Resolve columns + row heights together (one min-content
-      // scan) so both can be stamped for the paint pass (B2 table stage 1b).
-      const tblContentWPt = colW();
-      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: measuredRowHs } =
-        computeTablePtLayout(measureState, tbl, tblContentWPt);
       // ECMA-376 §17.11.10 — a footnote referenced from inside a table cell is
       // drawn at the bottom of the page holding the table, so the body area must
       // shrink by the note height just as it does for a body-paragraph reference
@@ -3523,7 +3553,8 @@ export function computePages(
       // their height into BOTH the fit decision and the committed page reserve.
       // (A row-split table reserves on the page where it ends — the same
       // approximation a split footnote-bearing paragraph uses above; §17.11.10's
-      // per-row placement across a split is a documented residual.)
+      // per-row placement across a split is a documented residual.) Shared by
+      // the upright-vertical and horizontal block-table paths below.
       let tblNewRefIds: string[] = [];
       let tblReservePt = 0;
       if (haveFootnotes) {
@@ -3535,6 +3566,51 @@ export function computePages(
         }
         tblReservePt = sumReserve(tblNewRefIds);
       }
+      const commitTableReserve = () => {
+        if (!haveFootnotes || tblNewRefIds.length === 0) return;
+        // Re-filter against the landing page (a split may have advanced pages, so
+        // the separator region is charged only if that page had no note yet).
+        tblNewRefIds = tblNewRefIds.filter((id) => !pageNoteIds.has(id));
+        const addPt = sumReserve(tblNewRefIds);
+        const idx = pages.length - 1;
+        footnoteReservePt[idx] = (footnoteReservePt[idx] ?? 0) + addPt;
+        for (const id of tblNewRefIds) pageNoteIds.add(id);
+      };
+
+      // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): a
+      // block table in a vertical (tbRl) section is an UPRIGHT block — resolve
+      // its layout at the PHYSICAL content width and charge its PHYSICAL WIDTH
+      // as the flow footprint (the paint pass advances by the same tableW, so
+      // pagination and paint agree). Stamp the physical scale-1 layout so the
+      // paint pass's computeTableLayout reuses it at the same physical band.
+      // Rows stack along the physical vertical axis (the column-length axis),
+      // NOT the flow axis, so the table is atomic: no row-splitting across
+      // columns/pages (a follow-up if a fixture ever adjudicates it) — a table
+      // that does not fit the remaining flow advances to the next column/page
+      // whole, and one wider than a full column overflows like a too-tall
+      // horizontal row.
+      if (verticalUpright) {
+        const bandPt = uprightTableBandPt();
+        const { colWidthsPt, rowHeightsPt } =
+          computeTablePtLayout(measureState, tbl, bandPt);
+        const h = colWidthsPt.reduce((s, w) => s + w, 0);
+        const tableEl = { ...tbl, type: 'table' } as PaginatedBodyElement;
+        stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);
+        if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
+        pushTagged(tableEl);
+        y += h;
+        measureState.y += h;
+        commitTableReserve();
+        prevPara = null;
+        continue;
+      }
+
+      // Tables in a multi-column section are sized to the column width, not the
+      // full content band. Resolve columns + row heights together (one min-content
+      // scan) so both can be stamped for the paint pass (B2 table stage 1b).
+      const tblContentWPt = colW();
+      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: measuredRowHs } =
+        computeTablePtLayout(measureState, tbl, tblContentWPt);
       // effContentH() respects any reserve already accumulated on this page; the
       // table's own footnote reserve is subtracted on top so the note clears the
       // table content.
@@ -3551,16 +3627,6 @@ export function computePages(
       const sourceRowIndexByRow = splitRows?.sourceRowIndexByRow;
       const tableEl = { ...pageTable, type: 'table' } as PaginatedBodyElement;
       const h = rowHs.reduce((s, x) => s + x, 0);
-      const commitTableReserve = () => {
-        if (!haveFootnotes || tblNewRefIds.length === 0) return;
-        // Re-filter against the landing page (a split may have advanced pages, so
-        // the separator region is charged only if that page had no note yet).
-        tblNewRefIds = tblNewRefIds.filter((id) => !pageNoteIds.has(id));
-        const addPt = sumReserve(tblNewRefIds);
-        const idx = pages.length - 1;
-        footnoteReservePt[idx] = (footnoteReservePt[idx] ?? 0) + addPt;
-        for (const id of tblNewRefIds) pageNoteIds.add(id);
-      };
       const overflowsCurrentColumn = y + h > tableContentH;
       if (h > tableContentH || (!wantsBalanceBreak(h) && overflowsCurrentColumn)) {
         // Split row-by-row so overflow continues into the next column / page
@@ -4050,6 +4116,35 @@ function buildMeasureState(
     balanceSingleByteDoubleByteWidth:
       layoutSettings.compat.balanceSingleByteDoubleByteWidth,
     showTrackChanges: false,
+    // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②, Codex review F1): for a
+    // vertical (tbRl) section — `section` is the SWAPPED logical geometry — the
+    // measure pass must resolve DrawingML anchors against the same PHYSICAL
+    // page the paint pass uses (`resolveAnchorBox`/`resolveShapeBox` key their
+    // physical branch on `verticalPhys`), otherwise a wrapped shape's exclusion
+    // band is reserved at the raw logical rectangle during pagination while the
+    // paint wraps around the physical projection — diverging page assignment.
+    // Mirrors the paint-state seed (renderDocumentToCanvas), un-swapping via
+    // physicalLayoutSection; `cssWidthPx` at the paginator's scale 1 is the
+    // physical page width in pt. `verticalCJK` stays UNSET: the measure pass
+    // keeps its horizontal glyph metrics (only anchor geometry re-frames).
+    // Seeded from the BODY-LEVEL section, the single frame-consistent source —
+    // vertical layout is body-section uniform until the #988 ① per-section
+    // follow-up (see verticalLayoutDoc), and the paint pass resolves the same
+    // geometry for every vertical page.
+    verticalPhys: isVerticalSection(section)
+      ? (() => {
+          const phys = physicalLayoutSection(section);
+          return {
+            pageWidth: phys.pageWidth,
+            pageHeight: phys.pageHeight,
+            marginLeft: phys.marginLeft,
+            marginRight: phys.marginRight,
+            marginTop: bodyMarginInsetPt(phys.marginTop),
+            marginBottom: bodyMarginInsetPt(phys.marginBottom),
+            cssWidthPx: phys.pageWidth,
+          };
+        })()
+      : undefined,
   };
 }
 
@@ -9411,6 +9506,28 @@ function resolveShapeBox(
   state: RenderState,
   paragraphTopPx: number,
 ): { x: number; y: number; w: number; h: number } {
+  // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 batch-3 adjudication ②): on a
+  // vertical (tbRl) page an anchored shape's positionH/V resolve against the
+  // PHYSICAL (un-rotated) page — the drawing layer is independent of the
+  // section text direction, exactly like the image path (resolveAnchorBox).
+  // Resolve in the physical frame, then project into the swapped logical
+  // layout frame (w↔h swapped) so the float-exclusion band and the flow all
+  // share one geometry. A `paragraph`/`line`-relative positionV anchors from
+  // the PHYSICAL TOP of the anchor paragraph's COLUMN (Word GT: margin-top +
+  // posOffset for a single-column body) — that physical y is the column
+  // band's logical x start (`state.contentX`, since physical y = logical x
+  // under the +90° page paint), NOT the paragraph's logical flow
+  // `paragraphTopPx`, which lies on the column-progression axis.
+  if (state.verticalPhys) {
+    const phys = resolveShapeBox(
+      shape,
+      verticalPhysicalContentState(state),
+      state.contentX,
+    );
+    return physicalToLogicalAnchorBox(
+      phys.x, phys.y, phys.w, phys.h, state.verticalPhys.cssWidthPx,
+    );
+  }
   const { scale } = state;
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
   // the static wp:extent for that axis. The size is `relativeFrom` container
@@ -9531,6 +9648,29 @@ export function drawWatermarkTextPath(
 }
 
 function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
+  // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 batch-3 adjudication ②): on a
+  // vertical (tbRl) page an anchored shape stays UPRIGHT at its physical-page
+  // position — the drawing layer does not rotate with the text flow, and a
+  // horizontal (`vert="horz"`) text body keeps horizontal labels. Undo the +90°
+  // page paint (its exact inverse: rotate −90° then translate(−cssW, 0), the
+  // same physical frame the header/footer path re-enters) and re-run this
+  // renderer with the PHYSICAL state view: `resolveShapeBox` then resolves the
+  // physical box directly, text draws horizontally (verticalCJK off), and the
+  // overlay geometry is emitted unrotated at physical coordinates. The physical
+  // paragraph base for a `paragraph`-relative positionV is the column's
+  // physical top = the column band's logical x (`state.contentX`), matching
+  // resolveShapeBox's logical-projection branch so the float band (registered
+  // from the LOGICAL projection) and the painted shape share one geometry.
+  if (state.verticalPhys) {
+    const cssW = state.verticalPhys.cssWidthPx;
+    const { ctx } = state;
+    ctx.save();
+    ctx.rotate(-Math.PI / 2);
+    ctx.translate(-cssW, 0);
+    renderAnchorShape(shape, verticalPhysicalContentState(state), state.contentX);
+    ctx.restore();
+    return;
+  }
   const { ctx, scale } = state;
   let { x, y, w, h } = resolveShapeBox(shape, state, paragraphTopPx);
   // Line/connector presets (ECMA-376 §20.1.9.18) are valid with a degenerate
@@ -10868,6 +11008,16 @@ export const __test_resolveAnchorBox = (
 ): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } =>
   resolveAnchorBox(img, state, paraBaseY);
 
+/** Exported for the vertical shape-anchor test (ECMA-376 §17.6.20 + §20.4.3.x,
+ *  issue #988 ②): pins the physical-page resolution (and logical projection) of
+ *  an anchored SHAPE's positionH/V on a vertical (tbRl) page. */
+export const __test_resolveShapeBox = (
+  shape: ShapeRun,
+  state: RenderState,
+  paragraphTopPx: number,
+): { x: number; y: number; w: number; h: number } =>
+  resolveShapeBox(shape, state, paragraphTopPx);
+
 /** Exported for the vertical header/footer test (ECMA-376 §17.6.20 + §17.10.1,
  *  issue #988): pins the inverse-of-`verticalLayoutSection` page/margin mapping a
  *  vertical section's HORIZONTAL header/footer are laid out in. */
@@ -10991,6 +11141,32 @@ function physicalAnchorState(state: RenderState): RenderState {
   };
 }
 
+/** ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②/④) — a RenderState view whose
+ *  geometry AND text flags are PHYSICAL, for content that stays UPRIGHT inside a
+ *  vertical (tbRl) section: anchored shapes and block tables. Word resolves and
+ *  paints these against the un-rotated physical page — cell/label text is
+ *  horizontal — so on top of {@link physicalAnchorState}'s page/margin un-swap
+ *  this view also re-points the content band at the physical margins and clears
+ *  the vertical flags (no per-glyph counter-rotation, no +90° text-layer
+ *  transform, `resolveShapeBox`/`resolveAnchorBox` take their horizontal path).
+ *  `floats` is fresh: the live float set is in LOGICAL flow coordinates and must
+ *  not leak into a physical-frame layout (and vice-versa). `deferFront` is
+ *  cleared so a nested front float paints in place, inside the counter-rotated
+ *  physical frame its geometry was resolved in. */
+function verticalPhysicalContentState(state: RenderState): RenderState {
+  const p = state.verticalPhys;
+  if (!p) return state;
+  return {
+    ...physicalAnchorState(state),
+    contentX: p.marginLeft * state.scale,
+    contentW: (p.pageWidth - p.marginLeft - p.marginRight) * state.scale,
+    verticalCJK: false,
+    verticalPhys: undefined,
+    floats: [],
+    deferFront: null,
+  };
+}
+
 type AnchorBoxSource = Pick<ImageRun,
   | 'widthPt' | 'heightPt'
   | 'anchorXPt' | 'anchorYPt'
@@ -11031,18 +11207,20 @@ function resolveAnchorBox(
     // relative (the drawing layer is not rotated with the text flow). Resolve
     // the box in physical space, then project it into the swapped logical layout
     // frame the body text flows in — so the float-exclusion band and the
-    // (drawUprightBox-un-swapped) painted image share one geometry. paraBaseY is
-    // a LOGICAL flow coordinate and only feeds paragraph-relative positionV; the
-    // vertical samples in scope anchor page/margin-relative, so it is not
-    // physical-mapped here (paragraph-relative vertical anchors in tbRl are a
-    // follow-up — see the vertical-text stage-1 scope note).
+    // (drawUprightBox-un-swapped) painted image share one geometry. A
+    // `paragraph`/`line`-relative positionV anchors from the PHYSICAL TOP of
+    // the anchor paragraph's COLUMN (issue #988 batch-3 adjudication ②: Word GT
+    // = margin-top + posOffset for a single-column body). That physical y is
+    // the column band's logical x start (`state.contentX`; physical y =
+    // logical x under the +90° page paint) — NOT the logical flow `paraBaseY`,
+    // which lies on the column-progression axis and would rotate the offset.
     const phys = physicalAnchorState(state);
     const px = resolveAnchorX(
       img.anchorXAlign, img.anchorXFromMargin ?? false, img.anchorXPt ?? 0, w, phys,
       img.anchorXRelativeFrom ?? null, null, null,
     );
     const py = resolveAnchorY(
-      img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, paraBaseY, phys,
+      img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, state.contentX, phys,
       img.anchorYRelativeFrom ?? null, null, null,
     );
     const box = physicalToLogicalAnchorBox(px, py, w, h, state.verticalPhys.cssWidthPx);
@@ -11343,10 +11521,20 @@ function registerShapeFloat(
     shape.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
 
   const scale = state.scale;
-  const dl = (shape.distLeft   ?? 0) * scale;
-  const dr = (shape.distRight  ?? 0) * scale;
-  const dt = (shape.distTop    ?? 0) * scale;
-  const db = (shape.distBottom ?? 0) * scale;
+  const pdl = (shape.distLeft   ?? 0) * scale;
+  const pdr = (shape.distRight  ?? 0) * scale;
+  const pdt = (shape.distTop    ?? 0) * scale;
+  const pdb = (shape.distBottom ?? 0) * scale;
+  // §17.6.20 — on a vertical page the box above is the LOGICAL projection of the
+  // physically-resolved shape (resolveShapeBox), so rotate the dist* labels one
+  // quarter-turn with it, exactly like the image path (resolveAnchorBox):
+  // physical top/bottom ↦ logical left/right, physical right/left ↦ logical
+  // top/bottom (logical y runs opposite physical x).
+  const vertical = !!state.verticalPhys;
+  const dl = vertical ? pdt : pdl;
+  const dr = vertical ? pdb : pdr;
+  const dt = vertical ? pdr : pdt;
+  const db = vertical ? pdl : pdb;
 
   // Overlap avoidance, kept consistent with the image path. Shapes carry no
   // parsed allowOverlap field; the spec default is true (§20.4.2.3), so
@@ -11919,6 +12107,42 @@ function renderTable(table: DocTable, state: RenderState): void {
   // path before the normal block layout (which would advance state.y).
   if (table.tblpPr) {
     renderFloatTable(table, state);
+    return;
+  }
+
+  // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): a block
+  // table inside a vertical (tbRl) section renders UPRIGHT — its cells do NOT
+  // inherit the section text direction (cell text is horizontal), a fixed
+  // `tcW` is a PHYSICAL width, and `trHeight` exact/auto clip/grow along the
+  // physical vertical axis. Lay the table out with the PHYSICAL state view and
+  // paint it inside the inverse of the +90° page transform (the same physical
+  // frame the header/footer and anchored-shape paths re-enter). Its placement
+  // in the vertical flow: the physical TOP edge sits at the column axis start
+  // (the logical x band start, contentX ⇒ the physical top content margin —
+  // matching Word GT, both fixture tables pinned at the top margin) and the
+  // block advances the flow by its PHYSICAL WIDTH (logical Δy = tableW; the
+  // physical box spans x ∈ [cssW − y − tableW, cssW − y]). `w:jc`/`w:tblInd`
+  // placement along the flow axis and row-splitting across vertical pages are
+  // un-adjudicated follow-ups; the paginator charges the same tableW footprint
+  // (computePages' vertical table branch) so pagination and paint agree.
+  if (state.verticalPhys) {
+    const cssW = state.verticalPhys.cssWidthPx;
+    const physState = verticalPhysicalContentState(state);
+    const { colWidths, tableW, rowHeights } = computeTableLayout(
+      table, physState.contentW, physState,
+    );
+    const physX = cssW - state.y - tableW;
+    // The column axis start: the LOGICAL band start (state.contentX) images the
+    // physical top of the current column (physical y = logical x under the +90°
+    // page paint) — the top content margin for a single-column body.
+    const physY = state.contentX;
+    const { ctx } = state;
+    ctx.save();
+    ctx.rotate(-Math.PI / 2);
+    ctx.translate(-cssW, 0);
+    drawTableRows(table, colWidths, tableW, rowHeights, physX, physY, physState);
+    ctx.restore();
+    state.y += tableW;
     return;
   }
 
