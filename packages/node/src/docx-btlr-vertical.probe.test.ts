@@ -1,14 +1,25 @@
 /**
- * Section-level `btLr` renders identically to `tbRl` — ECMA-376 §17.6.20,
- * issue #988 batch-3 adjudication ①.
+ * Section-level `btLr` — the horizontal layout rotated +90° CW wholesale.
+ * ECMA-376 §17.6.20 + Part 4 §14.11.7; issue #988 re-adjudication (correcting
+ * batch-3 adjudication ①).
  *
- * Word ground truth: a section whose `<w:textDirection w:val="btLr"/>` is applied
- * at SECTION level is laid out the same as `tbRl` (CJK upright stacked top→bottom,
- * Latin/digits sideways 90° CW, columns right→left) — Word does NOT honor btLr's
- * nominal bottom-to-top / left-to-right flow. This probe renders the SAME body
- * once as `btLr` and once as `tbRl` and asserts the two produce byte-identical
- * text-run layouts (position + rotation), pinning that `btLr` routes through the
- * vertical path.
+ * Word ground truth (raster-proven on asymmetric glyphs — the dakuten of 「び」
+ * lands bottom-right, readable only after rotating the page 90° CCW): a section
+ * whose `<w:textDirection w:val="btLr"/>` shares the `tbRl` PAGE FRAME (physical
+ * portrait page, quarter-turned logical layout, columns right→left, character
+ * advance top→bottom) but rotates EVERY glyph with the page — CJK is NOT
+ * counter-rotated upright and vertical punctuation forms are NOT substituted
+ * (（） stay the horizontal forms, rotated). Equivalently: the btLr page raster
+ * IS the horizontal rendering of the quarter-turned frame, rotated +90° CW.
+ *
+ * Three probes pin that:
+ *   1. FRAME — btLr text-run layout (position + rotation transform) is
+ *      identical to tbRl (adjudication ①'s geometry findings stand).
+ *   2. GLYPHS — the btLr page raster equals the HORIZONTAL rendering of the
+ *      same content in the quarter-turned (swapped pgSz, rotated pgMar) frame,
+ *      rotated +90° CW as a bitmap (small anti-aliasing tolerance).
+ *   3. TRIPWIRE — the btLr raster differs from the tbRl raster of the same CJK
+ *      body (a regression to "btLr ≡ tbRl upright CJK" trips this).
  *
  * CI-safe: gated on docx WASM + skia-canvas; skips when absent, hard-fails under
  * OOXML_REQUIRE_SKIA=1.
@@ -75,7 +86,10 @@ function storedZip(files: Record<string, string>): Uint8Array {
   return Uint8Array.from([...chunks, ...central, ...end]);
 }
 
-function verticalDocx(dir: 'btLr' | 'tbRl'): Uint8Array {
+const PARAS = ['縦横ABC混在123テスト', '日本語Wordと英語Englishの並び（対照）'];
+
+/** A one-section docx. `sectPr` supplies the raw pgSz/pgMar/textDirection XML. */
+function docxWith(sectPr: string): Uint8Array {
   const contentTypes =
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -92,13 +106,8 @@ function verticalDocx(dir: 'btLr' | 'tbRl'): Uint8Array {
     `<w:p><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>${t}</w:t></w:r></w:p>`;
   const document =
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>` +
-    para('縦横ABC混在123テスト') +
-    para('日本語Wordと英語Englishの並び') +
-    '<w:sectPr>' +
-    '<w:pgSz w:w="12240" w:h="15840"/>' +
-    '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>' +
-    `<w:textDirection w:val="${dir}"/>` +
-    '</w:sectPr></w:body></w:document>';
+    PARAS.map(para).join('') +
+    `<w:sectPr>${sectPr}</w:sectPr></w:body></w:document>`;
   return storedZip({
     '[Content_Types].xml': contentTypes,
     '_rels/.rels': rootRels,
@@ -106,20 +115,39 @@ function verticalDocx(dir: 'btLr' | 'tbRl'): Uint8Array {
   });
 }
 
+// ASYMMETRIC margins so any frame-rotation slip shifts the raster and fails the
+// pixel comparison. Physical (btLr / tbRl) frame: portrait Letter.
+const VERT_SECTPR = (dir: 'btLr' | 'tbRl') =>
+  '<w:pgSz w:w="12240" w:h="15840"/>' +
+  '<w:pgMar w:top="1440" w:right="720" w:bottom="480" w:left="240" w:header="720" w:footer="720" w:gutter="0"/>' +
+  `<w:textDirection w:val="${dir}"/>`;
+
+// The QUARTER-TURNED logical frame rendered as a plain horizontal document:
+// swapped pgSz, margins rotated logical{L,T,R,B} = physical{T,R,B,L}
+// (verticalLayoutSection, §17.6.11). No textDirection.
+const HORIZ_CONTROL_SECTPR =
+  '<w:pgSz w:w="15840" w:h="12240"/>' +
+  '<w:pgMar w:top="720" w:right="480" w:bottom="240" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
+
 interface Run { t: string; x: number; y: number; w: number; h: number; tr: string }
 
-async function renderRuns(dir: 'btLr' | 'tbRl'): Promise<Run[]> {
+async function renderDoc(
+  bytes: Uint8Array,
+): Promise<{ runs: Run[]; pixels: Uint8ClampedArray; w: number; h: number }> {
   const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
   const { renderDocumentToCanvas } = rendererMod as Any;
-  const doc = parseDocx(verticalDocx(dir));
-  const canvas = new Canvas(Math.round(doc.section.pageWidth), Math.round(doc.section.pageHeight));
+  const doc = parseDocx(bytes);
+  // Single-section docs: `doc.section` is the sectPr's verbatim PHYSICAL page
+  // box (the vertical swap happens inside renderDocumentToCanvas).
+  const physWidthPt = doc.section.pageWidth;
+  const canvas = new Canvas(10, 10);
   const runs: Run[] = [];
   const rImg = installImageBitmapShim(factory);
   const rOff = installOffscreenCanvasShim(factory);
   try {
     await renderDocumentToCanvas(doc, canvas, 0, {
       dpr: 1,
-      width: doc.section.pageWidth,
+      width: physWidthPt,
       onTextRun: (r: Any) =>
         runs.push({
           t: r.text,
@@ -134,20 +162,70 @@ async function renderRuns(dir: 'btLr' | 'tbRl'): Promise<Run[]> {
     rOff();
     rImg();
   }
-  return runs;
+  const ctx = (canvas as Any).getContext('2d');
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return { runs, pixels: img.data, w: canvas.width, h: canvas.height };
 }
 
-describe.skipIf(!skia || !docxMod || !rendererMod)('docx section btLr ≡ tbRl (§17.6.20)', () => {
-  it('renders a btLr section identically to tbRl (vertical, same run layout)', async () => {
-    // Sequential — each render installs/restores global OffscreenCanvas +
-    // createImageBitmap shims; running them concurrently could restore out of order.
-    const btlr = await renderRuns('btLr');
-    const tbrl = await renderRuns('tbRl');
-    // Both must actually be vertical (rotate transform present).
-    expect(btlr.length, 'btLr produced runs').toBeGreaterThan(0);
-    expect(btlr.every((r) => /rotate/.test(r.tr)), 'btLr runs are vertical').toBe(true);
-    expect(tbrl.every((r) => /rotate/.test(r.tr)), 'tbRl runs are vertical').toBe(true);
-    // And identical layout: same texts, positions, and rotation.
-    expect(btlr).toEqual(tbrl);
-  });
-});
+describe.skipIf(!skia || !docxMod || !rendererMod)(
+  'docx section btLr = rotated horizontal (§17.6.20, #988 re-adjudication)',
+  () => {
+    it('FRAME: btLr text-run layout (position + transform) equals tbRl', async () => {
+      // Sequential — each render installs/restores global OffscreenCanvas +
+      // createImageBitmap shims; concurrent runs could restore out of order.
+      const btlr = await renderDoc(docxWith(VERT_SECTPR('btLr')));
+      const tbrl = await renderDoc(docxWith(VERT_SECTPR('tbRl')));
+      expect(btlr.runs.length, 'btLr produced runs').toBeGreaterThan(0);
+      expect(btlr.runs.every((r) => /rotate/.test(r.tr)), 'btLr runs are on the rotated page').toBe(true);
+      expect(btlr.runs).toEqual(tbrl.runs);
+    });
+
+    it('GLYPHS: the btLr raster equals the quarter-turned horizontal render rotated +90° CW', async () => {
+      const btlr = await renderDoc(docxWith(VERT_SECTPR('btLr')));
+      const horiz = await renderDoc(docxWith(HORIZ_CONTROL_SECTPR));
+      // Physical portrait page vs its logical landscape frame.
+      expect([btlr.w, btlr.h]).toEqual([612, 792]);
+      expect([horiz.w, horiz.h]).toEqual([792, 612]);
+      // Page paint transform: physical = (cssWidth − logical.y, logical.x) —
+      // control pixel (cx, cy) lands on btLr pixel (611 − cy, cx). Count
+      // channel mismatches with a small AA tolerance: the two rasters are the
+      // same layout drawn under a ±90° coordinate change, so glyph coverage may
+      // differ by a hair at edges, but any orientation/position error moves
+      // whole glyphs (thousands of pixels).
+      let mismatched = 0;
+      const TOL = 32;
+      for (let cy = 0; cy < 612; cy++) {
+        for (let cx = 0; cx < 792; cx++) {
+          const hIdx = (cy * 792 + cx) * 4;
+          const bIdx = (cx * 612 + (611 - cy)) * 4;
+          if (
+            Math.abs(btlr.pixels[bIdx] - horiz.pixels[hIdx]) > TOL ||
+            Math.abs(btlr.pixels[bIdx + 1] - horiz.pixels[hIdx + 1]) > TOL ||
+            Math.abs(btlr.pixels[bIdx + 2] - horiz.pixels[hIdx + 2]) > TOL
+          ) {
+            mismatched++;
+          }
+        }
+      }
+      const total = 612 * 792;
+      // Anti-aliasing may differ between drawing under a rotated CTM and
+      // rotating the raster: measured 0.10% on macOS skia. The wrong glyph
+      // mode (upright CJK, the pre-#988-re-adjudication behavior) measures
+      // 0.69%. Gate at 0.3% — 3× the correct output (portability headroom for
+      // other skia/font stacks) while keeping a 2.3× margin below the broken
+      // state.
+      expect(mismatched / total, `mismatched ${mismatched}/${total}`).toBeLessThan(0.003);
+    });
+
+    it('TRIPWIRE: the btLr raster differs from tbRl (CJK rides the page rotation)', async () => {
+      const btlr = await renderDoc(docxWith(VERT_SECTPR('btLr')));
+      const tbrl = await renderDoc(docxWith(VERT_SECTPR('tbRl')));
+      let differing = 0;
+      for (let i = 0; i < btlr.pixels.length; i += 4) {
+        if (Math.abs(btlr.pixels[i] - tbrl.pixels[i]) > 32) differing++;
+      }
+      // Upright CJK vs rotated CJK moves nearly every ideograph's ink.
+      expect(differing, 'btLr must not render CJK upright like tbRl').toBeGreaterThan(1000);
+    });
+  },
+);

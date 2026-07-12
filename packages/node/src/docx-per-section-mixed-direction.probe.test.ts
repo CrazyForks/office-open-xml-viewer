@@ -1,12 +1,14 @@
 /**
  * Per-section text-direction mixing — ECMA-376 §17.6.20, issue #1000 (the
  * carve-out of #988 batch-3 adjudication ①): a document whose NON-FINAL
- * section is vertical (`btLr` ≡ `tbRl` per Word ground truth) while the FINAL
+ * section is vertical (`btLr`, which shares the `tbRl` page FRAME per the #988
+ * re-adjudication; its GLYPHS all ride the page rotation — pinned by
+ * docx-btlr-vertical.probe.test.ts, not here) while the FINAL
  * section is horizontal renders page 1 vertical and page 2 horizontal.
  *
  * Word ground truth (the batch-3 btLr fixture's PDF, `pdftotext -bbox` +
- * `pdfinfo`): 2 pages, BOTH physical Letter portrait 612×792 pt; page 1 lays
- * the btLr section out exactly like tbRl — the heading column hugs the RIGHT
+ * `pdfinfo`): 2 pages, BOTH physical Letter portrait 612×792 pt; page 1 frames
+ * the btLr section exactly like tbRl — the heading column hugs the RIGHT
  * content margin (x ≈ 519.1–532.0), glyphs advance top→bottom from y = 72, and
  * successive paragraphs stack as columns progressing right→left (x ≈ 519 →
  * 496 → 470 → 444 → 418); page 2 draws the same text horizontally from the
@@ -97,7 +99,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !havePrereqs)(
           return { runs, canvas };
         };
 
-        // Page 1 — vertical (btLr ≡ tbRl): physical portrait canvas, every text
+        // Page 1 — vertical (btLr, tbRl-framed): physical portrait canvas, every text
         // run projected through the +90° page rotation (transform set), heading
         // column hugging the right content margin, columns advancing right→left.
         const p0 = await renderPage(0);
