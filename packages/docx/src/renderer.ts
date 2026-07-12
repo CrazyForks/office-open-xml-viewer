@@ -490,15 +490,33 @@ export interface RenderState {
    *  default) or to the continued value for continuous/newSection. Incremented
    *  once per body line drawn (or measured in a dry-run counting pass). */
   lineNumberCounter?: number;
-  /** ECMA-376 §17.6.20 vertical writing (tbRl). When true the page is laid out
-   *  in a SWAPPED logical coordinate space (logical width = physical page height)
-   *  and the whole page paint is rotated +90° into physical space by
-   *  {@link renderDocumentToCanvas}; the glyph-draw path then counter-rotates each
-   *  upright (CJK) glyph −90° about its own centre so ideographs stand upright
-   *  while Latin/digits stay sideways (correct for vertical Japanese). Absent /
-   *  false ⇒ horizontal (lrTb) — the whole layout + paint path is byte-identical
-   *  to the pre-vertical renderer. */
+  /** ECMA-376 §17.6.20 vertical writing — the FRAME-level vertical flag. When
+   *  true the page is laid out in a SWAPPED logical coordinate space (logical
+   *  width = physical page height) and the whole page paint is rotated +90°
+   *  into physical space by {@link renderDocumentToCanvas}. On a tbRl-family
+   *  page (no {@link verticalAllRotated}) the glyph-draw path then counter-
+   *  rotates each upright (CJK) glyph −90° about its own centre so ideographs
+   *  stand upright while Latin/digits stay sideways (correct for vertical
+   *  Japanese); a `btLr` page sets {@link verticalAllRotated} too, which
+   *  SUPPRESSES that counter-rotation (all glyphs ride the page rotation).
+   *  Absent / false ⇒ horizontal (lrTb) — the whole layout + paint path is
+   *  byte-identical to the pre-vertical renderer. */
   verticalCJK?: boolean;
+  /** ECMA-376 §17.6.20 + Part 4 §14.11.7 — set (always together with
+   *  {@link verticalCJK}) on a section-level `btLr` page. Word GT (issue #988
+   *  re-adjudication, raster-proven on asymmetric glyphs — the dakuten of 「び」
+   *  lands bottom-right): `btLr` shares the `tbRl` PAGE FRAME (swapped logical
+   *  layout, +90° page paint, columns right→left) but rotates EVERY glyph with
+   *  the page — CJK is NOT counter-rotated upright, vertical punctuation forms
+   *  (、。（） → U+FE1x/FE3x) are NOT substituted, and 縦中横 (§17.3.2.10) is
+   *  NOT grouped. When set, the glyph-draw sites take the ordinary HORIZONTAL
+   *  branches inside the rotated frame, so the page raster equals the
+   *  horizontal rendering of the swapped frame rotated +90° CW wholesale.
+   *  Frame-level consumers (page rotation, text-layer transform, `verticalPhys`
+   *  anchors, upright images/tables — GT-less for btLr, kept at tbRl parity)
+   *  keep reading {@link verticalCJK}. Absent ⇒ upright-vertical (tbRl family)
+   *  or horizontal. */
+  verticalAllRotated?: boolean;
   /** ECMA-376 §17.6.20 + §20.4.3.x — the PHYSICAL page geometry for a vertical
    *  (tbRl) page, in the SAME units the rest of RenderState uses (margins/page
    *  size in pt; `cssWidthPx` in px). Present only when `verticalCJK` is set.
@@ -1091,13 +1109,20 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
  *
  *    - `btLr`  (≡ Strict `lr`)  — its NOMINAL semantics are bottom-to-top /
  *                                 left-to-right, but Word ground truth (issue #988
- *                                 batch-3 adjudication ①) shows Word renders a
- *                                 SECTION-level `btLr` IDENTICALLY to `tbRl`:
- *                                 CJK upright stacked top→bottom, Latin/digits
- *                                 rotated 90° CW (sideways), columns right→left —
- *                                 it does NOT honor the literal bottom-to-top /
- *                                 left-to-right flow. So it routes through the
- *                                 same +90° vertical path as `tbRl`. (The per-
+ *                                 re-adjudication, correcting the batch-3
+ *                                 adjudication ① with raster proof on asymmetric
+ *                                 glyphs) shows Word renders a SECTION-level
+ *                                 `btLr` as the HORIZONTAL layout rotated +90° CW
+ *                                 WHOLESALE: same page frame as `tbRl` (columns
+ *                                 right→left, advance top→bottom — neither axis
+ *                                 honors the nominal bottom-to-top/left-to-right),
+ *                                 but EVERY glyph rides the page rotation — CJK is
+ *                                 NOT counter-rotated upright (the dakuten of 「び」
+ *                                 lands bottom-right) and vertical punctuation
+ *                                 forms are NOT substituted. So `btLr` routes
+ *                                 through the same +90° FRAME as `tbRl` while
+ *                                 `RenderState.verticalAllRotated` switches the
+ *                                 glyph draw to the horizontal branches. (The per-
  *                                 SECTION mixing that fixture also exercises —
  *                                 a `btLr` non-final section beside a horizontal
  *                                 final section — is surfaced per-section: the
@@ -1119,6 +1144,16 @@ function isVerticalSection(s: SectionProps): boolean {
  *  full SectionProps (issue #1000). `null`/`undefined`/unknown ⇒ horizontal. */
 function isVerticalTextDirection(td: string | null | undefined): boolean {
   return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV' || td === 'btLr';
+}
+
+/** True for a VERTICAL direction whose glyphs ALL ride the +90° page rotation
+ *  (no CJK upright counter-rotation, no vertical punctuation forms, no 縦中横):
+ *  section-level `btLr` per the issue #988 re-adjudication (Word GT, raster-
+ *  proven — see {@link RenderState.verticalAllRotated}). The tbRl family keeps
+ *  the upright-CJK glyph path. Only meaningful when
+ *  {@link isVerticalTextDirection} is already true. */
+function isAllRotatedVerticalTextDirection(td: string | null | undefined): boolean {
+  return td === 'btLr';
 }
 
 /** Map a vertical (tbRl) section's PHYSICAL page geometry to the SWAPPED LOGICAL
@@ -1241,8 +1276,8 @@ interface PageFrameMeta {
 const pageFrameMeta = new WeakMap<object, PageFrameMeta>();
 
 /** A section resolved to the LOGICAL frame the paginator lays it out in (issue
- *  #1000 per-section text direction): a vertical (tbRl ≡ btLr, §17.6.20 + the
- *  #988 batch-3 adjudication ①) section's `geom` is its PHYSICAL page geometry
+ *  #1000 per-section text direction): a vertical (tbRl, or btLr which shares the
+ *  tbRl FRAME per the #988 re-adjudication) section's `geom` is its PHYSICAL page geometry
  *  quarter-turned by {@link logicalGeomOf}; a horizontal section's `geom` is
  *  physical verbatim. `textDirection` is the owning section's raw token
  *  (`null` ⇒ horizontal) and `vertical` its {@link isVerticalTextDirection}
@@ -1521,8 +1556,10 @@ async function renderDocumentToCanvasLeased(
   // (`translate(cssWidth, 0)` then `rotate(+90°)`): logical +x (character flow)
   // → physical +y (down the column), logical +y (line stacking) → physical −x
   // (columns advance right→left). The white background above stays in physical
-  // space (drawn before the rotate). Glyphs are counter-rotated per-glyph in the
-  // draw path (`state.verticalCJK`) so CJK ideographs stand upright.
+  // space (drawn before the rotate). On a tbRl-family page, glyphs are counter-
+  // rotated per-glyph in the draw path (`state.verticalCJK`) so CJK ideographs
+  // stand upright; on a btLr page (`state.verticalAllRotated`) NO glyph is
+  // counter-rotated — everything rides this page rotation (#988 re-adjudication).
   if (vertical) {
     ctx.translate(cssWidth, 0);
     ctx.rotate(Math.PI / 2);
@@ -1602,10 +1639,15 @@ async function renderDocumentToCanvasLeased(
     // §17.16.4.1 — the instant DATE/TIME fields format against (default real time).
     currentDateMs: resolveCurrentDateMs(opts.currentDate),
     noteNumbers,
-    // ECMA-376 §17.6.20 — when set, the glyph-draw path counter-rotates upright
-    // (CJK) glyphs so they stand up inside the +90°-rotated page (see the page
-    // transform above and `drawVerticalRun`).
+    // ECMA-376 §17.6.20 — the frame-level vertical flag. On a tbRl-family page
+    // the glyph-draw path counter-rotates upright (CJK) glyphs so they stand up
+    // inside the +90°-rotated page (see the page transform above and
+    // `drawVerticalRun`); `verticalAllRotated` below suppresses that for btLr.
     verticalCJK: vertical,
+    // §17.6.20 btLr (#988 re-adjudication): every glyph rides the +90° page
+    // rotation — the glyph-draw sites take the HORIZONTAL branches instead of
+    // the upright-CJK vertical ones (see RenderState.verticalAllRotated).
+    verticalAllRotated: vertical && isAllRotatedVerticalTextDirection(pageTd),
     // ECMA-376 §20.4.3.x — physical page geometry for resolving DrawingML anchors
     // against the un-rotated physical page (see `verticalPhys` docs and
     // `resolveAnchorBox`). `sec` here is the LOGICAL (swapped) section, so un-swap
@@ -1673,6 +1715,7 @@ async function renderDocumentToCanvasLeased(
         docGrid: toLegacyDocGridContext(physSectionLayout),
         sectionLayout: physSectionLayout,
         verticalCJK: false,
+        verticalAllRotated: false,
         verticalPhys: undefined,
       };
       ctx.save();
@@ -4480,6 +4523,7 @@ function paragraphMeasurementEnvironment(
     | 'noteNumbers'
     | 'currentNoteNumber'
     | 'verticalCJK'
+    | 'verticalAllRotated'
     | 'docEastAsian'
   >,
 ): ParagraphMeasurementEnvironment {
@@ -4491,9 +4535,25 @@ function paragraphMeasurementEnvironment(
     currentDateMs: state.currentDateMs,
     noteNumbers: state.noteNumbers,
     currentNoteNumber: state.currentNoteNumber,
-    verticalCJK: state.verticalCJK,
+    // §17.6.20 btLr (#988 re-adjudication): an all-rotated page lays its lines
+    // out with the HORIZONTAL semantics (no 縦中横 grouping — the whole layout
+    // rotates wholesale), so the environment's vertical flag is the effective
+    // "upright vertical" one. tbRl (no verticalAllRotated) is unchanged.
+    verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     documentHasEastAsianText: state.docEastAsian,
   };
+}
+
+/** The `LineLayoutEnvironment` for building a paragraph's segments straight
+ *  from a paint state. Identity (the state itself — byte-identical) for
+ *  horizontal and upright-vertical (tbRl family) states; an all-rotated
+ *  (§17.6.20 btLr, #988 re-adjudication) page builds its segments with
+ *  `verticalCJK` CLEARED so no 縦中横 grouping (§17.3.2.10) engages — the btLr
+ *  page is the horizontal layout rotated wholesale, so its segments are the
+ *  horizontal ones (measure == paint: the paginator's measure state never sets
+ *  `verticalCJK` either). */
+function segmentEnvironmentOf(state: RenderState): RenderState {
+  return state.verticalAllRotated ? { ...state, verticalCJK: false } : state;
 }
 
 // ===== Body layout fragments (PR 5) =====
@@ -7517,7 +7577,7 @@ function resolveFrameBox(
   const grid = paraGrid(para, state);
   const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
   const paraHasRuby = paragraphContext.hasRuby;
-  const segments = buildSegments(para.runs, state);
+  const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
 
   // Measure the frame's natural content size at a wide width (single-line frame
   // content stays one line). No floats apply INSIDE the frame; the cap glyph's
@@ -7834,7 +7894,7 @@ function renderParagraph(
     && (!baseRtl || ((para.numbering?.suff || 'tab') === 'tab' && indFirst < 0));
 
   // Collect all text segments with formatting (resolving field runs against page context)
-  const segments = buildSegments(para.runs, state);
+  const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
   // Word renders ruby paragraphs with consistent line spacing — every line
   // in a paragraph that carries ANY furigana snaps to the same pitch
   // multiple. Compute once at paragraph scope and share with the line loop.
@@ -8344,6 +8404,13 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     decimalAutoTabPx, drawGridDeltaPx, lineHForLine,
   } = c;
     const line = lines[li];
+    // ECMA-376 §17.6.20 + Part 4 §14.11.7 (#988 re-adjudication): only an
+    // UPRIGHT-vertical page (tbRl family) takes the per-glyph vertical draw
+    // paths below. A `btLr` page (`state.verticalAllRotated`) is the horizontal
+    // layout rotated wholesale — its glyphs draw through the ordinary
+    // HORIZONTAL branches and ride the +90° page rotation, so CJK lies rotated
+    // 90° CW exactly like Word's GT. Horizontal pages: false, byte-identical.
+    const verticalUpright = !!state.verticalCJK && !state.verticalAllRotated;
     // First-line indent and numbering prefix only apply to the paragraph's
     // ORIGINAL first line, not the first line of a continuation slice.
     const firstLine = li === 0 && !continuesParagraph;
@@ -8593,9 +8660,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // (numBodyOffset).
           const markerText = markerDisplayText(para.numbering!);
           const markerX = lineLeft + indFirst + markerJcShiftPx;
-          if (state.verticalCJK) {
+          if (verticalUpright) {
             // §17.6.20 (tbRl) — draw the bullet/number upright inside the rotated
-            // page, same per-glyph counter-rotation as body glyphs.
+            // page, same per-glyph counter-rotation as body glyphs. A btLr page
+            // takes the plain branch: the marker rides the page rotation too.
             drawVerticalRun(ctx, markerText, markerX, baseline, numFontSize, 0);
           } else {
             ctx.fillText(markerText, markerX, baseline);
@@ -8639,8 +8707,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       // ECMA-376 §17.18.44 low/medium/highKashida first elongate valid
       // Arabic joins. Only the residual goes through the ordinary space/CJK
       // distributor; a line with no eligible join falls back to the full-slack
-      // `both` behaviour. Vertical text keeps the established stage-1 path.
-      const kashidaLevel = !state.verticalCJK
+      // `both` behaviour. Upright-vertical (tbRl) text keeps the established
+      // stage-1 path; an all-rotated (btLr) page follows the horizontal rules
+      // like every other horizontal-branch behavior (measure == paint).
+      const kashidaLevel = !verticalUpright
         ? kashidaLevelOf(para.alignment)
         : null;
       const kashidaDist = kashidaLevel
@@ -8981,7 +9051,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         if (
           visual &&
           visual.rtl[si] === true &&
-          !state.verticalCJK &&
+          !verticalUpright &&
           /\s$/u.test(drawText)
         ) {
           const trimmed = drawText.replace(/\s+$/u, '');
@@ -9000,7 +9070,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             glyphDrawX = x + rtlWsShiftPx;
           }
         }
-        if (state.verticalCJK && s.tateChuYoko) {
+        if (verticalUpright && s.tateChuYoko) {
           // ECMA-376 §17.3.2.10 縦中横 (horizontal-in-vertical): draw the whole run
           // horizontally, side by side, inside ONE cell of the vertical column.
           // The cell's along-column advance is `spanW` (= s.measuredWidth, which
@@ -9017,7 +9087,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             segCharScale,
             !!s.tateChuYokoCompress,
           );
-        } else if (state.verticalCJK) {
+        } else if (verticalUpright) {
           // ECMA-376 §17.6.20 (tbRl) — the run flows DOWN the column (logical
           // +x). Draw each glyph advancing by its measured horizontal width
           // (× the §17.3.2.43 `w:w` scale) plus the combined per-glyph pitch —
@@ -9342,8 +9412,10 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           );
           // Reuse the paint path's single pitch authority so selection and find
           // overlays reproduce §17.3.2.14 fitText or docGrid + §17.3.2.35 spacing.
-          // Vertical / 縦中横 runs retain their existing payload and geometry.
-          const letterSpacingPx = !state.verticalCJK && !s.tateChuYoko
+          // Upright-vertical / 縦中横 runs retain their existing payload and
+          // geometry; an all-rotated (btLr) run drew through the horizontal
+          // branch WITH the pitch, so its overlay reports it like horizontal.
+          const letterSpacingPx = !verticalUpright && !s.tateChuYoko
             ? segLetterSpacingPx(s, drawGridDeltaPx, scale)
             : 0;
           state.onTextRun({
@@ -9365,7 +9437,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             // natural glyph width (#836). Only set on a vertical page, where the
             // 縦中横 draw path (above) actually fires; `undefined` otherwise so a
             // non-縦中横 run's payload is byte-identical.
-            eastAsianVert: state.verticalCJK && s.tateChuYoko ? true : undefined,
+            eastAsianVert: verticalUpright && s.tateChuYoko ? true : undefined,
           });
         }
 
@@ -11545,6 +11617,7 @@ function verticalPhysicalContentState(state: RenderState): RenderState {
     contentX: p.marginLeft * state.scale,
     contentW: (p.pageWidth - p.marginLeft - p.marginRight) * state.scale,
     verticalCJK: false,
+    verticalAllRotated: false,
     verticalPhys: undefined,
     floats: [],
     deferFront: null,

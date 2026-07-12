@@ -12,7 +12,9 @@ import type {
 } from './types';
 
 // ECMA-376 §17.6.20 — text direction is PER-SECTION (issue #1000, #988 batch-3
-// adjudication ①): a vertical (tbRl ≡ btLr per Word GT) NON-FINAL section can
+// adjudication ①): a vertical (tbRl, or btLr which shares the tbRl page FRAME
+// per the #988 re-adjudication — its GLYPHS all ride the page rotation, see
+// btlr-rotated-glyphs.test.ts) NON-FINAL section can
 // coexist with a horizontal FINAL section in one document. The parser carries
 // the ending section's `<w:textDirection>` on its SectionBreak marker; the
 // paginator lays a vertical section out in its SWAPPED LOGICAL geometry
