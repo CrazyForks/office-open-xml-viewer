@@ -1222,12 +1222,16 @@ function physicalGeomOf(logical: SectionGeom): SectionGeom {
  *  into the paint pass without any API change — mirrors the `bodyFlowFragments`
  *  WeakMap pattern). It duplicates the first element's `sectionGeom` /
  *  `sectionTextDirection` stamps, and is the ONLY carrier for an EMPTY page
- *  (§17.18.79 oddPage/evenPage parity padding), whose direction and physical
- *  size are observable even though it has no elements — the incoming section
- *  (the paginator's transition model) owns it. Scope note (issue #1000): the
- *  metadata carries the page FRAME only (geometry + direction); header/footer
- *  and page-number resolution for empty pages keep their existing body-level
- *  fallback (documented residual). */
+ *  (§17.18.77 oddPage/evenPage parity padding), whose direction and physical
+ *  size are observable even though it has no elements. An oddPage/evenPage
+ *  parity BLANK belongs to the OUTGOING section (§17.18.77: the new section
+ *  "begins on the next odd/even-numbered page, LEAVING the next page blank" —
+ *  the blank precedes the incoming section's start); every other page open
+ *  records the incoming frame. Consumed by `resolvePageSection` (paint frame),
+ *  `layoutDocument`, `pageTextDirection` and `physicalPageSizeForPage`. Scope
+ *  note (issue #1000): the metadata carries the page FRAME only (geometry +
+ *  direction); header/footer and page-number resolution for empty pages keep
+ *  their existing body-level fallback (documented residual). */
 interface PageFrameMeta {
   /** The owning section's LOGICAL page geometry (swapped for a vertical section). */
   geom: SectionGeom;
@@ -2585,13 +2589,13 @@ export function computePages(
   };
 
   const pages: PaginatedBodyElement[][] = [[]];
-  // Issue #1000 — record the CURRENT (incoming) section's frame as the page's
+  // Issue #1000 — record the CURRENT section's frame as the page's
   // {@link PageFrameMeta} whenever a page opens. It duplicates the per-element
-  // stamps for content pages and is the only frame carrier for an EMPTY page
-  // (§17.18.79 parity padding): the incoming section — the paginator's
-  // transition model — owns it, so its physical size and direction resolve
-  // consistently (Word GT for parity-blank ownership is unverified; this pins
-  // the model's deterministic choice).
+  // stamps for content pages and is the only frame carrier for an EMPTY page.
+  // An oddPage/evenPage parity BLANK is re-stamped with the OUTGOING frame at
+  // the section-break parity push (§17.18.77: the new section "begins on the
+  // next odd/even-numbered page, leaving the next page blank" — the blank
+  // precedes the incoming section's start).
   const stampPageMeta = (): void => {
     pageFrameMeta.set(pages[pages.length - 1], {
       geom: currentSectionGeom,
@@ -3028,11 +3032,15 @@ export function computePages(
       //
       // Issue #1000 — a CONTINUOUS boundary whose RENDERED ORIENTATION changes
       // (vertical ⇄ horizontal, compared via the frames' `vertical` flags — NOT
-      // raw tokens, so tbRl→btLr stays continuous) is promoted to a page break:
-      // the paint model rotates a whole physical page, so one direction per page
-      // is a hard renderer constraint (a documented model constraint — Word's
-      // behaviour at such a boundary has no fixture yet, so this pins the
-      // constraint, not a Word claim). Horizontal-only documents never differ.
+      // raw tokens, so tbRl→btLr stays continuous) is promoted to a page break.
+      // ⚠ DOCUMENTED SPEC DEVIATION: §17.18.77 "continuous" begins the new
+      // section on the following paragraph (its only stated exception is a
+      // same-page footnote reference); this renderer's paint model rotates ONE
+      // whole physical page, so a same-page orientation mix is unrepresentable
+      // and the promotion is the deliberate, pinned fallback (the alternative
+      // is an incoherent page). No Word ground-truth fixture for this boundary
+      // exists yet; revisit against Word output if one is adjudicated.
+      // Horizontal-only documents never differ (both flags false).
       const upcomingKindRaw = sectionKindFrom(i + 1);
       const upcomingKind =
         upcomingKindRaw === 'continuous' && currentSectionFrame.vertical !== prevFrame.vertical
@@ -3095,10 +3103,25 @@ export function computePages(
         startPageBookkeeping();
         // Balance the new section's columns if it fits on its fresh page (§17.6.4).
         setupBalancing(i + 1);
+        // ECMA-376 §17.6.22 / §17.18.77 — oddPage/evenPage "begins the new
+        // section on the next odd/even-numbered page, leaving the next
+        // even/odd page blank if necessary": the intervening BLANK precedes the
+        // incoming section's start, so its frame metadata belongs to the
+        // OUTGOING section (`prevFrame`) — re-stamp the just-opened page (which
+        // becomes the blank once the padding page is pushed) before opening the
+        // section's real start page (issue #1000; Codex review).
         if (upcomingKind === 'oddPage' && pages.length % 2 === 0) {
+          pageFrameMeta.set(pages[pages.length - 1], {
+            geom: prevFrame.geom,
+            textDirection: prevFrame.textDirection,
+          });
           pages.push([]);
           startPageBookkeeping();
         } else if (upcomingKind === 'evenPage' && pages.length % 2 === 1) {
+          pageFrameMeta.set(pages[pages.length - 1], {
+            geom: prevFrame.geom,
+            textDirection: prevFrame.textDirection,
+          });
           pages.push([]);
           startPageBookkeeping();
         }
@@ -4307,12 +4330,18 @@ export function layoutDocument(doc: DocxDocumentModel): DocumentLayout {
   );
   const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
     const firstEl = elements[0] as PaginatedBodyElement | undefined;
-    const geomOverride = firstEl?.sectionGeom;
-    // Issue #1000 — merge the page's OWN text direction alongside its geometry
-    // (stamped in lockstep), so `LayoutPage.section.textDirection` reports the
-    // page's direction, not the body's, in a per-section mixed document.
-    // Undefined (unstamped legacy pages) keeps the body-level value.
-    const tdOverride = firstEl?.sectionTextDirection;
+    // Issue #1000 — merge the page's OWN frame: geometry + text direction
+    // (stamped in lockstep on the first element; an EMPTY parity page resolves
+    // through its PageFrameMeta), so `LayoutPage.section.textDirection` and
+    // `.geometry` report the page's frame, not the body's, in a per-section
+    // mixed document. Undefined (unstamped legacy pages) keeps the body-level
+    // value.
+    const meta = pageFrameMeta.get(elements);
+    const geomOverride = firstEl?.sectionGeom ?? meta?.geom;
+    const tdOverride =
+      firstEl?.sectionTextDirection !== undefined
+        ? firstEl.sectionTextDirection
+        : meta?.textDirection;
     const sectionProps: SectionProps = geomOverride
       ? {
           ...layoutDoc.section,
@@ -6836,10 +6865,14 @@ function resolvePageSection(
   const titlePage = active?.titlePage ?? doc.section.titlePage;
   const isFirstPageOfSection = pageIndex === 0 || sectionOf(pageIndex - 1) !== active;
   // ECMA-376 §17.6.13 / §17.6.11 — the page's geometry, from the paginator's stamp
-  // on this page's first element, falling back to the body-level section (the value
-  // the paginator itself stamps for the final/single section, so this fallback only
-  // fires for a truly empty page). Sizes the canvas + margins per page.
-  const geom: SectionGeom = pages[pageIndex]?.[0]?.sectionGeom ?? sectionGeomOf(doc.section);
+  // on this page's first element; an EMPTY page (§17.18.77 parity padding)
+  // resolves through its {@link PageFrameMeta} (issue #1000) so the blank paints
+  // in its owning section's frame, consistent with `physicalPageSizeForPage`.
+  // The body-level fallback only fires for pages with neither (legacy / manually
+  // constructed test pages). Sizes the canvas + margins per page.
+  const page = pages[pageIndex];
+  const meta = page ? pageFrameMeta.get(page) : undefined;
+  const geom: SectionGeom = page?.[0]?.sectionGeom ?? meta?.geom ?? sectionGeomOf(doc.section);
   return { headers, footers, titlePage, isFirstPageOfSection, geom };
 }
 

@@ -297,19 +297,21 @@ describe('per-section text direction (§17.6.20, issue #1000) — physical page 
     expect(physicalPageSizeForPage(pages, 1, doc.section)).toEqual({ widthPt: 400, heightPt: 500 });
   });
 
-  it('resolves an EMPTY parity page from its page metadata, not the body fallback', () => {
-    // Mid VERTICAL section whose start type is oddPage: the parity padding leaves
-    // a BLANK page owned by the incoming vertical section (pages: [H1][blank][V1]
-    // [H2]). Element-stamp fallback would report the body-level 400×500 box for
-    // the blank page; the paginator's page metadata reports the vertical
-    // section's physical 612×792.
+  it('resolves an EMPTY parity page from its page metadata: the blank belongs to the OUTGOING section', () => {
+    // A VERTICAL first section followed by an oddPage-starting horizontal
+    // section: the parity padding leaves a BLANK page (pages: [V1][blank][H1]
+    // [H2]). §17.18.77 — the new section "begins on the next odd-numbered page,
+    // LEAVING the next even page blank": the blank precedes the incoming
+    // section's start, so it carries the OUTGOING (vertical) section's frame —
+    // physical 612×792 — not the body-level 400×500 the element-stamp fallback
+    // would report (the blank has no elements).
     const body: BodyElement[] = [
-      para('H1'),
-      // marker ending section 1 (horizontal, geom-less). The UPCOMING section's
-      // start type is the NEXT marker's kind (§17.6.22): oddPage.
-      { type: 'sectionBreak', kind: 'nextPage' } as BodyElement,
       para('V1'),
-      { type: 'sectionBreak', kind: 'oddPage', geom: VERT_PHYS, textDirection: 'tbRl' } as BodyElement,
+      // marker ending section 1 (vertical). The UPCOMING section's start type
+      // is the NEXT marker's kind (§17.6.22): oddPage.
+      { type: 'sectionBreak', kind: 'nextPage', geom: VERT_PHYS, textDirection: 'tbRl' } as BodyElement,
+      para('H1'),
+      { type: 'sectionBreak', kind: 'oddPage' } as BodyElement,
       para('H2'),
     ];
     const doc = {
@@ -317,14 +319,137 @@ describe('per-section text direction (§17.6.20, issue #1000) — physical page 
       headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
     const pages = paginateDocument(doc);
-    // Page 0: H1. Page 1: parity blank (the oddPage section pads past the even
-    // slot). Page 2: V1 (vertical). Page 3: H2.
+    // Page 0: V1 (vertical). Page 1: parity blank (the oddPage section pads
+    // past the even slot). Page 2: H1. Page 3: H2 (nextPage default into the
+    // final section).
     expect(pages.length).toBe(4);
     expect(pages[1]).toHaveLength(0);
-    expect(physicalPageSizeForPage(pages, 2, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
-    // The blank parity page belongs to the INCOMING vertical section (the
-    // paginator's transition model): physical 612×792, not the body 400×500.
+    expect(physicalPageSizeForPage(pages, 0, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+    // The blank parity page belongs to the OUTGOING vertical section
+    // (§17.18.77): physical 612×792, not the body 400×500.
     expect(physicalPageSizeForPage(pages, 1, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+    // The incoming oddPage section itself is horizontal at the body box.
+    expect(physicalPageSizeForPage(pages, 2, doc.section)).toEqual({ widthPt: 400, heightPt: 500 });
+  });
+});
+
+describe('per-section text direction (§17.6.20, issue #1000) — vertical BODY + horizontal mid', () => {
+  // The reverse mix: the FINAL (body) section is vertical, a NON-final section
+  // horizontal. The body-level swap (verticalLayoutDoc) still runs, so the
+  // geom-less horizontal marker must inherit the body's PHYSICAL geometry
+  // (physicalGeomOf un-swaps the already-swapped body frame — the double-swap
+  // trap), and the horizontal page must paint unrotated while the vertical
+  // final page rotates.
+  it('a geom-less horizontal mid-section inherits the PHYSICAL body geometry', () => {
+    const section: SectionProps = {
+      ...horizontalBodySection(),
+      pageWidth: 612, pageHeight: 792,
+      marginTop: 10, marginRight: 20, marginBottom: 30, marginLeft: 40,
+      headerDistance: 7, footerDistance: 8,
+      textDirection: 'tbRl',
+    } as SectionProps;
+    const body: BodyElement[] = [
+      para('H1'),
+      { type: 'sectionBreak', kind: 'nextPage' } as BodyElement, // horizontal, geom-less
+      para('V1'),
+    ];
+    const doc = {
+      section, body, headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const pages = paginateDocument(doc);
+    const h1 = pages[0].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    // The horizontal mid-section's frame is the body's verbatim PHYSICAL box —
+    // NOT the swapped logical one, and NOT a double-swap of it.
+    expect(h1.sectionTextDirection).toBeNull();
+    expect(h1.sectionGeom).toEqual({
+      pageWidth: 612, pageHeight: 792,
+      marginTop: 10, marginRight: 20, marginBottom: 30, marginLeft: 40,
+      headerDistance: 7, footerDistance: 8,
+    });
+    // The vertical final section keeps the swapped logical frame.
+    const v1 = pages[1].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    expect(v1.sectionTextDirection).toBe('tbRl');
+    expect(v1.sectionGeom).toEqual({
+      pageWidth: 792, pageHeight: 612,
+      marginLeft: 10, marginTop: 20, marginRight: 30, marginBottom: 40,
+      headerDistance: 7, footerDistance: 8,
+    });
+    // Physical page boxes agree per page.
+    expect(physicalPageSizeForPage(pages, 0, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+    expect(physicalPageSizeForPage(pages, 1, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+  });
+
+  it('paints the horizontal mid page unrotated and the vertical final page rotated', async () => {
+    const section: SectionProps = {
+      ...horizontalBodySection(),
+      pageWidth: 612, pageHeight: 792,
+      marginTop: 10, marginRight: 20, marginBottom: 30, marginLeft: 40,
+      textDirection: 'tbRl',
+    } as SectionProps;
+    const body: BodyElement[] = [
+      para('H1'),
+      { type: 'sectionBreak', kind: 'nextPage' } as BodyElement,
+      para('V1'),
+    ];
+    const doc = {
+      section, body, headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const { canvas: c0, rotations: r0 } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, c0, 0, { dpr: 1 });
+    const { canvas: c1, rotations: r1 } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, c1, 1, { dpr: 1 });
+    expect(r0.some((r) => Math.abs(r - Math.PI / 2) < 1e-9)).toBe(false);
+    expect(r1.some((r) => Math.abs(r - Math.PI / 2) < 1e-9)).toBe(true);
+    // Both pages share the same physical portrait box here.
+    expect(c0.width / c0.height).toBeCloseTo(612 / 792, 2);
+    expect(c1.width / c1.height).toBeCloseTo(612 / 792, 2);
+  });
+});
+
+describe('per-section text direction (§17.6.20, issue #1000) — split slices and layoutDocument', () => {
+  it('stamps the direction on every slice of a split paragraph in a vertical mid-section', () => {
+    // Physical 200×300, margins 20 ⇒ logical frame 300×200: wrap width 260
+    // (13 chars × 20 pt), content height 160 (8 lines/page). One 40-char
+    // paragraph wraps to 4 lines; 26 of them (104 lines) force paragraph
+    // SPLITS across pages, so the split-slice stamping path (tagSection…
+    // thunks) is exercised, not just pushTagged.
+    const vertPhys: SectionGeom = {
+      pageWidth: 200, pageHeight: 300,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 0, footerDistance: 0,
+    };
+    const body: BodyElement[] = [
+      para('X'.repeat(13 * 12)), // 12 lines > 8 per page ⇒ must split
+      { type: 'sectionBreak', kind: 'nextPage', geom: vertPhys, textDirection: 'tbRl' } as BodyElement,
+      para('B1'),
+    ];
+    const doc = {
+      section: horizontalBodySection(), body,
+      headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const pages = computePages(doc.body, doc.section, makeCtx());
+    // The paragraph split across ≥ 2 pages inside the vertical section.
+    expect(pages.length).toBeGreaterThanOrEqual(3);
+    for (let i = 0; i < pages.length - 1; i++) {
+      const slices = pages[i].filter((e) => e.type === 'paragraph') as PaginatedBodyElement[];
+      expect(slices.length).toBeGreaterThan(0);
+      for (const s of slices) {
+        expect(s.sectionTextDirection).toBe('tbRl');
+        expect(s.sectionGeom?.pageWidth).toBe(300);
+        expect(s.sectionGeom?.pageHeight).toBe(200);
+      }
+    }
+  });
+
+  it('layoutDocument reports each page own textDirection', async () => {
+    const { layoutDocument } = await import('./renderer.js');
+    const layout = layoutDocument(mixedDoc());
+    expect(layout.pages.length).toBe(2);
+    expect(layout.pages[0].section.textDirection).toBe('btLr');
+    // The vertical page's LayoutPage geometry is the swapped logical frame.
+    expect(layout.pages[0].geometry.pageWidth).toBe(792);
+    expect(layout.pages[1].section.textDirection).toBe('lrTb');
+    expect(layout.pages[1].geometry.pageWidth).toBe(400);
   });
 });
 
