@@ -19,6 +19,11 @@ function makeMeasureState(
   docGridType: 'lines' | 'snapToChars' = 'lines',
 ): MeasureState {
   let font = '10px serif';
+  // The mock glyph box is a flat 1.0×em (ascent 0.8 + descent 0.2 of the
+  // CURRENT font size). No run family is in the core metric table, so every
+  // height below is exactly the tallest run's synthetic box — any growth
+  // beyond it must come from the grid cell rounding under test.
+  const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const ctx = {
     get font() {
       return font;
@@ -29,10 +34,10 @@ function makeMeasureState(
     letterSpacing: '0px',
     measureText: (text: string) => ({
       width: [...text].length * 10,
-      fontBoundingBoxAscent: 8,
-      fontBoundingBoxDescent: 2,
-      actualBoundingBoxAscent: 8,
-      actualBoundingBoxDescent: 2,
+      fontBoundingBoxAscent: px() * 0.8,
+      fontBoundingBoxDescent: px() * 0.2,
+      actualBoundingBoxAscent: px() * 0.8,
+      actualBoundingBoxDescent: px() * 0.2,
     }) as TextMetrics,
     save() {},
     restore() {},
@@ -222,23 +227,24 @@ describe('table-cell line grid compatibility', () => {
   });
 });
 
-// The docGrid line-cell count (docGridLineCells) is derived from the line's em
-// — the TALLEST run on the line (ECMA-376 §17.6.5; the grid reserves whole
-// cells for the line box, which the tallest run governs). These integration
-// cases pin two call-path properties the pure lineBoxHeight tests cannot see:
-// which em the layout hands over, and which script gate each LINE uses. The
+// The docGrid line-cell count (docGridLineCells) is derived from the line's
+// resolved single-line height — the TALLEST run's box governs the line
+// (ECMA-376 §17.3.1.33; the grid reserves the whole cells that CONTAIN that
+// box, §17.6.5 / issue #1013 sample-58 adjudication). These integration cases
+// pin two call-path properties the pure lineBoxHeight tests cannot see: which
+// line height the layout hands over, and which script gate each LINE uses. The
 // grid is active in a cell via adjustLineHeightInTable (§17.15.3.1); pitch =
-// 20 pt; the mock font box is a fixed 8+2 px, so every height difference below
-// comes from the em / script routing alone.
+// 20 pt; the mock font box is a flat 1.0×em, so every height difference below
+// comes from the line-height / script routing alone.
 describe('docGrid line-cell integration through the cell measure path', () => {
-  it('a manual line break in a SMALLER run does not shrink the line em (tallest governs)', () => {
-    // Line 1: 'あ' at 20 pt + 'い' at 10 pt, terminated by a <w:br> whose
+  it('a manual line break in a SMALLER run does not shrink the line height (tallest governs)', () => {
+    // Line 1: 'あ' at 24 pt + 'い' at 10 pt, terminated by a <w:br> whose
     // nearby size resolves to 10 pt (§17.3.3.1; findNearbyFontSize looks at the
     // preceding run). Line 2: 'う' at 10 pt. The break must NOT overwrite the
-    // line's tallest em (20 pt → floor(20/20)+1 = 2 cells = 40) with its own
-    // 10 pt (1 cell = 20).
+    // line's tallest box (24 px → ceil(24/20) = 2 cells = 40) with its own
+    // 10 pt box (1 cell = 20).
     const para = paragraphWithRuns([
-      { text: 'あ', fontSize: 20 },
+      { text: 'あ', fontSize: 24 },
       { text: 'い', fontSize: 10 },
       { type: 'break', breakType: 'line' },
       { text: 'う', fontSize: 10 },
@@ -250,15 +256,15 @@ describe('docGrid line-cell integration through the cell measure path', () => {
   it('the East Asian cell rounding is gated per LINE, not per paragraph', () => {
     // Line 1: CJK 10 pt → 1 cell (20). Line 2: Latin-only 'Hello' at 22 pt —
     // Word does not cell-round Latin lines; they keep their natural height
-    // above a one-cell floor (mock natural = 10 px → floor = 20), NOT the em
-    // cell count floor(22/20)+1 = 2 cells = 40 that a paragraph-level East
-    // Asian flag would apply.
+    // above a one-cell floor (mock natural = 22 px > floor 20 → 22), NOT the
+    // cell count ceil(22/20) = 2 cells = 40 that a paragraph-level East Asian
+    // flag would apply.
     const para = paragraphWithRuns([
       { text: 'あ', fontSize: 10 },
       { type: 'break', breakType: 'line' },
       { text: 'Hello', fontSize: 22 },
     ]);
     expect(calculateRowHeight(rowWith(para), table(), [100], 1, makeMeasureState(true)))
-      .toBe(40); // 20 (CJK, 1 cell) + 20 (Latin, one-cell floor)
+      .toBe(42); // 20 (CJK, 1 cell) + 22 (Latin, natural above the one-cell floor)
   });
 });

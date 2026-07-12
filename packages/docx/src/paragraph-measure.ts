@@ -252,7 +252,7 @@ export function measureParagraph(
         columnWidthPt: placement.availableWidthPt,
         floats: [],
         lineWindow: (input) => placement.wrap!.lineWindow(input),
-        lineBoxH: (ascent, descent, _hasRuby, intendedSingle, emPx, eastAsian) => lineBoxHeight(
+        lineBoxH: (ascent, descent, _hasRuby, intendedSingle, eastAsian) => lineBoxHeight(
           context.lineSpacing,
           ascent,
           descent,
@@ -263,7 +263,6 @@ export function measureParagraph(
           // §17.6.5 cell rounding follows this line's script, matching text boxes;
           // ruby paragraphs retain their established uniform paragraph resolver.
           context.hasRuby ? context.hasEastAsianText : (eastAsian ?? false),
-          emPx,
         ),
         pageH: placement.maximumYPt,
       }
@@ -302,7 +301,6 @@ export function measureParagraph(
           true,
           line.intendedSingle,
           context.hasEastAsianText,
-          line.height,
         ))),
         grid,
       )
@@ -331,7 +329,6 @@ export function measureParagraph(
           // §17.6.5 cell rounding is gated by the line's script; a Latin-only
           // line in a CJK paragraph keeps its natural height.
           line.eastAsian ?? false,
-          line.height,
         );
     measuredLines.push({ layout: line, topYPt, advancePt });
     cursorPt = topYPt + advancePt;

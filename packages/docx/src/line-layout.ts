@@ -352,7 +352,7 @@ export interface WrapLayoutCtx {
     maximumWidthPt: number;
   };
   /** Per-line box-height resolver (line natural ascent+descent → total px box height). */
-  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, emPx?: number, eastAsian?: boolean) => number;
+  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number, eastAsian?: boolean) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -762,7 +762,7 @@ export function emptyIntendedSinglePx(para: DocParagraph, scale: number): number
 /** Intended single-line height (px) for an empty paragraph in the script axis
  *  used to draw its paragraph mark. */
 function emptyIntendedSingleForScriptPx(para: DocParagraph, scale: number, eastAsian: boolean): number {
-  return intendedSingleLinePx(getDefaultFontFamily(para, eastAsian), getDefaultFontSize(para) * scale);
+  return intendedSingleLinePx(getDefaultFontFamily(para, eastAsian), getDefaultFontSize(para) * scale, eastAsian);
 }
 
 /** Code points whose presence marks a line as East Asian for docGrid line-cell
@@ -914,26 +914,36 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
 
 /**
  * ECMA-376 §17.6.5 docGrid line grid — number of whole grid CELLS a
- * single-spaced East Asian line of em `emPx` occupies on a pitch of `pitchPx`.
+ * single-spaced East Asian line occupies on a pitch of `pitchPx`, from the
+ * line's SINGLE-LINE HEIGHT `naturalPx` (the document font's design line
+ * height: max of the corrected glyph box and the intendedSingleLinePx floor).
+ * The count is `ceil(naturalPx / pitchPx)` — the smallest number of whole
+ * cells that CONTAINS the line.
  *
- * Measured in Word PDF output (`pdftotext -bbox`): 10.5pt and 12pt lines on an
- * 18pt pitch occupy one cell (the sub-pitch region), while a 20pt line on a
- * 20pt pitch occupies two (the em == pitch boundary). The k >= 2 region — for
- * example an em of two pitches occupying three cells — extrapolates
- * `floor(em / pitch) + 1` beyond the measured range because the boundary rule
- * is scale-free: an em square that fills k pitches still needs inter-line
- * leading and therefore spills into cell k+1. No Word measurement covers that
- * region yet.
+ * Adjudicated by the sample-58 sweep (issue #1013; Word PDF, pdftotext -bbox;
+ * 19 sections over {10.5,12,14,16,20}pt × pitch {18,24}pt × {lrTb,tbRl} ×
+ * {lines,linesAndChars,none}, all Yu Mincho): with Yu Mincho's design line
+ * height (1.3 × hhea box = 1.43267 em — see core line-metrics) every measured
+ * point is ceil(design/pitch): on an 18pt pitch 10.5/12pt → 1 cell and
+ * 14/16/20pt → 2 cells; on a 24pt pitch 12/16pt → 1 cell and 20pt → 2 cells.
+ * Horizontal (lrTb) and vertical (tbRl) sections measured IDENTICAL pitches,
+ * so the rule is direction-agnostic (the tbRl column pitch is this same cell
+ * height), and the §17.6.5 grid type does not change the count. The pre-sweep
+ * calibration points remain satisfied: sample-35's 12pt heading / 10.5pt body
+ * on 18pt → 1 cell (design 17.19 / 15.04 < 18) and sample-9's 20pt title on a
+ * 20pt pitch → 2 cells (design 28.65). An earlier em-based rule
+ * (floor(em/pitch)+1) fit those sparse points but under-counted every
+ * 14–16pt-class line whose design height exceeds the pitch (Word: 2 cells).
  *
- * For a mixed-size line, callers supply the tallest run's em. This conservative
- * anti-clipping choice follows the tallest-run line-box rule (§17.3.1.33); it is
- * not a Word-measured mixed-size grid behaviour.
- * ECMA-376 defines `linePitch` as one single-spaced line; rounding taller lines
- * to whole cells is Word runtime behaviour. Returns at least 1 for every finite
- * `emPx >= 0`.
+ * A line that fills k pitches exactly occupies k cells (ceil; no measured
+ * point sits on the boundary — the geometric reading is that it still FITS).
+ * For a mixed-size line, callers supply the tallest run's resolved height
+ * (§17.3.1.33 tallest-run line box). ECMA-376 defines `linePitch` as one
+ * single-spaced line; spreading taller lines over whole cells is Word runtime
+ * behaviour. Returns at least 1 for every finite `naturalPx >= 0`.
  */
-export function docGridLineCells(emPx: number, pitchPx: number): number {
-  return pitchPx > 0 ? Math.floor(emPx / pitchPx) + 1 : 1;
+export function docGridLineCells(naturalPx: number, pitchPx: number): number {
+  return pitchPx > 0 ? Math.max(1, Math.ceil(naturalPx / pitchPx)) : 1;
 }
 
 /**
@@ -960,7 +970,6 @@ export function lineBoxHeight(
   hasRuby?: boolean,
   intendedSinglePx = 0,
   eastAsian = false,
-  emPx = 0,
 ): number {
   const glyphNatural = ascentPx + descentPx;
   // For `auto`/single spacing the multiplier applies to the intended font's
@@ -982,20 +991,21 @@ export function lineBoxHeight(
   // body paragraph with line="320" renders at pitch × 1.33 = ~24 pt.
   //
   // A single-spaced line on a docGrid snaps to whole grid CELLS in East Asian
-  // text. The number of cells is derived from the run em rather than the Canvas
-  // glyph bounding box; see docGridLineCells for the boundary rule and Word
-  // observations. A Latin-only line is NOT cell-rounded — it keeps its natural
-  // height above a one-cell floor (demo/sample-1: an 18pt heading on an 18pt
-  // pitch stays ~20.7px, not 36). ECMA-376 Part 1 only defines the natural ≤
-  // pitch case (§17.6.5 / §17.3.1.32); the East-Asian cell rounding for taller
-  // lines is Word runtime behaviour, so it is gated on the line's script.
+  // text. The number of cells is derived from the line's resolved single-line
+  // height (`natural` — the design line height, per the sample-58 adjudication
+  // of issue #1013); see docGridLineCells for the rule and Word measurements.
+  // A Latin-only line is NOT cell-rounded — it keeps its natural height above
+  // a one-cell floor (demo/sample-1: an 18pt heading on an 18pt pitch stays
+  // ~20.7px, not 36). ECMA-376 Part 1 only defines the natural ≤ pitch case
+  // (§17.6.5 / §17.3.1.32); the East-Asian cell rounding for taller lines is
+  // Word runtime behaviour, so it is gated on the line's script.
   const gridSingleCell = (): number => {
     if (!eastAsian) return Math.max(glyphNatural, pitchPx);
     // Ruby lines reserve real furigana height (base + rt); honor the measured
-    // glyph box so the annotation is not clipped. Plain EA lines discount the
-    // substituted font's ~1.6em leading and snap by the run EM.
+    // glyph box so the annotation is not clipped. Plain EA lines snap their
+    // design single-line height to whole cells.
     if (hasRuby) return Math.max(pitchPx, Math.ceil(glyphNatural / pitchPx) * pitchPx);
-    return docGridLineCells(emPx, pitchPx) * pitchPx;
+    return docGridLineCells(natural, pitchPx) * pitchPx;
   };
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
@@ -1061,10 +1071,11 @@ export function correctedLineMetrics(
   family: string | null | undefined,
   fallbackEmPx: number,
   correctionEmPx: number,
+  eastAsian = false,
 ): { ascent: number; descent: number } {
   const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fallbackEmPx * 0.8;
   const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fallbackEmPx * 0.2;
-  return correctLineMetrics(family, correctionEmPx, rawAsc, rawDesc);
+  return correctLineMetrics(family, correctionEmPx, rawAsc, rawDesc, eastAsian);
 }
 
 /**
@@ -1126,11 +1137,11 @@ export function paragraphMarkLineMetrics(
     const m = ctx.measureText(eastAsian ? 'あ' : 'x');
     ctx.font = prevFont;
     // A mark line carries no smallCaps/vertAlign, so fallback == correction size.
-    ({ ascent: asc, descent: desc } = correctedLineMetrics(m, family, fs * scale, fs * scale));
+    ({ ascent: asc, descent: desc } = correctedLineMetrics(m, family, fs * scale, fs * scale, eastAsian));
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  const advancePx = lineBoxHeight(effectiveLineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian, fs * scale);
+  const advancePx = lineBoxHeight(effectiveLineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSingleForScriptPx(para, scale, eastAsian), eastAsian);
   return { advancePx, ascentPx: asc, descentPx: desc };
 }
 
@@ -2669,7 +2680,7 @@ export function layoutLines(
       consumedEnd: nextStart ?? queue[0]?.src ?? endBoundary,
     });
     if (wrapCtx) {
-      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle, h * scale, lineEastAsian);
+      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle, lineEastAsian);
     }
     currentLine = [];
     currentWidth = 0;
@@ -2719,7 +2730,14 @@ export function layoutLines(
       // Small caps (non-super/sub) keep the FULL run size here so the line box
       // follows the run size, not the 2pt-reduced glyphs (§17.3.2.33).
       const intendedEm = ts.smallCaps && !ts.vertAlign ? ts.fontSize * scale : effectiveFontPx(ts);
-      const intended = intendedSingleLinePx(ts.fontFamily, intendedEm);
+      // Script hint: eaOnly design heights (Word FE 1.3 × hhea, e.g. Yu Mincho)
+      // apply to East Asian segments only — a Latin segment in the same font
+      // keeps its Canvas box (issue #1013 / demo sample-1 footnote). Ruby
+      // segments are excluded too: a ruby line reserves its MEASURED base +
+      // annotation box (sample-5 calibration) and Word's FE height for a
+      // ruby-bearing line is unmeasured, so the pre-#1013 metrics stand.
+      const segScriptHint = EAST_ASIAN_RE.test(ts.text) && !ts.ruby;
+      const intended = intendedSingleLinePx(ts.fontFamily, intendedEm, segScriptHint);
       if (intended > lineIntendedSingle) lineIntendedSingle = intended;
     }
   };
@@ -3142,7 +3160,9 @@ export function layoutLines(
       ctx.font = prevFont;
       metricEmPx = fullPx;
     }
-    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx);
+    // FE design correction for EA segments only; ruby keeps its measured box
+    // (see addToLine's segScriptHint note).
+    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, EAST_ASIAN_RE.test(s.text) && !s.ruby);
     let asc = corrected.ascent;
     const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
@@ -3701,13 +3721,16 @@ export function rescaleLayoutLines(
       metricM = ctx.measureText(s.text || 'X');
       metricEmPx = fullPx;
     }
-    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx);
+    // FE design correction for EA segments only; ruby keeps its measured box
+    // (see addToLine's segScriptHint note).
+    const segScriptHint = EAST_ASIAN_RE.test(s.text) && !s.ruby;
+    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, segScriptHint);
     // §17.3.3.25 — ruby reserves extra ascent room (rt size × 1.5), same as layoutLines.
     const asc = s.ruby ? corrected.ascent + s.ruby.fontSizePt * scale * 1.5 : corrected.ascent;
     // Intended single-line floor (font-metrics.ts) — small caps keep the FULL run
     // size here too (addToLine's intendedEm).
     const intendedEm = s.smallCaps && !s.vertAlign ? fullPx : effPx;
-    const intended = intendedSingleLinePx(s.fontFamily, intendedEm);
+    const intended = intendedSingleLinePx(s.fontFamily, intendedEm, segScriptHint);
     return { advance, asc, desc: corrected.descent, intended };
   };
 

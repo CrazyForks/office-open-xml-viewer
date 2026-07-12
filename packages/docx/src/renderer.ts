@@ -7678,7 +7678,6 @@ function resolveFrameBox(
         // §17.6.5 cell rounding follows this line's script, matching text boxes;
         // ruby paragraphs retain their established uniform paragraph resolver.
         paraHasRuby ? paragraphContext.hasEastAsianText : (l.eastAsian ?? false),
-        l.height * scale,
       ),
     0,
   );
@@ -8017,7 +8016,7 @@ function renderParagraph(
     columnXPt: contentX,
     columnWidthPt: contentW,
     floats: state.floats,
-    lineBoxH: (a, d, _h, is, emPx, ea) => lineBoxHeight(
+    lineBoxH: (a, d, _h, is, ea) => lineBoxHeight(
       para.lineSpacing,
       a,
       d,
@@ -8028,7 +8027,6 @@ function renderParagraph(
       // §17.6.5 cell rounding follows this line's script, matching text boxes;
       // ruby paragraphs retain their established uniform paragraph resolver.
       paraHasRuby ? paragraphContext.hasEastAsianText : (ea ?? false),
-      emPx,
     ),
     pageH: state.pageH,
   } : undefined;
@@ -8214,7 +8212,7 @@ function renderParagraph(
   // else just the max natural.
   const uniformLineH = paraHasRuby
     ? snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText, l.height * scale))),
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText))),
         grid,
         scale,
       )
@@ -8224,7 +8222,7 @@ function renderParagraph(
       ? uniformLineH
       // §17.6.5 cell rounding is gated by the line's script; a Latin-only line
       // in a CJK paragraph keeps its natural height, matching the text-box path.
-      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false, l.height * scale);
+      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false);
 
   // Slice bounds — when the paginator split this paragraph across pages,
   // only render lines in [sliceStart, sliceEnd). The first line we paint
@@ -10429,26 +10427,39 @@ export function measureShapeTextAutoFitHeight(
 
   const lineHeightFor = (b: ShapeText, line: LayoutLine): number => {
     let tallest: LayoutTextSeg | null = null;
+    let tallestEa = false;
     let floorPx = 0;
     let lineText = '';
     for (const seg of line.segments) {
       if (!('text' in seg)) continue;
       const ts = seg as LayoutTextSeg;
       lineText += ts.text;
-      if (!tallest || ts.fontSize > tallest.fontSize) tallest = ts;
+      // Script hint: eaOnly design heights (Word FE 1.3 × hhea) apply to East
+      // Asian segments only (issue #1013); Latin segments keep the Canvas box.
+      // Ruby segments keep their MEASURED box too (Word's FE height for a
+      // ruby-bearing line is unmeasured — sample-5 calibration stands).
+      const segEa = EAST_ASIAN_RE.test(ts.text) && !ts.ruby;
+      if (!tallest || ts.fontSize > tallest.fontSize) {
+        tallest = ts;
+        tallestEa = segEa;
+      }
       const segPx = ts.fontSize * scale;
       floorPx = Math.max(
         floorPx,
-        intendedSingleLinePx(ts.fontFamily ?? null, segPx),
-        intendedSingleLinePx(ts.eaFloorFamily ?? null, segPx),
+        intendedSingleLinePx(ts.fontFamily ?? null, segPx, segEa),
+        intendedSingleLinePx(ts.eaFloorFamily ?? null, segPx, segEa),
       );
     }
+    const lineEa = EAST_ASIAN_RE.test(lineText);
     const fontPt = tallest?.fontSize ?? b.fontSizePt;
     const fontPx = fontPt * scale;
     const family = tallest?.fontFamily ?? b.fontFamily ?? null;
     const eaFamily = tallest?.eaFloorFamily ?? b.fontFamily ?? null;
-    const asciiIntended = intendedSingleLinePx(family, fontPx);
-    const eaIntended = intendedSingleLinePx(eaFamily, fontPx);
+    // METRIC hint = the tallest segment's own script (a Latin tallest segment
+    // keeps its Canvas box even on a CJK-bearing line); GRID participation
+    // stays line-wide (any EA content on the line makes it cell-rounded).
+    const asciiIntended = intendedSingleLinePx(family, fontPx, tallestEa);
+    const eaIntended = intendedSingleLinePx(eaFamily, fontPx, tallestEa);
     const measureFamily = eaIntended > asciiIntended ? eaFamily : family;
     ctx.font = buildFont(
       tallest?.bold ?? b.bold ?? false,
@@ -10460,14 +10471,14 @@ export function measureShapeTextAutoFitHeight(
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
     const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
-    const c = correctLineMetrics(measureFamily, fontPx, rawAsc, rawDesc);
+    const c = correctLineMetrics(measureFamily, fontPx, rawAsc, rawDesc, tallestEa);
     const ls: LineSpacing | null = b.lineSpacingRule
       ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
       : null;
-    const eastAsian = EAST_ASIAN_RE.test(lineText);
+    const eastAsian = lineEa;
     // Ruby lines reserve real furigana height, so use the measured glyph box,
     // mirroring the body path.
-    return lineBoxHeight(ls, c.ascent, c.descent, scale, effState.docGrid, line.hasRuby ?? false, floorPx, eastAsian, fontPx);
+    return lineBoxHeight(ls, c.ascent, c.descent, scale, effState.docGrid, line.hasRuby ?? false, floorPx, eastAsian);
   };
 
   const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
@@ -10782,6 +10793,11 @@ export function renderShapeText(
     grid?: DocGridCtx,
     eastAsian = false,
     hasRuby = false,
+    // METRIC script hint (issue #1013): the measured/tallest segment's own
+    // script — eaOnly design heights (Word FE 1.3 × hhea) size the glyph box
+    // only when the measured segment is East Asian. `eastAsian` above stays
+    // line-wide (it gates the §17.6.5 grid cell rounding).
+    metricEastAsian = eastAsian,
   ): { lineH: number; baselineOffset: number } => {
     // Floor the single-line box by the TALLEST design line among the run's
     // declared faces (ascii §17.3.2.26 + eastAsia). The common Japanese encoding
@@ -10793,8 +10809,8 @@ export function renderShapeText(
     // Sakkal text boxes are unchanged. Mirrors the xlsx shape-text floor
     // (PR #646) and the docx BODY per-eastAsia-segment floor. It is NOT per-glyph
     // CJK font switching (a larger change deferred here).
-    const asciiIntended = intendedSingleLinePx(family ?? null, fontPx);
-    const eaIntended = intendedSingleLinePx(familyEa ?? null, fontPx);
+    const asciiIntended = intendedSingleLinePx(family ?? null, fontPx, metricEastAsian);
+    const eaIntended = intendedSingleLinePx(familyEa ?? null, fontPx, metricEastAsian);
     // Use the explicit all-runs floor when provided (rich path); else fall back
     // to this run's own faces (single-format path). Both are a floor, so the
     // per-run ascii/eastAsia max is still folded in for the fallback.
@@ -10812,7 +10828,7 @@ export function renderShapeText(
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
     const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
-    const c = correctLineMetrics(measureFamily, fontPx, rawAsc, rawDesc);
+    const c = correctLineMetrics(measureFamily, fontPx, rawAsc, rawDesc, metricEastAsian);
     // The glyph box (measured, corrected) is kept SEPARATE from the floored line
     // box: `intended` may inflate `lineH` above the glyph box, and Word centers
     // the glyph box within that expanded box (half-leading) rather than pinning
@@ -10824,7 +10840,7 @@ export function renderShapeText(
       : null;
     // Ruby lines reserve real furigana height, so use the measured glyph box,
     // mirroring the body path.
-    const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, grid, hasRuby, intended, eastAsian, fontPx);
+    const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, grid, hasRuby, intended, eastAsian);
     // Baseline placement inside the line box, mirroring the body draw path
     // (~7859). §17.3.1.33 sizes the box; the placement is Word's OBSERVED
     // behaviour (#990), not an ECMA rule:
@@ -10854,13 +10870,13 @@ export function renderShapeText(
   // back to the block's own font.
   const lineMetricsFor = (b: ShapeText, line: LayoutLine): { lineH: number; baselineOffset: number } => {
     let tallest: LayoutTextSeg | null = null;
+    let tallestEa = false;
     let floorPx = 0;
     let lineText = '';
     for (const seg of line.segments) {
       if (!('text' in seg)) continue;
       const ts = seg as LayoutTextSeg;
       lineText += ts.text;
-      if (!tallest || ts.fontSize > tallest.fontSize) tallest = ts;
       // Design-line FLOOR is the MAX intendedSingleLinePx over EVERY segment's
       // ascii AND declared eastAsia face (§17.3.2.26), at that segment's size —
       // mirrors the body's per-segment max and the pre-refactor per-run floor.
@@ -10868,10 +10884,17 @@ export function renderShapeText(
       // the run declares it on eastAsia even though the glyphs are Latin. 0 for an
       // all-untabled line ⇒ unchanged (a pure FLOOR, PR #640/#646/#648).
       const segPx = ts.fontSize * scale;
+      // Script hint: eaOnly design heights apply to EA segments only, and ruby
+      // segments keep their measured box (#1013).
+      const segEa = EAST_ASIAN_RE.test(ts.text) && !ts.ruby;
+      if (!tallest || ts.fontSize > tallest.fontSize) {
+        tallest = ts;
+        tallestEa = segEa;
+      }
       floorPx = Math.max(
         floorPx,
-        intendedSingleLinePx(ts.fontFamily ?? null, segPx),
-        intendedSingleLinePx(ts.eaFloorFamily ?? null, segPx),
+        intendedSingleLinePx(ts.fontFamily ?? null, segPx, segEa),
+        intendedSingleLinePx(ts.eaFloorFamily ?? null, segPx, segEa),
       );
     }
     const fontPx = (tallest?.fontSize ?? b.fontSizePt) * scale;
@@ -10891,6 +10914,9 @@ export function renderShapeText(
       effState.docGrid,
       eastAsian,
       line.hasRuby ?? false,
+      // METRIC hint = tallest segment's own script (Latin tallest keeps its
+      // Canvas box on a CJK-bearing line); grid rounding stays line-wide.
+      tallestEa,
     );
   };
 
@@ -12855,7 +12881,7 @@ function measureCellParagraphWindow(
     const uniformLineH = paraHasRuby
       ? snapParaLineToGrid(
           Math.max(0, ...paintLines.map((l) => lineBoxHeight(
-            para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, eastAsian, l.height * scale,
+            para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, eastAsian,
           ))),
           grid,
           scale,
@@ -12866,7 +12892,7 @@ function measureCellParagraphWindow(
         ? uniformLineH
         // §17.6.5 cell rounding is gated by the line's script; a Latin-only line
         // in a CJK paragraph keeps its natural height, matching the text-box path.
-        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false, l.height * scale);
+        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false);
     return {
       heightPx: paintedParagraphHeight(paintLines, windowStart, windowEnd, 0, lineHForLine),
       totalLines,
