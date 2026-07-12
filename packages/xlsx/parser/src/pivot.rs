@@ -1,4 +1,8 @@
-use ooxml_common::{depth::parse_guarded, ns::is_x_ns, zip::read_zip_string};
+use ooxml_common::{
+    depth::parse_guarded,
+    ns::{is_x_ns, relationships},
+    zip::read_zip_string,
+};
 
 const PACKAGE_REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 
@@ -78,6 +82,9 @@ fn parse_pivot_table(
         .attribute("cacheId")
         .and_then(|v| v.parse().ok())
         .ok_or(PivotDiagnosticReason::MissingIdentity)?;
+    root.attribute("dataCaption")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(PivotDiagnosticReason::MissingIdentity)?;
     let location = child(root, "location")
         .and_then(parse_location)
         .ok_or(PivotDiagnosticReason::InvalidLocation)?;
@@ -117,7 +124,9 @@ fn parse_pivot_table(
                 .collect()
         })
         .unwrap_or_default();
-    let mut malformed_data = false;
+    let mut malformed_data_field = false;
+    let mut malformed_data_subtotal = false;
+    let mut data_semantic_features = Vec::new();
     let data_fields = child(root, "dataFields")
         .map(|parent| {
             parent
@@ -128,13 +137,33 @@ fn parse_pivot_table(
                         && is_x_ns(n.tag_name().namespace())
                 })
                 .filter_map(|n| match n.attribute("fld").and_then(|v| v.parse().ok()) {
-                    Some(field) => Some(PivotDataField {
-                        field,
-                        subtotal: n.attribute("subtotal").unwrap_or("sum").to_string(),
-                        name: n.attribute("name").map(str::to_string),
-                    }),
+                    Some(field) => {
+                        let raw_subtotal = n.attribute("subtotal");
+                        let subtotal = raw_subtotal.unwrap_or("sum");
+                        let subtotal_valid = is_data_subtotal(subtotal);
+                        if !subtotal_valid {
+                            malformed_data_subtotal = true;
+                        }
+                        if n.attribute("showDataAs")
+                            .is_some_and(|value| value != "normal")
+                        {
+                            data_semantic_features.push("dataField.showDataAs".to_string());
+                        }
+                        if n.attribute("baseField").is_some_and(|value| value != "-1")
+                            || n.attribute("baseItem")
+                                .is_some_and(|value| value != "1048832")
+                        {
+                            data_semantic_features.push("dataField.base".to_string());
+                        }
+                        Some(PivotDataField {
+                            field,
+                            subtotal: subtotal_valid.then(|| subtotal.to_string()),
+                            raw_subtotal: (!subtotal_valid).then(|| subtotal.to_string()),
+                            name: n.attribute("name").map(str::to_string),
+                        })
+                    }
                     None => {
-                        malformed_data = true;
+                        malformed_data_field = true;
                         None
                     }
                 })
@@ -158,17 +187,31 @@ fn parse_pivot_table(
             field: "pageFields".into(),
         });
     }
-    if malformed_data {
+    if malformed_data_field {
         reasons.push(PivotPartialReason::MalformedField {
-            field: "dataFields".into(),
+            field: "dataFields.field".into(),
         });
     }
+    if malformed_data_subtotal {
+        reasons.push(PivotPartialReason::MalformedField {
+            field: "dataFields.subtotal".into(),
+        });
+    }
+    reasons.extend(
+        data_semantic_features
+            .into_iter()
+            .map(|feature| PivotPartialReason::UnsupportedSemanticFeature { feature }),
+    );
     let mut refresh_on_load = None;
+    let mut cache_invalid = None;
     let mut cache_definition_part = None;
     let mut cache_source = None;
     let mut recorded_extension_uris = extension_uris(root);
     match pivot_cache_target(archive, part) {
         CacheLink::Missing => reasons.push(PivotPartialReason::MissingCacheRelationship),
+        CacheLink::Malformed => reasons.push(PivotPartialReason::MalformedCacheRelationships),
+        CacheLink::Unreadable => reasons.push(PivotPartialReason::UnreadableCacheRelationships),
+        CacheLink::External => reasons.push(PivotPartialReason::ExternalCacheRelationship),
         CacheLink::Ambiguous => reasons.push(PivotPartialReason::AmbiguousCacheRelationship),
         CacheLink::Target(target) => {
             cache_definition_part = Some(target.clone());
@@ -189,22 +232,54 @@ fn parse_pivot_table(
                                     field: "refreshOnLoad".into(),
                                 }),
                             }
+                            match parse_bool(cache_root.attribute("invalid")) {
+                                Ok(value) => cache_invalid = Some(value),
+                                Err(()) => reasons.push(PivotPartialReason::MalformedField {
+                                    field: "cache.invalid".into(),
+                                }),
+                            }
                             recorded_extension_uris.extend(extension_uris(cache_root));
                             if let Some(source) = child(cache_root, "cacheSource") {
                                 let kind = source.attribute("type").unwrap_or("");
+                                if kind.is_empty() {
+                                    reasons.push(PivotPartialReason::MalformedCacheDefinition);
+                                }
                                 cache_source = match kind {
                                     "worksheet" => {
                                         let ws = child(source, "worksheetSource");
+                                        let relationship_id = ws.and_then(|node| {
+                                            node.attribute((relationships::TRANSITIONAL, "id"))
+                                                .or_else(|| {
+                                                    node.attribute((relationships::STRICT, "id"))
+                                                })
+                                        });
+                                        let sheet = ws
+                                            .and_then(|node| node.attribute("sheet"))
+                                            .map(str::to_string);
+                                        let reference = ws
+                                            .and_then(|node| node.attribute("ref"))
+                                            .map(str::to_string);
+                                        let name = ws
+                                            .and_then(|node| node.attribute("name"))
+                                            .map(str::to_string);
+                                        if sheet.is_none()
+                                            && reference.is_none()
+                                            && name.is_none()
+                                            && relationship_id.is_none()
+                                        {
+                                            reasons
+                                                .push(PivotPartialReason::MalformedCacheDefinition);
+                                        }
+                                        if relationship_id.is_some() {
+                                            reasons.push(
+                                                PivotPartialReason::UnresolvedWorksheetSourceRelationship,
+                                            );
+                                        }
                                         Some(PivotCacheSource::Worksheet {
-                                            sheet: ws
-                                                .and_then(|n| n.attribute("sheet"))
-                                                .map(str::to_string),
-                                            reference: ws
-                                                .and_then(|n| n.attribute("ref"))
-                                                .map(str::to_string),
-                                            name: ws
-                                                .and_then(|n| n.attribute("name"))
-                                                .map(str::to_string),
+                                            sheet,
+                                            reference,
+                                            name,
+                                            relationship_id: relationship_id.map(str::to_string),
                                         })
                                     }
                                     "external" => Some(PivotCacheSource::External),
@@ -212,11 +287,16 @@ fn parse_pivot_table(
                                     "scenario" => Some(PivotCacheSource::Scenario),
                                     _ => None,
                                 };
-                                if kind != "worksheet" {
+                                if !kind.is_empty() && kind != "worksheet" {
                                     reasons.push(PivotPartialReason::UnsupportedCacheSource {
                                         source_type: kind.to_string(),
                                     });
                                 }
+                            } else {
+                                reasons.push(PivotPartialReason::MalformedCacheDefinition);
+                            }
+                            if child(cache_root, "cacheFields").is_none() {
+                                reasons.push(PivotPartialReason::MalformedCacheDefinition);
                             }
                             for feature in [
                                 "tupleCache",
@@ -262,6 +342,7 @@ fn parse_pivot_table(
         page_fields,
         data_fields,
         refresh_on_load,
+        cache_invalid,
         cache_definition_part,
         cache_source,
         status,
@@ -271,6 +352,9 @@ fn parse_pivot_table(
 
 enum CacheLink {
     Missing,
+    Malformed,
+    Unreadable,
+    External,
     Ambiguous,
     Target(String),
 }
@@ -279,13 +363,25 @@ fn pivot_cache_target(archive: &mut XlsxZip, pivot_part: &str) -> CacheLink {
     let Some((dir, file)) = pivot_part.rsplit_once('/') else {
         return CacheLink::Missing;
     };
-    let Ok(xml) = read_zip_string(archive, &format!("{dir}/_rels/{file}.rels")) else {
-        return CacheLink::Missing;
+    let rels_path = format!("{dir}/_rels/{file}.rels");
+    let rels_exists = archive.file_names().any(|name| name == rels_path);
+    let Ok(xml) = read_zip_string(archive, &rels_path) else {
+        return if rels_exists {
+            CacheLink::Unreadable
+        } else {
+            CacheLink::Missing
+        };
     };
     let Ok(doc) = parse_guarded(&xml) else {
-        return CacheLink::Missing;
+        return CacheLink::Malformed;
     };
-    let targets: Vec<_> = doc
+    let root = doc.root_element();
+    if root.tag_name().name() != "Relationships"
+        || root.tag_name().namespace() != Some(PACKAGE_REL_NS)
+    {
+        return CacheLink::Malformed;
+    }
+    let relationships: Vec<_> = doc
         .root_element()
         .children()
         .filter(|n| n.is_element())
@@ -294,10 +390,23 @@ fn pivot_cache_target(archive: &mut XlsxZip, pivot_part: &str) -> CacheLink {
             n.attribute("Type")
                 .is_some_and(|t| t.ends_with("/pivotCacheDefinition"))
         })
-        .filter_map(|n| n.attribute("Target"))
         .collect();
-    match targets.as_slice() {
-        [target] => CacheLink::Target(resolve_zip_path(dir, target)),
+    match relationships.as_slice() {
+        [relationship] => {
+            if relationship.attribute("TargetMode") == Some("External") {
+                return CacheLink::External;
+            }
+            if relationship
+                .attribute("TargetMode")
+                .is_some_and(|mode| mode != "Internal")
+            {
+                return CacheLink::Malformed;
+            }
+            match relationship.attribute("Target") {
+                Some(target) => CacheLink::Target(resolve_zip_path(dir, target)),
+                None => CacheLink::Malformed,
+            }
+        }
         [] => CacheLink::Missing,
         _ => CacheLink::Ambiguous,
     }
@@ -325,9 +434,10 @@ fn parse_a1_range(value: &str) -> Option<CellRange> {
 }
 
 fn parse_a1_cell(value: &str) -> Option<(u32, u32)> {
-    let value = value.replace('$', "");
-    let split = value.find(|c: char| c.is_ascii_digit())?;
-    let (letters, digits) = value.split_at(split);
+    let value = value.strip_prefix('$').unwrap_or(value);
+    let split = value.find(|c: char| !c.is_ascii_alphabetic())?;
+    let (letters, row_part) = value.split_at(split);
+    let digits = row_part.strip_prefix('$').unwrap_or(row_part);
     if letters.is_empty()
         || digits.is_empty()
         || !letters.chars().all(|c| c.is_ascii_alphabetic())
@@ -340,7 +450,8 @@ fn parse_a1_cell(value: &str) -> Option<(u32, u32)> {
             .checked_add((c.to_ascii_uppercase() as u8 - b'A' + 1) as u32)
     })?;
     let row = digits.parse().ok()?;
-    (col > 0 && row > 0).then_some((col, row))
+    // SpreadsheetML's A1 grid is bounded by XFD / row 1,048,576.
+    (col > 0 && col <= 16_384 && row > 0 && row <= 1_048_576).then_some((col, row))
 }
 
 fn parse_signed_fields(root: roxmltree::Node<'_, '_>, parent_name: &str) -> (Vec<i32>, bool) {
@@ -369,6 +480,9 @@ fn parse_signed_fields(root: roxmltree::Node<'_, '_>, parent_name: &str) -> (Vec
 
 fn unsupported_features(root: roxmltree::Node<'_, '_>) -> Vec<PivotPartialReason> {
     [
+        "pivotFields",
+        "rowItems",
+        "colItems",
         "pivotHierarchies",
         "filters",
         "rowHierarchiesUsage",
@@ -384,10 +498,29 @@ fn unsupported_features(root: roxmltree::Node<'_, '_>) -> Vec<PivotPartialReason
 
 fn extension_uris(root: roxmltree::Node<'_, '_>) -> Vec<String> {
     root.descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "ext")
+        .filter(|n| {
+            n.is_element() && n.tag_name().name() == "ext" && is_x_ns(n.tag_name().namespace())
+        })
         .filter_map(|n| n.attribute("uri"))
         .map(str::to_string)
         .collect()
+}
+
+fn is_data_subtotal(value: &str) -> bool {
+    matches!(
+        value,
+        "average"
+            | "count"
+            | "countNums"
+            | "max"
+            | "min"
+            | "product"
+            | "stdDev"
+            | "stdDevp"
+            | "sum"
+            | "var"
+            | "varp"
+    )
 }
 
 fn child<'a>(node: roxmltree::Node<'a, 'a>, name: &str) -> Option<roxmltree::Node<'a, 'a>> {

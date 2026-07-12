@@ -4810,7 +4810,7 @@ mod pivot_metadata_tests {
                 "missingIdentity",
             ),
             (
-                r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="Bad" cacheId="7"><location ref="not-a-range" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/></pivotTableDefinition>"#,
+                r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="Bad" cacheId="7" dataCaption="Values"><location ref="not-a-range" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/></pivotTableDefinition>"#,
                 "invalidLocation",
             ),
         ] {
@@ -4826,6 +4826,287 @@ mod pivot_metadata_tests {
                 Some(42.0)
             );
         }
+    }
+
+    #[test]
+    fn unsupported_cache_source_reason_serializes_camel_case_payload() {
+        for source_type in ["external", "consolidation", "futureSource"] {
+            let cache =
+                COMPLETE_CACHE.replace("type=\"worksheet\"", &format!("type=\"{source_type}\""));
+            let sheet = parse(&workbook_with_pivot(
+                COMPLETE_PIVOT,
+                Some(PIVOT_RELS),
+                Some(&cache),
+            ));
+            let reason = sheet["pivotTables"][0]["status"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|reason| reason["kind"] == "unsupportedCacheSource")
+                .unwrap();
+            assert_eq!(reason["sourceType"], source_type);
+            assert!(reason.get("source_type").is_none());
+        }
+    }
+
+    #[test]
+    fn missing_required_cache_source_is_partial() {
+        let cache = COMPLETE_CACHE.replace(
+            r#"<cacheSource type="worksheet"><worksheetSource ref="A1:D20" sheet="Data"/></cacheSource>"#,
+            "",
+        );
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some(&cache),
+        ));
+        assert_eq!(sheet["pivotTables"][0]["status"]["state"], "partial");
+        assert!(sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["kind"] == "malformedCacheDefinition"));
+    }
+
+    #[test]
+    fn worksheet_source_relationship_is_exposed_and_partial_until_resolved() {
+        let cache = COMPLETE_CACHE.replace(
+            r#"<worksheetSource ref="A1:D20" sheet="Data"/>"#,
+            r#"<worksheetSource xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdExternalSheet"/>"#,
+        );
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some(&cache),
+        ));
+        let pivot = &sheet["pivotTables"][0];
+        assert_eq!(pivot["cacheSource"]["relationshipId"], "rIdExternalSheet");
+        assert!(pivot["status"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["kind"] == "unresolvedWorksheetSourceRelationship"));
+    }
+
+    #[test]
+    fn empty_worksheet_source_is_not_complete() {
+        for replacement in ["", "<worksheetSource/>"] {
+            let cache = COMPLETE_CACHE.replace(
+                r#"<worksheetSource ref="A1:D20" sheet="Data"/>"#,
+                replacement,
+            );
+            let sheet = parse(&workbook_with_pivot(
+                COMPLETE_PIVOT,
+                Some(PIVOT_RELS),
+                Some(&cache),
+            ));
+            assert_eq!(sheet["pivotTables"][0]["status"]["state"], "partial");
+        }
+    }
+
+    #[test]
+    fn malformed_pivot_relationships_are_not_reported_as_missing() {
+        for rels in [
+            "<Relationships",
+            r#"<Relationships xmlns="urn:not-package-relationships"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#,
+        ] {
+            let sheet = parse(&workbook_with_pivot(COMPLETE_PIVOT, Some(rels), None));
+            assert_eq!(
+                sheet["pivotTables"][0]["status"]["reasons"][0]["kind"],
+                "malformedCacheRelationships"
+            );
+        }
+    }
+
+    #[test]
+    fn location_rejects_out_of_bounds_and_misplaced_dollar_markers() {
+        for bad_ref in ["XFE1", "A1048577", "A$1$", "$$A1", "$A1$"] {
+            let pivot = COMPLETE_PIVOT.replace("A1:D8", bad_ref);
+            let sheet = parse(&workbook_with_pivot(
+                &pivot,
+                Some(PIVOT_RELS),
+                Some(COMPLETE_CACHE),
+            ));
+            assert_eq!(
+                sheet["pivotDiagnostics"][0]["reason"]["kind"],
+                "invalidLocation"
+            );
+        }
+        for valid_ref in ["XFD1048576", "$A$1:$D$8"] {
+            let pivot = COMPLETE_PIVOT.replace("A1:D8", valid_ref);
+            let sheet = parse(&workbook_with_pivot(
+                &pivot,
+                Some(PIVOT_RELS),
+                Some(COMPLETE_CACHE),
+            ));
+            assert_eq!(sheet["pivotTables"][0]["name"], "SalesPivot");
+        }
+    }
+
+    #[test]
+    fn external_cache_relationship_is_partial_without_package_path() {
+        let rels = PIVOT_RELS.replace("Target=", "TargetMode=\"External\" Target=");
+        let sheet = parse(&workbook_with_pivot(COMPLETE_PIVOT, Some(&rels), None));
+        let pivot = &sheet["pivotTables"][0];
+        assert!(pivot.get("cacheDefinitionPart").is_none());
+        assert_eq!(
+            pivot["status"]["reasons"][0]["kind"],
+            "externalCacheRelationship"
+        );
+    }
+
+    #[test]
+    fn extension_uri_collection_ignores_non_spreadsheetml_ext_elements() {
+        let pivot = COMPLETE_PIVOT.replace(
+            "</extLst>",
+            r#"<foreign:ext xmlns:foreign="urn:foreign" uri="urn:foreign:extension"/></extLst>"#,
+        );
+        let sheet = parse(&workbook_with_pivot(
+            &pivot,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        assert_eq!(
+            sheet["pivotTables"][0]["extensionUris"],
+            serde_json::json!(["urn:example:future-pivot-feature"])
+        );
+    }
+
+    #[test]
+    fn non_default_data_field_show_data_as_is_partial() {
+        let pivot = COMPLETE_PIVOT.replace("fld=\"3\"", "fld=\"3\" showDataAs=\"percentOfTotal\"");
+        let sheet = parse(&workbook_with_pivot(
+            &pivot,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        assert!(sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["feature"] == "dataField.showDataAs"));
+    }
+
+    #[test]
+    fn cache_invalid_fact_is_known_only_after_valid_cache_parse() {
+        for (attribute, expected) in [("", false), (" invalid=\"1\"", true)] {
+            let cache = COMPLETE_CACHE.replace(
+                " refreshOnLoad=\"1\"",
+                &format!("{attribute} refreshOnLoad=\"1\""),
+            );
+            let sheet = parse(&workbook_with_pivot(
+                COMPLETE_PIVOT,
+                Some(PIVOT_RELS),
+                Some(&cache),
+            ));
+            assert_eq!(sheet["pivotTables"][0]["cacheInvalid"], expected);
+        }
+        let malformed = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some("<bad"),
+        ));
+        assert!(malformed["pivotTables"][0].get("cacheInvalid").is_none());
+    }
+
+    #[test]
+    fn missing_required_data_caption_skips_pivot_and_cache_fields_make_partial() {
+        let no_caption = COMPLETE_PIVOT.replace(" dataCaption=\"Values\"", "");
+        let sheet = parse(&workbook_with_pivot(
+            &no_caption,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        assert_eq!(
+            sheet["pivotDiagnostics"][0]["reason"]["kind"],
+            "missingIdentity"
+        );
+
+        let no_fields = COMPLETE_CACHE.replace(
+            r#"<cacheFields count="4"><cacheField name="Category"/><cacheField name="Month"/><cacheField name="Region"/><cacheField name="Sales"/></cacheFields>"#,
+            "",
+        );
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some(&no_fields),
+        ));
+        assert!(sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["kind"] == "malformedCacheDefinition"));
+    }
+
+    #[test]
+    fn invalid_data_subtotal_is_raw_unknown_and_partial() {
+        let pivot = COMPLETE_PIVOT.replace("fld=\"3\"", "fld=\"3\" subtotal=\"notAFunction\"");
+        let sheet = parse(&workbook_with_pivot(
+            &pivot,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        let field = &sheet["pivotTables"][0]["dataFields"][0];
+        assert!(field.get("subtotal").is_none());
+        assert_eq!(field["rawSubtotal"], "notAFunction");
+        assert!(sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["field"] == "dataFields.subtotal"));
+
+        let bad_field = COMPLETE_PIVOT.replace("fld=\"3\"", "fld=\"not-unsigned\"");
+        let sheet = parse(&workbook_with_pivot(
+            &bad_field,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        assert!(sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["field"] == "dataFields.field"));
+    }
+
+    #[test]
+    fn missing_required_cache_source_type_is_malformed_not_unsupported() {
+        let cache = COMPLETE_CACHE.replace(" type=\"worksheet\"", "");
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some(&cache),
+        ));
+        let reasons = sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons
+            .iter()
+            .any(|reason| reason["kind"] == "malformedCacheDefinition"));
+        assert!(!reasons
+            .iter()
+            .any(|reason| reason["kind"] == "unsupportedCacheSource"));
+    }
+
+    #[test]
+    fn omitted_saved_pivot_state_structures_are_named_partial_features() {
+        let pivot = COMPLETE_PIVOT.replace(
+            "<rowFields",
+            r#"<pivotFields count="1"><pivotField><items count="1"><item x="0"/></items></pivotField></pivotFields><rowItems count="1"><i/></rowItems><colItems count="1"><i/></colItems><rowFields"#,
+        );
+        let sheet = parse(&workbook_with_pivot(
+            &pivot,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        let features: Vec<_> = sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reason| reason["feature"].as_str())
+            .collect();
+        assert!(features.contains(&"pivotFields"));
+        assert!(features.contains(&"rowItems"));
+        assert!(features.contains(&"colItems"));
     }
 }
 

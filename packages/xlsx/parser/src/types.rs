@@ -265,6 +265,9 @@ pub struct PivotTableMetadata {
     pub data_fields: Vec<PivotDataField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_on_load: Option<bool>,
+    /// `pivotCacheDefinition@invalid`, known only after the cache part parses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_invalid: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_definition_part: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,7 +303,10 @@ pub struct PivotPageField {
 pub struct PivotDataField {
     /// ECMA-376 §18.10.1.16 `CT_DataField@fld` is unsigned.
     pub field: u32,
-    pub subtotal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtotal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_subtotal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
@@ -315,6 +321,8 @@ pub enum PivotCacheSource {
         reference: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        #[serde(rename = "relationshipId", skip_serializing_if = "Option::is_none")]
+        relationship_id: Option<String>,
     },
     External,
     Consolidation,
@@ -332,12 +340,23 @@ pub enum PivotMetadataStatus {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PivotPartialReason {
     MissingCacheRelationship,
+    MalformedCacheRelationships,
+    UnreadableCacheRelationships,
+    ExternalCacheRelationship,
     AmbiguousCacheRelationship,
     UnreadableCacheDefinition,
     MalformedCacheDefinition,
-    MalformedField { field: String },
-    UnsupportedCacheSource { source_type: String },
-    UnsupportedSemanticFeature { feature: String },
+    MalformedField {
+        field: String,
+    },
+    UnsupportedCacheSource {
+        #[serde(rename = "sourceType")]
+        source_type: String,
+    },
+    UnresolvedWorksheetSourceRelationship,
+    UnsupportedSemanticFeature {
+        feature: String,
+    },
 }
 
 #[derive(Debug, Serialize)]

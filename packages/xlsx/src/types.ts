@@ -160,6 +160,8 @@ export interface PivotTableMetadata {
   dataFields: PivotDataField[];
   /** Absent when the cache definition could not be parsed; false includes the schema default. */
   refreshOnLoad?: boolean;
+  /** Cache invalidity flag; absent when the cache definition did not parse. */
+  cacheInvalid?: boolean;
   cacheDefinitionPart?: string;
   cacheSource?: PivotCacheSource;
   status: PivotMetadataStatus;
@@ -180,12 +182,13 @@ export interface PivotPageField {
 
 export interface PivotDataField {
   field: number;
-  subtotal: string;
+  subtotal?: string;
+  rawSubtotal?: string;
   name?: string;
 }
 
 export type PivotCacheSource =
-  | { kind: 'worksheet'; sheet?: string; reference?: string; name?: string }
+  | { kind: 'worksheet'; sheet?: string; reference?: string; name?: string; relationshipId?: string }
   | { kind: 'external' }
   | { kind: 'consolidation' }
   | { kind: 'scenario' };
@@ -196,11 +199,15 @@ export type PivotMetadataStatus =
 
 export type PivotPartialReason =
   | { kind: 'missingCacheRelationship' }
+  | { kind: 'malformedCacheRelationships' }
+  | { kind: 'unreadableCacheRelationships' }
+  | { kind: 'externalCacheRelationship' }
   | { kind: 'ambiguousCacheRelationship' }
   | { kind: 'unreadableCacheDefinition' }
   | { kind: 'malformedCacheDefinition' }
   | { kind: 'malformedField'; field: string }
   | { kind: 'unsupportedCacheSource'; sourceType: string }
+  | { kind: 'unresolvedWorksheetSourceRelationship' }
   | { kind: 'unsupportedSemanticFeature'; feature: string };
 
 export interface PivotDiagnostic {
