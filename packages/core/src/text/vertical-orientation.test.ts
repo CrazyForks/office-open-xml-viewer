@@ -3,6 +3,7 @@ import {
   verticalOrientation,
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
+  verticalTrUprightFallback,
 } from './vertical-orientation.js';
 
 const cp = (ch: string): number => ch.codePointAt(0) ?? 0;
@@ -132,25 +133,40 @@ describe('verticalBracketFormSubstitute (UAX #50 Tr code points → U+FE1x/FE3x 
     expect(verticalBracketFormSubstitute(0x300f)).toBe(0xfe44); // 』 → ﹄
   });
 
-  it('maps the vo=Tr fullwidth colon/semicolon and white lenticular brackets to their U+FE1x form (issue #969)', () => {
-    // Word/PowerPoint ground truth (Yu Mincho tbRl + eaVert, PDF-adjudicated):
-    // these vo=Tr code points SUBSTITUTE their U+FE1x vertical presentation form
-    // and draw UPRIGHT — NOT the rotate fallback. The fullwidth colon/semicolon are
-    // vo=Tr punctuation (not brackets) but share the same substitute-first behaviour,
-    // so they live in this Tr map. FE13/FE14 decompose (UnicodeData `<vertical>`) to
-    // the ASCII 003A/003B; vertical Japanese carries the FULLWIDTH forms, so — like
-    // FE10 ← FF0C — the map keys on FF1A/FF1B. FE17/FE18 are the exact `<vertical>`
-    // inverses of the white lenticular brackets 3016/3017.
-    expect(verticalBracketFormSubstitute(0xff1a)).toBe(0xfe13); // ： → ︓ vertical colon
-    expect(verticalBracketFormSubstitute(0xff1b)).toBe(0xfe14); // ； → ︔ vertical semicolon
+  it('maps the vo=Tr white lenticular brackets to their U+FE1x form (issue #969)', () => {
+    // FE17/FE18 are the exact UnicodeData `<vertical>` inverses of the white
+    // lenticular brackets 3016/3017 and ARE present in the common substitute fonts,
+    // so they stay substituted and draw UPRIGHT.
     expect(verticalBracketFormSubstitute(0x3016)).toBe(0xfe17); // 〖 → ︗ vertical left white lenticular
     expect(verticalBracketFormSubstitute(0x3017)).toBe(0xfe18); // 〗 → ︘ vertical right white lenticular
+  });
+
+  it('does NOT substitute the fullwidth colon/semicolon (FE13/FE14 dropped, issue #969 follow-up)', () => {
+    // FE13/FE14 are absent from most render fonts (Hiragino Mincho ProN, macOS's Yu
+    // Mincho substitute) and a Canvas cannot invoke the font's `vert` feature, so
+    // substituting reached a mispositioned system-fallback glyph. The colon/semicolon
+    // now take a GEOMETRIC fallback in the renderers instead (see
+    // verticalTrUprightFallback): colon rotates (→ FE13's side-by-side dots),
+    // semicolon draws upright (→ FE14's dot-over-comma).
+    expect(verticalBracketFormSubstitute(0xff1a)).toBeNull(); // ： fullwidth colon
+    expect(verticalBracketFormSubstitute(0xff1b)).toBeNull(); // ； fullwidth semicolon
   });
 
   it('returns null for Tr code points with no U+FE30 vertical form (ー, quotes)', () => {
     expect(verticalBracketFormSubstitute(0x30fc)).toBeNull(); // ー prolonged sound mark
     expect(verticalBracketFormSubstitute(0x201c)).toBeNull(); // “ left double quote
     expect(verticalBracketFormSubstitute(0x201d)).toBeNull(); // ” right double quote
+  });
+
+  it('verticalTrUprightFallback: only the fullwidth semicolon takes the UPRIGHT Tr fallback', () => {
+    // ；(FF1B) → FE14 is an upright dot-over-comma, NOT a rotation of the base, so its
+    // no-vertical-form fallback is UPRIGHT (Word/JIS-verified). Everything else that
+    // rotates — colon ：, ー, quotes, un-substituted brackets — returns false.
+    expect(verticalTrUprightFallback(0xff1b)).toBe(true); // ；
+    expect(verticalTrUprightFallback(0xff1a)).toBe(false); // ： (rotates → FE13 dots)
+    expect(verticalTrUprightFallback(0x30fc)).toBe(false); // ー
+    expect(verticalTrUprightFallback(0x300c)).toBe(false); // 「 (substituted, not fallback)
+    expect(verticalTrUprightFallback(cp('漢'))).toBe(false); // ideograph
   });
 
   it('returns null for non-bracket code points (Tu punctuation, ideographs, Latin)', () => {

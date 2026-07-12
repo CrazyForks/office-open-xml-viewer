@@ -268,18 +268,25 @@ describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin side
     expect(fills.every((f) => f.x === 0 && f.y === 0)).toBe(true);
   });
 
-  it('substitutes the vo=Tr colon/semicolon and white lenticular brackets, drawn UPRIGHT (issue #969)', () => {
-    // Word/PowerPoint ground truth (PDF-adjudicated): ：；〖〗 are vo=Tr with a
-    // U+FE1x vertical form, so they substitute-first and draw upright like the other
-    // brackets — NOT the rotate fallback (the semicolon staying an upright dot-over-
-    // comma is the proof; a rotation could not produce that).
+  it('gives the colon/semicolon a geometric fallback and substitutes the lenticular brackets (issue #969)', () => {
+    // FE13/FE14 (vertical colon/semicolon) are absent from most render fonts and a
+    // Canvas cannot invoke the font's `vert` feature, so unconditional substitution
+    // reached a mispositioned system-fallback glyph. They now take a GEOMETRIC
+    // fallback that reproduces each vertical form's design directly (Word-verified):
+    //   • colon ： → ROTATE (drawn as-is in the +90° page frame → FE13's side-by-side
+    //     dots); no local counter-rotation.
+    //   • semicolon ； → UPRIGHT (counter-rotated −90° → FE14's dot-over-comma; a
+    //     rotation could not produce that).
+    // The white lenticular brackets 〖〗 keep their FE17/FE18 substitute (present in
+    // the substitute fonts), drawn upright.
     const { ctx, ops } = mockCtx();
     drawVerticalRun(ctx, '：；〖〗', 0, 0, 12, 0);
     const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
-    expect(fills.map((f) => f.text)).toEqual(['︓', '︔', '︗', '︘']); // FE13/FE14/FE17/FE18
-    // All four are counter-rotated −90° (upright), centred on the column.
+    expect(fills.map((f) => f.text)).toEqual(['：', '；', '︗', '︘']); // colon/semicolon base; FE17/FE18
+    // Counter-rotations (−90°, upright): semicolon + both lenticular brackets = 3;
+    // the colon is NOT counter-rotated (it rides the +90° page rotation).
     const rotates = ops.filter((o): o is Extract<Op, { op: 'rotate' }> => o.op === 'rotate');
-    expect(rotates).toHaveLength(4);
+    expect(rotates).toHaveLength(3);
     expect(rotates.every((r) => Math.abs(r.a - -Math.PI / 2) < 1e-9)).toBe(true);
     expect(fills.every((f) => f.align === 'center' && f.baseline === 'middle')).toBe(true);
   });
