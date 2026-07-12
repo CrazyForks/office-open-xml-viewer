@@ -5922,6 +5922,29 @@ fn extract_simple_paragraph_text(
         .clone()
         .or_else(|| style_para.line_spacing_rule.clone());
 
+    // ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved with the SAME
+    // §17.7.2 precedence as the spacing above (direct `<w:pPr>` via `direct_ind`
+    // wins, else the style-chain-resolved `style_para`, which folds in the
+    // paragraph style + docDefaults). Paired with the resolved paragraph style id
+    // so the renderer can drop the inter-paragraph gap between two adjacent
+    // same-style paragraphs that both set the toggle — the identical rule the body
+    // path applies (`contextual_spacing`/`style_id`; renderer `contextualSuppressed`).
+    // Without this a `<w:contextualSpacing/>` ListParagraph list inside a fixed box
+    // kept the docDefault `after=160` (8 pt) gap that inflated its line pitch and
+    // clipped the trailing line (sample-32).
+    let contextual_spacing = direct_ind
+        .contextual_spacing
+        .or(style_para.contextual_spacing)
+        .unwrap_or(false);
+    // Expose the SAME stable style id the body path stamps (parser.rs ~2578):
+    // the explicit `<w:pStyle>`, else the document default paragraph style
+    // (locale ids like "a"/"標準"), else "Normal", so grouping survives templates
+    // that never name the default style explicitly.
+    let resolved_style_id = style_id
+        .clone()
+        .or_else(|| style_map.default_para_style_id().map(str::to_string))
+        .or_else(|| Some("Normal".to_string()));
+
     // ECMA-376 §17.3.1.37 tab stops and §17.3.1.6 bidi — resolved with the SAME
     // §17.7.2 precedence as the indent/spacing above (direct `<w:pPr>` via
     // `direct_ind` = `parse_para_fmt`, else the style-chain-resolved `style_para`).
@@ -5994,6 +6017,8 @@ fn extract_simple_paragraph_text(
         indent_first,
         tab_stops,
         bidi,
+        contextual_spacing,
+        style_id: resolved_style_id,
         image_path,
         mime_type,
         svg_image_path,
@@ -14666,6 +14691,77 @@ mod txbx_inline_image_tests {
         .unwrap();
         assert!((block2.space_before - 12.0).abs() < 1e-6);
         assert!((block2.space_after - 18.0).abs() < 1e-6);
+    }
+
+    /// ECMA-376 §17.3.1.9 — a text-box paragraph surfaces its resolved
+    /// `contextualSpacing` toggle AND its style id so the renderer can group
+    /// adjacent same-style paragraphs and drop the inter-paragraph gap (the body
+    /// path already does this via `contextual_spacing`/`style_id`; the text-box
+    /// path previously dropped both, so a `<w:contextualSpacing/>` ListParagraph
+    /// list kept the docDefault `after=160` gap that clipped its trailing line —
+    /// sample-32). Direct `<w:contextualSpacing/>` wins; an absent one inherits
+    /// from the paragraph style; a style id is exposed for grouping.
+    #[test]
+    fn extract_simple_paragraph_text_surfaces_contextual_spacing_and_style_id() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="ListParagraph">
+                <w:name w:val="List Paragraph"/>
+                <w:pPr><w:contextualSpacing/><w:spacing w:after="160"/></w:pPr>
+              </w:style>
+              <w:style w:type="paragraph" w:styleId="Plain">
+                <w:name w:val="Plain"/>
+                <w:pPr><w:spacing w:after="160"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let parse_block = |xml: &str| {
+            let doc = roxmltree::Document::parse(xml).unwrap();
+            extract_simple_paragraph_text(
+                &styles,
+                doc.root_element(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            )
+            .unwrap()
+        };
+
+        // (a) The toggle is INHERITED from the paragraph style (no direct one),
+        // and the explicit pStyle is exposed as the block's style id.
+        let inherited = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="ListParagraph"/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            inherited.contextual_spacing,
+            "contextualSpacing must inherit from the paragraph style"
+        );
+        assert_eq!(inherited.style_id.as_deref(), Some("ListParagraph"));
+
+        // (b) A style WITHOUT contextualSpacing ⇒ false; its id is still exposed.
+        let plain = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Plain"/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            !plain.contextual_spacing,
+            "a style without contextualSpacing ⇒ false"
+        );
+        assert_eq!(plain.style_id.as_deref(), Some("Plain"));
+
+        // (c) A DIRECT `<w:contextualSpacing/>` sets the toggle even over a style
+        // that lacks it.
+        let direct = parse_block(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                 <w:pPr><w:pStyle w:val="Plain"/><w:contextualSpacing/></w:pPr>
+                 <w:r><w:t>item</w:t></w:r></w:p>"#,
+        );
+        assert!(
+            direct.contextual_spacing,
+            "direct contextualSpacing must win over a style that lacks it"
+        );
     }
 
     /// ECMA-376 §17.3.1.12 — a text-box paragraph surfaces its own `<w:ind>`
