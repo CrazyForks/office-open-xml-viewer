@@ -213,6 +213,10 @@ export type PivotPartialReason =
 export interface PivotDiagnostic {
   part: string;
   reason:
+    | { kind: 'unreadableWorksheetRelationships' }
+    | { kind: 'malformedWorksheetRelationships' }
+    | { kind: 'malformedPivotRelationship' }
+    | { kind: 'externalPivotRelationship' }
     | { kind: 'unreadablePart' }
     | { kind: 'malformedXml' }
     | { kind: 'missingIdentity' }

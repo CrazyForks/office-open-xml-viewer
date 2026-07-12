@@ -4592,6 +4592,48 @@ mod pivot_metadata_tests {
         bytes
     }
 
+    fn workbook_with_worksheet_rels(worksheet_rels: &[u8]) -> Vec<u8> {
+        workbook_with_relationship_parts(worksheet_rels, PIVOT_RELS.as_bytes())
+    }
+
+    fn workbook_with_relationship_parts(worksheet_rels: &[u8], pivot_rels: &[u8]) -> Vec<u8> {
+        let entries: [(&str, &[u8]); 7] = [
+            (
+                "xl/workbook.xml",
+                br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Report" sheetId="1" r:id="rIdSheet"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSheet" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>"#,
+            ),
+            ("xl/worksheets/_rels/sheet1.xml.rels", worksheet_rels),
+            ("xl/pivotTables/pivotTable1.xml", COMPLETE_PIVOT.as_bytes()),
+            (
+                "xl/pivotTables/_rels/pivotTable1.xml.rels",
+                pivot_rels,
+            ),
+            (
+                "xl/pivotCache/pivotCacheDefinition7.xml",
+                COMPLETE_CACHE.as_bytes(),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, content) in entries {
+                zip.start_file(path, options).unwrap();
+                zip.write_all(content).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        bytes
+    }
+
     fn parse(data: &[u8]) -> Value {
         serde_json::from_str(&parse_sheet_native(data, 0, "Report").unwrap()).unwrap()
     }
@@ -4909,6 +4951,7 @@ mod pivot_metadata_tests {
         for rels in [
             "<Relationships",
             r#"<Relationships xmlns="urn:not-package-relationships"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#,
         ] {
             let sheet = parse(&workbook_with_pivot(COMPLETE_PIVOT, Some(rels), None));
             assert_eq!(
@@ -5107,6 +5150,154 @@ mod pivot_metadata_tests {
         assert!(features.contains(&"pivotFields"));
         assert!(features.contains(&"rowItems"));
         assert!(features.contains(&"colItems"));
+    }
+
+    #[test]
+    fn worksheet_relationship_failures_are_diagnostic_and_keep_saved_cells() {
+        for (rels, reason) in [
+            (
+                b"<Relationships".as_slice(),
+                "malformedWorksheetRelationships",
+            ),
+            (&[0xff][..], "unreadableWorksheetRelationships"),
+        ] {
+            let sheet = parse(&workbook_with_worksheet_rels(rels));
+            assert_eq!(sheet["pivotDiagnostics"][0]["reason"]["kind"], reason);
+            assert_eq!(
+                sheet["rows"][0]["cells"][0]["value"]["number"].as_f64(),
+                Some(42.0)
+            );
+        }
+    }
+
+    #[test]
+    fn bad_worksheet_pivot_relationship_does_not_suppress_valid_sibling() {
+        let valid = r#"<Relationship Id="rIdValid" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/>"#;
+        for bad in [
+            r#"<Relationship Id="rIdBad" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable"/>"#,
+            r#"<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/ignored.xml"/>"#,
+            r#"<Relationship Id="rIdBad" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" TargetMode="Bogus" Target="../pivotTables/ignored.xml"/>"#,
+        ] {
+            let rels = format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{bad}{valid}</Relationships>"#
+            );
+            let sheet = parse(&workbook_with_worksheet_rels(rels.as_bytes()));
+            assert_eq!(sheet["pivotTables"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                sheet["pivotDiagnostics"][0]["reason"]["kind"],
+                "malformedPivotRelationship"
+            );
+        }
+
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdExternal" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" TargetMode="External" Target="https://example.invalid/pivot.xml"/>{valid}</Relationships>"#
+        );
+        let sheet = parse(&workbook_with_worksheet_rels(rels.as_bytes()));
+        assert_eq!(sheet["pivotTables"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sheet["pivotDiagnostics"][0]["reason"]["kind"],
+            "externalPivotRelationship"
+        );
+
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMalformed" Target="ignored.xml"/>{valid}</Relationships>"#
+        );
+        let sheet = parse(&workbook_with_worksheet_rels(rels.as_bytes()));
+        assert_eq!(sheet["pivotTables"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sheet["pivotDiagnostics"][0]["reason"]["kind"],
+            "malformedWorksheetRelationships"
+        );
+    }
+
+    #[test]
+    fn exact_strict_pivot_relationship_types_resolve_and_suffix_impostors_do_not() {
+        let strict_sheet_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/></Relationships>"#;
+        let data = workbook_with_worksheet_rels(strict_sheet_rels);
+        let sheet = parse(&data);
+        assert_eq!(sheet["pivotTables"].as_array().unwrap().len(), 1);
+
+        let impostor = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="urn:foreign/pivotTable" Target="../pivotTables/pivotTable1.xml"/></Relationships>"#;
+        let sheet = parse(&workbook_with_worksheet_rels(impostor));
+        assert!(sheet.get("pivotTables").is_none());
+
+        let strict_cache_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdCache" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#;
+        let sheet = parse(&workbook_with_relationship_parts(
+            strict_sheet_rels,
+            strict_cache_rels,
+        ));
+        assert_eq!(sheet["pivotTables"][0]["status"]["state"], "complete");
+
+        let impostor_cache_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdCache" Type="urn:foreign/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#;
+        let sheet = parse(&workbook_with_relationship_parts(
+            strict_sheet_rels,
+            impostor_cache_rels,
+        ));
+        assert_eq!(
+            sheet["pivotTables"][0]["status"]["reasons"][0]["kind"],
+            "missingCacheRelationship"
+        );
+    }
+
+    #[test]
+    fn worksheet_source_ref_uses_bounded_a1_range_grammar() {
+        for valid_ref in ["$A$1:$XFD$1048576", "A1:D20"] {
+            let cache = COMPLETE_CACHE.replace("A1:D20", valid_ref);
+            let sheet = parse(&workbook_with_pivot(
+                COMPLETE_PIVOT,
+                Some(PIVOT_RELS),
+                Some(&cache),
+            ));
+            assert_eq!(
+                sheet["pivotTables"][0]["cacheSource"]["reference"],
+                valid_ref
+            );
+        }
+        for invalid_ref in ["XFE1", "A1048577", "A$1$", "D20:A1"] {
+            let cache = COMPLETE_CACHE.replace("A1:D20", invalid_ref);
+            let sheet = parse(&workbook_with_pivot(
+                COMPLETE_PIVOT,
+                Some(PIVOT_RELS),
+                Some(&cache),
+            ));
+            let pivot = &sheet["pivotTables"][0];
+            assert!(pivot["cacheSource"].get("reference").is_none());
+            assert!(pivot["status"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason["field"] == "cacheSource.worksheetSource.ref"));
+        }
+    }
+
+    #[test]
+    fn pivot_axis_data_placement_semantics_are_never_silently_complete() {
+        for attributes in [" dataOnRows=\"true\"", " dataPosition=\"2\""] {
+            let pivot = COMPLETE_PIVOT.replace(
+                " dataCaption=\"Values\"",
+                &format!(" dataCaption=\"Values\"{attributes}"),
+            );
+            let sheet = parse(&workbook_with_pivot(
+                &pivot,
+                Some(PIVOT_RELS),
+                Some(COMPLETE_CACHE),
+            ));
+            assert!(sheet["pivotTables"][0]["status"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason["feature"] == "pivotTable.dataPlacement"));
+        }
+        let pivot = COMPLETE_PIVOT.replace(
+            " dataCaption=\"Values\"",
+            " dataCaption=\"Values\" dataOnRows=\"false\"",
+        );
+        let sheet = parse(&workbook_with_pivot(
+            &pivot,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        assert_eq!(sheet["pivotTables"][0]["status"]["state"], "complete");
     }
 }
 

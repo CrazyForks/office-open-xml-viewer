@@ -5,6 +5,14 @@ use ooxml_common::{
 };
 
 const PACKAGE_REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+const PIVOT_TABLE_REL_TRANSITIONAL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable";
+const PIVOT_TABLE_REL_STRICT: &str =
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/pivotTable";
+const PIVOT_CACHE_REL_TRANSITIONAL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition";
+const PIVOT_CACHE_REL_STRICT: &str =
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/pivotCacheDefinition";
 
 use crate::{
     resolve_zip_path, CellRange, PivotCacheSource, PivotDataField, PivotDiagnostic,
@@ -22,28 +30,118 @@ pub(crate) fn load_sheet_pivots(
         return (Vec::new(), Vec::new());
     };
     let rels_path = format!("xl/{sheet_dir}/_rels/{sheet_file}.rels");
+    let rels_exists = archive.file_names().any(|name| name == rels_path);
     let Ok(rels_xml) = read_zip_string(archive, &rels_path) else {
-        return (Vec::new(), Vec::new());
+        return if rels_exists {
+            (
+                Vec::new(),
+                vec![PivotDiagnostic {
+                    part: rels_path,
+                    reason: PivotDiagnosticReason::UnreadableWorksheetRelationships,
+                }],
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
     };
     let Ok(rels) = parse_guarded(&rels_xml) else {
-        return (Vec::new(), Vec::new());
+        return (
+            Vec::new(),
+            vec![PivotDiagnostic {
+                part: rels_path,
+                reason: PivotDiagnosticReason::MalformedWorksheetRelationships,
+            }],
+        );
     };
+    let root = rels.root_element();
+    if root.tag_name().name() != "Relationships"
+        || root.tag_name().namespace() != Some(PACKAGE_REL_NS)
+    {
+        return (
+            Vec::new(),
+            vec![PivotDiagnostic {
+                part: rels_path,
+                reason: PivotDiagnosticReason::MalformedWorksheetRelationships,
+            }],
+        );
+    }
     let base = format!("xl/{sheet_dir}");
-    let targets: Vec<_> = rels
-        .root_element()
-        .children()
-        .filter(|n| n.is_element())
-        .filter(|n| n.tag_name().namespace() == Some(PACKAGE_REL_NS))
-        .filter(|n| {
-            n.attribute("Type")
-                .is_some_and(|t| t.ends_with("/pivotTable"))
-        })
-        .filter_map(|n| n.attribute("Target"))
-        .map(|target| resolve_zip_path(&base, target))
-        .collect();
-
     let mut tables = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut targets = Vec::new();
+    for relationship in root.children().filter(|node| node.is_element()) {
+        if relationship.tag_name().name() != "Relationship"
+            || relationship.tag_name().namespace() != Some(PACKAGE_REL_NS)
+        {
+            diagnostics.push(PivotDiagnostic {
+                part: rels_path.clone(),
+                reason: PivotDiagnosticReason::MalformedPivotRelationship,
+            });
+            continue;
+        }
+        let rel_type = relationship.attribute("Type");
+        if relationship.attribute("Id").is_none_or(|id| id.is_empty()) {
+            diagnostics.push(PivotDiagnostic {
+                part: rels_path.clone(),
+                reason: if matches!(
+                    rel_type,
+                    Some(PIVOT_TABLE_REL_TRANSITIONAL | PIVOT_TABLE_REL_STRICT)
+                ) {
+                    PivotDiagnosticReason::MalformedPivotRelationship
+                } else {
+                    PivotDiagnosticReason::MalformedWorksheetRelationships
+                },
+            });
+            continue;
+        }
+        let Some(rel_type) = rel_type else {
+            diagnostics.push(PivotDiagnostic {
+                part: rels_path.clone(),
+                reason: PivotDiagnosticReason::MalformedWorksheetRelationships,
+            });
+            continue;
+        };
+        if rel_type != PIVOT_TABLE_REL_TRANSITIONAL && rel_type != PIVOT_TABLE_REL_STRICT {
+            if relationship
+                .attribute("Target")
+                .is_none_or(|target| target.is_empty())
+            {
+                diagnostics.push(PivotDiagnostic {
+                    part: rels_path.clone(),
+                    reason: PivotDiagnosticReason::MalformedWorksheetRelationships,
+                });
+            }
+            continue;
+        }
+        match relationship.attribute("TargetMode") {
+            Some("External") => {
+                diagnostics.push(PivotDiagnostic {
+                    part: rels_path.clone(),
+                    reason: PivotDiagnosticReason::ExternalPivotRelationship,
+                });
+                continue;
+            }
+            None | Some("Internal") => {}
+            Some(_) => {
+                diagnostics.push(PivotDiagnostic {
+                    part: rels_path.clone(),
+                    reason: PivotDiagnosticReason::MalformedPivotRelationship,
+                });
+                continue;
+            }
+        }
+        let Some(target) = relationship
+            .attribute("Target")
+            .filter(|target| !target.is_empty())
+        else {
+            diagnostics.push(PivotDiagnostic {
+                part: rels_path.clone(),
+                reason: PivotDiagnosticReason::MalformedPivotRelationship,
+            });
+            continue;
+        };
+        targets.push(resolve_zip_path(&base, target));
+    }
     for part in targets {
         let xml = match read_zip_string(archive, &part) {
             Ok(xml) => xml,
@@ -172,6 +270,26 @@ fn parse_pivot_table(
         .unwrap_or_default();
 
     let mut reasons = unsupported_features(root);
+    match parse_bool(root.attribute("dataOnRows")) {
+        Ok(true) => reasons.push(PivotPartialReason::UnsupportedSemanticFeature {
+            feature: "pivotTable.dataPlacement".into(),
+        }),
+        Ok(false) => {}
+        Err(()) => reasons.push(PivotPartialReason::MalformedField {
+            field: "pivotTable.dataOnRows".into(),
+        }),
+    }
+    if let Some(data_position) = root.attribute("dataPosition") {
+        if data_position.parse::<u32>().is_ok() {
+            reasons.push(PivotPartialReason::UnsupportedSemanticFeature {
+                feature: "pivotTable.dataPlacement".into(),
+            });
+        } else {
+            reasons.push(PivotPartialReason::MalformedField {
+                field: "pivotTable.dataPosition".into(),
+            });
+        }
+    }
     if malformed_rows {
         reasons.push(PivotPartialReason::MalformedField {
             field: "rowFields".into(),
@@ -256,9 +374,16 @@ fn parse_pivot_table(
                                         let sheet = ws
                                             .and_then(|node| node.attribute("sheet"))
                                             .map(str::to_string);
-                                        let reference = ws
-                                            .and_then(|node| node.attribute("ref"))
+                                        let raw_reference =
+                                            ws.and_then(|node| node.attribute("ref"));
+                                        let reference = raw_reference
+                                            .filter(|value| parse_a1_range(value).is_some())
                                             .map(str::to_string);
+                                        if raw_reference.is_some() && reference.is_none() {
+                                            reasons.push(PivotPartialReason::MalformedField {
+                                                field: "cacheSource.worksheetSource.ref".into(),
+                                            });
+                                        }
                                         let name = ws
                                             .and_then(|node| node.attribute("name"))
                                             .map(str::to_string);
@@ -387,12 +512,17 @@ fn pivot_cache_target(archive: &mut XlsxZip, pivot_part: &str) -> CacheLink {
         .filter(|n| n.is_element())
         .filter(|n| n.tag_name().namespace() == Some(PACKAGE_REL_NS))
         .filter(|n| {
-            n.attribute("Type")
-                .is_some_and(|t| t.ends_with("/pivotCacheDefinition"))
+            matches!(
+                n.attribute("Type"),
+                Some(PIVOT_CACHE_REL_TRANSITIONAL | PIVOT_CACHE_REL_STRICT)
+            )
         })
         .collect();
     match relationships.as_slice() {
         [relationship] => {
+            if relationship.attribute("Id").is_none_or(|id| id.is_empty()) {
+                return CacheLink::Malformed;
+            }
             if relationship.attribute("TargetMode") == Some("External") {
                 return CacheLink::External;
             }

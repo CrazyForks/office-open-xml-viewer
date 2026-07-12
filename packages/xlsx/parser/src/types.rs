@@ -369,6 +369,10 @@ pub struct PivotDiagnostic {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PivotDiagnosticReason {
+    UnreadableWorksheetRelationships,
+    MalformedWorksheetRelationships,
+    MalformedPivotRelationship,
+    ExternalPivotRelationship,
     UnreadablePart,
     MalformedXml,
     MissingIdentity,
