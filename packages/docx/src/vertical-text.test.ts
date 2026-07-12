@@ -226,7 +226,17 @@ function mockCtx(metrics: MockMetrics = {}): { ctx: any; ops: Op[] } {
 describe('drawVerticalRun (§17.6.20 — upright CJK counter-rotated, Latin sideways)', () => {
   it('uses vert only for mirror-fallback marks and keeps other glyphs on manual paths', () => {
     const { ctx, ops } = mockCtx();
-    drawVerticalRunWithCapability(ctx, 'ー〜～、。：；「」“”A', 0, 0, 12, 0, 1, true, true);
+    drawVerticalRunWithCapability(
+      ctx,
+      'ー〜～、。：；「」“”A',
+      0,
+      0,
+      12,
+      0,
+      1,
+      true,
+      () => true,
+    );
     const fills = ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
     expect(fills.map((fill) => fill.text)).toEqual([
       'ー', '〜', '～', '︑', '︒', '：', '；', '﹁', '﹂', '“', '”', 'A',
@@ -476,7 +486,29 @@ describe('vo=Tr rotate-fallback ink overrun (#1014 — ink-sized cell + ink-cent
         '：': { left: 5, right: 24 },
       },
     });
-    expect(verticalRunInkExtraPxWithCapability(ctx, 'ー“：', true)).toBeCloseTo(38, 6);
+    expect(verticalRunInkExtraPxWithCapability(ctx, 'ー“：', () => true)).toBeCloseTo(38, 6);
+  });
+
+  it('uses the same per-code-point vert gate for measurement and painting', () => {
+    const metrics = {
+      inkLR: {
+        'ー': { left: 5, right: 24 },
+        '〜': { left: 5, right: 24 },
+      },
+    };
+    const supported = (cp: number) => cp === 0x30fc;
+    const { ctx } = mockCtx(metrics);
+    expect(verticalRunInkExtraPxWithCapability(ctx, 'ー〜', supported)).toBeCloseTo(19, 6);
+
+    const painted = mockCtx(metrics);
+    drawVerticalRunWithCapability(painted.ctx, 'ー〜', 0, 0, 12, 0, 1, true, supported);
+    const fills = painted.ops.filter((o): o is Extract<Op, { op: 'fillText' }> => o.op === 'fillText');
+    expect(fills.map((fill) => fill.feature)).toEqual(['"vert" 1', 'normal']);
+    const transforms = painted.ops.filter(
+      (o): o is Extract<Op, { op: 'transform' }> => o.op === 'transform',
+    );
+    expect(transforms).toHaveLength(1);
+    expect(transforms[0].d).toBe(-1);
   });
 
   it('applies the same per-glyph growth gate while painting', () => {
@@ -487,7 +519,7 @@ describe('vo=Tr rotate-fallback ink overrun (#1014 — ink-sized cell + ink-cent
         '：': { left: 5, right: 24 },
       },
     });
-    drawVerticalRunWithCapability(ctx, 'ー“：話', 0, 0, 12, 0, 1, true, true);
+    drawVerticalRunWithCapability(ctx, 'ー“：話', 0, 0, 12, 0, 1, true, () => true);
     const translates = ops.filter((o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate');
     expect(translates.map((op) => op.x)).toEqual([5, 24.5, -9.5, 53.5, -9.5, 73]);
   });

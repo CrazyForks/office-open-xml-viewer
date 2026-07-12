@@ -22,6 +22,13 @@ function replaceFontSize(font: string, replacement: string): string {
   );
 }
 
+function composeVertFeature(featureSettings: string): string {
+  const normalized = featureSettings.trim();
+  return normalized === '' || normalized.toLowerCase() === 'normal'
+    ? '"vert" 1'
+    : `${featureSettings}, "vert" 1`;
+}
+
 function probeState(doc: Document): ProbeState {
   const existing = probeStates.get(doc);
   if (existing) return existing;
@@ -71,28 +78,31 @@ function inkBounds(ctx: CanvasRenderingContext2D): { width: number; height: numb
 
 function rasterizeProbe(
   ctx: CanvasRenderingContext2D,
+  cp: number,
   featureSettings: string,
 ): { width: number; height: number } | null {
   const canvas = ctx.canvas;
   canvas.style.fontFeatureSettings = featureSettings;
   ctx.font = ctx.font;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillText('ー', canvas.width / 2, canvas.height / 2);
+  ctx.fillText(String.fromCodePoint(cp), canvas.width / 2, canvas.height / 2);
   return inkBounds(ctx);
 }
 
 /**
- * Whether this main-thread canvas/font can paint the font's OpenType `vert`
- * glyphs. Results are cached by family/weight/style shorthand and invalidated
- * whenever the document FontFaceSet completes or fails a load.
+ * Whether this main-thread canvas/font can paint the requested code point with
+ * a wide-to-tall OpenType `vert` substitution. Results are cached by code point,
+ * feature settings, and family/weight/style shorthand, and invalidated whenever
+ * the document FontFaceSet completes or fails a load.
  */
-export function verticalVertFeatureSupported(ctx: Ctx2D): boolean {
+export function verticalVertFeatureSupported(ctx: Ctx2D, cp: number): boolean {
   const target = canvasElementFor(ctx);
   if (target === null || typeof document === 'undefined') return false;
 
   const doc = target.ownerDocument ?? document;
   const state = probeState(doc);
-  const key = `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}`;
+  const sourceFeature = target.style.fontFeatureSettings;
+  const key = `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${cp}`;
   const cached = state.cache.get(key);
   if (cached !== undefined) return cached;
 
@@ -109,8 +119,8 @@ export function verticalVertFeatureSupported(ctx: Ctx2D): boolean {
       probe.fillStyle = '#000';
       probe.textAlign = 'center';
       probe.textBaseline = 'middle';
-      const plain = rasterizeProbe(probe, 'normal');
-      const vert = rasterizeProbe(probe, '"vert" 1');
+      const plain = rasterizeProbe(probe, cp, sourceFeature);
+      const vert = rasterizeProbe(probe, cp, composeVertFeature(sourceFeature));
       supported =
         plain !== null &&
         vert !== null &&
@@ -129,14 +139,14 @@ export function verticalVertFeatureSupported(ctx: Ctx2D): boolean {
   return supported;
 }
 
-/** Enable the element's `vert` feature, refont, draw, then restore and refont. */
+/** Compose `vert` onto the element features, refont, draw, then restore exactly. */
 export function withVertFeature<T>(ctx: Ctx2D, draw: () => T): T {
   const canvas = ctx.canvas as HTMLCanvasElement;
   const style = canvas?.style;
   if (!style) return draw();
 
   const previous = style.fontFeatureSettings;
-  style.fontFeatureSettings = '"vert" 1';
+  style.fontFeatureSettings = composeVertFeature(previous);
   ctx.font = ctx.font;
   try {
     return draw();

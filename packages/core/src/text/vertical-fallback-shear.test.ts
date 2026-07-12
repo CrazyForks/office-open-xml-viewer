@@ -139,4 +139,25 @@ describe('non-vert prolonged-mark fallback shear', () => {
     expect(verticalFallbackShearCoefficient(ctx, 0x30fc)).toBeCloseTo(0.125, 2);
     expect(reads).toBe(2);
   });
+
+  it('scopes non-DOM cache reuse to the source canvas surface', () => {
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('document', undefined);
+    let reads = 0;
+    const Canvas = rasterCanvas(0.125, () => { reads += 1; });
+    const first = {
+      canvas: new Canvas(10, 10),
+      font: '16px "Surface Mincho", serif',
+    } as unknown as CanvasRenderingContext2D;
+    const second = {
+      canvas: new Canvas(10, 10),
+      font: '16px "Surface Mincho", serif',
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(verticalFallbackShearCoefficient(first, 0x30fc)).toBeCloseTo(0.125, 2);
+    expect(verticalFallbackShearCoefficient(first, 0x30fc)).toBeCloseTo(0.125, 2);
+    expect(reads).toBe(1);
+    expect(verticalFallbackShearCoefficient(second, 0x30fc)).toBeCloseTo(0.125, 2);
+    expect(reads).toBe(2);
+  });
 });

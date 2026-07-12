@@ -50,6 +50,8 @@ import {
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+type VertCapability = (cp: number) => boolean;
+const NO_VERT_CAPABILITY: VertCapability = () => false;
 
 /**
  * Cross-axis (column-thickness) offset, in px, from the alphabetic baseline to
@@ -135,7 +137,7 @@ export function drawEaVertRunWithCapability(
   fontPx: number,
   letterSpacingPx: number,
   paint: 'fill' | 'stroke' = 'fill',
-  vertCapable = false,
+  vertCapability: VertCapability = NO_VERT_CAPABILITY,
 ): void {
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
@@ -163,7 +165,8 @@ export function drawEaVertRunWithCapability(
     const bracketCp = vo === 'Tr' ? verticalBracketFormSubstitute(cp) : null;
     const uprightFallback = vo === 'Tr' && bracketCp === null && verticalTrUprightFallback(cp);
     const upright = vo === 'U' || vo === 'Tu' || bracketCp !== null || uprightFallback;
-    if (vertCapable && verticalTrMirrorFallback(cp)) {
+    const vertGlyphSupported = verticalTrMirrorFallback(cp) && vertCapability(cp);
+    if (vertGlyphSupported) {
       const cx = x + ax + adv / 2;
       ctx.save();
       ctx.translate(cx, crossCenterY);
@@ -207,9 +210,10 @@ export function drawEaVertRunWithCapability(
       // The long-stroke marks ー and 〜 ～ (core `verticalTrMirrorFallback`) are the
       // EXCEPTION: their font-designed vertical form is the HORIZONTAL REFLECTION of
       // the +90° rotation, not the rotation (Word PDF + font `vert` glyph verified — a
-      // plain rotation of ー bulges LEFT, Word bulges RIGHT). A Canvas cannot reach the
-      // `vert` glyph, so reflect about the cell centre (the on-screen horizontal
-      // mirror in the +90° page frame). For U+30FC only, the shared runtime
+      // plain rotation of ー bulges LEFT, Word bulges RIGHT). When the element/CSS
+      // route or this glyph's `vert` coverage is unavailable, reflect about the cell
+      // centre (the on-screen horizontal mirror in the +90° page frame). For U+30FC
+      // only, the shared runtime
       // coefficient adds y'=m·x−y to cancel the horizontal glyph's measured drift;
       // the designed wave-mark drift remains untouched. Same fix as docx.
       const cx = x + ax + adv / 2;
@@ -248,7 +252,6 @@ export function drawEaVertRun(
   letterSpacingPx: number,
   paint: 'fill' | 'stroke' = 'fill',
 ): void {
-  const vertCapable = verticalVertFeatureSupported(ctx);
   drawEaVertRunWithCapability(
     ctx,
     text,
@@ -257,6 +260,6 @@ export function drawEaVertRun(
     fontPx,
     letterSpacingPx,
     paint,
-    vertCapable,
+    (cp) => verticalVertFeatureSupported(ctx, cp),
   );
 }

@@ -19,7 +19,7 @@ const PROLONGED_SOUND_MARK = 0x30fc;
 const RASTER_SIZE_PX = 512;
 const RASTER_FONT_PX = 384;
 const documentStates = new WeakMap<object, CacheState>();
-const constructorStates = new WeakMap<object, CacheState>();
+const surfaceStates = new WeakMap<object, CacheState>();
 const fallbackState: CacheState = { cache: new Map(), epoch: 0 };
 
 function replaceFontSize(font: string, replacement: string): string {
@@ -51,12 +51,12 @@ function cacheState(ctx: Ctx2D): CacheState {
     return state;
   }
 
-  const constructor = ctx.canvas?.constructor;
-  if (typeof constructor === 'function') {
-    const existing = constructorStates.get(constructor);
+  const surface = ctx.canvas;
+  if (surface !== null && (typeof surface === 'object' || typeof surface === 'function')) {
+    const existing = surfaceStates.get(surface);
     if (existing) return existing;
     const state: CacheState = { cache: new Map(), epoch: 0 };
-    constructorStates.set(constructor, state);
+    surfaceStates.set(surface, state);
     return state;
   }
   return fallbackState;
@@ -115,8 +115,10 @@ export function verticalFallbackShearEnabled(cp: number): boolean {
 
 /**
  * Runtime-measured horizontal-glyph slope used by the non-`vert` mirror fallback.
- * A FontFace completion advances the cache epoch. Any allocation, paint, or
- * readback failure returns and caches zero, preserving the prior fallback.
+ * DOM results follow the document FontFace epoch; worker/Node results are cached
+ * only on the source canvas surface, so a new surface remeasures after host-side
+ * font registration. Any allocation, paint, or readback failure returns and
+ * caches zero, preserving the prior fallback.
  */
 export function verticalFallbackShearCoefficient(ctx: Ctx2D, cp: number): number {
   if (!verticalFallbackShearEnabled(cp)) return 0;
