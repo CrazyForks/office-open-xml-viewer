@@ -149,6 +149,15 @@ const WIN_METRICS: ReadonlyArray<readonly [test: (n: string) => boolean, m: WinM
   // substituted-canvas behavior for Latin lines predates this entry and
   // changing it is out of the issue #1013 adjudication's scope.
   //
+  // Yu Gothic scope note: the hhea numbers are verified for BOTH families
+  // (byte-identical tables), but the 1.3 Word FE factor is Word-PDF-measured
+  // on Yu Mincho only — for Yu Gothic it is an EXTRAPOLATION via the identical
+  // metrics and the same vendor pairing. A dedicated Yu Gothic sweep page
+  // (sample-58 style) should confirm it; without this entry a 12pt Yu Gothic
+  // line on an 18pt grid would round by the substitute's ~1.6 em Canvas box to
+  // 2 cells, contradicting the measured Yu Mincho 1 cell, so sharing the value
+  // is the lower-risk reading until measured.
+  //
   // "Yu Gothic UI" is EXCLUDED: the UI faces have different (unverified)
   // metrics, like the Arial Narrow case above.
   [

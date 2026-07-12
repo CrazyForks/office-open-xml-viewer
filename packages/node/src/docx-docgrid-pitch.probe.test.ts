@@ -87,7 +87,7 @@ function storedZip(files: Record<string, string>): Uint8Array {
  *  <w:br/>. Line spacing is single via docDefaults ONLY (inherited-only, the
  *  state that grid-snaps per §17.6.5 — an explicit per-pPr w:line would take
  *  the multiplier path instead, matching Word). */
-function docxWith(sizePt: number, sectPr: string): Uint8Array {
+function docxWith(sizePt: number, sectPr: string, lineText?: string): Uint8Array {
   const contentTypes =
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -116,7 +116,7 @@ function docxWith(sizePt: number, sectPr: string): Uint8Array {
     '</w:docDefaults></w:styles>';
   const sz = String(Math.round(sizePt * 2));
   const rpr = `<w:rPr><w:rFonts w:ascii="Yu Mincho" w:hAnsi="Yu Mincho" w:eastAsia="游明朝"/><w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/></w:rPr>`;
-  const line = '国境の長いトンネルを抜けると雪国であった';
+  const line = lineText ?? '国境の長いトンネルを抜けると雪国であった';
   const runs = Array.from({ length: 4 }, (_, i) =>
     `<w:r>${rpr}<w:t xml:space="preserve">${line}</w:t></w:r>` +
     (i < 3 ? `<w:r>${rpr}<w:br/></w:r>` : ''),
@@ -137,16 +137,16 @@ function docxWith(sizePt: number, sectPr: string): Uint8Array {
 const A4 = '<w:pgSz w:w="11906" w:h="16838"/>' +
   '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
 
-function sectPr(opts: { vertical?: boolean; pitchTw?: number }): string {
+function sectPr(opts: { vertical?: boolean; pitchTw?: number; gridType?: string }): string {
   return A4 +
     (opts.vertical ? '<w:textDirection w:val="tbRl"/>' : '') +
-    (opts.pitchTw ? `<w:docGrid w:type="lines" w:linePitch="${opts.pitchTw}"/>` : '');
+    (opts.pitchTw ? `<w:docGrid w:type="${opts.gridType ?? 'lines'}" w:linePitch="${opts.pitchTw}"/>` : '');
 }
 
 /** Render page 0 and return the mean gap between consecutive line positions —
  *  physical y for horizontal pages, physical x (column advance, right→left
  *  page rotated to +x order) for vertical ones. */
-async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x'): Promise<number> {
+async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x', marker = '国境'): Promise<number> {
   const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
   const { renderDocumentToCanvas } = rendererMod as Any;
   const doc = parseDocx(bytes);
@@ -159,7 +159,7 @@ async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x'): Promise<number>
       dpr: 1,
       width: doc.section.pageWidth,
       onTextRun: (r: Any) => {
-        if (String(r.text).includes('国境')) pos.push(axis === 'y' ? r.y : r.x);
+        if (String(r.text).includes(marker)) pos.push(axis === 'y' ? r.y : r.x);
       },
     });
   } finally {
@@ -203,6 +203,30 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
     it('no docGrid: the Yu Mincho design single line (1.43267 em; 16pt → 22.92pt)', async () => {
       const pitch = await measurePitch(docxWith(16, sectPr({})), 'y');
       expect(pitch).toBeCloseTo(16 * ((2257 * 1.3) / 2048), 1);
+    });
+    it('a 20pt line on a 24pt grid takes 2 cells (48pt) — sample-58 C3', async () => {
+      const pitch = await measurePitch(docxWith(20, sectPr({ vertical: true, pitchTw: 480 })), 'x');
+      expect(pitch).toBeCloseTo(48, 1);
+    });
+    it('linesAndChars behaves like lines (grid-type-agnostic; 16pt/18pt → 36pt) — sample-58 D2', async () => {
+      const pitch = await measurePitch(
+        docxWith(16, sectPr({ vertical: true, pitchTw: 360, gridType: 'linesAndChars' })), 'x');
+      expect(pitch).toBeCloseTo(36, 1);
+    });
+    it('a LATIN-only Yu Mincho line keeps its natural box above a one-pitch floor, never FE cells', async () => {
+      // §17.6.5 leaves Latin lines at default spacing above a one-pitch floor
+      // (max(natural, pitch)), and the eaOnly Yu Mincho FE height must NOT
+      // fire for a Latin line (demo/sample-1 footnote adjudication: Word gives
+      // Latin Yu Mincho the win box, not 1.43267 em). The Latin natural is the
+      // SUBSTITUTED font's box (environment-dependent in this headless run),
+      // so calibrate it from the no-grid render and assert the on-grid value
+      // is exactly max(natural, pitch) — an FE regression would instead
+      // cell-round 16pt to 2 cells (36pt).
+      const latin = 'The quick brown fox jumps over the dog';
+      const natural = await measurePitch(docxWith(16, sectPr({}), latin), 'y', 'quick');
+      const pitch = await measurePitch(docxWith(16, sectPr({ pitchTw: 360 }), latin), 'y', 'quick');
+      expect(pitch).toBeCloseTo(Math.max(natural, 18), 1);
+      expect(pitch).toBeLessThan(36);
     });
   },
 );

@@ -2732,8 +2732,12 @@ export function layoutLines(
       const intendedEm = ts.smallCaps && !ts.vertAlign ? ts.fontSize * scale : effectiveFontPx(ts);
       // Script hint: eaOnly design heights (Word FE 1.3 × hhea, e.g. Yu Mincho)
       // apply to East Asian segments only — a Latin segment in the same font
-      // keeps its Canvas box (issue #1013 / demo sample-1 footnote).
-      const intended = intendedSingleLinePx(ts.fontFamily, intendedEm, EAST_ASIAN_RE.test(ts.text));
+      // keeps its Canvas box (issue #1013 / demo sample-1 footnote). Ruby
+      // segments are excluded too: a ruby line reserves its MEASURED base +
+      // annotation box (sample-5 calibration) and Word's FE height for a
+      // ruby-bearing line is unmeasured, so the pre-#1013 metrics stand.
+      const segScriptHint = EAST_ASIAN_RE.test(ts.text) && !ts.ruby;
+      const intended = intendedSingleLinePx(ts.fontFamily, intendedEm, segScriptHint);
       if (intended > lineIntendedSingle) lineIntendedSingle = intended;
     }
   };
@@ -3156,7 +3160,9 @@ export function layoutLines(
       ctx.font = prevFont;
       metricEmPx = fullPx;
     }
-    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, EAST_ASIAN_RE.test(s.text));
+    // FE design correction for EA segments only; ruby keeps its measured box
+    // (see addToLine's segScriptHint note).
+    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, EAST_ASIAN_RE.test(s.text) && !s.ruby);
     let asc = corrected.ascent;
     const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
@@ -3715,13 +3721,16 @@ export function rescaleLayoutLines(
       metricM = ctx.measureText(s.text || 'X');
       metricEmPx = fullPx;
     }
-    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, EAST_ASIAN_RE.test(s.text));
+    // FE design correction for EA segments only; ruby keeps its measured box
+    // (see addToLine's segScriptHint note).
+    const segScriptHint = EAST_ASIAN_RE.test(s.text) && !s.ruby;
+    const corrected = correctedLineMetrics(metricM, s.fontFamily, fullPx, metricEmPx, segScriptHint);
     // §17.3.3.25 — ruby reserves extra ascent room (rt size × 1.5), same as layoutLines.
     const asc = s.ruby ? corrected.ascent + s.ruby.fontSizePt * scale * 1.5 : corrected.ascent;
     // Intended single-line floor (font-metrics.ts) — small caps keep the FULL run
     // size here too (addToLine's intendedEm).
     const intendedEm = s.smallCaps && !s.vertAlign ? fullPx : effPx;
-    const intended = intendedSingleLinePx(s.fontFamily, intendedEm, EAST_ASIAN_RE.test(s.text));
+    const intended = intendedSingleLinePx(s.fontFamily, intendedEm, segScriptHint);
     return { advance, asc, desc: corrected.descent, intended };
   };
 
