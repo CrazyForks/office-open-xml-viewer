@@ -113,6 +113,7 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     translate: (x: number) => { tx += x; },
     rotate: (a: number) => { rotation += a; },
     scale: (_sx: number, syArg: number) => { sy *= syArg; },
+    transform: (_a: number, _b: number, _c: number, d: number) => { sy *= d; },
     beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, stroke: () => {},
     clip: () => {}, rect: () => {}, fillRect: () => {}, drawImage: () => {},
     setLineDash: () => {}, closePath: () => {}, arc: () => {},

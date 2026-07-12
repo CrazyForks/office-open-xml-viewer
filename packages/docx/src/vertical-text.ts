@@ -72,6 +72,7 @@ import {
   verticalTrMirrorFallback,
   verticalVertFeatureSupported,
   withVertFeature,
+  verticalFallbackShearCoefficient,
 } from '@silurus/ooxml-core';
 
 /** How a code point is painted inside the +90°-rotated vertical page:
@@ -544,11 +545,10 @@ export function drawVerticalRunWithCapability(
       // between orientations (Word PDF sample-47 + font `vert` glyph verified: a plain
       // rotation of ー bulges LEFT, Word/the designed glyph bulge RIGHT). Since a
       // Canvas cannot invoke the font's `vert` OpenType glyph, we reproduce it by
-      // reflecting: in the +90° page frame the on-screen horizontal mirror is
-      // `scale(1, -1)` about the cell centre. Advance/measure and the column centring
-      // are unchanged (the em box is symmetric about the cell centre), so only the
-      // glyph's chirality flips. (Substituted bracket forms never reach here — they
-      // were drawn upright above; a rotated bracket's ink offset is not measurable.)
+      // reflecting about the cell centre. For U+30FC only, the shared runtime
+      // coefficient adds y'=m·x−y to cancel the horizontal glyph's measured drift;
+      // the designed wave-mark drift remains untouched. Because x'=s·x is independent
+      // of y, advance/measure and along-column centring are unchanged.
       const cx = x + ax + adv / 2;
       const mirror = verticalTrMirrorFallback(cp);
       ctx.textAlign = 'center';
@@ -556,17 +556,20 @@ export function drawVerticalRunWithCapability(
       // #1014: `rotateInkShiftPx` (glyph-space, non-zero ONLY when the cell was grown
       // to the ink extent above) re-centres the ink on the grown cell — a `center`
       // draw centres the glyph's ADVANCE, and an under-reported advance is off-centre
-      // from the ink. It rides the local frame so it composes with the §17.3.2.43
-      // `w:w` scale and the reflection; 0 (the common path) leaves today's advance-
-      // centred draw byte-identical.
+      // from the ink. It is applied separately on the advance OUTPUT axis before
+      // the §17.3.2.43 `w:w` + mirror/shear matrix, avoiding an m·shift cross-axis
+      // displacement. Zero (the common path) leaves advance centring unchanged.
       if (mirror || scaled || rotateInkShiftPx !== 0) {
         ctx.save();
         ctx.translate(cx, baseline);
-        // `scale(1, -1)` is the on-screen horizontal mirror in the +90° page frame
-        // (screen −x ↔ page-frame +y); combine with the §17.3.2.43 `w:w` width
-        // compression on the line axis. Non-mirror glyphs keep sy=+1.
-        ctx.scale(charScale, mirror ? -1 : 1);
-        ctx.fillText(ch, rotateInkShiftPx, 0);
+        // Keep the #1014 ink shift on the advance OUTPUT axis. Folding it into
+        // the shear matrix would introduce an m·shift cross-axis displacement.
+        if (rotateInkShiftPx !== 0) ctx.translate(charScale * rotateInkShiftPx, 0);
+        const shear = verticalFallbackShearCoefficient(ctx, cp);
+        // x'=charScale·x preserves along-column extent; y'=shear·x−y mirrors
+        // chirality and cancels the horizontal glyph's measured stroke drift.
+        ctx.transform(charScale, shear, 0, mirror ? -1 : 1, 0, 0);
+        ctx.fillText(ch, 0, 0);
         ctx.restore();
       } else {
         ctx.fillText(ch, cx, baseline);

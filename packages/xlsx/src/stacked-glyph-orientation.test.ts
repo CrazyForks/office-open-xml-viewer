@@ -79,6 +79,7 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; calls: DrawCall[] } {
     translate: () => {},
     rotate: (a: number) => { rotation += a; },
     scale: (_sx: number, syArg: number) => { sy *= syArg; },
+    transform: (_a: number, _b: number, _c: number, d: number) => { sy *= d; },
     fillStyle: '#000',
   };
   return { ctx: ctx as unknown as CanvasRenderingContext2D, calls };

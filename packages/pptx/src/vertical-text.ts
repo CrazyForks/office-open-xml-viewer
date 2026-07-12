@@ -46,6 +46,7 @@ import {
   verticalTrMirrorFallback,
   verticalVertFeatureSupported,
   withVertFeature,
+  verticalFallbackShearCoefficient,
 } from '@silurus/ooxml-core';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -207,15 +208,17 @@ export function drawEaVertRunWithCapability(
       // EXCEPTION: their font-designed vertical form is the HORIZONTAL REFLECTION of
       // the +90° rotation, not the rotation (Word PDF + font `vert` glyph verified — a
       // plain rotation of ー bulges LEFT, Word bulges RIGHT). A Canvas cannot reach the
-      // `vert` glyph, so reflect via `scale(1, -1)` about the cell centre (the on-screen
-      // horizontal mirror in the +90° page frame). Same fix as docx `drawVerticalRun`.
+      // `vert` glyph, so reflect about the cell centre (the on-screen horizontal
+      // mirror in the +90° page frame). For U+30FC only, the shared runtime
+      // coefficient adds y'=m·x−y to cancel the horizontal glyph's measured drift;
+      // the designed wave-mark drift remains untouched. Same fix as docx.
       const cx = x + ax + adv / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       if (verticalTrMirrorFallback(cp)) {
         ctx.save();
         ctx.translate(cx, crossCenterY);
-        ctx.scale(1, -1);
+        ctx.transform(1, verticalFallbackShearCoefficient(ctx, cp), 0, -1, 0, 0);
         draw(ch, 0, 0);
         ctx.restore();
       } else {
