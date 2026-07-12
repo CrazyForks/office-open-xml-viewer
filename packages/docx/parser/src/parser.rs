@@ -3620,10 +3620,16 @@ fn parse_run_inner(
                     .and_then(|v| v.parse::<f64>().ok())
                     .map(|hp| hp / 2.0) // half-points → points
                     .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
+                let hps_raise_pt = child_w(child, "rubyPr")
+                    .and_then(|rp| child_w(rp, "hpsRaise"))
+                    .and_then(|hps_raise| attr_w(hps_raise, "val"))
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|hp| hp / 2.0); // half-points → points (§17.3.3.12)
                 let ruby = if !rt_text.is_empty() {
                     Some(RubyAnnotation {
                         text: rt_text,
                         font_size_pt: rt_size_pt,
+                        hps_raise_pt,
                     })
                 } else {
                     None
@@ -5696,9 +5702,15 @@ fn extract_simple_paragraph_text(
                         .and_then(|v| v.parse::<f64>().ok())
                         .map(|hp| hp / 2.0)
                         .unwrap_or_else(|| fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE) / 2.0);
+                    let hps_raise_pt = child_w(ruby_node, "rubyPr")
+                        .and_then(|rp| child_w(rp, "hpsRaise"))
+                        .and_then(|hps_raise| attr_w(hps_raise, "val"))
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .map(|hp| hp / 2.0);
                     Some(RubyAnnotation {
                         text: rt_text,
                         font_size_pt,
+                        hps_raise_pt,
                     })
                 };
                 // §17.3.3.25 + §17.3.3.32 — split the base at tabs so the shared
@@ -8490,6 +8502,58 @@ mod tests {
                 _ => None,
             })
             .expect("expected a text run")
+    }
+
+    #[test]
+    fn body_ruby_surfaces_hps_raise_and_omits_it_when_absent() {
+        let base = RunFmt::default();
+        let styles = StyleMap::parse("");
+        let ruby = |ruby_pr: &str| {
+            format!(
+                r#"<w:r><w:ruby>
+                    <w:rubyPr><w:hps w:val="15"/>{ruby_pr}</w:rubyPr>
+                    <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+                    <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+                  </w:ruby></w:r>"#
+            )
+        };
+
+        let with_raise = parse_para(&ruby(r#"<w:hpsRaise w:val="30"/>"#), &base, &styles);
+        let annotation = first_text(&with_raise)
+            .ruby
+            .as_ref()
+            .expect("ruby annotation");
+        assert_eq!(
+            annotation.font_size_pt, 7.5,
+            "w:hps is stored in half-points"
+        );
+        assert_eq!(annotation.hps_raise_pt, Some(15.0));
+        assert_eq!(
+            serde_json::to_value(annotation).unwrap()["hpsRaisePt"],
+            serde_json::json!(15.0),
+        );
+
+        let without_raise = parse_para(&ruby(""), &base, &styles);
+        let annotation = first_text(&without_raise)
+            .ruby
+            .as_ref()
+            .expect("ruby annotation");
+        assert_eq!(annotation.hps_raise_pt, None);
+        assert!(
+            serde_json::to_value(annotation)
+                .unwrap()
+                .get("hpsRaisePt")
+                .is_none(),
+            "absent w:hpsRaise must remain distinguishable from zero",
+        );
+
+        let zero = parse_para(&ruby(r#"<w:hpsRaise w:val="0"/>"#), &base, &styles);
+        let annotation = first_text(&zero).ruby.as_ref().expect("ruby annotation");
+        assert_eq!(annotation.hps_raise_pt, Some(0.0));
+        assert_eq!(
+            serde_json::to_value(annotation).unwrap()["hpsRaisePt"],
+            serde_json::json!(0.0),
+        );
     }
 
     // §17.16.5.69 — Word generates each TOC entry as a navigation hyperlink
@@ -18150,6 +18214,46 @@ mod ruby_tab_tests {
         let media: HashMap<String, String> = HashMap::new();
         let theme = ThemeColors::default();
         extract_simple_paragraph_text(&style_map, &mut num_map, doc.root_element(), &theme, &media)
+    }
+
+    #[test]
+    fn shape_ruby_surfaces_hps_raise_and_omits_it_when_absent() {
+        let parse = |ruby_pr: &str| {
+            parse_shape_para(&format!(
+                r#"<w:r><w:ruby>
+                    <w:rubyPr><w:hps w:val="15"/>{ruby_pr}</w:rubyPr>
+                    <w:rt><w:r><w:t>かん</w:t></w:r></w:rt>
+                    <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+                  </w:ruby></w:r>"#
+            ))
+            .expect("text-box paragraph yields a ShapeText block")
+        };
+
+        let with_raise = parse(r#"<w:hpsRaise w:val="30"/>"#);
+        let annotation = with_raise.runs[0].ruby.as_ref().expect("ruby annotation");
+        assert_eq!(
+            annotation.font_size_pt, 7.5,
+            "w:hps is stored in half-points"
+        );
+        assert_eq!(annotation.hps_raise_pt, Some(15.0));
+        assert_eq!(
+            serde_json::to_value(annotation).unwrap()["hpsRaisePt"],
+            serde_json::json!(15.0),
+        );
+
+        let without_raise = parse("");
+        let annotation = without_raise.runs[0]
+            .ruby
+            .as_ref()
+            .expect("ruby annotation");
+        assert_eq!(annotation.hps_raise_pt, None);
+        assert!(
+            serde_json::to_value(annotation)
+                .unwrap()
+                .get("hpsRaisePt")
+                .is_none(),
+            "absent w:hpsRaise must remain distinguishable from zero",
+        );
     }
 
     /// ECMA-376 §17.3.3.25 (`w:ruby`) + §17.3.3.32 (`w:tab`) — a `<w:tab/>` inside

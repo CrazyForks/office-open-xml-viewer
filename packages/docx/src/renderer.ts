@@ -9383,7 +9383,9 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           // characters don't touch. fillText baseline is at the line of the
           // characters, so subtract the ruby descent + small gap from the
           // base's ascent line to position correctly.
-          const rubyBaseline = baseline + yOffset - effSizePx * 0.85 - rubySizePx * 0.1;
+          const rubyBaseline = s.ruby.hpsRaisePt != null
+            ? baseline + yOffset - s.ruby.hpsRaisePt * scale
+            : baseline + yOffset - effSizePx * 0.85 - rubySizePx * 0.1;
           // Ruby shares glyphColor, so a track-changes run's ruby inherits the
           // author revision color (a behavior change from previously ignoring
           // revColor for ruby).
@@ -11184,7 +11186,10 @@ export function renderShapeText(
         const rubyReserve = mongolianLineFlip
           ? line.segments.reduce((reserve, seg) => {
               if (!('text' in seg) || !seg.ruby) return reserve;
-              return Math.max(reserve, rubyAscentReservePx(seg.ruby.fontSizePt, scale));
+              return Math.max(
+                reserve,
+                rubyAscentReservePx(seg.ruby.fontSizePt, seg.ruby.hpsRaisePt, scale),
+              );
             }, 0)
           : 0;
         const baseline =
@@ -11424,7 +11429,9 @@ export function renderShapeText(
               const rubyPx = s.ruby.fontSizePt * scale;
               const rubyChars = [...s.ruby.text];
               const spanAlong = s.measuredWidth;
-              const rubyCross = baseline + yOffset - (effSizePx / 2 + rubyPx);
+              const rubyCross = s.ruby.hpsRaisePt != null
+                ? baseline + yOffset - s.ruby.hpsRaisePt * scale
+                : baseline + yOffset - (effSizePx / 2 + rubyPx);
               const natural = rubyChars.length * rubyPx;
               const along0 = natural <= spanAlong ? x : x + (spanAlong - natural) / 2;
               const step = natural <= spanAlong ? spanAlong / rubyChars.length : rubyPx;
@@ -11551,7 +11558,9 @@ export function renderShapeText(
             ctx.font = rubyFont;
             const rubyW = ctx.measureText(s.ruby.text).width;
             const rubyX = x + (spanW - rubyW) / 2;
-            const rubyBaseline = baseline + yOffset - effSizePx * 0.85 - rubySizePx * 0.1;
+            const rubyBaseline = s.ruby.hpsRaisePt != null
+              ? baseline + yOffset - s.ruby.hpsRaisePt * scale
+              : baseline + yOffset - effSizePx * 0.85 - rubySizePx * 0.1;
             ctx.fillText(s.ruby.text, rubyX, rubyBaseline);
             ctx.restore();
           }

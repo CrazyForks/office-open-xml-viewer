@@ -1310,6 +1310,10 @@ export interface RubyAnnotation {
   text: string;
   /** Annotation font size in pt. Word stores this as half-points in `<w:hps>`. */
   fontSizePt: number;
+  /** Distance “between the phonetic guide base text and the phonetic guide
+   *  text” in pt. Word stores this as half-points in `<w:hpsRaise>`
+   *  (ECMA-376 §17.3.3.12). */
+  hpsRaisePt?: number;
 }
 
 /** ECMA-376 §17.18.24 ST_Em — the emphasis-mark styles a run may carry via

@@ -502,6 +502,89 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     }
   });
 
+  it('mongolianVert hpsRaise increases the ruby-bearing column advance by the reservation delta', () => {
+    const render = (ruby: false | { hpsRaisePt?: number }) => {
+      const { ctx, glyphs } = makeMatrixCtx();
+      const baseSizePt = 15;
+      const rubySizePt = 7.5;
+      const baseRun: ShapeTextRun = {
+        text: '漢', fontSizePt: baseSizePt, fontFamily: 'NotInMetrics',
+        ...(ruby ? { ruby: { text: 'かん', fontSizePt: rubySizePt, ...ruby } } : {}),
+      };
+      const rubyBlock: ShapeText = {
+        text: '漢', fontSizePt: baseSizePt, alignment: 'left',
+        runs: [baseRun],
+      };
+      const nextBlock: ShapeText = {
+        text: CJK, fontSizePt: baseSizePt, alignment: 'left',
+        runs: [{ text: CJK, fontSizePt: baseSizePt, fontFamily: 'NotInMetrics' }],
+      };
+      const shape = richTextbox([baseRun], 'mongolianVert');
+      (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [rubyBlock, nextBlock];
+      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      const base = glyphs.find((g) => g.text.includes('漢'));
+      const next = glyphs.find((g) => g.text.includes(CJK));
+      const rubyGlyphs = glyphs.filter((g) => /[かん]/.test(g.text));
+      expect(base, 'base glyph drawn').toBeDefined();
+      expect(next, 'next-column glyph drawn').toBeDefined();
+      if (ruby) expect(rubyGlyphs.length, 'ruby glyphs drawn').toBe(2);
+      return {
+        columnAdvance: next!.devX - base!.devX,
+        rubyCrossOffset: rubyGlyphs.length > 0
+          ? Math.max(...rubyGlyphs.map((g) => g.devX)) - base!.devX
+          : NaN,
+      };
+    };
+
+    const plain = render(false);
+    const fallback = render({});
+    const zero = render({ hpsRaisePt: 0 });
+    const raised = render({ hpsRaisePt: 15 });
+    expect(
+      fallback.columnAdvance - plain.columnAdvance,
+      'the absent-hpsRaise column reserves 1.5 × 7.5pt',
+    ).toBeCloseTo(11.25, 5);
+    expect(
+      raised.columnAdvance - fallback.columnAdvance,
+      'the explicit reservation grows from 11.25pt to 15pt',
+    ).toBeCloseTo(3.75, 5);
+    expect(zero.columnAdvance, 'zero hpsRaise adds no column reservation')
+      .toBeCloseTo(plain.columnAdvance, 5);
+    expect(zero.rubyCrossOffset, 'zero hpsRaise draws ruby on the base centerline').toBeCloseTo(0, 5);
+    expect(
+      raised.rubyCrossOffset,
+      '15pt hpsRaise equals the established effSize/2 + rubySize draw offset',
+    ).toBeCloseTo(fallback.rubyCrossOffset, 5);
+  });
+
+  it('mongolianVert without hpsRaise keeps the ruby-size-times-1.5 column reservation', () => {
+    const columnAdvance = (withRuby: boolean): number => {
+      const { ctx, glyphs } = makeMatrixCtx();
+      const baseRun: ShapeTextRun = {
+        text: '漢', fontSizePt: 15, fontFamily: 'NotInMetrics',
+        ...(withRuby ? { ruby: { text: 'かん', fontSizePt: 7.5 } } : {}),
+      };
+      const rubyBlock: ShapeText = {
+        text: '漢', fontSizePt: 15, alignment: 'left',
+        runs: [baseRun],
+      };
+      const nextBlock: ShapeText = {
+        text: CJK, fontSizePt: 15, alignment: 'left',
+        runs: [{ text: CJK, fontSizePt: 15, fontFamily: 'NotInMetrics' }],
+      };
+      const shape = richTextbox([baseRun], 'mongolianVert');
+      (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [rubyBlock, nextBlock];
+      renderShapeText(shape, 0, 0, 200, 100, ctx, 1, {});
+      const base = glyphs.find((g) => g.text.includes('漢'));
+      const next = glyphs.find((g) => g.text.includes(CJK));
+      expect(base, 'base glyph drawn').toBeDefined();
+      expect(next, 'next-column glyph drawn').toBeDefined();
+      return next!.devX - base!.devX;
+    };
+
+    expect(columnAdvance(true) - columnAdvance(false)).toBeCloseTo(11.25, 5);
+  });
+
   // Autofit (spAutoFit) shares the same line resolver: a ruby-bearing vertical
   // line must widen the fitted cross extent by the same reservation, or the
   // grown box would clip the furigana (sample-53 box (d) class).
