@@ -883,6 +883,16 @@ pub(crate) fn parse_paragraph(
         })
         .unwrap_or_default();
 
+    // §21.1.2.2.7 defTabSz — the paragraph's default tab interval (EMU). When a
+    // `\t` has no reachable explicit stop it snaps to this grid (issue #1006).
+    // Read only from the paragraph's own pPr; a value inherited through
+    // lstStyle/lvlNpPr/layout/master is not resolved here. Acceptable because the
+    // renderer falls back to PowerPoint's universal 1-inch default (914400 EMU) —
+    // the value every real deck's defaultTextStyle carries.
+    let def_tab_sz = p_pr
+        .and_then(|n| attr_i64(&n, "defTabSz"))
+        .filter(|&v| v > 0);
+
     // Paragraph-level default run properties (pPr > defRPr)
     let def_rpr = p_pr.and_then(|n| child(n, "defRPr"));
     let def_font_size = def_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
@@ -1011,6 +1021,7 @@ pub(crate) fn parse_paragraph(
         def_italic,
         def_font_family,
         tab_stops,
+        def_tab_sz,
         rtl,
         ea_ln_brk,
         runs,
