@@ -77,4 +77,31 @@ describe('resolveTabWidths — inline tab gap resolution (§21.1.2.1.x)', () => 
     const out = resolveTabWidths(items, [S(400, 'l'), S(200, 'l')], 0, 600, 0);
     expect(out).toEqual([200, 10, 190, 10]);
   });
+
+  // §21.1.2.1.1 / §21.1.2.2.7 default tab grid (defTabSz) — issue #1006.
+  it('defTabSz grid: a tab with no explicit stops jumps to the next grid line', () => {
+    // Grid 100; pen 0 → first grid stop 100 (LEFT). Cell keeps its width.
+    const out = resolveTabWidths([tab(), text(30)], [], 0, 600, 0, 100);
+    expect(out).toEqual([100, 30]);
+  });
+
+  it('defTabSz grid resumes past the last explicit stop', () => {
+    // Explicit l@120 lands cell 1; the SECOND tab (pen 150) has no explicit stop
+    // past it → default grid 100 gives the next line at 200.
+    const items = [tab(), text(30), tab(), text(20)];
+    const out = resolveTabWidths(items, [S(120, 'l')], 0, 600, 0, 100);
+    // gap1 = 120, then text 30 → pen 150; gap2 to grid 200 = 50.
+    expect(out).toEqual([120, 30, 50, 20]);
+  });
+
+  it('defTabSz grid picks the NEXT line when the pen sits exactly on a grid line', () => {
+    // pen starts at 100 (on the grid); the tab must advance to 200, not stay.
+    const out = resolveTabWidths([tab(), text(10)], [], 100, 600, 0, 100);
+    expect(out).toEqual([100, 10]); // gap 100 → pen 200
+  });
+
+  it('defTabSz = 0 keeps the legacy space-degradation for an unreachable tab', () => {
+    const out = resolveTabWidths([tab(), text(30)], [], 0, 600, 20, 0);
+    expect(out).toEqual([20, 30]);
+  });
 });

@@ -975,6 +975,13 @@ pub(crate) struct Paragraph {
     pub(crate) def_font_family: Option<String>,
     /// Tab stops from pPr > tabLst
     pub(crate) tab_stops: Vec<TabStop>,
+    /// `<a:pPr defTabSz>` (ECMA-376 §21.1.2.2.7) — default tab interval in EMU.
+    /// A `\t` with no reachable explicit stop advances to the next multiple of
+    /// this grid (issue #1006). None when the paragraph carried no explicit
+    /// value; the renderer then applies PowerPoint's 1-inch (914400 EMU) default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub(crate) def_tab_sz: Option<i64>,
     /// ECMA-376 §21.1.2.2.7 `<a:pPr rtl="1">` — right-to-left paragraph.
     /// When true and no explicit `algn`, the default alignment flips from
     /// "l" to "r". Carried through so the renderer can also flow runs RTL

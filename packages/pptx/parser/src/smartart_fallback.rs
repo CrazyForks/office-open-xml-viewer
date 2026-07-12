@@ -446,6 +446,7 @@ fn default_paragraph() -> Paragraph {
         def_italic: None,
         def_font_family: None,
         tab_stops: Vec::new(),
+        def_tab_sz: None,
         rtl: false,
         ea_ln_brk: true,
         runs: Vec::new(),

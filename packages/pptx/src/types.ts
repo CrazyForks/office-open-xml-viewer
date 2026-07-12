@@ -80,6 +80,14 @@ export interface Paragraph extends CoreParagraph {
    * emits an effective boolean.
    */
   eaLnBrk: boolean;
+  /**
+   * `<a:pPr defTabSz>` (ECMA-376 §21.1.2.2.7) — the default tab-stop interval in
+   * EMU. When a `\t` has no reachable explicit `a:tabLst` stop, it advances to
+   * the next multiple of this grid (issue #1006). Absent ⇒ the renderer uses the
+   * PowerPoint universal default of 914400 EMU (1 inch). Omitted from JSON when
+   * the parser found no explicit value.
+   */
+  defTabSz?: number;
 }
 
 /**

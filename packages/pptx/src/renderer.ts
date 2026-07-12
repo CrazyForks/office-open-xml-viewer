@@ -103,7 +103,7 @@ import { justifyLine, type Justified } from './text-justify';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
 import { resolveTableBorderConflict } from './table-border-conflict.js';
 import { isSmartArtFallbackShape, smartArtFallbackTextColor } from './smartart-fallback-contrast';
-import { resolveTabWidths } from './tab-layout.js';
+import { resolveTabWidths, type TabItem, type TabStopPx } from './tab-layout.js';
 import { drawEaVertRun } from './vertical-text.js';
 
 /** Theme font context threaded through the render call chain. */
@@ -618,6 +618,12 @@ function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
  * `\t` runs. That matches what PowerPoint compares — "one continuous line
  * of glyphs" — and avoids over-eager wrap when a paragraph is barely wider
  * than the bbox due to font-measurement drift.
+ *
+ * Known limitation (issue #1006): because tab jumps are ignored here, a tab-led
+ * paragraph inside a `spAutoFit` shape whose raw glyph sum fits the box will
+ * take the grow-not-wrap path even if its tab-jumped extent would overflow. The
+ * adjudicated fixtures use `noAutofit`; spAutoFit + tab is unadjudicated and left
+ * as documented behaviour rather than guessed.
  */
 export function naturalWidthExceedsBbox(
   ctx: CanvasRenderingContext2D,
@@ -709,15 +715,89 @@ export function layoutParagraph(
   // sample-2 slide-7 stay on one line even though the bbox is tight).
   let hasWhitespaceOnLine = false;
 
-  // Once a line contains a tab, its cells remain unwrapped on that line.
-  let tabSeen = false;
+  // ── Wrap-aware tab context (issue #1006) ──────────────────────────────────
+  // A tab is a horizontal pen JUMP to its stop within the visual line where it
+  // occurs; content overflowing the line's right edge wraps normally and every
+  // CONTINUATION line re-anchors at the leading text-inset edge (text-left).
+  // The wrap budget must ACCOUNT for the tab jump, so a tabbed line measures its
+  // NATURAL extent with the SAME resolver the paint pass uses (`resolveTabWidths`
+  // with an infinite limit — the #835 clamp must not hide overflow). Tab-free
+  // lines keep the fast additive `lineW` path unchanged (byte-identical).
+  const baseRtl = para.rtl === true;
+  const marRPxL = emuToPx(para.marR, scale);
+  const stopsPxL: TabStopPx[] = (para.tabStops ?? []).map((s) => ({
+    pos: emuToPx(s.pos, scale),
+    algn: s.algn,
+  }));
+  // Effective default tab grid (§21.1.2.2.7): explicit pPr value, else the
+  // PowerPoint universal 1-inch default so a `\t` never collapses to a space.
+  const defTabSzPxL = emuToPx(para.defTabSz ?? 914400, scale);
+  // A tab contributes nothing to the additive `lineW` (its gap is resolved), so
+  // track "the line carries a tab" explicitly rather than via lineW.
+  let lineHasTab = false;
+  // Logical-order items for the current line (content advances + tab markers),
+  // mirroring the paint-side items so layout and paint resolve identically.
+  let lineItems: TabItem[] = [];
+  // Space width for the (now unused when defTabSz>0) no-stop fallback; captured
+  // from the first tab's font, matching the paint pass.
+  let tabSpaceW = 0;
+
+  /** Leading pen for the current line in the reading frame, matching the paint
+   *  pass's `leadingIndentPx`: RTL right-anchors at marR (no first-line indent);
+   *  LTR starts at marL plus the first line's positive indent. */
+  const lineStartPen = (): number =>
+    baseRtl ? marRPxL : marLPx + (lines.length === 0 ? firstLineIndentPx : 0);
+
+  /** Natural extent (px advance from the line's leading pen) of the current
+   *  line's committed items plus an optional trailing content advance, resolved
+   *  against the tab grid with NO trailing clamp. */
+  const tabAwareExtent = (extraW = 0): number => {
+    const items = extraW > 0 ? [...lineItems, { isTab: false, width: extraW }] : lineItems;
+    const widths = resolveTabWidths(items, stopsPxL, lineStartPen(), Infinity, tabSpaceW, defTabSzPxL);
+    let sum = 0;
+    for (const w of widths) sum += w;
+    return sum;
+  };
+
+  /** Whether a content advance of `w` still fits the current line's budget.
+   *  Tab-free lines use the fast additive path (byte-identical); a tabbed line
+   *  resolves the WHOLE hypothetical line (candidate-aware) so a right/centre
+   *  tab — whose gap SHRINKS as its cell grows — is placed correctly rather than
+   *  via `lineW + w`. An infinite budget (wrap="none" / spAutoFit measured on
+   *  one line) never wraps, so short-circuit before the O(items) resolve. */
+  const fitsW = (w: number): boolean => {
+    const budget = lineMaxW();
+    if (!Number.isFinite(budget)) return true;
+    return lineHasTab ? tabAwareExtent(w) <= budget : lineW + w <= budget;
+  };
+
+  /** Max additional content advance the current line can accept before its
+   *  natural extent exceeds the budget. Tab-free ⇒ the additive remainder; a
+   *  tabbed line ⇒ the exact monotone threshold of `tabAwareExtent` (correct for
+   *  left / right / centre tabs, so a fitting right-tab cell is never wrapped
+   *  early). Used by the CJK / SEA prefix-fit, which take a scalar budget. */
+  const availW = (): number => {
+    const budget = lineMaxW();
+    if (!lineHasTab) return budget - lineW;
+    if (!Number.isFinite(budget)) return Infinity;
+    if (tabAwareExtent(0) >= budget) return 0;
+    let lo = 0;
+    let hi = budget;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (tabAwareExtent(mid) <= budget) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  };
 
   const newLine = (endsWithBreak = false) => {
     if (endsWithBreak) currentLine.endsWithBreak = true;
     lines.push(currentLine);
     currentLine = { segments: [] };
     lineW = 0;
-    tabSeen = false;
+    lineHasTab = false;
+    lineItems = [];
     hasWhitespaceOnLine = false;
   };
 
@@ -781,6 +861,10 @@ export function layoutParagraph(
       (a.fontFamily ?? '') === (fontFamily ?? '') &&
       hyperlinkKey(a.hyperlink) === hyperlinkKey(hyperlink);
     lineW += w;
+    // Mirror the paint-side item sequence so a tabbed line's wrap budget resolves
+    // identically (issue #1006). One item per push call; consecutive content
+    // items simply sum inside resolveTabWidths.
+    lineItems.push({ isTab: false, width: w });
     const last = currentLine.segments.at(-1);
     if (last && sameMeta(last)) {
       last.text += text;
@@ -851,7 +935,8 @@ export function layoutParagraph(
       const descent = render ? render.descentEm * emPx : 0;
       // Block (display) math gets its own line; the draw pass centres it.
       if (run.display && lineW > 0) newLine();
-      else if (lineW + width > lineMaxW() && lineW > 0) newLine();
+      else if (!fitsW(width) && lineW > 0) newLine();
+      lineItems.push({ isTab: false, width });
       currentLine.segments.push({
         text: '',
         font: `${emPx}px sans-serif`,
@@ -954,6 +1039,13 @@ export function layoutParagraph(
       if (/^\t+$/.test(token)) {
         // §21.1.2.1.x: retain every tab inline. Gap resolution is deferred until
         // paint, when every cell width is known; UAX#9 S then reorders cells.
+        // The wrap pass measures the tab jump via `tabAwareExtent` (#1006) so the
+        // line breaks at the correct point, and a continuation line (which never
+        // carries the tab) re-anchors at text-left.
+        if (!lineHasTab) {
+          ctx.font = font;
+          tabSpaceW = ctx.measureText(' ').width;
+        }
         for (const _ of token) {
           currentLine.segments.push({
             text: '',
@@ -965,20 +1057,15 @@ export function layoutParagraph(
             underline: false,
             strikethrough: false,
           });
+          lineItems.push({ isTab: true, width: 0 });
         }
-        tabSeen = true;
+        lineHasTab = true;
         continue;
       }
 
       ctx.font = font;
       const tokW = ctx.measureText(token).width;
       const isWhitespace = /^\s+$/.test(token);
-
-      // Tab-delimited cells stay on one line; tab gaps are resolved as a unit.
-      if (tabSeen) {
-        push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
-        continue;
-      }
 
       // ── Symbol-font characters (Wingdings/Webdings/Symbol) ───────────────
       // PowerPoint stores symbol glyphs as Private-Use codepoints U+F020–U+F0FF
@@ -1009,7 +1096,7 @@ export function layoutParagraph(
           }
           ctx.font = chFont;
           const chW = ctx.measureText(drawCh).width;
-          if (lineW + chW > lineMaxW() && lineW > 0) newLine();
+          if (!fitsW(chW) && lineW > 0) newLine();
           push(drawCh, chFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
         continue;
@@ -1063,7 +1150,7 @@ export function layoutParagraph(
           // content and the token would overflow, wrap once before placing it;
           // never break mid-token (an over-wide token simply overflows).
           const tokenW = measured.reduce((acc, m) => acc + m.w, 0);
-          if (lineW > 0 && lineW + tokenW > lineMaxW()) newLine();
+          if (lineW > 0 && !fitsW(tokenW)) newLine();
           for (const m of measured) {
             push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: m.family });
           }
@@ -1071,10 +1158,19 @@ export function layoutParagraph(
         }
         let rest = measured;
         while (rest.length > 0) {
-          const n = fitCjkLine(rest, lineW, lineMaxW(), DEFAULT_KINSOKU_RULES);
+          // Effective start pen so the fit sees the line's true remaining width:
+          // budget − availW = the additive pen (tab-free / left tab) or the
+          // slack-adjusted pen (right / centre tab). Equivalent to lineW when no
+          // tab, so tab-free CJK is byte-identical.
+          const cjkPen = Number.isFinite(lineMaxW()) ? lineMaxW() - availW() : lineW;
+          let n = fitCjkLine(rest, cjkPen, lineMaxW(), DEFAULT_KINSOKU_RULES);
           if (n === 0) {
-            newLine(); // non-empty line can't take the run head → break, retry empty
-            continue;
+            // A non-empty line can't take the run head → break and retry empty.
+            // But a line holding ONLY a tab (lineW===0, tab jump consumed the
+            // width) must NOT be finalised as a tab-only line — place one glyph
+            // so it overflows, mirroring the Latin "no break opportunity" rule.
+            if (lineW > 0) { newLine(); continue; }
+            n = 1;
           }
           for (let i = 0; i < n; i++) {
             const m = rest[i];
@@ -1148,7 +1244,7 @@ export function layoutParagraph(
         const N = token.length;
         let start = 0;
         while (start < N) {
-          const avail = lineMaxW() - lineW;
+          const avail = availW();
           let end = fitSeaWordPrefix(token, seaBreaks, start, avail, measureSub, monotone);
           if (end <= start) {
             if (lineW > 0) { newLine(); continue; } // wrap first, retry empty line
@@ -1167,7 +1263,7 @@ export function layoutParagraph(
         continue;
       }
 
-      if (lineW + tokW <= lineMaxW()) {
+      if (fitsW(tokW)) {
         push(token, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         if (isWhitespace) hasWhitespaceOnLine = true;
       } else if (isWhitespace) {
@@ -1177,7 +1273,7 @@ export function layoutParagraph(
         for (const ch of token) {
           ctx.font = font;
           const chW = ctx.measureText(ch).width;
-          if (lineW + chW > lineMaxW() && lineW > 0) newLine();
+          if (!fitsW(chW) && lineW > 0) newLine();
           push(ch, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
       } else if (!hasWhitespaceOnLine) {
@@ -3358,7 +3454,11 @@ export function renderTextBody(
         pos: emuToPx(stop.pos, scale),
         algn: stop.algn,
       }));
-      const widths = resolveTabWidths(items, stops, leadingIndentPx, limitPx, spaceW);
+      // Default tab grid (§21.1.2.2.7): explicit pPr value, else PowerPoint's
+      // universal 1-inch default so an unreached tab snaps to the grid (matching
+      // the wrap pass) rather than collapsing to a space (issue #1006).
+      const defTabSzPx = emuToPx(entry.para.defTabSz ?? 914400, scale);
+      const widths = resolveTabWidths(items, stops, leadingIndentPx, limitPx, spaceW, defTabSzPx);
       for (let i = 0; i < line.segments.length; i++) {
         if (line.segments[i].isTab) line.segments[i].tabWidthPx = widths[i];
       }
