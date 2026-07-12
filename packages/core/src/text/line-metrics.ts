@@ -84,6 +84,17 @@ interface WinMetric {
   /** Design ascent ratio (ascent units / unitsPerEm). */ asc: number;
   /** Design descent ratio: `(|descent| + hhea lineGap) / unitsPerEm` so
    *  `asc + desc` is the font's full design single-line height. */ desc: number;
+  /** When true this entry only applies to EAST ASIAN lines (callers pass the
+   *  line/segment script as `eastAsian`). Word's Far East line height
+   *  (1.3 × hhea box) governs CJK lines only; a Latin-only line in the SAME
+   *  font keeps the win-box height. Measured for Yu Mincho: a pure-CJK line is
+   *  1.43267 em (sample-58 sweep, issue #1013) while a pure-Latin footnote
+   *  line in the same document is 13.44 pt at 10.5 pt = the win sum
+   *  1.28711 em (docx demo/sample-1 page-6 footnote, Word PDF). Entries
+   *  without this flag apply to every script — for Meiryo the two heights
+   *  coincide (its usWin sum was designed as 1.3 × its hhea box), which is
+   *  why the sample-3 Latin/mixed calibration matched the win sum. */
+  eaOnly?: boolean;
 }
 
 /** A known font's design line metrics. Keyed by a normalized (lowercased) name test. */
@@ -109,6 +120,43 @@ const WIN_METRICS: ReadonlyArray<readonly [test: (n: string) => boolean, m: WinM
   [
     (n) => n.includes('meiryo') || n.includes('メイリオ'),
     { asc: 2210 / 2048, desc: 1059 / 2048 },
+  ],
+  // Yu Mincho / Yu Gothic (游明朝 / 游ゴシック) — unitsPerEm 2048, hhea ascent
+  // 1802, descent −455 (identical across the Regular/Light/Demibold/Bold faces
+  // of BOTH families; extracted from the Word-bundled yumin*.ttf / YuGoth*.ttc
+  // via fontTools). Word's Far East single-line height for these faces is
+  // 1.3 × the hhea glyph box: (1802 + 455) × 1.3 / 2048 = 1.43267 em. Neither
+  // the OS/2 win sum (2636/2048 = 1.287 em — BELOW the glyph box + leading) nor
+  // the full hhea line height with its 1024 lineGap (3281/2048 = 1.602 em — what
+  // Canvas fontBoundingBox reports) matches what Word renders for CJK text.
+  //
+  // Provenance: the sample-58 adjudication sweep (issue #1013; Word PDF,
+  // pdftotext -bbox) measures Yu Mincho's off-grid single-line pitch at
+  // 20.04 pt for 14 pt and 22.94 pt for 16 pt — 1.432 ± 0.002 em, exactly the
+  // 1.3 × hhea-box value — and the same height reproduces all 15 measured
+  // §17.6.5 docGrid cell counts (see docx docGridLineCells). The 1.3 Word FE
+  // leading factor is corroborated by Meiryo, whose usWin sum (1.596 em) was
+  // designed as 1.3 × its Windows hhea box (2514/2048 = 1.2275 em) so that the
+  // win metric already encodes it. The ascent:descent split scales hhea
+  // proportionally (only the sum is Word-measured; the split keeps the glyph
+  // box centered the way Word's PDF places it inside grid cells).
+  //
+  // eaOnly: Word gives this FE height to EAST ASIAN lines only. A pure-Latin
+  // line set in the same Yu Mincho keeps the win-box height (demo/sample-1
+  // footnote: 13.44 pt at 10.5 pt = the 1.28711 em win sum, Word PDF page 6),
+  // so non-EA callers must not see this entry. A win-sum entry for Latin
+  // Yu-face lines is a possible follow-up; it is NOT included here because the
+  // substituted-canvas behavior for Latin lines predates this entry and
+  // changing it is out of the issue #1013 adjudication's scope.
+  //
+  // "Yu Gothic UI" is EXCLUDED: the UI faces have different (unverified)
+  // metrics, like the Arial Narrow case above.
+  [
+    (n) =>
+      !n.includes('ui')
+      && (n.includes('yu mincho') || n.includes('yumincho') || n.includes('游明朝')
+        || n.includes('yu gothic') || n.includes('yugothic') || n.includes('游ゴシック')),
+    { asc: (1802 * 1.3) / 2048, desc: (455 * 1.3) / 2048, eaOnly: true },
   ],
   // Sakkal Majalla — unitsPerEm 2048, usWinAscent 1810, usWinDescent 1050
   // → asc 0.8838, desc 0.5127, sum = 1.3965. Extracted directly from the
@@ -137,11 +185,14 @@ const WIN_METRICS: ReadonlyArray<readonly [test: (n: string) => boolean, m: WinM
   [(n) => n === 'arial', { asc: 1854 / 2048, desc: 501 / 2048 }],
 ];
 
-function lookupWinMetric(family: string | null | undefined): WinMetric | null {
+function lookupWinMetric(
+  family: string | null | undefined,
+  eastAsian: boolean,
+): WinMetric | null {
   if (!family) return null;
   const n = family.toLowerCase();
   for (const [test, m] of WIN_METRICS) {
-    if (test(n)) return m;
+    if (test(n) && (eastAsian || !m.eaOnly)) return m;
   }
   return null;
 }
@@ -153,9 +204,17 @@ function lookupWinMetric(family: string | null | undefined): WinMetric | null {
  * `(usWinAscent+usWinDescent)/unitsPerEm` for the CJK/Arabic faces and the hhea
  * sum `(ascent+|descent|+lineGap)/unitsPerEm` for the Latin faces (see
  * WIN_METRICS). The legacy name is kept to avoid churn at the call sites.
+ *
+ * `eastAsian` is the SCRIPT of the line/segment being sized (not of the font):
+ * entries flagged `eaOnly` (the Word FE 1.3 × hhea heights, e.g. Yu Mincho)
+ * are visible only to East Asian callers — a Latin-only line in the same font
+ * falls back to the substituted Canvas metrics exactly as if untabled.
  */
-export function fontWinLineHeightRatio(family: string | null | undefined): number | null {
-  const m = lookupWinMetric(family);
+export function fontWinLineHeightRatio(
+  family: string | null | undefined,
+  eastAsian = false,
+): number | null {
+  const m = lookupWinMetric(family, eastAsian);
   return m === null ? null : m.asc + m.desc;
 }
 
@@ -165,8 +224,12 @@ export function fontWinLineHeightRatio(family: string | null | undefined): numbe
  * the table. `0` is a no-op sentinel for the line-box math, which takes the
  * max of this and the substituted font's natural ascent+descent.
  */
-export function intendedSingleLinePx(family: string | null | undefined, emPx: number): number {
-  const ratio = fontWinLineHeightRatio(family);
+export function intendedSingleLinePx(
+  family: string | null | undefined,
+  emPx: number,
+  eastAsian = false,
+): number {
+  const ratio = fontWinLineHeightRatio(family, eastAsian);
   return ratio === null ? 0 : ratio * emPx;
 }
 
@@ -200,8 +263,9 @@ export function correctLineMetrics(
   emPx: number,
   ascentPx: number,
   descentPx: number,
+  eastAsian = false,
 ): { ascent: number; descent: number } {
-  const m = lookupWinMetric(family);
+  const m = lookupWinMetric(family, eastAsian);
   if (m === null) return { ascent: ascentPx, descent: descentPx };
   const targetTotal = (m.asc + m.desc) * emPx;
   if (ascentPx + descentPx <= targetTotal) {

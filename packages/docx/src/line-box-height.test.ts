@@ -18,6 +18,15 @@ const atLeast = (value: number): LineSpacing => ({
   explicit: true,
 });
 
+// Yu Mincho design line metrics per pt of font size: 1.3 × the hhea glyph box
+// (asc 1802, |desc| 455, upm 2048) — see core line-metrics and the sample-58
+// adjudication (issue #1013). Sum = 1.43267 em. All call sites feed lineBoxHeight
+// metrics through correctLineMetrics / the intendedSingleLinePx floor, so for a
+// tabled font both ascent+descent and intendedSingle equal this design height.
+const YU_ASC = (1802 * 1.3) / 2048;
+const YU_DESC = (455 * 1.3) / 2048;
+const YU = YU_ASC + YU_DESC;
+
 describe('lineBoxHeight — degenerate zero line spacing', () => {
   // ascent 12 + descent 3 = 15px natural single-line height (no grid).
   it('treats exact line=0 as single spacing (natural), not 0', () => {
@@ -73,99 +82,156 @@ describe('lineBoxHeight — atLeast with an active line grid', () => {
   });
 
   // BEHAVIOUR PIN, not Word-verified ground truth. For an East Asian atLeast
-  // line the grid-minimum term is the em-based single cell (docGridLineCells),
-  // no longer the glyph-box cell rounding: a 12pt line whose substituted glyph
-  // box is 19.22px on an 18pt pitch resolves to its natural 19.22px (max of
-  // natural / authored 18 / em cell 18) — previously 36px (glyph box rounded to
-  // 2 cells). No corpus sample exercises atLeast inside an active line grid and
-  // a Word fixture export could not be captured when this was pinned, so Word's
-  // exact atLeast-on-grid height is UNVERIFIED; the pin makes any future change
-  // to this resolution deliberate rather than accidental. Ruby lines keep the
+  // line the grid-minimum term is the natural-height cell count
+  // (docGridLineCells): a 12pt Yu Mincho line (design box 17.19px) on an 18pt
+  // pitch resolves to max(natural 17.19 / authored 18 / grid cell 18) = 18.
+  // No corpus sample exercises atLeast inside an active line grid and a Word
+  // fixture export could not be captured when this was pinned, so Word's exact
+  // atLeast-on-grid height is UNVERIFIED; the pin makes any future change to
+  // this resolution deliberate rather than accidental. Ruby lines keep the
   // measured-glyph-box minimum (they reserve real furigana height).
-  it('[pin] EA atLeast takes max(natural, authored, em single cell) — unverified vs Word', () => {
-    expect(lineBoxHeight(atLeast(18), 15.38, 3.84, 1, grid18, false, 0, true, 12)).toBeCloseTo(19.22, 6);
+  it('[pin] EA atLeast takes max(natural, authored, grid cells) — unverified vs Word', () => {
+    expect(lineBoxHeight(atLeast(18), 12 * YU_ASC, 12 * YU_DESC, 1, grid18, false, 12 * YU, true)).toBe(18);
   });
-  it('[pin] EA atLeast still snaps to the em cell when it exceeds natural and authored', () => {
-    // em 20 on pitch 18 → 2 cells = 36 > natural 12 and authored 18.
-    expect(lineBoxHeight(atLeast(18), 10, 2, 1, grid18, false, 0, true, 20)).toBe(36);
+  it('[pin] EA atLeast still snaps to the grid cells when they exceed natural and authored', () => {
+    // 20pt design line 28.65px on pitch 18 → 2 cells = 36 > authored 18.
+    expect(lineBoxHeight(atLeast(18), 20 * YU_ASC, 20 * YU_DESC, 1, grid18, false, 20 * YU, true)).toBe(36);
   });
   it('[pin] a RUBY EA atLeast line keeps the measured glyph-box minimum', () => {
     // glyph box 41px (base + furigana reserve) → ceil(41/18) = 3 cells = 54.
-    expect(lineBoxHeight(atLeast(18), 33, 8, 1, grid18, true, 0, true, 13.5)).toBe(54);
+    expect(lineBoxHeight(atLeast(18), 33, 8, 1, grid18, true, 0, true)).toBe(54);
   });
 });
 
 // ECMA-376 §17.6.5 / §17.3.1.32 define the line pitch as the height of ONE
 // single-spaced line; how many whole grid CELLS a single-spaced East Asian line
-// occupies is Word runtime behaviour. That cell count is a function of the run's
-// EM (font size) — NOT the substituted-font glyph box (fontBoundingBox, ~1.6em),
-// which over-counts every EA line whose em is comfortably inside one pitch.
+// occupies is Word runtime behaviour. That cell count is a function of the
+// line's SINGLE-LINE HEIGHT (the document font's design line height): a line
+// occupies ceil(singleLineHeight / pitch) cells — the smallest number of whole
+// cells that CONTAINS it. It is NOT a function of the raw em, and NOT of the
+// substituted-font Canvas glyph box (which can overstate the design height).
 //
 // Word-PDF ground truth (pdftotext -bbox):
-//   • sample-35: docGrid pitch 18pt; a 12pt centred CJK heading is 1 cell (18pt),
-//     and the 10.5pt body lines are 1 cell — even though 12×1.6 = 19.2 > 18.
-//   • sample-9 : docGrid pitch 20pt; a 20pt CJK title is 2 cells (40pt).
-// `ceil(em/pitch)` fits the first two but fails the 20-on-20 boundary (→1, want
-// 2). `floor(em/pitch)+1` fits ALL three: a single-spaced EA line whose em-square
-// exactly fills k pitches still needs its inter-line leading, spilling into the
-// (k+1)-th cell. Latin-only lines are NOT cell-rounded (§17.6.5 leaves them at
-// default spacing); the `eastAsian` flag gates the rule.
-describe('docGridLineCells — em-based East Asian grid cell count (§17.6.5)', () => {
-  it('a sub-pitch em occupies a single cell (12pt heading / 18pt pitch → 1)', () => {
-    expect(docGridLineCells(12, 18)).toBe(1);
+//   • sample-58 adjudication sweep (issue #1013; 19 sections, {10.5,12,14,16,
+//     20}pt × pitch {18,24}pt × {lrTb,tbRl} × {lines,linesAndChars,none}, all
+//     Yu Mincho): with Yu Mincho's design line height 1.43267 em (1.3 × hhea
+//     box — see core line-metrics), EVERY measured point is ceil(design/pitch):
+//     12pt→1 cell, 14pt→2 cells on an 18pt pitch; 16pt→1 cell, 20pt→2 cells on
+//     a 24pt pitch. Horizontal and vertical (tbRl) sections measured IDENTICAL
+//     (36.00pt column pitch = 36.00pt line pitch), and the §17.6.5 grid type
+//     (lines vs linesAndChars) does not change the count.
+//   • sample-35: docGrid pitch 18pt; the 12pt CJK heading (design 17.19pt) and
+//     the 10.5pt body (15.04pt) are 1 cell each.
+//   • sample-9 : docGrid pitch 20pt; a 20pt CJK title (design 28.65pt) is
+//     2 cells (40pt).
+// An earlier em-based rule (floor(em/pitch)+1) fit the sparse pre-sweep data —
+// the sweep's 10.5/12/20pt rows coincide under both rules — but under-counted
+// every 14–16pt line on an 18pt pitch (Word: 2 cells, em rule: 1) in BOTH
+// writing directions. Latin-only lines are NOT cell-rounded (§17.6.5 leaves
+// them at default spacing); the `eastAsian` flag gates the rule.
+describe('docGridLineCells — natural-height East Asian grid cell count (§17.6.5)', () => {
+  it('a sub-pitch line occupies a single cell (12pt Yu Mincho / 18pt pitch → 1)', () => {
+    expect(docGridLineCells(12 * YU, 18)).toBe(1); // 17.19 < 18
   });
-  it('a 13pt em on an 18pt pitch is still a single cell', () => {
-    expect(docGridLineCells(13, 18)).toBe(1);
+  it('a 10.5pt body line on an 18pt pitch is a single cell (sample-58 A1/B1)', () => {
+    expect(docGridLineCells(10.5 * YU, 18)).toBe(1); // 15.04
   });
-  it('a 10.5pt body em on an 18pt pitch is a single cell', () => {
-    expect(docGridLineCells(10.5, 18)).toBe(1);
+  it('a 14pt line on an 18pt pitch spills into TWO cells (sample-58 A3/B3)', () => {
+    expect(docGridLineCells(14 * YU, 18)).toBe(2); // 20.06 > 18
   });
-  it('an em equal to the pitch occupies TWO cells (20pt / 20pt → 2)', () => {
-    expect(docGridLineCells(20, 20)).toBe(2);
+  it('a 16pt line on an 18pt pitch is two cells (sample-58 A4/B4)', () => {
+    expect(docGridLineCells(16 * YU, 18)).toBe(2); // 22.92
   });
-  it('the pitch boundary rounds up (18pt em / 18pt pitch → 2)', () => {
-    expect(docGridLineCells(18, 18)).toBe(2);
+  it('a 16pt line on a 24pt pitch stays a single cell (sample-58 C2)', () => {
+    expect(docGridLineCells(16 * YU, 24)).toBe(1); // 22.92 < 24
   });
-  it('an em between one and two pitches occupies two cells', () => {
-    expect(docGridLineCells(30, 20)).toBe(2);
+  it('a 20pt line on a 24pt pitch is two cells (sample-58 C3)', () => {
+    expect(docGridLineCells(20 * YU, 24)).toBe(2); // 28.65
   });
-  it('an em at exactly two pitches occupies three cells', () => {
-    expect(docGridLineCells(40, 20)).toBe(3);
+  it('a 20pt title on a 20pt pitch is two cells (sample-9)', () => {
+    expect(docGridLineCells(20 * YU, 20)).toBe(2); // 28.65
   });
+  it('a line exactly filling k pitches occupies k cells (ceil; boundary unmeasured)', () => {
+    expect(docGridLineCells(18, 18)).toBe(1);
+    expect(docGridLineCells(36, 18)).toBe(2);
+  });
+  it('a line taller than two pitches occupies three cells (extrapolated)', () => {
+    expect(docGridLineCells(30 * YU, 20)).toBe(3); // 42.98 → ceil = 3
+  });
+  it('returns at least one cell for degenerate heights and pitches', () => {
+    expect(docGridLineCells(0, 18)).toBe(1);
+    expect(docGridLineCells(5, 0)).toBe(1);
+  });
+});
+
+// The sample-58 adjudication matrix as measured (Word PDF, pdftotext -bbox):
+// line pitch (horizontal lrTb sections) = column pitch (vertical tbRl sections)
+// for every {font size × grid pitch} row. Both directions share lineBoxHeight
+// (the tbRl page is laid out by the horizontal engine and rotated), so this
+// table pins the shared rule against the measured matrix.
+describe('lineBoxHeight — sample-58 adjudicated docGrid matrix (Yu Mincho)', () => {
+  const rows: ReadonlyArray<readonly [sizePt: number, pitchPt: number, expectPt: number, sections: string]> = [
+    [10.5, 18, 18, 'A1/B1'],
+    [12, 18, 18, 'A2/B2/D1'],
+    [14, 18, 36, 'A3/B3'],
+    [16, 18, 36, 'A4/B4/D2'],
+    [20, 18, 36, 'A5/B5'],
+    [12, 24, 24, 'C1'],
+    [16, 24, 24, 'C2'],
+    [20, 24, 48, 'C3'],
+  ];
+  for (const [size, pitch, expected, sections] of rows) {
+    it(`${size}pt on a ${pitch}pt pitch → ${expected}pt (${sections})`, () => {
+      expect(lineBoxHeight(
+        null,
+        YU_ASC * size,
+        YU_DESC * size,
+        1,
+        { type: 'lines', linePitchPt: pitch },
+        false,
+        YU * size,
+        true,
+      )).toBe(expected);
+    });
+  }
 });
 
 describe('lineBoxHeight — docGrid line-cell rounding (East Asian vs Latin)', () => {
   const grid18 = { type: 'lines', linePitchPt: 18 } as const;
   const grid20 = { type: 'lines', linePitchPt: 20 } as const;
 
-  // Yu Mincho reports fontBoundingBox ≈ 1.602 em, so a 12pt run's glyph box is
-  // ~19.22px (asc 15.38 + desc 3.84) — over the 18pt pitch. The OLD rule
-  // ceil(19.22/18) = 2 cells over-counted; the em (12pt) → floor(12/18)+1 = 1
-  // cell = 18px is what Word renders (sample-35 heading).
-  it('snaps a sub-pitch EA line to ONE cell by its em, not its inflated glyph box', () => {
-    expect(lineBoxHeight(null, 15.38, 3.84, 1, grid18, false, 0, true, 12)).toBe(18);
+  // A 12pt Yu Mincho line reaches lineBoxHeight with design-corrected metrics
+  // (asc 13.73 + desc 3.47 = 17.19px, the 1.43267em box) — correctLineMetrics
+  // shrinks the substituted ~1.602em Canvas box to it, and intendedSingleLinePx
+  // floors an under-measuring substitute up to it. 17.19 < 18 → one cell
+  // (sample-35 heading, sample-58 A2/B2).
+  it('snaps a sub-pitch EA line to ONE cell of the grid pitch', () => {
+    expect(lineBoxHeight(null, 12 * YU_ASC, 12 * YU_DESC, 1, grid18, false, 12 * YU, true)).toBe(18);
   });
-  it('rounds an EA line whose em equals the pitch UP to two cells (20/20 → 40)', () => {
-    // glyph box 32.04px (25.63 + 6.41); em 20 on pitch 20 → floor(20/20)+1 = 2.
-    expect(lineBoxHeight(null, 25.63, 6.41, 1, grid20, false, 0, true, 20)).toBe(40);
+  it('rounds a 20pt EA line on a 20pt pitch UP to two cells (sample-9)', () => {
+    // design box 28.65px → ceil(28.65/20) = 2 cells = 40.
+    expect(lineBoxHeight(null, 20 * YU_ASC, 20 * YU_DESC, 1, grid20, false, 20 * YU, true)).toBe(40);
   });
-  it('rounds an EA line whose em exceeds the pitch to two cells (30/20 → 40)', () => {
-    expect(lineBoxHeight(null, 24, 6, 1, grid20, false, 0, true, 30)).toBe(40);
+  it('guards the cell count against an UNCORRECTED over-tall glyph box via max()', () => {
+    // A substitute box (24+6=30px) taller than the design floor (20pt design =
+    // 28.65px): natural = max(30, 28.65) = 30 → still 2 cells on a 20pt pitch.
+    expect(lineBoxHeight(null, 24, 6, 1, grid20, false, 20 * YU, true)).toBe(40);
   });
   it('keeps a Latin line at natural height (one-cell floor), NOT cell-rounded', () => {
     // 22px natural, Latin → max(22, 20) = 22px (Word does not cell-round it).
-    expect(lineBoxHeight(null, 17.6, 4.4, 1, grid20, false, 0, false, 22)).toBe(22);
+    expect(lineBoxHeight(null, 17.6, 4.4, 1, grid20, false, 0, false)).toBe(22);
   });
-  it('a RUBY EA line reserves its measured furigana height, NOT the em cell count', () => {
+  it('a RUBY EA line reserves its measured furigana height, NOT the design cell count', () => {
     // sample-5: a 13.5pt ruby base + 8pt rt on an 18pt pitch reserves the base +
     // annotation glyph box (~41px = asc 33 + desc 8), which Word spreads over
-    // whole cells (ceil(41/18) = 3 cells = 54px). The em (13.5pt) would collapse
-    // it to one cell (18px) and clip the furigana, so the em rule must NOT apply
-    // to ruby lines — hasRuby (arg 6) keeps them on the measured glyph box.
-    expect(lineBoxHeight(null, 33, 8, 1, grid18, true, 0, true, 13.5)).toBe(54);
+    // whole cells (ceil(41/18) = 3 cells = 54px). The base design height (13.5pt
+    // → 19.3px → 2 cells) would clip the furigana, so the natural-height rule
+    // must NOT apply to ruby lines — hasRuby (arg 6) keeps them on the measured
+    // glyph box.
+    expect(lineBoxHeight(null, 33, 8, 1, grid18, true, 0, true)).toBe(54);
   });
   it('does not cell-round when no docGrid is active (East Asian, off grid)', () => {
-    expect(lineBoxHeight(null, 17.6, 4.4, 1, undefined, false, 0, true, 22)).toBe(22);
+    expect(lineBoxHeight(null, 17.6, 4.4, 1, undefined, false, 0, true)).toBe(22);
   });
   it('defaults to Latin (no cell rounding) when the flag is omitted', () => {
     expect(lineBoxHeight(null, 17.6, 4.4, 1, grid20)).toBe(22);
