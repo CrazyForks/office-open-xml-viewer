@@ -32,12 +32,12 @@ const TR_BRACKET_FE = String.fromCodePoint(0xfe35); // ︵
 const TU_COMMA = '、';
 const TU_COMMA_FE = String.fromCodePoint(0xfe11);
 const TR_ROTATE = 'ー'; // U+30FC — no vertical form → rotate
-// vo=Tr punctuation / white lenticular brackets with a U+FE1x form (issue #969).
-// XLSX has no Excel ground-truth image; it follows the Word/PowerPoint verdict
-// (docx tbRl + pptx eaVert, PDF-adjudicated) since the classifier is shared.
+// vo=Tr white lenticular brackets with a U+FE1x form present in the substitute
+// fonts (issue #969) — still substituted upright. XLSX has no Excel ground-truth
+// image; it follows the Word/PowerPoint verdict since the classifier is shared.
+// The fullwidth colon ： / semicolon ； (FE13/FE14) were dropped from the substitute
+// map (absent in most render fonts) and take a geometric fallback — see below.
 const TR_VFORMS: Array<[string, string]> = [
-  ['：', String.fromCodePoint(0xfe13)], // fullwidth colon → ︓
-  ['；', String.fromCodePoint(0xfe14)], // fullwidth semicolon → ︔
   ['〖', String.fromCodePoint(0xfe17)], // left white lenticular → ︗
   ['〗', String.fromCodePoint(0xfe18)], // right white lenticular → ︘
 ];
@@ -117,7 +117,7 @@ describe('xlsx stacked text — UAX#50 per-glyph orientation (textRotation=255, 
   });
 
   it.each(TR_VFORMS)(
-    'SUBSTITUTES the vo=Tr colon/semicolon/lenticular %s with its U+FE1x vertical form, upright (issue #969)',
+    'SUBSTITUTES the vo=Tr white lenticular %s with its U+FE1x vertical form, upright (issue #969)',
     (orig, fe) => {
       const calls = draw(orig);
       expect(calls.length).toBe(1);
@@ -125,6 +125,24 @@ describe('xlsx stacked text — UAX#50 per-glyph orientation (textRotation=255, 
       expect(norm(calls[0].rot)).toBeCloseTo(UPRIGHT, 5);
     },
   );
+
+  it('ROTATES the vo=Tr colon ： (geometric fallback → FE13 side-by-side dots) (issue #969)', () => {
+    // FE13 is absent from most render fonts, so ：is not substituted; a 90° rotation
+    // turns its two vertically-stacked dots into FE13's side-by-side dots.
+    const calls = draw('：');
+    expect(calls.length).toBe(1);
+    expect(calls[0].text, '： is painted as its own glyph').toBe('：');
+    expect(norm(calls[0].rot), '： rotates 90°').toBeCloseTo(ROTATED, 5);
+  });
+
+  it('draws the vo=Tr semicolon ； UPRIGHT (geometric fallback → FE14 dot-over-comma) (issue #969)', () => {
+    // FE14 is an upright dot-over-comma (not a rotation), so ；draws upright like an
+    // ideograph rather than rotating.
+    const calls = draw('；');
+    expect(calls.length).toBe(1);
+    expect(calls[0].text, '； is painted as its own glyph').toBe('；');
+    expect(norm(calls[0].rot), '； stays upright').toBeCloseTo(UPRIGHT, 5);
+  });
 
   it('ROTATES a vo=Tr glyph with no vertical form (ー) by 90°', () => {
     const calls = draw(TR_ROTATE);

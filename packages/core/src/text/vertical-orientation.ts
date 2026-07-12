@@ -91,10 +91,12 @@ export function verticalOrientation(cp: number): VerticalOrientation {
  *     (Hiragino ink at +0.31em cross-axis), so substituting them pushed ！／？ to
  *     the right of the column — the sample-26 "！ shifted right" defect (#771).
  *     PDF ground truth: Word centres ！ (+0.03em), matching the upright original.
- *   • ：FF1A / ；FF1B and 〖3016 / 〗3017 are vo=Tr, so their vertical forms
- *     (FE13/FE14/FE17/FE18) live in {@link verticalBracketFormSubstitute} (the Tr
- *     map), NOT here — the Tr draw branch consults that map, and this Tu-only map
- *     stays null for them (issue #969, following #790 / #771).
+ *   • ：FF1A / ；FF1B and 〖3016 / 〗3017 are vo=Tr, not Tu, so this Tu-only map
+ *     stays null for them. The white lenticular brackets 〖〗 (→ FE17/FE18) are
+ *     substituted via {@link verticalBracketFormSubstitute}; the fullwidth colon /
+ *     semicolon take a GEOMETRIC fallback in the renderers (their FE13/FE14 forms
+ *     are absent from most render fonts — see {@link verticalTrUprightFallback}),
+ *     issue #969, following #790 / #771.
  *   • … U+2026 is vo=R — the sideways branch rotates it 90° with the page, so
  *     its three dots already stack vertically, visually equivalent to Word's
  *     vertical ellipsis; no substitution is needed.
@@ -141,18 +143,22 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
  * Covers, keyed by their horizontal form:
  *   • the fullwidth parens / corner / angle / brace / tortoise-shell / black-
  *     lenticular brackets → U+FE35–U+FE44 ("Presentation Forms For Vertical");
- *   • the fullwidth colon ： / semicolon ； and the WHITE lenticular brackets 〖〗
- *     → U+FE13/FE14/FE17/FE18 (the U+FE1x "Vertical Forms" block, issue #969).
- *     The colon/semicolon are vo=Tr PUNCTUATION, not brackets, but they share the
- *     substitute-first / rotate-fallback behaviour this map encodes, so they live
- *     here. Word and PowerPoint substitute all four upright (PDF-adjudicated).
+ *   • the WHITE lenticular brackets 〖〗 → U+FE17/FE18 (the U+FE1x "Vertical Forms"
+ *     block, issue #969), which the common substitute fonts DO contain.
+ *
+ * NOTE: the fullwidth colon ： / semicolon ； (→ FE13/FE14) were REMOVED from this
+ * map (issue #969 follow-up). Those forms are absent from most render fonts and a
+ * Canvas cannot invoke the font's `vert` feature, so substituting reached a
+ * mispositioned system-fallback glyph. They now take a GEOMETRIC fallback in the
+ * renderers (colon rotate, semicolon upright per {@link verticalTrUprightFallback}).
  *
  * WHY this is separate from {@link verticalFormSubstitute} (the Tu map): the two
  * fallbacks differ. A Tu code point with no vertical form draws UPRIGHT; a Tr
  * one ROTATES. Keeping the maps distinct lets each draw branch pick the right
  * fallback (see the docx renderer's `drawVerticalRun`) without conflating the
  * two UAX #50 transform classes. (The name says "Bracket" for its original scope;
- * it is really "the vo=Tr vertical-form map" — brackets plus ：；.)
+ * it is really "the vo=Tr vertical-form map" — brackets plus the white lenticular
+ * 〖〗. The fullwidth colon/semicolon were removed — see the NOTE above.)
  *
  * WHY substitute a Tr bracket at all: UAX #50 §5 defines the Tr transform as
  * "substitute a vertical glyph variant; ROTATE only as the fallback when none is
@@ -175,9 +181,7 @@ const VERTICAL_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
  *
  * Mapping source: the UnicodeData.txt `<vertical>` compatibility decompositions
  * of the U+FE10 and U+FE30 blocks (each vertical form decomposes to its horizontal
- * source). FE17/FE18 decompose exactly to 〖/〗; FE13/FE14 decompose to the ASCII
- * colon/semicolon, but vertical Japanese carries the fullwidth forms, so the map
- * keys on FF1A/FF1B (as verticalFormSubstitute keys FE10 on FF0C).
+ * source). FE17/FE18 decompose exactly to 〖/〗.
  *
  * Renderers apply this ONLY at glyph-draw time (glyph selection): the advance/
  * width, text model, selection, and find/highlight all keep the ORIGINAL code
@@ -199,19 +203,19 @@ export function verticalBracketFormSubstitute(cp: number): number | null {
 // group is punctuation, not brackets:
 //   1. Fullwidth brackets / parens / braces → U+FE35–FE44 ("Presentation Forms For
 //      Vertical" block). Keyed on the horizontal bracket.
-//   2. The fullwidth colon / semicolon ：； and the white lenticular brackets 〖〗
-//      → the U+FE13/FE14/FE17/FE18 forms in the U+FE1x "Vertical Forms" block
-//      (issue #969). Word and PowerPoint substitute these upright too (Yu Mincho
-//      tbRl + eaVert, PDF-adjudicated): the colon becomes two side-by-side dots
-//      (FE13 — which *looks* rotated but is the vertical form), the semicolon stays
-//      an upright dot-over-comma (FE14 — a 90° rotation could never produce that,
-//      proving substitution), and the lenticular brackets become horizontal bracket
-//      forms (FE17/FE18). FE13/FE14 decompose to the ASCII colon/semicolon
-//      (003A/003B); vertical Japanese carries the FULLWIDTH forms, so — exactly like
-//      FE10 ← FF0C in verticalFormSubstitute — the map keys on FF1A/FF1B.
+//   2. The white lenticular brackets 〖〗 → the U+FE17/FE18 forms in the U+FE1x
+//      "Vertical Forms" block (issue #969), which the common substitute fonts DO
+//      contain, so they stay substituted upright (PDF-adjudicated). The fullwidth
+//      colon / semicolon ：；(→ FE13/FE14) were REMOVED — those forms are absent
+//      from most render fonts, so they take a geometric fallback in the renderers
+//      instead (colon rotate → FE13's side-by-side dots, semicolon upright → FE14's
+//      dot-over-comma; see verticalTrUprightFallback). FE17/FE18 decompose to
+//      the white lenticular brackets 3016/3017 exactly.
 //
 // ー (30FC) and the double quotes (201C/201D) are vo=Tr with NO vertical form and are
-// absent, so the renderer rotates them.
+// absent, so the renderer rotates them. The fullwidth colon ：(FF1A) rotates too
+// (→ FE13's side-by-side dots); the semicolon ；(FF1B) is upright (→ FE14) — see
+// verticalTrUprightFallback.
 const VERTICAL_BRACKET_FORM_MAP: ReadonlyMap<number, number> = new Map<number, number>([
   [0xff08, 0xfe35], // （ fullwidth left parenthesis  → ︵
   [0xff09, 0xfe36], // ） fullwidth right parenthesis → ︶
@@ -229,9 +233,48 @@ const VERTICAL_BRACKET_FORM_MAP: ReadonlyMap<number, number> = new Map<number, n
   [0x300d, 0xfe42], // 」 right corner bracket         → ﹂
   [0x300e, 0xfe43], // 『 left white corner bracket    → ﹃
   [0x300f, 0xfe44], // 』 right white corner bracket   → ﹄
-  // vo=Tr punctuation + white lenticular brackets in the U+FE1x block (issue #969).
-  [0xff1a, 0xfe13], // ： fullwidth colon              → ︓ vertical colon
-  [0xff1b, 0xfe14], // ； fullwidth semicolon          → ︔ vertical semicolon
+  // vo=Tr white lenticular brackets in the U+FE1x block (issue #969). The
+  // fullwidth colon ： / semicolon ； (→ FE13/FE14) were REMOVED here (issue #969
+  // follow-up): their U+FE13/FE14 forms are absent from most render fonts
+  // (e.g. Hiragino Mincho ProN, macOS's Yu Mincho substitute) and a Canvas
+  // cannot reach the font's `vert` OpenType feature, so substituting the code
+  // point reaches the system fallback cascade and paints a DIFFERENT font's glyph
+  // positioned wrong (measured: FE13/FE14 ink lands ~0.25em RIGHT of the column
+  // centre in both skia AND Chrome). They now take a GEOMETRIC fallback that
+  // reproduces each vertical form's design directly — colon rotates (→ FE13's
+  // side-by-side dots), semicolon stays upright (→ FE14's dot-over-comma). See
+  // {@link verticalTrUprightFallback}. The white lenticular brackets FE17/FE18
+  // ARE present in the substitute font, so they stay substituted.
   [0x3016, 0xfe17], // 〖 left white lenticular        → ︗ vertical left white lenticular
   [0x3017, 0xfe18], // 〗 right white lenticular       → ︘ vertical right white lenticular
 ]);
+
+// The vo=Tr code points whose no-vertical-form rotate fallback must be OVERRIDDEN
+// to UPRIGHT. This is an APPLICATION-LEVEL layout override, not the normative UAX
+// #50 Tr fallback (which is rotation): Vertical_Orientation is an informative
+// property that a layout application may override, and Word does here. The fullwidth
+// semicolon ；(FF1B) is the sole member: its Unicode vertical form FE14 (︔) is a
+// dot-over-comma drawn UPRIGHT, NOT a rotation of the base — Word/JIS X 4051 verified
+// (sample-47 PDF: ；renders as a vertical dot+comma centred on the column, whereas a
+// 90° rotation would put the comma and dot side by side). The colon ：(FF1A) is NOT
+// here: FE13 (︓) IS a 90° rotation of the base (two dots that go from vertically
+// stacked to side by side), so the generic Tr rotate fallback reproduces it. ASCII
+// `;` (003B) is vo=R (Latin), so only the fullwidth form participates.
+const VERTICAL_TR_UPRIGHT_FALLBACK: ReadonlySet<number> = new Set<number>([
+  0xff1b, // ； fullwidth semicolon → FE14 design is upright dot-over-comma
+]);
+
+/**
+ * True when a vo=Tr code point with NO substituted vertical form should take an
+ * UPRIGHT fallback rather than the generic ROTATE fallback. Only the fullwidth
+ * semicolon ；(FF1B) qualifies (its FE14 vertical form is upright dot-over-comma,
+ * not a rotation). All other rotate-fallback Tr code points — the colon ：, ー,
+ * quotes, un-substituted brackets — return false and rotate. This is an
+ * application-level override of the informative UAX #50 property (Word behaviour),
+ * not the normative Tr fallback (rotation).
+ *
+ * @param cp A Unicode scalar value.
+ */
+export function verticalTrUprightFallback(cp: number): boolean {
+  return VERTICAL_TR_UPRIGHT_FALLBACK.has(cp);
+}

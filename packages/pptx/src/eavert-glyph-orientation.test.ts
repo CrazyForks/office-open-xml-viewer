@@ -38,10 +38,11 @@ const TR_BRACKET_FE = String.fromCodePoint(0xfe35); // ︵
 const TU_COMMA = '、'; // vo=Tu → substitute U+FE11, upright
 const TU_COMMA_FE = String.fromCodePoint(0xfe11);
 const TR_ROTATE = 'ー'; // vo=Tr, no vertical form → rotate 90°
-// vo=Tr punctuation / white lenticular brackets with a U+FE1x form (issue #969).
+// vo=Tr white lenticular brackets with a U+FE1x form present in the substitute
+// fonts (issue #969) — still substituted upright. The fullwidth colon ： /
+// semicolon ； (FE13/FE14) were dropped from the substitute map (absent in most
+// render fonts) and take a geometric fallback instead — see their own tests below.
 const TR_VFORMS: Array<[string, string]> = [
-  ['：', String.fromCodePoint(0xfe13)], // fullwidth colon → ︓
-  ['；', String.fromCodePoint(0xfe14)], // fullwidth semicolon → ︔
   ['〖', String.fromCodePoint(0xfe17)], // left white lenticular → ︗
   ['〗', String.fromCodePoint(0xfe18)], // right white lenticular → ︘
 ];
@@ -186,7 +187,7 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
   });
 
   it.each(TR_VFORMS)(
-    'SUBSTITUTES the vo=Tr colon/semicolon/lenticular %s with its U+FE1x vertical form, drawn upright (issue #969)',
+    'SUBSTITUTES the vo=Tr white lenticular %s with its U+FE1x vertical form, drawn upright (issue #969)',
     (orig, fe) => {
       const calls = renderEaVert(orig);
       expect(calls.some((c) => c.text === orig), `original ${orig} is not painted`).toBe(false);
@@ -195,6 +196,25 @@ describe('pptx eaVert — UAX#50 per-glyph orientation (§20.1.10.83, issue #790
       expect(norm(sub[0].rot), 'substituted form is upright').toBeCloseTo(UPRIGHT, 5);
     },
   );
+
+  it('ROTATES the vo=Tr colon ： (geometric fallback → FE13 side-by-side dots) (issue #969)', () => {
+    // FE13 is absent from most render fonts, so the colon is NOT substituted; it
+    // rotates with the page like ー — a 90° rotation turns the base ：'s two
+    // vertically-stacked dots into FE13's side-by-side dots (Word-verified).
+    const calls = renderEaVert('：');
+    const mark = calls.filter((c) => c.text === '：');
+    expect(mark.length, '： is painted as its own glyph (not substituted)').toBe(1);
+    expect(norm(mark[0].rot), '： rotates 90° (the Tr fallback)').toBeCloseTo(SIDEWAYS, 5);
+  });
+
+  it('draws the vo=Tr semicolon ； UPRIGHT (geometric fallback → FE14 dot-over-comma) (issue #969)', () => {
+    // FE14 is an upright dot-over-comma, NOT a rotation, so the semicolon's fallback
+    // is UPRIGHT (Word/JIS-verified) rather than the generic Tr rotate.
+    const calls = renderEaVert('；');
+    const mark = calls.filter((c) => c.text === '；');
+    expect(mark.length, '； is painted as its own glyph (not substituted)').toBe(1);
+    expect(norm(mark[0].rot), '； stays upright (the FE14 fallback)').toBeCloseTo(UPRIGHT, 5);
+  });
 
   it('ROTATES a vo=Tr glyph with no vertical form (ー U+30FC) with the page (+90°)', () => {
     const calls = renderEaVert(TR_ROTATE);

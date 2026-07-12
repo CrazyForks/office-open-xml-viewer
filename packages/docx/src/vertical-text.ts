@@ -22,15 +22,18 @@
 //     corner-designed in many fonts and would shift ！？ off-column). Where no
 //     form exists (．, small kana) we draw the original upright unchanged (．
 //     keeps a corner-nudge fallback).
-//   • vo=Tr (transform, fallback rotate): the fullwidth brackets （「」〈〉【】…, the
-//     white lenticular brackets 〖〗, and the fullwidth colon/semicolon ：； have a
-//     U+FE1x/FE3x vertical presentation form (core `verticalBracketFormSubstitute`);
+//   • vo=Tr (transform, fallback rotate): the fullwidth brackets （「」〈〉【】… and
+//     the white lenticular brackets 〖〗 have a U+FE1x/FE3x vertical presentation
+//     form (core `verticalBracketFormSubstitute`) present in the substitute fonts;
 //     UAX#50 §5 makes Tr "substitute a vertical glyph, ROTATE only as fallback", so
-//     we SUBSTITUTE and draw them upright (Word/PowerPoint-verified, #969). Only Tr
-//     code points with NO vertical form — the ー prolonged sound mark and the quotes
-//     “” — take the ROTATE fallback: a plain `fillText` in the +90° page frame is
-//     already that 90° CW rotation, drawn CENTRED on the column axis so ー sits
-//     mid-column.
+//     we SUBSTITUTE and draw them upright (Word/PowerPoint-verified, #969). Tr code
+//     points with NO substituted form take a geometric fallback: ROTATE — the ー
+//     prolonged sound mark, the quotes “”, and the fullwidth colon ：(whose FE13
+//     form is absent from most render fonts, so a 90° rotation of the base reproduces
+//     FE13's side-by-side dots) — drawn CENTRED on the column axis via a plain
+//     `fillText` in the +90° page frame; or UPRIGHT — the fullwidth semicolon ；,
+//     whose FE14 form is an upright dot-over-comma, not a rotation (issue #969
+//     follow-up; see core `verticalTrUprightFallback`).
 //   • vo=R  (rotated): Latin letters, Western digits, Latin punctuation. Stay
 //     SIDEWAYS (rotated with the page) — the conventional "縦中横 not applied"
 //     appearance — drawn as an ordinary contextual `fillText` at the alphabetic
@@ -56,6 +59,7 @@ import {
   verticalOrientation,
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
+  verticalTrUprightFallback,
 } from '@silurus/ooxml-core';
 
 /** How a code point is painted inside the +90°-rotated vertical page:
@@ -290,13 +294,22 @@ export function drawVerticalRun(
     // Advance/width uses the ORIGINAL code point (measure == draw, and the text
     // model / selection / find keep the original character — see the module doc).
     const adv = ctx.measureText(ch).width * charScale + letterSpacingPx;
-    // A vo=Tr code point with a Unicode vertical presentation form — the brackets
-    // （）「」〈〉… and the colon/semicolon/white-lenticular ：；〖〗 (#969) — is
-    // SUBSTITUTED and drawn upright, exactly like the upright cells — UAX#50 §5
-    // Tr means "substitute a vertical glyph; rotate only as fallback". Only Tr
-    // code points with NO vertical form (ー, quotes “”) keep the rotate fallback.
+    // A vo=Tr code point with a substituted Unicode vertical presentation form — the
+    // brackets （）「」〈〉… and the white lenticular 〖〗 (#969) — is SUBSTITUTED and
+    // drawn upright, exactly like the upright cells — UAX#50 §5 Tr means "substitute a
+    // vertical glyph; rotate only as fallback". Tr code points with NO substituted form
+    // (ー, quotes “”, and the colon ：/ semicolon ；whose FE13/FE14 forms are absent
+    // from most render fonts) take a geometric fallback below (rotate, or — for ；—
+    // upright).
     const bracketCp = mode === 'rotate' ? verticalBracketFormSubstitute(cp) : null;
-    if (mode === 'upright' || bracketCp !== null) {
+    // A vo=Tr code point with NO substituted vertical form whose fallback is
+    // UPRIGHT rather than the generic UAX#50 §5 ROTATE — the fullwidth semicolon
+    // ；(FF1B), whose FE14 vertical form is an upright dot-over-comma, not a
+    // rotation (Word-verified, issue #969 follow-up). It draws upright exactly
+    // like the vo=U / vo=Tu cells; the colon ：is NOT here (its FE13 form IS a 90°
+    // rotation, so it takes the rotate branch below → side-by-side dots).
+    const uprightFallback = mode === 'rotate' && bracketCp === null && verticalTrUprightFallback(cp);
+    if (mode === 'upright' || bracketCp !== null || uprightFallback) {
       // vo=U / Tu, or a substituted Tr bracket. Counter-rotate −90° about the
       // cell centre so the glyph (which the page rotation would otherwise lay on
       // its side) stands upright. For corner-hanging Tu punctuation with a Unicode
@@ -350,12 +363,15 @@ export function drawVerticalRun(
       ctx.fillText(drawStr, off.dx * fontPx, (alongEm + off.dy) * fontPx);
       ctx.restore();
     } else if (mode === 'rotate') {
-      // vo=Tr with NO vertical form: ー (U+30FC) and the double quotes “”. UAX#50's
-      // Tr fallback (no vertical glyph reachable on a Canvas) is to ROTATE the
-      // glyph 90° CW. A plain `fillText` in the +90° page frame IS that rotation;
-      // centre it on the column with `center`/`middle` at the cell centre. (The
-      // bracket forms never reach here — they were substituted and drawn upright
-      // above; a rotated bracket's ink offset is not measurable from a Canvas.)
+      // vo=Tr with NO substituted vertical form and NOT the upright-fallback
+      // semicolon: ー (U+30FC), the double quotes “”, and the fullwidth colon ：
+      // (FF1A). UAX#50's Tr fallback (no vertical glyph reachable on a Canvas) is
+      // to ROTATE the glyph 90° CW. A plain `fillText` in the +90° page frame IS
+      // that rotation; centre it on the column with `center`/`middle` at the cell
+      // centre. For the colon this reproduces FE13's design directly (the two
+      // vertically-stacked dots become side by side), Word-verified (issue #969
+      // follow-up). (The substituted bracket forms never reach here — they were
+      // drawn upright above; a rotated bracket's ink offset is not Canvas-measurable.)
       const cx = x + ax + adv / 2;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';

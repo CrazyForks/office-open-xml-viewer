@@ -397,6 +397,7 @@ export {
   verticalOrientation,
   verticalFormSubstitute,
   verticalBracketFormSubstitute,
+  verticalTrUprightFallback,
   VO_UNICODE_VERSION,
 } from './text/vertical-orientation';
 export type { VerticalOrientation } from './text/vertical-orientation';
