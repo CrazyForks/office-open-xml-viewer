@@ -506,10 +506,24 @@ fn pivot_cache_target(archive: &mut XlsxZip, pivot_part: &str) -> CacheLink {
     {
         return CacheLink::Malformed;
     }
+    if root
+        .children()
+        .filter(|node| node.is_element())
+        .any(|node| {
+            matches!(
+                node.attribute("Type"),
+                Some(PIVOT_CACHE_REL_TRANSITIONAL | PIVOT_CACHE_REL_STRICT)
+            ) && (node.tag_name().name() != "Relationship"
+                || node.tag_name().namespace() != Some(PACKAGE_REL_NS))
+        })
+    {
+        return CacheLink::Malformed;
+    }
     let relationships: Vec<_> = doc
         .root_element()
         .children()
         .filter(|n| n.is_element())
+        .filter(|n| n.tag_name().name() == "Relationship")
         .filter(|n| n.tag_name().namespace() == Some(PACKAGE_REL_NS))
         .filter(|n| {
             matches!(
@@ -533,8 +547,11 @@ fn pivot_cache_target(archive: &mut XlsxZip, pivot_part: &str) -> CacheLink {
                 return CacheLink::Malformed;
             }
             match relationship.attribute("Target") {
-                Some(target) => CacheLink::Target(resolve_zip_path(dir, target)),
+                Some(target) if !target.is_empty() => {
+                    CacheLink::Target(resolve_zip_path(dir, target))
+                }
                 None => CacheLink::Malformed,
+                Some(_) => CacheLink::Malformed,
             }
         }
         [] => CacheLink::Missing,

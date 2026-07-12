@@ -4952,8 +4952,11 @@ mod pivot_metadata_tests {
             "<Relationships",
             r#"<Relationships xmlns="urn:not-package-relationships"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#,
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><NotRelationship Id="rIdCache" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdCache" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target=""/></Relationships>"#,
         ] {
             let sheet = parse(&workbook_with_pivot(COMPLETE_PIVOT, Some(rels), None));
+            assert!(sheet["pivotTables"][0].get("cacheDefinitionPart").is_none());
             assert_eq!(
                 sheet["pivotTables"][0]["status"]["reasons"][0]["kind"],
                 "malformedCacheRelationships"
