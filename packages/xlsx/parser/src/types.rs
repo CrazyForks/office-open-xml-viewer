@@ -166,6 +166,13 @@ pub struct Worksheet {
     /// and referenced pivotCacheDefinition so the renderer can draw a static
     /// button list with the saved selection state.
     pub slicers: Vec<SlicerAnchor>,
+    /// Metadata-only descriptions of saved pivot tables (ECMA-376 §18.10).
+    /// These facts never alter saved worksheet cells or styles.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub pivot_tables: Vec<PivotTableMetadata>,
+    /// Per-pivot failures that do not prevent the worksheet itself from loading.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub pivot_diagnostics: Vec<PivotDiagnostic>,
     /// Sparkline groups defined in the worksheet's `<extLst>` (Office 2010
     /// extension `http://schemas.microsoft.com/office/spreadsheetml/2009/9/main`,
     /// element `<x14:sparklineGroup>`, ECMA-376 §18.2 / Part 4).
@@ -231,6 +238,8 @@ impl Worksheet {
             defined_names: Vec::new(),
             tables: Vec::new(),
             slicers: Vec::new(),
+            pivot_tables: Vec::new(),
+            pivot_diagnostics: Vec::new(),
             sparkline_groups: Vec::new(),
             default_font_family: None,
             default_font_size: None,
@@ -238,6 +247,113 @@ impl Worksheet {
             parse_error: Some(parse_error),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotTableMetadata {
+    pub name: String,
+    /// `cacheId` is retained as an identity fact only. Part resolution follows
+    /// the pivot table part's own relationship, never this number.
+    pub cache_id: u32,
+    pub location: PivotLocation,
+    /// ECMA-376 §18.10.1.92/§18.10.1.15 `CT_Field@x` is signed; `-2` is the
+    /// Values pseudo-field sentinel and must remain distinguishable.
+    pub row_fields: Vec<i32>,
+    pub column_fields: Vec<i32>,
+    pub page_fields: Vec<PivotPageField>,
+    pub data_fields: Vec<PivotDataField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_on_load: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_definition_part: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_source: Option<PivotCacheSource>,
+    pub status: PivotMetadataStatus,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub extension_uris: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotLocation {
+    #[serde(flatten)]
+    pub range: CellRange,
+    pub first_header_row: u32,
+    pub first_data_row: u32,
+    pub first_data_col: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotPageField {
+    /// ECMA-376 §18.10.1.66 `CT_PageField@fld` is signed.
+    pub field: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotDataField {
+    /// ECMA-376 §18.10.1.16 `CT_DataField@fld` is unsigned.
+    pub field: u32,
+    pub subtotal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PivotCacheSource {
+    Worksheet {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    External,
+    Consolidation,
+    Scenario,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum PivotMetadataStatus {
+    Complete,
+    Partial { reasons: Vec<PivotPartialReason> },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PivotPartialReason {
+    MissingCacheRelationship,
+    AmbiguousCacheRelationship,
+    UnreadableCacheDefinition,
+    MalformedCacheDefinition,
+    MalformedField { field: String },
+    UnsupportedCacheSource { source_type: String },
+    UnsupportedSemanticFeature { feature: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotDiagnostic {
+    pub part: String,
+    pub reason: PivotDiagnosticReason,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PivotDiagnosticReason {
+    UnreadablePart,
+    MalformedXml,
+    MissingIdentity,
+    InvalidLocation,
 }
 
 /// Single sparkline group (`<x14:sparklineGroup>`). Holds the shared formatting

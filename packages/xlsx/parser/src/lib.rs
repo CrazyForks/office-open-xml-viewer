@@ -7,6 +7,8 @@ use ooxml_common::ns::{attr_ns, is_r_ns, is_x_ns, relationships};
 use ooxml_common::zip::read_zip_string;
 
 mod markdown;
+mod pivot;
+use pivot::*;
 
 mod types;
 pub use types::*;
@@ -274,6 +276,7 @@ fn parse_sheet_with(
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
     ws.tables = load_sheet_tables(archive, &sheet_path, theme_colors);
     ws.slicers = load_sheet_slicers(archive, &sheet_path);
+    (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, &sheet_path);
     ws.sparkline_groups =
         load_sheet_sparklines(archive, &sheet_xml, &shared.sheets, &rels_doc, theme_colors);
     let (df_family, df_size) = parse_default_font(archive);
@@ -1600,6 +1603,8 @@ fn parse_worksheet(
             defined_names: Vec::new(),
             tables: Vec::new(),
             slicers: Vec::new(),
+            pivot_tables: Vec::new(),
+            pivot_diagnostics: Vec::new(),
             sparkline_groups: Vec::new(),
             default_font_family: None,
             default_font_size: None,
@@ -4541,6 +4546,286 @@ mod rb7_partial_degradation_tests {
             wb["parseError"].is_null(),
             "an absent sharedStrings is normal, not a degradation; got {wb}"
         );
+    }
+}
+
+#[cfg(test)]
+mod pivot_metadata_tests {
+    use super::parse_sheet_native;
+    use serde_json::Value;
+    use std::io::{Cursor, Write};
+
+    fn workbook_with_pivot(
+        pivot_xml: &str,
+        pivot_rels: Option<&str>,
+        cache_xml: Option<&str>,
+    ) -> Vec<u8> {
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Report" sheetId="1" r:id="rIdSheet"/></sheets></workbook>"#;
+        let workbook_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSheet" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        let worksheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="3"><v>42</v></c></row></sheetData></worksheet>"#;
+        let worksheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/></Relationships>"#;
+
+        let mut entries = vec![
+            ("xl/workbook.xml", workbook),
+            ("xl/_rels/workbook.xml.rels", workbook_rels),
+            ("xl/worksheets/sheet1.xml", worksheet),
+            ("xl/worksheets/_rels/sheet1.xml.rels", worksheet_rels),
+            ("xl/pivotTables/pivotTable1.xml", pivot_xml),
+        ];
+        if let Some(rels) = pivot_rels {
+            entries.push(("xl/pivotTables/_rels/pivotTable1.xml.rels", rels));
+        }
+        if let Some(cache) = cache_xml {
+            entries.push(("xl/pivotCache/pivotCacheDefinition7.xml", cache));
+        }
+
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, xml) in entries {
+                zip.start_file(path, options).unwrap();
+                zip.write_all(xml.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn parse(data: &[u8]) -> Value {
+        serde_json::from_str(&parse_sheet_native(data, 0, "Report").unwrap()).unwrap()
+    }
+
+    const COMPLETE_PIVOT: &str = r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="SalesPivot" cacheId="99" dataCaption="Values"><location ref="A1:D8" firstHeaderRow="1" firstDataRow="2" firstDataCol="1"/><rowFields count="2"><field x="-2"/><field x="0"/></rowFields><colFields count="1"><field x="1"/></colFields><pageFields count="1"><pageField fld="-1" item="4" name="Region"/></pageFields><dataFields count="1"><dataField name="Sum of Sales" fld="3"/></dataFields><extLst><ext uri="urn:example:future-pivot-feature"/></extLst></pivotTableDefinition>"#;
+    const PIVOT_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdCache" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition7.xml"/></Relationships>"#;
+    const COMPLETE_CACHE: &str = r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" refreshOnLoad="1"><cacheSource type="worksheet"><worksheetSource ref="A1:D20" sheet="Data"/></cacheSource><cacheFields count="4"><cacheField name="Category"/><cacheField name="Month"/><cacheField name="Region"/><cacheField name="Sales"/></cacheFields></pivotCacheDefinition>"#;
+
+    #[test]
+    fn preserves_saved_cells_and_attaches_complete_pivot_facts() {
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+
+        // Characterization: saved worksheet values and styles are authoritative.
+        assert_eq!(
+            sheet["rows"][0]["cells"][0]["value"]["number"].as_f64(),
+            Some(42.0)
+        );
+        assert_eq!(sheet["rows"][0]["cells"][0]["styleIndex"], 3);
+
+        let pivot = &sheet["pivotTables"][0];
+        assert_eq!(pivot["name"], "SalesPivot");
+        assert_eq!(pivot["cacheId"], 99);
+        assert_eq!(pivot["location"]["top"], 1);
+        assert_eq!(pivot["location"]["right"], 4);
+        // ECMA-376 §18.10 CT_Field@x and CT_PageField@fld are signed; retain sentinels.
+        assert_eq!(pivot["rowFields"], serde_json::json!([-2, 0]));
+        assert_eq!(pivot["columnFields"], serde_json::json!([1]));
+        assert_eq!(pivot["pageFields"][0]["field"], -1);
+        assert_eq!(pivot["dataFields"][0]["field"], 3);
+        assert_eq!(pivot["dataFields"][0]["subtotal"], "sum");
+        assert_eq!(pivot["refreshOnLoad"], true);
+        assert_eq!(pivot["cacheSource"]["kind"], "worksheet");
+        assert_eq!(pivot["cacheSource"]["sheet"], "Data");
+        assert_eq!(pivot["status"]["state"], "complete");
+        assert_eq!(
+            pivot["extensionUris"],
+            serde_json::json!(["urn:example:future-pivot-feature"])
+        );
+    }
+
+    #[test]
+    fn missing_cache_relationship_is_partial() {
+        let sheet = parse(&workbook_with_pivot(COMPLETE_PIVOT, None, None));
+        assert_eq!(sheet["pivotTables"][0]["status"]["state"], "partial");
+        assert!(sheet["pivotTables"][0].get("refreshOnLoad").is_none());
+        assert!(sheet["pivotTables"][0].get("cacheDefinitionPart").is_none());
+        assert_eq!(
+            sheet["pivotTables"][0]["status"]["reasons"][0]["kind"],
+            "missingCacheRelationship"
+        );
+    }
+
+    #[test]
+    fn resolved_cache_exposes_schema_default_refresh_as_known_false() {
+        let cache = COMPLETE_CACHE.replace(" refreshOnLoad=\"1\"", "");
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some(&cache),
+        ));
+        assert_eq!(sheet["pivotTables"][0]["refreshOnLoad"], false);
+        assert_eq!(
+            sheet["pivotTables"][0]["cacheDefinitionPart"],
+            "xl/pivotCache/pivotCacheDefinition7.xml"
+        );
+    }
+
+    #[test]
+    fn rejects_extension_namespace_elements_as_core_pivot_identity_or_location() {
+        let pivot = r#"<pivotTableDefinition xmlns="urn:not-spreadsheetml" name="Fake" cacheId="7"><location ref="A1:B2" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/></pivotTableDefinition>"#;
+        let sheet = parse(&workbook_with_pivot(
+            pivot,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        assert_eq!(
+            sheet["pivotDiagnostics"][0]["reason"]["kind"],
+            "malformedXml"
+        );
+    }
+
+    #[test]
+    fn malformed_field_fact_is_partial_instead_of_silently_omitted() {
+        let pivot = COMPLETE_PIVOT.replace("<field x=\"0\"/>", "<field x=\"not-an-int\"/>");
+        let sheet = parse(&workbook_with_pivot(
+            &pivot,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        let reasons = sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons.iter().any(|r| r["kind"] == "malformedField"));
+
+        let bad_item = COMPLETE_PIVOT.replace("item=\"4\"", "item=\"not-unsigned\"");
+        let sheet = parse(&workbook_with_pivot(
+            &bad_item,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        let reasons = sheet["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons.iter().any(|r| r["field"] == "pageFields"));
+    }
+
+    #[test]
+    fn ambiguous_cache_relationship_is_partial_and_does_not_choose_a_target() {
+        let rels = PIVOT_RELS.replace(
+            "</Relationships>",
+            r#"<Relationship Id="rIdCache2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition8.xml"/></Relationships>"#,
+        );
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(&rels),
+            Some(COMPLETE_CACHE),
+        ));
+        let pivot = &sheet["pivotTables"][0];
+        assert!(pivot.get("cacheDefinitionPart").is_none());
+        assert_eq!(
+            pivot["status"]["reasons"][0]["kind"],
+            "ambiguousCacheRelationship"
+        );
+    }
+
+    #[test]
+    fn invalid_refresh_boolean_is_unknown_and_partial() {
+        let cache = COMPLETE_CACHE.replace("refreshOnLoad=\"1\"", "refreshOnLoad=\"TRUE\"");
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some(&cache),
+        ));
+        let pivot = &sheet["pivotTables"][0];
+        assert!(pivot.get("refreshOnLoad").is_none());
+        assert_eq!(pivot["status"]["reasons"][0]["kind"], "malformedField");
+    }
+
+    #[test]
+    fn resolved_cache_part_is_retained_when_the_part_is_malformed() {
+        let sheet = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some("<bad"),
+        ));
+        assert_eq!(
+            sheet["pivotTables"][0]["cacheDefinitionPart"],
+            "xl/pivotCache/pivotCacheDefinition7.xml"
+        );
+        assert_eq!(
+            sheet["pivotTables"][0]["status"]["reasons"][0]["kind"],
+            "malformedCacheDefinition"
+        );
+    }
+
+    #[test]
+    fn presentation_formats_stay_complete_but_cache_field_group_is_partial() {
+        let formatted = COMPLETE_PIVOT.replace(
+            "<extLst>",
+            "<formats count=\"0\"/><conditionalFormats count=\"0\"/><chartFormats count=\"0\"/><extLst>",
+        );
+        let complete = parse(&workbook_with_pivot(
+            &formatted,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        assert_eq!(complete["pivotTables"][0]["status"]["state"], "complete");
+
+        let grouped_cache = COMPLETE_CACHE.replace(
+            "<cacheField name=\"Category\"/>",
+            "<cacheField name=\"Category\"><fieldGroup/></cacheField>",
+        );
+        let partial = parse(&workbook_with_pivot(
+            COMPLETE_PIVOT,
+            Some(PIVOT_RELS),
+            Some(&grouped_cache),
+        ));
+        let reasons = partial["pivotTables"][0]["status"]["reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons.iter().any(|r| r["feature"] == "fieldGroup"));
+    }
+
+    #[test]
+    fn recognized_unsupported_core_feature_is_partial_but_unknown_extension_is_not() {
+        let pivot = COMPLETE_PIVOT.replace(
+            "<extLst>",
+            "<filters count=\"1\"><filter fld=\"0\" type=\"captionEqual\"/></filters><extLst>",
+        );
+        let sheet = parse(&workbook_with_pivot(
+            &pivot,
+            Some(PIVOT_RELS),
+            Some(COMPLETE_CACHE),
+        ));
+        assert_eq!(sheet["pivotTables"][0]["status"]["state"], "partial");
+        assert_eq!(
+            sheet["pivotTables"][0]["status"]["reasons"][0]["kind"],
+            "unsupportedSemanticFeature"
+        );
+        assert_eq!(
+            sheet["pivotTables"][0]["status"]["reasons"][0]["feature"],
+            "filters"
+        );
+    }
+
+    #[test]
+    fn malformed_identity_or_location_skips_only_that_pivot_with_typed_diagnostic() {
+        for (pivot, reason) in [
+            ("<pivotTableDefinition", "malformedXml"),
+            (
+                r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" cacheId="7"><location ref="A1:B2" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/></pivotTableDefinition>"#,
+                "missingIdentity",
+            ),
+            (
+                r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="Bad" cacheId="7"><location ref="not-a-range" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/></pivotTableDefinition>"#,
+                "invalidLocation",
+            ),
+        ] {
+            let sheet = parse(&workbook_with_pivot(
+                pivot,
+                Some(PIVOT_RELS),
+                Some(COMPLETE_CACHE),
+            ));
+            assert!(sheet.get("pivotTables").is_none());
+            assert_eq!(sheet["pivotDiagnostics"][0]["reason"]["kind"], reason);
+            assert_eq!(
+                sheet["rows"][0]["cells"][0]["value"]["number"].as_f64(),
+                Some(42.0)
+            );
+        }
     }
 }
 

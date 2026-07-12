@@ -118,6 +118,11 @@ export interface Worksheet {
    *  caption and the saved item list (with selection flags) so the renderer
    *  can draw a static button bank without the live pivot engine. */
   slicers?: SlicerAnchor[];
+  /** Metadata-only pivot facts (ECMA-376 §18.10). Consumers must treat saved
+   * worksheet cell values and styles as authoritative. */
+  pivotTables?: PivotTableMetadata[];
+  /** Pivot parts skipped because their XML, identity, or location was invalid. */
+  pivotDiagnostics?: PivotDiagnostic[];
   /** Sparkline groups (Office 2010+ extension `x14:sparklineGroup`).
    *  Cross-sheet `<xm:f>` data references are resolved to numeric values at
    *  parse time, and theme + tint colors are flattened to `#RRGGBB`. */
@@ -141,6 +146,70 @@ export interface Worksheet {
    *  part (e.g. `"xl/worksheets/sheet3.xml: <detail>"`). Absent (`undefined`) for
    *  every healthy sheet. The renderer paints a visible error overlay. */
   parseError?: string;
+}
+
+export interface PivotTableMetadata {
+  name: string;
+  /** Declarative identity fact only; cache resolution uses the pivot part relationship. */
+  cacheId: number;
+  location: PivotLocation;
+  /** Signed field indexes; `-2` is the Values pseudo-field sentinel. */
+  rowFields: number[];
+  columnFields: number[];
+  pageFields: PivotPageField[];
+  dataFields: PivotDataField[];
+  /** Absent when the cache definition could not be parsed; false includes the schema default. */
+  refreshOnLoad?: boolean;
+  cacheDefinitionPart?: string;
+  cacheSource?: PivotCacheSource;
+  status: PivotMetadataStatus;
+  extensionUris?: string[];
+}
+
+export interface PivotLocation extends CellRange {
+  firstHeaderRow: number;
+  firstDataRow: number;
+  firstDataCol: number;
+}
+
+export interface PivotPageField {
+  field: number;
+  item?: number;
+  name?: string;
+}
+
+export interface PivotDataField {
+  field: number;
+  subtotal: string;
+  name?: string;
+}
+
+export type PivotCacheSource =
+  | { kind: 'worksheet'; sheet?: string; reference?: string; name?: string }
+  | { kind: 'external' }
+  | { kind: 'consolidation' }
+  | { kind: 'scenario' };
+
+export type PivotMetadataStatus =
+  | { state: 'complete' }
+  | { state: 'partial'; reasons: PivotPartialReason[] };
+
+export type PivotPartialReason =
+  | { kind: 'missingCacheRelationship' }
+  | { kind: 'ambiguousCacheRelationship' }
+  | { kind: 'unreadableCacheDefinition' }
+  | { kind: 'malformedCacheDefinition' }
+  | { kind: 'malformedField'; field: string }
+  | { kind: 'unsupportedCacheSource'; sourceType: string }
+  | { kind: 'unsupportedSemanticFeature'; feature: string };
+
+export interface PivotDiagnostic {
+  part: string;
+  reason:
+    | { kind: 'unreadablePart' }
+    | { kind: 'malformedXml' }
+    | { kind: 'missingIdentity' }
+    | { kind: 'invalidLocation' };
 }
 
 export interface SparklineGroup {
