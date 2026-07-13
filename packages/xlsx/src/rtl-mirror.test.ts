@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { rtlMirrorX, HEADER_W } from './renderer.js';
+import { rtlMirrorX, sheetAnchoredRectX, HEADER_W } from './renderer.js';
 
 /**
  * Regression tests for the RTL selection / hit-testing bug (ECMA-376
@@ -92,5 +92,21 @@ describe('rtlMirrorX', () => {
     const xA = rtlMirrorX(HEADER_W + 100, colW, canvasW);
     const xB = rtlMirrorX(HEADER_W + 200, colW, canvasW);
     expect(xB).toBeLessThan(xA);
+  });
+});
+
+describe('sheetAnchoredRectX', () => {
+  it('preserves an anchored rectangle in LTR', () => {
+    expect(sheetAnchoredRectX(420, 180, 800, false)).toBe(420);
+  });
+
+  it('mirrors the full rectangle in RTL without changing its width', () => {
+    const x = sheetAnchoredRectX(420, 180, 800, true);
+    expect(x).toBe(200);
+    expect(x + 180).toBe(380);
+  });
+
+  it('mirrors the scroll-area clipping rectangle through the same transform', () => {
+    expect(sheetAnchoredRectX(HEADER_W, 750, 800, true)).toBe(0);
   });
 });
