@@ -6635,6 +6635,32 @@ function splitRowsTallerThanPage(
   return { table: outTable, rowHs: heights, sourceRowIndexByRow };
 }
 
+/** Pick the greatest safe slice endpoint whose fully materialized height fits.
+ * Endpoint heights are not monotonic: appending an exact §17.4.80 row can
+ * replace the preceding auto row's wide outer-bottom footprint with a narrow
+ * insideH boundary and make the longer slice shorter. The content-height scan
+ * performed by each paginator already limits `endpoints` to the tentative tail;
+ * walking that tail backwards therefore preserves the largest-fit contract and
+ * normally resolves only the already-known last candidate. The first safe
+ * endpoint is the forward-progress fallback even when one atomic row/span is
+ * taller than the page. */
+function selectLastFittingSliceEndpoint<T extends { usedPt: number }>(
+  endpoints: readonly number[],
+  availablePt: number,
+  materialize: (endpoint: number) => T,
+  knownLast?: { endpoint: number; value: T },
+): { endpoint: number; value: T } {
+  if (endpoints.length === 0) throw new Error('expected at least one safe table endpoint');
+  for (let index = endpoints.length - 1; index >= 0; index--) {
+    const endpoint = endpoints[index];
+    const value = knownLast?.endpoint === endpoint
+      ? knownLast.value
+      : materialize(endpoint);
+    if (value.usedPt <= availablePt || index === 0) return { endpoint, value };
+  }
+  throw new Error('unreachable table endpoint selection');
+}
+
 /**
  * Split a table that is taller than one page across page boundaries, row by
  * row (ECMA-376 table pagination). Each page receives a {@link DocTable} slice
@@ -6926,8 +6952,7 @@ export function splitTableAcrossPages(
 
     // Content-only scanning can tentatively include a row whose page-local
     // outer/inside rule footprint crosses the available band. Find the largest
-    // safe endpoint whose exact slice geometry fits. Binary search keeps exact
-    // boundary resolution to O(log rows) candidates instead of once per row.
+    // safe endpoint whose exact slice geometry fits.
     let materialized = materializeSlice(start, end, isContinuation);
     if (materialized.usedPt > avail && end > start + 1) {
       const candidates = [
@@ -6937,24 +6962,14 @@ export function splitTableAcrossPages(
         ),
         ...(end > start + 1 ? [end] : []),
       ];
-      let low = 0;
-      let high = candidates.length - 1;
-      let bestEnd = start + 1;
-      let bestSlice = materializeSlice(start, bestEnd, isContinuation);
-      while (low <= high) {
-        const mid = Math.floor((low + high) / 2);
-        const candidateEnd = candidates[mid];
-        const candidateSlice = materializeSlice(start, candidateEnd, isContinuation);
-        if (candidateSlice.usedPt <= avail || candidateEnd === start + 1) {
-          bestEnd = candidateEnd;
-          bestSlice = candidateSlice;
-          low = mid + 1;
-        } else {
-          high = mid - 1;
-        }
-      }
-      end = bestEnd;
-      materialized = bestSlice;
+      const selected = selectLastFittingSliceEndpoint(
+        candidates,
+        avail,
+        (candidateEnd) => materializeSlice(start, candidateEnd, isContinuation),
+        { endpoint: end, value: materialized },
+      );
+      end = selected.endpoint;
+      materialized = selected.value;
     }
     const sliceRows = materialized.rows;
     const sliceEl = { ...workTable, type: 'table', rows: sliceRows } as PaginatedBodyElement;
@@ -7139,24 +7154,14 @@ export function splitFloatTableAcrossPages(
 
     let materialized = materializeSlice(start, end, firstSlice);
     if (materialized.usedPt > avail && safeEnds.length > 1) {
-      let low = 0;
-      let high = safeEnds.length - 1;
-      let best = materializeSlice(start, safeEnds[0], firstSlice);
-      let bestEnd = safeEnds[0];
-      while (low <= high) {
-        const mid = Math.floor((low + high) / 2);
-        const candidateEnd = safeEnds[mid];
-        const candidate = materializeSlice(start, candidateEnd, firstSlice);
-        if (candidate.usedPt <= avail || mid === 0) {
-          best = candidate;
-          bestEnd = candidateEnd;
-          low = mid + 1;
-        } else {
-          high = mid - 1;
-        }
-      }
-      materialized = best;
-      end = bestEnd;
+      const selected = selectLastFittingSliceEndpoint(
+        safeEnds,
+        avail,
+        (candidateEnd) => materializeSlice(start, candidateEnd, firstSlice),
+        { endpoint: end, value: materialized },
+      );
+      materialized = selected.value;
+      end = selected.endpoint;
     }
 
     // Build the slice element: a subset of rows, its own tblpPr (slice 1 keeps the

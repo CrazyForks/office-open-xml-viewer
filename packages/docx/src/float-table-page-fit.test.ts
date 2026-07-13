@@ -179,6 +179,40 @@ function borderedFloatTableRows(
   return { type: 'table', ...table } as unknown as BodyElement;
 }
 
+function mixedBoundaryFloatTable(tp: TblpPr): BodyElement {
+  const rules = [
+    { height: 10, rule: 'auto' },
+    { height: 1, rule: 'exact' },
+    { height: 10, rule: 'auto' },
+    { height: 1, rule: 'exact' },
+    { height: 10, rule: 'auto' },
+  ] as const;
+  const rows = rules.map(({ height, rule }) => ({
+    ...row(height),
+    rowHeightRule: rule,
+  } as DocTableRow));
+  const outer = { style: 'single', width: 12, color: '#000000' } as const;
+  const table: DocTable = {
+    colWidths: [80],
+    rows,
+    borders: {
+      top: outer,
+      bottom: outer,
+      left: null,
+      right: null,
+      insideH: null,
+      insideV: null,
+    },
+    cellMarginTop: 0,
+    cellMarginBottom: 0,
+    cellMarginLeft: 0,
+    cellMarginRight: 0,
+    jc: 'left',
+    tblpPr: tp,
+  };
+  return { type: 'table', ...table } as unknown as BodyElement;
+}
+
 /** A floating table (`w:tblpPr`) of total height `tableHPt`, laid out as one
  *  exact-height row so its measured extent is deterministic. */
 function floatTable(tp: TblpPr, tableHPt: number): BodyElement {
@@ -289,6 +323,25 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
         .toEqual([[24], [24], [24]]);
     },
   );
+
+  it('chooses the largest fitting mixed exact/auto floating-slice endpoint', () => {
+    const body = [
+      mixedBoundaryFloatTable(tblp({ vertAnchor: 'text', tblpY: 0 })),
+      para({ text: 'anchor' }),
+    ];
+
+    // The candidate prefix heights are [22, 17, 33, 28, 44]. They are not
+    // monotonic because appending an exact row removes the preceding auto row's
+    // outer-bottom footprint. The 32pt band must select four rows at 28pt.
+    const pages = computePages(body, section({ pageHeight: 72 }), makeCtx());
+    const slices = pages.flatMap((page) => page.filter(isFloatTable));
+
+    expect(slices.map((slice) => (slice as unknown as DocTable).rows.length))
+      .toEqual([4, 1]);
+    expect(slices.map((slice) =>
+      slice.tableRowHeightsPt?.reduce((sum, height) => sum + height, 0)))
+      .toEqual([28, 22]);
+  });
 
   it('moves a following block table past a page-filling float across a continuous section', () => {
     const body = [

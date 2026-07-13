@@ -454,6 +454,37 @@ describe('layoutDocument — table fragments', () => {
       .toEqual([24, 24, 24]);
   });
 
+  it('chooses the largest fitting mixed exact/auto slice endpoint', () => {
+    const outer = singleBorder(12);
+    const rows = [
+      row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+      row([cell([])], { rowHeight: 1, rowHeightRule: 'exact' }),
+      row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+      row([cell([])], { rowHeight: 1, rowHeightRule: 'exact' }),
+      row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+    ];
+    const t = table(rows, [120], {
+      borders: {
+        top: outer,
+        bottom: outer,
+        left: null,
+        right: null,
+        insideH: null,
+        insideV: null,
+      },
+    });
+
+    // Prefix slice heights are non-monotonic because exact rows already contain
+    // their complete §17.4.80 boxes: [22, 17, 33, 28, 44]. The 32pt band must
+    // therefore select the four-row endpoint (28pt), not the two-row endpoint.
+    const tables = allTables(doc([t as unknown as BodyElement], 52));
+
+    expect(tables.map(({ table: fragment }) => fragment.rows.length))
+      .toEqual([4, 1]);
+    expect(tables.map(({ table: fragment }) => tableFragmentHeightPt(fragment)))
+      .toEqual([28, 22]);
+  });
+
   it('re-resolves repeated-header boundaries for each atLeast page slice', () => {
     const rows = [
       row([textCell('header')], {

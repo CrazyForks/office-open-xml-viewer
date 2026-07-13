@@ -1273,11 +1273,11 @@ export function paragraphMarkLineMetrics(
     // The synthetic 0.8/0.2 ≈ 1em box under-measured every empty paragraph
     // whenever the (often substituted) font's real box exceeds 1em — a Latin
     // fallback reports ~1.15em — so a run of empty "spacer" paragraphs fell
-    // short and the following content rose into a preceding float's wrap band
-    // (sample-12: the figure caption wrapped beside the image instead of below
-    // it). East Asian documents probe an EA glyph so docGrid cell rounding
-    // (lineBoxHeight) reserves whole cells (a 20pt mark on a 20pt pitch → 2
-    // cells); others probe a Latin glyph. fontBoundingBox is reported per
+    // short and following content rose into a preceding float's wrap band
+    // instead of clearing the float. East Asian documents probe an EA glyph so
+    // docGrid cell rounding (lineBoxHeight) reserves whole cells (a 20pt mark
+    // on a 20pt pitch occupies two cells); others probe a Latin glyph.
+    // fontBoundingBox is reported per
     // resolved face (not per glyph), so the probe choice does not change the box
     // for a face that contains it — and the probe is script-matched, so the mark
     // font does. correctedLineMetrics rescales a substituted font to the document
