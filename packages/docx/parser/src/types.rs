@@ -871,6 +871,11 @@ pub enum DocRun {
     // keeps the enum compact (clippy::large_enum_variant). Serde flattens the
     // Box, so the JSON tag/shape is unchanged.
     Text(Box<TextRun>),
+    /// Zero-advance formatting contribution of the WordprocessingML run that
+    /// hosts a floating DrawingML object. Kept independent of the drawing kind
+    /// because the same `<wp:anchor>` can contain a picture, chart, shape, or
+    /// group, while the host character participates in line sizing exactly once.
+    AnchorHost(AnchorHostMetrics),
     Image(ImageRun),
     /// ECMA-376 §21.2 DrawingML chart embedded in a `<w:drawing>` whose
     /// `<a:graphicData uri=".../chart">` carries a `<c:chart r:id>`. The chart
@@ -975,10 +980,6 @@ pub struct AnchorHostMetrics {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeRun {
-    /// Formatting of the `<w:r>` anchor character that contains this floating
-    /// drawing. Absent on legacy/parser-created shapes that predate this field.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anchor_host_metrics: Option<AnchorHostMetrics>,
     /// pt
     pub width_pt: f64,
     /// pt

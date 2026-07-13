@@ -26,27 +26,14 @@ function linearCtx(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-function anchoredShape(): DocRun {
+function anchorHost(): DocRun {
   return {
-    type: 'shape',
-    widthPt: 100,
-    heightPt: 1,
-    anchorXPt: 0,
-    anchorYPt: 0,
-    anchorXFromMargin: false,
-    anchorYFromPara: true,
-    zOrder: 0,
-    subpaths: [],
-    presetGeometry: 'line',
-    fill: null,
-    stroke: '000000',
-    anchorHostMetrics: {
-      fontSize: 20,
-      fontFamily: 'Arial',
-      fontFamilyEastAsia: 'Yu Mincho',
-      bold: false,
-      italic: false,
-    },
+    type: 'anchorHost',
+    fontSize: 20,
+    fontFamily: 'Arial',
+    fontFamilyEastAsia: 'Yu Mincho',
+    bold: false,
+    italic: false,
   } as DocRun;
 }
 
@@ -92,7 +79,7 @@ function layOut(runs: DocRun[]) {
 
 describe('floating drawing anchor-host metrics', () => {
   it('emits a zero-width metric segment using the anchor character formatting', () => {
-    const segments = buildSegments([anchoredShape()], { pageIndex: 0, totalPages: 1 });
+    const segments = buildSegments([anchorHost()], { pageIndex: 0, totalPages: 1 });
 
     expect(segments).toHaveLength(1);
     expect(segments[0]).toMatchObject({
@@ -106,7 +93,7 @@ describe('floating drawing anchor-host metrics', () => {
   });
 
   it('uses the zero-width metric segment to allocate East Asian document-grid cells', () => {
-    const segments = buildSegments([anchoredShape()], { pageIndex: 0, totalPages: 1 });
+    const segments = buildSegments([anchorHost()], { pageIndex: 0, totalPages: 1 });
     const [line] = layoutLines(
       linearCtx(),
       segments.map((segment) => ({ ...segment })) as LayoutSeg[],
@@ -142,9 +129,9 @@ describe('floating drawing anchor-host metrics', () => {
   });
 
   it('reserves host line height without using its zero-ink box for a visible run baseline', () => {
-    const [hostOnly] = layOut([anchoredShape()]);
+    const [hostOnly] = layOut([anchorHost()]);
     const [visibleOnly] = layOut([textRun('Caption')]);
-    const [mixed] = layOut([anchoredShape(), textRun('Caption')]);
+    const [mixed] = layOut([anchorHost(), textRun('Caption')]);
 
     // The host formatting still reserves the same two-cell line advance used by
     // anchor-only rows; only the visible glyph baseline comes from visible ink.

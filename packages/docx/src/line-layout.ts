@@ -16,7 +16,7 @@
 // is documented inline (as before the move) — see packages/docx/CLAUDE.md.
 
 import type {
-  DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun,
+  DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
 import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
@@ -1057,7 +1057,10 @@ export function eastAsianGridCountSinglePx(intendedSinglePx: number, emPx: numbe
  *             multiplier applies against the grid pitch instead, with a
  *             floor of the natural line height.
  *   exact   → value in pt, converted to px (ignores font and grid).
- *   atLeast → max(natural, authored minimum, active grid minimum).
+ *   atLeast → max(natural, authored minimum, active grid minimum). For an
+ *             explicitly authored value, the unsnapped tall-line result is an
+ *             observed Windows Word compatibility behavior; it is not stated
+ *             normatively by the line-grid clauses.
  *   null    → natural, or grid pitch if the section defines one.
  *
  * Exported for unit tests only — not part of the package API (not
@@ -1171,11 +1174,13 @@ export function lineBoxHeight(
   }
   if (ls.rule === 'exact') return ls.value * scale;
   if (ls.rule === 'atLeast') {
-    // §17.18.48 makes the authored value a minimum that expands to fit content;
-    // §17.6.5 contributes one active line pitch as another minimum. Unlike the
-    // automatic/null rule, explicit atLeast does not snap a tall plain line to
-    // an integer cell count. Ruby keeps the established whole-cell reservation
-    // because its measured base + annotation box must fit without clipping.
+    // §17.18.48 establishes the authored minimum and §17.6.5 establishes the
+    // grid pitch, but neither clause specifies how a tall, plain line with an
+    // explicit atLeast value combines with whole-cell grid allocation. Windows
+    // Word output leaves that line at its raw content height while later
+    // ordinary lines remain on one pitch. Preserve that observed compatibility
+    // behavior here. Ruby and inherited-only spacing retain the established
+    // whole-cell path because their separate fixtures require it.
     return Math.max(
       natural,
       ls.value * scale,
@@ -2280,12 +2285,21 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // family for its whole `.text` — so the measure==draw / docGrid char-grid
     // invariant holds and the draw loop needs no per-segment font switching.
     const pushSeg = (text: string, cs: boolean, fontFamily: string | null) => {
+      const bold = cs ? csBold : base.bold;
+      const italic = cs ? csItalic : base.italic;
       const localFont = resolvedFont(fontFamily);
       const localEaFloor = resolvedFont(eaFontFamily);
+      // Local-metric aliases intentionally register the normal face only. A
+      // bold/italic Canvas request against that alias would synthesize the
+      // style instead of resolving the installed family's real styled face.
+      // Keep the authored family for styled paint/measurement, while retaining
+      // the family-level design line ratio used by Word's line-box calculation.
+      const localPaintFamily = !bold && !italic ? localFont?.family : undefined;
+      const localEaFloorFamily = !bold && !italic ? localEaFloor?.family : undefined;
       segs.push({
         text,
-        bold: cs ? csBold : base.bold,
-        italic: cs ? csItalic : base.italic,
+        bold,
+        italic,
         underline: base.underline,
         // §17.3.2.40 underline style / colour — carried only on DocxTextRun (a
         // FieldRun draws single). Kept raw ST_Underline; the renderer normalizes
@@ -2295,7 +2309,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
-        fontFamily: localFont?.family ?? fontFamily,
+        fontFamily: localPaintFamily ?? fontFamily,
         resolvedLineHeightRatio: localFont?.lineHeightRatio,
         vertAlign,
         measuredWidth: 0,
@@ -2315,7 +2329,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         digitsAsAN: digitsAsAN ? true : undefined,
         // §17.3.2.26 declared eastAsia axis — recorded for the text-box line-box
         // floor only (see LayoutTextSeg.eaFloorFamily). Inert for the body path.
-        eaFloorFamily: localEaFloor?.family ?? eaFontFamily,
+        eaFloorFamily: localEaFloorFamily ?? eaFontFamily,
         resolvedEaFloorLineHeightRatio: localEaFloor?.lineHeightRatio,
         // IX1 — resolved hyperlink target of the originating run, for the
         // text-layer clickable overlay. Does not affect layout or drawing.
@@ -2539,27 +2553,33 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         leader: run.leader,
         ptab: { alignment: run.alignment, relativeTo: run.relativeTo },
       });
-    } else if (run.type === 'shape') {
-      const host = (run as unknown as ShapeRun).anchorHostMetrics;
-      if (host) {
-        const eastAsian = host.fontFamilyEastAsia != null;
-        segs.push({
-          text: '',
-          metricOnly: true,
-          ...(eastAsian ? { metricEastAsian: true as const } : {}),
-          bold: host.bold ?? false,
-          italic: host.italic ?? false,
-          underline: false,
-          strikethrough: false,
-          fontSize: host.fontSize,
-          color: null,
-          fontFamily: host.fontFamilyEastAsia ?? host.fontFamily ?? null,
-          vertAlign: null,
-          measuredWidth: 0,
-          eaFloorFamily: host.fontFamilyEastAsia ?? null,
-          snapToCharacterGrid: false,
-        });
-      }
+    } else if (run.type === 'anchorHost') {
+      const eastAsian = run.fontFamilyEastAsia != null;
+      const bold = run.bold ?? false;
+      const italic = run.italic ?? false;
+      const authoredFamily = run.fontFamilyEastAsia ?? run.fontFamily ?? null;
+      const localFont = resolvedFont(authoredFamily);
+      const localEaFloor = resolvedFont(run.fontFamilyEastAsia ?? null);
+      const normalFace = !bold && !italic;
+      segs.push({
+        text: '',
+        metricOnly: true,
+        ...(eastAsian ? { metricEastAsian: true as const } : {}),
+        bold,
+        italic,
+        underline: false,
+        strikethrough: false,
+        fontSize: run.fontSize,
+        color: null,
+        fontFamily: (normalFace ? localFont?.family : undefined) ?? authoredFamily,
+        resolvedLineHeightRatio: localFont?.lineHeightRatio,
+        vertAlign: null,
+        measuredWidth: 0,
+        eaFloorFamily:
+          (normalFace ? localEaFloor?.family : undefined) ?? run.fontFamilyEastAsia ?? null,
+        resolvedEaFloorLineHeightRatio: localEaFloor?.lineHeightRatio,
+        snapToCharacterGrid: false,
+      });
     }
   }
 

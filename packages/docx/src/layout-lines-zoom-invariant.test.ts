@@ -304,6 +304,10 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     const rightmostRunX = Math.max(...runBoxes.map(({ x, w }) => x + w));
     expect(rightmostRunX).toBeLessThanOrEqual(rightBorderX + 1e-6);
     expect(Math.max(...glyphDraws.map(({ right }) => right))).toBeLessThanOrEqual(rightBorderX + 1e-6);
+    // Top-level body paragraphs intentionally have an empty story-container
+    // chain and still use the canonical document-space glyph transform.
+    expect(glyphDraws.some(({ font, scaleX }) =>
+      font.includes('10px') && Math.abs(scaleX - paintScale) < 1e-9)).toBe(true);
     expect(runBoxes.every(({ font, fontSize }) => font.includes('5px') && fontSize === 5)).toBe(true);
   });
 

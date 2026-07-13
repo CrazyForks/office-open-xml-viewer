@@ -775,6 +775,7 @@ export interface NumberingInfo {
 
 export type DocRun =
   | { type: 'text' } & DocxTextRun
+  | { type: 'anchorHost' } & AnchorHostMetrics
   | { type: 'image' } & ImageRun
   | { type: 'chart' } & ChartRun
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
@@ -876,8 +877,6 @@ export interface AnchorHostMetrics {
 }
 
 export interface ShapeRun {
-  /** Formatting of the `<w:r>` anchor character containing this floating shape. */
-  anchorHostMetrics?: AnchorHostMetrics | null;
   widthPt: number;
   heightPt: number;
   /** X offset in pt */

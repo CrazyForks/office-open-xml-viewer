@@ -156,6 +156,11 @@ export function resolvedHorizontalBoundaryWidths(table: DocTable): number[] {
     }
 
     for (let boundary = 1; boundary < rowCount; boundary++) {
+      // Runtime row pieces separated inside one emitted slice are one
+      // continuous source row. Paint deliberately leaves that internal cut
+      // open, so it has no footprint in either adjacent row box.
+      if ((table.rows[boundary - 1] as DocTableRow & { pageCutBottom?: boolean })
+        .pageCutBottom === true) continue;
       const above = owners[boundary - 1][ci];
       const below = owners[boundary][ci];
       if (above && above === below) continue;
@@ -265,7 +270,11 @@ export function resolveSingleRowHeight(
   return rowH;
 }
 
-export function resolveTableRowHeights(
+/** Resolve row content boxes, before page-local horizontal rule footprints are
+ * added. Keeping this geometry separate is essential for pagination: once a
+ * table is sliced, the first/last rows resolve against that slice's outer
+ * borders rather than the original table's interior boundaries. */
+export function resolveTableRowContentHeights(
   table: DocTable,
   colWidths: number[],
   scale: number,
@@ -274,18 +283,6 @@ export function resolveTableRowHeights(
   const rowHeights = table.rows.map((row) =>
     resolveSingleRowHeight(row, colWidths, scale, measureCellContentHeight),
   );
-
-  // Word's auto/atLeast row footprint runs between the centres of the resolved
-  // horizontal rules. Therefore each non-exact row reserves half of the rule
-  // above and half below. Exact `trHeight` already defines the complete row box
-  // and is not expanded (§17.4.80).
-  const horizontalBoundaries = resolvedHorizontalBoundaryWidths(table);
-  for (let ri = 0; ri < rowHeights.length; ri++) {
-    if (table.rows[ri].rowHeightRule === 'exact') continue;
-    rowHeights[ri] += (
-      (horizontalBoundaries[ri] ?? 0) + (horizontalBoundaries[ri + 1] ?? 0)
-    ) * scale / 2;
-  }
 
   // §17.4.85 span extension: for each vMerge=restart cell, grow the span's last
   // row if the restart cell's full content is taller than the summed span rows.
@@ -309,4 +306,34 @@ export function resolveTableRowHeights(
   }
 
   return rowHeights;
+}
+
+/** Add the horizontal rule footprint painted by this concrete table or page
+ * slice. Auto/atLeast row boxes run between rule centres; exact trHeight already
+ * defines the complete row box and is not expanded (§17.4.80). */
+export function applyTableRowBoundaryFootprints(
+  table: DocTable,
+  contentHeights: readonly number[],
+  scale: number,
+): number[] {
+  const horizontalBoundaries = resolvedHorizontalBoundaryWidths(table);
+  return contentHeights.map((contentHeight, ri) => {
+    if (table.rows[ri]?.rowHeightRule === 'exact') return contentHeight;
+    return contentHeight + (
+      (horizontalBoundaries[ri] ?? 0) + (horizontalBoundaries[ri + 1] ?? 0)
+    ) * scale / 2;
+  });
+}
+
+export function resolveTableRowHeights(
+  table: DocTable,
+  colWidths: number[],
+  scale: number,
+  measureCellContentHeight: MeasureCellContentHeight,
+): number[] {
+  return applyTableRowBoundaryFootprints(
+    table,
+    resolveTableRowContentHeights(table, colWidths, scale, measureCellContentHeight),
+    scale,
+  );
 }

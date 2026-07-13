@@ -110,6 +110,8 @@ import {
 import {
   findMergeEndRow,
   rowGridBefore,
+  applyTableRowBoundaryFootprints,
+  resolveTableRowContentHeights,
   resolveTableRowHeights,
   resolveSingleRowHeight,
 } from './table-geometry.js';
@@ -617,10 +619,16 @@ function canonicalParagraphTextScaleEligible(
   paragraph: Pick<DocParagraph, 'alignment' | 'numbering'>,
   segments: readonly LayoutSeg[],
 ): boolean {
+  // `containers=[]` is the deliberate top-level body case. Nested body text is
+  // accepted only while every enclosing story container is a table cell; other
+  // stories/containers keep their established paint-space paths.
+  const isSupportedBodyContainerChain =
+    storyContext.story === 'body'
+    && (storyContext.containers.length === 0
+      || storyContext.containers.every((container) => container.kind === 'tableCell'));
   return !hasWrapContext
     && !inFrame
-    && storyContext.story === 'body'
-    && storyContext.containers.every((container) => container.kind === 'tableCell')
+    && isSupportedBodyContainerChain
     && !verticalCJK
     && !paragraphContext.hasRuby
     && !paragraphContext.baseRtl
@@ -3996,7 +4004,11 @@ export function computePages(
       // full content band. Resolve columns + row heights together (one min-content
       // scan) so both can be stamped for the paint pass (B2 table stage 1b).
       const tblContentWPt = colW();
-      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: measuredRowHs } =
+      const {
+        colWidthsPt: tblColWidthsPt,
+        rowContentHeightsPt: measuredRowContentHs,
+        rowHeightsPt: measuredRowHs,
+      } =
         computeTablePtLayout(measureState, tbl, tblContentWPt);
       const tblWidthPt = tblColWidthsPt.reduce((sum, width) => sum + width, 0);
 
@@ -4055,13 +4067,17 @@ export function computePages(
       const tableContentH = effContentH() - tblReservePt;
       const splitRows = splitRowsTallerThanPage(
         tbl,
-        measuredRowHs,
+        measuredRowContentHs,
         tblColWidthsPt,
         tableContentH,
         measureState,
+        true,
       );
       const pageTable = splitRows?.table ?? tbl;
-      const rowHs = splitRows?.rowHs ?? measuredRowHs;
+      const rowContentHs = splitRows?.rowHs ?? measuredRowContentHs;
+      const rowHs = splitRows
+        ? applyTableRowBoundaryFootprints(pageTable, rowContentHs, 1)
+        : measuredRowHs;
       const sourceRowIndexByRow = splitRows?.sourceRowIndexByRow;
       const tableEl = { ...pageTable, type: 'table' } as PaginatedBodyElement;
       const h = rowHs.reduce((s, x) => s + x, 0);
@@ -4073,7 +4089,7 @@ export function computePages(
         // splitter may also divide that row by cell block boundaries, matching
         // Word's default table-row pagination.
         const endY = splitTableAcrossPages(
-          pageTable, rowHs, y, tableContentH, pages,
+          pageTable, rowContentHs, y, tableContentH, pages,
           // Table slices belong to THIS table element, so the new page's
           // pre-scan starts at `i` (this table's body index). The just-filled
           // column bottom folds into `maxColBottomY` so a following continuous
@@ -4089,7 +4105,11 @@ export function computePages(
           // B2 table stage 1b — stamp the scale-1 layout onto each slice so the
           // paint pass reuses it. Each slice records ITS rows' heights; the column
           // widths + contentWPt are constant across the split.
-          { colWidthsPt: tblColWidthsPt, contentWPt: tblContentWPt },
+          {
+            colWidthsPt: tblColWidthsPt,
+            contentWPt: tblContentWPt,
+            rowHeightsAreContent: true,
+          },
           { colWidthsPt: tblColWidthsPt, state: measureState },
           sourceRowIndexByRow,
           // PR 6 — attach each slice's table fragment (byte-identical additive step:
@@ -5581,12 +5601,13 @@ function computeTablePtLayout(
   state: RenderState,
   table: DocTable,
   contentWPt: number,
-): { colWidthsPt: number[]; rowHeightsPt: number[] } {
+): { colWidthsPt: number[]; rowContentHeightsPt: number[]; rowHeightsPt: number[] } {
   const colWidthsPt = resolveColumnWidths(table, contentWPt, state);
-  const rowHeightsPt = resolveTableRowHeights(table, colWidthsPt, 1, (cell, cellW) =>
+  const rowContentHeightsPt = resolveTableRowContentHeights(table, colWidthsPt, 1, (cell, cellW) =>
     measureCellContentHeightPx(cell, table, cellW, 1, state),
   );
-  return { colWidthsPt, rowHeightsPt };
+  const rowHeightsPt = applyTableRowBoundaryFootprints(table, rowContentHeightsPt, 1);
+  return { colWidthsPt, rowContentHeightsPt, rowHeightsPt };
 }
 
 function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
@@ -6566,6 +6587,7 @@ function splitRowsTallerThanPage(
   colWidthsPt: number[],
   pageContentHeightPt: number,
   state: RenderState,
+  rowHeightsAreContent = false,
 ): { table: DocTable; rowHs: number[]; sourceRowIndexByRow: number[] } | null {
   let changed = false;
   const rows: DocTableRow[] = [];
@@ -6575,8 +6597,18 @@ function splitRowsTallerThanPage(
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
     const rowH = rowHeightsPt[ri];
-    if (rowH > pageContentHeightPt) {
-      const split = splitRowForHeight(table, row, colWidthsPt, pageContentHeightPt, state);
+    const singleRowHeight = rowHeightsAreContent
+      ? applyTableRowBoundaryFootprints({ ...table, rows: [row] }, [rowH], 1)[0]
+      : rowH;
+    if (singleRowHeight > pageContentHeightPt) {
+      const boundaryFootprint = Math.max(0, singleRowHeight - rowH);
+      const split = splitRowForHeight(
+        table,
+        row,
+        colWidthsPt,
+        Math.max(0, pageContentHeightPt - boundaryFootprint),
+        state,
+      );
       if (split) {
         rows.push(...split.rows);
         heights.push(...split.heights);
@@ -6654,7 +6686,13 @@ export function splitTableAcrossPages(
    *  gets ITS rows' heights (sliced from `rowHs`, with the repeated header rows
    *  prepended on continuations so the stamp aligns 1:1 with the slice's rows).
    *  Omitted (direct unit tests) ⇒ slices carry no table stamp and paint recomputes. */
-  tableStamp?: { colWidthsPt: number[]; contentWPt: number },
+  tableStamp?: {
+    colWidthsPt: number[];
+    contentWPt: number;
+    /** Incoming row heights exclude horizontal rule footprints. Each emitted
+     * slice must resolve those footprints from its own first/last boundaries. */
+    rowHeightsAreContent?: boolean;
+  },
   /** Optional row-block splitter used by computePages. Direct unit tests can omit
    *  this and exercise only row-boundary splitting. */
   rowSplit?: { colWidthsPt: number[]; state: RenderState },
@@ -6693,8 +6731,44 @@ export function splitTableAcrossPages(
   while (headerCount < n && workRows[headerCount].isHeader) headerCount++;
   const headerRows = workRows.slice(0, headerCount);
   const headerSourceRowIndices = workSourceRowIndices.slice(0, headerCount);
-  const headerH = workRowHs.slice(0, headerCount).reduce((s, h) => s + h, 0);
   const headerHeightsPt = workRowHs.slice(0, headerCount);
+  const headerContentHeightPt = headerHeightsPt.reduce((sum, height) => sum + height, 0);
+
+  const materializeSlice = (
+    windowStart: number,
+    windowEnd: number,
+    isContinuation: boolean,
+  ): { rows: DocTableRow[]; heightsPt: number[]; usedPt: number } => {
+    const bodyRows = workRows.slice(windowStart, windowEnd);
+    // §17.4.85 — a slice that starts inside a vMerge span re-opens the merged
+    // cell so both paint and page-local boundary resolution see the same row.
+    const reopenedBody =
+      windowStart > 0 && bodyRows.length > 0 && bodyRows[0].cells.some((c) => c.vMerge === false)
+        ? [
+            reopenMergedCellsInRow(
+              workRows,
+              windowStart,
+              headerCount,
+              isContinuation,
+              workTable.colWidths.length,
+            ),
+            ...bodyRows.slice(1),
+          ]
+        : bodyRows;
+    const rows = isContinuation ? [...headerRows, ...reopenedBody] : reopenedBody;
+    const baseHeights = isContinuation
+      ? [...headerHeightsPt, ...workRowHs.slice(windowStart, windowEnd)]
+      : workRowHs.slice(windowStart, windowEnd);
+    const sliceTable = { ...workTable, rows };
+    const heightsPt = tableStamp?.rowHeightsAreContent
+      ? applyTableRowBoundaryFootprints(sliceTable, baseHeights, 1)
+      : baseHeights;
+    return {
+      rows,
+      heightsPt,
+      usedPt: heightsPt.reduce((sum, height) => sum + height, 0),
+    };
+  };
 
   let y = startY;
   let start = 0;
@@ -6703,9 +6777,9 @@ export function splitTableAcrossPages(
   while (start < n) {
     const isContinuation = !firstSlice && headerCount > 0 && start >= headerCount;
     const avail = contentH - y;
-    const firstRowH = (isContinuation ? headerH : 0) + workRowHs[start];
+    const firstRowH = materializeSlice(start, start + 1, isContinuation).usedPt;
     const freshAvail = contentH - colTop();
-    const rowAvail = avail - (isContinuation ? headerH : 0);
+    const rowAvail = Math.max(0, workRowHs[start] + avail - firstRowH);
     // The vMerge group starting at `start`: a restart row chained to its continue
     // rows. This renderer keeps such a group together across page breaks (Word's
     // observed behavior; ECMA-376 §17.4.85 defines the merge STRUCTURE but does not
@@ -6728,8 +6802,7 @@ export function splitTableAcrossPages(
     //     full page rather than splitting inside the region.
     let groupEnd = start;
     while (groupEnd + 1 < n && !tableBreakAllowedBefore(workTable, groupEnd + 1)) groupEnd++;
-    let groupH = isContinuation ? headerH : 0;
-    for (let r = start; r <= groupEnd; r++) groupH += workRowHs[r];
+    const groupH = materializeSlice(start, groupEnd + 1, isContinuation).usedPt;
     const relaxSpanBreak = groupH > contentH;
     const breakAllowedBefore = (ri: number): boolean =>
       tableBreakAllowedBefore(workTable, ri) ||
@@ -6770,16 +6843,34 @@ export function splitTableAcrossPages(
       firstSlice = false;
       continue;
     }
-    let used = isContinuation ? headerH : 0;
+    // In content-height mode the repeated header's bottom is not an outer edge
+    // once a body row is appended. Start from header CONTENT only; the exact
+    // endpoint materialization below supplies the header/body insideH and final
+    // outer-bottom footprints. Using a header-only materialization here can
+    // overestimate mixed atLeast/exact slices and stop one row early.
+    let used = tableStamp?.rowHeightsAreContent
+      ? (isContinuation ? headerContentHeightPt : 0)
+      : materializeSlice(start, start, isContinuation).usedPt;
     let end = start;
     let lastSafeEnd = start;
     let lastSafeUsed = used;
+    const safeEnds: number[] = [];
     // Always place at least one row to guarantee forward progress.
     while (end < n) {
-      const h = workRowHs[end];
-      if (end > start && used + h > avail) {
+      // Scan content heights linearly. Page-local boundary footprints are
+      // resolved only for the selected safe endpoints below; resolving the
+      // whole candidate slice for every row would make long-table pagination
+      // quadratic.
+      const candidateUsed = used + workRowHs[end];
+      if (end > start && candidateUsed > avail) {
         if (breakAllowedBefore(end)) {
-          const remainingForNextRow = avail - used;
+          const candidateWithBoundaries = tableStamp?.rowHeightsAreContent
+            ? materializeSlice(start, end + 1, isContinuation).usedPt
+            : candidateUsed;
+          const remainingForNextRow = Math.max(
+            0,
+            workRowHs[end] + avail - candidateWithBoundaries,
+          );
           if (rowSplit && remainingForNextRow > 0 && end >= headerCount) {
             const split = splitRowForHeight(
               workTable,
@@ -6826,31 +6917,45 @@ export function splitTableAcrossPages(
       if (end > start && breakAllowedBefore(end)) {
         lastSafeEnd = end;
         lastSafeUsed = used;
+        safeEnds.push(end);
       }
-      used += h;
+      used = candidateUsed;
       end++;
     }
 
-    const bodyRows = workRows.slice(start, end);
-    // §17.4.85 — a slice that STARTS inside a vMerge span (its first body row is a
-    // `vMerge=continue` row, because an over-tall span was broken at an interior
-    // boundary above) re-opens the merged cell so the paint pass draws its box on
-    // this page. Runtime-only clone; only the leading body row is rewritten, and a
-    // column already re-opened by a prepended repeated header is left untouched.
-    const reopenedBody =
-      start > 0 && bodyRows.length > 0 && bodyRows[0].cells.some((c) => c.vMerge === false)
-        ? [
-            reopenMergedCellsInRow(
-              workRows,
-              start,
-              headerCount,
-              isContinuation,
-              workTable.colWidths.length,
-            ),
-            ...bodyRows.slice(1),
-          ]
-        : bodyRows;
-    const sliceRows = isContinuation ? [...headerRows, ...reopenedBody] : reopenedBody;
+    // Content-only scanning can tentatively include a row whose page-local
+    // outer/inside rule footprint crosses the available band. Find the largest
+    // safe endpoint whose exact slice geometry fits. Binary search keeps exact
+    // boundary resolution to O(log rows) candidates instead of once per row.
+    let materialized = materializeSlice(start, end, isContinuation);
+    if (materialized.usedPt > avail && end > start + 1) {
+      const candidates = [
+        start + 1,
+        ...safeEnds.filter(
+          (candidateEnd) => candidateEnd > start + 1 && candidateEnd < end,
+        ),
+        ...(end > start + 1 ? [end] : []),
+      ];
+      let low = 0;
+      let high = candidates.length - 1;
+      let bestEnd = start + 1;
+      let bestSlice = materializeSlice(start, bestEnd, isContinuation);
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        const candidateEnd = candidates[mid];
+        const candidateSlice = materializeSlice(start, candidateEnd, isContinuation);
+        if (candidateSlice.usedPt <= avail || candidateEnd === start + 1) {
+          bestEnd = candidateEnd;
+          bestSlice = candidateSlice;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      end = bestEnd;
+      materialized = bestSlice;
+    }
+    const sliceRows = materialized.rows;
     const sliceEl = { ...workTable, type: 'table', rows: sliceRows } as PaginatedBodyElement;
     if (tagColIndex) sliceEl.colIndex = tagColIndex();
     if (colGeom) sliceEl.colGeom = colGeom;
@@ -6864,9 +6969,7 @@ export function splitTableAcrossPages(
     // B2 table stage 1b — stamp this slice's own row heights (repeated header rows
     // prepended on continuations, matching `sliceRows`) so the paint pass reuses
     // them 1:1 instead of re-measuring the slice.
-    const sliceHeightsPt = isContinuation
-      ? [...headerHeightsPt, ...workRowHs.slice(start, end)]
-      : workRowHs.slice(start, end);
+    const sliceHeightsPt = materialized.heightsPt;
     if (tableStamp) {
       stampTableLayout(sliceEl, tableStamp.colWidthsPt, sliceHeightsPt, tableStamp.contentWPt);
     }
@@ -6892,6 +6995,7 @@ export function splitTableAcrossPages(
     }
     pages[pages.length - 1].push(sliceEl);
 
+    used = materialized.usedPt;
     y += used;
     start = end;
     firstSlice = false;
@@ -7905,6 +8009,9 @@ interface NumberingMarkerLayout {
   picBullet: { bmp: DecodedImage; w: number; h: number } | null;
   numBodyOffset: number;
   markerJcShiftPx: number;
+  /** Resolved marker ink width in px. Uses the decoded picture-bullet width when
+   *  present, otherwise the marker glyph measurement in its resolved font. */
+  markerWidthPx: number;
   hasMarker: boolean;
 }
 
@@ -7933,6 +8040,7 @@ function resolveNumberingMarker(
   // 0 = left (default); −markerW = right (period-aligned numerals: right edge at
   // firstLineX); −markerW/2 = centre. Set in the numbering block below.
   let markerJcShiftPx = 0;
+  let markerWidthPx = 0;
   if (para.numbering) {
     numMarker = para.numbering.text;
     numTab = para.numbering.tab * scale;
@@ -7958,6 +8066,7 @@ function resolveNumberingMarker(
       ctx.font = buildFont(false, false, getDefaultFontSize(para) * scale, markerFontFamily(para.numbering), fontFamilyClasses);
       markerW = ctx.measureText(markerDisplayText(para.numbering)).width;
     }
+    markerWidthPx = markerW;
     // §17.9.8 lvlJc: shift the marker so its left/right/centre aligns at
     // firstLineX (the hanging-indent reference). The marker's RIGHT edge measured
     // from paraX (the indentLeft tab) is then `indFirst + shift + markerW`.
@@ -7999,7 +8108,40 @@ function resolveNumberingMarker(
   }
   // True when the paragraph has any marker to draw (text glyph OR picture bullet).
   const hasMarker = numMarker !== '' || picBullet !== null;
-  return { numTab, picBullet, numBodyOffset, markerJcShiftPx, hasMarker };
+  return { numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, hasMarker };
+}
+
+/** Resolved numbering-marker bounds in the paragraph's physical coordinate
+ * space. §17.9.7 applies lvlJc at the logical first-line margin; the RTL result
+ * is therefore the physical mirror of LTR. `markerWidthPx` already represents
+ * either measured text ink or the resolved picture-bullet width. */
+function numberingMarkerBorderBounds(
+  contentX: number,
+  contentW: number,
+  physicalIndentLeft: number,
+  physicalIndentRight: number,
+  firstIndent: number,
+  markerJcShiftPx: number,
+  markerWidthPx: number,
+  numTab: number,
+  baseRtl: boolean,
+): { left: number; right: number } {
+  if (!baseRtl) {
+    const left = contentX + physicalIndentLeft + firstIndent + markerJcShiftPx;
+    return { left, right: left + markerWidthPx };
+  }
+  const anchor = contentX + contentW - physicalIndentRight - firstIndent;
+  const mirroredRight = anchor - markerJcShiftPx;
+  const mirroredLeft = mirroredRight - markerWidthPx;
+  // The established RTL draw path anchors the marker's right edge `numTab`
+  // beyond the aligned body start. Its maximum physical-right position is the
+  // paragraph start edge plus numTab (other text alignments can only move it
+  // inward). Union that actual paint envelope with the mirrored lvlJc bounds.
+  const paintedRight = contentX + contentW - physicalIndentRight + numTab;
+  return {
+    left: Math.min(mirroredLeft, paintedRight - markerWidthPx),
+    right: Math.max(mirroredRight, paintedRight),
+  };
 }
 
 function renderParagraph(
@@ -8087,12 +8229,25 @@ function renderParagraph(
   const indFirst = inFrame ? 0 : para.indentFirst * scale;
 
   // Numbering marker layout (§17.9.x): see resolveNumberingMarker.
-  const { numTab, picBullet, numBodyOffset, markerJcShiftPx, hasMarker } =
+  const { numTab, picBullet, numBodyOffset, markerJcShiftPx, markerWidthPx, hasMarker } =
     resolveNumberingMarker(para, state, indLeft, indFirst);
 
   const paraX = contentX + indLeft;
   const firstLineX = paraX + indFirst;
   const paraW = contentW - indLeft - indRight;
+  const markerBounds = hasMarker
+    ? numberingMarkerBorderBounds(
+        contentX,
+        contentW,
+        indLeft,
+        indRight,
+        indFirst,
+        markerJcShiftPx,
+        markerWidthPx,
+        numTab,
+        baseRtl,
+      )
+    : undefined;
   const borderBox = paragraphBorderContentBox(
     contentX,
     contentW,
@@ -8100,6 +8255,7 @@ function renderParagraph(
     indRight,
     indFirst,
     baseRtl,
+    markerBounds,
   );
 
   // ECMA-376 §17.9.28 (`<w:suff>`) governs where a numbering marker's first-line
@@ -13868,13 +14024,14 @@ export interface ParaBorderSegment {
 /**
  * Horizontal paragraph content extent used by shading and `w:pBdr`.
  *
- * ECMA-376 §17.3.1.17 describes the border as surrounding the paragraph. A
+ * ECMA-376 §17.3.1.24 applies pBdr to the paragraph. A
  * hanging first line (including a list marker from §17.9) is part of that
  * paragraph, so its start position must be inside the box. The normal body edge
  * remains authoritative for a positive first-line indent because later lines
  * still begin at the body edge. `physicalIndentLeft/Right` have already been
  * mirrored for bidi; `firstIndent` remains logical, so the expansion is applied
- * to the physical left for LTR and physical right for RTL.
+ * to the physical left for LTR and physical right for RTL. Resolved marker bounds
+ * are then unioned so lvlJc-shifted text and picture markers remain inside the box.
  */
 export function paragraphBorderContentBox(
   contentX: number,
@@ -13883,12 +14040,17 @@ export function paragraphBorderContentBox(
   physicalIndentRight: number,
   firstIndent: number,
   baseRtl: boolean,
+  markerBounds?: { left: number; right: number },
 ): { x: number; w: number } {
   let left = contentX + physicalIndentLeft;
   let right = contentX + contentW - physicalIndentRight;
   if (firstIndent < 0) {
     if (baseRtl) right -= firstIndent;
     else left += firstIndent;
+  }
+  if (markerBounds) {
+    left = Math.min(left, markerBounds.left);
+    right = Math.max(right, markerBounds.right);
   }
   return { x: left, w: Math.max(0, right - left) };
 }

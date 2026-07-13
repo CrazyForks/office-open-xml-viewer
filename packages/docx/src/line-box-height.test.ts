@@ -86,17 +86,15 @@ describe('lineBoxHeight — atLeast with an active line grid', () => {
     expect(lineBoxHeight(atLeast(24), 10, 2, 1, grid20)).toBe(24);
   });
 
-  // ECMA-376 §17.18.48 defines atLeast as an authored minimum that expands only
-  // as needed to fit its content. §17.6.5 contributes the active line pitch as
-  // another minimum (unless exact spacing or snapToGrid=false overrides it),
-  // but does not require an explicit atLeast line to occupy an integer number
-  // of grid cells. Whole-cell rounding belongs to automatic/null grid layout.
+  // ECMA-376 defines the authored atLeast minimum and the active grid pitch,
+  // but not this precise tall-line interaction. The unsnapped result below is
+  // retained as observed Windows Word compatibility behavior.
   it('takes the maximum of content, authored minimum, and one grid pitch', () => {
     expect(lineBoxHeight(atLeast(18), 12 * YU_ASC, 12 * YU_DESC, 1, grid18, false, 12 * YU, true)).toBe(18);
   });
   it('does not round tall East Asian content up to an additional grid cell', () => {
-    // 20pt design line 28.65px on pitch 18: content exceeds both minima, so
-    // atLeast keeps 28.65px rather than automatic grid rounding it to 36px.
+    // Observed output keeps a 20pt design line at 28.65px on an 18px pitch,
+    // rather than applying automatic grid rounding to 36px.
     expect(lineBoxHeight(atLeast(18), 20 * YU_ASC, 20 * YU_DESC, 1, grid18, false, 20 * YU, true))
       .toBeCloseTo(20 * YU, 12);
   });

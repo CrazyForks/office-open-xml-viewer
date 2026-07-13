@@ -56,7 +56,7 @@ describe('paraShadingRect (§17.3.1.31 shading fills the border box)', () => {
   });
 });
 
-describe('paragraph border joins (§17.3.1.17)', () => {
+describe('paragraph border joins (§17.3.1.24)', () => {
   it('includes a hanging first-line/list marker on the paragraph start side', () => {
     expect(paragraphBorderContentBox(100, 500, 36, 0, -36, false)).toEqual({ x: 100, w: 500 });
     expect(paragraphBorderContentBox(100, 500, 0, 36, -36, true)).toEqual({ x: 100, w: 500 });
@@ -64,6 +64,18 @@ describe('paragraph border joins (§17.3.1.17)', () => {
 
   it('does not expand toward a positive first-line indent', () => {
     expect(paragraphBorderContentBox(100, 500, 36, 18, 12, false)).toEqual({ x: 136, w: 446 });
+  });
+
+  it('unions resolved marker bounds on either physical side', () => {
+    expect(paragraphBorderContentBox(
+      100,
+      500,
+      36,
+      18,
+      -18,
+      false,
+      { left: 90, right: 610 },
+    )).toEqual({ x: 90, w: 520 });
   });
 
   it('spans horizontal edges to the vertical border positions and vertical edges between them', () => {

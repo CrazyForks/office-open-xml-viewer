@@ -4,6 +4,7 @@ import {
   type LocalFontMetricRequest,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
+import { docxRenderedFontFamilies } from './document-content.js';
 
 /** Word's Far-East single-line height for Meiryo is 1.3 × the selected face's
  * hhea design box. This is Office compatibility behavior, not an ECMA-376
@@ -17,6 +18,7 @@ export function docxLocalMetricRequests(doc: DocxDocumentModel): LocalFontMetric
     ...Object.keys(doc.fontFamilyClasses ?? {}),
     ...(doc.majorFont ? [doc.majorFont] : []),
     ...(doc.minorFont ? [doc.minorFont] : []),
+    ...docxRenderedFontFamilies(doc),
   ]);
   const requests: LocalFontMetricRequest[] = [];
   for (const family of names) {

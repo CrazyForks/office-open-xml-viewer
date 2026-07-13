@@ -1513,7 +1513,10 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         runs.iter().any(|r| {
             matches!(r,
             DocRun::Text(t) if !t.text.trim().is_empty())
-                || matches!(r, DocRun::Field(_) | DocRun::Image(_) | DocRun::Shape(_))
+                || matches!(
+                    r,
+                    DocRun::Field(_) | DocRun::Image(_) | DocRun::Chart(_) | DocRun::Shape(_)
+                )
         })
     };
 
@@ -3095,6 +3098,24 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
 
 // Same parse-context threading as handle_run_in_para.
 #[allow(clippy::too_many_arguments)]
+/// Prepend the zero-advance host-character metrics for a floating DrawingML
+/// payload. The metrics belong to the enclosing WordprocessingML `<w:r>`, so a
+/// group expanded into multiple drawing runs must still receive exactly one.
+fn prepend_anchor_host_metrics(
+    drawing_runs: &mut Vec<DocRun>,
+    anchor_host_metrics: &AnchorHostMetrics,
+) {
+    let has_floating_drawing = drawing_runs.iter().any(|run| match run {
+        DocRun::Image(image) => image.anchor,
+        DocRun::Chart(chart) => chart.anchor,
+        DocRun::Shape(_) => true,
+        _ => false,
+    });
+    if has_floating_drawing {
+        drawing_runs.insert(0, DocRun::AnchorHost(anchor_host_metrics.clone()));
+    }
+}
+
 fn parse_run_inner(
     node: roxmltree::Node,
     base_run: &RunFmt,
@@ -3205,16 +3226,8 @@ fn parse_run_inner(
         bold,
         italic,
     };
-    let attach_anchor_host_metrics = |drawing_runs: &mut [DocRun]| {
-        // A grouped drawing expands into several ShapeRuns, but its containing
-        // `<w:r>` still has one anchor character. Attach the zero-width metric
-        // contribution once, to the first emitted shape.
-        if let Some(shape) = drawing_runs.iter_mut().find_map(|run| match run {
-            DocRun::Shape(shape) => Some(shape),
-            _ => None,
-        }) {
-            shape.anchor_host_metrics = Some(anchor_host_metrics.clone());
-        }
+    let attach_anchor_host_metrics = |drawing_runs: &mut Vec<DocRun>| {
+        prepend_anchor_host_metrics(drawing_runs, &anchor_host_metrics);
     };
     let vert_align = fmt.vert_align.clone();
     let all_caps = fmt.all_caps.unwrap_or(false);
@@ -9604,6 +9617,16 @@ mod tests {
         };
         let cases: Vec<(DocRun, &str)> = vec![
             (DocRun::Text(Box::default()), "text"),
+            (
+                DocRun::AnchorHost(AnchorHostMetrics {
+                    font_size: 11.0,
+                    font_family: None,
+                    font_family_east_asia: None,
+                    bold: false,
+                    italic: false,
+                }),
+                "anchorHost",
+            ),
             (DocRun::Image(image), "image"),
             (
                 DocRun::Break {
@@ -12540,6 +12563,19 @@ mod anchor_image_relative_from_tests {
             .expect("expected one anchor shape")
     }
 
+    fn first_anchor_host(doc: &Document) -> &AnchorHostMetrics {
+        doc.body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                    DocRun::AnchorHost(host) => Some(host),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("expected one anchor host")
+    }
+
     /// Body XML for an anchor image with the given `<wp:positionH>` and
     /// `<wp:positionV>` children (relativeFrom + align). Mirrors the shape
     /// produced by Word for the sample-11 left/right page arrows: `wrap=none`,
@@ -12650,7 +12686,7 @@ mod anchor_image_relative_from_tests {
     }
 
     #[test]
-    fn anchored_shape_serializes_its_host_run_metrics() {
+    fn anchored_shape_serializes_independent_host_run_metrics() {
         let body = r#"<w:p><w:r>
   <w:rPr>
     <w:rFonts w:ascii="Arial" w:eastAsia="Yu Mincho"/>
@@ -12675,13 +12711,75 @@ mod anchor_image_relative_from_tests {
 </w:r></w:p>"#;
         let data = build_docx(body);
         let doc = parse_from_bytes(&data).expect("parse must succeed");
-        let json = serde_json::to_value(first_shape(&doc)).expect("shape serializes");
+        let json = serde_json::to_value(first_anchor_host(&doc)).expect("host serializes");
 
-        assert_eq!(json["anchorHostMetrics"]["fontSize"], 20.0);
-        assert_eq!(json["anchorHostMetrics"]["fontFamily"], "Arial");
-        assert_eq!(json["anchorHostMetrics"]["fontFamilyEastAsia"], "Yu Mincho");
-        assert_eq!(json["anchorHostMetrics"]["bold"], true);
-        assert_eq!(json["anchorHostMetrics"]["italic"], true);
+        assert_eq!(json["fontSize"], 20.0);
+        assert_eq!(json["fontFamily"], "Arial");
+        assert_eq!(json["fontFamilyEastAsia"], "Yu Mincho");
+        assert_eq!(json["bold"], true);
+        assert_eq!(json["italic"], true);
+    }
+
+    #[test]
+    fn anchored_picture_gets_one_independent_host_run() {
+        let body = anchor_body(
+            r#"<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#,
+        );
+        let doc = parse_from_bytes(&build_docx(&body)).expect("parse must succeed");
+        let paragraph = doc
+            .body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("paragraph");
+
+        assert_eq!(
+            paragraph
+                .runs
+                .iter()
+                .filter(|r| matches!(r, DocRun::AnchorHost(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            paragraph
+                .runs
+                .iter()
+                .filter(|r| matches!(r, DocRun::Image(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn grouped_shapes_share_one_independent_host_run() {
+        let metrics = AnchorHostMetrics {
+            font_size: 12.0,
+            font_family: Some("Arial".to_string()),
+            font_family_east_asia: None,
+            bold: false,
+            italic: false,
+        };
+        // A parsed wpg group expands into multiple Shape runs before the host
+        // character is attached. The enclosing w:r contributes only once.
+        let mut runs = vec![DocRun::Shape(Box::default()), DocRun::Shape(Box::default())];
+        prepend_anchor_host_metrics(&mut runs, &metrics);
+
+        assert_eq!(
+            runs.iter()
+                .filter(|r| matches!(r, DocRun::AnchorHost(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            runs.iter()
+                .filter(|r| matches!(r, DocRun::Shape(_)))
+                .count(),
+            2
+        );
     }
 
     /// ECMA-376 §20.4.2.3/§20.4.3.5 — a standalone `wps:wsp` inside
@@ -13129,9 +13227,20 @@ mod anchor_image_relative_from_tests {
         let mut chart_map: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
         chart_map.insert("rIdChart".to_string(), model);
 
-        let runs = parse_inline_drawing(&style_map, drawing, &media, &chart_map, &theme);
-        assert_eq!(runs.len(), 1, "one anchored chart run expected");
-        match &runs[0] {
+        let mut runs = parse_inline_drawing(&style_map, drawing, &media, &chart_map, &theme);
+        prepend_anchor_host_metrics(
+            &mut runs,
+            &AnchorHostMetrics {
+                font_size: 11.0,
+                font_family: Some("Arial".to_string()),
+                font_family_east_asia: None,
+                bold: false,
+                italic: false,
+            },
+        );
+        assert_eq!(runs.len(), 2, "one host plus one anchored chart expected");
+        assert!(matches!(&runs[0], DocRun::AnchorHost(host) if host.font_size == 11.0));
+        match &runs[1] {
             DocRun::Chart(c) => {
                 assert!(c.anchor, "anchored chart must carry anchor == true");
                 assert_eq!(c.chart.chart_type, "clusteredBar");
@@ -13157,7 +13266,17 @@ mod anchor_image_relative_from_tests {
 
         // Unresolvable rId (empty map) → no run (chart fell through, no blip).
         let empty: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
-        let none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
+        let mut none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
+        prepend_anchor_host_metrics(
+            &mut none,
+            &AnchorHostMetrics {
+                font_size: 11.0,
+                font_family: None,
+                font_family_east_asia: None,
+                bold: false,
+                italic: false,
+            },
+        );
         assert!(
             none.is_empty(),
             "unresolvable anchored chart rId must emit nothing"
