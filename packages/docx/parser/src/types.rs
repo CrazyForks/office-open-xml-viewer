@@ -1048,6 +1048,9 @@ pub struct ShapeRun {
     /// `<a:ln><a:prstDash val>` (ECMA-376 §20.1.8.48). None ⇒ solid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke_dash: Option<String>,
+    /// VML `<v:stroke endcap>` / DrawingML line cap, normalized for Canvas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_cap: Option<String>,
     /// `<a:ln><a:headEnd>` decoration (line start). None ⇒ no head.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_end: Option<LineEnd>,
@@ -1684,6 +1687,13 @@ pub struct ImageRun {
     pub width_pt: f64,
     /// pt
     pub height_pt: f64,
+    /// Effective DrawingML rotation after composing a picture's parent groups.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub rotation: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_h: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_v: bool,
     /// true = wp:anchor (absolute page position), false = wp:inline (flows with text)
     pub anchor: bool,
     /// X offset in pt (anchor only).  Interpretation depends on anchor_x_from_margin.
@@ -2010,6 +2020,12 @@ pub struct BorderSpec {
 #[serde(rename_all = "camelCase")]
 pub struct DocTableRow {
     pub cells: Vec<DocTableCell>,
+    /// ECMA-376 §17.4.15: number of table-grid columns skipped before the first
+    /// real cell in this row. Omitted means zero.
+    pub grid_before: u32,
+    /// ECMA-376 §17.4.14: number of table-grid columns skipped after the last
+    /// real cell in this row. Omitted means zero.
+    pub grid_after: u32,
     /// pt, None = auto
     pub row_height: Option<f64>,
     /// ECMA-376 §17.4.80 w:trHeight/@hRule. "auto" (default) = treat row_height

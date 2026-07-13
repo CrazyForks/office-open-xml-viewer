@@ -3,6 +3,7 @@ use ooxml_common::blip::{
     svg_blip_rid, Duotone,
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
+use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
@@ -4124,6 +4125,9 @@ fn parse_inline_drawing(
             src_rect,
             width_pt,
             height_pt,
+            rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
             anchor: false,
             anchor_x_pt: 0.0,
             anchor_y_pt: 0.0,
@@ -4330,11 +4334,7 @@ fn parse_inline_drawing(
             pos_y,
             y_from_para,
             &anchor_meta,
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            false,
+            None,
             anchor_z_order,
         ) {
             shp.behind_doc = behind_doc;
@@ -4367,6 +4367,9 @@ fn parse_inline_drawing(
         src_rect,
         width_pt,
         height_pt,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         anchor: true,
         anchor_x_pt: pos_x,
         anchor_y_pt: pos_y,
@@ -4654,7 +4657,7 @@ fn parse_wgp_images(
     // pic's own offset, ignoring both the group's scale/offset and any nested
     // grpSp transform, mis-placing/mis-sizing grouped pictures.)
     let base = match group_xfrm(wgp) {
-        Some(x) => GroupTransform::IDENTITY.compose_child(x),
+        Some(x) => compose_group_xfrm(GroupTransform::IDENTITY, x),
         None => GroupTransform::IDENTITY,
     };
     let mut results = Vec::new();
@@ -4714,7 +4717,7 @@ fn walk_group_images(
             }
             "grpSp" => {
                 let child_xform = match group_xfrm(child) {
-                    Some(x) => xform.compose_child(x),
+                    Some(x) => compose_group_xfrm(xform, x),
                     None => xform,
                 };
                 walk_group_images(
@@ -4774,6 +4777,22 @@ fn parse_group_pic(
         .attribute("cy")
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0);
+    let leaf_rotation = xfrm
+        .attribute("rot")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        / 60000.0;
+    let leaf_flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
+    let leaf_flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
+    let mapped = xform.apply_rect(DrawingRect {
+        x: ox,
+        y: oy,
+        width: cx,
+        height: cy,
+        rotation_degrees: leaf_rotation,
+        flip_h: leaf_flip_h,
+        flip_v: leaf_flip_v,
+    });
 
     if cx <= 0.0 || cy <= 0.0 {
         return None;
@@ -4810,13 +4829,16 @@ fn parse_group_pic(
         mime_type,
         svg_image_path,
         src_rect,
-        width_pt: cx * xform.scale_x / 12700.0,
-        height_pt: cy * xform.scale_y / 12700.0,
+        width_pt: mapped.width / 12700.0,
+        height_pt: mapped.height / 12700.0,
+        rotation: mapped.rotation_degrees,
+        flip_h: mapped.flip_h,
+        flip_v: mapped.flip_v,
         anchor: true,
         // Map the pic offset through the group chain, then add the page-space
         // anchor offset of the whole group.
-        anchor_x_pt: anchor_pos_x + xform.off_x_emu / 12700.0 + ox * xform.scale_x / 12700.0,
-        anchor_y_pt: anchor_pos_y + xform.off_y_emu / 12700.0 + oy * xform.scale_y / 12700.0,
+        anchor_x_pt: anchor_pos_x + mapped.x / 12700.0,
+        anchor_y_pt: anchor_pos_y + mapped.y / 12700.0,
         anchor_x_from_margin: x_from_margin,
         anchor_y_from_para: y_from_para,
         color_replace_from,
@@ -4854,54 +4876,17 @@ fn parse_group_pic(
 /// transforms have no skew). ECMA-376 §20.1.7.5 (`a:grpSpPr` group transform)
 /// and §20.1.7.6 (`a:xfrm` child offset/extent) define this scale/offset, and
 /// nested groups compose their transforms multiplicatively.
-#[derive(Clone, Copy)]
-struct GroupTransform {
-    scale_x: f64,
-    scale_y: f64,
-    off_x_emu: f64,
-    off_y_emu: f64,
-}
+type GroupTransform = DrawingGroupTransform;
 
-impl GroupTransform {
-    const IDENTITY: GroupTransform = GroupTransform {
-        scale_x: 1.0,
-        scale_y: 1.0,
-        off_x_emu: 0.0,
-        off_y_emu: 0.0,
-    };
-
-    /// Compose with the transform of a child group whose own `grpSpPr/xfrm`
-    /// gives off/ext/chOff/chExt. The child group maps grandchild coordinates
-    /// `g` to this group's child space via `mid = g_off - g_chOff*g_scale +
-    /// g*g_scale`; applying `self` (child→page) on top yields the composite
-    /// `page = self.off + self.scale*(mid)`. Expanding gives:
-    ///   new_scale = self.scale * g_scale
-    ///   new_off   = self.off + self.scale * (g_off - g_chOff * g_scale)
-    fn compose_child(self, xfrm: roxmltree::Node) -> GroupTransform {
-        let (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy) =
-            read_group_xfrm(xfrm);
-        let g_scale_x = if ch_ext_cx > 0.0 && ext_cx > 0.0 {
-            ext_cx / ch_ext_cx
-        } else {
-            1.0
-        };
-        let g_scale_y = if ch_ext_cy > 0.0 && ext_cy > 0.0 {
-            ext_cy / ch_ext_cy
-        } else {
-            1.0
-        };
-        GroupTransform {
-            scale_x: self.scale_x * g_scale_x,
-            scale_y: self.scale_y * g_scale_y,
-            off_x_emu: self.off_x_emu + self.scale_x * (off_x - ch_off_x * g_scale_x),
-            off_y_emu: self.off_y_emu + self.scale_y * (off_y - ch_off_y * g_scale_y),
-        }
-    }
+/// Parse the host element's `a:xfrm` and delegate the DrawingML composition
+/// contract to `ooxml-common`, shared with the PPTX and XLSX adapters.
+fn compose_group_xfrm(parent: GroupTransform, xfrm: roxmltree::Node) -> GroupTransform {
+    parent.compose_group(read_group_xfrm(xfrm))
 }
 
 /// Read off/ext/chOff/chExt (EMU) from a group `a:xfrm`. Returns
 /// (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy).
-fn read_group_xfrm(xfrm: roxmltree::Node) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
+fn read_group_xfrm(xfrm: roxmltree::Node) -> DrawingGroupSpec {
     let attr = |node: Option<roxmltree::Node>, name: &str| {
         node.and_then(|n| n.attribute(name).and_then(|v| v.parse::<f64>().ok()))
             .unwrap_or(0.0)
@@ -4918,16 +4903,23 @@ fn read_group_xfrm(xfrm: roxmltree::Node) -> (f64, f64, f64, f64, f64, f64, f64,
     let ch_ext = xfrm
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "chExt");
-    (
-        attr(off, "x"),
-        attr(off, "y"),
-        attr(ext, "cx"),
-        attr(ext, "cy"),
-        attr(ch_off, "x"),
-        attr(ch_off, "y"),
-        attr(ch_ext, "cx"),
-        attr(ch_ext, "cy"),
-    )
+    DrawingGroupSpec {
+        off_x: attr(off, "x"),
+        off_y: attr(off, "y"),
+        ext_x: attr(ext, "cx"),
+        ext_y: attr(ext, "cy"),
+        child_off_x: attr(ch_off, "x"),
+        child_off_y: attr(ch_off, "y"),
+        child_ext_x: attr(ch_ext, "cx"),
+        child_ext_y: attr(ch_ext, "cy"),
+        rotation_degrees: xfrm
+            .attribute("rot")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            / 60000.0,
+        flip_h: matches!(xfrm.attribute("flipH"), Some("1") | Some("true")),
+        flip_v: matches!(xfrm.attribute("flipV"), Some("1") | Some("true")),
+    }
 }
 
 /// Locate a group's `grpSpPr > xfrm` (the group's own transform), if present.
@@ -4964,7 +4956,7 @@ fn parse_wgp_shapes(
 ) -> Vec<ShapeRun> {
     // Base transform = the outermost wgp grpSpPr/xfrm (chOff/chExt → off/ext).
     let base = match group_xfrm(wgp) {
-        Some(x) => GroupTransform::IDENTITY.compose_child(x),
+        Some(x) => compose_group_xfrm(GroupTransform::IDENTITY, x),
         None => GroupTransform::IDENTITY,
     };
 
@@ -4975,10 +4967,18 @@ fn parse_wgp_shapes(
     // nesting depth.
     let (group_w_pt, group_h_pt) = match group_xfrm(wgp) {
         Some(x) => {
-            let (_, _, ext_cx, ext_cy, _, _, ch_ext_cx, ch_ext_cy) = read_group_xfrm(x);
+            let spec = read_group_xfrm(x);
             (
-                (if ext_cx > 0.0 { ext_cx } else { ch_ext_cx }) / 12700.0,
-                (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0,
+                (if spec.ext_x > 0.0 {
+                    spec.ext_x
+                } else {
+                    spec.child_ext_x
+                }) / 12700.0,
+                (if spec.ext_y > 0.0 {
+                    spec.ext_y
+                } else {
+                    spec.child_ext_y
+                }) / 12700.0,
             )
         }
         None => (0.0, 0.0),
@@ -5052,11 +5052,7 @@ fn walk_group_children(
                     anchor_pos_y,
                     y_from_para,
                     anchor_meta,
-                    xform.scale_x,
-                    xform.scale_y,
-                    xform.off_x_emu / 12700.0,
-                    xform.off_y_emu / 12700.0,
-                    true,
+                    Some(xform),
                     anchor_z_order.saturating_add(idx),
                 ) {
                     shape.group_width_pt = Some(group_w_pt);
@@ -5067,7 +5063,7 @@ fn walk_group_children(
             "grpSp" => {
                 // Compose this nested group's transform, then recurse.
                 let child_xform = match group_xfrm(child) {
-                    Some(x) => xform.compose_child(x),
+                    Some(x) => compose_group_xfrm(xform, x),
                     None => xform,
                 };
                 walk_group_children(
@@ -5094,11 +5090,8 @@ fn walk_group_children(
     }
 }
 
-/// Parse a single wps:wsp into ShapeRun. `sx,sy` scale the shape's spPr/xfrm
-/// from group child coord space to page EMU; `group_off_pt_*` are the group origin
-/// on the page (in pt) so the shape's off.x/off.y (in child coord space) can be
-/// translated to page-relative pt. For a standalone wsp (no wgp), pass sx=sy=1,
-/// group_off=0 and `include_xfrm_offset=false`: the enclosing wp:anchor
+/// Parse a single wps:wsp into ShapeRun. `group_transform` is the cumulative
+/// Annex L DrawingML group hierarchy. For a standalone wsp pass `None`: the enclosing wp:anchor
 /// positionH/V already places the DrawingML object, while the shape's
 /// a:xfrm/off is its local DrawingML transform.
 // Carries the accumulated anchor/group coordinate transform (offsets, scale,
@@ -5116,11 +5109,7 @@ fn parse_wsp_shape(
     anchor_pos_y: f64,
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
-    sx: f64,
-    sy: f64,
-    group_off_pt_x: f64,
-    group_off_pt_y: f64,
-    include_xfrm_offset: bool,
+    group_transform: Option<GroupTransform>,
     z_order: u32,
 ) -> Option<ShapeRun> {
     let sp_pr = wsp
@@ -5174,20 +5163,42 @@ fn parse_wsp_shape(
     let flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
     let flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
 
-    let width_pt = cx * sx / 12700.0;
-    let height_pt = cy * sy / 12700.0;
-    let local_x_pt = if include_xfrm_offset {
-        ox * sx / 12700.0
-    } else {
-        0.0
-    };
-    let local_y_pt = if include_xfrm_offset {
-        oy * sy / 12700.0
-    } else {
-        0.0
-    };
-    let anchor_x_pt = anchor_pos_x + group_off_pt_x + local_x_pt;
-    let anchor_y_pt = anchor_pos_y + group_off_pt_y + local_y_pt;
+    // Annex L §L.4.7.4–§L.4.7.6: effective scale stays on its authored axis,
+    // rotations/flips compose separately, and the full hierarchy maps the
+    // child's original centre to determine translation.
+    let (width_pt, height_pt, local_x_pt, local_y_pt, rotation, flip_h, flip_v) =
+        if let Some(transform) = group_transform {
+            let mapped = transform.apply_rect(DrawingRect {
+                x: ox,
+                y: oy,
+                width: cx,
+                height: cy,
+                rotation_degrees: rotation,
+                flip_h,
+                flip_v,
+            });
+            (
+                mapped.width / 12700.0,
+                mapped.height / 12700.0,
+                mapped.x / 12700.0,
+                mapped.y / 12700.0,
+                mapped.rotation_degrees,
+                mapped.flip_h,
+                mapped.flip_v,
+            )
+        } else {
+            (
+                cx / 12700.0,
+                cy / 12700.0,
+                0.0,
+                0.0,
+                rotation,
+                flip_h,
+                flip_v,
+            )
+        };
+    let anchor_x_pt = anchor_pos_x + local_x_pt;
+    let anchor_y_pt = anchor_pos_y + local_y_pt;
 
     let cust_geom = sp_pr
         .children()
@@ -6150,66 +6161,89 @@ fn parse_vml_pict(
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
 ) -> Option<ShapeRun> {
-    // v:shape / v:rect / v:roundrect — any VML shape element with geometry. A
+    // v:shape / v:rect / v:roundrect / v:line — any VML shape element with geometry. A
     // shape whose payload is a `<v:imagedata>` is a PICTURE, not a text/fill
     // panel (it is drawn by parse_vml_pict_image, or intentionally skipped when
     // its image can't be resolved); such a shape must not be turned into an
     // empty rectangle here, so it is excluded from the candidate set.
     let shape = pict.descendants().find(|n| {
         n.is_element()
-            && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+            && matches!(
+                n.tag_name().name(),
+                "shape" | "rect" | "roundrect" | "oval" | "line"
+            )
             && !n
                 .children()
                 .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
     })?;
 
-    // CSS-like `style`: "position:relative;width:300pt;height:60pt;…"
+    // CSS-like `style`: "position:relative;width:300pt;height:60pt;…".
+    // A referenced shapetype carries the legacy conceptual shape id (`o:spt`);
+    // map the interoperable subset onto the shared DrawingML preset engine.
     let style = shape.attribute("style").unwrap_or("");
-    let width_pt = vml_css_length_pt(style, "width").unwrap_or(0.0);
-    let height_pt = vml_css_length_pt(style, "height").unwrap_or(0.0);
-    if width_pt <= 0.0 || height_pt <= 0.0 {
+    let shape_type = shape
+        .attribute("type")
+        .map(|value| value.trim_start_matches('#'))
+        .and_then(|id| {
+            pict.descendants().find(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "shapetype"
+                    && node.attribute("id") == Some(id)
+            })
+        });
+    let spt = shape
+        .attributes()
+        .find(|attr| attr.name() == "spt")
+        .or_else(|| shape_type.and_then(|node| node.attributes().find(|attr| attr.name() == "spt")))
+        .and_then(|attr| attr.value().parse::<u16>().ok());
+    let preset_geometry = match shape.tag_name().name() {
+        "line" => Some("line".to_string()),
+        "rect" => Some("rect".to_string()),
+        "roundrect" => Some("roundRect".to_string()),
+        "oval" => Some("ellipse".to_string()),
+        _ => Some(
+            spt.and_then(vml_shape_type_preset)
+                .unwrap_or("rect")
+                .to_string(),
+        ),
+    };
+    let is_line_geometry = preset_geometry.as_deref().is_some_and(|preset| {
+        let preset = preset.to_ascii_lowercase();
+        preset == "line" || preset.contains("connector")
+    });
+
+    let line_points = if shape.tag_name().name() == "line" {
+        match (
+            shape.attribute("from").and_then(parse_vml_point_pt),
+            shape.attribute("to").and_then(parse_vml_point_pt),
+        ) {
+            (Some(from), Some(to)) => Some((from, to)),
+            _ => return None,
+        }
+    } else {
+        None
+    };
+    let (width_pt, height_pt) = if let Some((from, to)) = line_points {
+        ((to.0 - from.0).abs(), (to.1 - from.1).abs())
+    } else {
+        (
+            vml_css_length_pt(style, "width").unwrap_or(0.0),
+            vml_css_length_pt(style, "height").unwrap_or(0.0),
+        )
+    };
+    if width_pt < 0.0
+        || height_pt < 0.0
+        || (is_line_geometry && width_pt == 0.0 && height_pt == 0.0)
+        || (!is_line_geometry && (width_pt == 0.0 || height_pt == 0.0))
+    {
         return None;
     }
 
-    // VML colors: `fillcolor` / `strokecolor` are "#rrggbb" or a named color; we
-    // keep the 6-hex form the renderer expects (no leading '#').
-    let fill = shape
-        .attribute("fillcolor")
-        .and_then(vml_color_hex6)
-        .map(|color| ShapeFill::Solid { color });
-    // `stroked="f"` (or "false") disables the stroke regardless of strokecolor
-    // (§19.1.2 shape stroked attribute). Otherwise a strokecolor implies a
-    // stroke; VML's default weight is 0.75pt (Part 4 §19.1.2.21 strokeweight).
-    let stroked_off = shape
-        .attribute("stroked")
-        .is_some_and(|v| matches!(v.trim(), "f" | "false" | "0"));
-    let stroke = if stroked_off {
-        None
-    } else {
-        shape.attribute("strokecolor").and_then(vml_color_hex6)
-    };
-    let stroke_width = if stroke.is_some() {
-        shape
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "stroke")
-            .and_then(|n| n.attribute("weight"))
-            .and_then(|w| w.trim_end_matches("pt").trim().parse::<f64>().ok())
-            .or_else(|| {
-                shape
-                    .attribute("strokeweight")
-                    .and_then(|w| w.trim_end_matches("pt").trim().parse::<f64>().ok())
-            })
-            .unwrap_or(0.75)
-    } else {
-        0.0
-    };
+    let resolved_fill = resolve_vml_fill(shape, shape_type);
+    let resolved_stroke = resolve_vml_stroke(shape, shape_type);
 
     // ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — fill alpha (default opaque).
-    let fill_opacity = shape
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "fill")
-        .and_then(|f| f.attribute("opacity"))
-        .and_then(parse_vml_opacity);
+    let fill_opacity = resolved_fill.opacity;
 
     // §19.1.2.23 `<v:textpath>` — WordArt text (a watermark). When present this
     // shape draws stretched rotated text instead of a fill/stroke panel + body.
@@ -6239,17 +6273,27 @@ fn parse_vml_pict(
     };
     let anchor_x_align = vml_css_str(style, "mso-position-horizontal").and_then(map_align);
     let anchor_y_align = vml_css_str(style, "mso-position-vertical").and_then(map_valign);
-    // `text` and `char`/`line` relative-froms map to paragraph-relative flow; we
-    // only forward the page/margin containers the watermark cares about.
-    let map_rel = |v: &str| match v {
+    // VML's `text` base is the containing text column horizontally (including a
+    // table cell's inner text box) and the anchor paragraph vertically. Carry
+    // those explicit containers instead of degrading them to the page margins.
+    let map_x_rel = |v: &str| match v {
         "margin" => Some("margin".to_string()),
         "page" => Some("page".to_string()),
+        "text" => Some("column".to_string()),
+        "char" => Some("character".to_string()),
+        _ => None,
+    };
+    let map_y_rel = |v: &str| match v {
+        "margin" => Some("margin".to_string()),
+        "page" => Some("page".to_string()),
+        "text" => Some("paragraph".to_string()),
+        "line" => Some("line".to_string()),
         _ => None,
     };
     let anchor_x_relative_from =
-        vml_css_str(style, "mso-position-horizontal-relative").and_then(map_rel);
+        vml_css_str(style, "mso-position-horizontal-relative").and_then(map_x_rel);
     let anchor_y_relative_from =
-        vml_css_str(style, "mso-position-vertical-relative").and_then(map_rel);
+        vml_css_str(style, "mso-position-vertical-relative").and_then(map_y_rel);
 
     // §19.1.2.19 style `z-index` — a negative value places the shape BEHIND the
     // document text (a watermark), matching wp:anchor behindDoc semantics.
@@ -6273,11 +6317,42 @@ fn parse_vml_pict(
             .unwrap_or_default()
     };
 
+    // §19.1.2.19: Word's absolute VML text boxes encode their numeric
+    // position in margin-left / margin-top even when `left:0` is also present.
+    // Preserve those authored offsets instead of collapsing every box to the
+    // anchor paragraph's leading corner.
+    let anchor_x_pt = line_points
+        .map(|(from, to)| from.0.min(to.0))
+        .unwrap_or_else(|| {
+            vml_css_length_pt(style, "margin-left")
+                .or_else(|| vml_css_length_pt(style, "left"))
+                .unwrap_or(0.0)
+        });
+    let anchor_y_pt = line_points
+        .map(|(from, to)| from.1.min(to.1))
+        .unwrap_or_else(|| {
+            vml_css_length_pt(style, "margin-top")
+                .or_else(|| vml_css_length_pt(style, "top"))
+                .unwrap_or(0.0)
+        });
+    let style_flip = vml_css_str(style, "flip").unwrap_or_default();
+    let flip_h = line_points.is_some_and(|(from, to)| from.0 > to.0)
+        ^ style_flip.split_whitespace().any(|axis| axis == "x");
+    let flip_v = line_points.is_some_and(|(from, to)| from.1 > to.1)
+        ^ style_flip.split_whitespace().any(|axis| axis == "y");
+    let adj_values = shape
+        .attribute("adj")
+        .or_else(|| shape_type.and_then(|node| node.attribute("adj")))
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .map(|value| vec![Some(value * 100000.0 / 21600.0)])
+        .unwrap_or_default();
+
     Some(ShapeRun {
         width_pt,
         height_pt,
-        anchor_x_pt: 0.0,
-        anchor_y_pt: 0.0,
+        anchor_x_pt,
+        anchor_y_pt,
         anchor_x_from_margin: true,
         anchor_y_from_para: !behind_doc,
         anchor_x_align,
@@ -6287,13 +6362,19 @@ fn parse_vml_pict(
         behind_doc,
         z_order: 0,
         subpaths: Vec::new(),
-        preset_geometry: Some("rect".to_string()),
-        adj_values: Vec::new(),
-        fill,
+        preset_geometry,
+        adj_values,
+        fill: resolved_fill.fill,
         fill_opacity,
-        stroke,
-        stroke_width,
+        stroke: resolved_stroke.color,
+        stroke_width: resolved_stroke.width_pt,
+        stroke_dash: resolved_stroke.dash,
+        stroke_cap: resolved_stroke.cap,
+        head_end: resolved_stroke.head_end,
+        tail_end: resolved_stroke.tail_end,
         rotation,
+        flip_h,
+        flip_v,
         text_path,
         // VML t202 text-box default insets are the OOXML defaults (§21.1.2.1.1).
         text_blocks,
@@ -6306,11 +6387,330 @@ fn parse_vml_pict(
     })
 }
 
+/// Map legacy VML conceptual shape ids ([MS-OE376] §3.9.5) onto the equivalent
+/// DrawingML preset names consumed by the shared DOCX/PPTX geometry engine.
+fn vml_shape_type_preset(spt: u16) -> Option<&'static str> {
+    match spt {
+        1 => Some("rect"),
+        2 => Some("roundRect"),
+        3 => Some("ellipse"),
+        20 => Some("line"),
+        32 => Some("straightConnector1"),
+        85 => Some("leftBracket"),
+        86 => Some("rightBracket"),
+        87 => Some("leftBrace"),
+        88 => Some("rightBrace"),
+        185 => Some("bracketPair"),
+        186 => Some("bracePair"),
+        202 => Some("rect"),
+        _ => None,
+    }
+}
+
+fn vml_direct_child<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+    local_name: &str,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    node.children()
+        .find(|child| child.is_element() && child.tag_name().name() == local_name)
+}
+
+struct ResolvedVmlStroke {
+    color: Option<String>,
+    width_pt: f64,
+    dash: Option<String>,
+    cap: Option<String>,
+    head_end: Option<LineEnd>,
+    tail_end: Option<LineEnd>,
+}
+
+struct ResolvedVmlFill {
+    fill: Option<ShapeFill>,
+    opacity: Option<f64>,
+}
+
+/// Resolve the Part 4 §19.1.2.5/§19.1.2.19 fill cascade. Instance properties
+/// override the referenced shapetype; within either layer `<v:fill>` overrides
+/// the element attributes. An enabled fill defaults to white.
+fn resolve_vml_fill(
+    shape: roxmltree::Node,
+    shape_type: Option<roxmltree::Node>,
+) -> ResolvedVmlFill {
+    let shape_fill = vml_direct_child(shape, "fill");
+    let type_fill = shape_type.and_then(|node| vml_direct_child(node, "fill"));
+    let type_enabled = type_fill
+        .and_then(|node| node.attribute("on"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| {
+            shape_type
+                .and_then(|node| node.attribute("filled"))
+                .and_then(parse_vml_true_false)
+        })
+        .unwrap_or(true);
+    let enabled = shape_fill
+        .and_then(|node| node.attribute("on"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| shape.attribute("filled").and_then(parse_vml_true_false))
+        .unwrap_or(type_enabled);
+    let fill = enabled.then(|| {
+        let color = shape_fill
+            .and_then(|node| node.attribute("color"))
+            .and_then(vml_color_hex6)
+            .or_else(|| shape.attribute("fillcolor").and_then(vml_color_hex6))
+            .or_else(|| {
+                type_fill
+                    .and_then(|node| node.attribute("color"))
+                    .and_then(vml_color_hex6)
+            })
+            .or_else(|| {
+                shape_type
+                    .and_then(|node| node.attribute("fillcolor"))
+                    .and_then(vml_color_hex6)
+            })
+            .unwrap_or_else(|| "FFFFFF".to_string());
+        ShapeFill::Solid { color }
+    });
+    let opacity = enabled
+        .then(|| {
+            shape_fill
+                .and_then(|node| node.attribute("opacity"))
+                .or_else(|| type_fill.and_then(|node| node.attribute("opacity")))
+                .and_then(parse_vml_opacity)
+        })
+        .flatten();
+    ResolvedVmlFill { fill, opacity }
+}
+
+/// Resolve the Part 4 §19.1.2.19/§19.1.2.21 stroke cascade as one cohesive
+/// value. Instance properties override the referenced shapetype; within either
+/// layer a direct `<v:stroke>` child overrides the element attributes.
+fn resolve_vml_stroke(
+    shape: roxmltree::Node,
+    shape_type: Option<roxmltree::Node>,
+) -> ResolvedVmlStroke {
+    let shape_stroke = vml_direct_child(shape, "stroke");
+    let type_stroke = shape_type.and_then(|node| vml_direct_child(node, "stroke"));
+    let type_enabled = type_stroke
+        .and_then(|node| node.attribute("on"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| {
+            shape_type
+                .and_then(|node| node.attribute("stroked"))
+                .and_then(parse_vml_true_false)
+        })
+        .unwrap_or(true);
+    let enabled = shape_stroke
+        .and_then(|node| node.attribute("on"))
+        .and_then(parse_vml_true_false)
+        .or_else(|| shape.attribute("stroked").and_then(parse_vml_true_false))
+        .unwrap_or(type_enabled);
+
+    let color = enabled.then(|| {
+        shape_stroke
+            .and_then(|node| node.attribute("color"))
+            .and_then(vml_color_hex6)
+            .or_else(|| shape.attribute("strokecolor").and_then(vml_color_hex6))
+            .or_else(|| {
+                type_stroke
+                    .and_then(|node| node.attribute("color"))
+                    .and_then(vml_color_hex6)
+            })
+            .or_else(|| {
+                shape_type
+                    .and_then(|node| node.attribute("strokecolor"))
+                    .and_then(vml_color_hex6)
+            })
+            .unwrap_or_else(|| "000000".to_string())
+    });
+    let width_pt = if enabled {
+        shape_stroke
+            .and_then(|node| node.attribute("weight"))
+            .and_then(parse_vml_stroke_weight_pt)
+            .or_else(|| {
+                shape
+                    .attribute("strokeweight")
+                    .and_then(parse_vml_stroke_weight_pt)
+            })
+            .or_else(|| {
+                type_stroke
+                    .and_then(|node| node.attribute("weight"))
+                    .and_then(parse_vml_stroke_weight_pt)
+            })
+            .or_else(|| {
+                shape_type
+                    .and_then(|node| node.attribute("strokeweight"))
+                    .and_then(parse_vml_stroke_weight_pt)
+            })
+            .unwrap_or(1.0)
+    } else {
+        0.0
+    };
+    let dash = enabled
+        .then(|| {
+            shape_stroke
+                .and_then(|node| node.attribute("dashstyle"))
+                .or_else(|| type_stroke.and_then(|node| node.attribute("dashstyle")))
+                .and_then(normalize_vml_dashstyle)
+        })
+        .flatten();
+    let cap = enabled
+        .then(|| {
+            shape_stroke
+                .and_then(|node| node.attribute("endcap"))
+                .or_else(|| type_stroke.and_then(|node| node.attribute("endcap")))
+                .and_then(|value| match value.to_ascii_lowercase().as_str() {
+                    "round" => Some("round".to_string()),
+                    "square" => Some("square".to_string()),
+                    "flat" => Some("butt".to_string()),
+                    _ => None,
+                })
+        })
+        .flatten();
+    let head_end = shape_stroke
+        .filter(|node| node.attribute("startarrow").is_some())
+        .or_else(|| type_stroke.filter(|node| node.attribute("startarrow").is_some()))
+        .and_then(|node| {
+            parse_vml_line_end(node, "startarrow", "startarrowwidth", "startarrowlength")
+        });
+    let tail_end = shape_stroke
+        .filter(|node| node.attribute("endarrow").is_some())
+        .or_else(|| type_stroke.filter(|node| node.attribute("endarrow").is_some()))
+        .and_then(|node| parse_vml_line_end(node, "endarrow", "endarrowwidth", "endarrowlength"));
+
+    ResolvedVmlStroke {
+        color,
+        width_pt,
+        dash,
+        cap,
+        head_end,
+        tail_end,
+    }
+}
+
+/// VML ST_TrueFalse accepts the long, short, and numeric spellings.
+fn parse_vml_true_false(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "t" | "true" | "1" => Some(true),
+        "f" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Part 4 §19.1.2.19 `strokeweight`: explicit CSS units convert normally, but
+/// a bare number is EMU (not points). The caller supplies the specified 1pt
+/// default when no valid value is present.
+fn parse_vml_stroke_weight_pt(raw: &str) -> Option<f64> {
+    let value = raw.trim().to_ascii_lowercase();
+    let has_unit = ["pt", "in", "cm", "mm", "pc", "px"]
+        .iter()
+        .any(|unit| value.ends_with(unit));
+    if has_unit {
+        parse_vml_length_pt(&value)
+    } else {
+        value.parse::<f64>().ok().map(|emu| emu / 12700.0)
+    }
+}
+
+/// Normalize Part 4 §19.1.2.21 VML symbolic dash names onto the shared
+/// DrawingML preset vocabulary. Numeric custom patterns remain textual and are
+/// interpreted by core's shape-stroke resolver, which applies the Part 4
+/// pair/discard grammar.
+fn normalize_vml_dashstyle(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("solid") {
+        return None;
+    }
+    let preset = match value.to_ascii_lowercase().as_str() {
+        "shortdash" => "sysDash",
+        "shortdot" => "sysDot",
+        "shortdashdot" => "sysDashDot",
+        "shortdashdotdot" => "sysDashDotDot",
+        "dot" => "dot",
+        "dash" => "dash",
+        "longdash" => "lgDash",
+        "dashdot" => "dashDot",
+        "longdashdot" => "lgDashDot",
+        "longdashdotdot" => "lgDashDotDot",
+        _ => return Some(value.to_string()),
+    };
+    Some(preset.to_string())
+}
+
+/// Convert one VML length to points. VML coordinates commonly use points and
+/// inches in the same document (`from="…pt"`, `to="6in"`), while a bare number
+/// in a WordprocessingML `<w:pict>` is interpreted as points.
+fn parse_vml_length_pt(value: &str) -> Option<f64> {
+    let value = value.trim().to_ascii_lowercase();
+    let (number, scale) = if let Some(number) = value.strip_suffix("pt") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("in") {
+        (number, 72.0)
+    } else if let Some(number) = value.strip_suffix("cm") {
+        (number, 72.0 / 2.54)
+    } else if let Some(number) = value.strip_suffix("mm") {
+        (number, 72.0 / 25.4)
+    } else if let Some(number) = value.strip_suffix("pc") {
+        (number, 12.0)
+    } else if let Some(number) = value.strip_suffix("px") {
+        (number, 72.0 / 96.0)
+    } else {
+        (value.as_str(), 1.0)
+    };
+    number.trim().parse::<f64>().ok().map(|n| n * scale)
+}
+
+/// Parse VML's `x,y` point-pair grammar used by `<v:line from/to>`.
+fn parse_vml_point_pt(value: &str) -> Option<(f64, f64)> {
+    let mut parts = value.split(',');
+    let x = parse_vml_length_pt(parts.next()?)?;
+    let y = parse_vml_length_pt(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((x, y))
+}
+
+/// Convert VML `<v:stroke startarrow/endarrow>` to the DrawingML-compatible
+/// line-end contract used by the shared renderer.
+fn parse_vml_line_end(
+    stroke: roxmltree::Node,
+    type_attr: &str,
+    width_attr: &str,
+    length_attr: &str,
+) -> Option<LineEnd> {
+    let r#type = match stroke
+        .attribute(type_attr)?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "none" => return None,
+        "block" => "triangle",
+        "classic" => "stealth",
+        "diamond" => "diamond",
+        "oval" => "oval",
+        "open" => "arrow",
+        _ => return None,
+    };
+    let w = match stroke.attribute(width_attr).unwrap_or("medium").trim() {
+        "narrow" | "sm" => "sm",
+        "wide" | "lg" => "lg",
+        _ => "med",
+    };
+    let len = match stroke.attribute(length_attr).unwrap_or("medium").trim() {
+        "short" | "sm" => "sm",
+        "long" | "lg" => "lg",
+        _ => "med",
+    };
+    Some(LineEnd {
+        r#type: r#type.to_string(),
+        w: w.to_string(),
+        len: len.to_string(),
+    })
+}
+
 /// Read a length from a VML CSS `style` string (ECMA-376 Part 4 §19.1.2.19
-/// "style" — a semicolon-delimited `name:value` list). Returns the numeric value
-/// with a trailing `pt` unit stripped; VML lengths in a `<w:pict>` default to
-/// points, so a bare number is taken as pt. Non-`pt` units (px/cm/…) and
-/// percentages are not converted here (callers that need them handle it).
+/// "style" — a semicolon-delimited `name:value` list) and convert it to points.
 /// Property match is case-insensitive per the CSS2 grammar.
 fn vml_css_length_pt(style: &str, prop: &str) -> Option<f64> {
     for decl in style.split(';') {
@@ -6321,7 +6721,7 @@ fn vml_css_length_pt(style: &str, prop: &str) -> Option<f64> {
             None => continue,
         };
         if k.eq_ignore_ascii_case(prop) {
-            return v.trim_end_matches("pt").trim().parse::<f64>().ok();
+            return parse_vml_length_pt(v);
         }
     }
     None
@@ -6481,6 +6881,9 @@ fn parse_vml_pict_image(
         src_rect: None,
         width_pt,
         height_pt,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         anchor: false,
         anchor_x_pt: 0.0,
         anchor_y_pt: 0.0,
@@ -6569,6 +6972,9 @@ fn parse_object_ole_image(
         src_rect: None,
         width_pt,
         height_pt,
+        rotation: 0.0,
+        flip_h: false,
+        flip_v: false,
         anchor: false,
         anchor_x_pt: 0.0,
         anchor_y_pt: 0.0,
@@ -7538,6 +7944,21 @@ fn parse_table_row(
     let cant_split = tr_pr
         .and_then(|p| bool_prop(p, "cantSplit"))
         .unwrap_or(false);
+    // ECMA-376 §17.4.15 / §17.4.14 — these are structural offsets into the
+    // shared tblGrid. They determine which grid columns the row's first/last
+    // cells occupy; wBefore/wAfter only supply preferred widths for those
+    // skipped columns and the saved tblGrid already carries their resolved
+    // widths for the renderer's fixed-grid placement.
+    let grid_before = tr_pr
+        .and_then(|p| child_w(p, "gridBefore"))
+        .and_then(|n| attr_w(n, "val"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let grid_after = tr_pr
+        .and_then(|p| child_w(p, "gridAfter"))
+        .and_then(|n| attr_w(n, "val"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
 
     let mut cells = vec![];
     for (i, tc_node) in children_w_flat(node, "tc").into_iter().enumerate() {
@@ -7559,6 +7980,8 @@ fn parse_table_row(
 
     DocTableRow {
         cells,
+        grid_before,
+        grid_after,
         row_height,
         row_height_rule,
         is_header,
@@ -8055,6 +8478,30 @@ mod tests {
             &theme,
             DepthGuard::root(),
         )
+    }
+
+    #[test]
+    fn table_row_preserves_grid_columns_before_and_after_cells() {
+        // ECMA-376 §17.4.15 / §17.4.14: gridBefore/gridAfter are structural
+        // grid offsets, not ignorable preferred-width hints. A consumer must
+        // skip these columns before/after placing the row's real cells.
+        let table = parse_tbl(
+            r#"
+            <w:tblGrid>
+              <w:gridCol w:w="400"/><w:gridCol w:w="800"/><w:gridCol w:w="1200"/>
+            </w:tblGrid>
+            <w:tr>
+              <w:trPr>
+                <w:gridBefore w:val="1"/><w:wBefore w:w="400" w:type="dxa"/>
+                <w:gridAfter w:val="1"/><w:wAfter w:w="1200" w:type="dxa"/>
+              </w:trPr>
+              <w:tc><w:tcPr><w:tcW w:w="800" w:type="dxa"/></w:tcPr><w:p/></w:tc>
+            </w:tr>
+            "#,
+        );
+        let row = serde_json::to_value(&table.rows[0]).expect("serialize table row");
+        assert_eq!(row["gridBefore"], 1);
+        assert_eq!(row["gridAfter"], 1);
     }
 
     // ── Nested-table recursion depth guard (RB2) ───────────────────────────
@@ -9110,6 +9557,9 @@ mod tests {
             src_rect: None,
             width_pt: 24.0,
             height_pt: 24.0,
+            rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
             anchor: false,
             anchor_x_pt: 0.0,
             anchor_y_pt: 0.0,
@@ -11424,6 +11874,9 @@ mod svg_blip_tests {
             src_rect: None,
             width_pt: 24.0,
             height_pt: 24.0,
+            rotation: 0.0,
+            flip_h: false,
+            flip_v: false,
             anchor: false,
             anchor_x_pt: 0.0,
             anchor_y_pt: 0.0,
@@ -15542,11 +15995,7 @@ mod shape_preset_geometry_tests {
             0.0,
             true,
             &AnchorMeta::default(),
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            false,
+            None,
             0,
         )
         .expect("shape parses")
@@ -15678,11 +16127,7 @@ mod shape_fontref_color_tests {
             0.0,
             true,
             &AnchorMeta::default(),
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            false,
+            None,
             0,
         )
         .expect("shape parses")
@@ -17269,6 +17714,178 @@ mod vml_pict_tests {
             .collect()
     }
 
+    /// VML §19.1.2.19 absolute text boxes carry their authored offsets in the
+    /// CSS-like `margin-left` / `margin-top` declarations. A stroke is enabled
+    /// by default unless `stroked="f"`; when no `strokecolor` is authored VML's
+    /// default is black. Word also emits numeric relative dash patterns on the
+    /// child `<v:stroke>` element.
+    #[test]
+    fn textbox_preserves_offsets_and_default_stroke() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape type="#_x0000_t202"
+                  style="position:absolute;margin-left:18.25pt;margin-top:-14.25pt;width:444.7pt;height:38.7pt;mso-width-relative:margin"
+                  filled="f" strokeweight="1.5pt">
+                  <v:stroke dashstyle="0 2" endcap="round"/>
+                  <v:textbox><w:txbxContent><w:p><w:r><w:t>notice</w:t></w:r></w:p></w:txbxContent></v:textbox>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1);
+        let shape = &shapes[0];
+        assert!((shape.anchor_x_pt - 18.25).abs() < 1e-6);
+        assert!((shape.anchor_y_pt + 14.25).abs() < 1e-6);
+        assert_eq!(shape.stroke.as_deref(), Some("000000"));
+        assert!((shape.stroke_width - 1.5).abs() < 1e-6);
+        assert_eq!(shape.stroke_dash.as_deref(), Some("0 2"));
+        assert_eq!(shape.stroke_cap.as_deref(), Some("round"));
+    }
+
+    /// Part 4 §19.1.2.19/§19.1.2.21: the shape instance overrides its
+    /// referenced shapetype, while the instance's child stroke overrides the
+    /// instance attributes. Stroke weight defaults to 1pt and a unitless value
+    /// is expressed in EMU.
+    #[test]
+    fn vml_stroke_cascade_and_units_follow_part4() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="base" o:spt="86" stroked="f" strokecolor="#ff0000"
+                  strokeweight="25400" adj="1000">
+                  <v:stroke color="#00ff00" dashstyle="shortdot"/>
+                </v:shapetype>
+                <v:shape type="#base" stroked="t" strokecolor="#0000ff" adj="2000"
+                  style="width:20pt;height:30pt">
+                  <v:stroke on="t" color="#112233" weight="12700" dashstyle="longdashdotdot"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:rect style="width:20pt;height:30pt" stroked="t">
+                  <v:stroke on="f" color="#abcdef"/>
+                </v:rect>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:rect style="width:20pt;height:30pt"/>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 3);
+
+        assert_eq!(shapes[0].stroke.as_deref(), Some("112233"));
+        assert!((shapes[0].stroke_width - 1.0).abs() < 1e-6);
+        assert_eq!(shapes[0].stroke_dash.as_deref(), Some("lgDashDotDot"));
+        assert_eq!(
+            shapes[0].adj_values,
+            vec![Some(2000.0 * 100000.0 / 21600.0)]
+        );
+
+        assert_eq!(shapes[1].stroke, None);
+        assert_eq!(shapes[1].stroke_width, 0.0);
+
+        assert_eq!(shapes[2].stroke.as_deref(), Some("000000"));
+        assert!((shapes[2].stroke_width - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vml_fill_cascade_and_default_follow_part4() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="inherited" fillcolor="#ff0000"/>
+                <v:rect type="#inherited" style="width:20pt;height:30pt"/>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="typedChild"><v:fill color="#00ff00"/></v:shapetype>
+                <v:rect type="#typedChild" fillcolor="#0000ff" style="width:20pt;height:30pt"/>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:rect fillcolor="#0000ff" style="width:20pt;height:30pt">
+                  <v:fill color="#112233" opacity="0.5"/>
+                </v:rect>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict>
+                <v:rect filled="t" style="width:20pt;height:30pt"><v:fill on="f"/></v:rect>
+              </w:pict></w:r></w:p>
+              <w:p><w:r><w:pict><v:rect style="width:20pt;height:30pt"/></w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 5);
+        fn color(shape: &ShapeRun) -> Option<&str> {
+            match shape.fill.as_ref() {
+                Some(ShapeFill::Solid { color }) => Some(color.as_str()),
+                _ => None,
+            }
+        }
+        assert_eq!(color(&shapes[0]), Some("ff0000"));
+        assert_eq!(color(&shapes[1]), Some("0000ff"));
+        assert_eq!(color(&shapes[2]), Some("112233"));
+        assert!((shapes[2].fill_opacity.unwrap_or(0.0) - 0.5).abs() < 1e-6);
+        assert!(shapes[3].fill.is_none());
+        assert_eq!(color(&shapes[4]), Some("FFFFFF"));
+    }
+
+    /// VML §19.1.2.12 `<v:line>` stores its geometry in `from` / `to`
+    /// rather than CSS width/height. Word uses these legacy line elements for
+    /// form connectors; `<v:stroke endarrow="block">` decorates the `to` end.
+    #[test]
+    fn line_preserves_endpoints_and_block_arrow() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:line style="position:absolute;mso-position-horizontal-relative:text;mso-position-vertical-relative:text" from="44pt,6.5pt"
+                  to="142pt,6.5pt" strokeweight="1.5pt">
+                  <v:stroke endarrow="block"/>
+                </v:line>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1);
+        let shape = &shapes[0];
+        assert_eq!(shape.preset_geometry.as_deref(), Some("line"));
+        assert!((shape.anchor_x_pt - 44.0).abs() < 1e-6);
+        assert!((shape.anchor_y_pt - 6.5).abs() < 1e-6);
+        assert!((shape.width_pt - 98.0).abs() < 1e-6);
+        assert!(shape.height_pt.abs() < 1e-6);
+        assert_eq!(shape.stroke.as_deref(), Some("000000"));
+        assert!((shape.stroke_width - 1.5).abs() < 1e-6);
+        assert_eq!(shape.anchor_x_relative_from.as_deref(), Some("column"));
+        assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("paragraph"));
+        assert_eq!(
+            shape.tail_end.as_ref().map(|end| end.r#type.as_str()),
+            Some("triangle")
+        );
+    }
+
+    /// [MS-OE376] §3.9.5 maps VML shape type 86 to Right Bracket. Reusing
+    /// the shared DrawingML preset lets DOCX and PPTX render the same geometry.
+    #[test]
+    fn legacy_shape_type_86_maps_to_right_bracket_preset() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shapetype id="_x0000_t86" o:spt="86" filled="f"/>
+                <v:shape type="#_x0000_t86"
+                  style="position:absolute;margin-left:133.5pt;margin-top:10.3pt;width:13.35pt;height:15.1pt"
+                  filled="f"/>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].preset_geometry.as_deref(), Some("rightBracket"));
+    }
+
     /// §19.1.2.11 imagedata — a bare `<w:pict>` (no `<w:object>` wrapper) whose
     /// `<v:shape>` carries a `<v:imagedata r:id>` is a non-OLE inline VML image.
     /// It must surface as an inline `ImageRun` sized from the shape's CSS `style`
@@ -17462,6 +18079,151 @@ mod vml_pict_tests {
                 .as_deref(),
             Some("Arial")
         );
+    }
+}
+
+#[cfg(test)]
+mod wgp_shape_transform_tests {
+    use super::*;
+
+    /// Annex L §L.4.7.4–§L.4.7.5: horizontal/vertical scales are multiplied on
+    /// their authored axes; child rotation is summed independently. The full
+    /// group transform maps the child's original centre.
+    #[test]
+    fn quarter_turned_child_composes_non_uniform_group_scale_about_its_center() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:a="urn:a">
+            <wpg:grpSpPr><a:xfrm>
+              <a:off x="0" y="0"/><a:ext cx="127000" cy="254000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <wps:wsp>
+              <wps:spPr>
+                <a:xfrm rot="5400000">
+                  <a:off x="0" y="50800"/><a:ext cx="127000" cy="25400"/>
+                </a:xfrm>
+                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                <a:noFill/><a:ln><a:noFill/></a:ln>
+              </wps:spPr>
+            </wps:wsp>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let shapes = parse_wgp_shapes(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            0.0,
+            false,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+            0,
+        );
+        assert_eq!(shapes.len(), 1);
+        let shape = &shapes[0];
+        assert!((shape.rotation - 90.0).abs() < 1e-6);
+        assert!(
+            (shape.width_pt - 10.0).abs() < 1e-6,
+            "width={}",
+            shape.width_pt
+        );
+        assert!(
+            (shape.height_pt - 4.0).abs() < 1e-6,
+            "height={}",
+            shape.height_pt
+        );
+        assert!(
+            (shape.anchor_y_pt - 8.0).abs() < 1e-6,
+            "y={}",
+            shape.anchor_y_pt
+        );
+        assert!(!shape.flip_h);
+        assert!(!shape.flip_v);
+    }
+
+    #[test]
+    fn rotated_flipped_group_composes_shape_per_annex_l() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:a="urn:a">
+            <wpg:grpSpPr><a:xfrm rot="5400000" flipH="1">
+              <a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="1270000" cy="1270000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <wps:wsp><wps:spPr>
+              <a:xfrm rot="900000" flipV="1">
+                <a:off x="127000" y="254000"/><a:ext cx="254000" cy="127000"/>
+              </a:xfrm>
+              <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+              <a:noFill/><a:ln><a:noFill/></a:ln>
+            </wps:spPr></wps:wsp>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let shapes = parse_wgp_shapes(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            0.0,
+            false,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+            0,
+        );
+        let shape = &shapes[0];
+        assert!((shape.anchor_x_pt - 105.0).abs() < 1e-6);
+        assert!((shape.anchor_y_pt - 105.0).abs() < 1e-6);
+        assert!((shape.width_pt - 40.0).abs() < 1e-6);
+        assert!((shape.height_pt - 10.0).abs() < 1e-6);
+        assert!((shape.rotation - 105.0).abs() < 1e-6);
+        assert!(shape.flip_h);
+        assert!(shape.flip_v);
+    }
+
+    #[test]
+    fn rotated_flipped_group_composes_picture_per_annex_l() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:pic="urn:pic" xmlns:a="urn:a"
+                   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <wpg:grpSpPr><a:xfrm rot="5400000" flipH="1">
+              <a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="1270000" cy="1270000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <pic:pic>
+              <pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill>
+              <pic:spPr><a:xfrm rot="900000" flipV="1">
+                <a:off x="127000" y="254000"/><a:ext cx="254000" cy="127000"/>
+              </a:xfrm></pic:spPr>
+            </pic:pic>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let media = HashMap::from([("rId1".to_string(), "word/media/image1.png".to_string())]);
+        let images = parse_wgp_images(
+            doc.root_element(),
+            &media,
+            &ThemeColors::default(),
+            0.0,
+            false,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+        );
+        let image = &images[0];
+        assert!((image.anchor_x_pt - 105.0).abs() < 1e-6);
+        assert!((image.anchor_y_pt - 105.0).abs() < 1e-6);
+        assert!((image.width_pt - 40.0).abs() < 1e-6);
+        assert!((image.height_pt - 10.0).abs() < 1e-6);
+        assert!((image.rotation - 105.0).abs() < 1e-6);
+        assert!(image.flip_h);
+        assert!(image.flip_v);
     }
 }
 
