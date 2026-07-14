@@ -200,7 +200,7 @@ async function renderAllPages(model: DocxDocumentModel, pages: PaginatedBodyElem
   for (let p = 0; p < pages.length; p++) {
     const rec = makeRecordingCanvas();
     const services = createLayoutServices(model, {
-      localMetrics: testFontSnapshot(model), measureContext: rec.canvas.getContext('2d'),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: rec.canvas.getContext('2d'),
     });
     await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, width: 200, prebuiltPages: pages, layoutServices: services });
     perPage.push(rec.calls);
@@ -258,7 +258,7 @@ async function renderVariantScaled(
  *  Reports measureText counts so the caller can pin non-vacuity (a fast path really
  *  fired, or was legitimately rejected). */
 async function assertPaintIdentical(model: DocxDocumentModel): Promise<{ pages: number; drawn: number; split: boolean; measuresProduction: number; measuresRecompute: number; streams: Call[][] }> {
-  const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot(model) }));
+  const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
   // Sanity: this document actually split a paragraph, so continuation slices exist.
   const split = pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice));
 

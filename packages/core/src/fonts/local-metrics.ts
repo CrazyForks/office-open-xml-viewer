@@ -12,14 +12,10 @@ export interface LocalFontMetricRequest {
   /** Evidence-backed Office single-line multiplier applied to the local face's
    * design box. Omit when the face is loaded only as an exact geometry alias. */
   lineHeightMultiplier?: number;
-  /** Canvas request tuple mapped to the isolated regular local face. CSS Fonts
-   * local() selects by full/PostScript face name, not these descriptors, so
-   * non-normal tuples deliberately use Canvas synthesis from the loaded face. */
+  /** Descriptor of this exact full/PostScript face name. A styled face requires
+   * its own request and exact local name; capabilities are never synthesized. */
   weight?: number;
   style?: 'normal' | 'italic';
-  /** Document-used strings measured transiently into the geometry hash. The
-   * strings themselves are never retained in the resolved snapshot. */
-  geometryProbeTexts?: readonly string[];
 }
 
 export interface ResolvedLocalFontMetric {
@@ -31,8 +27,12 @@ export interface ResolvedLocalFontMetric {
   requestedFamily?: string;
   weight?: number;
   style?: 'normal' | 'italic';
-  /** Measured tuple signature included in document layout fingerprints. */
-  geometrySignature?: string;
+  /** Canonical exact local() source. This is a route identity, not a claim that
+   * native Canvas geometry is portable across engines or machines. */
+  sourceIdentity?: string;
+  /** Explicit UA synthesis policy. Production exact-local records are false;
+   * deterministic test fixtures may opt into and label synthesis explicitly. */
+  synthesized?: boolean;
 }
 
 export interface LoadedLocalFontMetrics {
@@ -73,20 +73,16 @@ function measureContext():
 }
 
 /** Load positively identified local faces without accepting CSS fallback.
- * CSS Fonts local() identifies a single face by full/PostScript name; it cannot
- * enumerate an installed family's bold/italic faces. We therefore register one
- * isolated regular alias and intentionally let Canvas synthesize every authored
- * weight/style tuple from that exact loaded face. Each synthesized tuple is
- * measured into `geometrySignature`, so capability, geometry, diagnostics, and
- * fingerprints describe the same face used for paint. A missing local() source
- * rejects FontFace.load() and contributes no inventory entry.
+ * Every request names one exact full/PostScript face and one descriptor tuple.
+ * CSS Fonts local() is not family discovery, so a regular face never implies a
+ * bold/italic capability. Native geometry belongs to later retained placements;
+ * this snapshot records only the immutable prepared route.
  */
 export async function loadLocalFontMetrics(
   requests: readonly LocalFontMetricRequest[],
 ): Promise<LoadedLocalFontMetrics> {
   const set = activeFontSet();
-  const ctx = measureContext();
-  if (!set || !ctx || typeof FontFace === 'undefined') return { faces: [], metrics: {} };
+  if (!set || typeof FontFace === 'undefined') return { faces: [], metrics: {} };
 
   const faces: FontFace[] = [];
   const metrics: Record<string, ResolvedLocalFontMetric> = {};
@@ -108,7 +104,7 @@ export async function loadLocalFontMetrics(
     if (!(weight >= 100 && weight <= 900) || (style !== 'normal' && style !== 'italic')) continue;
     const source = localNames.map(quoteLocalName).join(', ');
     const normalizedFamily = normalizeLocalFontMetricFamily(family);
-    const signature = `local-face:${source}`;
+    const signature = `local-face:${source}:${weight}:${style}`;
     const group = grouped.get(signature) ?? { source, requests: [] };
     group.requests.push({ ...request, family, normalizedFamily, source, weight, style });
     grouped.set(signature, group);
@@ -117,7 +113,11 @@ export async function loadLocalFontMetrics(
   for (const [signature, group] of grouped) {
     const alias = collisionFreeAlias(signature);
     const { face } = retainFace(signature, set, () => {
-      const created = new FontFace(alias, group.source);
+      const tuple = group.requests[0];
+      const created = new FontFace(alias, group.source, {
+        weight: String(tuple.weight),
+        style: tuple.style,
+      });
       set.add(created);
       return created;
     });
@@ -129,28 +129,13 @@ export async function loadLocalFontMetrics(
       // alone is not a sufficient loaded-state guarantee under concurrent opens.
       const loaded = await withFontCeiling(face.load());
       if (!loaded || face.status !== 'loaded') throw new Error('local font load timed out');
-      let hasMetrics = false;
+      let hasRoute = false;
       for (const request of group.requests) {
-        ctx.font = `${request.style} ${request.weight} 100px "${alias}"`;
-        const geometry: Array<number | null> = [];
-        let geometryAvailable = true;
-        for (const probe of ['Aa0', '国', 'ش', ...(request.geometryProbeTexts ?? [])]) {
-          const measured = ctx.measureText(probe);
-          if (!Number.isFinite(measured.width)) {
-            geometryAvailable = false;
-            break;
-          }
-          geometry.push(
-            measured.width,
-            Number.isFinite(measured.actualBoundingBoxAscent) ? measured.actualBoundingBoxAscent : null,
-            Number.isFinite(measured.actualBoundingBoxDescent) ? measured.actualBoundingBoxDescent : null,
-            Number.isFinite(measured.fontBoundingBoxAscent) ? measured.fontBoundingBoxAscent : null,
-            Number.isFinite(measured.fontBoundingBoxDescent) ? measured.fontBoundingBoxDescent : null,
-          );
-        }
-        if (!geometryAvailable) continue;
         let lineHeightRatio: number | undefined;
         if (request.lineHeightMultiplier != null) {
+          const ctx = measureContext();
+          if (!ctx) continue;
+          ctx.font = `${request.style} ${request.weight} 100px "${alias}"`;
           const measured = ctx.measureText('Hg国');
           const ascent = measured.fontBoundingBoxAscent;
           const descent = measured.fontBoundingBoxDescent;
@@ -168,13 +153,12 @@ export async function loadLocalFontMetrics(
           requestedFamily: request.family,
           weight: request.weight,
           style: request.style,
-          // Collision-safe canonical numeric serialization; document text is
-          // absent, and service identity never depends on a short hash.
-          geometrySignature: JSON.stringify(geometry),
+          sourceIdentity: request.source,
+          synthesized: false,
         };
-        hasMetrics = true;
+        hasRoute = true;
       }
-      if (!hasMetrics) throw new Error('font geometry unavailable');
+      if (!hasRoute) throw new Error('exact local font route unavailable');
       faces.push(face);
     } catch {
       releaseFaces([face]);

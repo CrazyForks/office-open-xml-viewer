@@ -1,5 +1,10 @@
 import type { LayoutDiagnostic } from './types.js';
-import { graphemeClusterOffsets, type ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import {
+  graphemeClusterOffsets,
+  classifyFontGeneric,
+  normalizeLocalFontMetricFamily,
+  type ResolvedLocalFontMetric,
+} from '@silurus/ooxml-core';
 import type {
   FontResolution,
   FontResolver,
@@ -85,6 +90,65 @@ export interface TextLayoutServiceInput {
   readonly measurer: GlyphMeasurer;
   readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
   readonly eastAsiaFontCharsets?: Readonly<Record<string, string>>;
+  readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
+}
+
+/** Generic fallback for an unavailable authored DOCX face. fontTable
+ * family/pitch metadata is authoritative; the shared OOXML name classifier is
+ * used only for absent or `auto` entries. */
+export function classifyDocxFontGeneric(
+  family: string | null | undefined,
+  fontFamilyClasses: Readonly<Record<string, string>> = {},
+  fontFamilyPitches: Readonly<Record<string, string>> = {},
+): 'serif' | 'sans-serif' | 'monospace' {
+  if (!family) return 'sans-serif';
+  const tableClass = fontFamilyClasses[family];
+  if (tableClass === 'roman') return 'serif';
+  if (tableClass === 'swiss') return 'sans-serif';
+  if (tableClass === 'modern' && fontFamilyPitches[family] === 'fixed') return 'monospace';
+  if (tableClass && tableClass !== 'auto') return 'sans-serif';
+  const generic = classifyFontGeneric(family);
+  return generic === 'serif' ? 'serif' : generic === 'mono' ? 'monospace' : 'sans-serif';
+}
+
+const LOCAL_METRIC_SNAPSHOT = Symbol('docx.localMetricSnapshot');
+type LocalMetricSnapshot = Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> & {
+  readonly [LOCAL_METRIC_SNAPSHOT]: true;
+};
+
+/** Copy successful face routes once at the document boundary. The brand lets
+ * downstream services share the same deeply frozen object without retaining
+ * caller-owned mutable records. */
+export function snapshotLocalMetrics(
+  input: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> = {},
+): Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> {
+  if ((input as Partial<LocalMetricSnapshot>)[LOCAL_METRIC_SNAPSHOT]) return input;
+  const entries = Object.entries(input)
+    .map(([key, metric]) => {
+      if (!metric.family?.trim()) throw new TypeError(`Local metric ${key} requires a family`);
+      if (metric.lineHeightRatio !== undefined
+        && (!Number.isFinite(metric.lineHeightRatio) || metric.lineHeightRatio < 0)) {
+        throw new RangeError(`Local metric ${key} lineHeightRatio must be finite and non-negative`);
+      }
+      if (metric.weight !== undefined
+        && (!Number.isFinite(metric.weight) || metric.weight < 1 || metric.weight > 1000)) {
+        throw new RangeError(`Local metric ${key} weight must be finite and between 1 and 1000`);
+      }
+      const copy: ResolvedLocalFontMetric = {
+        family: metric.family,
+        ...(metric.lineHeightRatio === undefined ? {} : { lineHeightRatio: metric.lineHeightRatio }),
+        ...(metric.requestedFamily === undefined ? {} : { requestedFamily: metric.requestedFamily }),
+        ...(metric.weight === undefined ? {} : { weight: metric.weight }),
+        ...(metric.style === undefined ? {} : { style: metric.style }),
+        ...(metric.sourceIdentity === undefined ? {} : { sourceIdentity: metric.sourceIdentity }),
+        ...(metric.synthesized === undefined ? {} : { synthesized: metric.synthesized }),
+      };
+      return [normalizeLocalFontMetricFamily(key), Object.freeze(copy)] as const;
+    })
+    .sort(([a], [b]) => a.localeCompare(b));
+  const snapshot = Object.fromEntries(entries) as LocalMetricSnapshot;
+  Object.defineProperty(snapshot, LOCAL_METRIC_SNAPSHOT, { value: true });
+  return Object.freeze(snapshot);
 }
 
 const LATIN1_EAST_ASIA = new Set([
@@ -119,22 +183,38 @@ function scriptSlot(
     ) ? 'eastAsia' : 'highAnsi';
   } else if (codePoint >= 0x0100 && codePoint <= 0x02af) {
     tableSlot = hintedEastAsia && (chinese || chineseCharset) ? 'eastAsia' : 'highAnsi';
-  } else if (codePoint >= 0x02b0 && codePoint <= 0x04ff) {
+  } else if (
+    (codePoint >= 0x02b0 && codePoint <= 0x02ff)
+    || (codePoint >= 0x0300 && codePoint <= 0x036f)
+    || (codePoint >= 0x0370 && codePoint <= 0x03cf)
+    || (codePoint >= 0x0400 && codePoint <= 0x04ff)
+  ) {
     tableSlot = hintedEastAsia ? 'eastAsia' : 'highAnsi';
   } else if (
     (codePoint >= 0x0590 && codePoint <= 0x07bf)
     || (codePoint >= 0xfb1d && codePoint <= 0xfdff)
-    || (codePoint >= 0xfe70 && codePoint <= 0xfeff)
+    || (codePoint >= 0xfe70 && codePoint <= 0xfefe)
   ) tableSlot = 'ascii';
   else if (
     (codePoint >= 0x1100 && codePoint <= 0x11ff)
-    || (codePoint >= 0x2e80 && codePoint <= 0x9fff)
-    || (codePoint >= 0xa000 && codePoint <= 0xa4cf)
+    || (codePoint >= 0x2e80 && codePoint <= 0x2eff)
+    || (codePoint >= 0x2f00 && codePoint <= 0x2fdf)
+    || (codePoint >= 0x2ff0 && codePoint <= 0x318f)
+    || (codePoint >= 0x3190 && codePoint <= 0x319f)
+    || (codePoint >= 0x3200 && codePoint <= 0x4dbf)
+    || (codePoint >= 0x4e00 && codePoint <= 0x9faf)
+    || (codePoint >= 0xa000 && codePoint <= 0xa48f)
+    || (codePoint >= 0xa490 && codePoint <= 0xa4cf)
     || (codePoint >= 0xac00 && codePoint <= 0xd7af)
     || (codePoint >= 0xf900 && codePoint <= 0xfaff)
-    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe4f)
+    || (codePoint >= 0xfe50 && codePoint <= 0xfe6f)
     || (codePoint >= 0xff00 && codePoint <= 0xffef)
-    || (codePoint >= 0x20000 && codePoint <= 0x2fa1f)
+    // The normative table is expressed over UTF-16 code units and assigns the
+    // complete high/high-private/low-surrogate ranges to eastAsia. This shaper
+    // iterates Unicode scalars, so every supplementary scalar projects through
+    // one listed surrogate pair and is therefore equivalent to eastAsia.
+    || (codePoint >= 0x10000 && codePoint <= 0x10ffff)
   ) tableSlot = 'eastAsia';
   else if (codePoint >= 0x1e00 && codePoint <= 0x1eff) {
     tableSlot = hintedEastAsia && chinese ? 'eastAsia' : 'highAnsi';
@@ -164,16 +244,18 @@ function requestedFamily(request: Readonly<TextShapeRequest>, slot: FontScriptSl
  * authored East Asian and complex-script faces.
  */
 export function createTextLayoutService(input: TextLayoutServiceInput): TextLayoutService {
-  const localMetrics = Object.freeze(Object.fromEntries(
-    Object.entries(input.localMetrics ?? {})
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([family, metric]) => [family, Object.freeze({ ...metric })]),
+  const localMetrics = snapshotLocalMetrics(input.localMetrics);
+  const genericFamilies = Object.freeze(Object.fromEntries(
+    Object.entries(input.genericFamilies ?? {})
+      .map(([family, generic]) => [family.trim().toLocaleLowerCase('en-US'), generic])
+      .sort(([a], [b]) => a.localeCompare(b)),
   ));
   const fingerprint = stableFingerprint('text', {
     fonts: input.fonts.fingerprint,
     measurer: input.measurer.fingerprint,
     localMetrics,
     eastAsiaFontCharsets: input.eastAsiaFontCharsets ?? {},
+    genericFamilies,
   });
   return Object.freeze({
     fingerprint,
@@ -211,9 +293,16 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       }
 
       const spans = grouped.map((group): TextShapeSpan => {
+        const authoredFamily = requestedFamily(request, group.script);
+        const nameGeneric = authoredFamily ? classifyFontGeneric(authoredFamily) : 'sans';
+        const genericFamily = authoredFamily
+          ? genericFamilies[authoredFamily.trim().toLocaleLowerCase('en-US')]
+            ?? request.genericFamily
+            ?? (nameGeneric === 'serif' ? 'serif' : nameGeneric === 'mono' ? 'monospace' : 'sans-serif')
+          : request.genericFamily;
         const font = input.fonts.resolve({
-          requestedFamily: requestedFamily(request, group.script),
-          genericFamily: request.genericFamily,
+          requestedFamily: authoredFamily,
+          genericFamily,
           weight: request.weight,
           style: request.style,
         });

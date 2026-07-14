@@ -16,8 +16,6 @@ export interface ImageMetadataRecord extends ImageLayoutResource {
 
 export interface MathLayoutResource {
   readonly resourceKey: string;
-  /** Deterministic content/display alias used by the transitional line adapter. */
-  readonly lookupKey?: string;
   readonly widthEm: number;
   readonly ascentEm: number;
   readonly descentEm: number;
@@ -29,6 +27,8 @@ export interface MathOccurrence {
   readonly nodes: MathNode[];
   readonly display: boolean;
   readonly source: SourceRef;
+  readonly runs: readonly DocRun[];
+  readonly runIndex: number;
 }
 
 export interface ImageMetadataService {
@@ -53,10 +53,6 @@ export function mathResourceKey(source: SourceRef, localName: string): string {
   return `math:${sourceKey(source)}:${encodeURIComponent(localName)}`;
 }
 
-export function mathAstResourceKey(nodes: unknown): string {
-  return stableFingerprint('math-resource', nodes);
-}
-
 export function bodyMathOccurrences(
   body: BodyElement[],
   story: SourceRef['story'] = 'body',
@@ -72,6 +68,8 @@ export function bodyMathOccurrences(
             nodes: run.nodes,
             display: run.display,
             source: { story, storyInstance, path: [...path, runIndex] },
+            runs: element.runs,
+            runIndex,
           });
         });
       } else if (element.type === 'table') {
@@ -166,7 +164,6 @@ export function createMathMetadataService(records: readonly MathLayoutResource[]
   const snapshot = [...records]
     .map((record) => Object.freeze({
       resourceKey: record.resourceKey,
-      ...(record.lookupKey ? { lookupKey: record.lookupKey } : {}),
       widthEm: finiteNonNegative(record.widthEm, 'widthEm'),
       ascentEm: finiteNonNegative(record.ascentEm, 'ascentEm'),
       descentEm: finiteNonNegative(record.descentEm, 'descentEm'),
@@ -176,9 +173,6 @@ export function createMathMetadataService(records: readonly MathLayoutResource[]
     .sort((a, b) => a.resourceKey.localeCompare(b.resourceKey));
   const byKey = new Map(snapshot.map((resource) => [resource.resourceKey, resource]));
   if (byKey.size !== snapshot.length) throw new Error('Duplicate math resource key');
-  for (const resource of snapshot) {
-    if (resource.lookupKey && !byKey.has(resource.lookupKey)) byKey.set(resource.lookupKey, resource);
-  }
   return Object.freeze({
     fingerprint: stableFingerprint('math', snapshot),
     resolve(resourceKey: string): DeepReadonly<MathLayoutResource> {

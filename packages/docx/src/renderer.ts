@@ -135,7 +135,6 @@ import { normalizeLayoutOptions } from './layout/options.js';
 import type { LayoutOptions } from './layout/options.js';
 import { paintLayoutPage as paintRetainedLayoutPage } from './paint/canvas-page.js';
 import {
-  mathAstResourceKey,
   mathResourceKey,
   bodyMathOccurrences,
   createImageMetadataService,
@@ -145,13 +144,20 @@ import {
   type MathLayoutResource,
 } from './layout/resources.js';
 import { createFontResolver, type FontInventoryFace } from './layout/font-service.js';
-import { attachPrivateResourceLookup, privateResourceLookupOf } from './layout/runtime-state.js';
+import {
+  attachMathOccurrenceLookup,
+  attachPrivateResourceLookup,
+  privateResourceLookupOf,
+} from './layout/runtime-state.js';
 import {
   createTextLayoutService,
+  classifyDocxFontGeneric,
+  snapshotLocalMetrics,
   type GlyphMeasureRequest,
   type TextLayoutService,
 } from './layout/text.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
+import { internalDocumentModel } from './parser-model.js';
 
 
 export { computeColumns };
@@ -335,9 +341,9 @@ export function createLayoutServices(
     readonly googleFaces?: readonly FontFace[];
   } = {},
 ): LayoutServices {
-  const localMetrics = Object.freeze({ ...(options.localMetrics ?? {}) });
+  const localMetrics = snapshotLocalMetrics(options.localMetrics);
   const fontFamilyCharsets = Object.freeze(Object.fromEntries(
-    Object.entries((doc as DocxDocumentModel & { fontFamilyCharsets?: Record<string, string> }).fontFamilyCharsets ?? {})
+    Object.entries(internalDocumentModel(doc).fontFamilyCharsets ?? {})
       .map(([family, charset]) => [family.trim().toLowerCase(), charset]),
   ));
   const displayFaceFamily = (family: string): string => family
@@ -425,6 +431,17 @@ export function createLayoutServices(
     fonts: createFontResolver(inventory),
     localMetrics,
     eastAsiaFontCharsets: fontFamilyCharsets,
+    genericFamilies: Object.fromEntries(
+      [...new Set([
+        ...Object.keys(doc.fontFamilyClasses ?? {}),
+        ...Object.keys(doc.fontFamilyPitches ?? {}),
+        ...(doc.majorFont ? [doc.majorFont] : []),
+        ...(doc.minorFont ? [doc.minorFont] : []),
+      ])].map((family) => [
+        family,
+        classifyDocxFontGeneric(family, doc.fontFamilyClasses, doc.fontFamilyPitches),
+      ]),
+    ),
     measurer: {
       fingerprint: ctx ? 'canvas-text-metrics-v1' : 'deterministic-text-metrics-v1',
       measure(request: Readonly<GlyphMeasureRequest>) {
@@ -454,9 +471,9 @@ export function createLayoutServices(
       },
     },
   });
-  const mathResources = options.mathResources ?? documentMathOccurrences(doc).map(({ nodes, display, source }) => ({
+  const mathOccurrences = documentMathOccurrences(doc);
+  const mathResources = options.mathResources ?? mathOccurrences.map(({ display, source }) => ({
     resourceKey: mathResourceKey(source, display ? 'display' : 'inline'),
-    lookupKey: mathAstResourceKey({ nodes, display }),
     widthEm: 0,
     ascentEm: 0,
     descentEm: 0,
@@ -468,10 +485,21 @@ export function createLayoutServices(
     }],
   }));
   const services: LayoutServices = Object.freeze({
-    text: Object.freeze({ ...textBase, resolvedLocalFonts: localMetrics }),
+    text: textBase,
     images: createImageMetadataService(documentImageMetadataRecords(doc)),
     math: createMathMetadataService(mathResources),
   });
+  const occurrenceKeys = mathOccurrences.map(({ source, display }) =>
+    mathResourceKey(source, display ? 'display' : 'inline'));
+  const metadataKeys = mathResources.map((resource) => resource.resourceKey);
+  const missingMetadata = occurrenceKeys.filter((key) => !metadataKeys.includes(key));
+  const extraMetadata = metadataKeys.filter((key) => !occurrenceKeys.includes(key));
+  if (missingMetadata.length || extraMetadata.length) {
+    throw new Error(
+      `Math metadata membership mismatch: missing [${missingMetadata.join(', ')}]; extra [${extraMetadata.join(', ')}]`,
+    );
+  }
+  attachMathOccurrenceLookup(services, mathOccurrences);
   const availableMathKeys = mathResources
     .filter((resource) => resource.available !== false)
     .map((resource) => resource.resourceKey);
@@ -494,8 +522,8 @@ function svgToImage(svg: string): Promise<HTMLImageElement> {
   });
 }
 
-/** Convert equations before layout and address the resulting metadata by a
- * stable content key. Parser array identity is deliberately not retained. */
+/** Convert equations before layout. Public records contain only structural
+ * SourceRef identities; parser run-array identity stays in the private runtime. */
 export async function prepareMathRuns(
   input: BodyElement[] | DocxDocumentModel,
   math: MathRenderer,
@@ -508,7 +536,6 @@ export async function prepareMathRuns(
   const seen = new Set<string>();
   for (const r of runs) {
     const resourceKey = mathResourceKey(r.source, r.display ? 'display' : 'inline');
-    const lookupKey = mathAstResourceKey({ nodes: r.nodes, display: r.display });
     if (seen.has(resourceKey)) throw new Error(`Duplicate math occurrence: ${resourceKey}`);
     seen.add(resourceKey);
     try {
@@ -516,7 +543,6 @@ export async function prepareMathRuns(
       const img = await svgToImage(recolorSvg(out.svg, '#000000'));
       records.push({
         resourceKey,
-        lookupKey,
         widthEm: out.widthEm,
         ascentEm: out.ascentEm,
         descentEm: out.descentEm,
@@ -526,7 +552,6 @@ export async function prepareMathRuns(
     } catch {
       records.push({
         resourceKey,
-        lookupKey,
         widthEm: 0,
         ascentEm: 0,
         descentEm: 0,
@@ -1646,9 +1671,7 @@ async function renderDocumentToCanvasLeased(
   // get `doc` unchanged (referential identity ⇒ byte-identical). Text direction
   // is PER-SECTION (issue #1000), so the `vertical` flag is resolved per PAGE
   // below, after the stamped page frame is merged.
-  const resolvedLocalFonts = (layoutServices.text as TextLayoutService & {
-    readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
-  }).resolvedLocalFonts ?? {};
+  const resolvedLocalFonts = layoutServices.text.localMetrics;
   const layoutOptions = normalizeLayoutOptions(
     opts.currentDate,
     opts.defaultCurrentDateMs ?? Date.now(),
@@ -4632,9 +4655,7 @@ export function paginateDocument(
   // the swapped doc here keeps the two passes consistent whether the pages are
   // prebuilt (this path) or paginated inline. Horizontal docs are unchanged
   // (referential identity).
-  const resolvedLocalFonts = (services.text as TextLayoutService & {
-    readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
-  }).resolvedLocalFonts ?? {};
+  const resolvedLocalFonts = services.text.localMetrics;
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   return paginateWithHeaderFooterReserve(
@@ -4675,9 +4696,7 @@ export function layoutDocument(
 ): DocumentLayout {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return Object.freeze({ pages: Object.freeze([]) });
-  const resolvedLocalFonts = (services.text as TextLayoutService & {
-    readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
-  }).resolvedLocalFonts ?? {};
+  const resolvedLocalFonts = services.text.localMetrics;
   const layoutDoc = verticalLayoutDoc(doc);
   const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
   const pages = paginateWithHeaderFooterReserve(

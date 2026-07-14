@@ -106,7 +106,7 @@ function doc(body: BodyElement[], pageHeight: number): DocxDocumentModel {
 const B = (...ps: DocParagraph[]): BodyElement[] => ps.map((p) => p as unknown as BodyElement);
 const paginate = (model: DocxDocumentModel) => paginateDocument(
   model,
-  createLayoutServices(model, { localMetrics: testFontSnapshot(model) }),
+  createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }),
 );
 
 // Content band = pageHeight − 2·margin = 57pt holds four single-line paragraphs

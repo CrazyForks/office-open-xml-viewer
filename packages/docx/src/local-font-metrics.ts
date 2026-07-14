@@ -16,11 +16,10 @@ import { docxRenderedTextUsages } from './document-content.js';
  * family with different metrics and has no equivalent Word measurement here. */
 export function docxLocalMetricRequests(
   doc: DocxDocumentModel,
-  includeGeometryText = false,
 ): LocalFontMetricRequest[] {
   // ECMA-376 §17.8.3.3: an embedded face is authoritative for its exact
-  // family/weight/style tuple. Other tuples may still use a positively probed
-  // local regular face through the core loader's isolated synthesis alias.
+  // family/weight/style tuple. Other tuples remain unavailable unless they
+  // have their own positively identified exact face route.
   const embeddedTuples = new Set(
     (doc.embeddedFonts ?? [])
       .map((font) => {
@@ -29,58 +28,34 @@ export function docxLocalMetricRequests(
         return `${normalizeLocalFontMetricFamily(font.fontName)}:${weight}:${style}`;
       }),
   );
-  const candidates: Array<{
-    request: LocalFontMetricRequest;
-    geometryTexts: Set<string>;
-  }> = [];
-  const byTuple = new Map<string, (typeof candidates)[number]>();
-  const addCandidate = (
-    familyValue: string | null | undefined,
-    weight: number,
-    style: 'normal' | 'italic',
-    geometryText: string,
-  ): void => {
+  const requests: LocalFontMetricRequest[] = [];
+  const seen = new Set<string>();
+  const addCandidate = (familyValue: string | null | undefined): void => {
     const family = familyValue?.trim();
     if (!family) return;
     const normalized = normalizeLocalFontMetricFamily(family);
-    const key = `${normalized}:${weight}:${style}`;
-    if (embeddedTuples.has(key)) return;
-    const existing = byTuple.get(key);
-    if (existing) {
-      if (geometryText) existing.geometryTexts.add(geometryText);
-      return;
-    }
+    // This reviewed compatibility profile is the only mapping for which DOCX
+    // knows an exact local full-face name. Arbitrary w:rFonts family text is not
+    // a CSS local() identity and must use embedded/web/generic routing instead.
     const isMeiryo = normalized === 'meiryo' || family === 'メイリオ';
-    const candidate = {
-      request: {
-        family,
-        localNames: [isMeiryo ? 'Meiryo' : family],
-        ...(isMeiryo ? { lineHeightMultiplier: 1.3 } : {}),
-        ...(weight === 400 ? {} : { weight }),
-        ...(style === 'normal' ? {} : { style }),
-      },
-      geometryTexts: new Set(geometryText ? [geometryText] : []),
-    };
-    candidates.push(candidate);
-    byTuple.set(key, candidate);
+    if (!isMeiryo) return;
+    const key = `${normalized}:400:normal`;
+    if (embeddedTuples.has(key)) return;
+    if (seen.has(key)) return;
+    seen.add(key);
+    requests.push({ family, localNames: ['Meiryo'], lineHeightMultiplier: 1.3 });
   };
   for (const usage of docxRenderedTextUsages(doc)) {
-    const weight = usage.bold ? 700 : 400;
-    const style = usage.italic ? 'italic' as const : 'normal' as const;
+    if (usage.bold || usage.italic) continue;
     for (const authoredFamily of usage.fontFamilies) {
-      addCandidate(authoredFamily, weight, style, usage.text);
+      addCandidate(authoredFamily);
     }
   }
-  return candidates.map(({ request, geometryTexts }) => ({
-    ...request,
-    ...(includeGeometryText && geometryTexts.size > 0
-      ? { geometryProbeTexts: [...geometryTexts] }
-      : {}),
-  }));
+  return requests;
 }
 
 export function loadDocxLocalFontMetrics(
   doc: DocxDocumentModel,
 ): Promise<LoadedLocalFontMetrics> {
-  return loadLocalFontMetrics(docxLocalMetricRequests(doc, true));
+  return loadLocalFontMetrics(docxLocalMetricRequests(doc));
 }

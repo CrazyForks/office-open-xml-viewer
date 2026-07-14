@@ -157,7 +157,8 @@ async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x', marker = '国境
     const metric = {
       family: 'serif', requestedFamily: family, weight: 400, style: 'normal',
       ...(family === '游明朝' ? { lineHeightRatio } : {}),
-      geometrySignature: 'node-skia-generic-serif-fixture',
+      sourceIdentity: 'test-fixture:node-skia-generic-serif',
+      synthesized: false,
     };
     return [[key, metric]];
   }));

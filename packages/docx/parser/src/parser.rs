@@ -3032,6 +3032,16 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors
         font_family: theme
             .resolve_font_ref(fmt.font_family_ascii.clone())
             .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
+        font_family_east_asia: theme.resolve_font_ref(fmt.font_family_east_asia.clone()),
+        font_hint: fmt.font_hint.clone(),
+        rtl: fmt.rtl,
+        cs: fmt.cs_toggle,
+        font_family_cs: theme.resolve_font_ref(fmt.font_family_cs.clone()),
+        font_size_cs: fmt.font_size_cs,
+        bold_cs: fmt.bold_cs,
+        italic_cs: fmt.italic_cs,
+        lang_bidi: fmt.lang_bidi.clone(),
+        lang_east_asia: fmt.lang_east_asia.clone(),
         background: fmt.background.clone(),
         vert_align: fmt.vert_align.clone(),
         all_caps: fmt.all_caps.unwrap_or(false),
@@ -8900,6 +8910,50 @@ mod tests {
             Some("dot"),
             "PAGE field run must carry w:em like a plain text run"
         );
+    }
+
+    #[test]
+    fn field_run_carries_inherited_script_slot_metadata() {
+        let base = RunFmt {
+            font_family_ascii: Some("Latin Face".to_string()),
+            font_family_east_asia: Some("EA Face".to_string()),
+            font_hint: Some("eastAsia".to_string()),
+            rtl: Some(true),
+            cs_toggle: Some(true),
+            font_family_cs: Some("CS Face".to_string()),
+            font_size: Some(10.0),
+            font_size_cs: Some(20.0),
+            bold: Some(false),
+            bold_cs: Some(true),
+            italic_cs: Some(true),
+            lang_bidi: Some("ar-sa".to_string()),
+            lang_east_asia: Some("zh-cn".to_string()),
+            ..Default::default()
+        };
+        let runs = parse_para(
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+            &base,
+            &StyleMap::parse(""),
+        );
+        let field = runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Field(field) => Some(field),
+                _ => None,
+            })
+            .expect("field run");
+
+        assert_eq!(field.font_family.as_deref(), Some("Latin Face"));
+        assert_eq!(field.font_family_east_asia.as_deref(), Some("EA Face"));
+        assert_eq!(field.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(field.rtl, Some(true));
+        assert_eq!(field.cs, Some(true));
+        assert_eq!(field.font_family_cs.as_deref(), Some("CS Face"));
+        assert_eq!(field.font_size_cs, Some(20.0));
+        assert_eq!(field.bold_cs, Some(true));
+        assert_eq!(field.italic_cs, Some(true));
+        assert_eq!(field.lang_bidi.as_deref(), Some("ar-sa"));
+        assert_eq!(field.lang_east_asia.as_deref(), Some("zh-cn"));
     }
 
     // ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — a `fldSimple` DATE/TIME

@@ -21,7 +21,7 @@ function paragraphWithFamily(family: string): unknown {
 }
 
 describe('docxLocalMetricRequests', () => {
-  it('snapshots every authored family and requested weight/style tuple', () => {
+  it('does not treat arbitrary OOXML family names as exact local face names', () => {
     const doc = {
       body: [{
         type: 'paragraph',
@@ -33,15 +33,10 @@ describe('docxLocalMetricRequests', () => {
       }],
     } as unknown as DocxDocumentModel;
 
-    expect(docxLocalMetricRequests(doc)).toEqual([
-      { family: 'Times New Roman', localNames: ['Times New Roman'] },
-      { family: 'Times New Roman', localNames: ['Times New Roman'], weight: 700, style: 'italic' },
-      { family: 'Arial', localNames: ['Arial'], weight: 700 },
-      { family: 'Yu Mincho', localNames: ['Yu Mincho'], weight: 700 },
-    ]);
+    expect(docxLocalMetricRequests(doc)).toEqual([]);
   });
 
-  it('inventories Latin/eastAsia and complex-script axes with their independent style tuples', () => {
+  it('does not infer exact styled faces from arbitrary slot families', () => {
     const doc = {
       body: [{
         type: 'paragraph',
@@ -60,14 +55,7 @@ describe('docxLocalMetricRequests', () => {
       }],
     } as unknown as DocxDocumentModel;
 
-    expect(docxLocalMetricRequests(doc)).toEqual([
-      { family: 'Latin Regular', localNames: ['Latin Regular'] },
-      { family: 'EA Regular', localNames: ['EA Regular'] },
-      { family: 'CS Bold', localNames: ['CS Bold'], weight: 700 },
-      { family: 'Latin Bold', localNames: ['Latin Bold'], weight: 700 },
-      { family: 'EA Bold', localNames: ['EA Bold'], weight: 700 },
-      { family: 'CS Regular', localNames: ['CS Regular'] },
-    ]);
+    expect(docxLocalMetricRequests(doc)).toEqual([]);
   });
   it('maps Japanese and English Meiryo names to the exact local family', () => {
     expect(docxLocalMetricRequests(model(['メイリオ', 'Meiryo']))).toEqual([
@@ -76,10 +64,8 @@ describe('docxLocalMetricRequests', () => {
     ]);
   });
 
-  it('probes Meiryo UI under its own isolated alias rather than merging it into Meiryo', () => {
-    expect(docxLocalMetricRequests(model(['Meiryo UI']))).toEqual([
-      { family: 'Meiryo UI', localNames: ['Meiryo UI'] },
-    ]);
+  it('does not guess a unique face name for Meiryo UI', () => {
+    expect(docxLocalMetricRequests(model(['Meiryo UI']))).toEqual([]);
   });
 
   it('keeps an embedded regular face authoritative over terminal-local probing and aliases', () => {
@@ -144,7 +130,6 @@ describe('docxLocalMetricRequests', () => {
     } as unknown as DocxDocumentModel;
 
     expect(docxLocalMetricRequests(doc)).toEqual([
-      { family: 'Arial', localNames: ['Arial'] },
       { family: 'Meiryo', localNames: ['Meiryo'], lineHeightMultiplier: 1.3 },
     ]);
   });

@@ -58,8 +58,9 @@ import {
 import { verticalRunInkExtraPx } from './vertical-text.js';
 import type { LayoutServices } from './layout/types.js';
 import type { TextLayoutService, TextShapeRequest } from './layout/text.js';
-import { mathAstResourceKey } from './layout/resources.js';
+import type { InternalTextBearingRun } from './parser-model.js';
 import type { MathLayoutResource } from './layout/resources.js';
+import { mathOccurrenceLookupOf } from './layout/runtime-state.js';
 
 export interface LineBoundary {
   segIndex: number;
@@ -2232,6 +2233,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     sourceRunIndex: number,
     sourceFragmentIndex?: number,
   ) => {
+    const r: InternalTextBearingRun = base;
     // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
     // points smaller, uppercase letters and non-alphabetic characters at the full
     // run size. `reduced` (set per case-piece in the loop below) carries that onto
@@ -2241,7 +2243,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // Ruby annotation rides with the WHOLE base text (typically 1-2 chars).
     // Splitting on word boundaries would lose the association, so attach
     // the annotation only to the first emitted segment.
-    const baseRuby = (base as DocxTextRun).ruby;
+    const baseRuby = r.ruby;
     const ruby = baseRuby
       ? {
           text: baseRuby.text,
@@ -2249,12 +2251,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           ...(baseRuby.hpsRaisePt != null ? { hpsRaisePt: baseRuby.hpsRaisePt } : {}),
         }
       : undefined;
-    const revision = (base as DocxTextRun).revision;
-    const r = base as DocxTextRun;
-    const slotMetadata = r as DocxTextRun & {
-      fontHint?: 'default' | 'eastAsia' | 'cs';
-      langEastAsia?: string;
-    };
+    const revision = r.revision;
     const rtl = r.rtl === true ? true : undefined;
     const fitTextFragmentEntryIndex = sourceFragmentIndex === undefined
       ? undefined
@@ -2304,7 +2301,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     // this same builder (via `shapeRunToDocRun`), so a text box's per-script face
     // is picked here too. Bold/italic/size are NOT axis-specific here — eastAsia
     // shares the Latin (non-cs) toggles, so only the family differs.
-    const eaFontFamily = (base as DocxTextRun).fontFamilyEastAsia ?? base.fontFamily;
+    const eaFontFamily = r.fontFamilyEastAsia ?? base.fontFamily;
 
     // Word classifies European digits in an Arabic/Hebrew complex-script run as
     // AN (§17.3.2.20 w:lang w:bidi): use the bidi language's primary subtag when
@@ -2349,8 +2346,8 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         weight,
         style,
         complexScript: cs,
-        fontHint: slotMetadata.fontHint,
-        eastAsiaLanguage: slotMetadata.langEastAsia,
+        fontHint: r.fontHint,
+        eastAsiaLanguage: r.langEastAsia,
         kerning: r.kerning == null
           ? undefined
           : (cs ? csFontSize : base.fontSize) >= r.kerning,
@@ -2384,8 +2381,8 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         // §17.3.2.40 underline style / colour — carried only on DocxTextRun (a
         // FieldRun draws single). Kept raw ST_Underline; the renderer normalizes
         // to DrawingML §20.1.10.82 at draw time.
-        underlineStyle: (base as DocxTextRun).underlineStyle,
-        underlineColor: (base as DocxTextRun).underlineColor,
+        underlineStyle: r.underlineStyle,
+        underlineColor: r.underlineColor,
         strikethrough: base.strikethrough,
         fontSize: cs ? csFontSize : base.fontSize,
         color: base.color,
@@ -2614,12 +2611,15 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // The parser resolves the paragraph font size; fall back to a nearby run only
       // if it is somehow absent.
       const fontSize = run.fontSize || findNearbyFontSize(runs, runs.indexOf(run));
-      const lookupKey = mathAstResourceKey({ nodes: run.nodes, display: run.display });
-      const mathMetadata = environment.layoutServices?.math.resolve(lookupKey);
-      const resourceKey = mathMetadata?.resourceKey ?? lookupKey;
+      const resourceKey = environment.layoutServices
+        ? mathOccurrenceLookupOf(environment.layoutServices)?.resourceKey(runs, runIndex)
+        : undefined;
+      const mathMetadata = resourceKey
+        ? environment.layoutServices?.math.resolve(resourceKey)
+        : undefined;
       segs.push({
         mathNodes: run.nodes,
-        mathResourceKey: resourceKey,
+        mathResourceKey: resourceKey ?? '',
         mathMetadata,
         display: run.display,
         fontSize,

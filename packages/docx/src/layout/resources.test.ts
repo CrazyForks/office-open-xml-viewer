@@ -56,16 +56,15 @@ describe('layout resource snapshots', () => {
     const inlineB = mathResourceKey({ story: 'body', storyInstance: 'body', path: [1, 0] }, 'inline');
     const display = mathResourceKey({ story: 'body', storyInstance: 'body', path: [2, 0] }, 'display');
     const service = createMathMetadataService([
-      { resourceKey: inlineA, lookupKey: 'formula:inline', widthEm: 1, ascentEm: 1, descentEm: 0, diagnostics: [] },
-      { resourceKey: inlineB, lookupKey: 'formula:inline', widthEm: 1, ascentEm: 1, descentEm: 0, diagnostics: [] },
-      { resourceKey: display, lookupKey: 'formula:display', widthEm: 2, ascentEm: 1, descentEm: 0, diagnostics: [] },
+      { resourceKey: inlineA, widthEm: 1, ascentEm: 1, descentEm: 0, diagnostics: [] },
+      { resourceKey: inlineB, widthEm: 1, ascentEm: 1, descentEm: 0, diagnostics: [] },
+      { resourceKey: display, widthEm: 2, ascentEm: 1, descentEm: 0, diagnostics: [] },
     ]);
 
     expect(new Set([inlineA, inlineB, display]).size).toBe(3);
     expect(service.resolve(inlineA).resourceKey).toBe(inlineA);
     expect(service.resolve(inlineB).resourceKey).toBe(inlineB);
-    expect(service.resolve('formula:inline').resourceKey).toBe(inlineA);
-    expect(service.resolve('formula:display').resourceKey).toBe(display);
+    expect(() => service.resolve('formula:inline')).toThrow(/Unknown math resource/);
   });
 
   it('fingerprints immutable resource content independent of insertion order', () => {

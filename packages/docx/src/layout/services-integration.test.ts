@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { buildSegments, layoutLines, rescaleLayoutLines, type LineLayoutEnvironment } from '../line-layout.js';
 import { createLayoutServices } from '../renderer.js';
 import type { DocRun, DocxDocumentModel } from '../types.js';
+import type { InternalDocxDocumentModel, InternalFieldRun } from '../parser-model.js';
 import type { TextLayoutService } from './text.js';
-import { mathAstResourceKey } from './resources.js';
-import { privateResourceLookupOf } from './runtime-state.js';
+import { documentMathOccurrences, mathResourceKey } from './resources.js';
+import { mathOccurrenceLookupOf, privateResourceLookupOf } from './runtime-state.js';
 
 function measureContext(): CanvasRenderingContext2D {
   return {
@@ -148,8 +149,48 @@ describe('production layout service integration', () => {
     expect('text' in segment && segment.textShapeRequest?.complexScript).toBe(false);
   });
 
+  it('classifies a CJK-hinted field result on its inherited East Asian axis', () => {
+    const services = createLayoutServices(model(), { measureContext: measureContext() });
+    const field: InternalFieldRun & { type: 'field' } = {
+      type: 'field', fieldType: 'other', instruction: 'REF cjk', fallbackText: '国',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Latin Face', background: null,
+      vertAlign: null, fontFamilyEastAsia: 'EA Face', fontHint: 'eastAsia',
+      langEastAsia: 'zh-cn', rtl: true, cs: true, fontFamilyCs: 'CS Face',
+      fontSizeCs: 20, boldCs: true, italicCs: true,
+    };
+    const [segment] = buildSegments([field as DocRun], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+    });
+
+    expect(segment).toMatchObject({ text: '国', fontSize: 10, bold: false, italic: false });
+    expect('text' in segment && segment.textShapeRequest).toMatchObject({
+      fontHint: 'eastAsia', eastAsiaLanguage: 'zh-cn', complexScript: false,
+    });
+  });
+
+  it('applies inherited complex-script font, size, and style to an RTL field result', () => {
+    const services = createLayoutServices(model(), { measureContext: measureContext() });
+    const field: InternalFieldRun & { type: 'field' } = {
+      type: 'field', fieldType: 'other', instruction: 'REF rtl', fallbackText: 'A',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'Latin Face', background: null,
+      vertAlign: null, rtl: true, cs: true, fontFamilyCs: 'CS Face',
+      fontSizeCs: 20, boldCs: true, italicCs: true, langBidi: 'ar-sa',
+    };
+    const [segment] = buildSegments([field as DocRun], {
+      pageIndex: 0, totalPages: 1, layoutServices: services,
+    });
+
+    expect(segment).toMatchObject({ text: 'A', fontSize: 20, bold: true, italic: true, rtl: true });
+    expect('text' in segment && segment.textShapeRequest).toMatchObject({
+      complexScript: true,
+      fonts: { complexScript: 'CS Face' },
+    });
+  });
+
   it('plumbs the selected eastAsia font charset from fontTable into slot selection', () => {
-    const doc = model() as DocxDocumentModel & { fontFamilyCharsets: Record<string, string> };
+    const doc = model() as InternalDocxDocumentModel;
     doc.fontFamilyCharsets = { 'EA Face': '86' };
     const services = createLayoutServices(doc, { measureContext: measureContext() });
     const shaped = services.text.shape({
@@ -196,10 +237,72 @@ describe('production layout service integration', () => {
 
     expect(shape(present).spans[0]?.font).toMatchObject({ source: 'local', resolvedFamily: '__local_times_bi' });
     expect(shape(present).advancePt).toBe(34);
-    expect(shape(absent).spans[0]?.font).toMatchObject({ source: 'generic', resolvedFamily: 'sans-serif' });
+    expect(shape(absent).spans[0]?.font).toMatchObject({ source: 'generic', resolvedFamily: 'serif' });
     expect(shape(absent).advancePt).toBe(10);
     expect(present.text.fingerprint).toBe(worker.text.fingerprint);
     expect(present.text.fingerprint).not.toBe(absent.text.fingerprint);
+  });
+
+  it('takes one deeply immutable local-metric snapshot at the document boundary', () => {
+    const callerMetric = {
+      family: '__local_authored',
+      lineHeightRatio: 1.25,
+      requestedFamily: 'Authored Sans',
+      weight: 400,
+      style: 'normal' as const,
+      sourceIdentity: 'local:Authored Sans',
+      synthesized: false,
+    };
+    const caller: Record<string, typeof callerMetric> = { 'authored sans:400:normal': callerMetric };
+    const services = createLayoutServices(model(), {
+      measureContext: measureContext(),
+      localMetrics: caller,
+    });
+    const before = services.text.fingerprint;
+
+    callerMetric.family = '__mutated';
+    callerMetric.lineHeightRatio = 99;
+    caller['late face:400:normal'] = { ...callerMetric };
+
+    expect(services.text.localMetrics).toEqual({
+      'authored sans:400:normal': {
+        family: '__local_authored',
+        lineHeightRatio: 1.25,
+        requestedFamily: 'Authored Sans',
+        weight: 400,
+        style: 'normal',
+        sourceIdentity: 'local:Authored Sans',
+        synthesized: false,
+      },
+    });
+    expect(Object.isFrozen(services.text.localMetrics)).toBe(true);
+    expect(Object.isFrozen(services.text.localMetrics['authored sans:400:normal'])).toBe(true);
+    expect(services.text.fingerprint).toBe(before);
+  });
+
+  it('derives generic fallback from fontTable family and pitch for each selected face', () => {
+    const doc = model({
+      fontFamilyClasses: {
+        'Roman Face': 'roman',
+        'Swiss Face': 'swiss',
+        'Fixed Modern': 'modern',
+        'Variable Modern': 'modern',
+      },
+      fontFamilyPitches: {
+        'Fixed Modern': 'fixed',
+        'Variable Modern': 'variable',
+      },
+    });
+    const services = createLayoutServices(doc, { measureContext: measureContext() });
+    const generic = (family: string) => services.text.shape({
+      text: 'x', fontSizePt: 10, fonts: { ascii: family },
+    }).spans[0]?.font.genericFamily;
+
+    expect(generic('Roman Face')).toBe('serif');
+    expect(generic('Swiss Face')).toBe('sans-serif');
+    expect(generic('Fixed Modern')).toBe('monospace');
+    expect(generic('Variable Modern')).toBe('sans-serif');
+    expect(generic('Garamond')).toBe('serif');
   });
 
   it('inventories only successfully registered faces and labels Office replacements as substitutions', () => {
@@ -273,34 +376,71 @@ describe('production layout service integration', () => {
     } as unknown as Partial<DocxDocumentModel>);
     const services = createLayoutServices(doc, { measureContext: measureContext() });
 
-    for (const value of ['body', 'header', 'footer', 'footnote', 'endnote']) {
-      const lookupKey = mathAstResourceKey({ nodes: [{ type: 'text', text: value }], display: false });
-      expect(() => services.math.resolve(lookupKey), value).not.toThrow();
+    for (const occurrence of documentMathOccurrences(doc)) {
+      const key = mathOccurrenceLookupOf(services)?.resourceKey(occurrence.runs, occurrence.runIndex);
+      expect(key).toBe(mathResourceKey(occurrence.source, 'inline'));
+      expect(() => services.math.resolve(key as string)).not.toThrow();
     }
   });
 
+  it('keeps identical and private math contents out of public resource identity', () => {
+    const first = { type: 'math', nodes: [{ type: 'text', text: 'PRIVATE-SENTINEL' }], display: false, fontSize: 10 };
+    const second = { ...first, nodes: [{ type: 'text', text: 'PRIVATE-SENTINEL' }] };
+    const doc = model({ body: [
+      { type: 'paragraph', runs: [first] },
+      { type: 'paragraph', runs: [second] },
+    ] } as unknown as Partial<DocxDocumentModel>);
+    const services = createLayoutServices(doc);
+    const occurrences = documentMathOccurrences(doc);
+    const keys = occurrences.map((occurrence) =>
+      mathOccurrenceLookupOf(services)?.resourceKey(occurrence.runs, occurrence.runIndex));
+
+    expect(new Set(keys).size).toBe(2);
+    expect(keys.join(' ')).not.toContain('PRIVATE-SENTINEL');
+    expect(services.math.fingerprint).not.toContain('PRIVATE-SENTINEL');
+  });
+
+  it('resolves repeated math ASTs by owning run array and ordinal during segmentation', () => {
+    const mathRun = () => ({
+      type: 'math', nodes: [{ type: 'text', text: 'same' }], display: false, fontSize: 10,
+    });
+    const paragraphs = [
+      { type: 'paragraph', runs: [mathRun()] },
+      { type: 'paragraph', runs: [mathRun()] },
+    ] as unknown as Array<{ type: 'paragraph'; runs: DocRun[] }>;
+    const doc = model({ body: paragraphs } as unknown as Partial<DocxDocumentModel>);
+    const services = createLayoutServices(doc);
+    const environment = { pageIndex: 0, totalPages: 1, layoutServices: services };
+    const first = buildSegments(paragraphs[0].runs, environment)[0];
+    const second = buildSegments(paragraphs[1].runs, environment)[0];
+
+    expect('mathResourceKey' in first && 'mathResourceKey' in second
+      ? first.mathResourceKey === second.mathResourceKey
+      : true).toBe(false);
+  });
+
   it('requires runtime math handles to match available metadata exactly', () => {
-    const available = {
-      resourceKey: 'math:available', widthEm: 1, ascentEm: 0.8, descentEm: 0.2, diagnostics: [],
-    };
-    const unavailable = {
-      resourceKey: 'math:unavailable', widthEm: 0, ascentEm: 0, descentEm: 0,
-      available: false as const, diagnostics: [],
-    };
+    const doc = model({ body: [
+      { type: 'paragraph', runs: [{ type: 'math', nodes: [], display: false, fontSize: 10 }] },
+      { type: 'paragraph', runs: [{ type: 'math', nodes: [], display: true, fontSize: 10 }] },
+    ] } as unknown as Partial<DocxDocumentModel>);
+    const [availableOccurrence, unavailableOccurrence] = documentMathOccurrences(doc);
+    const available = { resourceKey: mathResourceKey(availableOccurrence.source, 'inline'), widthEm: 1, ascentEm: 0.8, descentEm: 0.2, diagnostics: [] };
+    const unavailable = { resourceKey: mathResourceKey(unavailableOccurrence.source, 'display'), widthEm: 0, ascentEm: 0, descentEm: 0, available: false as const, diagnostics: [] };
     const drawable = {} as CanvasImageSource;
 
-    expect(() => createLayoutServices(model(), { mathResources: [available], mathDrawables: new Map() }))
-      .toThrow(/math.*membership|missing/i);
-    expect(() => createLayoutServices(model(), {
+    expect(() => createLayoutServices(doc, { mathResources: [available], mathDrawables: new Map() }))
+      .toThrow(/math metadata.*missing/i);
+    expect(() => createLayoutServices(doc, {
       mathResources: [unavailable],
-      mathDrawables: new Map([['math:unavailable', drawable]]),
-    })).toThrow(/math.*membership|extra/i);
+      mathDrawables: new Map([[unavailable.resourceKey, drawable]]),
+    })).toThrow(/math metadata.*missing|extra/i);
 
-    const services = createLayoutServices(model(), {
+    const services = createLayoutServices(doc, {
       mathResources: [available, unavailable],
-      mathDrawables: new Map([['math:available', drawable]]),
+      mathDrawables: new Map([[available.resourceKey, drawable]]),
     });
-    expect(privateResourceLookupOf(services)?.keys).toEqual(['math:available']);
+    expect(privateResourceLookupOf(services)?.keys).toEqual([available.resourceKey]);
   });
 
   it('gives main and worker factories identical fingerprints for identical successful snapshots', () => {

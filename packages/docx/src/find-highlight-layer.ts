@@ -22,6 +22,7 @@
  */
 import { sliceHorizontalExtent, overlayPercent, type MatchRunSlice } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer';
+import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
 /** One page's highlight input: the run-slices a match covers, and whether that
  *  match is the active one (emphasis colour). */
@@ -93,19 +94,11 @@ export function buildDocxHighlightLayer(
       const end = Math.max(start, Math.min(slice.end, run.text.length));
       const prefixGlyphCount = [...run.text.slice(0, start)].length;
       const sliceGlyphCount = [...run.text.slice(start, end)].length;
-      const fullGlyphCount = [...run.text].length;
       const pitchedX = extent.x + prefixGlyphCount * pitch;
       const pitchedWidth = extent.width + Math.max(0, sliceGlyphCount - 1) * pitch;
-      // `run.w` is the advance retained from the actual paint pass. A later
-      // overlay measure may differ because of contextual kerning, a substituted
-      // host face, fitText pitch, horizontal scaling, or §17.3.2.10 縦中横
-      // compression. Project both prefix and slice extents through the same
-      // full-run ratio so the full match ends exactly at the drawn run edge and
-      // partial matches keep their measured intra-run proportions.
-      const measuredFullAdvance = measure(run.text) + Math.max(0, fullGlyphCount - 1) * pitch;
-      const k = measuredFullAdvance > 0 && Number.isFinite(run.w) && run.w >= 0
-        ? run.w / measuredFullAdvance
-        : 1;
+      // §17.3.2.10 縦中横 alone compresses natural extents into the retained
+      // one-em cell. Ordinary runs preserve the established natural measurement.
+      const k = tateChuYokoOverlayScale(run, measure);
       const x = pitchedX * k;
       const width = pitchedWidth * k;
       if (width <= 0) continue;

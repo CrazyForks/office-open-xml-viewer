@@ -126,7 +126,11 @@ async function render(num: NumberingInfo | null) {
     width: 400, // scale = 1 (px per pt)
     onTextRun: (r) => runs.push(r),
     layoutServices: createLayoutServices(model, {
-      localMetrics: testFontSnapshot(model),
+      localMetrics: testFontSnapshot([
+        { family: 'Times New Roman' },
+        { family: 'ＭＳ ゴシック' },
+        { family: 'ＭＳ 明朝' },
+      ]),
       measureContext: canvas.getContext('2d'),
     }),
   });
@@ -198,7 +202,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400, onTextRun: (r) => runs.push(r),
       layoutServices: createLayoutServices(model, {
-        localMetrics: testFontSnapshot(model), measureContext: canvas.getContext('2d'),
+        localMetrics: testFontSnapshot([{ family: 'Times New Roman' }, { family: 'ＭＳ 明朝' }]), measureContext: canvas.getContext('2d'),
       }),
     });
     const seg = runs.find((r) => r.text === '原稿');
@@ -233,7 +237,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400, onTextRun: (r) => runs.push(r),
       layoutServices: createLayoutServices(model, {
-        localMetrics: testFontSnapshot(model), measureContext: canvas.getContext('2d'),
+        localMetrics: testFontSnapshot([{ family: 'Times New Roman' }, { family: 'ＭＳ 明朝' }]), measureContext: canvas.getContext('2d'),
       }),
     });
     const seg = runs.find((r) => r.text === '本文')!;

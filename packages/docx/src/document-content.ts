@@ -8,6 +8,7 @@ import type {
   ShapeRun,
   ShapeText,
 } from './types.js';
+import { internalFieldRun } from './parser-model.js';
 
 /** One rendered string and every authored font family that can supply it.
  * Empty text records are intentional: paragraph marks and drawing anchors can
@@ -71,7 +72,19 @@ function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
       italic: run.italicCs ?? false,
     };
   } else if (run.type === 'field') {
-    yield { text: run.fallbackText, fontFamilies: [run.fontFamily], bold: run.bold, italic: run.italic };
+    const field = internalFieldRun(run);
+    yield {
+      text: field.fallbackText,
+      fontFamilies: [field.fontFamily, field.fontFamilyEastAsia],
+      bold: field.bold,
+      italic: field.italic,
+    };
+    yield {
+      text: field.fallbackText,
+      fontFamilies: [field.fontFamilyCs],
+      bold: field.boldCs ?? false,
+      italic: field.italicCs ?? false,
+    };
   } else if (run.type === 'shape') {
     yield* shapeTextUsages(run);
   } else if (run.type === 'anchorHost') {

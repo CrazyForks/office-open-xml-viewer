@@ -1284,6 +1284,26 @@ pub struct FieldRun {
     pub font_size: f64,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_east_asia: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_cs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_east_asia: Option<String>,
     pub background: Option<String>,
     /// "super" | "sub" | None
     pub vert_align: Option<String>,

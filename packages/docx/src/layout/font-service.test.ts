@@ -250,9 +250,62 @@ describe('font layout services', () => {
     expect(slot('\u1e00', { ...eastAsia, eastAsiaLanguage: 'zh-Hans' })).toBe('eastAsia');
     expect(slot('\u1e00', { ...eastAsia, eastAsiaLanguage: 'ko-KR' })).toBe('highAnsi');
 
+    // ECMA-376 Part 1 (5th ed.) §17.3.2.26: listed endpoints are inclusive
+    // and every unlisted gap falls back to hAnsi.
+    const boundaries: Array<[
+      string,
+      'ascii' | 'highAnsi' | 'eastAsia',
+      { hint: 'eastAsia' }?,
+    ]> = [
+      ['\u02ff', 'eastAsia', eastAsia],
+      ['\u0300', 'eastAsia', eastAsia],
+      ['\u036f', 'eastAsia', eastAsia],
+      ['\u0370', 'eastAsia', eastAsia],
+      ['\u03cf', 'eastAsia', eastAsia],
+      ['\u03d0', 'highAnsi', eastAsia],
+      ['\u03ff', 'highAnsi', eastAsia],
+      ['\u0400', 'eastAsia', eastAsia],
+      ['\u2e80', 'eastAsia'],
+      ['\u2e80', 'eastAsia', eastAsia],
+      ['\u2eff', 'eastAsia', eastAsia],
+      ['\u2f00', 'eastAsia'],
+      ['\u2fdf', 'eastAsia'],
+      ['\u2fe0', 'highAnsi'],
+      ['\u2fef', 'highAnsi'],
+      ['\u2ff0', 'eastAsia'],
+      ['\u318f', 'eastAsia'],
+      ['\u3190', 'eastAsia'],
+      ['\u319f', 'eastAsia'],
+      ['\u31a0', 'highAnsi'],
+      ['\u31ff', 'highAnsi'],
+      ['\u3200', 'eastAsia'],
+      ['\u4dbf', 'eastAsia'],
+      ['\u4dc0', 'highAnsi'],
+      ['\u4dff', 'highAnsi'],
+      ['\u4e00', 'eastAsia'],
+      ['\u9faf', 'eastAsia'],
+      ['\u9fb0', 'highAnsi'],
+      ['\ua4cf', 'eastAsia'],
+      ['\ua4d0', 'highAnsi'],
+      ['\ud7af', 'eastAsia'],
+      ['\ud7b0', 'highAnsi'],
+      ['\ufafe', 'eastAsia'],
+      ['\ufaff', 'eastAsia'],
+      ['\ufe6f', 'eastAsia'],
+      ['\ufe70', 'ascii'],
+      ['\ufefe', 'ascii'],
+      ['\ufeff', 'highAnsi'],
+      ['\u{1f642}', 'eastAsia'],
+    ];
+    for (const [scalar, expected, options] of boundaries) {
+      expect(slot(scalar, options), `U+${scalar.codePointAt(0)?.toString(16)}`).toBe(expected);
+    }
+
     // Step 2: cs/rtl wins unless step 1 selected eastAsia while hint=eastAsia.
     expect(slot('\u4e00', { complexScript: true })).toBe('complexScript');
     expect(slot('\u4e00', { ...eastAsia, complexScript: true })).toBe('eastAsia');
+    expect(slot('\u2e80', { complexScript: true })).toBe('complexScript');
+    expect(slot('\u2e80', { ...eastAsia, complexScript: true })).toBe('eastAsia');
     expect(slot('A', { ...eastAsia, complexScript: true })).toBe('complexScript');
   });
 

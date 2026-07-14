@@ -123,7 +123,7 @@ async function renderAndRead(...body: BodyElement[]) {
     dpr: 1,
     width: 400, // scale = 400/400 = 1 (px per pt) ⇒ asserts are in pt-equivalent units
     layoutServices: createLayoutServices(model, {
-      localMetrics: testFontSnapshot(model), measureContext: canvas.getContext('2d'),
+      localMetrics: testFontSnapshot([{ family: TEST_FONT }]), measureContext: canvas.getContext('2d'),
     }),
   });
   return fillTextCalls;
@@ -237,7 +237,7 @@ describe('lineRule=auto — the substituted-font single-line FLOOR is centred; o
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400,
       layoutServices: createLayoutServices(model, {
-        localMetrics: testFontSnapshot(model), measureContext: canvas.getContext('2d'),
+        localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: canvas.getContext('2d'),
       }),
     });
     const t = fillTextCalls.find((c) => c.text === 'T');
@@ -270,7 +270,7 @@ describe('lineRule=auto on an ACTIVE docGrid keeps the full-box centring (grid g
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400,
       layoutServices: createLayoutServices(model, {
-        localMetrics: testFontSnapshot(model), measureContext: canvas.getContext('2d'),
+        localMetrics: testFontSnapshot([{ family: TEST_FONT }]), measureContext: canvas.getContext('2d'),
       }),
     });
     const t = fillTextCalls.find((c) => c.text === 'T');
@@ -329,7 +329,7 @@ async function renderTextbox(rule: 'auto' | 'exact' | 'atLeast' | null, val: num
   await renderDocumentToCanvas(model, canvas, 0, {
     dpr: 1, width: 400,
     layoutServices: createLayoutServices(model, {
-      localMetrics: testFontSnapshot(model), measureContext: canvas.getContext('2d'),
+      localMetrics: testFontSnapshot([{ family: TEST_FONT }]), measureContext: canvas.getContext('2d'),
     }),
   });
   const t = fillTextCalls.find((c) => c.text === 'T');
