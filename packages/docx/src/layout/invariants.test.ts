@@ -302,4 +302,35 @@ describe('layoutFlowBlocks', () => {
       blocks: [{ kind: 'paragraph', source: source(1) }],
     }, services, algorithms)).toThrow(/INVALID_REFERENCE/);
   });
+
+  it('rejects invalid containers and initial cursors before dispatch', () => {
+    const unused: BlockLayoutAlgorithms = {
+      layoutParagraph() { throw new Error('not used'); },
+      layoutTable() { throw new Error('not used'); },
+    };
+    const services: LayoutServices = {
+      text: { fingerprint: 'text' },
+      images: { fingerprint: 'images' },
+      math: { fingerprint: 'math' },
+    };
+    const base = {
+      source: source(0),
+      blocks: [],
+      container: { id: 'body', kind: 'body' as const, bounds: rect(10, 20, 100, 200) },
+      cursor: { xPt: 10, yPt: 20 },
+    };
+
+    expect(() => layoutFlowBlocks({
+      ...base,
+      container: { ...base.container, bounds: rect(10, 20, Number.NaN, 200) },
+    }, services, unused)).toThrow(/INVALID_GEOMETRY/);
+    expect(() => layoutFlowBlocks({
+      ...base,
+      cursor: { xPt: 10, yPt: 19 },
+    }, services, unused)).toThrow(/INVALID_GEOMETRY/);
+    expect(() => layoutFlowBlocks({
+      ...base,
+      cursor: { xPt: 111, yPt: 20 },
+    }, services, unused)).toThrow(/INVALID_GEOMETRY/);
+  });
 });

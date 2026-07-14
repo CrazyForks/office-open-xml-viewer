@@ -109,6 +109,20 @@ test('allows only named shared atomic painters from core', () => {
   assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
 });
 
+test('audits dependencies of the retained page graph allowed in paint', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-page-graph-edge-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', "import { orderedPagePaintNodes } from '../layout/page-graph.js';\nexport { orderedPagePaintNodes };\n");
+  write(root, 'packages/docx/src/layout/page-graph.ts', "import { measureTextWidth } from '../measurement.js';\nexport const orderedPagePaintNodes = measureTextWidth;\n");
+  write(root, 'packages/docx/src/measurement.ts', 'export function measureTextWidth() { return 1; }\n');
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /FORBIDDEN_PAINT_EDGE/);
+  assert.match(result.output, /canvas-page\.ts.*page-graph\.ts.*measurement\.ts/s);
+});
+
 test('rejects non-literal dynamic paint imports', () => {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-dynamic-edge-'));
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');

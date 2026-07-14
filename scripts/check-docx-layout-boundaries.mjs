@@ -259,7 +259,7 @@ function paintBoundaryViolations(root) {
           violations.push(chain.map((path) => posixPath(relative(root, path))));
           continue;
         }
-        if (insidePaint && !visited.has(dependency)) {
+        if ((insidePaint || dependency === pageGraph) && !visited.has(dependency)) {
           visited.add(dependency);
           stack.push({ path: dependency, chain });
         }

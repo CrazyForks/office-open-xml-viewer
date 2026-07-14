@@ -27,8 +27,22 @@ export function layoutFlowBlocks(
 ): FlowLayout {
   const blocks: Array<ParagraphLayout | TableLayout> = [];
   let cursor = input.cursor;
+  const bounds = input.container.bounds;
+  if (![bounds.xPt, bounds.yPt, bounds.widthPt, bounds.heightPt].every(Number.isFinite)
+    || bounds.widthPt < 0
+    || bounds.heightPt < 0) {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', `${input.container.id} has invalid bounds`);
+  }
   const containerBottom = input.container.bounds.yPt + input.container.bounds.heightPt;
   const containerRight = input.container.bounds.xPt + input.container.bounds.widthPt;
+  if (!Number.isFinite(cursor.xPt)
+    || !Number.isFinite(cursor.yPt)
+    || cursor.xPt < bounds.xPt
+    || cursor.xPt > containerRight
+    || cursor.yPt < bounds.yPt
+    || cursor.yPt > containerBottom) {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', `${input.container.id} has an invalid initial flow cursor`);
+  }
 
   for (const block of input.blocks) {
     const placement = {
