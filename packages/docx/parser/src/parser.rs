@@ -1333,7 +1333,9 @@ fn parse_body_elements(
                         // continues correctly after the break.
                         for piece in split_para_on_page_breaks(result) {
                             match piece {
-                                ParaPiece::Para(p) => body.push(BodyElement::Paragraph(p)),
+                                ParaPiece::Para(p) => {
+                                    body.push(BodyElement::Paragraph(Box::new(p)))
+                                }
                                 ParaPiece::PageBreak => {
                                     body.push(BodyElement::PageBreak { parity: None })
                                 }
@@ -1369,7 +1371,7 @@ fn parse_body_elements(
                     theme,
                     DepthGuard::root(),
                 );
-                body.push(BodyElement::Table(tbl));
+                body.push(BodyElement::Table(Box::new(tbl)));
             }
             // Mid-body loose sectPr (rare) defines the section that ENDS here.
             // Emit a SectionBreak carrying its columns + break kind (see the
@@ -1839,11 +1841,11 @@ fn section_break_element(
     BodyElement::SectionBreak {
         kind,
         columns: parse_columns(sect_pr),
-        headers: resolved.headers,
-        footers: resolved.footers,
+        headers: Box::new(resolved.headers),
+        footers: Box::new(resolved.footers),
         title_page: resolved.title_page,
         // ECMA-376 §17.6.13 / §17.6.11 — this ending section's page geometry.
-        geom: section_geom(sect_pr),
+        geom: section_geom(sect_pr).map(Box::new),
         // ECMA-376 §17.6.12 — this ending section's page-numbering restart/format.
         page_num_type: parse_pgnum_type(sect_pr),
         // ECMA-376 §17.6.20 — this ending section's flow direction (issue #1000
@@ -8260,7 +8262,7 @@ fn parse_table_cell(
     let mut field = FieldState::default();
     for child in element_children_flat(node) {
         match child.tag_name().name() {
-            "p" => content.push(CellElement::Paragraph(parse_paragraph_cond(
+            "p" => content.push(CellElement::Paragraph(Box::new(parse_paragraph_cond(
                 child,
                 style_map,
                 num_map,
@@ -8271,7 +8273,7 @@ fn parse_table_cell(
                 table_style_id,
                 cond,
                 &mut field,
-            ))),
+            )))),
             // A nested table resolves its OWN table style + conditional
             // formatting; the outer cell's `cond` does not propagate into it.
             //
@@ -8282,7 +8284,7 @@ fn parse_table_cell(
             // unaffected.
             "tbl" => {
                 if let Some(child_depth) = depth.descend() {
-                    content.push(CellElement::Table(parse_table(
+                    content.push(CellElement::Table(Box::new(parse_table(
                         child,
                         style_map,
                         num_map,
@@ -8291,7 +8293,7 @@ fn parse_table_cell(
                         rel_map,
                         theme,
                         child_depth,
-                    )));
+                    ))));
                 }
             }
             _ => {}
@@ -11604,7 +11606,7 @@ mod footnote_tests {
         );
         for e in elems {
             if let BodyElement::Paragraph(p) = e {
-                return p;
+                return *p;
             }
         }
         panic!("no paragraph parsed");
@@ -11650,7 +11652,7 @@ mod footnote_tests {
         )
         .into_iter()
         .filter_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
+            BodyElement::Paragraph(p) => Some(*p),
             _ => None,
         })
         .collect()
@@ -16723,7 +16725,7 @@ mod numbering_marker_font_tests {
         elems
             .into_iter()
             .find_map(|e| match e {
-                BodyElement::Paragraph(p) => Some(p),
+                BodyElement::Paragraph(p) => Some(*p),
                 _ => None,
             })
             .expect("heading paragraph present")
@@ -17788,7 +17790,7 @@ mod numbering_marker_color_tests {
         )
         .into_iter()
         .find_map(|e| match e {
-            BodyElement::Paragraph(p) => Some(p),
+            BodyElement::Paragraph(p) => Some(*p),
             _ => None,
         })
         .expect("bullet paragraph present")

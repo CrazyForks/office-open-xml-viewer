@@ -462,8 +462,13 @@ pub struct ColSpec {
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BodyElement {
-    Paragraph(DocParagraph),
-    Table(DocTable),
+    // Keep the block wrapper compact as paragraph metadata grows. `Box` is
+    // transparent to Serde, so the parser wire shape remains unchanged while
+    // body vectors avoid reserving the largest paragraph payload per element.
+    Paragraph(Box<DocParagraph>),
+    // Tables are similarly recursive and substantially larger than marker
+    // variants; indirection keeps every body-vector slot compact.
+    Table(Box<DocTable>),
     /// Page break. `parity` carries section-break parity intent:
     /// `Some("odd")` = oddPage break (next content must start on an odd
     /// 1-based page), `Some("even")` = evenPage. `None` = a plain `nextPage`
@@ -513,13 +518,13 @@ pub enum BodyElement {
         /// `columns` lets it pick the section's column geometry. Empty when no
         /// section in the inheritance chain declared a header.
         #[serde(default)]
-        headers: HeadersFooters,
+        headers: Box<HeadersFooters>,
         /// ECMA-376 §17.10.1 — the resolved footer set for the section that ENDS
         /// at this marker (see `headers`). sample-13's first section declares a
         /// `first` footer (the DOI line) here; the renderer renders it on that
         /// section's first page.
         #[serde(default)]
-        footers: HeadersFooters,
+        footers: Box<HeadersFooters>,
         /// ECMA-376 §17.10.1 `<w:titlePg>` — whether THIS ending section has a
         /// distinct first-page header/footer. NOT inherited (each sectPr's flag
         /// stands alone, like the body-level `Document.section.title_page`).
@@ -529,7 +534,7 @@ pub enum BodyElement {
         /// `<w:pgMar>` (the renderer then falls back to the body-level section).
         /// The final (body-level) section's geometry stays on `Document.section`.
         #[serde(skip_serializing_if = "Option::is_none")]
-        geom: Option<SectionGeom>,
+        geom: Option<Box<SectionGeom>>,
         /// ECMA-376 §17.6.12 `<w:pgNumType>` — this ENDING section's page-numbering
         /// settings (start / fmt). `None` when the sectPr omits `<w:pgNumType>` (or
         /// carries only chapter attributes) — numbering continues; decimal. Carried
@@ -2191,8 +2196,10 @@ pub struct DocTableRow {
 #[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CellElement {
-    Paragraph(DocParagraph),
-    Table(DocTable),
+    // Match `BodyElement`: nested cell block vectors must not inherit the full
+    // inline size of the paragraph model, and Serde still emits the same wire.
+    Paragraph(Box<DocParagraph>),
+    Table(Box<DocTable>),
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
