@@ -138,6 +138,17 @@ export function rtlMirrorX(x: number, w: number, canvasW: number): number {
   return canvasW - x - w;
 }
 
+/** Map a logical-LTR anchored-object rectangle into sheet display space.
+ * Sheet RTL mirrors placement only; the object contents and width stay intact. */
+export function sheetAnchoredRectX(
+  x: number,
+  width: number,
+  canvasWidth: number,
+  rtl: boolean,
+): number {
+  return rtl ? rtlMirrorX(x, width, canvasWidth) : x;
+}
+
 // Thin line drawn between frozen and scrollable areas
 const FREEZE_LINE_COLOR = '#7a7a7a';
 
@@ -3103,6 +3114,7 @@ export function renderViewport(
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
       scrollAreaW, scrollAreaH,
+      worksheet.rightToLeft === true, canvasW,
     );
   }
 
@@ -3115,6 +3127,7 @@ export function renderViewport(
       scrollAreaX, scrollAreaY,
       scrollAreaW, scrollAreaH,
       opts.loadedImages,
+      worksheet.rightToLeft === true, canvasW,
     );
   }
 
@@ -3126,6 +3139,7 @@ export function renderViewport(
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
       scrollAreaW, scrollAreaH,
+      worksheet.rightToLeft === true, canvasW,
     );
   }
 
@@ -3137,6 +3151,7 @@ export function renderViewport(
       scrollOffsetX, scrollOffsetY,
       scrollAreaX, scrollAreaY,
       scrollAreaW, scrollAreaH,
+      worksheet.rightToLeft === true, canvasW,
     );
   }
 
@@ -3436,6 +3451,8 @@ function renderImages(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
+  rtl: boolean,
+  canvasW: number,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
@@ -3445,7 +3462,8 @@ function renderImages(
 
   ctx.save();
   ctx.beginPath();
-  ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+  const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
+  ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
   ctx.clip();
 
   for (const anchor of ws.images) {
@@ -3487,11 +3505,12 @@ function renderImages(
     if (imgW <= 0 || imgH <= 0) continue;
 
     // Translate to canvas coordinates of the scrollable viewport
-    const canvasX = scrollAreaX + (imgSheetX1 - scrollOriginSheetX) - scrollOffsetX;
+    const logicalCanvasX = scrollAreaX + (imgSheetX1 - scrollOriginSheetX) - scrollOffsetX;
+    const canvasX = sheetAnchoredRectX(logicalCanvasX, imgW, canvasW, rtl);
     const canvasY = scrollAreaY + (imgSheetY1 - scrollOriginSheetY) - scrollOffsetY;
 
     // Early out when entirely off-screen
-    if (canvasX + imgW < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
+    if (canvasX + imgW < clipX || canvasX > clipX + scrollAreaW) continue;
     if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
 
     // ECMA-376 §20.1.8.6 `<a:alphaModFix>`: scale the picture's opacity so it
@@ -3522,7 +3541,9 @@ function renderShapeGroups(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
-  loadedImages?: Map<string, CanvasImageSource | null>,
+  loadedImages: Map<string, CanvasImageSource | null> | undefined,
+  rtl: boolean,
+  canvasW: number,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
   const anchors = ws.shapeGroups;
@@ -3533,7 +3554,8 @@ function renderShapeGroups(
 
   ctx.save();
   ctx.beginPath();
-  ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+  const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
+  ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
   ctx.clip();
 
   for (const anchor of anchors) {
@@ -3560,10 +3582,11 @@ function renderShapeGroups(
     }
     if (w <= 0 || h <= 0) continue;
 
-    const canvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
+    const logicalCanvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
+    const canvasX = sheetAnchoredRectX(logicalCanvasX, w, canvasW, rtl);
     const canvasY = scrollAreaY + (y1 - scrollOriginSheetY) - scrollOffsetY;
 
-    if (canvasX + w < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
+    if (canvasX + w < clipX || canvasX > clipX + scrollAreaW) continue;
     if (canvasY + h < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
 
     for (const shape of anchor.shapes) {
@@ -4460,11 +4483,14 @@ function renderCharts(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
+  rtl: boolean,
+  canvasW: number,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
   const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
   const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+  const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
 
   for (const anchor of ws.charts) {
     const fromCol1 = anchor.fromCol + 1;
@@ -4481,15 +4507,16 @@ function renderCharts(
     const ch = shY2 - shY1;
     if (cw <= 0 || ch <= 0) continue;
 
-    const cx = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const logicalCx = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const cx = sheetAnchoredRectX(logicalCx, cw, canvasW, rtl);
     const cy = scrollAreaY + (shY1 - scrollOriginSheetY) - scrollOffsetY;
 
-    if (cx + cw < scrollAreaX || cx > scrollAreaX + scrollAreaW) continue;
+    if (cx + cw < clipX || cx > clipX + scrollAreaW) continue;
     if (cy + ch < scrollAreaY || cy > scrollAreaY + scrollAreaH) continue;
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+    ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
     ctx.clip();
 
     // XLSX natural rendering is device-px at 96 DPI where 1pt = 4/3 px. Scale
@@ -4538,6 +4565,8 @@ function renderSlicers(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
+  rtl: boolean,
+  canvasW: number,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
   const slicers = ws.slicers;
@@ -4545,6 +4574,7 @@ function renderSlicers(
 
   const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
   const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+  const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
 
   for (const anchor of slicers) {
     const fromCol1 = anchor.fromCol + 1;
@@ -4561,15 +4591,16 @@ function renderSlicers(
     const h = shY2 - shY1;
     if (w <= 0 || h <= 0) continue;
 
-    const x = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const logicalX = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const x = sheetAnchoredRectX(logicalX, w, canvasW, rtl);
     const y = scrollAreaY + (shY1 - scrollOriginSheetY) - scrollOffsetY;
 
-    if (x + w < scrollAreaX || x > scrollAreaX + scrollAreaW) continue;
+    if (x + w < clipX || x > clipX + scrollAreaW) continue;
     if (y + h < scrollAreaY || y > scrollAreaY + scrollAreaH) continue;
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+    ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
     ctx.clip();
 
     drawSlicerFrame(ctx, anchor.caption, anchor.items, x, y, w, h, cs);
