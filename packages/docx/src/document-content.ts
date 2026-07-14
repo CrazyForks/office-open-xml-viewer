@@ -8,7 +8,7 @@ import type {
   ShapeRun,
   ShapeText,
 } from './types.js';
-import { internalFieldRun } from './parser-model.js';
+import { internalFieldRun, internalTextRun } from './parser-model.js';
 
 /** One rendered string and every authored font family that can supply it.
  * Empty text records are intentional: paragraph marks and drawing anchors can
@@ -59,9 +59,10 @@ function* shapeBlockUsages(block: ShapeText): Generator<DocxRenderedTextUsage> {
 
 function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
   if (run.type === 'text') {
+    const text = internalTextRun(run);
     yield {
       text: run.text,
-      fontFamilies: [run.fontFamily, run.fontFamilyEastAsia],
+      fontFamilies: [run.fontFamily, text.fontFamilyHighAnsi, run.fontFamilyEastAsia],
       bold: run.bold,
       italic: run.italic,
     };
@@ -75,7 +76,7 @@ function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
     const field = internalFieldRun(run);
     yield {
       text: field.fallbackText,
-      fontFamilies: [field.fontFamily, field.fontFamilyEastAsia],
+      fontFamilies: [field.fontFamily, field.fontFamilyHighAnsi, field.fontFamilyEastAsia],
       bold: field.bold,
       italic: field.italic,
     };

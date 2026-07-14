@@ -173,6 +173,73 @@ describe('font layout services', () => {
     expect(perAxis).toEqual(['Theme Serif', 'Calibri', 'Meiryo']);
   });
 
+  it('keeps an authored but unresolved theme attribute suppressing the direct face on every axis', () => {
+    const service = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: {
+        fingerprint: 'unresolved-theme-v1',
+        measure: (request) => ({ advancePt: request.text.length, ascentPt: 1, descentPt: 0 }),
+      },
+    });
+    const fonts = {
+      ascii: 'Direct ASCII',
+      highAnsi: 'Direct HANSI',
+      eastAsia: 'Direct EA',
+      complexScript: 'Direct CS',
+    };
+    const themeFontPresence = {
+      ascii: true,
+      highAnsi: true,
+      eastAsia: true,
+      complexScript: true,
+    };
+
+    for (const slot of ['ascii', 'highAnsi', 'eastAsia', 'complexScript'] as const) {
+      const resolved = service.resolve({
+        fonts,
+        themeFonts: {},
+        themeFontPresence,
+        slot,
+      } as Parameters<typeof service.resolve>[0]);
+      expect(resolved, slot).toMatchObject({ source: 'generic', requestedFamily: 'sans-serif' });
+    }
+  });
+
+  it('snapshots charset routing so caller mutation cannot change shape under one fingerprint', () => {
+    const charsets = { 'ea face': '86' };
+    const service = createTextLayoutService({
+      fonts: createFontResolver([]),
+      eastAsiaFontCharsets: charsets,
+      measurer: {
+        fingerprint: 'charset-snapshot-v1',
+        measure: (request) => ({ advancePt: request.text.length, ascentPt: 1, descentPt: 0 }),
+      },
+    });
+    const shape = () => service.shape({
+      text: '\u0100',
+      fontSizePt: 10,
+      fontHint: 'eastAsia',
+      fonts: { highAnsi: 'HANSI Face', eastAsia: 'EA Face' },
+    }).spans[0]?.script;
+    const fingerprint = service.fingerprint;
+
+    expect(shape()).toBe('eastAsia');
+    charsets['ea face'] = '00';
+    expect(shape()).toBe('eastAsia');
+    expect(service.fingerprint).toBe(fingerprint);
+  });
+
+  it('canonicalizes exact face tuples independently of inventory order', () => {
+    const inventory: FontInventoryFace[] = [
+      { requestedFamily: 'Tuple Face', resolvedFamily: 'Tuple Face', source: 'embedded', weight: 700, style: 'italic' },
+      { requestedFamily: 'Tuple Face', resolvedFamily: 'Tuple Face', source: 'embedded', weight: 400, style: 'normal' },
+      { requestedFamily: 'Tuple Face', resolvedFamily: 'Tuple Face', source: 'embedded', weight: 700, style: 'normal' },
+    ];
+
+    expect(createFontResolver(inventory).fingerprint)
+      .toBe(createFontResolver([...inventory].reverse()).fingerprint);
+  });
+
   it('produces identical main and worker fingerprints from identical snapshots', () => {
     const make = () => createTextLayoutService({
       fonts: createFontResolver([...faces].reverse()),

@@ -134,8 +134,11 @@ export interface LayoutOptions {
 
 The text service is responsible for font selection, shaping, and measurement.
 It preserves the four independent WordprocessingML `rFonts` axes, applies theme
-precedence within each cascaded slot, and returns per-scalar spans plus legal
-grapheme boundaries. Each span carries one immutable core `CanvasFontRoute`;
+precedence within each cascaded slot, and retains authored theme-attribute
+presence even when its theme reference cannot resolve, because the matching
+direct attribute remains suppressed in that case. It returns per-scalar spans
+plus legal grapheme boundaries, which also constrain emergency overlong-word
+splits. Each span carries one immutable core `CanvasFontRoute`;
 measurement, kashida/vertical probes, and paint serialize that same complete CSS
 family list. Exact registered tuples win first. Otherwise an authored family is
 an engine-scoped native CSS request with a fontTable-derived generic tail (or the

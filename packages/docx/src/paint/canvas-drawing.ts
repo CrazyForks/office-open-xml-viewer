@@ -1,5 +1,6 @@
 import type { DrawingLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
+import { canvasFontString } from '@silurus/ooxml-core';
 
 export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintContext): void {
   for (const command of node.commands) {
@@ -27,7 +28,12 @@ export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintCont
       continue;
     }
     context.ctx.fillStyle = command.fill;
-    context.ctx.font = `${command.fontStyle} ${command.fontWeight} ${command.fontSizePt}px ${JSON.stringify(command.fontFamily)}`;
+    context.ctx.font = canvasFontString(
+      command.fontRoute,
+      command.fontSizePt,
+      command.fontWeight,
+      command.fontStyle,
+    );
     context.ctx.textAlign = command.align === 'start' ? 'left' : command.align === 'end' ? 'right' : 'center';
     context.ctx.textBaseline = command.baseline;
     const xPt = command.align === 'start'

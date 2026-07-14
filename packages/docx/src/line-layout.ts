@@ -2345,6 +2345,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
           complexScript: csFontFamily,
         },
         themeFonts: r.fontSlots?.theme,
+        themeFontPresence: r.fontSlots?.themePresent,
         weight,
         style,
         complexScript: cs,
@@ -2393,6 +2394,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       const eaResolution = environment.layoutServices?.text.resolve({
         fonts: textShapeRequest.fonts,
         themeFonts: textShapeRequest.themeFonts,
+        themeFontPresence: textShapeRequest.themeFontPresence,
         slot: 'eastAsia',
         weight,
         style,
@@ -4121,28 +4123,41 @@ export function layoutLines(
       // breaks where a space could have wrapped.
       const available = availW();
       setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
-      const allChars = [...s.text];
       const prevKern = setSegKerning(s);
-      let split = 0;
+      let fittedUtf16 = 0;
       try {
-        split = available > 0 ? [...fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true)].length : 0;
+        fittedUtf16 = available > 0
+          ? fitCJKPrefix(
+              ctx,
+              s.text,
+              available,
+              segmentCharacterGridDeltaPx(s, gridDeltaPx),
+              charScaleFactor(s),
+              charSpacingDeltaPx(s, scale),
+              s.verticalRun === true,
+            ).length
+          : 0;
       } finally {
         restoreKerning(prevKern);
       }
-      if (split < 1) split = 1;
-      split = extendThroughTrailingIdeographicSpaces(allChars, split);
-      if (split >= allChars.length) {
+      const graphemeOffsets = [0, ...graphemeClusterOffsets(s.text), s.text.length];
+      let split = graphemeOffsets.filter((offset) => offset <= fittedUtf16).at(-1) ?? 0;
+      if (split <= 0) split = graphemeOffsets[1] ?? s.text.length;
+      // Preserve the existing JLReq/Word line-end hanging rule after switching
+      // the emergency splitter from code-point indexes to UTF-16 grapheme offsets.
+      while (s.text.startsWith('\u3000', split)) split += 1;
+      if (split >= s.text.length) {
         // The visible glyphs actually fit (only a trailing space pushed it over the
         // fit test) — place the word whole.
         s.measuredWidth = w;
         addToLine(s, w, h, asc, desc);
       } else {
-        const prefix = allChars.slice(0, split).join('');
+        const prefix = s.text.slice(0, split);
         const pw = strAdvance(s, prefix);
         addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
         queue.unshift({
           ...s,
-          text: allChars.slice(split).join(''),
+          text: s.text.slice(split),
           measuredWidth: 0,
           src: {
             segIndex: s.src!.segIndex,

@@ -33,7 +33,7 @@ function wrapWords(
   const widthOf = (value: string): number => service.shape({
     text: value,
     fontSizePt,
-    fonts: { ascii: 'sans-serif', highAnsi: 'sans-serif', eastAsia: 'sans-serif', complexScript: 'sans-serif' },
+    fonts: {},
     genericFamily: 'sans-serif',
   }).advancePt;
   const ellipsize = (value: string): string => {
@@ -113,6 +113,7 @@ export function layoutParseErrorPage(
     heightPt: size.heightPt - padPt * 2,
   };
   const detailSizePt = Math.max(8, Math.min(size.widthPt, size.heightPt) * 0.02);
+  const fontRoute = text.resolve({ fonts: {}, slot: 'ascii', genericFamily: 'sans-serif' }).route;
   const detailLines = wrapWords(message, size.widthPt - padPt * 4, detailSizePt, text, 4);
   const detailLineHeightPt = detailSizePt * 1.4;
   const commands: DrawingPaintCommand[] = [
@@ -120,12 +121,12 @@ export function layoutParseErrorPage(
     { kind: 'stroke-rect', rect: frame, stroke: '#c8ccd2', lineWidthPt: 1, dashPt: [6, 5] },
     {
       kind: 'text', rect: { xPt: 0, yPt: size.heightPt * 0.27, widthPt: size.widthPt, heightPt: 36 },
-      text: '⚠', fill: '#b23b3b', fontFamily: 'sans-serif', fontSizePt: 28,
+      text: '⚠', fill: '#b23b3b', fontRoute, fontSizePt: 28,
       fontWeight: 400, fontStyle: 'normal', align: 'center', baseline: 'middle',
     },
     {
       kind: 'text', rect: { xPt: padPt * 2, yPt: size.heightPt * 0.40, widthPt: size.widthPt - padPt * 4, heightPt: 24 },
-      text: 'This document could not be displayed', fill: '#333333', fontFamily: 'sans-serif', fontSizePt: 13,
+      text: 'This document could not be displayed', fill: '#333333', fontRoute, fontSizePt: 13,
       fontWeight: 600, fontStyle: 'normal', align: 'center', baseline: 'middle',
     },
     ...detailLines.map((line, index): DrawingPaintCommand => ({
@@ -138,7 +139,7 @@ export function layoutParseErrorPage(
       },
       text: line,
       fill: '#666666',
-      fontFamily: 'sans-serif',
+      fontRoute,
       fontSizePt: detailSizePt,
       fontWeight: 400,
       fontStyle: 'normal',

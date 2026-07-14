@@ -3,18 +3,23 @@ import { layoutParseErrorPage } from './error-page.js';
 import { createFontResolver } from './font-service.js';
 import { createTextLayoutService } from './text.js';
 import { paintLayoutPage } from '../paint/canvas-page.js';
+import { canvasFontString } from '@silurus/ooxml-core';
 
 describe('parse-error page layout', () => {
   it('wraps detail text during layout and never measures text during paint', async () => {
+    const measuredFonts: string[] = [];
     const text = createTextLayoutService({
       fonts: createFontResolver([]),
       measurer: {
         fingerprint: 'fixed-width-v1',
-        measure: (request) => ({
-          advancePt: request.text.length * request.fontSizePt * 0.5,
-          ascentPt: request.fontSizePt * 0.8,
-          descentPt: request.fontSizePt * 0.2,
-        }),
+        measure: (request) => {
+          measuredFonts.push(canvasFontString(request.fontRoute, request.fontSizePt, request.weight, request.style));
+          return {
+            advancePt: request.text.length * request.fontSizePt * 0.5,
+            ascentPt: request.fontSizePt * 0.8,
+            descentPt: request.fontSizePt * 0.2,
+          };
+        },
       },
     });
     const layout = layoutParseErrorPage(
@@ -31,6 +36,8 @@ describe('parse-error page layout', () => {
       .toContain('word/document.xml:');
 
     const calls: string[] = [];
+    const paintedFonts: string[] = [];
+    let paintedFont = '';
     const ctx = {
       save: () => calls.push('save'),
       restore: () => calls.push('restore'),
@@ -44,7 +51,8 @@ describe('parse-error page layout', () => {
       fillStyle: '',
       strokeStyle: '',
       lineWidth: 1,
-      font: '',
+      get font() { return paintedFont; },
+      set font(value: string) { paintedFont = value; paintedFonts.push(value); },
       textAlign: 'start',
       textBaseline: 'alphabetic',
     } as unknown as CanvasRenderingContext2D;
@@ -56,6 +64,8 @@ describe('parse-error page layout', () => {
 
     await expect(paintLayoutPage(layout, 0, canvas, { scale: 1, dpr: 1 })).resolves.toBeUndefined();
     expect(calls).toContain('fillText');
+    expect(measuredFonts.length).toBeGreaterThan(0);
+    for (const measured of new Set(measuredFonts)) expect(paintedFonts).toContain(measured);
   });
 
   it('emergency-splits an overlong token only at grapheme boundaries', () => {

@@ -80,7 +80,9 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
     .sort((a, b) => {
       const family = normalizeFamily(a.requestedFamily).localeCompare(normalizeFamily(b.requestedFamily));
       return family || sourcePriority[a.source] - sourcePriority[b.source]
-        || a.resolvedFamily.localeCompare(b.resolvedFamily);
+        || a.resolvedFamily.localeCompare(b.resolvedFamily)
+        || a.weight - b.weight
+        || a.style.localeCompare(b.style);
     });
   const byFamily = new Map<string, (typeof faces)[number][]>();
   for (const face of faces) {

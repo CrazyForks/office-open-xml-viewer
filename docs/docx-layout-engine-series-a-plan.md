@@ -271,8 +271,9 @@ and plain metadata. Assert `layoutOptionsKey` changes for `currentDateMs` or any
 service-owned resource fingerprint but not paint width/DPR/default color. Prove
 there is no overload accepting caller-supplied environment strings. Assert convergence returns on
 a stable fingerprint, throws `NON_CONVERGENCE` on a repeated cycle or limit, and
-never returns a stale iteration. Assert parse-error text wraps during layout and
-its paint calls no `measureText`.
+never returns a stale iteration. Assert parse-error text wraps during layout,
+retains the exact `CanvasFontRoute` used for that measurement, and paints with
+the same core serialization without calling `measureText`.
 
 - [ ] **Step 2: Run tests to verify Red**
 

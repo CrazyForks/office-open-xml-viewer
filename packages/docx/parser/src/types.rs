@@ -1267,7 +1267,7 @@ pub enum PathCmd {
     Close,
 }
 
-#[derive(Serialize, Debug, Clone, Default)]
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunFontAxisValues {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1280,11 +1280,21 @@ pub struct RunFontAxisValues {
     pub complex_script: Option<String>,
 }
 
-#[derive(Serialize, Debug, Clone, Default)]
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFontAxisPresence {
+    pub ascii: bool,
+    pub high_ansi: bool,
+    pub east_asia: bool,
+    pub complex_script: bool,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunFontSlots {
     pub direct: RunFontAxisValues,
     pub theme: RunFontAxisValues,
+    pub theme_present: RunFontAxisPresence,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

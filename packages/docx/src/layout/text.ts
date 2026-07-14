@@ -21,11 +21,19 @@ export interface TextFontSlots {
   readonly complexScript?: string | null;
 }
 
+export interface TextFontSlotPresence {
+  readonly ascii?: boolean;
+  readonly highAnsi?: boolean;
+  readonly eastAsia?: boolean;
+  readonly complexScript?: boolean;
+}
+
 export interface TextShapeRequest {
   readonly text: string;
   readonly fontSizePt: number;
   readonly fonts: TextFontSlots;
   readonly themeFonts?: TextFontSlots;
+  readonly themeFontPresence?: TextFontSlotPresence;
   readonly weight?: number;
   readonly style?: FontStyle;
   readonly complexScript?: boolean;
@@ -47,6 +55,7 @@ export interface TextShapeRequest {
 export interface TextFontResolveRequest {
   readonly fonts: TextFontSlots;
   readonly themeFonts?: TextFontSlots;
+  readonly themeFontPresence?: TextFontSlotPresence;
   readonly slot: FontScriptSlot;
   readonly weight?: number;
   readonly style?: FontStyle;
@@ -243,13 +252,18 @@ function scriptSlot(
 }
 
 function requestedFamily(
-  request: Readonly<Pick<TextShapeRequest, 'fonts' | 'themeFonts'>>,
+  request: Readonly<Pick<TextShapeRequest, 'fonts' | 'themeFonts' | 'themeFontPresence'>>,
   slot: FontScriptSlot,
 ): string | null | undefined {
-  return request.themeFonts?.[slot]
-    ?? request.fonts[slot]
-    ?? request.themeFonts?.ascii
-    ?? request.fonts.ascii;
+  const selectedThemePresent = request.themeFontPresence?.[slot]
+    ?? request.themeFonts?.[slot] != null;
+  if (selectedThemePresent) return request.themeFonts?.[slot];
+  const selected = request.fonts[slot];
+  if (selected != null) return selected;
+  const asciiThemePresent = request.themeFontPresence?.ascii
+    ?? request.themeFonts?.ascii != null;
+  if (asciiThemePresent) return request.themeFonts?.ascii;
+  return request.fonts.ascii;
 }
 
 /**
@@ -264,11 +278,16 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       .map(([family, generic]) => [family.trim().toLocaleLowerCase('en-US'), generic])
       .sort(([a], [b]) => a.localeCompare(b)),
   ));
+  const eastAsiaFontCharsets = Object.freeze(Object.fromEntries(
+    Object.entries(input.eastAsiaFontCharsets ?? {})
+      .map(([family, charset]) => [family.trim().toLocaleLowerCase('en-US'), charset.trim()])
+      .sort(([a], [b]) => a.localeCompare(b)),
+  ));
   const fingerprint = stableFingerprint('text', {
     fonts: input.fonts.fingerprint,
     measurer: input.measurer.fingerprint,
     localMetrics,
-    eastAsiaFontCharsets: input.eastAsiaFontCharsets ?? {},
+    eastAsiaFontCharsets,
     genericFamilies,
   });
   const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
@@ -306,7 +325,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         const eastAsiaFamily = requestedFamily(request, 'eastAsia');
         const eastAsiaCharset = request.eastAsiaFontCharset
           ?? (eastAsiaFamily
-            ? input.eastAsiaFontCharsets?.[eastAsiaFamily.trim().toLowerCase()]
+            ? eastAsiaFontCharsets[eastAsiaFamily.trim().toLocaleLowerCase('en-US')]
             : undefined);
         const script = scriptSlot(
           character.codePointAt(0) ?? 0,
@@ -329,6 +348,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         const font = resolve({
           fonts: request.fonts,
           themeFonts: request.themeFonts,
+          themeFontPresence: request.themeFontPresence,
           slot: group.script,
           weight: request.weight,
           style: request.style,

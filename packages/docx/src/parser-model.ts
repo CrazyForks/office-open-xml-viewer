@@ -2,11 +2,12 @@ import type { BodyElement, DocRun, DocxDocumentModel, DocxTextRun, FieldRun, Hea
 import type { SourceRef } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
 import { mathResourceKey } from './layout/source-key.js';
-import type { TextFontSlots } from './layout/text.js';
+import type { TextFontSlotPresence, TextFontSlots } from './layout/text.js';
 
 export interface InternalRunFontSlots {
   readonly direct: TextFontSlots;
   readonly theme: TextFontSlots;
+  readonly themePresent: TextFontSlotPresence;
 }
 
 /** Parser-emitted metadata intentionally kept outside the stable public model.
@@ -178,6 +179,10 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
 
 export function internalFieldRun(run: FieldRun): InternalFieldRun {
   return run as InternalFieldRun;
+}
+
+export function internalTextRun(run: DocxTextRun): InternalTextRun {
+  return run as InternalTextRun;
 }
 
 export function internalDocumentModel(doc: DocxDocumentModel): InternalDocxDocumentModel {

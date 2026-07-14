@@ -3030,17 +3030,24 @@ fn resolved_run_font_slots(fmt: &RunFmt, theme: &ThemeColors) -> Option<RunFontS
         east_asia: theme.resolve_font_ref(fmt.font_family_east_asia_theme.clone()),
         complex_script: theme.resolve_font_ref(fmt.font_family_cs_theme.clone()),
     };
+    let theme_present = RunFontAxisPresence {
+        ascii: fmt.font_family_ascii_theme.is_some(),
+        high_ansi: fmt.font_family_high_ansi_theme.is_some(),
+        east_asia: fmt.font_family_east_asia_theme.is_some(),
+        complex_script: fmt.font_family_cs_theme.is_some(),
+    };
     let any = direct.ascii.is_some()
         || direct.high_ansi.is_some()
         || direct.east_asia.is_some()
         || direct.complex_script.is_some()
-        || theme_values.ascii.is_some()
-        || theme_values.high_ansi.is_some()
-        || theme_values.east_asia.is_some()
-        || theme_values.complex_script.is_some();
+        || theme_present.ascii
+        || theme_present.high_ansi
+        || theme_present.east_asia
+        || theme_present.complex_script;
     any.then_some(RunFontSlots {
         direct,
         theme: theme_values,
+        theme_present,
     })
 }
 
@@ -3132,6 +3139,8 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.font_size == b.font_size
         && a.color == b.color
         && a.font_family == b.font_family
+        && a.font_family_high_ansi == b.font_family_high_ansi
+        && a.font_slots == b.font_slots
         && a.font_family_east_asia == b.font_family_east_asia
         && a.font_hint == b.font_hint
         && a.is_link == b.is_link
@@ -9681,6 +9690,81 @@ mod tests {
             "a formatting difference must block the merge — the bold \"999\" \
              and the non-bold \"-99\" stay separate runs"
         );
+    }
+
+    #[test]
+    fn no_break_hyphen_merge_gate_compares_high_ansi_and_slot_metadata() {
+        let first = TextRun::default();
+        let mut high_ansi = first.clone();
+        high_ansi.font_family_high_ansi = Some("HANSI only".to_string());
+        assert!(!text_runs_mergeable(&first, &high_ansi));
+
+        let mut themed = first.clone();
+        let mut slots = RunFontSlots::default();
+        slots.direct.high_ansi = Some("Direct HANSI".to_string());
+        slots.theme_present.high_ansi = true;
+        themed.font_slots = Some(slots);
+        assert!(!text_runs_mergeable(&first, &themed));
+    }
+
+    #[test]
+    fn no_break_hyphen_does_not_merge_runs_that_differ_only_on_high_ansi() {
+        let runs = parse_para(
+            concat!(
+                r#"<w:r><w:rPr><w:rFonts w:hAnsi="HANSI A"/></w:rPr><w:t>999</w:t></w:r>"#,
+                r#"<w:r><w:rPr><w:rFonts w:hAnsi="HANSI B"/></w:rPr><w:noBreakHyphen/><w:t>99</w:t></w:r>"#,
+            ),
+            &RunFmt::default(),
+            &StyleMap::parse(""),
+        );
+        let text: Vec<(&str, Option<&str>)> = runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Text(run) => {
+                    Some((run.text.as_str(), run.font_family_high_ansi.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text,
+            vec![("999", Some("HANSI A")), ("-99", Some("HANSI B"))]
+        );
+    }
+
+    #[test]
+    fn unresolved_theme_presence_suppresses_direct_faces_on_all_four_axes() {
+        let fmt = RunFmt {
+            font_family_ascii_direct: Some("Direct ASCII".to_string()),
+            font_family_ascii_theme: Some("@theme:missingAscii".to_string()),
+            font_family_high_ansi_direct: Some("Direct HANSI".to_string()),
+            font_family_high_ansi_theme: Some("@theme:missingHAnsi".to_string()),
+            font_family_east_asia_direct: Some("Direct EA".to_string()),
+            font_family_east_asia_theme: Some("@theme:missingEA".to_string()),
+            font_family_cs_direct: Some("Direct CS".to_string()),
+            font_family_cs_theme: Some("@theme:missingCS".to_string()),
+            ..RunFmt::default()
+        };
+
+        let slots =
+            resolved_run_font_slots(&fmt, &ThemeColors::default()).expect("authored font slots");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Direct ASCII"));
+        assert_eq!(slots.direct.high_ansi.as_deref(), Some("Direct HANSI"));
+        assert_eq!(slots.direct.east_asia.as_deref(), Some("Direct EA"));
+        assert_eq!(slots.direct.complex_script.as_deref(), Some("Direct CS"));
+        assert!(slots.theme_present.ascii);
+        assert!(slots.theme_present.high_ansi);
+        assert!(slots.theme_present.east_asia);
+        assert!(slots.theme_present.complex_script);
+        assert_eq!(slots.theme.ascii, None);
+        assert_eq!(slots.theme.high_ansi, None);
+        assert_eq!(slots.theme.east_asia, None);
+        assert_eq!(slots.theme.complex_script, None);
+        let wire = serde_json::to_value(&slots).expect("font slots serialize");
+        assert_eq!(wire["themePresent"]["ascii"], true);
+        assert_eq!(wire["themePresent"]["highAnsi"], true);
+        assert_eq!(wire["themePresent"]["eastAsia"], true);
+        assert_eq!(wire["themePresent"]["complexScript"], true);
     }
 
     // ECMA-376 §17.3.2.14: a fitText run renders at a MANUAL width, so merging

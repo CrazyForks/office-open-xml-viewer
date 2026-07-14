@@ -134,6 +134,26 @@ describe('docxLocalMetricRequests', () => {
     ]);
   });
 
+  it('discovers the reviewed exact local face from hAnsi-only text and field runs', () => {
+    const doc = {
+      body: [{
+        type: 'paragraph',
+        runs: [
+          { type: 'text', text: 'é', fontFamilyHighAnsi: 'Meiryo', bold: false, italic: false },
+          {
+            type: 'field', fieldType: 'other', instruction: 'REF x', fallbackText: 'é',
+            fontFamilyHighAnsi: 'メイリオ', bold: false, italic: false,
+          },
+        ],
+      }],
+    } as unknown as DocxDocumentModel;
+
+    expect(docxLocalMetricRequests(doc)).toEqual([
+      { family: 'Meiryo', localNames: ['Meiryo'], lineHeightMultiplier: 1.3 },
+      { family: 'メイリオ', localNames: ['Meiryo'], lineHeightMultiplier: 1.3 },
+    ]);
+  });
+
   it.each([
     {
       story: 'header',

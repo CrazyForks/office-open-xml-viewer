@@ -1,6 +1,7 @@
 import type { SectionLayoutContext } from '../layout-context.js';
 import type { TextLayoutService } from './text.js';
 import type { ImageMetadataService, MathMetadataService } from './resources.js';
+import type { CanvasFontRoute } from '@silurus/ooxml-core';
 
 export type { TextLayoutService } from './text.js';
 export type { ImageMetadataService, MathMetadataService } from './resources.js';
@@ -94,7 +95,7 @@ export type DrawingPaintCommand =
       rect: LayoutRect;
       text: string;
       fill: string;
-      fontFamily: string;
+      fontRoute: CanvasFontRoute;
       fontSizePt: number;
       fontWeight: number;
       fontStyle: 'normal' | 'italic';

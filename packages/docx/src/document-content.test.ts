@@ -9,7 +9,7 @@ describe('docx rendered text inventory', () => {
       type: 'field', fieldType: 'other', instruction: 'REF x', fallbackText: 'result',
       bold: true, italic: false, underline: false, strikethrough: false,
       fontSize: 10, color: null, fontFamily: 'Latin Face', background: null,
-      vertAlign: null, fontFamilyEastAsia: 'EA Face', fontFamilyCs: 'CS Face',
+      vertAlign: null, fontFamilyHighAnsi: 'HANSI Face', fontFamilyEastAsia: 'EA Face', fontFamilyCs: 'CS Face',
       boldCs: false, italicCs: true,
     };
     const doc = {
@@ -19,8 +19,22 @@ describe('docx rendered text inventory', () => {
     } as unknown as DocxDocumentModel;
 
     expect([...docxRenderedTextUsages(doc)].filter((usage) => usage.text === 'result')).toEqual([
-      { text: 'result', fontFamilies: ['Latin Face', 'EA Face'], bold: true, italic: false },
+      { text: 'result', fontFamilies: ['Latin Face', 'HANSI Face', 'EA Face'], bold: true, italic: false },
       { text: 'result', fontFamilies: ['CS Face'], bold: false, italic: true },
     ]);
+  });
+
+  it('inventories an ordinary text face authored only on the hAnsi axis', () => {
+    const doc = {
+      body: [{ type: 'paragraph', runs: [{
+        type: 'text', text: 'é', fontFamily: null, fontFamilyHighAnsi: 'HANSI Only',
+        bold: false, italic: false,
+      }] }],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as unknown as DocxDocumentModel;
+
+    expect([...docxRenderedTextUsages(doc)].find((usage) => usage.text === 'é')?.fontFamilies)
+      .toContain('HANSI Only');
   });
 });
