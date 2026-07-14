@@ -234,11 +234,17 @@ Use the roadmap review gate.
 - Create: `rule-tests/no-docx-migration-flags-test.yml`
 - Create: `packages/docx/src/layout/architecture.test.ts`
 - Modify: `scripts/check-docx-public-api.mjs`
-- Modify: `scripts/check-docx-layout-boundaries.mjs`
+- Delete: `scripts/check-docx-layout-boundaries.mjs`
+- Delete: `scripts/check-docx-layout-boundaries.test.mjs`
 - Delete: `scripts/docx-layout-boundary-baseline.json`
+- Create: `.agents/skills/docx-architecture-audit/SKILL.md`
 - Modify: `sgconfig.yml`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `docs/docx-layout-engine-redesign.md`
+- Delete: `docs/docx-layout-engine-implementation-roadmap.md`
+- Delete: `docs/docx-layout-engine-series-a-plan.md`
+- Delete: `docs/docx-layout-engine-series-b-plan.md`
+- Delete: `docs/docx-layout-engine-series-c-plan.md`
 
 **Interfaces:**
 
@@ -267,7 +273,7 @@ dependencies are free of measurement, shaping, style merge, pagination, and
 parser-object access, and so every pagination/layout entry is on an explicit
 allowlist outside `renderer.ts`.
 
-Build `packages/docx/dist/types/index.d.ts`, normalize source-map paths/comments,
+Build the published root `dist/types/docx.d.ts`, normalize source-map paths/comments,
 and compare it with `packages/docx/api/public-api-baseline.d.ts`. The comparison
 must fail on any added, removed, or changed exported declaration; it replaces a
 manual four-file diff.
@@ -281,7 +287,7 @@ pnpm vitest run packages/docx/src/layout/architecture.test.ts packages/docx/src/
 pnpm lint
 pnpm lint:test
 node scripts/check-docx-layout-boundaries.mjs --final
-pnpm --filter @silurus/ooxml-docx build
+pnpm build
 node scripts/check-docx-public-api.mjs
 ```
 
@@ -321,7 +327,7 @@ pnpm typecheck
 pnpm build-storybook
 pnpm playwright test --config packages/docx/playwright.config.ts conformance.spec.ts
 cargo test -p docx-parser
-pnpm --filter @silurus/ooxml-docx build
+pnpm build
 node scripts/check-docx-public-api.mjs
 node scripts/check-docx-layout-boundaries.mjs --final
 git diff --check
@@ -334,13 +340,28 @@ is tracked.
 
 - [ ] **Step 6: Obtain an independent final architecture audit**
 
-Use the roadmap review brief and additionally require the reviewer to prove each
-release-gate claim with a command or exact code reference. Expected: one production
-algorithm per feature class, no paint measurement, no parser stamps, no migration
-flags/fallback, all stories in layout, main/worker parity, and compatible public APIs.
+Create and use the repository-local DOCX architecture-audit skill. It owns the
+semantic checks that cannot be proved reliably by identifier matching: spec-first
+ownership, one production algorithm per feature class, renderer adapter thinness,
+SRP, duplication, and cross-package consistency. Require evidence by command or
+exact code reference. Keep only deterministic, inexpensive checks in CI: public
+API compatibility, import ownership, migration-flag/stamp absence, plain-data
+worker contracts, and retained-reference integrity.
+
+Expected: no paint measurement, parser stamps, or migration flags/fallback; all
+stories are laid out through the immutable pipeline; main/worker behavior and
+public APIs remain compatible. Run this skill for C3, major DOCX architecture
+changes, and periodic audits rather than pretending semantic review is fully
+enforceable on every CI run.
 
 - [ ] **Step 7: Fix findings, reverify, commit, and merge PR C3**
 
 Commit subject: `refactor(docx): complete immutable layout pipeline`.
 Repeat Steps 4–6 after material fixes, then merge with `gh pr merge <number> --merge`.
-Close Issue #1037 only after GitHub shows PR C3 merged. Do not create a release or tag.
+Before committing, delete the migration roadmap and Series A/B/C execution plans;
+their durable architectural decisions remain in `docx-layout-engine-redesign.md`,
+while Issue #1037 retains the implementation history. Remove the transitional
+boundary checker and baseline. Retain only deterministic static/API/contract
+gates in CI, and retain the semantic architecture audit as a repository skill.
+Close Issue #1037 only after GitHub shows PR C3 merged. Do not create a release
+or tag.
