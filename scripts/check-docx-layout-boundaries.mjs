@@ -378,10 +378,15 @@ function normalizedNodeHash(node, source) {
  * buildMeasureState call. Everything else remains represented in the hash. */
 function normalizedComputePagesHash(node, source) {
   const allowedNames = ['layoutServices', 'layoutOptions'];
+  const allowedParameterSyntax = [
+    'layoutServices?: LayoutServices',
+    'layoutOptions?: LayoutOptions',
+  ];
   const appendedParameters = node.parameters?.slice(-2) ?? [];
   const hasAllowedParameters = appendedParameters.length === 2
     && appendedParameters.every((parameter, index) => (
       ts.isIdentifier(parameter.name) && parameter.name.text === allowedNames[index]
+      && parameter.getText(source).replace(/\s+/g, ' ').trim() === allowedParameterSyntax[index]
     ));
   const omittedParameters = new Set(hasAllowedParameters ? appendedParameters : []);
   const shape = (current) => {

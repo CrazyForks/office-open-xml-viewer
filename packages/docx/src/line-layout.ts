@@ -2326,6 +2326,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         weight: bold ? 700 : 400,
         style: italic ? 'italic' : 'normal',
         complexScript: cs,
+        kerning: r.kerning == null
+          ? undefined
+          : (cs ? csFontSize : base.fontSize) >= r.kerning,
         measure: false,
       });
       const shaped = environment.layoutServices?.text.shape(textShapeRequest);
@@ -3139,6 +3142,10 @@ export function layoutLines(
   // select it via measureText / setMeasureFont immediately before).
   const verticalInkExtra = (s: LayoutTextSeg, text: string): number => {
     if (!s.verticalRun) return 0;
+    // The format-neutral text service may measure on a different adapter and
+    // restores its Canvas state. The vertical-feature probe is intentionally
+    // paint-context-local, so select the same resolved face explicitly here.
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
     const prevKern = setSegKerning(s);
     try {
       return verticalRunInkExtraPx(ctx, text);
@@ -4179,9 +4186,34 @@ export function rescaleLayoutLines(
     }
   };
 
-  const naturalWidth = (s: LayoutTextSeg, text: string): number =>
-    withSegKerning(s, () =>
-      ctx.measureText(text).width + (s.verticalRun ? verticalRunInkExtraPx(ctx, text) : 0));
+  const measureTextMetrics = (s: LayoutTextSeg, text: string, fontPx: number): TextMetrics => {
+    if (s.textLayoutService && s.textShapeRequest) {
+      const shaped = s.textLayoutService.shape({
+        ...s.textShapeRequest,
+        text,
+        fontSizePt: fontPx,
+        measure: true,
+      });
+      return {
+        width: shaped.advancePt,
+        actualBoundingBoxAscent: shaped.ascentPt,
+        actualBoundingBoxDescent: shaped.descentPt,
+        fontBoundingBoxAscent: shaped.ascentPt,
+        fontBoundingBoxDescent: shaped.descentPt,
+      } as TextMetrics;
+    }
+    ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses);
+    return withSegKerning(s, () => ctx.measureText(text));
+  };
+
+  const verticalInkExtra = (s: LayoutTextSeg, text: string, fontPx: number): number => {
+    if (!s.verticalRun) return 0;
+    // Vertical feature capability belongs to the paint context, not the
+    // format-neutral text service. Select the exact resolved paint face before
+    // applying this narrow glyph-cell correction.
+    ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses);
+    return withSegKerning(s, () => verticalRunInkExtraPx(ctx, text));
+  };
 
   // Per-text-segment measurement at the PAINT scale — the SAME model layoutLines
   // uses (segAdvance + the text-segment metric block), so measure == draw.
@@ -4193,12 +4225,16 @@ export function rescaleLayoutLines(
     gridCount: number;
   } => {
     const effPx = calcEffectiveFontPx(s, scale);
-    ctx.font = buildFont(s.bold, s.italic, effPx, s.fontFamily, fontFamilyClasses);
-    const m = withSegKerning(s, () => ctx.measureText(s.text));
+    const m = measureTextMetrics(s, s.text, effPx);
     // #1014 — fold in the vo=Tr rotate-fallback ink-extent deficit for a vertical
     // run so the rescaled box matches the ink-sized cell (measure == draw); 0 on
     // horizontal pages and non-under-reporting fonts. `ctx.font` is set above.
-    const advance = segAdvanceWidth(s, naturalWidth(s, s.text), gridDeltaPx, scale);
+    const advance = segAdvanceWidth(
+      s,
+      m.width + verticalInkExtra(s, s.text, effPx),
+      gridDeltaPx,
+      scale,
+    );
     // §17.3.2.33 — a small-caps run's LINE BOX follows the FULL run size (measure
     // the box at fullPx, not the 2pt-reduced glyphs); super/subscript keeps its
     // shrunk contribution. Mirrors layoutLines' fullPx / metricEmPx split.
@@ -4206,8 +4242,7 @@ export function rescaleLayoutLines(
     let metricM = m;
     let metricEmPx = effPx;
     if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
-      ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses);
-      metricM = ctx.measureText(s.text || 'X');
+      metricM = measureTextMetrics(s, s.text || 'X', fullPx);
       metricEmPx = fullPx;
     }
     // FE design correction for EA segments only; ruby keeps its measured box
@@ -4250,10 +4285,10 @@ export function rescaleLayoutLines(
       scale,
       (segment) => {
         const effPx = calcEffectiveFontPx(segment, scale);
-        ctx.font = buildFont(segment.bold, segment.italic, effPx, segment.fontFamily, fontFamilyClasses);
         // #1014 — include the vo=Tr ink deficit so the rescaled fitText gap stays
         // measure==paint against the ink-grown cell; 0 for non-under-reporting runs.
-        return naturalWidth(segment, segment.text);
+        return measureTextMetrics(segment, segment.text, effPx).width
+          + verticalInkExtra(segment, segment.text, effPx);
       },
     );
     const segments = scaledSource.map((s) => {

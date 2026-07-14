@@ -242,6 +242,38 @@ test('rejects unrelated computePages control-flow, calls, and parameters during 
   }
 });
 
+test('rejects any non-exact A2 parameter syntax and pass-through expression', () => {
+  const variants = [
+    'layoutServices: LayoutServices, layoutOptions?: LayoutOptions',
+    'layoutServices?: LayoutServices = undefined, layoutOptions?: LayoutOptions',
+    '...layoutServices: LayoutServices[], layoutOptions?: LayoutOptions',
+    'readonly layoutServices?: LayoutServices, layoutOptions?: LayoutOptions',
+    'layoutOptions?: LayoutOptions, layoutServices?: LayoutServices',
+  ];
+  for (const tail of variants) {
+    const root = initializeRepository();
+    establishA1Baseline(root);
+    write(root, 'packages/docx/src/renderer.ts', `function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function createLayoutServices() {}\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, ${tail}) { const measure = buildMeasureState(ctx, resolvedLocalFonts, layoutServices, layoutOptions); return [measure]; }\nexport function computeTableLayout() { return []; }\n`);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, tail);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+
+  const expressions = [
+    'layoutServices as LayoutServices, layoutOptions',
+    'layoutServices, layoutOptions ?? undefined',
+    '{ ...layoutServices }, layoutOptions',
+  ];
+  for (const args of expressions) {
+    const root = initializeRepository();
+    establishA1Baseline(root);
+    write(root, 'packages/docx/src/renderer.ts', `function buildMeasureState(ctx: unknown, fonts: unknown, services?: LayoutServices, options?: LayoutOptions) { return [ctx, fonts, services, options]; }\nexport function createLayoutServices() {}\nexport function computePages(ctx: unknown, resolvedLocalFonts: unknown = {}, layoutServices?: LayoutServices, layoutOptions?: LayoutOptions) { const measure = buildMeasureState(ctx, resolvedLocalFonts, ${args}); return [measure]; }\nexport function computeTableLayout() { return []; }\n`);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, args);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
 test('final mode enforces the renderer adapter export and import allowlists', () => {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-final-adapter-'));
   write(root, 'packages/docx/src/layout/document.ts', 'export function layoutDocument() {}\n');

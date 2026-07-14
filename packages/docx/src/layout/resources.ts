@@ -1,6 +1,7 @@
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { BodyElement, DocRun, DocTable, DocxDocumentModel, ShapeRun } from '../types.js';
+import type { MathNode } from '@silurus/ooxml-core';
 import { rasterExceedsBudget, sniffRasterDimensions } from '@silurus/ooxml-core';
 
 export interface ImageLayoutResource {
@@ -22,6 +23,12 @@ export interface MathLayoutResource {
   readonly descentEm: number;
   readonly diagnostics: readonly LayoutDiagnostic[];
   readonly available?: boolean;
+}
+
+export interface MathOccurrence {
+  readonly nodes: MathNode[];
+  readonly display: boolean;
+  readonly source: SourceRef;
 }
 
 export interface ImageMetadataService {
@@ -48,6 +55,66 @@ export function mathResourceKey(source: SourceRef, localName: string): string {
 
 export function mathAstResourceKey(nodes: unknown): string {
   return stableFingerprint('math-resource', nodes);
+}
+
+export function bodyMathOccurrences(
+  body: BodyElement[],
+  story: SourceRef['story'] = 'body',
+  storyInstance = 'body',
+): MathOccurrence[] {
+  const found: MathOccurrence[] = [];
+  const visit = (elements: BodyElement[], prefix: number[] = []): void => {
+    elements.forEach((element, elementIndex) => {
+      const path = [...prefix, elementIndex];
+      if (element.type === 'paragraph') {
+        element.runs.forEach((run, runIndex) => {
+          if (run.type === 'math') found.push({
+            nodes: run.nodes,
+            display: run.display,
+            source: { story, storyInstance, path: [...path, runIndex] },
+          });
+        });
+      } else if (element.type === 'table') {
+        element.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
+          visit(cell.content as BodyElement[], [...path, rowIndex, cellIndex]);
+        }));
+      }
+    });
+  };
+  visit(body);
+  return found;
+}
+
+/** Collect every story whose current model retains OMML MathNode runs. Shape
+ * txbxContent is intentionally excluded: the parser currently flattens its
+ * equations into ShapeTextRun.text. Planned rich-textbox work must extend this
+ * traversal when that model begins retaining MathNode rather than silently
+ * resolving an absent resource. */
+export function documentMathOccurrences(doc: DocxDocumentModel): MathOccurrence[] {
+  const found = bodyMathOccurrences(doc.body, 'body', 'body');
+  const add = (
+    body: BodyElement[],
+    story: 'header' | 'footer' | 'footnote' | 'endnote',
+    storyInstance: string,
+  ) => found.push(...bodyMathOccurrences(body, story, storyInstance));
+  for (const kind of ['default', 'first', 'even'] as const) {
+    const header = doc.headers[kind];
+    const footer = doc.footers[kind];
+    if (header) add(header.body, 'header', kind);
+    if (footer) add(footer.body, 'footer', kind);
+  }
+  doc.body.forEach((element, elementIndex) => {
+    if (element.type !== 'sectionBreak') return;
+    for (const kind of ['default', 'first', 'even'] as const) {
+      const header = element.headers?.[kind];
+      const footer = element.footers?.[kind];
+      if (header) add(header.body, 'header', `section:${elementIndex}:${kind}`);
+      if (footer) add(footer.body, 'footer', `section:${elementIndex}:${kind}`);
+    }
+  });
+  for (const note of doc.footnotes ?? []) add(note.content, 'footnote', note.id);
+  for (const note of doc.endnotes ?? []) add(note.content, 'endnote', note.id);
+  return found;
 }
 
 function finiteNonNegative(value: number, name: string): number {

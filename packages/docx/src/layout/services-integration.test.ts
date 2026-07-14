@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildSegments, layoutLines, type LineLayoutEnvironment } from '../line-layout.js';
+import { buildSegments, layoutLines, rescaleLayoutLines, type LineLayoutEnvironment } from '../line-layout.js';
 import { createLayoutServices } from '../renderer.js';
 import type { DocRun, DocxDocumentModel } from '../types.js';
 import type { TextLayoutService } from './text.js';
+import { mathAstResourceKey } from './resources.js';
+import { privateResourceLookupOf } from './runtime-state.js';
 
 function measureContext(): CanvasRenderingContext2D {
   return {
@@ -59,10 +61,47 @@ describe('production layout service integration', () => {
     const environment: LineLayoutEnvironment = { pageIndex: 0, totalPages: 1, layoutServices: services };
     const segments = buildSegments([textRun('first'), textRun('second')], environment);
     const afterSegmentation = calls;
-    layoutLines(measureContext(), segments, 300, 0, 1);
+    const lines = layoutLines(measureContext(), segments, 300, 0, 1);
 
     expect(afterSegmentation).toBeGreaterThanOrEqual(2);
     expect(calls).toBeGreaterThan(afterSegmentation);
+    const afterLayout = calls;
+    rescaleLayoutLines(lines, 2, measureContext(), {}, 0);
+    expect(calls).toBeGreaterThan(afterLayout);
+  });
+
+  it('carries the w:kern threshold through the text service measure adapter', () => {
+    let fontKerning: CanvasFontKerning = 'auto';
+    const states: CanvasFontKerning[] = [];
+    const ctx = {
+      font: '',
+      letterSpacing: '0px',
+      get fontKerning() { return fontKerning; },
+      set fontKerning(value: CanvasFontKerning) { fontKerning = value; },
+      measureText(text: string) {
+        states.push(fontKerning);
+        const width = fontKerning === 'normal' ? 40 : fontKerning === 'none' ? 30 : 20;
+        return {
+          width: text ? width : 0,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+          fontBoundingBoxAscent: 8,
+          fontBoundingBoxDescent: 2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const services = createLayoutServices(model(), { measureContext: ctx });
+    const environment: LineLayoutEnvironment = { pageIndex: 0, totalPages: 1, layoutServices: services };
+    const measure = (kerning: number) => {
+      const segments = buildSegments([textRun('AV', { fontSize: 10, kerning })], environment);
+      return layoutLines(ctx, segments, 300, 0, 1)[0].segments[0].measuredWidth;
+    };
+
+    expect(measure(5)).toBe(40);
+    expect(measure(20)).toBe(30);
+    expect(states).toContain('normal');
+    expect(states).toContain('none');
+    expect(ctx.fontKerning).toBe('auto');
   });
 
   it('inventories only successfully registered faces and labels Office replacements as substitutions', () => {
@@ -92,6 +131,78 @@ describe('production layout service integration', () => {
     const substituted = loaded.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'Calibri' } });
     expect(substituted.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Carlito' });
     expect(substituted.diagnostics[0]?.message).toMatch(/implementation-dependent/i);
+  });
+
+  it('requires loaded status and an exact family/weight/style match for every face', () => {
+    const doc = model({
+      embeddedFonts: [
+        { fontName: 'Partial Embedded', partPath: 'word/fonts/regular.odttf', fontKey: '', style: 'regular' },
+        { fontName: 'Partial Embedded', partPath: 'word/fonts/bold.odttf', fontKey: '', style: 'bold' },
+      ],
+    });
+    const services = createLayoutServices(doc, {
+      measureContext: measureContext(),
+      embeddedFaces: [
+        { family: '"Partial Embedded"', weight: '400', style: 'normal', status: 'loaded' },
+        { family: 'Partial Embedded', weight: '700', style: 'normal', status: 'error' },
+        { family: 'Timed Out', weight: '400', style: 'normal', status: 'loading' },
+      ] as FontFace[],
+    });
+    const shape = (family: string, weight: number, style: 'normal' | 'italic' = 'normal') =>
+      services.text.shape({ text: 'x', fontSizePt: 10, weight, style, fonts: { ascii: family } });
+
+    expect(shape('Partial Embedded', 400).spans[0]?.font)
+      .toMatchObject({ source: 'embedded', resolvedFamily: 'Partial Embedded' });
+    expect(shape('Partial Embedded', 700).spans[0]?.font.source).toBe('generic');
+    expect(shape('Partial Embedded', 400, 'italic').spans[0]?.font.source).toBe('generic');
+    expect(shape('Timed Out', 400).spans[0]?.font.source).toBe('generic');
+  });
+
+  it('collects every currently representable math story, including nested tables', () => {
+    const math = (value: string) => ({
+      type: 'math', nodes: [{ type: 'text', text: value }], display: false, fontSize: 10,
+    });
+    const paragraph = (value: string) => ({ type: 'paragraph', runs: [math(value)] });
+    const table = (value: string) => ({
+      type: 'table', rows: [{ cells: [{ content: [paragraph(value)] }] }],
+    });
+    const doc = model({
+      body: [paragraph('body')],
+      headers: { default: { body: [table('header')] }, first: null, even: null },
+      footers: { default: null, first: { body: [paragraph('footer')] }, even: null },
+      footnotes: [{ id: '1', content: [table('footnote')] }],
+      endnotes: [{ id: '2', content: [paragraph('endnote')] }],
+    } as unknown as Partial<DocxDocumentModel>);
+    const services = createLayoutServices(doc, { measureContext: measureContext() });
+
+    for (const value of ['body', 'header', 'footer', 'footnote', 'endnote']) {
+      const lookupKey = mathAstResourceKey({ nodes: [{ type: 'text', text: value }], display: false });
+      expect(() => services.math.resolve(lookupKey), value).not.toThrow();
+    }
+  });
+
+  it('requires runtime math handles to match available metadata exactly', () => {
+    const available = {
+      resourceKey: 'math:available', widthEm: 1, ascentEm: 0.8, descentEm: 0.2, diagnostics: [],
+    };
+    const unavailable = {
+      resourceKey: 'math:unavailable', widthEm: 0, ascentEm: 0, descentEm: 0,
+      available: false as const, diagnostics: [],
+    };
+    const drawable = {} as CanvasImageSource;
+
+    expect(() => createLayoutServices(model(), { mathResources: [available], mathDrawables: new Map() }))
+      .toThrow(/math.*membership|missing/i);
+    expect(() => createLayoutServices(model(), {
+      mathResources: [unavailable],
+      mathDrawables: new Map([['math:unavailable', drawable]]),
+    })).toThrow(/math.*membership|extra/i);
+
+    const services = createLayoutServices(model(), {
+      mathResources: [available, unavailable],
+      mathDrawables: new Map([['math:available', drawable]]),
+    });
+    expect(privateResourceLookupOf(services)?.keys).toEqual(['math:available']);
   });
 
   it('gives main and worker factories identical fingerprints for identical successful snapshots', () => {

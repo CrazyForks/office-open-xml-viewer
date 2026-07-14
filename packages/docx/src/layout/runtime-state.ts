@@ -51,7 +51,23 @@ export function createImmutableResourceLookup<T>(entries: ReadonlyMap<string, T>
 
 const privateResourceLookups = new WeakMap<object, ImmutableResourceLookup<unknown>>();
 
-export function attachPrivateResourceLookup<T>(owner: object, entries: ReadonlyMap<string, T>): void {
+export function attachPrivateResourceLookup<T>(
+  owner: object,
+  entries: ReadonlyMap<string, T>,
+  expectedKeys: Iterable<string> = entries.keys(),
+): void {
+  if (privateResourceLookups.has(owner)) {
+    throw new Error('Private resource lookup is already attached');
+  }
+  const actual = new Set(entries.keys());
+  const expected = new Set(expectedKeys);
+  const missing = [...expected].filter((key) => !actual.has(key)).sort();
+  const extra = [...actual].filter((key) => !expected.has(key)).sort();
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `Runtime resource membership mismatch: missing [${missing.join(', ')}]; extra [${extra.join(', ')}]`,
+    );
+  }
   privateResourceLookups.set(owner, createImmutableResourceLookup(entries));
 }
 

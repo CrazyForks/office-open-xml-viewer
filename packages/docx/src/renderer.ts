@@ -137,8 +137,10 @@ import { paintLayoutPage as paintRetainedLayoutPage } from './paint/canvas-page.
 import {
   mathAstResourceKey,
   mathResourceKey,
+  bodyMathOccurrences,
   createImageMetadataService,
   createMathMetadataService,
+  documentMathOccurrences,
   documentImageMetadataRecords,
   type MathLayoutResource,
 } from './layout/resources.js';
@@ -304,31 +306,18 @@ function computeLineKashidaDistribution(
   return computeKashidaDistribution(distSegs, slackPx, level, measureAdvance);
 }
 
-/** True if any run in the body (incl. tables) is an OMML equation. */
-export function documentHasMath(body: BodyElement[]): boolean {
-  return collectMathRuns(body).length > 0;
+function collectMathRuns(
+  body: BodyElement[],
+  story: import('./layout/types.js').SourceRef['story'] = 'body',
+  storyInstance = 'body',
+): ReturnType<typeof bodyMathOccurrences> {
+  return bodyMathOccurrences(body, story, storyInstance);
 }
 
-function collectMathRuns(body: BodyElement[]): { nodes: MathNode[]; display: boolean; source: import('./layout/types.js').SourceRef }[] {
-  const found: { nodes: MathNode[]; display: boolean; source: import('./layout/types.js').SourceRef }[] = [];
-  const walkBody = (elements: BodyElement[], prefix: number[] = []) => elements.forEach((el, elementIndex) => {
-    const path = [...prefix, elementIndex];
-    if (el.type === 'paragraph') {
-      el.runs.forEach((run, runIndex) => {
-        if (run.type === 'math') found.push({
-          nodes: run.nodes,
-          display: run.display,
-          source: { story: 'body', storyInstance: 'body', path: [...path, runIndex] },
-        });
-      });
-    } else if (el.type === 'table') {
-      el.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
-        walkBody(cell.content as BodyElement[], [...path, rowIndex, cellIndex]);
-      }));
-    }
-  });
-  walkBody(body);
-  return found;
+/** True if any currently representable document story contains OMML. The body
+ * array form remains supported for existing callers. */
+export function documentHasMath(input: BodyElement[] | DocxDocumentModel): boolean {
+  return (Array.isArray(input) ? collectMathRuns(input) : documentMathOccurrences(input)).length > 0;
 }
 
 /** Build the one immutable resource snapshot shared by pagination and paint.
@@ -347,25 +336,56 @@ export function createLayoutServices(
   } = {},
 ): LayoutServices {
   const localMetrics = Object.freeze({ ...(options.localMetrics ?? {}) });
-  const successfulEmbedded = new Map((options.embeddedFaces ?? []).map((face) => [
-    face.family.toLocaleLowerCase('en-US'), face,
+  const displayFaceFamily = (family: string): string => family
+    .trim()
+    .replace(/^(['"])(.*)\1$/, '$2');
+  const normalizedFaceFamily = (family: string): string => displayFaceFamily(family)
+    .toLocaleLowerCase('en-US');
+  const loadedFaceStyle = (face: FontFace): 'normal' | 'italic' | null => {
+    const style = face.style.trim().toLocaleLowerCase('en-US');
+    return style === 'normal' || style === 'italic' ? style : null;
+  };
+  const loadedFaceWeight = (face: FontFace): number | null => {
+    const weight = face.weight.trim().toLocaleLowerCase('en-US');
+    if (weight === 'normal') return 400;
+    if (weight === 'bold') return 700;
+    if (!/^\d+$/.test(weight)) return null;
+    const numeric = Number(weight);
+    return numeric >= 100 && numeric <= 900 ? numeric : null;
+  };
+  const loadedFaces = (faces: readonly FontFace[]): Array<{ family: string; displayFamily: string; weight: number; style: 'normal' | 'italic' }> =>
+    faces.flatMap((face) => {
+      if (face.status !== 'loaded') return [];
+      const weight = loadedFaceWeight(face);
+      const style = loadedFaceStyle(face);
+      return weight == null || style == null ? [] : [{
+        family: normalizedFaceFamily(face.family),
+        displayFamily: displayFaceFamily(face.family),
+        weight,
+        style,
+      }];
+    });
+  const successfulEmbedded = new Map(loadedFaces(options.embeddedFaces ?? []).map((loaded) => [
+    `${loaded.family}:${loaded.weight}:${loaded.style}`, loaded,
   ]));
   const inventory: FontInventoryFace[] = (doc.embeddedFonts ?? []).flatMap((font) => {
-    const face = successfulEmbedded.get(font.fontName.toLocaleLowerCase('en-US'));
-    if (!face) return [];
+    const weight = font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400;
+    const style = font.style === 'italic' || font.style === 'boldItalic' ? 'italic' as const : 'normal' as const;
+    const loaded = successfulEmbedded.get(`${normalizedFaceFamily(font.fontName)}:${weight}:${style}`);
+    if (!loaded) return [];
     return [{
       requestedFamily: font.fontName,
-      resolvedFamily: face.family,
+      resolvedFamily: loaded.displayFamily,
       source: 'embedded' as const,
-      weights: [font.style === 'bold' || font.style === 'boldItalic' ? 700 : 400],
-      styles: [font.style === 'italic' || font.style === 'boldItalic' ? 'italic' as const : 'normal' as const],
+      weights: [weight],
+      styles: [style],
     }];
   });
   for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
     inventory.push({ requestedFamily, resolvedFamily: metric.family, source: 'local', weights: [400], styles: ['normal'] });
   }
   if (options.useGoogleFonts) {
-    const successfulGoogle = new Set((options.googleFaces ?? []).map((face) => face.family.toLocaleLowerCase('en-US')));
+    const successfulGoogle = loadedFaces(options.googleFaces ?? []);
     const seen = new Set<string>();
     for (const name of docxFontPreloadNames(doc)) {
       if (!name) continue;
@@ -374,13 +394,16 @@ export function createLayoutServices(
       seen.add(key);
       const entry = DOCX_GOOGLE_FONTS[key];
       const resolvedFamily = entry?.loadFamily ?? name;
-      if (entry && successfulGoogle.has(resolvedFamily.toLocaleLowerCase('en-US'))) inventory.push({
-        requestedFamily: name,
-        resolvedFamily,
-        source: resolvedFamily.toLocaleLowerCase('en-US') === name.toLocaleLowerCase('en-US') ? 'google' : 'substitute',
-        weights: [400],
-        styles: ['normal'],
-      });
+      if (!entry) continue;
+      for (const loaded of successfulGoogle.filter((face) => face.family === normalizedFaceFamily(resolvedFamily))) {
+        inventory.push({
+          requestedFamily: name,
+          resolvedFamily: loaded.displayFamily,
+          source: normalizedFaceFamily(resolvedFamily) === normalizedFaceFamily(name) ? 'google' : 'substitute',
+          weights: [loaded.weight],
+          styles: [loaded.style],
+        });
+      }
     }
   }
   const ctx = options.measureContext ?? (typeof OffscreenCanvas !== 'undefined'
@@ -401,9 +424,11 @@ export function createLayoutServices(
         };
         const previousFont = ctx.font;
         const previousLetterSpacing = ctx.letterSpacing;
+        const previousKerning = ctx.fontKerning;
         try {
           ctx.font = `${request.style} ${request.weight} ${request.fontSizePt}px ${JSON.stringify(request.resolvedFamily)}, ${request.genericFamily}`;
           ctx.letterSpacing = `${request.letterSpacingPt}px`;
+          if (request.kerning != null) ctx.fontKerning = request.kerning ? 'normal' : 'none';
           const metrics = ctx.measureText(request.text);
           return {
             advancePt: metrics.width,
@@ -413,11 +438,12 @@ export function createLayoutServices(
         } finally {
           ctx.font = previousFont;
           ctx.letterSpacing = previousLetterSpacing;
+          if (request.kerning != null) ctx.fontKerning = previousKerning;
         }
       },
     },
   });
-  const mathResources = options.mathResources ?? collectMathRuns(doc.body).map(({ nodes, display, source }) => ({
+  const mathResources = options.mathResources ?? documentMathOccurrences(doc).map(({ nodes, display, source }) => ({
     resourceKey: mathResourceKey(source, display ? 'display' : 'inline'),
     lookupKey: mathAstResourceKey({ nodes, display }),
     widthEm: 0,
@@ -435,7 +461,14 @@ export function createLayoutServices(
     images: createImageMetadataService(documentImageMetadataRecords(doc)),
     math: createMathMetadataService(mathResources),
   });
-  attachPrivateResourceLookup(services, options.mathDrawables ?? new Map());
+  const availableMathKeys = mathResources
+    .filter((resource) => resource.available !== false)
+    .map((resource) => resource.resourceKey);
+  attachPrivateResourceLookup(
+    services,
+    options.mathDrawables ?? new Map(),
+    availableMathKeys,
+  );
   return services;
 }
 
@@ -453,10 +486,10 @@ function svgToImage(svg: string): Promise<HTMLImageElement> {
 /** Convert equations before layout and address the resulting metadata by a
  * stable content key. Parser array identity is deliberately not retained. */
 export async function prepareMathRuns(
-  body: BodyElement[],
+  input: BodyElement[] | DocxDocumentModel,
   math: MathRenderer,
 ) {
-  const runs = collectMathRuns(body);
+  const runs = Array.isArray(input) ? collectMathRuns(input) : documentMathOccurrences(input);
   if (runs.length === 0) return { records: [], drawables: new Map() };
   await math.loadMathJax();
   const records: MathLayoutResource[] = [];

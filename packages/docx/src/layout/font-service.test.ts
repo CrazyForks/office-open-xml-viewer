@@ -162,6 +162,48 @@ describe('font layout services', () => {
     expect(shape('ش-12').spans.every((span) => span.script !== 'complexScript')).toBe(true);
   });
 
+  it('implements the complete ECMA-376 §17.3.2.26 character-range table', () => {
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'script-slot-table-v1',
+        measure: (request) => ({ advancePt: [...request.text].length, ascentPt: 1, descentPt: 0 }),
+      },
+    });
+    const slot = (text: string, complexScript = false) => service.shape({
+      text,
+      fontSizePt: 10,
+      complexScript,
+      fonts: {
+        ascii: 'Embedded Sans',
+        highAnsi: 'Theme Serif',
+        eastAsia: 'Meiryo',
+        complexScript: 'Legacy Arabic',
+      },
+    }).spans.map((span) => span.script);
+
+    const cases: Array<[string, string, 'ascii' | 'highAnsi' | 'eastAsia']> = [
+      ['ASCII', 'A', 'ascii'],
+      ['Latin-1', 'é', 'highAnsi'],
+      ['Hebrew', '\u05D0', 'ascii'],
+      ['Arabic', '\u0627', 'ascii'],
+      ['Syriac', '\u0710', 'ascii'],
+      ['Thaana', '\u0780', 'ascii'],
+      ['Hebrew presentation form', '\uFB1D', 'ascii'],
+      ['Arabic presentation form A', '\uFB50', 'ascii'],
+      ['Arabic presentation form B', '\uFE70', 'ascii'],
+      ['Hangul Jamo', '\u1100', 'eastAsia'],
+      ['Yi syllable', '\uA000', 'eastAsia'],
+      ['CJK compatibility form', '\uFE30', 'eastAsia'],
+      ['small form variant', '\uFE50', 'eastAsia'],
+    ];
+    for (const [name, text, expected] of cases) {
+      expect(slot(text), name).toEqual([expected]);
+    }
+    expect(slot('\u05D0', true)).toEqual(['complexScript']);
+    expect(slot('\u0627', true)).toEqual(['complexScript']);
+  });
+
   it('includes immutable local geometry metrics in the text fingerprint', () => {
     const make = (lineHeightRatio: number) => createTextLayoutService({
       fonts: createFontResolver(faces),

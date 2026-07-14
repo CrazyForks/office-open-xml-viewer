@@ -181,8 +181,8 @@ export class DocxDocument {
     // equations are skipped (and the engine asset is never bundled). Math is
     // main-mode only (the engine needs a DOM, absent in workers).
     let preparedMath;
-    if (mode === 'main' && opts.math && doc._document && documentHasMath(doc._document.body)) {
-      preparedMath = await prepareMathRuns(doc._document.body, opts.math);
+    if (mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
+      preparedMath = await prepareMathRuns(doc._document, opts.math);
     }
     if (mode === 'main' && doc._document) {
       const runtime = documentLayoutRuntimeOf(doc);

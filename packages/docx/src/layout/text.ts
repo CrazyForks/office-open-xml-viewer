@@ -26,6 +26,9 @@ export interface TextShapeRequest {
   readonly complexScript?: boolean;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
   readonly letterSpacingPt?: number;
+  /** Resolved §17.3.2.19 w:kern state at this run size. Absent preserves the
+   * measurement adapter's inherited kerning policy. */
+  readonly kerning?: boolean;
   /** Resolve script slots and faces without touching the measurement adapter. */
   readonly measure?: boolean;
 }
@@ -37,6 +40,7 @@ export interface GlyphMeasureRequest {
   readonly weight: number;
   readonly style: FontStyle;
   readonly letterSpacingPt: number;
+  readonly kerning?: boolean;
   readonly genericFamily: 'serif' | 'sans-serif' | 'monospace';
 }
 
@@ -78,11 +82,21 @@ export interface TextLayoutServiceInput {
 
 function scriptSlot(codePoint: number, forceComplex: boolean): FontScriptSlot {
   if (forceComplex) return 'complexScript';
+  // ECMA-376 §17.3.2.26 assigns the Hebrew/Arabic-family ranges to the ASCII
+  // slot unless the run is explicitly complex-script (`w:cs` / `w:rtl`). They
+  // must not fall through to highAnsi merely because their scalar is > 0x7f.
   if (
-    (codePoint >= 0x2e80 && codePoint <= 0x9fff)
+    (codePoint >= 0x0590 && codePoint <= 0x07bf)
+    || (codePoint >= 0xfb1d && codePoint <= 0xfdff)
+    || (codePoint >= 0xfe70 && codePoint <= 0xfeff)
+  ) return 'ascii';
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x11ff)
+    || (codePoint >= 0x2e80 && codePoint <= 0x9fff)
+    || (codePoint >= 0xa000 && codePoint <= 0xa4cf)
     || (codePoint >= 0xac00 && codePoint <= 0xd7af)
     || (codePoint >= 0xf900 && codePoint <= 0xfaff)
-    || (codePoint >= 0x3040 && codePoint <= 0x30ff)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
     || (codePoint >= 0xff00 && codePoint <= 0xffef)
     || (codePoint >= 0x20000 && codePoint <= 0x2fa1f)
   ) return 'eastAsia';
@@ -154,6 +168,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           weight: font.weight,
           style: font.style,
           letterSpacingPt: request.letterSpacingPt ?? 0,
+          kerning: request.kerning,
           genericFamily: font.genericFamily,
         });
         return Object.freeze({ ...group, ...measurement, font });
