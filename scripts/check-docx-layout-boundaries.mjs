@@ -307,19 +307,68 @@ function assertCapabilityBoundaries(root) {
   }
 }
 
-function assertLayoutParserModelBoundaries(root) {
+function layoutParserModelBoundaryViolations(root) {
   const graph = dependencyGraph(root);
   const parserModel = resolve(root, PARSER_MODEL);
-  for (const [path, edges] of graph) {
-    const rel = posixPath(relative(root, path));
-    if (!rel.startsWith(`${LAYOUT_SOURCE}/`)
-      || LAYOUT_PARSER_MODEL_ALLOWLIST.has(rel)) continue;
-    for (const edge of edges) {
-      if (!edge.literal || !edge.specifier.startsWith('.')) continue;
-      if (resolveLocalImport(path, edge.specifier) === parserModel) {
-        fail('LAYOUT_PARSER_MODEL_DEPENDENCY', `${rel} -> ${PARSER_MODEL}`);
+  const entries = [...graph.keys()].filter((path) => (
+    posixPath(relative(root, path)).startsWith(`${LAYOUT_SOURCE}/`)
+  ));
+  const violations = [];
+  const nonLiteral = [];
+
+  for (const entry of entries) {
+    const stack = [{ path: entry, chain: [entry] }];
+    const visited = new Set([entry]);
+    while (stack.length > 0) {
+      const current = stack.pop();
+      const currentRel = posixPath(relative(root, current.path));
+      // `layout/resources.ts` is the explicit parser-model gateway: it projects
+      // parser-owned facts into stable resource contracts. The graph walk stops
+      // at that boundary instead of treating its intentional adapter edge as a
+      // layout-algorithm dependency.
+      if (LAYOUT_PARSER_MODEL_ALLOWLIST.has(currentRel)) continue;
+      for (const edge of graph.get(current.path) ?? []) {
+        if (!edge.literal) {
+          nonLiteral.push(current.chain.map((path) => posixPath(relative(root, path))));
+          continue;
+        }
+        if (!edge.specifier.startsWith('.')) continue;
+        const dependency = resolveLocalImport(current.path, edge.specifier);
+        if (!dependency) continue;
+        const chain = [...current.chain, dependency];
+        if (dependency === parserModel) {
+          violations.push(chain.map((path) => posixPath(relative(root, path))));
+          continue;
+        }
+        // A type-only edge is erased and cannot create a runtime parser-model
+        // dependency through the referenced contract. A direct parser-model
+        // type import was rejected above so layout stays parser-model-free.
+        if (edge.typeOnly) continue;
+        const dependencyRel = posixPath(relative(root, dependency));
+        if (LAYOUT_PARSER_MODEL_ALLOWLIST.has(dependencyRel)) continue;
+        if (graph.has(dependency) && !visited.has(dependency)) {
+          visited.add(dependency);
+          stack.push({ path: dependency, chain });
+        }
       }
     }
+  }
+  return { violations, nonLiteral };
+}
+
+function assertLayoutParserModelBoundaries(root) {
+  const { violations, nonLiteral } = layoutParserModelBoundaryViolations(root);
+  if (nonLiteral.length > 0) {
+    fail(
+      'NON_LITERAL_LAYOUT_MODULE_EDGE',
+      nonLiteral.map((chain) => chain.join(' -> ')).join('\n'),
+    );
+  }
+  if (violations.length > 0) {
+    fail(
+      'LAYOUT_PARSER_MODEL_DEPENDENCY',
+      violations.map((chain) => chain.join(' -> ')).join('\n'),
+    );
   }
 }
 

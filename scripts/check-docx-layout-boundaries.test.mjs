@@ -44,6 +44,14 @@ function initializeRepository() {
   return root;
 }
 
+function initializeLayoutParserBoundaryRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-parser-boundary-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/parser-model.ts', 'export const parserFacts = true;\nexport interface ParserFacts { value: string; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  return root;
+}
+
 function initializeShapeRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-shape-'));
   write(root, 'packages/docx/src/renderer.ts', 'function buildFont(bold: boolean, italic: boolean, size: number, family: string | null, classes: Record<string, string>) { return String([bold, italic, size, family, classes]); }\nexport function renderShapeText(s: { bold: boolean; italic: boolean; size: number; family: string | null; fontRoute?: unknown }, classes: Record<string, string>) { return buildFont(s.bold, s.italic, s.size, s.family, classes); }\n');
@@ -132,6 +140,94 @@ test('rejects new parser-model dependencies inside retained layout modules', () 
   assert.notEqual(result.status, 0);
   assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
   assert.match(result.output, /layout\/numbering-marker\.ts.*parser-model\.ts/s);
+});
+
+test('rejects transitive layout-to-parser-model bridge modules', () => {
+  const root = initializeLayoutParserBoundaryRepository();
+  write(
+    root,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import { bridgeFacts as markerFacts } from '../parser-bridge.js';\nexport const marker = markerFacts;\n",
+  );
+  write(
+    root,
+    'packages/docx/src/parser-bridge.ts',
+    "import { parserFacts } from './parser-model.js';\nexport const bridgeFacts = parserFacts;\n",
+  );
+
+  const result = runChecker(root, '--final');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
+  assert.match(
+    result.output,
+    /layout\/numbering-marker\.ts.*parser-bridge\.ts.*parser-model\.ts/s,
+  );
+});
+
+test('rejects literal dynamic and CommonJS layout-to-parser-model bridges', () => {
+  for (const source of [
+    "export const load = () => import('../parser-bridge.js');\n",
+    "export const load = () => require('../parser-bridge.js');\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/numbering-marker.ts', source);
+    write(
+      root,
+      'packages/docx/src/parser-bridge.ts',
+      "export { parserFacts } from './parser-model.js';\n",
+    );
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /LAYOUT_PARSER_MODEL_DEPENDENCY/);
+    assert.match(result.output, /numbering-marker\.ts.*parser-bridge\.ts.*parser-model\.ts/s);
+  }
+});
+
+test('rejects non-literal dynamic and CommonJS imports reachable from layout', () => {
+  for (const source of [
+    "export const load = (name: string) => import(`../${name}.js`);\n",
+    "export const load = (name: string) => require('../' + name + '.js');\n",
+  ]) {
+    const root = initializeLayoutParserBoundaryRepository();
+    write(root, 'packages/docx/src/layout/numbering-marker.ts', source);
+
+    const result = runChecker(root, '--final');
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /NON_LITERAL_LAYOUT_MODULE_EDGE/);
+    assert.match(result.output, /layout\/numbering-marker\.ts/);
+  }
+});
+
+test('allows the exact parser gateway and stops at erased type-only contracts', () => {
+  const gateway = initializeLayoutParserBoundaryRepository();
+  write(
+    gateway,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import { resourceFacts } from './resources.js';\nexport const marker = resourceFacts;\n",
+  );
+  write(
+    gateway,
+    'packages/docx/src/layout/resources.ts',
+    "import { parserFacts } from '../parser-model.js';\nexport const resourceFacts = parserFacts;\n",
+  );
+  assert.equal(runChecker(gateway, '--final').status, 0);
+
+  const typeOnly = initializeLayoutParserBoundaryRepository();
+  write(
+    typeOnly,
+    'packages/docx/src/layout/numbering-marker.ts',
+    "import type { BridgeFacts } from '../parser-contract.js';\nexport type MarkerFacts = BridgeFacts;\n",
+  );
+  write(
+    typeOnly,
+    'packages/docx/src/parser-contract.ts',
+    "import { parserFacts } from './parser-model.js';\nexport interface BridgeFacts { value: typeof parserFacts; }\n",
+  );
+  assert.equal(runChecker(typeOnly, '--final').status, 0);
 });
 
 test('rejects any paint runtime dependency outside the paint owner directory', () => {
