@@ -10,6 +10,13 @@ This design completes and supersedes the transitional boundaries in
 `docs/docx-layout-context-fragments-design.md`. The existing fragment work is the
 starting point, not the final architecture.
 
+Implementation is tracked by Issue #1037 and the executable plans in:
+
+- `docs/docx-layout-engine-implementation-roadmap.md`;
+- `docs/docx-layout-engine-series-a-plan.md`;
+- `docs/docx-layout-engine-series-b-plan.md`;
+- `docs/docx-layout-engine-series-c-plan.md`.
+
 ## Problem
 
 The DOCX renderer supports a broad set of WordprocessingML features, but layout
