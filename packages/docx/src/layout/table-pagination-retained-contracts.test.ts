@@ -3,6 +3,7 @@ import {
   bodyFragmentFor,
   paginateDocument,
 } from '../renderer.js';
+import { tableFormatInput } from '../parser-model.js';
 import type {
   BodyElement,
   CellElement,
@@ -216,9 +217,9 @@ describe('retained table pagination contracts', () => {
     const outer = singleBorder(4);
     const inside = singleBorder(1);
     const source = table(
-      Array.from({ length: 3 }, (_unused, index) => row(
-        [textCell(`row ${index}`)],
-        { rowHeight: 20, rowHeightRule: 'auto' },
+      Array.from({ length: 3 }, () => row(
+        [cell([], { marginTop: 10, marginBottom: 10 })],
+        { rowHeight: null, rowHeightRule: 'auto' },
       )),
       [120],
       {
@@ -228,6 +229,9 @@ describe('retained table pagination contracts', () => {
         },
       },
     );
+
+    expect(tableFormatInput(source).rows.map((format) => format.height?.rule ?? 'auto'))
+      .toEqual(['auto', 'auto', 'auto']);
 
     const fragments = retainedTopLevelTables(
       paginateDocument(documentModel([source as unknown as BodyElement], 50)),
@@ -253,11 +257,17 @@ describe('retained table pagination contracts', () => {
     const outer = singleBorder(12);
     const source = table(
       [
-        row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+        row([cell([], { marginTop: 5, marginBottom: 5 })], {
+          rowHeight: null, rowHeightRule: 'auto',
+        }),
         row([cell([])], { rowHeight: 1, rowHeightRule: 'exact' }),
-        row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+        row([cell([], { marginTop: 5, marginBottom: 5 })], {
+          rowHeight: null, rowHeightRule: 'auto',
+        }),
         row([cell([])], { rowHeight: 1, rowHeightRule: 'exact' }),
-        row([cell([])], { rowHeight: 10, rowHeightRule: 'auto' }),
+        row([cell([], { marginTop: 5, marginBottom: 5 })], {
+          rowHeight: null, rowHeightRule: 'auto',
+        }),
       ],
       [120],
       {
@@ -267,6 +277,9 @@ describe('retained table pagination contracts', () => {
         },
       },
     );
+
+    expect(tableFormatInput(source).rows.map((format) => format.height?.rule ?? 'auto'))
+      .toEqual(['auto', 'exact', 'auto', 'exact', 'auto']);
 
     const fragments = retainedTopLevelTables(
       paginateDocument(documentModel([source as unknown as BodyElement], 52)),
