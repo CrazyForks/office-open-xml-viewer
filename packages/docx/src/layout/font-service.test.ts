@@ -99,6 +99,41 @@ describe('font layout services', () => {
     expect(forced.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Noto Naskh Arabic' });
   });
 
+  it('retains aggregate glyph ink bounds independently from typographic metrics', () => {
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'ink-bounds-v1',
+        measure: (request) => request.text === 'A'
+          ? {
+              advancePt: 8, ascentPt: 9, descentPt: 3,
+              inkBounds: { xMinPt: -1, xMaxPt: 7, ascentPt: 7, descentPt: 2 },
+            }
+          : {
+              advancePt: 6, ascentPt: 10, descentPt: 4,
+              inkBounds: { xMinPt: 0, xMaxPt: 8, ascentPt: 8, descentPt: 1 },
+            },
+      },
+    });
+
+    const result = service.shape({
+      text: 'A国', fontSizePt: 10,
+      fonts: { ascii: 'Embedded Sans', eastAsia: 'Meiryo' },
+    });
+
+    expect(result.inkBounds).toEqual({
+      xMinPt: -1,
+      xMaxPt: 16,
+      ascentPt: 8,
+      descentPt: 2,
+    });
+    expect(result.spans.map((span) => span.inkBounds)).toEqual([
+      { xMinPt: -1, xMaxPt: 7, ascentPt: 7, descentPt: 2 },
+      { xMinPt: 0, xMaxPt: 8, ascentPt: 8, descentPt: 1 },
+    ]);
+    expect(structuredClone(result.inkBounds)).toEqual(result.inkBounds);
+  });
+
   it('uses theme slots without collapsing mixed-script runs to one family', () => {
     const service = createTextLayoutService({
       fonts: createFontResolver(faces),
@@ -278,11 +313,18 @@ describe('font layout services', () => {
     expect(shape('a\u0301').spans.map((span) => [span.text, span.script]))
       .toEqual([['a', 'ascii'], ['\u0301', 'highAnsi']]);
     expect(shape('a\u0301').graphemeBoundaries).toEqual([0, 2]);
+    expect(shape('a\u0301').clusters).toEqual([
+      { range: { start: 0, end: 2 }, offsetPt: 0, advancePt: 2 },
+    ]);
     expect(shape('a\u0301').spans.map((span) => span.breakBefore)).toEqual([true, false]);
     expect(shape('国\u{E0100}').spans.map((span) => [span.text, span.script]))
       .toEqual([['国\u{E0100}', 'eastAsia']]);
     expect(shape('\u{20000}').spans.map((span) => [span.text, span.script]))
       .toEqual([['\u{20000}', 'eastAsia']]);
+    expect(shape('\u{20000}観').clusters).toEqual([
+      { range: { start: 0, end: 2 }, offsetPt: 0, advancePt: 1 },
+      { range: { start: 2, end: 3 }, offsetPt: 1, advancePt: 1 },
+    ]);
     expect(shape('👩‍💻').spans.map((span) => [span.text, span.script]))
       .toEqual([['👩', 'eastAsia'], ['\u200d', 'highAnsi'], ['💻', 'eastAsia']]);
     expect(shape('𠀀').spans.flatMap((span) => [...span.text])).toEqual(['𠀀']);
