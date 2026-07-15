@@ -571,8 +571,15 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
             return Object.freeze({ xMinPt, xMaxPt, ascentPt, descentPt });
           })()
         : undefined;
+      const totalAdvancePt = spans.reduce((sum, span) => sum + span.advancePt, 0);
+      const prefixAdvances = new Map<number, number>([
+        [0, 0],
+        [request.text.length, totalAdvancePt],
+      ]);
       const prefixAdvance = (boundary: number): number => {
         if (request.measure === false || boundary <= 0) return 0;
+        const retained = prefixAdvances.get(boundary);
+        if (retained !== undefined) return retained;
         let advancePt = 0;
         for (const span of spans) {
           if (boundary >= span.end) {
@@ -591,6 +598,10 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           }).advancePt;
           break;
         }
+        // One boundary is the trailing edge of one cluster and the leading edge
+        // of the next. Retain the contextual prefix result so both consumers use
+        // the same native shaping fact without measuring it twice.
+        prefixAdvances.set(boundary, advancePt);
         return advancePt;
       };
       const clusters = Object.freeze(graphemeBoundaries.slice(0, -1).map((start, index) => {
@@ -603,7 +614,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         });
       }));
       return Object.freeze({
-        advancePt: spans.reduce((sum, span) => sum + span.advancePt, 0),
+        advancePt: totalAdvancePt,
         ascentPt: Math.max(0, ...spans.map((span) => span.ascentPt)),
         descentPt: Math.max(0, ...spans.map((span) => span.descentPt)),
         ...(inkBounds ? { inkBounds } : {}),

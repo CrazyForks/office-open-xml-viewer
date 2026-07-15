@@ -331,6 +331,42 @@ describe('font layout services', () => {
     expect(shape('ش-12').spans.every((span) => span.script !== 'complexScript')).toBe(true);
   });
 
+  it('measures each contextual grapheme boundary once', () => {
+    const measured: string[] = [];
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'contextual-boundary-count-v1',
+        measure: (request) => {
+          measured.push(request.text);
+          return {
+            advancePt: request.text.length ** 2,
+            ascentPt: 1,
+            descentPt: 0,
+          };
+        },
+      },
+    });
+
+    const request = {
+      text: 'abcd',
+      fontSizePt: 10,
+      fonts: { ascii: 'Embedded Sans' },
+    } as const;
+    const shaped = service.shape(request);
+
+    // Cluster advances remain contextual prefix differences. The acquisition
+    // boundary must not ask the native measurer for the same prefix twice just
+    // because it is both one cluster's end and the next cluster's start.
+    expect(shaped.clusters).toEqual([
+      { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 1 },
+      { range: { start: 1, end: 2 }, offsetPt: 1, advancePt: 3 },
+      { range: { start: 2, end: 3 }, offsetPt: 4, advancePt: 5 },
+      { range: { start: 3, end: 4 }, offsetPt: 9, advancePt: 7 },
+    ]);
+    expect(measured).toEqual(['abcd', 'a', 'ab', 'abc']);
+  });
+
   it('implements the complete ECMA-376 §17.3.2.26 character-range table', () => {
     const service = createTextLayoutService({
       fonts: createFontResolver(faces),
