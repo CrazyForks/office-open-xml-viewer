@@ -277,6 +277,49 @@ function initializeComposedFittingOuterProbeRepository() {
   return { root, current };
 }
 
+function priorSplitParentCommitSource(current) {
+  const startMarker = `            (sliceEl) => {
+              // Stamp destination ownership first, then resolve the accepted parent`;
+  const endMarker = '            },\n          );';
+  const start = current.indexOf(startMarker);
+  const end = current.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start);
+  const legacy = `            (sliceEl) => {
+              withColumnBand(() => {
+                const sp = sliceEl as PaginatedBodyElement;
+                const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
+                const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
+                  sp, measureState.scale,
+                );
+                const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
+                const sliceBox = computeFloatTableBox(
+                  sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
+                );
+                const side = floatTableWrapSide(sliceBox, measureState);
+                registerTableFloat(sliceBox, sliceTp, measureState, side, tbl.overlap !== 'never');
+              });
+              pushTagged(sliceEl);
+`;
+  return current.slice(0, start) + legacy + current.slice(end);
+}
+
+function initializeSplitParentCommitRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-split-parent-commit-'));
+  const productionRoot = resolve(import.meta.dirname, '..');
+  const current = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
+  write(root, 'packages/docx/src/renderer.ts', priorSplitParentCommitSource(current));
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base with ordinary split parent registration');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return { root, current };
+}
+
 function initializeComputePagesTableStampRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-pages-table-stamp-'));
   write(root, 'packages/docx/src/renderer.ts', computePagesTableStampBaseline);
@@ -1563,11 +1606,38 @@ test('composes fitting outer probe normalization over an earlier A5 base', () =>
   assert.equal(result.status, 0, result.output);
 });
 
-test('composes all exact A5 computePages normalizers over the production merge-base', () => {
+test('composes all exact A5 computePages normalizers over production A5 bases', () => {
   const productionRoot = resolve(import.meta.dirname, '..');
-  const result = runChecker(productionRoot, '--base-ref', 'ec4e046');
+  for (const ref of ['ec4e046', 'aa02bbc']) {
+    const result = runChecker(productionRoot, '--base-ref', ref);
+    assert.equal(result.status, 0, `${ref}: ${result.output}`);
+  }
+});
 
+test('allows only split parent pre-resolution before the child commit', () => {
+  const { root, current } = initializeSplitParentCommitRepository();
+  write(root, 'packages/docx/src/renderer.ts', current);
+  const result = runChecker(root, '--base-ref', 'main');
   assert.equal(result.status, 0, result.output);
+});
+
+test('rejects altered or adjacent split parent pre-resolution', () => {
+  const variants = [
+    [
+      "                  { allowOverlap: tbl.overlap !== 'never' },",
+      '                  { allowOverlap: true },',
+    ],
+    ['              pushTagged(sliceEl);\n              return withColumnBand', '              return withColumnBand'],
+    ['                return computeFloatTableBox(', '                sideEffect();\n                return computeFloatTableBox('],
+  ];
+  for (const [expected, replacement] of variants) {
+    const { root, current } = initializeSplitParentCommitRepository();
+    assert.ok(current.includes(expected));
+    write(root, 'packages/docx/src/renderer.ts', current.replace(expected, replacement));
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, `${expected} -> ${replacement}`);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
 });
 
 test('rejects altered fitting outer probe transactions over an earlier A5 base', () => {
@@ -1576,6 +1646,8 @@ test('rejects altered fitting outer probe transactions over an earlier A5 base',
     ['pageIndex: physicalPageIndex', 'pageIndex: physicalPageIndex + 1'],
     ['box: first.box,', 'box: first.rawBox,'],
     ['first.requiresCanonicalSplit', 'false'],
+    ["{ allowOverlap: tbl.overlap !== 'never' },", '{ allowOverlap: true },'],
+    ["tbl.overlap !== 'never', true,", "tbl.overlap !== 'never', false,"],
   ];
   for (const [expected, replacement] of variants) {
     const { root, current } = initializeComposedFittingOuterProbeRepository();

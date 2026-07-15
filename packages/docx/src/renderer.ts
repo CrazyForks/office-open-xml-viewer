@@ -4197,7 +4197,8 @@ export function computePages(
             };
             let finalHeightPt = layout.rowHeights.reduce((sum, height) => sum + height, 0);
             let box = computeFloatTableBox(
-              tp, finalState, finalState.y, layout.tableW, finalHeightPt,
+              tp, finalState, finalState.y, layout.tableW, finalHeightPt, false,
+              { allowOverlap: tbl.overlap !== 'never' },
             );
             for (let pass = 0; pass < 4; pass += 1) {
               const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
@@ -4216,7 +4217,8 @@ export function computePages(
               }
               const nextHeightPt = prepared.fragment.advancePt;
               const nextBox = computeFloatTableBox(
-                tp, finalState, finalState.y, layout.tableW, nextHeightPt,
+                tp, finalState, finalState.y, layout.tableW, nextHeightPt, false,
+                { allowOverlap: tbl.overlap !== 'never' },
               );
               const rawBox = computeFloatTableBox(
                 tp, finalState, finalState.y, layout.tableW, nextHeightPt, true,
@@ -4356,16 +4358,10 @@ export function computePages(
             () => effContentH(),
             () => nextColumnOrPage(i),
             (sliceEl) => {
-              // Register the slice's wrap float + push it, both against the CURRENT
-              // column band on the page it landed on. registerTableFloat pushes onto
-              // measureState.floats so a following same-page paragraph (the anchor
-              // beside the final band) wraps around it. The box's WIDTH/HEIGHT come
-              // from the slice's stamp (the anchor-column layout, resolved once — so
-              // every slice uses one consistent geometry, matching the greedy fit);
-              // only its x/side re-resolve against the current column via
-              // withColumnBand (a continuation may land in a different newspaper
-              // column, #513). scale is 1 here (px==pt), so the stamp is used as-is.
-              withColumnBand(() => {
+              // Stamp destination ownership first, then resolve the accepted parent
+              // box against the external pre-child registry in the live column band.
+              pushTagged(sliceEl);
+              return withColumnBand(() => {
                 const sp = sliceEl as PaginatedBodyElement;
                 const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
                 const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
@@ -4376,13 +4372,11 @@ export function computePages(
                 // text-anchored slice (every continuation, and text-anchored slice 1)
                 // is never clamped, so skipVClamp is a no-op there.
                 const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
-                const sliceBox = computeFloatTableBox(
+                return computeFloatTableBox(
                   sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
+                  { allowOverlap: tbl.overlap !== 'never' },
                 );
-                const side = floatTableWrapSide(sliceBox, measureState);
-                registerTableFloat(sliceBox, sliceTp, measureState, side, tbl.overlap !== 'never');
               });
-              pushTagged(sliceEl);
             },
           );
           y = endY;
@@ -4426,7 +4420,9 @@ export function computePages(
             acceptedPrepared,
           );
           const side = floatTableWrapSide(first.box, measureState);
-          registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
+          registerTableFloat(
+            first.box, tp, measureState, side, tbl.overlap !== 'never', true,
+          );
         });
         pushTagged(el as PaginatedBodyElement);
         continue;
@@ -8239,9 +8235,9 @@ export function splitTableAcrossPages(
  *     FINAL band from the terminal page's body top, so the caller sets the body
  *     cursor to that page's region top (the returned `endY`).
  *
- * `emitSlice` is invoked once per slice (on the page it landed on) to register its
- * wrap FloatRect and push it onto the current page — the caller owns the column
- * band / float bookkeeping. `advancePage` moves to the next column/page (clearing
+ * `emitSlice` is invoked once per slice (on the page it landed on) to push it and
+ * return its parent box resolved against the external pre-child registry — the
+ * caller owns the column band. `advancePage` moves to the next column/page (clearing
  * page-scoped floats there). `curY` / `regionTopY` / `contentH` are read live
  * (AFTER each `advancePage`) so multi-column regions and per-page reserves are
  * honored.
@@ -8279,10 +8275,9 @@ export function splitFloatTableAcrossPages(
   contentH: () => number,
   /** Advance to the next column / page (clears page-scoped floats there). */
   advancePage: () => void,
-  /** Push the fully-stamped slice element onto the current page (and register its
-   *  wrap float). Called once per slice, on the page it landed on. Omitted (direct
-   *  unit tests) ⇒ the slice is dropped (the test asserts geometry via a stub). */
-  emitSlice?: (sliceEl: PaginatedBodyElement) => void,
+  /** Push the fully-stamped slice and return its externally pre-resolved parent
+   *  box. Omitted (direct unit tests) ⇒ the slice is dropped. */
+  emitSlice?: (sliceEl: PaginatedBodyElement) => FloatTableBox,
 ): number {
   const retainedRecord = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
     .forTable(table);
@@ -8327,6 +8322,7 @@ export function splitFloatTableAcrossPages(
         retainedWidthPt * probeScale,
         retained.layout.advancePt * probeScale,
         probeTp.vertAnchor === 'page' || probeTp.vertAnchor === 'margin',
+        { allowOverlap: table.overlap !== 'never' },
       );
       const result = takeTableFragment(retained, cursor, {
         availableHeightPt,
@@ -8454,10 +8450,10 @@ export function splitFloatTableAcrossPages(
         widthPt: tableWidthPt,
         },
       );
-      // The selected nested-float transaction was resolved before this outer
-      // slice existed in the page registry. Commit it against that exact base
-      // first; emitSlice then registers the parent with the next paragraph id,
-      // so the parent cannot displace or consume sequence ahead of its child.
+      // Resolve/stamp the parent against the external base before descendants
+      // enter the registry. The accepted box is appended exactly after the child
+      // delta, so descendants cannot re-seat their own retained parent.
+      const acceptedParentBox = emitSlice?.(sliceEl) ?? outerProbe;
       if (emitSlice && result.floatingTableRegistryDelta?.entries.length) {
         const destinationPageIndex = destinationPage?.pageIndex ?? sliceOrdinal;
         bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
@@ -8467,42 +8463,31 @@ export function splitFloatTableAcrossPages(
           `logical-page:${destinationPageIndex}`,
         );
       }
-      emitSlice?.(sliceEl);
+      if (emitSlice) {
+        registerTableFloat(
+          acceptedParentBox,
+          sliceTp,
+          retainedRecord.state,
+          floatTableWrapSide(acceptedParentBox, retainedRecord.state),
+          table.overlap !== 'never',
+          true,
+        );
+      }
 
-      // pushTagged has now supplied the destination column. Resolve the final
-      // absolute wrapper without touching the already-retained table geometry.
-      const column = sliceEl.colGeom?.[sliceEl.colIndex ?? 0];
-      const placementState = column
-        ? {
-            ...retainedRecord.state,
-            contentX: column.xPt * retainedRecord.state.scale,
-            contentW: column.wPt * retainedRecord.state.scale,
-          }
-        : retainedRecord.state;
-      const skipVClamp = firstSlice
-        && (sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin');
-      const box = computeFloatTableBox(
-        sliceTp,
-        placementState,
-        retainedRecord.state.y,
-        tableWidthPt * retainedRecord.state.scale,
-        fragment.advancePt * retainedRecord.state.scale,
-        skipVClamp,
-      );
       retainTableEnvelope(
         sliceEl,
         {
         fragment,
-        xPt: box.x / retainedRecord.state.scale,
-        yPt: box.y / retainedRecord.state.scale,
+        xPt: acceptedParentBox.x / retainedRecord.state.scale,
+        yPt: acceptedParentBox.y / retainedRecord.state.scale,
         widthPt: tableWidthPt,
         },
       );
       bodyFlowFragments.set(sliceEl, Object.freeze({
         fragment,
         columnIndex: sliceEl.colIndex ?? 0,
-        xPt: box.x / retainedRecord.state.scale,
-        yPt: box.y / retainedRecord.state.scale,
+        xPt: acceptedParentBox.x / retainedRecord.state.scale,
+        yPt: acceptedParentBox.y / retainedRecord.state.scale,
         widthPt: tableWidthPt,
         heightPt: fragment.advancePt,
       }));

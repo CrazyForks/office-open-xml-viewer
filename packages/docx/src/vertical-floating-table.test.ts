@@ -193,6 +193,13 @@ describe('vertical outer floating tables retain the canonical logical paint doma
 
   it('finalizes a fitting nested float before registering and painting its outer tblpPr parent', async () => {
     const outer = floatingTable([{ text: 'unused', heightPt: 90 }]);
+    outer.tblpPr = {
+      ...outer.tblpPr!,
+      leftFromText: 3,
+      rightFromText: 5,
+      topFromText: 7,
+      bottomFromText: 11,
+    };
     const parentBorder = { style: 'single', width: 1, color: 'ff00ff' };
     outer.borders = {
       top: parentBorder,
@@ -215,6 +222,9 @@ describe('vertical outer floating tables retain the canonical logical paint doma
       { type: 'paragraph', ...paragraph('FITTING-ANCHOR') },
     ] as unknown as DocTableCell['content'];
     const doc = documentWith(outer);
+    const external = floatingTable([{ text: 'AFTER-EXTERNAL', heightPt: 20 }]);
+    doc.body.push({ type: 'table', ...external } as unknown as BodyElement);
+    doc.body.push({ type: 'paragraph', ...paragraph('AFTER-FITTING') } as unknown as BodyElement);
     const measure = recordingCanvas();
     const pages = computePages(
       doc.body,
@@ -240,6 +250,26 @@ describe('vertical outer floating tables retain the canonical logical paint doma
       widthPt: nested.exclusionBounds.widthPt,
       heightPt: nested.exclusionBounds.heightPt,
     };
+    const followingElement = pages[0]?.find(
+      (element) => element.type === 'paragraph' && element.runs?.some(
+        (run) => run.type === 'text' && run.text === 'AFTER-FITTING',
+      ),
+    );
+    const following = followingElement ? bodyFragmentFor(followingElement) : undefined;
+    if (following?.fragment.kind !== 'paragraph') {
+      throw new Error('expected a following fitting-parent paragraph fragment');
+    }
+    const expectedParentExclusion = {
+      xPt: retained.xPt - outer.tblpPr.leftFromText,
+      yPt: retained.yPt - outer.tblpPr.topFromText,
+      widthPt: retained.widthPt + outer.tblpPr.leftFromText + outer.tblpPr.rightFromText,
+      heightPt: retained.heightPt + outer.tblpPr.topFromText + outer.tblpPr.bottomFromText,
+    };
+    const externalElement = pages[0]?.filter((element) => element.type === 'table')[1];
+    const retainedExternal = externalElement ? bodyFragmentFor(externalElement) : undefined;
+    if (retainedExternal?.fragment.kind !== 'table') {
+      throw new Error('expected a following external floating table fragment');
+    }
 
     expect(pages).toHaveLength(1);
     expect(fragment.floatingTableCoordinateSpace).toBe('logical-page-points');
@@ -252,6 +282,21 @@ describe('vertical outer floating tables retain the canonical logical paint doma
     });
     expect(anchor?.layout.kind === 'paragraph' ? anchor.layout.exclusions : [])
       .toContainEqual(expect.objectContaining({ bounds: expectedLocalExclusion }));
+    expect(following.fragment.exclusions.map((exclusion) => exclusion.id)).toEqual([
+      nested.occurrenceId,
+      'body:float:1',
+      'body:float:2',
+    ]);
+    expect(following.fragment.exclusions[1]?.bounds).toEqual(expectedParentExclusion);
+    expect(retainedExternal.yPt).toBeGreaterThanOrEqual(
+      expectedParentExclusion.yPt + expectedParentExclusion.heightPt,
+    );
+    expect(following.fragment.exclusions[2]?.bounds).toEqual({
+      xPt: retainedExternal.xPt,
+      yPt: retainedExternal.yPt,
+      widthPt: retainedExternal.widthPt,
+      heightPt: retainedExternal.heightPt,
+    });
 
     const paint = recordingCanvas();
     const runs: DocxTextRunInfo[] = [];
@@ -449,11 +494,19 @@ describe('vertical outer floating tables retain the canonical logical paint doma
       tblpX: 20,
       tblpY: 30,
     };
-    outer.rows[0]!.cells[0]!.content = [
+    outer.tblpPr = {
+      ...outer.tblpPr!,
+      leftFromText: 3,
+      rightFromText: 5,
+      topFromText: 7,
+      bottomFromText: 11,
+    };
+    outer.rows[1]!.cells[0]!.content = [
       { type: 'table', ...nestedTable },
       { type: 'paragraph', ...paragraph('NESTED-ANCHOR') },
     ] as unknown as DocTableCell['content'];
     const doc = documentWith(outer);
+    doc.body.push({ type: 'paragraph', ...paragraph('AFTER-SPLIT') } as unknown as BodyElement);
     const measure = recordingCanvas();
     const pages = computePages(
       doc.body,
@@ -461,14 +514,30 @@ describe('vertical outer floating tables retain the canonical logical paint doma
       measure.canvas.getContext('2d') as CanvasRenderingContext2D,
       doc.fontFamilyClasses,
     );
-    const firstTable = pages[0]?.find((element) => element.type === 'table');
-    const retained = firstTable ? bodyFragmentFor(firstTable) : undefined;
+    const finalTable = pages[1]?.find((element) => element.type === 'table');
+    const retained = finalTable ? bodyFragmentFor(finalTable) : undefined;
     if (retained?.fragment.kind !== 'table'
       || !('resolvedFloatingTables' in retained.fragment)) {
-      throw new Error('expected the first logical outer slice with a selected nested float');
+      throw new Error('expected the final logical outer slice with a selected nested float');
     }
     const fragment = retained.fragment as TableFragmentLayout;
     const [nested] = fragment.resolvedFloatingTables;
+    if (!nested) throw new Error('expected a retained split nested float');
+    const followingElement = pages[1]?.find(
+      (element) => element.type === 'paragraph' && element.runs?.some(
+        (run) => run.type === 'text' && run.text === 'AFTER-SPLIT',
+      ),
+    );
+    const following = followingElement ? bodyFragmentFor(followingElement) : undefined;
+    if (following?.fragment.kind !== 'paragraph') {
+      throw new Error('expected a following split-parent paragraph fragment');
+    }
+    const expectedParentExclusion = {
+      xPt: retained.xPt - outer.tblpPr.leftFromText,
+      yPt: retained.yPt - outer.tblpPr.topFromText,
+      widthPt: retained.widthPt + outer.tblpPr.leftFromText + outer.tblpPr.rightFromText,
+      heightPt: retained.heightPt + outer.tblpPr.topFromText + outer.tblpPr.bottomFromText,
+    };
 
     expect(pages).toHaveLength(2);
     expect(fragment.floatingTableCoordinateSpace).toBe('logical-page-points');
@@ -479,6 +548,11 @@ describe('vertical outer floating tables retain the canonical logical paint doma
       widthPt: nested.child.columnWidthsPt.reduce((sum, width) => sum + width, 0),
       heightPt: 20,
     });
+    expect(following.fragment.exclusions.map((exclusion) => exclusion.id)).toEqual([
+      nested.occurrenceId,
+      'body:float:1',
+    ]);
+    expect(following.fragment.exclusions[1]?.bounds).toEqual(expectedParentExclusion);
 
     const runs: DocxTextRunInfo[] = [];
     for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {

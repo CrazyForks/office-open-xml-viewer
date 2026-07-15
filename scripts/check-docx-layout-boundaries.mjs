@@ -981,7 +981,8 @@ function normalizedComputePagesHash(node, source) {
         };
         let finalHeightPt = layout.rowHeights.reduce((sum, height) => sum + height, 0);
         let box = computeFloatTableBox(
-          tp, finalState, finalState.y, layout.tableW, finalHeightPt,
+          tp, finalState, finalState.y, layout.tableW, finalHeightPt, false,
+          { allowOverlap: tbl.overlap !== 'never' },
         );
         for (let pass = 0; pass < 4; pass += 1) {
           const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
@@ -1000,7 +1001,8 @@ function normalizedComputePagesHash(node, source) {
           }
           const nextHeightPt = prepared.fragment.advancePt;
           const nextBox = computeFloatTableBox(
-            tp, finalState, finalState.y, layout.tableW, nextHeightPt,
+            tp, finalState, finalState.y, layout.tableW, nextHeightPt, false,
+            { allowOverlap: tbl.overlap !== 'never' },
           );
           const rawBox = computeFloatTableBox(
             tp, finalState, finalState.y, layout.tableW, nextHeightPt, true,
@@ -1022,6 +1024,15 @@ function normalizedComputePagesHash(node, source) {
         throw new Error('Fitting outer table final-frame probe did not converge');
       });
   `.replace(/\s+/g, '');
+  const exactPreviousFittingOuterProbe = exactFittingOuterProbe
+    .replace(
+      "computeFloatTableBox(tp,finalState,finalState.y,layout.tableW,finalHeightPt,false,{allowOverlap:tbl.overlap!=='never'},)",
+      'computeFloatTableBox(tp,finalState,finalState.y,layout.tableW,finalHeightPt,)',
+    )
+    .replace(
+      "computeFloatTableBox(tp,finalState,finalState.y,layout.tableW,nextHeightPt,false,{allowOverlap:tbl.overlap!=='never'},)",
+      'computeFloatTableBox(tp,finalState,finalState.y,layout.tableW,nextHeightPt,)',
+    );
   const exactFittingOuterSplitCondition =
     'first.requiresCanonicalSplit||(isTextAnchored&&tableOverflowsHere)||pageAnchoredOverflows';
   const exactFittingOuterAcceptance = `
@@ -1047,16 +1058,27 @@ function normalizedComputePagesHash(node, source) {
         acceptedPrepared,
       );
       const side = floatTableWrapSide(first.box, measureState);
-      registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
+      registerTableFloat(
+        first.box, tp, measureState, side, tbl.overlap !== 'never', true,
+      );
     });
   `.replace(/\s+/g, '');
+  const exactPreviousFittingOuterAcceptance = exactFittingOuterAcceptance.replace(
+    "registerTableFloat(first.box,tp,measureState,side,tbl.overlap!=='never',true,);",
+    "registerTableFloat(first.box,tp,measureState,side,tbl.overlap!=='never');",
+  );
   const fittingOuterProbes = [];
   const fittingOuterSplitConditions = [];
   const fittingOuterAcceptances = [];
   const findFittingOuterProbeTransaction = (current) => {
-    if (ts.isVariableStatement(current)
-      && compactText(current, source) === exactFittingOuterProbe) {
-      fittingOuterProbes.push(current);
+    if (ts.isVariableStatement(current)) {
+      const compact = compactText(current, source);
+      if (compact === exactFittingOuterProbe || compact === exactPreviousFittingOuterProbe) {
+        fittingOuterProbes.push({
+          node: current,
+          variant: compact === exactFittingOuterProbe ? 'pre-resolved' : 'previous',
+        });
+      }
     }
     if (ts.isIfStatement(current)
       && compactText(current.expression, source) === exactFittingOuterSplitCondition) {
@@ -1065,9 +1087,13 @@ function normalizedComputePagesHash(node, source) {
     if (ts.isBlock(current)) {
       for (let index = 0; index + 4 < current.statements.length; index += 1) {
         const statements = current.statements.slice(index, index + 5);
-        if (statements.map((statement) => compactText(statement, source)).join('')
-          === exactFittingOuterAcceptance) {
-          fittingOuterAcceptances.push([statements[0], statements[4]]);
+        const compact = statements.map((statement) => compactText(statement, source)).join('');
+        if (compact === exactFittingOuterAcceptance
+          || compact === exactPreviousFittingOuterAcceptance) {
+          fittingOuterAcceptances.push({
+            range: [statements[0], statements[4]],
+            variant: compact === exactFittingOuterAcceptance ? 'pre-resolved' : 'previous',
+          });
         }
       }
     }
@@ -1076,7 +1102,8 @@ function normalizedComputePagesHash(node, source) {
   findFittingOuterProbeTransaction(node);
   if (fittingOuterProbes.length === 1
     && fittingOuterSplitConditions.length === 1
-    && fittingOuterAcceptances.length === 1) {
+    && fittingOuterAcceptances.length === 1
+    && fittingOuterProbes[0].variant === fittingOuterAcceptances[0].variant) {
     const nodeStart = node.getStart(source);
     const legacyProbe = `
       const measureFloat = () =>
@@ -1107,9 +1134,13 @@ function normalizedComputePagesHash(node, source) {
         registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
       });
     `;
-    const [acceptanceStart, acceptanceEnd] = fittingOuterAcceptances[0];
+    const [acceptanceStart, acceptanceEnd] = fittingOuterAcceptances[0].range;
     const replacements = [
-      [fittingOuterProbes[0].getStart(source), fittingOuterProbes[0].getEnd(), legacyProbe],
+      [
+        fittingOuterProbes[0].node.getStart(source),
+        fittingOuterProbes[0].node.getEnd(),
+        legacyProbe,
+      ],
       [
         fittingOuterSplitConditions[0].getStart(source),
         fittingOuterSplitConditions[0].getEnd(),
@@ -1125,6 +1156,86 @@ function normalizedComputePagesHash(node, source) {
     }
     const virtualSource = ts.createSourceFile(
       'compute-pages-a5-fitting-probe-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((candidate) => (
+      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
+  const exactSplitParentPreResolutionSource = `
+    (sliceEl) => {
+      pushTagged(sliceEl);
+      return withColumnBand(() => {
+        const sp = sliceEl as PaginatedBodyElement;
+        const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
+        const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
+          sp, measureState.scale,
+        );
+        const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
+        return computeFloatTableBox(
+          sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
+          { allowOverlap: tbl.overlap !== 'never' },
+        );
+      });
+    }
+  `;
+  const expectedSplitCallbackSource = ts.createSourceFile(
+    'compute-pages-a5-split-parent-commit-expected.ts',
+    `const callback = ${exactSplitParentPreResolutionSource};`,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const expectedSplitCallbackDeclaration = expectedSplitCallbackSource.statements[0]
+    ?.declarationList?.declarations?.[0];
+  const expectedSplitCallback = expectedSplitCallbackDeclaration?.initializer;
+  const syntaxPrinter = ts.createPrinter({ removeComments: true });
+  const printedSyntax = (current, currentSource) => syntaxPrinter
+    .printNode(ts.EmitHint.Unspecified, current, currentSource)
+    .replace(/\s+/g, '');
+  const exactSplitParentPreResolutionSyntax = expectedSplitCallback
+    ? printedSyntax(expectedSplitCallback, expectedSplitCallbackSource)
+    : '';
+  const splitParentPreResolutions = [];
+  const findSplitParentPreResolution = (current) => {
+    if (ts.isArrowFunction(current)
+      && printedSyntax(current, source) === exactSplitParentPreResolutionSyntax) {
+      splitParentPreResolutions.push(current);
+    }
+    ts.forEachChild(current, findSplitParentPreResolution);
+  };
+  findSplitParentPreResolution(node);
+  if (splitParentPreResolutions.length === 1) {
+    const callback = splitParentPreResolutions[0];
+    const nodeStart = node.getStart(source);
+    const start = callback.getStart(source) - nodeStart;
+    const end = callback.getEnd() - nodeStart;
+    const legacyCallback = `
+      (sliceEl) => {
+        withColumnBand(() => {
+          const sp = sliceEl as PaginatedBodyElement;
+          const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
+          const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
+            sp, measureState.scale,
+          );
+          const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
+          const sliceBox = computeFloatTableBox(
+            sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
+          );
+          const side = floatTableWrapSide(sliceBox, measureState);
+          registerTableFloat(sliceBox, sliceTp, measureState, side, tbl.overlap !== 'never');
+        });
+        pushTagged(sliceEl);
+      }
+    `;
+    const nodeText = node.getText(source);
+    const virtualText = nodeText.slice(0, start) + legacyCallback + nodeText.slice(end);
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-split-parent-commit-virtual.ts',
       virtualText,
       ts.ScriptTarget.Latest,
       true,

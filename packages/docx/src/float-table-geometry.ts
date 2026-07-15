@@ -14,6 +14,7 @@
 
 import type { TblpPr } from './types.js';
 import type { RenderState } from './renderer.js';
+import { resolveFloatOverlap } from './float-layout.js';
 import { resolvePointSpaceFloatingTableBoxPt } from './layout/floating-table-transaction.js';
 export {
   resolveFloatingTableBoxPt,
@@ -61,10 +62,13 @@ export function computeFloatTableBox(
    *  hide the overflow the split is meant to resolve. Placement (paint) keeps the
    *  clamp. Ignored for vertAnchor="text" (never clamped). */
   skipVClamp = false,
+  /** Resolve against the current external registry before retained descendants
+   *  are committed. The returned box may later be registered pre-resolved. */
+  overlapResolution?: Readonly<{ allowOverlap: boolean }>,
 ): FloatTableBox {
   const sc = state.scale;
   const textBand = frameXContainer('text', state);
-  return resolvePointSpaceFloatingTableBoxPt({
+  const box = resolvePointSpaceFloatingTableBoxPt({
     leftFromTextPt: tp.leftFromText * sc,
     rightFromTextPt: tp.rightFromText * sc,
     topFromTextPt: tp.topFromText * sc,
@@ -96,6 +100,23 @@ export function computeFloatTableBox(
       heightPt: tableH,
     },
   }, tableW, tableH, skipVClamp);
+  if (!overlapResolution || box.w <= 0 || box.h <= 0) return box;
+  const resolved = resolveFloatOverlap(
+    box.x,
+    box.y,
+    box.w,
+    box.h,
+    tp.leftFromText * sc,
+    tp.rightFromText * sc,
+    tp.topFromText * sc,
+    tp.bottomFromText * sc,
+    state.floatParaSeq,
+    overlapResolution.allowOverlap,
+    'table',
+    state.pageWidth * sc,
+    state.floats,
+  );
+  return { ...box, x: resolved.x, y: resolved.y };
 }
 
 /**
@@ -120,6 +141,8 @@ export function registerTableFloat(
   state: RenderState,
   side: string,
   allowOverlap: boolean,
+  /** The box was already resolved against the pre-descendant registry. */
+  preResolved = false,
 ): void {
   if (box.w <= 0 || box.h <= 0) return;
   const sc = state.scale;
@@ -148,7 +171,7 @@ export function registerTableFloat(
     imageKey: '', // non-image float: the table is painted by renderFloatTable.
     drawn: true, // painted by renderFloatTable; deferred image path must skip it.
     paraId,
-    avoidOverlap: true,
+    avoidOverlap: !preResolved,
     allowOverlap,
   });
 }

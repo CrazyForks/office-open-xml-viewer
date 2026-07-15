@@ -325,6 +325,39 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
     expect(f.xLeft).toBeGreaterThanOrEqual(200);
   });
 
+  it('appends a pre-resolved parent exactly after its retained child entry', () => {
+    const child: FloatRect = {
+      kind: 'table', mode: 'square', imageKey: 'nested-child',
+      imageX: 20, imageY: 30, imageW: 60, imageH: 20,
+      xLeft: 20, xRight: 80, yTop: 30, yBottom: 50, side: 'bothSides',
+      distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
+      paraId: 7, drawn: true,
+    };
+    const st = makeState({ floatParaSeq: 8, floats: [child] });
+    const tp = tblp({
+      leftFromText: 3, rightFromText: 5, topFromText: 7, bottomFromText: 11,
+    });
+    const accepted = { x: 24, y: 20, w: 140, h: 90 };
+
+    registerTableFloat(
+      accepted, tp, st as never, 'bothSides', false, /* preResolved */ true,
+    );
+
+    expect(st.floats).toHaveLength(2);
+    expect(st.floatParaSeq).toBe(9);
+    expect(st.floats.map((float) => float.paraId)).toEqual([7, 8]);
+    expect(st.floats[1]).toMatchObject({
+      imageX: accepted.x,
+      imageY: accepted.y,
+      imageW: accepted.w,
+      imageH: accepted.h,
+      xLeft: accepted.x - tp.leftFromText,
+      xRight: accepted.x + accepted.w + tp.rightFromText,
+      yTop: accepted.y - tp.topFromText,
+      yBottom: accepted.y + accepted.h + tp.bottomFromText,
+    });
+  });
+
   // §17.4.56 scope: a floating table with <w:tblOverlap w:val="never"/> must
   // only avoid OTHER FLOATING TABLES. DrawingML anchors (§20.4.2.3) and text
   // frames keep their own placement — a never-overlap table does NOT re-seat off
