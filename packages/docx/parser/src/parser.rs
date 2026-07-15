@@ -70,9 +70,11 @@ mod private_typography_wire_tests {
         let run = paragraph
             .runs
             .iter()
-            .find(|run| match (kind, run) {
-                ("text", DocRun::Text(_)) | ("field", DocRun::Field(_)) => true,
-                _ => false,
+            .find(|run| {
+                matches!(
+                    (kind, run),
+                    ("text", DocRun::Text(_)) | ("field", DocRun::Field(_))
+                )
             })
             .expect("requested run");
         serde_json::to_value(run).expect("run serializes")
@@ -2061,13 +2063,13 @@ fn section_break_element(
         // ECMA-376 §17.6.20 — this ending section's flow direction (issue #1000
         // per-section mixing); lrTb/absent ⇒ None, others verbatim.
         text_direction: read_text_direction(sect_pr),
-        section_placement: SectionPlacementWire {
+        section_placement: Box::new(SectionPlacementWire {
             section_id,
             v_align: child_w(sect_pr, "vAlign")
                 .and_then(|node| attr_w(node, "val"))
                 .filter(|value| value != "top"),
             line_numbering: parse_line_numbering(sect_pr),
-        },
+        }),
     }
 }
 
@@ -3500,7 +3502,7 @@ fn make_field_run(
     revision: Option<&RunRevision>,
 ) -> DocRun {
     let field_type = classify_field(instr);
-    DocRun::Field(FieldRun {
+    DocRun::Field(Box::new(FieldRun {
         field_type,
         instruction: instr.trim().to_string(),
         fallback_text: fallback.to_string(),
@@ -3533,7 +3535,7 @@ fn make_field_run(
         highlight: fmt.highlight.clone(),
         emphasis_mark: fmt.emphasis_mark.clone(),
         typography_acquisition: Some(run_typography_wire(fmt, None, revision)),
-    })
+    }))
 }
 
 fn classify_field(instr: &str) -> String {
@@ -4398,7 +4400,7 @@ fn parse_run_inner(
                 // The imagedata form is tried first so a picture pict is not
                 // mistaken for an (empty) text-box panel.
                 if let Some(img) = parse_vml_pict_image(child, media_map) {
-                    runs.push(DocRun::Image(img));
+                    runs.push(DocRun::Image(Box::new(img)));
                 } else if let Some(shp) =
                     parse_vml_pict(style_map, num_map, child, theme, media_map)
                 {
@@ -4430,7 +4432,7 @@ fn parse_run_inner(
                     attach_anchor_host_metrics(&mut drawing_runs);
                     runs.extend(drawing_runs);
                 } else if let Some(img) = parse_object_ole_image(child, media_map) {
-                    runs.push(DocRun::Image(img));
+                    runs.push(DocRun::Image(Box::new(img)));
                 }
             }
             _ => {}
@@ -4732,7 +4734,7 @@ fn parse_inline_drawing(
             Some(b) => b,
             None => return vec![],
         };
-        return vec![DocRun::Image(ImageRun {
+        return vec![DocRun::Image(Box::new(ImageRun {
             image_path,
             mime_type,
             svg_image_path,
@@ -4767,7 +4769,7 @@ fn parse_inline_drawing(
             anchor_x_relative_from: None,
             anchor_y_relative_from: None,
             anchor_acquisition: None,
-        })];
+        }))];
     }
 
     // ── Anchor image/shape ─────────────────────────────────
@@ -4934,7 +4936,7 @@ fn parse_inline_drawing(
             let mut facts = anchor_acquisition.clone();
             facts.group = group;
             img.anchor_acquisition = Some(facts);
-            out.push(DocRun::Image(img));
+            out.push(DocRun::Image(Box::new(img)));
         }
         for mut shp in shapes.drain(..) {
             shp.behind_doc = behind_doc;
@@ -4992,7 +4994,7 @@ fn parse_inline_drawing(
         Some(b) => b,
         None => return vec![],
     };
-    vec![DocRun::Image(ImageRun {
+    vec![DocRun::Image(Box::new(ImageRun {
         image_path,
         mime_type,
         svg_image_path,
@@ -5034,7 +5036,7 @@ fn parse_inline_drawing(
         anchor_x_relative_from: rel_h.clone(),
         anchor_y_relative_from: rel_v.clone(),
         anchor_acquisition: Some(anchor_acquisition),
-    })]
+    }))]
 }
 
 fn parse_on_off(value: &str) -> Option<bool> {
@@ -10980,14 +10982,14 @@ mod tests {
                 }),
                 "anchorHost",
             ),
-            (DocRun::Image(image), "image"),
+            (DocRun::Image(Box::new(image)), "image"),
             (
                 DocRun::Break {
                     break_type: BreakType::Line,
                 },
                 "break",
             ),
-            (DocRun::Field(FieldRun::default()), "field"),
+            (DocRun::Field(Box::default()), "field"),
             (DocRun::Shape(Box::default()), "shape"),
             (
                 DocRun::Math {
@@ -19555,7 +19557,7 @@ mod ole_object_tests {
             })
             .flat_map(|p| p.runs.into_iter())
             .filter_map(|r| match r {
-                DocRun::Image(img) => Some(img),
+                DocRun::Image(img) => Some(*img),
                 _ => None,
             })
             .collect()
@@ -19825,7 +19827,7 @@ mod vml_pict_tests {
         all_runs(body_xml, media)
             .into_iter()
             .filter_map(|r| match r {
-                DocRun::Image(img) => Some(img),
+                DocRun::Image(img) => Some(*img),
                 _ => None,
             })
             .collect()

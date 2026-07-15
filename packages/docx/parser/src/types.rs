@@ -571,8 +571,10 @@ pub enum BodyElement {
         text_direction: Option<String>,
         /// Internal A3 placement projection. Kept off the stable TS public
         /// BodyElement contract and consumed only by parser-model normalization.
+        /// Boxed because this private diagnostic payload would otherwise set the
+        /// allocation size of every body element; Serde keeps the wire unchanged.
         #[serde(rename = "__sectionPlacement")]
-        section_placement: SectionPlacementWire,
+        section_placement: Box<SectionPlacementWire>,
     },
 }
 
@@ -921,7 +923,9 @@ pub enum DocRun {
     /// because the same `<wp:anchor>` can contain a picture, chart, shape, or
     /// group, while the host character participates in line sizing exactly once.
     AnchorHost(AnchorHostMetrics),
-    Image(ImageRun),
+    // Boxed with Field because these rich payloads otherwise make every run
+    // reserve image/field-sized storage; Serde keeps the wire unchanged.
+    Image(Box<ImageRun>),
     /// ECMA-376 §21.2 DrawingML chart embedded in a `<w:drawing>` whose
     /// `<a:graphicData uri=".../chart">` carries a `<c:chart r:id>`. The chart
     /// model is the shared [`ooxml_common::chart::ChartModel`] (the same
@@ -936,7 +940,7 @@ pub enum DocRun {
     Break {
         break_type: BreakType,
     },
-    Field(FieldRun),
+    Field(Box<FieldRun>),
     // Boxed: ShapeRun is by far the largest Run variant; boxing keeps the
     // enum compact (clippy::large_enum_variant). Serde flattens the Box, so
     // the JSON tag/shape is unchanged.
@@ -1040,23 +1044,19 @@ pub(crate) struct AnchorEdgesWire {
     pub(crate) left_status: AnchorValueStatusWire,
 }
 
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum AnchorValueStatusWire {
+    #[default]
     Missing,
     Invalid,
     Valid,
 }
 
-impl Default for AnchorValueStatusWire {
-    fn default() -> Self {
-        Self::Missing
-    }
-}
-
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, Default)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(crate) enum AnchorAxisChoiceWire {
+    #[default]
     Missing,
     Invalid,
     Align {
@@ -1069,12 +1069,6 @@ pub(crate) enum AnchorAxisChoiceWire {
     Percent {
         fraction: f64,
     },
-}
-
-impl Default for AnchorAxisChoiceWire {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -1156,9 +1150,10 @@ pub(crate) struct AnchorPolygonSpaceWire {
     pub(crate) height: u32,
 }
 
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum AnchorWrapKindWire {
+    #[default]
     Missing,
     Invalid,
     None,
@@ -1166,12 +1161,6 @@ pub(crate) enum AnchorWrapKindWire {
     Tight,
     Through,
     TopAndBottom,
-}
-
-impl Default for AnchorWrapKindWire {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
