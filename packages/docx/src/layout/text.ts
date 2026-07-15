@@ -214,6 +214,9 @@ export interface TextShapeRequest {
   readonly kerning?: boolean;
   /** Resolve script slots and faces without touching the measurement adapter. */
   readonly measure?: boolean;
+  /** Aggregate-only acquisition may omit per-grapheme contextual advances.
+   * Script spans and aggregate metrics remain authoritative. */
+  readonly clusterGeometry?: boolean;
 }
 
 export interface TextFontResolveRequest {
@@ -572,47 +575,50 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           })()
         : undefined;
       const totalAdvancePt = spans.reduce((sum, span) => sum + span.advancePt, 0);
-      const prefixAdvances = new Map<number, number>([
-        [0, 0],
-        [request.text.length, totalAdvancePt],
-      ]);
-      const prefixAdvance = (boundary: number): number => {
-        if (request.measure === false || boundary <= 0) return 0;
-        const retained = prefixAdvances.get(boundary);
-        if (retained !== undefined) return retained;
-        let advancePt = 0;
-        for (const span of spans) {
-          if (boundary >= span.end) {
-            advancePt += span.advancePt;
-            continue;
-          }
-          if (boundary <= span.start) break;
-          advancePt += input.measurer.measure({
-            text: span.text.slice(0, boundary - span.start),
-            fontRoute: span.fontRoute,
-            fontSizePt: request.fontSizePt,
-            weight: span.font.weight,
-            style: span.font.style,
-            letterSpacingPt: request.letterSpacingPt ?? 0,
-            kerning: request.kerning,
-          }).advancePt;
-          break;
-        }
-        // One boundary is the trailing edge of one cluster and the leading edge
-        // of the next. Retain the contextual prefix result so both consumers use
-        // the same native shaping fact without measuring it twice.
-        prefixAdvances.set(boundary, advancePt);
-        return advancePt;
-      };
-      const clusters = Object.freeze(graphemeBoundaries.slice(0, -1).map((start, index) => {
-        const end = graphemeBoundaries[index + 1] ?? start;
-        const offsetPt = prefixAdvance(start);
-        return Object.freeze({
-          range: Object.freeze({ start, end }),
-          offsetPt,
-          advancePt: prefixAdvance(end) - offsetPt,
-        });
-      }));
+      const clusters = request.clusterGeometry === false
+        ? undefined
+        : (() => {
+            const prefixAdvances = new Map<number, number>([
+              [0, 0],
+              [request.text.length, totalAdvancePt],
+            ]);
+            const prefixAdvance = (boundary: number): number => {
+              if (request.measure === false || boundary <= 0) return 0;
+              const retained = prefixAdvances.get(boundary);
+              if (retained !== undefined) return retained;
+              let advancePt = 0;
+              for (const span of spans) {
+                if (boundary >= span.end) {
+                  advancePt += span.advancePt;
+                  continue;
+                }
+                if (boundary <= span.start) break;
+                advancePt += input.measurer.measure({
+                  text: span.text.slice(0, boundary - span.start),
+                  fontRoute: span.fontRoute,
+                  fontSizePt: request.fontSizePt,
+                  weight: span.font.weight,
+                  style: span.font.style,
+                  letterSpacingPt: request.letterSpacingPt ?? 0,
+                  kerning: request.kerning,
+                }).advancePt;
+                break;
+              }
+              // One boundary is the trailing edge of one cluster and the leading
+              // edge of the next. Keep one contextual fact for this shape call.
+              prefixAdvances.set(boundary, advancePt);
+              return advancePt;
+            };
+            return Object.freeze(graphemeBoundaries.slice(0, -1).map((start, index) => {
+              const end = graphemeBoundaries[index + 1] ?? start;
+              const offsetPt = prefixAdvance(start);
+              return Object.freeze({
+                range: Object.freeze({ start, end }),
+                offsetPt,
+                advancePt: prefixAdvance(end) - offsetPt,
+              });
+            }));
+          })();
       return Object.freeze({
         advancePt: totalAdvancePt,
         ascentPt: Math.max(0, ...spans.map((span) => span.ascentPt)),
@@ -620,7 +626,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         ...(inkBounds ? { inkBounds } : {}),
         spans: Object.freeze(spans),
         graphemeBoundaries,
-        clusters,
+        ...(clusters ? { clusters } : {}),
         diagnostics: Object.freeze(diagnostics),
       });
     },

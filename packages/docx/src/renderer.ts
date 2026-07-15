@@ -6453,6 +6453,7 @@ function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderStat
               text,
               fontSizePt: calcEffectiveFontPx(candidate, 1),
               measure: true,
+              clusterGeometry: false,
             });
             width += segAdvanceWidth(candidate, shaped.advancePt, 0, 1);
           } else {

@@ -275,12 +275,14 @@ export function rubyAscentReservePx(
       text: segment.text,
       fontSizePt: calcEffectiveFontPx(segment, scale),
       measure: true,
+      clusterGeometry: false,
     });
     const guide = segment.textLayoutService.shape({
       ...segment.textShapeRequest,
       text: segment.ruby.text,
       fontSizePt: segment.ruby.fontSizePt * scale,
       measure: true,
+      clusterGeometry: false,
     });
     if (base.inkBounds && guide.inkBounds) {
       return base.inkBounds.ascentPt + guide.inkBounds.descentPt;
@@ -3242,15 +3244,16 @@ export function layoutLines(
     if (prev != null) ctx.fontKerning = prev;
   };
 
-  const measureText = (s: LayoutTextSeg): TextMetrics => {
+  const measureText = (s: LayoutTextSeg, clusterGeometry = false): TextMetrics => {
     if (s.textLayoutService && s.textShapeRequest) {
       const shaped = s.textLayoutService.shape({
         ...s.textShapeRequest,
         text: s.text,
         fontSizePt: effectiveFontPx(s),
         measure: true,
+        clusterGeometry,
       });
-      s.shapedClusters = shaped.clusters;
+      if (clusterGeometry) s.shapedClusters = shaped.clusters;
       return {
         width: shaped.advancePt,
         actualBoundingBoxAscent: shaped.ascentPt,
@@ -3373,6 +3376,7 @@ export function layoutLines(
         text,
         fontSizePt: effectiveFontPx(s),
         measure: true,
+        clusterGeometry: false,
       });
       return segAdvanceWidth({ ...s, text }, shaped.advancePt + verticalInkExtra(s, text), gridDeltaPx, scale);
     }
@@ -3682,6 +3686,7 @@ export function layoutLines(
           text: s.text || 'X',
           fontSizePt: fullPx,
           measure: true,
+          clusterGeometry: false,
         });
         metricM = {
           width: shaped.advancePt,
@@ -4245,7 +4250,7 @@ export function layoutLines(
     for (const segment of line.segments) {
       if (!('text' in segment) || segment.metricOnly || segment.text.length === 0) continue;
       segment.shapedClusters = undefined;
-      if (segment.textLayoutService && segment.textShapeRequest) measureText(segment);
+      if (segment.textLayoutService && segment.textShapeRequest) measureText(segment, true);
     }
   }
 
@@ -4364,6 +4369,7 @@ export function rescaleLayoutLines(
         text,
         fontSizePt: fontPx,
         measure: true,
+        clusterGeometry: false,
       });
       return {
         width: shaped.advancePt,

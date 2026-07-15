@@ -367,6 +367,31 @@ describe('font layout services', () => {
     expect(measured).toEqual(['abcd', 'a', 'ab', 'abc']);
   });
 
+  it('can acquire aggregate metrics without contextual cluster geometry', () => {
+    const measured: string[] = [];
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'aggregate-only-v1',
+        measure: (request) => {
+          measured.push(request.text);
+          return { advancePt: request.text.length, ascentPt: 1, descentPt: 0 };
+        },
+      },
+    });
+
+    const shaped = service.shape({
+      text: 'abcd',
+      fontSizePt: 10,
+      fonts: { ascii: 'Embedded Sans' },
+      clusterGeometry: false,
+    });
+
+    expect(shaped.advancePt).toBe(4);
+    expect(shaped.clusters).toBeUndefined();
+    expect(measured).toEqual(['abcd']);
+  });
+
   it('implements the complete ECMA-376 §17.3.2.26 character-range table', () => {
     const service = createTextLayoutService({
       fonts: createFontResolver(faces),
