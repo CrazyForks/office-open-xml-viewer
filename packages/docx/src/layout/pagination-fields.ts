@@ -1,6 +1,12 @@
 import { convergeLayout, type LayoutIteration } from './convergence.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { FlowFragment } from '../layout-fragments.js';
+import type {
+  BodyElement,
+  CellElement,
+  DocNote,
+  DocRun,
+} from '../types.js';
 
 // A resource-safety bound, not visual tuning. Sixteen exceeds the decimal digit
 // transitions of any practical page count; convergeLayout's seen-set catches
@@ -15,6 +21,58 @@ export function convergePaginationFields<T extends LayoutIteration>(
 ): T {
   const seed = acquire(1);
   return convergeLayout(seed, (current) => acquire(current.pageCount), limit);
+}
+
+/** The field dependencies whose measured result can change physical pagination. */
+export function paginationFieldDependency(
+  run: Extract<DocRun, { type: 'field' }>,
+): 'page' | 'total-pages' | undefined {
+  if (run.fieldType === 'page') return 'page';
+  if (/numPages/i.test(run.fieldType) || /NUMPAGES/i.test(run.instruction)) return 'total-pages';
+  return undefined;
+}
+
+function storyHasPaginationFields(elements: readonly (BodyElement | CellElement)[]): boolean {
+  return elements.some((element) => {
+    if (element.type === 'paragraph') {
+      return element.runs.some((run) => {
+        if (run.type !== 'field') return false;
+        return paginationFieldDependency(run) !== undefined;
+      });
+    }
+    if (element.type === 'table') {
+      return element.rows.some((row) => row.cells.some((cell) =>
+        storyHasPaginationFields(cell.content)));
+    }
+    return false;
+  });
+}
+
+/**
+ * Whether `computePages` has a field feedback edge that requires another pass.
+ * Body PAGE needs its destination occurrence from the preceding pass. A footnote
+ * PAGE likewise feeds its owning page's formatted number into note height and the
+ * body reserve. Body and footnote NUMPAGES can feed measured width back into the
+ * total page count. Header/footer reserve measurement is a separate story seam and
+ * must not force an otherwise field-free body to repeat.
+ */
+export function paginatedFlowHasPaginationDependentFields(
+  body: readonly BodyElement[],
+  footnotes: readonly DocNote[] = [],
+): boolean {
+  return storyHasPaginationFields(body)
+    || footnotes.some((note) => storyHasPaginationFields(note.content));
+}
+
+/**
+ * Field-free layout has no page-count feedback edge, so one acquisition is the
+ * fixpoint. Keep the bounded convergence policy only when such an edge exists.
+ */
+export function resolvePaginationFieldLayout<T extends LayoutIteration>(
+  acquire: (totalPagesHint: number) => T,
+  hasPaginationFields: boolean,
+): T {
+  return hasPaginationFields ? convergePaginationFields(acquire) : acquire(1);
 }
 
 /** Project retained flow into convergence-relevant plain data. Field values are

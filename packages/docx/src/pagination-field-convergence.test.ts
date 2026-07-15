@@ -1,11 +1,98 @@
 import { describe, expect, it } from 'vitest';
 import {
   convergePaginationFields,
+  paginatedFlowHasPaginationDependentFields,
   paginationFieldFlowGeometry,
   paginationFieldGeometryFingerprint,
+  resolvePaginationFieldLayout,
 } from './layout/pagination-fields.js';
+import type { BodyElement, DocParagraph, DocxDocumentModel, FieldRun } from './types.js';
+
+function paragraphWithRuns(
+  runs: DocParagraph['runs'],
+): Extract<BodyElement, { type: 'paragraph' }> {
+  return {
+    type: 'paragraph',
+    alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
+    tabStops: [], runs,
+  } as Extract<BodyElement, { type: 'paragraph' }>;
+}
+
+function field(fieldType: 'page' | 'numPages'): FieldRun & { type: 'field' } {
+  return {
+    type: 'field', fieldType,
+    instruction: fieldType === 'page' ? 'PAGE' : 'NUMPAGES', fallbackText: '?',
+    bold: false, italic: false, underline: false, strikethrough: false,
+    fontSize: 10, color: null, fontFamily: null, background: null, vertAlign: null,
+  };
+}
+
+function documentWith(body: BodyElement[]): DocxDocumentModel {
+  return {
+    body,
+    section: {} as DocxDocumentModel['section'],
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+  };
+}
 
 describe('pagination field convergence seam', () => {
+  it('acquires field-independent pagination exactly once', () => {
+    const hints: number[] = [];
+    const result = resolvePaginationFieldLayout((hint) => {
+      hints.push(hint);
+      return { fingerprint: 'pages:2', pageCount: 2 };
+    }, false);
+
+    expect(hints).toEqual([1]);
+    expect(result.pageCount).toBe(2);
+  });
+
+  it('retains convergence when pagination fields can change geometry', () => {
+    const hints: number[] = [];
+    resolvePaginationFieldLayout((hint) => {
+      hints.push(hint);
+      return { fingerprint: 'pages:2', pageCount: 2 };
+    }, true);
+
+    expect(hints).toEqual([1, 2]);
+  });
+
+  it('finds pagination fields in body, nested table, and footnote acquisition inputs', () => {
+    const fieldFree = documentWith([paragraphWithRuns([])]);
+    expect(paginatedFlowHasPaginationDependentFields(fieldFree.body)).toBe(false);
+
+    const nestedTable = documentWith([{
+      type: 'table',
+      rows: [{ cells: [{ content: [paragraphWithRuns([field('numPages')])] }] }],
+    } as unknown as BodyElement]);
+    expect(paginatedFlowHasPaginationDependentFields(nestedTable.body)).toBe(true);
+
+    const bodyPage = documentWith([paragraphWithRuns([field('page')])]);
+    expect(paginatedFlowHasPaginationDependentFields(bodyPage.body)).toBe(true);
+
+    const sectionHeader = documentWith([{
+      type: 'sectionBreak', kind: 'nextPage',
+      headers: {
+        default: { body: [paragraphWithRuns([field('numPages')])] },
+        first: null, even: null,
+      },
+    }]);
+    expect(paginatedFlowHasPaginationDependentFields(sectionHeader.body)).toBe(false);
+
+    const footnote = documentWith([paragraphWithRuns([])]);
+    footnote.footnotes = [{ id: '1', content: [paragraphWithRuns([field('numPages')])] }];
+    expect(paginatedFlowHasPaginationDependentFields(footnote.body, footnote.footnotes)).toBe(true);
+
+    const pageOnlyFootnote = documentWith([paragraphWithRuns([])]);
+    pageOnlyFootnote.footnotes = [{ id: '1', content: [paragraphWithRuns([field('page')])] }];
+    expect(paginatedFlowHasPaginationDependentFields(
+      pageOnlyFootnote.body,
+      pageOnlyFootnote.footnotes,
+    )).toBe(true);
+  });
+
   it('normalizes absent optional runtime placement facts before fingerprinting', () => {
     const omitted = paginationFieldGeometryFingerprint({
       pageCount: 1,

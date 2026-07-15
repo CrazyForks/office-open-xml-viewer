@@ -58,6 +58,7 @@ import {
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
 import { resolveAnchorFrame, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
+import { paginationFieldDependency } from './pagination-fields.js';
 import {
   measureParagraphIntrinsicWidth,
   type BodyFrameGroup,
@@ -772,8 +773,8 @@ function chartResourceKey(source: SourceRef): string {
 }
 
 function fieldDependency(run: Extract<DocRun, { type: 'field' }>): TextPlacement['dependency'] {
-  if (run.fieldType === 'page') return 'page';
-  if (/numPages/i.test(run.fieldType) || /NUMPAGES/i.test(run.instruction)) return 'total-pages';
+  const paginationDependency = paginationFieldDependency(run);
+  if (paginationDependency) return paginationDependency;
   if (/^date$/i.test(run.fieldType)) return 'date';
   if (/^time$/i.test(run.fieldType)) return 'time';
   return 'document';

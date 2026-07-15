@@ -137,9 +137,11 @@ import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js
 import { normalizeLayoutOptions } from './layout/options.js';
 import type { LayoutOptions } from './layout/options.js';
 import {
-  convergePaginationFields,
+  paginatedFlowHasPaginationDependentFields,
+  paginationFieldDependency,
   paginationFieldGeometryFingerprint,
   paginationFieldFlowGeometry,
+  resolvePaginationFieldLayout,
 } from './layout/pagination-fields.js';
 import {
   createCanvasPaintResourcePainter,
@@ -2479,6 +2481,31 @@ function measureFootnoteBlockPt(
   return { total, trailingSpaceAfter };
 }
 
+/**
+ * A footnote PAGE field belongs to the physical page whose body reference owns
+ * the note reserve (ECMA-376 §17.11.10 + §17.16.5.44). Reserve measurement can
+ * be speculative before a paragraph relocates, so the iteration recorder keeps
+ * the last page observed for an occurrence and the next convergence pass resolves
+ * its section restart/format before measuring again.
+ */
+function recordFootnotePageFieldOccurrences(
+  note: DocNote,
+  state: RenderState,
+  pageIndex: number,
+): void {
+  if (!state.layoutServices) return;
+  const record = fieldAcquisitionContextOf(state.layoutServices).recordPageFieldOccurrence;
+  if (!record) return;
+  for (const element of note.content) {
+    if (element.type !== 'paragraph') continue;
+    element.runs.forEach((run, sourceRunIndex) => {
+      if (run.type === 'field' && paginationFieldDependency(run) === 'page') {
+        record(element, sourceRunIndex, pageIndex);
+      }
+    });
+  }
+}
+
 /** Height (pt) to RESERVE on the page for a footnote: its content minus the
  *  trailing spaceAfter (overflows the bottom margin) plus the separator region. */
 function footnoteReserveHeightPt(
@@ -3069,9 +3096,14 @@ export function computePages(
   // paths so a footnote referenced from either reserves body space consistently.
   const sumReserve = (ids: string[]): number => {
     let sum = 0;
+    const pageIndex = pages.length - 1;
+    // PAGE's physical fallback must match the page currently being tested even
+    // on the seed pass, before a section-aware occurrence context exists.
+    measureState.pageIndex = pageIndex;
     for (let k = 0; k < ids.length; k++) {
       const note = noteById.get(ids[k]);
       if (!note) continue;
+      recordFootnotePageFieldOccurrences(note, measureState, pageIndex);
       const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
       sum += footnoteReserveHeightPt(note, measureState, colW(), firstOnPage);
     }
@@ -4660,6 +4692,7 @@ function paginateWithHeaderFooterReserve(
 ): PaginatedBodyElement[][] {
   // §17.15.1.25 — resolve once here so both pagination passes and the
   // reserve-measure state share the document's automatic tab interval.
+  const hasPaginationFields = paginatedFlowHasPaginationDependentFields(doc.body, footnotes);
   const computeConverged = (pageReserves: PageReserve[]): PaginatedBodyElement[][] => {
     // PAGE belongs to one field occurrence, not to its enclosing paragraph: a
     // paragraph can split and carry distinct PAGE runs on different pages.
@@ -4700,31 +4733,58 @@ function paginateWithHeaderFooterReserve(
           || placement.dependency !== 'page'
           || placement.sourceRunIndex === undefined
         ) return;
-        let occurrences = target.get(paragraph);
-        if (!occurrences) {
-          occurrences = new Map();
-          target.set(paragraph, occurrences);
-        }
-        const previous = occurrences.get(placement.sourceRunIndex);
-        if (previous && (
-          previous.pageIndex !== context.pageIndex
-          || previous.displayPageNumber !== context.displayPageNumber
-          || previous.pageNumberFormat !== context.pageNumberFormat
-        )) {
-          throw new Error('A PAGE field occurrence cannot belong to multiple destination pages');
-        }
-        occurrences.set(placement.sourceRunIndex, context);
+        retainPageFieldOccurrence(
+          paragraph,
+          placement.sourceRunIndex,
+          context,
+          target,
+        );
       }));
+    };
+
+    const retainPageFieldOccurrence = (
+      paragraph: object,
+      sourceRunIndex: number,
+      context: PageFieldAcquisitionContext,
+      target: WeakMap<object, Map<number, PageFieldAcquisitionContext>>,
+    ): void => {
+      let occurrences = target.get(paragraph);
+      if (!occurrences) {
+        occurrences = new Map();
+        target.set(paragraph, occurrences);
+      }
+      const previous = occurrences.get(sourceRunIndex);
+      if (previous && (
+        previous.pageIndex !== context.pageIndex
+        || previous.displayPageNumber !== context.displayPageNumber
+        || previous.pageNumberFormat !== context.pageNumberFormat
+      )) {
+        throw new Error('A PAGE field occurrence cannot belong to multiple destination pages');
+      }
+      occurrences.set(sourceRunIndex, context);
     };
 
     const acquire = (totalPagesHint: number) => {
       const iterationOccurrences = pageFieldOccurrences;
+      const footnoteOccurrencePages = new Map<object, Map<number, number>>();
       const iterationServices = layoutServices
-        ? createFieldAcquisitionServicesView(layoutServices, {
-            totalPages: totalPagesHint,
-            resolvePageField: (paragraph, sourceRunIndex) =>
-              iterationOccurrences.get(paragraph)?.get(sourceRunIndex),
-          })
+        ? hasPaginationFields
+          ? createFieldAcquisitionServicesView(layoutServices, {
+              totalPages: totalPagesHint,
+              resolvePageField: (paragraph, sourceRunIndex) =>
+                iterationOccurrences.get(paragraph)?.get(sourceRunIndex),
+              recordPageFieldOccurrence: (paragraph, sourceRunIndex, pageIndex) => {
+                let occurrences = footnoteOccurrencePages.get(paragraph);
+                if (!occurrences) {
+                  occurrences = new Map();
+                  footnoteOccurrencePages.set(paragraph, occurrences);
+                }
+                // A fit probe may measure on one page before relocation. The
+                // final measurement in this iteration owns the occurrence.
+                occurrences.set(sourceRunIndex, pageIndex);
+              },
+            })
+          : layoutServices
         : undefined;
       const pages = computePages(
         doc.body,
@@ -4741,6 +4801,9 @@ function paginateWithHeaderFooterReserve(
         iterationServices,
         layoutOptions,
       );
+      if (!hasPaginationFields) {
+        return { pages, pageCount: pages.length, fingerprint: 'field-independent' };
+      }
       const pageNumbers = computePageNumbering(pages);
       const nextOccurrences = new WeakMap<object, Map<number, PageFieldAcquisitionContext>>();
       pages.forEach((elements, pageIndex) => {
@@ -4754,6 +4817,17 @@ function paginateWithHeaderFooterReserve(
         elements.forEach((element) => {
           const placed = bodyFlowFragments.get(element as object);
           if (placed) retainPageFieldOccurrences(placed.fragment, pageContext, nextOccurrences);
+        });
+      });
+      footnoteOccurrencePages.forEach((occurrences, paragraph) => {
+        occurrences.forEach((pageIndex, sourceRunIndex) => {
+          const number = pageNumbers[pageIndex]
+            ?? { displayNumber: pageIndex + 1, format: 'decimal' as NumberFormat };
+          retainPageFieldOccurrence(paragraph, sourceRunIndex, Object.freeze({
+            pageIndex,
+            displayPageNumber: number.displayNumber,
+            pageNumberFormat: number.format,
+          }), nextOccurrences);
         });
       });
       pageFieldOccurrences = nextOccurrences;
@@ -4793,7 +4867,7 @@ function paginateWithHeaderFooterReserve(
     // transitions of any practical document while still making an adversarial
     // measurer or cyclic field/layout dependency fail deterministically. A2's
     // seen-set catches cycles before this hard limit; no stale iteration escapes.
-    return convergePaginationFields(acquire).pages;
+    return resolvePaginationFieldLayout(acquire, hasPaginationFields).pages;
   };
   const pass1 = computeConverged([]);
   // ECMA-376 §17.6.20 + §17.10.1 (issue #988): a vertical (tbRl) section lays its
