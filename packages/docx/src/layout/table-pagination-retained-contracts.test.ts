@@ -266,6 +266,48 @@ describe('retained table pagination contracts', () => {
     expect(placements[0]?.fragment.source.path).not.toEqual(placements[1]?.fragment.source.path);
   });
 
+  it('emits distinct retained paragraph envelopes for repeated source occurrences', () => {
+    const source = paragraph('repeated paragraph');
+    const pages = paginateDocument(documentModel([
+      source as unknown as BodyElement,
+      source as unknown as BodyElement,
+    ], 100));
+    const emitted = pages.flatMap((page) => page).filter(
+      (element) => element.type === 'paragraph',
+    );
+    const placements = emitted.map((element) => bodyFragmentFor(element));
+
+    expect(emitted).toHaveLength(2);
+    expect(emitted[0]).not.toBe(emitted[1]);
+    expect(placements.map((placement) => placement?.fragment.source.path[0])).toEqual([0, 1]);
+    expect(placements[0]?.yPt).toBeLessThan(placements[1]?.yPt ?? 0);
+    expect(placements[0]?.fragment).not.toBe(placements[1]?.fragment);
+  });
+
+  it('keeps an earlier retained paragraph envelope stable across sessions', () => {
+    const source = paragraph('independent paragraph session');
+    const wideModel = documentModel([source as unknown as BodyElement], 100, 200);
+    const narrowModel = documentModel([source as unknown as BodyElement], 100, 150);
+    const firstElement = paginateDocument(wideModel)[0]?.find(
+      (element) => element.type === 'paragraph',
+    );
+    if (!firstElement) throw new Error('expected the first retained paragraph occurrence');
+    const firstPlacement = bodyFragmentFor(firstElement);
+    const firstFingerprint = JSON.stringify(firstPlacement);
+
+    const secondElement = paginateDocument(narrowModel)[0]?.find(
+      (element) => element.type === 'paragraph',
+    );
+    if (!secondElement) throw new Error('expected the second retained paragraph occurrence');
+    const secondPlacement = bodyFragmentFor(secondElement);
+
+    expect(firstElement).not.toBe(secondElement);
+    expect(firstPlacement?.widthPt).toBeCloseTo(180, 6);
+    expect(secondPlacement?.widthPt).toBeCloseTo(130, 6);
+    expect(bodyFragmentFor(firstElement)).toEqual(firstPlacement);
+    expect(JSON.stringify(bodyFragmentFor(firstElement))).toBe(firstFingerprint);
+  });
+
   it('resolves page-local outer border ink for every auto-height slice', () => {
     const outer = singleBorder(4);
     const inside = singleBorder(1);

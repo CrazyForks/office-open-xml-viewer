@@ -98,6 +98,7 @@ function paragraph(text: string): DocParagraph {
 
 function floatingTable(rows: readonly Readonly<{ text: string; heightPt: number }>[]): DocTable {
   return {
+    type: 'table',
     colWidths: [60],
     rows: rows.map(({ text, heightPt }): DocTableRow => ({
       cells: [{
@@ -198,6 +199,70 @@ function freshPageSensitiveSplitDocument(): DocxDocumentModel {
 }
 
 describe('vertical outer floating tables retain the canonical logical paint domain', () => {
+  it('emits distinct fitting envelopes when one source table occurs twice', () => {
+    const source = floatingTable([{ text: 'REUSED-FITTING', heightPt: 30 }]);
+    const doc = documentWith(source);
+    doc.body = [source, source] as unknown as BodyElement[];
+    const measure = recordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYSICAL_SECTION),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const emitted = pages.flatMap((page) => page).filter((element) => element.type === 'table');
+    const placements = emitted.map((element) => bodyFragmentFor(element));
+
+    expect(emitted).toHaveLength(2);
+    expect(emitted[0]).not.toBe(emitted[1]);
+    expect(placements.map((placement) => placement?.fragment.source.path[0])).toEqual([0, 1]);
+    expect({ xPt: placements[0]?.xPt, yPt: placements[0]?.yPt })
+      .not.toEqual({ xPt: placements[1]?.xPt, yPt: placements[1]?.yPt });
+    expect(placements[0]?.fragment).not.toBe(placements[1]?.fragment);
+  });
+
+  it('keeps an earlier fitting envelope stable across independent widths', () => {
+    const source = floatingTable([{ text: 'SESSION-FITTING', heightPt: 30 }]);
+    source.widthPct = 5000;
+    source.colWidths = [180];
+    source.rows[0]!.cells[0]!.widthPt = 180;
+    const wideSection = {
+      ...PHYSICAL_SECTION,
+      pageHeight: 360,
+    } as SectionProps;
+    const narrowSection = {
+      ...wideSection,
+      pageHeight: 240,
+    } as SectionProps;
+    const firstMeasure = recordingCanvas();
+    const firstPages = computePages(
+      [source as unknown as BodyElement],
+      __test_verticalLayoutSection(wideSection),
+      firstMeasure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      { 'Times New Roman': 'roman' },
+    );
+    const firstElement = firstPages[0]?.find((element) => element.type === 'table');
+    if (!firstElement) throw new Error('expected the first fitting occurrence');
+    const firstPlacement = bodyFragmentFor(firstElement);
+    const firstFingerprint = JSON.stringify(firstPlacement);
+
+    const secondMeasure = recordingCanvas();
+    const secondPages = computePages(
+      [source as unknown as BodyElement],
+      __test_verticalLayoutSection(narrowSection),
+      secondMeasure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      { 'Times New Roman': 'roman' },
+    );
+    const secondElement = secondPages[0]?.find((element) => element.type === 'table');
+    if (!secondElement) throw new Error('expected the second fitting occurrence');
+    const secondPlacement = bodyFragmentFor(secondElement);
+
+    expect(firstElement).not.toBe(secondElement);
+    expect(firstPlacement?.widthPt).not.toBeCloseTo(secondPlacement?.widthPt ?? 0, 6);
+    expect(bodyFragmentFor(firstElement)).toEqual(firstPlacement);
+    expect(JSON.stringify(bodyFragmentFor(firstElement))).toBe(firstFingerprint);
+  });
+
   it('paints a fitting outer tblpPr table once without physical-domain finalization', async () => {
     const doc = documentWith(floatingTable([{ text: 'OUTER-FLOAT', heightPt: 30 }]));
     const measure = recordingCanvas();

@@ -4108,13 +4108,14 @@ export function computePages(
         // (measured at its FINAL placement, `measureState.y`, after any relocation).
         // M-1: hand it the fit-decision measurement; it is reused only if the final
         // placement still matches (no relocation), else remeasured.
-        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {
+        const occurrenceEl = { ...el } as PaginatedElementWithLines;
+        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {
           paragraphXPt: colX(),
           availableWidthPt: colW(),
           suppressSpaceBefore: suppressBefore,
           columnIndex: colIndex,
         }, fitMeasured);
-        pushTagged(el as PaginatedBodyElement);
+        pushTagged(occurrenceEl);
         y += h;
         measureState.y += h;
       }
@@ -4417,9 +4418,10 @@ export function computePages(
           fragment: acceptedFragment,
           box: first.box,
         };
+        const occurrenceEl = { ...el } as PaginatedBodyElement;
         withColumnBand(() => {
           stampTableLayout(
-            el as PaginatedBodyElement,
+            occurrenceEl,
             first.layout.colWidths,
             first.layout.rowHeights,
             first.contentWPt,
@@ -4434,7 +4436,7 @@ export function computePages(
             first.box, tp, measureState, side, tbl.overlap !== 'never', true,
           );
         });
-        pushTagged(el as PaginatedBodyElement);
+        pushTagged(occurrenceEl);
         continue;
       }
 

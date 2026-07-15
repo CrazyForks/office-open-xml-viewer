@@ -244,7 +244,7 @@ function priorFittingOuterProbeSource(current) {
   prior = replaceRange(
     prior,
     "        if (!first.prepared) {\n          throw new Error('Fitting outer table acceptance requires a whole prepared fragment');\n        }\n",
-    '        pushTagged(el as PaginatedBodyElement);',
+    '        continue;\n      }\n\n      // ECMA-376 §17.11.10',
     `        withColumnBand(() => {
           stampTableLayout(
             el as PaginatedBodyElement,
@@ -255,6 +255,7 @@ function priorFittingOuterProbeSource(current) {
           const side = floatTableWrapSide(first.box, measureState);
           registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
         });
+        pushTagged(el as PaginatedBodyElement);
 `,
   );
   return prior;
@@ -289,6 +290,23 @@ function priorOccurrenceOwnerSource(current) {
       'measureState, para, colW, suppressBefore, colX,',
     ],
     [
+      `        const occurrenceEl = { ...el } as PaginatedElementWithLines;
+        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {
+          paragraphXPt: colX(),
+          availableWidthPt: colW(),
+          suppressSpaceBefore: suppressBefore,
+          columnIndex: colIndex,
+        }, fitMeasured);
+        pushTagged(occurrenceEl);`,
+      `        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {
+          paragraphXPt: colX(),
+          availableWidthPt: colW(),
+          suppressSpaceBefore: suppressBefore,
+          columnIndex: colIndex,
+        }, fitMeasured);
+        pushTagged(el as PaginatedBodyElement);`,
+    ],
+    [
       'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {',
       'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {',
     ],
@@ -300,6 +318,45 @@ function priorOccurrenceOwnerSource(current) {
               );`,
       `              const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
                 .prepareFittingOuterFragment(tbl, finalState, box);`,
+    ],
+    [
+      `        const occurrenceEl = { ...el } as PaginatedBodyElement;
+        withColumnBand(() => {
+          stampTableLayout(
+            occurrenceEl,
+            first.layout.colWidths,
+            first.layout.rowHeights,
+            first.contentWPt,
+            i,
+            retainedTableRecord(measureState, i),
+            measureState,
+            undefined,
+            acceptedPrepared,
+          );
+          const side = floatTableWrapSide(first.box, measureState);
+          registerTableFloat(
+            first.box, tp, measureState, side, tbl.overlap !== 'never', true,
+          );
+        });
+        pushTagged(occurrenceEl);`,
+      `        withColumnBand(() => {
+          stampTableLayout(
+            el as PaginatedBodyElement,
+            first.layout.colWidths,
+            first.layout.rowHeights,
+            first.contentWPt,
+            i,
+            retainedTableRecord(measureState, i),
+            measureState,
+            undefined,
+            acceptedPrepared,
+          );
+          const side = floatTableWrapSide(first.box, measureState);
+          registerTableFloat(
+            first.box, tp, measureState, side, tbl.overlap !== 'never', true,
+          );
+        });
+        pushTagged(el as PaginatedBodyElement);`,
     ],
     [
       `            first.contentWPt,
@@ -1819,6 +1876,22 @@ test('rejects altered, duplicated, or adjacent occurrence-owner edits', () => {
       `            () => pages.length - 1,
             sideEffect(),
             { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },
+`,
+    ],
+    [
+      '        const occurrenceEl = { ...el } as PaginatedElementWithLines;\n',
+      '        const occurrenceEl = { ...para } as PaginatedElementWithLines;\n',
+    ],
+    [
+      '        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {\n',
+      `        const duplicateOccurrenceEl = { ...el } as PaginatedElementWithLines;
+        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {
+`,
+    ],
+    [
+      '        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {\n',
+      `        sideEffect();
+        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {
 `,
     ],
   ];

@@ -1042,6 +1042,23 @@ function normalizedComputePagesHash(node, source) {
       'measureState, para, colW, suppressBefore, colX,',
     ],
     [
+      `        const occurrenceEl = { ...el } as PaginatedElementWithLines;
+        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {
+          paragraphXPt: colX(),
+          availableWidthPt: colW(),
+          suppressSpaceBefore: suppressBefore,
+          columnIndex: colIndex,
+        }, fitMeasured);
+        pushTagged(occurrenceEl);`,
+      `        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {
+          paragraphXPt: colX(),
+          availableWidthPt: colW(),
+          suppressSpaceBefore: suppressBefore,
+          columnIndex: colIndex,
+        }, fitMeasured);
+        pushTagged(el as PaginatedBodyElement);`,
+    ],
+    [
       'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {',
       'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {',
     ],
@@ -1053,6 +1070,45 @@ function normalizedComputePagesHash(node, source) {
               );`,
       `              const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
                 .prepareFittingOuterFragment(tbl, finalState, box);`,
+    ],
+    [
+      `        const occurrenceEl = { ...el } as PaginatedBodyElement;
+        withColumnBand(() => {
+          stampTableLayout(
+            occurrenceEl,
+            first.layout.colWidths,
+            first.layout.rowHeights,
+            first.contentWPt,
+            i,
+            retainedTableRecord(measureState, i),
+            measureState,
+            undefined,
+            acceptedPrepared,
+          );
+          const side = floatTableWrapSide(first.box, measureState);
+          registerTableFloat(
+            first.box, tp, measureState, side, tbl.overlap !== 'never', true,
+          );
+        });
+        pushTagged(occurrenceEl);`,
+      `        withColumnBand(() => {
+          stampTableLayout(
+            el as PaginatedBodyElement,
+            first.layout.colWidths,
+            first.layout.rowHeights,
+            first.contentWPt,
+            i,
+            retainedTableRecord(measureState, i),
+            measureState,
+            undefined,
+            acceptedPrepared,
+          );
+          const side = floatTableWrapSide(first.box, measureState);
+          registerTableFloat(
+            first.box, tp, measureState, side, tbl.overlap !== 'never', true,
+          );
+        });
+        pushTagged(el as PaginatedBodyElement);`,
     ],
     [
       `            first.contentWPt,
@@ -1121,7 +1177,7 @@ function normalizedComputePagesHash(node, source) {
   ];
   const currentOccurrenceOwnerText = node.getText(source);
   const priorFittingProbeOccurrenceReplacements = occurrenceOwnerReplacements.filter(
-    (_replacement, index) => ![4, 5, 6, 7].includes(index),
+    (_replacement, index) => ![5, 6, 7, 8, 9].includes(index),
   );
   const hasExactPriorFittingProbe = currentOccurrenceOwnerText.includes(
     'const layout = computeTableLayout(tbl, cW, measureState);',
