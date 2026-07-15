@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { bodyFragmentFor, computePages } from './renderer.js';
+import { tableFormatInput } from './parser-model.js';
 import type { TableFragmentLayout } from './layout/table-pagination.js';
 import type {
   BodyElement,
@@ -174,10 +175,19 @@ function borderedFloatTableRows(
   n: number,
   rule: 'auto' | 'atLeast',
 ): BodyElement {
-  const rows = Array.from({ length: n }, (_value, index) => ({
-    ...row(20, `r${index + 1}`),
-    rowHeightRule: rule,
-  } as DocTableRow));
+  const rows = Array.from({ length: n }, () => {
+    const source = row(rule === 'auto' ? 0 : 20);
+    return {
+      ...source,
+      cells: source.cells.map((sourceCell) => ({
+        ...sourceCell,
+        content: [],
+        ...(rule === 'auto' ? { marginTop: 10, marginBottom: 10 } : {}),
+      })),
+      rowHeight: rule === 'auto' ? null : 20,
+      rowHeightRule: rule,
+    } as DocTableRow;
+  });
   const outer = { style: 'single', width: 4, color: '#000000' } as const;
   const inside = { style: 'single', width: 1, color: '#000000' } as const;
   const table: DocTable = {
@@ -209,10 +219,19 @@ function mixedBoundaryFloatTable(tp: TblpPr): BodyElement {
     { height: 1, rule: 'exact' },
     { height: 10, rule: 'auto' },
   ] as const;
-  const rows = rules.map(({ height, rule }) => ({
-    ...row(height),
-    rowHeightRule: rule,
-  } as DocTableRow));
+  const rows = rules.map(({ height, rule }) => {
+    const source = row(rule === 'auto' ? 0 : height);
+    return {
+      ...source,
+      cells: source.cells.map((sourceCell) => ({
+        ...sourceCell,
+        content: [],
+        ...(rule === 'auto' ? { marginTop: 5, marginBottom: 5 } : {}),
+      })),
+      rowHeight: rule === 'auto' ? null : height,
+      rowHeightRule: rule,
+    } as DocTableRow;
+  });
   const outer = { style: 'single', width: 12, color: '#000000' } as const;
   const table: DocTable = {
     colWidths: [80],
@@ -330,46 +349,83 @@ describe('computePages — floating-table page-fit / row-split (§17.4.57, Word 
   });
 
   it.each(['auto', 'atLeast'] as const)(
-    're-resolves outer border footprints for every %s floating-table slice',
+    'keeps centered outer-border ink out of %s floating-slice flow',
     (rule) => {
+      const source = borderedFloatTableRows(
+        tblp({ vertAnchor: 'text', tblpY: 0 }),
+        3,
+        rule,
+      ) as unknown as DocTable;
       const body = [
-        borderedFloatTableRows(tblp({ vertAnchor: 'text', tblpY: 0 }), 3, rule),
+        source as unknown as BodyElement,
         para({ text: 'anchor' }),
       ];
 
-      // The body band is 44pt. In the unsliced table, the first two rows appear
-      // to total 43.5pt (outer/2 + inside + content). Once emitted as a page
-      // slice, however, their last edge is the 4pt outer bottom and the pair is
-      // 45pt, so only one row fits. Each one-row slice is 20 + 4/2 + 4/2 = 24pt.
+      expect(tableFormatInput(source).rows.map((format) => format.height?.rule ?? 'auto'))
+        .toEqual([rule, rule, rule]);
+
+      // §17.4.57 does not define a separate border reservation for floating
+      // overflow. The 44pt band therefore admits two 20pt row tracks; each slice
+      // still resolves its own 4pt outer rules as retained ink.
       const pages = computePages(body, section({ pageHeight: 84 }), makeCtx());
       const slices = pages
         .flatMap((page) => page.filter(isFloatTable));
+      const fragments = slices.map(retainedFloatFragment);
 
-      expect(slices).toHaveLength(3);
-      expect(pages.map(floatRowsOn).filter((labels) => labels.length > 0))
-        .toEqual([['r1'], ['r2'], ['r3']]);
-      expect(slices.map((slice) =>
-        retainedFloatFragment(slice).rows.map((rowLayout) => rowLayout.advancePt)))
-        .toEqual([[24], [24], [24]]);
+      expect(fragments).toHaveLength(2);
+      expect(fragments.map((fragment) =>
+        fragment.rows.map((rowLayout) => rowLayout.logicalRowIndex)))
+        .toEqual([[0, 1], [2]]);
+      expect(fragments.map((fragment) =>
+        fragment.rows.map((rowLayout) => rowLayout.advancePt)))
+        .toEqual([[20, 20], [20]]);
+      expect(fragments.map((fragment) => fragment.advancePt)).toEqual([40, 20]);
+      expect(fragments.map((fragment) => fragment.flowBounds.heightPt)).toEqual([40, 20]);
+      expect(fragments.map((fragment) => fragment.inkBounds.heightPt)).toEqual([44, 24]);
+      for (const fragment of fragments) {
+        expect(fragment.inkBounds.yPt).toBe(fragment.flowBounds.yPt - 2);
+        expect(fragment.borders.filter((border) => border.edge === 'top')).toEqual([
+          expect.objectContaining({ widthPt: 4 }),
+        ]);
+        expect(fragment.borders.filter((border) => border.edge === 'bottom')).toEqual([
+          expect.objectContaining({ widthPt: 4 }),
+        ]);
+      }
     },
   );
 
-  it('chooses the largest fitting mixed exact/auto floating-slice endpoint', () => {
+  it('fits mixed exact/auto floating rows by flow while retaining outer ink', () => {
+    const source = mixedBoundaryFloatTable(
+      tblp({ vertAnchor: 'text', tblpY: 0 }),
+    ) as unknown as DocTable;
     const body = [
-      mixedBoundaryFloatTable(tblp({ vertAnchor: 'text', tblpY: 0 })),
+      source as unknown as BodyElement,
       para({ text: 'anchor' }),
     ];
 
-    // The candidate prefix heights are [22, 17, 33, 28, 44]. They are not
-    // monotonic because appending an exact row removes the preceding auto row's
-    // outer-bottom footprint. The 32pt band must select four rows at 28pt.
+    expect(tableFormatInput(source).rows.map((format) => format.height?.rule ?? 'auto'))
+      .toEqual(['auto', 'exact', 'auto', 'exact', 'auto']);
+
+    // The older nonmonotonic threshold came from border-in-flow geometry, not a
+    // recorded Office observation. The complete 32pt row-track allocation fits
+    // the band; centered 12pt outer rules extend only the retained ink box.
     const pages = computePages(body, section({ pageHeight: 72 }), makeCtx());
     const slices = pages.flatMap((page) => page.filter(isFloatTable));
+    const fragments = slices.map(retainedFloatFragment);
 
-    expect(slices.map((slice) => (slice as unknown as DocTable).rows.length))
-      .toEqual([4, 1]);
-    expect(slices.map((slice) => retainedFloatFragment(slice).advancePt))
-      .toEqual([28, 22]);
+    expect(fragments).toHaveLength(1);
+    expect(fragments[0]?.rows.map((rowLayout) => rowLayout.advancePt))
+      .toEqual([10, 1, 10, 1, 10]);
+    expect(fragments[0]?.advancePt).toBe(32);
+    expect(fragments[0]?.flowBounds.heightPt).toBe(32);
+    expect(fragments[0]?.inkBounds.yPt).toBe((fragments[0]?.flowBounds.yPt ?? 0) - 6);
+    expect(fragments[0]?.inkBounds.heightPt).toBe(44);
+    expect(fragments[0]?.borders.filter((border) => border.edge === 'top')).toEqual([
+      expect.objectContaining({ widthPt: 12 }),
+    ]);
+    expect(fragments[0]?.borders.filter((border) => border.edge === 'bottom')).toEqual([
+      expect.objectContaining({ widthPt: 12 }),
+    ]);
   });
 
   it('repeats leading tblHeader rows with page-local ownership on floating continuations', () => {
