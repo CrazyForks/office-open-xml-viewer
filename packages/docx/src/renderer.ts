@@ -138,9 +138,9 @@ import { normalizeLayoutOptions } from './layout/options.js';
 import type { LayoutOptions } from './layout/options.js';
 import {
   paginatedFlowHasPaginationDependentFields,
-  paginationFieldDependency,
   paginationFieldGeometryFingerprint,
   paginationFieldFlowGeometry,
+  recordStoryPageFieldOccurrences,
   resolvePaginationFieldLayout,
 } from './layout/pagination-fields.js';
 import {
@@ -2481,31 +2481,6 @@ function measureFootnoteBlockPt(
   return { total, trailingSpaceAfter };
 }
 
-/**
- * A footnote PAGE field belongs to the physical page whose body reference owns
- * the note reserve (ECMA-376 §17.11.10 + §17.16.5.44). Reserve measurement can
- * be speculative before a paragraph relocates, so the iteration recorder keeps
- * the last page observed for an occurrence and the next convergence pass resolves
- * its section restart/format before measuring again.
- */
-function recordFootnotePageFieldOccurrences(
-  note: DocNote,
-  state: RenderState,
-  pageIndex: number,
-): void {
-  if (!state.layoutServices) return;
-  const record = fieldAcquisitionContextOf(state.layoutServices).recordPageFieldOccurrence;
-  if (!record) return;
-  for (const element of note.content) {
-    if (element.type !== 'paragraph') continue;
-    element.runs.forEach((run, sourceRunIndex) => {
-      if (run.type === 'field' && paginationFieldDependency(run) === 'page') {
-        record(element, sourceRunIndex, pageIndex);
-      }
-    });
-  }
-}
-
 /** Height (pt) to RESERVE on the page for a footnote: its content minus the
  *  trailing spaceAfter (overflows the bottom margin) plus the separator region. */
 function footnoteReserveHeightPt(
@@ -3096,14 +3071,9 @@ export function computePages(
   // paths so a footnote referenced from either reserves body space consistently.
   const sumReserve = (ids: string[]): number => {
     let sum = 0;
-    const pageIndex = pages.length - 1;
-    // PAGE's physical fallback must match the page currently being tested even
-    // on the seed pass, before a section-aware occurrence context exists.
-    measureState.pageIndex = pageIndex;
     for (let k = 0; k < ids.length; k++) {
       const note = noteById.get(ids[k]);
       if (!note) continue;
-      recordFootnotePageFieldOccurrences(note, measureState, pageIndex);
       const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
       sum += footnoteReserveHeightPt(note, measureState, colW(), firstOnPage);
     }
@@ -4766,23 +4736,12 @@ function paginateWithHeaderFooterReserve(
 
     const acquire = (totalPagesHint: number) => {
       const iterationOccurrences = pageFieldOccurrences;
-      const footnoteOccurrencePages = new Map<object, Map<number, number>>();
       const iterationServices = layoutServices
         ? hasPaginationFields
           ? createFieldAcquisitionServicesView(layoutServices, {
               totalPages: totalPagesHint,
               resolvePageField: (paragraph, sourceRunIndex) =>
                 iterationOccurrences.get(paragraph)?.get(sourceRunIndex),
-              recordPageFieldOccurrence: (paragraph, sourceRunIndex, pageIndex) => {
-                let occurrences = footnoteOccurrencePages.get(paragraph);
-                if (!occurrences) {
-                  occurrences = new Map();
-                  footnoteOccurrencePages.set(paragraph, occurrences);
-                }
-                // A fit probe may measure on one page before relocation. The
-                // final measurement in this iteration owns the occurrence.
-                occurrences.set(sourceRunIndex, pageIndex);
-              },
             })
           : layoutServices
         : undefined;
@@ -4819,16 +4778,44 @@ function paginateWithHeaderFooterReserve(
           if (placed) retainPageFieldOccurrences(placed.fragment, pageContext, nextOccurrences);
         });
       });
-      footnoteOccurrencePages.forEach((occurrences, paragraph) => {
-        occurrences.forEach((pageIndex, sourceRunIndex) => {
-          const number = pageNumbers[pageIndex]
-            ?? { displayNumber: pageIndex + 1, format: 'decimal' as NumberFormat };
-          retainPageFieldOccurrence(paragraph, sourceRunIndex, Object.freeze({
-            pageIndex,
-            displayPageNumber: number.displayNumber,
-            pageNumberFormat: number.format,
-          }), nextOccurrences);
+      // Footnote reserve ownership follows the page containing its body reference
+      // (§17.11.10). A split paragraph/table is currently charged on its final
+      // slice, so last-write by note id mirrors computePages' existing approximation
+      // without adding another pagination side channel.
+      const footnotePageById = new Map<string, number>();
+      pages.forEach((elements, pageIndex) => elements.forEach((element) => {
+        if (element.type === 'table') {
+          const sourceIndex = bodyFlowFragments.sourceIndices.get(element as object);
+          const sourceElement = sourceIndex === undefined ? undefined : doc.body[sourceIndex];
+          const sourceTable = sourceElement?.type === 'table' ? sourceElement : element;
+          footnoteRefsInElement(sourceTable).forEach((id) =>
+            footnotePageById.set(id, pageIndex));
+        } else {
+          footnoteRefsInElement(element).forEach((id) =>
+            footnotePageById.set(id, pageIndex));
+        }
+      }));
+      const noteById = indexNotes(footnotes);
+      footnotePageById.forEach((pageIndex, noteId) => {
+        const note = noteById.get(noteId);
+        if (!note) return;
+        const number = pageNumbers[pageIndex]
+          ?? { displayNumber: pageIndex + 1, format: 'decimal' as NumberFormat };
+        const pageContext = Object.freeze({
+          pageIndex,
+          displayPageNumber: number.displayNumber,
+          pageNumberFormat: number.format,
         });
+        recordStoryPageFieldOccurrences(
+          note.content,
+          pageIndex,
+          (paragraph, sourceRunIndex) => retainPageFieldOccurrence(
+            paragraph,
+            sourceRunIndex,
+            pageContext,
+            nextOccurrences,
+          ),
+        );
       });
       pageFieldOccurrences = nextOccurrences;
       return {

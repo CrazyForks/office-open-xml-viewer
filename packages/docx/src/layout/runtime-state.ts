@@ -86,15 +86,6 @@ export interface FieldAcquisitionContext {
     paragraph: object,
     sourceRunIndex: number,
   ) => PageFieldAcquisitionContext | undefined;
-  /**
-   * Retain a PAGE occurrence discovered in a page-owned nested story during the
-   * current iteration. The next iteration resolves its display-page context.
-   */
-  readonly recordPageFieldOccurrence?: (
-    paragraph: object,
-    sourceRunIndex: number,
-    pageIndex: number,
-  ) => void;
 }
 
 export interface PageFieldAcquisitionContext {

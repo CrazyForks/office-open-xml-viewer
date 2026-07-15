@@ -65,6 +65,30 @@ export function paginatedFlowHasPaginationDependentFields(
 }
 
 /**
+ * Retain PAGE run identities from a page-owned story for the next acquisition
+ * iteration (ECMA-376 §17.16.5.44). Keeping the traversal beside dependency
+ * detection prevents nested-story field ownership from leaking into the renderer.
+ */
+export function recordStoryPageFieldOccurrences(
+  elements: readonly (BodyElement | CellElement)[],
+  pageIndex: number,
+  record: (paragraph: object, sourceRunIndex: number, pageIndex: number) => void,
+): void {
+  for (const element of elements) {
+    if (element.type === 'paragraph') {
+      element.runs.forEach((run, sourceRunIndex) => {
+        if (run.type === 'field' && paginationFieldDependency(run) === 'page') {
+          record(element, sourceRunIndex, pageIndex);
+        }
+      });
+    } else if (element.type === 'table') {
+      element.rows.forEach((row) => row.cells.forEach((cell) =>
+        recordStoryPageFieldOccurrences(cell.content, pageIndex, record)));
+    }
+  }
+}
+
+/**
  * Field-free layout has no page-count feedback edge, so one acquisition is the
  * fixpoint. Keep the bounded convergence policy only when such an edge exists.
  */
