@@ -1,13 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { computeFloatTableBox, registerTableFloat, floatTableWrapSide } from './float-table-geometry.js';
+import {
+  computeFloatTableBox,
+  registerTableFloat,
+  floatTableWrapSide,
+  resolveFloatingTablePlacement,
+} from './float-table-geometry.js';
 import type { FloatTableBox } from './float-table-geometry.js';
 import type { TblpPr } from './types.js';
 import type { FloatRect } from './float-layout.js';
+import type {
+  FloatingTablePlacementLayout,
+  FloatingTableReferenceFramesPt,
+  TableLayout,
+} from './layout/types.js';
+import {
+  beginFloatingTablePlacementTransaction,
+  floatingTableRegistryDelta,
+  resolveFloatingTablePlacementInTransaction,
+  resolveFloatingTablePlacementsInFreshRegistry,
+  validateFloatingTableRegistryDelta,
+} from './layout/floating-table-transaction.js';
 
 // Table-driven geometry assertions for floating tables (ECMA-376 §17.4.57
 // `<w:tblpPr>` / §17.4.56 `<w:tblOverlap>`). The VRT does not cover the
-// floating-table sample (private/sample-11 is not in the VRT suite), so these
-// pin the placement math AND the FloatRect that registerTableFloat emits
+// These synthetic cases pin the placement math and the FloatRect registration
 // (xLeft/xRight/yTop/yBottom/mode/side), which resolveLineFloatWindow consumes
 // to wrap the surrounding body text.
 //
@@ -50,7 +66,7 @@ function makeState(over: Partial<MinState> = {}): MinState {
 // Full TblpPr with the spec defaults; tests override only the axis under test.
 // The factory sets horzAnchor:'page' (an explicit horizontal hint), so
 // horzSpecified defaults to true; the "no horizontal spec at all" case is
-// exercised by overriding horzSpecified:false (see the sample-11 case).
+// exercised by overriding horzSpecified:false below.
 function tblp(over: Partial<TblpPr> = {}): TblpPr {
   return {
     leftFromText: 0,
@@ -214,15 +230,15 @@ describe('floating table geometry (§17.4.57) — vertical placement', () => {
   });
 });
 
-// Word ground truth (private/sample-18 Sec B, Word-exported PDF via pdftotext):
+// Observed Office behavior, represented here with synthetic geometry:
 // a vertAnchor="page" floating table whose requested tblpY would push its BOTTOM
 // past the physical page edge is shifted UP so its bottom sits flush on the page
 // bottom (measured top 741.9pt = 841.9 − 100 for a 100pt table), NOT left
 // overflowing. computeFloatTableBox clamps it via clampAbsBoxIntoContainer.
 // vertAnchor="text" is NOT clamped (its overflow is row-split by the paginator).
-describe('floating table geometry (§17.4.57) — page/margin-anchored clamp (Word ground truth)', () => {
+describe('floating table geometry (§17.4.57) — page/margin-anchored Office clamp', () => {
   it('vertAnchor="page": a box overflowing the page bottom is clamped up to pageH − boxH', () => {
-    // The sample-18 Sec B geometry at A4 (pageH 841.9, table 100pt): tblpY=775
+    // With pageH 841.9 and a 100pt table, tblpY=775
     // would put the bottom at 875 > 841.9 ⇒ clamp to y = 841.9 − 100 = 741.9.
     const st = makeState({ pageH: 841.9 });
     const b = box(tblp({ vertAnchor: 'page', tblpY: 775 }), st, 300, 250, 100);
@@ -309,6 +325,39 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
     expect(f.xLeft).toBeGreaterThanOrEqual(200);
   });
 
+  it('appends a pre-resolved parent exactly after its retained child entry', () => {
+    const child: FloatRect = {
+      kind: 'table', mode: 'square', imageKey: 'nested-child',
+      imageX: 20, imageY: 30, imageW: 60, imageH: 20,
+      xLeft: 20, xRight: 80, yTop: 30, yBottom: 50, side: 'bothSides',
+      distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
+      paraId: 7, drawn: true,
+    };
+    const st = makeState({ floatParaSeq: 8, floats: [child] });
+    const tp = tblp({
+      leftFromText: 3, rightFromText: 5, topFromText: 7, bottomFromText: 11,
+    });
+    const accepted = { x: 24, y: 20, w: 140, h: 90 };
+
+    registerTableFloat(
+      accepted, tp, st as never, 'bothSides', false, /* preResolved */ true,
+    );
+
+    expect(st.floats).toHaveLength(2);
+    expect(st.floatParaSeq).toBe(9);
+    expect(st.floats.map((float) => float.paraId)).toEqual([7, 8]);
+    expect(st.floats[1]).toMatchObject({
+      imageX: accepted.x,
+      imageY: accepted.y,
+      imageW: accepted.w,
+      imageH: accepted.h,
+      xLeft: accepted.x - tp.leftFromText,
+      xRight: accepted.x + accepted.w + tp.rightFromText,
+      yTop: accepted.y - tp.topFromText,
+      yBottom: accepted.y + accepted.h + tp.bottomFromText,
+    });
+  });
+
   // §17.4.56 scope: a floating table with <w:tblOverlap w:val="never"/> must
   // only avoid OTHER FLOATING TABLES. DrawingML anchors (§20.4.2.3) and text
   // frames keep their own placement — a never-overlap table does NOT re-seat off
@@ -354,7 +403,7 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
   });
 });
 
-describe('floating table — sample-11 case (§17.4.57)', () => {
+describe('floating table — omitted horizontal positioning (§17.4.57)', () => {
   // <w:tblpPr w:rightFromText="187" w:bottomFromText="72" w:vertAnchor="text"
   //           w:tblpY="1"/> + <w:tblOverlap w:val="never"/>. NO horzAnchor, NO
   // tblpX, NO tblpXSpec ⇒ horzSpecified=false. The spec-literal default would be
@@ -382,14 +431,14 @@ describe('floating table — sample-11 case (§17.4.57)', () => {
     expect(b.x).toBe(100); // text/column left (contentX), NOT page-left 0
     expect(b.y).toBe(300 + 1); // vAnchor=text ⇒ paraTop + tblpY
 
-    // side from the column band [100,500]: the float's right edge (100+120=220)
-    // is left of the column centre (300) ⇒ float on the LEFT ⇒ text wraps RIGHT.
+    // The table contributes its actual exclusion rectangle; the line-layout
+    // solver chooses the widest usable free gap on either side.
     const side = wrapSide(b, st);
-    expect(side).toBe('right'); // text sits to the RIGHT of the float
+    expect(side).toBe('bothSides');
 
     registerFloat(b, tp, st, side, /* overlap="never" ⇒ */ false);
     const f = st.floats[0];
-    expect(f.side).toBe('right');
+    expect(f.side).toBe('bothSides');
     expect(f.xRight).toBe(100 + tableW + RIGHT_FROM_TEXT); // right edge includes the dist padding
     expect(f.yBottom).toBe(b.y + 50 + BOTTOM_FROM_TEXT);
   });
@@ -402,18 +451,262 @@ describe('floating table — sample-11 case (§17.4.57)', () => {
   });
 });
 
-describe('floating table wrap side (§17.4.57) from the column band', () => {
-  const st = makeState(); // column band [100, 500], centre 300
+describe('floating table wrap exclusion (§17.4.57)', () => {
+  const st = makeState();
 
-  it('float whose right edge is left-of-centre ⇒ text wraps RIGHT', () => {
-    expect(wrapSide({ x: 0, y: 0, w: 120, h: 50 }, st)).toBe('right');
+  it.each([
+    { x: 0, w: 120 },
+    { x: 350, w: 120 },
+    { x: 200, w: 200 },
+  ])('offers both flanks to the shared widest-free-gap solver', ({ x, w }) => {
+    expect(wrapSide({ x, y: 0, w, h: 50 }, st)).toBe('bothSides');
+  });
+});
+
+function retainedFloatingPlacement(
+  positioning: Partial<FloatingTablePlacementLayout['positioning']> = {},
+): FloatingTablePlacementLayout {
+  const child = {
+    kind: 'table', id: 'nested-table',
+    source: { story: 'body', storyInstance: 'body', path: [0, 0, 0] },
+    flowDomainId: 'nested', ordinaryFlow: false,
+    flowBounds: { xPt: 20, yPt: 10, widthPt: 80, heightPt: 40 },
+    inkBounds: { xPt: 20, yPt: 10, widthPt: 80, heightPt: 40 },
+    advancePt: 40, columnWidthsPt: [80], rows: [], borders: [],
+  } as TableLayout;
+  return Object.freeze({
+    kind: 'floating-table-placement',
+    occurrenceId: 'page-1:cell-0:0:nested-table',
+    ownership: 'source',
+    physicalPageIndex: 0,
+    displayPageNumber: 1,
+    hostCellId: 'cell-0',
+    sourceBlockIndex: 0,
+    anchorBlockIndex: 1,
+    tableId: child.id,
+    overlap: 'never',
+    positioning: Object.freeze({
+      leftFromTextPt: 1,
+      rightFromTextPt: 2,
+      topFromTextPt: 3,
+      bottomFromTextPt: 4,
+      horzAnchor: 'text',
+      horzSpecified: true,
+      vertAnchor: 'text',
+      xPt: 5,
+      yPt: 6,
+      ...positioning,
+    }),
+    anchorBounds: Object.freeze({ xPt: 120, yPt: 250, widthPt: 200, heightPt: 20 }),
+    child,
+  });
+}
+
+const retainedReferenceFrames: FloatingTableReferenceFramesPt = Object.freeze({
+  page: Object.freeze({ xPt: 0, yPt: 0, widthPt: 600, heightPt: 800 }),
+  margin: Object.freeze({ xPt: 100, yPt: 72, widthPt: 400, heightPt: 656 }),
+  text: Object.freeze({ xPt: 120, yPt: 250, widthPt: 200, heightPt: 20 }),
+});
+
+describe('retained floating table placement (§17.4.57)', () => {
+  it('validates the exact probed point delta and paragraph sequence once', () => {
+    const snapshot = Object.freeze({
+      coordinateSpace: 'logical-page-points' as const,
+      flowDomainId: 'logical-page:3',
+      entries: Object.freeze([]),
+      nextParagraphId: 7,
+    });
+    const placement = retainedFloatingPlacement({
+      horzAnchor: 'page', vertAnchor: 'page', xPt: 100, yPt: 100,
+    });
+    const resolution = resolveFloatingTablePlacementInTransaction(
+      placement,
+      retainedReferenceFrames,
+      beginFloatingTablePlacementTransaction(
+        snapshot.entries,
+        snapshot.nextParagraphId,
+        snapshot.coordinateSpace,
+        snapshot.flowDomainId,
+      ),
+    );
+    const delta = floatingTableRegistryDelta(
+      snapshot,
+      resolution.transaction.delta,
+      resolution.transaction.nextParagraphId,
+    );
+    const current = {
+      coordinateSpace: snapshot.coordinateSpace,
+      flowDomainId: snapshot.flowDomainId,
+      nextParagraphId: snapshot.nextParagraphId,
+      occurrenceIds: Object.freeze([]),
+    } as const;
+
+    expect(() => validateFloatingTableRegistryDelta(delta, current)).not.toThrow();
+    expect(delta.entries[0]).toMatchObject({
+      occurrenceId: placement.occurrenceId,
+      paragraphId: 7,
+      bounds: resolution.placement.bounds,
+      exclusionBounds: resolution.placement.exclusionBounds,
+    });
+    expect(() => validateFloatingTableRegistryDelta(delta, {
+      ...current,
+      nextParagraphId: 8,
+      occurrenceIds: [placement.occurrenceId],
+    })).toThrow('base/domain mismatch');
   });
 
-  it('float whose left edge is right-of-centre ⇒ text wraps LEFT', () => {
-    expect(wrapSide({ x: 350, y: 0, w: 120, h: 50 }, st)).toBe('left');
+  it('re-resolves an upright nested float in a fresh physical-page domain', () => {
+    const logicalRetained = retainedFloatingPlacement({
+      horzAnchor: 'page', vertAnchor: 'margin', xPt: 10, yPt: 0,
+    });
+    const physicalFrames: FloatingTableReferenceFramesPt = Object.freeze({
+      page: Object.freeze({ xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 }),
+      margin: Object.freeze({ xPt: 24, yPt: 20, widthPt: 146, heightPt: 240 }),
+      text: Object.freeze({ xPt: 150, yPt: 20, widthPt: 50, heightPt: 80 }),
+    });
+
+    const physical = resolveFloatingTablePlacementsInFreshRegistry(
+      [logicalRetained],
+      () => physicalFrames,
+      'upright-physical-page-points',
+      'upright-physical-page:0',
+    );
+
+    expect(physical.transaction).toMatchObject({
+      coordinateSpace: 'upright-physical-page-points',
+      flowDomainId: 'upright-physical-page:0',
+      nextParagraphId: 1,
+    });
+    expect(physical.placements[0]).toMatchObject({
+      xPt: 10,
+      yPt: 20,
+      bounds: { xPt: 10, yPt: 20 },
+    });
+    expect(physical.placements[0]?.bounds).not.toBe(logicalRetained.anchorBounds);
   });
 
-  it('float straddling the column centre ⇒ bothSides', () => {
-    expect(wrapSide({ x: 200, y: 0, w: 200, h: 50 }, st)).toBe('bothSides');
+  it('resolves multiple floats in source order without mutating or duplicating the base snapshot', () => {
+    const first = Object.freeze({
+      ...retainedFloatingPlacement({
+        horzAnchor: 'page', vertAnchor: 'page', xPt: 100, yPt: 100,
+      }),
+      occurrenceId: 'first',
+    });
+    const second = Object.freeze({
+      ...retainedFloatingPlacement({
+        horzAnchor: 'page', vertAnchor: 'page', xPt: 100, yPt: 100,
+      }),
+      occurrenceId: 'second',
+    });
+    const base = Object.freeze([]);
+    const started = beginFloatingTablePlacementTransaction(base, 7);
+    const firstResolution = resolveFloatingTablePlacementInTransaction(
+      first,
+      retainedReferenceFrames,
+      started,
+    );
+    const secondResolution = resolveFloatingTablePlacementInTransaction(
+      second,
+      retainedReferenceFrames,
+      firstResolution.transaction,
+    );
+    const duplicateProbe = resolveFloatingTablePlacementInTransaction(
+      second,
+      retainedReferenceFrames,
+      secondResolution.transaction,
+    );
+
+    expect(base).toEqual([]);
+    expect(secondResolution.transaction.delta.map((entry) => entry.occurrenceId)).toEqual([
+      'first', 'second',
+    ]);
+    expect(secondResolution.placement.xPt).toBeGreaterThan(
+      firstResolution.placement.exclusionBounds.xPt
+        + firstResolution.placement.exclusionBounds.widthPt,
+    );
+    expect(duplicateProbe.transaction).toBe(secondResolution.transaction);
+    expect(duplicateProbe.placement.bounds).toBe(
+      secondResolution.transaction.delta[1]!.bounds,
+    );
+    expect(secondResolution.transaction.nextParagraphId).toBe(9);
+  });
+
+  it('resolves text-relative offsets and exclusion padding entirely in point space', () => {
+    const placement = retainedFloatingPlacement();
+
+    const resolved = resolveFloatingTablePlacement(placement, retainedReferenceFrames);
+
+    expect(resolved).toMatchObject({
+      kind: 'resolved-floating-table-placement',
+      occurrenceId: placement.occurrenceId,
+      xPt: 125,
+      yPt: 256,
+      bounds: { xPt: 125, yPt: 256, widthPt: 80, heightPt: 40 },
+      exclusionBounds: { xPt: 124, yPt: 253, widthPt: 83, heightPt: 47 },
+      overlap: 'never',
+      child: placement.child,
+    });
+    expect(resolved.source).toBe(placement);
+  });
+
+  it('retains page and margin reference frames for aligned placement', () => {
+    const placement = retainedFloatingPlacement({
+      horzAnchor: 'page',
+      xPt: 999,
+      xAlign: 'center',
+      vertAnchor: 'margin',
+      yPt: 999,
+      yAlign: 'bottom',
+    });
+
+    const resolved = resolveFloatingTablePlacement(placement, retainedReferenceFrames);
+
+    expect(resolved.xPt).toBe(260);
+    expect(resolved.yPt).toBe(688);
+  });
+
+  it('uses the text frame when horizontal positioning was omitted', () => {
+    const placement = retainedFloatingPlacement({
+      horzAnchor: 'page',
+      horzSpecified: false,
+      xPt: 0,
+    });
+
+    expect(resolveFloatingTablePlacement(placement, retainedReferenceFrames).xPt).toBe(120);
+  });
+
+  it('uses grid width and table advance when row-specific origins widen flow bounds', () => {
+    const placement = retainedFloatingPlacement();
+    const rowExceptionEnvelope = Object.freeze({
+      ...placement,
+      child: Object.freeze({
+        ...placement.child,
+        flowBounds: Object.freeze({
+          ...placement.child.flowBounds,
+          widthPt: 140,
+          heightPt: 90,
+        }),
+      }),
+    });
+
+    const resolved = resolveFloatingTablePlacement(
+      rowExceptionEnvelope,
+      retainedReferenceFrames,
+    );
+
+    expect(resolved.bounds.widthPt).toBe(80);
+    expect(resolved.bounds.heightPt).toBe(40);
+  });
+
+  it('reuses the acquisition-time text-anchor offset after overlap resolution', () => {
+    const placement = Object.freeze({
+      ...retainedFloatingPlacement(),
+      acquiredTextOffsetPt: Object.freeze({ xPt: 30, yPt: 40 }),
+    });
+
+    const resolved = resolveFloatingTablePlacement(placement, retainedReferenceFrames);
+
+    expect(resolved.xPt).toBe(150);
+    expect(resolved.yPt).toBe(290);
   });
 });

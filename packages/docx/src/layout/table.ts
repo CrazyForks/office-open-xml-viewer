@@ -109,6 +109,17 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
   };
 }
 
+/**
+ * Return the authored block-flow height used by table row layout. Pagination
+ * calls this same fold while choosing legal fragment boundaries so paragraph
+ * spacing collapse cannot disagree with the geometry materialized afterwards.
+ */
+export function measureTableCellBlockFlowHeightPt(
+  blocks: readonly TableCellBlockInput[],
+): number {
+  return resolveCellFlow(blocks).flowHeightPt;
+}
+
 interface RowSpacingInsets {
   readonly topPt: number;
   readonly bottomPt: number;
@@ -942,6 +953,10 @@ export function layoutTable(
     flows.set(cell.id, resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks));
   }));
   const resolvedRows = resolveRowHeights(input.rows, flows);
+  const boundaries = resolvedBoundaries(input);
+  // ECMA-376 §17.4.80 owns row-track height. Collapsed rules are centred on
+  // those tracks, so their overhang contributes to inkBounds, never flow fit or
+  // advance; each page-local fragment still resolves its own winning segments.
   const rowHeightsPt = resolvedRows.heights;
   const widthPt = input.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const heightPt = rowHeightsPt.reduce((sum, height) => sum + height, 0);
@@ -960,7 +975,6 @@ export function layoutTable(
     placement,
     widthPt,
   );
-  const boundaries = resolvedBoundaries(input);
   const borders = materializeBorders(input, rowXPt, yPt, rowHeightsPt, boundaries);
 
   const columnOffsets = [0];

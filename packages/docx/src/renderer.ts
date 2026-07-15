@@ -100,9 +100,12 @@ import {
   pushFloatRect,
 } from './frame-geometry.js';
 import {
+  type FloatTableBox,
   computeFloatTableBox,
   registerTableFloat,
   floatTableWrapSide,
+  resolveFloatingTableBoxPt,
+  resolveFloatingTablePlacement,
 } from './float-table-geometry.js';
 import {
   xContainer,
@@ -134,14 +137,17 @@ import {
 import { canvasFontString, justifiedPiecePositions } from '@silurus/ooxml-core';
 import type {
   LayoutServices,
+  FloatRegistryDeltaPt,
   Matrix2DData,
   ParagraphLayout,
+  ResolvedFloatingTablePlacementLayout,
   SourceRef,
   TableLayout,
   WrapExclusion,
 } from './layout/types.js';
 import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
+import { validateFloatingTableRegistryDelta } from './layout/floating-table-transaction.js';
 import type { LayoutOptions } from './layout/options.js';
 import {
   paginatedFlowHasPaginationDependentFields,
@@ -282,34 +288,35 @@ import {
   type ParagraphMeasurementEnvironment,
 } from './paragraph-measure.js';
 import {
-  cellFragmentContentHeightPt,
   paragraphFragmentAdvancePt,
-  tableFragmentHeightPt,
   type DocumentLayout,
   type LayoutPage,
   type PlacedFragment,
   type FlowFragment,
-  type TableFragment,
-  type CellFragment,
 } from './layout-fragments.js';
-import { buildTableFragment } from './table-fragments.js';
-import { acquireTableCellBlocks } from './layout/table-cell-blocks.js';
 import {
-  acquireRetainedTableLayout,
+  acquireRetainedTable,
+  type RetainedTableAcquisition,
   type RetainedTableAcquisitionDependencies,
 } from './layout/table-acquisition.js';
+import {
+  startTableFragmentCursor,
+  takeTableFragment,
+  type PageDependentTableBlockRequest,
+  type TableFragmentLayout,
+} from './layout/table-pagination.js';
 import { paragraphGapAdjustment, paragraphGapPt } from './layout/paragraph-spacing.js';
 import { imageResourceKey } from './layout/source-key.js';
 import {
   hasVisibleParagraphBorder as hasAnyBorderEdge,
   paragraphsShareBorderBox as parasShareBorderBox,
+  resolveParagraphBorderEdges,
 } from './layout/paragraph-border-adjacency.js';
 import {
   acquireRetainedFrameGroup,
   acquireShapeTextBoxLayout,
   bodyFrameGroupFor,
   bodyParagraphBorderEdgesFor,
-  bodySourceIndexFor,
   paragraphLayoutFromMeasurement,
   sliceParagraphLayout,
 } from './layout/paragraph.js';
@@ -669,6 +676,13 @@ export async function prepareMathRuns(
   return { records, drawables };
 }
 
+interface RetainedTableRecord {
+  readonly sourceIndex: number;
+  readonly acquisition: RetainedTableAcquisition;
+  readonly contentWidthPt: number;
+  readonly anchorYPt: number;
+}
+
 export interface RenderState extends DeferredFrontPaintState {
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   scale: number;    // px per pt
@@ -750,12 +764,17 @@ export interface RenderState extends DeferredFrontPaintState {
   /** Per-render opaque retained resource session adapter. */
   retainedResourcePainter?: CanvasPaintResourcePainter;
   /** Renderer-owned retained table adapter, threaded through nested cell states. */
-  retainedTablePainter?: (fragment: TableFragment | TableLayout, state: RenderState) => void;
+  retainedTablePainter?: (fragment: TableLayout, state: RenderState) => void;
+  retainedNestedTableResolver?: (
+    fragment: TableLayout,
+    placement: Readonly<{ xPt: number; yPt: number }>,
+    state: RenderState,
+  ) => readonly ResolvedFloatingTablePlacementLayout[];
   /** Renderer authorities injected into the pure recursive table acquisition. */
   retainedTableAcquisition?: RetainedTableAcquisitionDependencies<RenderState>;
-  /** Final-width retained tables keyed by stable body source identity until the
-   * existing attachment seam consumes them. */
-  retainedTablesBySourceIndex?: Map<number, TableLayout>;
+  /** Each body occurrence owns its acquisition and pagination context for this
+   * render session. Parser objects may legally occur more than once. */
+  retainedTablesBySourceIndex?: Map<number, RetainedTableRecord>;
   /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
    *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
    *  Default is the application's Japanese kinsoku table with kinsoku ON. */
@@ -2022,17 +2041,102 @@ async function renderDocumentToCanvasLeased(
     resolvedLocalFonts,
     layoutServices,
     retainedResourcePainter,
-    retainedTablePainter: (fragment, state) => {
-      if (!('flowBounds' in fragment)) {
-        renderTableFragment(fragment, state);
-        return;
+    retainedNestedTableResolver: (fragment, placement, state) => {
+      if (!('floatingTables' in fragment)) return Object.freeze([]);
+      const tableFragment = fragment as TableFragmentLayout;
+      if (tableFragment.floatingTableCoordinateSpace === 'upright-physical-page-points') {
+        throw new Error('Upright physical table fragments require the upright paint boundary');
       }
+      const retained = tableFragment.resolvedFloatingTables ?? [];
+      const retainedIds = new Set(retained.map((item) => item.occurrenceId));
+      const occurrences = tableFragment.floatingTables.filter(
+        (occurrence) => !retainedIds.has(occurrence.occurrenceId),
+      );
+      const pageWidthPt = state.pageWidth;
+      const pageHeightPt = state.pageH / state.scale;
+      const marginLeftPt = state.marginLeft;
+      const marginRightPt = state.marginRight;
+      const marginTopPt = state.marginTop;
+      const marginBottomPt = state.marginBottom;
+      const dxPt = placement.xPt - fragment.flowBounds.xPt;
+      const dyPt = placement.yPt - fragment.flowBounds.yPt;
+      return Object.freeze([...retained, ...occurrences.map((occurrence) => (
+        resolveFloatingTablePlacement(occurrence, {
+          page: { xPt: 0, yPt: 0, widthPt: pageWidthPt, heightPt: pageHeightPt },
+          margin: {
+            xPt: marginLeftPt,
+            yPt: marginTopPt,
+            widthPt: Math.max(0, pageWidthPt - marginLeftPt - marginRightPt),
+            heightPt: Math.max(0, pageHeightPt - marginTopPt - marginBottomPt),
+          },
+          text: {
+            xPt: occurrence.anchorBounds.xPt + dxPt,
+            yPt: occurrence.anchorBounds.yPt + dyPt,
+            widthPt: occurrence.anchorBounds.widthPt,
+            heightPt: occurrence.anchorBounds.heightPt,
+          },
+        })
+      ))]);
+    },
+    retainedTablePainter: (fragment, state) => {
       const resources = state.retainedResourcePainter;
       if (!resources) throw new Error('Retained table paint requires a resource painter');
-      paintPlacedTableLayout(fragment, {
+      if (state.verticalPhys) {
+        const cssWidthPx = state.verticalPhys.cssWidthPx;
+        const tableWidthPt = fragment.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+        const physicalLeftPt = (cssWidthPx - state.y) / state.scale - tableWidthPt;
+        const physicalTopPt = state.contentX / state.scale;
+        const tableFragment = 'resolvedFloatingTables' in fragment
+          ? fragment as TableFragmentLayout
+          : null;
+        if (tableFragment?.floatingTables.length) {
+          throw new Error('Upright nested floats must resolve before retained paint');
+        }
+        if (tableFragment?.resolvedFloatingTables.length
+          && tableFragment.floatingTableCoordinateSpace !== 'upright-physical-page-points') {
+          throw new Error('Upright nested float coordinate-space mismatch');
+        }
+        const floatingTables = tableFragment?.resolvedFloatingTables ?? [];
+        const { ctx } = state;
+        ctx.save();
+        try {
+          // The page owns the +90° vertical-flow transform. An upright table
+          // re-enters the physical page frame while retaining its horizontal
+          // cell layout; only this renderer boundary performs the inverse turn.
+          ctx.rotate(-Math.PI / 2);
+          ctx.translate(-cssWidthPx, 0);
+          paintPlacedTableLayout(fragment, {
+            // TableLayout already resolves `jc`, signed `tblInd`, and
+            // `bidiVisual` into flowBounds.xPt. Apply that shared origin once at
+            // placement; the renderer must not reproduce the alignment rules.
+            xPt: physicalLeftPt + fragment.flowBounds.xPt,
+            yPt: physicalTopPt + fragment.flowBounds.yPt,
+          }, {
+            ctx,
+            scale: state.scale,
+            dpr: state.dpr,
+            defaultTextColor: state.defaultColor,
+            showTrackChanges: state.showTrackChanges,
+            resources,
+            pointToCss: { a: state.scale, b: 0, c: 0, d: state.scale, e: 0, f: 0 },
+            onTextRun: state.onTextRun,
+          }, floatingTables);
+        } finally {
+          ctx.restore();
+        }
+        state.y += tableWidthPt * state.scale;
+        return;
+      }
+      const placement = {
         xPt: state.contentX / state.scale + fragment.flowBounds.xPt,
         yPt: state.y / state.scale + fragment.flowBounds.yPt,
-      }, {
+      };
+      const floatingTables = state.retainedNestedTableResolver?.(
+        fragment,
+        placement,
+        state,
+      ) ?? [];
+      paintPlacedTableLayout(fragment, placement, {
         ctx: state.ctx,
         scale: state.scale,
         dpr: state.dpr,
@@ -2041,7 +2145,7 @@ async function renderDocumentToCanvasLeased(
         resources,
         pointToCss: state.pointToCss,
         onTextRun: state.onTextRun,
-      });
+      }, floatingTables);
       state.y += fragment.advancePt * state.scale;
     },
     kinsoku,
@@ -3222,7 +3326,7 @@ export function computePages(
       } else if (e.type === 'table') {
         const t = e as unknown as DocTable;
         if (t.tblpPr) continue; // floating table: out of flow
-        total += computeTableRowHeights(ms, t, colWPt).reduce((s, x) => s + x, 0);
+        total += computeTableRowHeights(ms, t, colWPt, j).reduce((s, x) => s + x, 0);
         prevAfter = 0;
         prevP = null;
       }
@@ -3331,7 +3435,7 @@ export function computePages(
           nxt as unknown as DocTable, uprightTableBandPt(), measureState,
         ).reduce((s, w) => s + w, 0);
       }
-      return estimateTableHeight(measureState, nxt as unknown as DocTable, colW());
+      return estimateTableHeight(measureState, nxt as unknown as DocTable, colW(), startIdx);
     }
     return 0;
   };
@@ -3967,7 +4071,7 @@ export function computePages(
       const splitFitHeight = bottomLimit === effContentH() ? fitHeightForBreak : fitHeight;
       if (splitFitHeight > remainingH && splittable) {
         const placed = splitParagraphAcrossPages(
-          measureState, para, colW, suppressBefore, colX,
+          measureState, para, i, colW, suppressBefore, colX,
           y, pageContentH, pages,
           // Overflow during the split advances to the next column first, then a
           // new page (newspaper fill). The just-filled column's bottom is folded
@@ -4004,13 +4108,14 @@ export function computePages(
         // (measured at its FINAL placement, `measureState.y`, after any relocation).
         // M-1: hand it the fit-decision measurement; it is reused only if the final
         // placement still matches (no relocation), else remeasured.
-        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {
+        const occurrenceEl = { ...el } as PaginatedElementWithLines;
+        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {
           paragraphXPt: colX(),
           availableWidthPt: colW(),
           suppressSpaceBefore: suppressBefore,
           columnIndex: colIndex,
         }, fitMeasured);
-        pushTagged(el as PaginatedBodyElement);
+        pushTagged(occurrenceEl);
         y += h;
         measureState.y += h;
       }
@@ -4080,15 +4185,63 @@ export function computePages(
         const measureFloat = () =>
           withColumnBand(() => {
             const cW = colW() * measureState.scale;
-            const layout = computeTableLayout(tbl, cW, measureState);
-            const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
-            const box = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH);
-            // RAW (pre-clamp) box: for a page/margin anchor computeFloatTableBox
-            // shifts a too-tall box UP to the container bottom, which would hide the
-            // overflow; skipVClamp keeps its absolute tblpY top so the split below
-            // can find where the table crosses the text region (sample-28 p.15).
-            const rawBox = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH, true);
-            return { box, rawBox, layout, contentWPt: cW / measureState.scale };
+            const layout = computeTableLayout(tbl, cW, measureState, i);
+            const physicalPageIndex = pages.length - 1;
+            const pageContext = measureState.layoutServices
+              ? fieldAcquisitionContextOf(measureState.layoutServices)
+                .resolveDestinationPage?.(physicalPageIndex)
+              : undefined;
+            const finalState: RenderState = {
+              ...measureState,
+              pageIndex: physicalPageIndex,
+              displayPageNumber: pageContext?.displayPageNumber ?? physicalPageIndex + 1,
+              pageNumberFormat: pageContext?.pageNumberFormat ?? measureState.pageNumberFormat,
+            };
+            const retainedRecord = retainedTableRecord(measureState, i);
+            let finalHeightPt = layout.rowHeights.reduce((sum, height) => sum + height, 0);
+            let box = computeFloatTableBox(
+              tp, finalState, finalState.y, layout.tableW, finalHeightPt, false,
+              { allowOverlap: tbl.overlap !== 'never' },
+            );
+            for (let pass = 0; pass < 4; pass += 1) {
+              const prepared = prepareFittingOuterFragment(
+                tbl, i, retainedRecord, finalState, box,
+              );
+              if (!prepared.fragment) {
+                const rawBox = computeFloatTableBox(
+                  tp, finalState, finalState.y, layout.tableW, finalHeightPt, true,
+                );
+                return {
+                  box,
+                  rawBox,
+                  layout,
+                  requiresCanonicalSplit: true as const,
+                  contentWPt: cW / finalState.scale,
+                };
+              }
+              const nextHeightPt = prepared.fragment.advancePt;
+              const nextBox = computeFloatTableBox(
+                tp, finalState, finalState.y, layout.tableW, nextHeightPt, false,
+                { allowOverlap: tbl.overlap !== 'never' },
+              );
+              const rawBox = computeFloatTableBox(
+                tp, finalState, finalState.y, layout.tableW, nextHeightPt, true,
+              );
+              if (nextHeightPt === finalHeightPt
+                && nextBox.x === box.x && nextBox.y === box.y) {
+                return {
+                  box: nextBox,
+                  rawBox,
+                  layout,
+                  prepared,
+                  requiresCanonicalSplit: false as const,
+                  contentWPt: cW / finalState.scale,
+                };
+              }
+              finalHeightPt = nextHeightPt;
+              box = nextBox;
+            }
+            throw new Error('Fitting outer table final-frame probe did not converge');
           });
         let first = measureFloat();
         const isTextAnchored = tp.vertAnchor !== 'page' && tp.vertAnchor !== 'margin';
@@ -4179,7 +4332,9 @@ export function computePages(
         const pageAnchoredOverflows =
           !isTextAnchored && first.rawBox.h > fullContentH();
 
-        if ((isTextAnchored && tableOverflowsHere) || pageAnchoredOverflows) {
+        if (first.requiresCanonicalSplit
+          || (isTextAnchored && tableOverflowsHere)
+          || pageAnchoredOverflows) {
           // ── Row-split across pages (Word ground truth, issue #674 + sample-28) ──
           // Greedy-fit the rows from the slice-1 top down to the body bottom, spilling
           // the remainder onto continuation pages. Registers one wrap FloatRect per
@@ -4206,34 +4361,31 @@ export function computePages(
             () => colTopY,
             () => effContentH(),
             () => nextColumnOrPage(i),
-            (sliceEl) => {
-              // Register the slice's wrap float + push it, both against the CURRENT
-              // column band on the page it landed on. registerTableFloat pushes onto
-              // measureState.floats so a following same-page paragraph (the anchor
-              // beside the final band) wraps around it. The box's WIDTH/HEIGHT come
-              // from the slice's stamp (the anchor-column layout, resolved once — so
-              // every slice uses one consistent geometry, matching the greedy fit);
-              // only its x/side re-resolve against the current column via
-              // withColumnBand (a continuation may land in a different newspaper
-              // column, #513). scale is 1 here (px==pt), so the stamp is used as-is.
+            (sliceTp, tableWidthPt, tableHeightPt, externalRegistry) =>
               withColumnBand(() => {
-                const sp = sliceEl as PaginatedBodyElement;
-                const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
-                const tableW = (sp.tableColWidthsPt ?? []).reduce((s, w) => s + w, 0) * measureState.scale;
-                const sliceH = (sp.tableRowHeightsPt ?? []).reduce((s, h) => s + h, 0) * measureState.scale;
                 // A still page/margin-anchored slice (slice 1 of a page-anchored
                 // split) resolves un-clamped so it lands at its raw tblpY; a
                 // text-anchored slice (every continuation, and text-anchored slice 1)
                 // is never clamped, so skipVClamp is a no-op there.
                 const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
-                const sliceBox = computeFloatTableBox(
-                  sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
+                const stateAgainstExternalRegistry: RenderState = {
+                  ...measureState,
+                  floats: [...externalRegistry.floats],
+                  floatParaSeq: externalRegistry.nextParagraphId,
+                };
+                return computeFloatTableBox(
+                  sliceTp,
+                  stateAgainstExternalRegistry,
+                  measureState.y,
+                  tableWidthPt * measureState.scale,
+                  tableHeightPt * measureState.scale,
+                  skipVClamp,
+                  { allowOverlap: tbl.overlap !== 'never' },
                 );
-                const side = floatTableWrapSide(sliceBox, measureState);
-                registerTableFloat(sliceBox, sliceTp, measureState, side, tbl.overlap !== 'never');
-              });
-              pushTagged(sliceEl);
-            },
+              }),
+            (sliceEl) => pushTagged(sliceEl),
+            () => pages.length - 1,
+            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },
           );
           y = endY;
           measureState.y = bodyTopPt() + endY;
@@ -4251,18 +4403,40 @@ export function computePages(
         // Register the wrap float against the column band so the box x / wrap side
         // match the column the table sits in. (page/margin: the box may be clamped
         // up by computeFloatTableBox; the float band follows the clamped box.)
+        // Finalize selected nested floats against the pre-parent registry.
+        // stampTableLayout commits that exact child delta before the parent
+        // exclusion below receives the next paragraph id.
+        if (!first.prepared) {
+          throw new Error('Fitting outer table acceptance requires a whole prepared fragment');
+        }
+        const acceptedFragment = first.prepared.fragment;
+        if (!acceptedFragment) {
+          throw new Error('Fitting outer table acceptance requires a whole prepared fragment');
+        }
+        const acceptedPrepared = {
+          ...first.prepared,
+          fragment: acceptedFragment,
+          box: first.box,
+        };
+        const occurrenceEl = { ...el } as PaginatedBodyElement;
         withColumnBand(() => {
+          stampTableLayout(
+            occurrenceEl,
+            first.layout.colWidths,
+            first.layout.rowHeights,
+            first.contentWPt,
+            i,
+            retainedTableRecord(measureState, i),
+            measureState,
+            undefined,
+            acceptedPrepared,
+          );
           const side = floatTableWrapSide(first.box, measureState);
-          registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
+          registerTableFloat(
+            first.box, tp, measureState, side, tbl.overlap !== 'never', true,
+          );
         });
-        // B2 stage 1b — stamp the whole-table layout so the paint pass reuses it.
-        stampTableLayout(
-          el as PaginatedBodyElement,
-          first.layout.colWidths,
-          first.layout.rowHeights,
-          first.contentWPt,
-        );
-        pushTagged(el as PaginatedBodyElement);
+        pushTagged(occurrenceEl);
         continue;
       }
 
@@ -4312,11 +4486,24 @@ export function computePages(
       if (verticalUpright()) {
         const bandPt = uprightTableBandPt();
         const { colWidthsPt, rowHeightsPt } =
-          computeTablePtLayout(measureState, tbl, bandPt);
+          computeTablePtLayout(measureState, tbl, bandPt, i);
         const h = colWidthsPt.reduce((s, w) => s + w, 0);
         const tableEl = { ...tbl, type: 'table' } as PaginatedBodyElement;
-        stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);
         if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
+        withColumnBand(() => stampTableLayout(
+          tableEl,
+          colWidthsPt,
+          rowHeightsPt,
+          bandPt,
+          i,
+          retainedTableRecord(measureState, i),
+          measureState,
+          {
+            ...measureState,
+            pageIndex: pages.length - 1,
+            displayPageNumber: pages.length,
+          },
+        ));
         pushTagged(tableEl);
         y += h;
         measureState.y += h;
@@ -4333,7 +4520,7 @@ export function computePages(
         colWidthsPt: tblColWidthsPt,
         rowContentHeightsPt: measuredRowContentHs,
         rowHeightsPt: measuredRowHs,
-      } = computeTablePtLayout(measureState, tbl, tblContentWPt);
+      } = computeTablePtLayout(measureState, tbl, tblContentWPt, i);
       const tblWidthPt = tblColWidthsPt.reduce((sum, width) => sum + width, 0);
 
       // §17.4.57: a floating table reserves a page-scoped exclusion band for
@@ -4395,6 +4582,7 @@ export function computePages(
         tblColWidthsPt,
         tableContentH,
         measureState,
+        i,
         true,
       );
       const pageTable = splitRows?.table ?? tbl;
@@ -4447,6 +4635,7 @@ export function computePages(
               meta.heightsPt,
               tblContentWPt,
               measureState,
+              i,
               {
                 columnIndex: sliceEl.colIndex ?? 0,
                 xPt: columns[sliceEl.colIndex ?? 0]?.xPt ?? colX(),
@@ -4455,9 +4644,11 @@ export function computePages(
                 continuesOnNextPage: meta.continuesOnNextPage,
                 repeatedHeaderRowCount: meta.repeatedHeaderRowCount,
                 sourceRowIndexOf: meta.sourceRowIndexOf,
+                fragment: meta.fragment,
               },
             ),
           () => currentSectionFrame.textDirection,
+          i,
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
@@ -4478,6 +4669,7 @@ export function computePages(
           rowHs,
           tblContentWPt,
           measureState,
+          i,
           {
             columnIndex: colIndex,
             xPt: colX(),
@@ -4713,6 +4905,12 @@ function paginateWithHeaderFooterReserve(
       object,
       ReadonlyMap<number, PageFieldAcquisitionContext>
     >();
+    let tablePageFieldOccurrences = new Map<
+      string,
+      WeakMap<object, ReadonlyMap<number, PageFieldAcquisitionContext>>
+    >();
+    let destinationPageContexts: readonly PageFieldAcquisitionContext[] = [];
+    let tableOccurrencePageContexts = new Map<string, PageFieldAcquisitionContext>();
 
     const sourceParagraphAt = (path: readonly number[]): DocParagraph | undefined => {
       let element = doc.body[path[0]!] as BodyElement | CellElement | undefined;
@@ -4732,15 +4930,32 @@ function paginateWithHeaderFooterReserve(
       fragment: FlowFragment,
       context: PageFieldAcquisitionContext,
       target: WeakMap<object, Map<number, PageFieldAcquisitionContext>>,
+      tableTarget: Map<string, WeakMap<object, Map<number, PageFieldAcquisitionContext>>>,
+      tablePageTarget: Map<string, PageFieldAcquisitionContext>,
+      tableOccurrenceId?: string,
     ): void => {
       if (fragment.kind === 'table') {
-        if ('flowBounds' in fragment) {
-          fragment.rows.forEach((row) => row.cells.forEach((cell) =>
-            cell.blocks.forEach((block) => retainPageFieldOccurrences(block.layout, context, target))));
-        } else {
-          fragment.rows.forEach((row) => row.cells.forEach((cell) =>
-            cell.blocks.forEach((block) => retainPageFieldOccurrences(block, context, target))));
-        }
+        fragment.rows.forEach((row) => {
+            const occurrenceId = 'occurrenceId' in row && typeof row.occurrenceId === 'string'
+              ? row.occurrenceId
+              : tableOccurrenceId;
+            if (occurrenceId) {
+              const previous = tablePageTarget.get(occurrenceId);
+              if (previous && previous.pageIndex !== context.pageIndex) {
+                throw new Error('A generated table row occurrence cannot belong to multiple destination pages');
+              }
+              tablePageTarget.set(occurrenceId, context);
+            }
+            row.cells.forEach((cell) => cell.blocks.forEach((block) =>
+              retainPageFieldOccurrences(
+                block.layout,
+                context,
+                target,
+                tableTarget,
+                tablePageTarget,
+                occurrenceId,
+              )));
+        });
         return;
       }
       const paragraph = sourceParagraphAt(fragment.source.path);
@@ -4751,13 +4966,51 @@ function paginateWithHeaderFooterReserve(
           || placement.dependency !== 'page'
           || placement.sourceRunIndex === undefined
         ) return;
-        retainPageFieldOccurrence(
-          paragraph,
-          placement.sourceRunIndex,
-          context,
-          target,
-        );
+        if (tableOccurrenceId) {
+          retainTablePageFieldOccurrence(
+            tableOccurrenceId,
+            paragraph,
+            placement.sourceRunIndex,
+            context,
+            tableTarget,
+          );
+        } else {
+          retainPageFieldOccurrence(
+            paragraph,
+            placement.sourceRunIndex,
+            context,
+            target,
+          );
+        }
       }));
+    };
+
+    const retainTablePageFieldOccurrence = (
+      occurrenceId: string,
+      paragraph: object,
+      sourceRunIndex: number,
+      context: PageFieldAcquisitionContext,
+      target: Map<string, WeakMap<object, Map<number, PageFieldAcquisitionContext>>>,
+    ): void => {
+      let byParagraph = target.get(occurrenceId);
+      if (!byParagraph) {
+        byParagraph = new WeakMap();
+        target.set(occurrenceId, byParagraph);
+      }
+      let byRun = byParagraph.get(paragraph);
+      if (!byRun) {
+        byRun = new Map();
+        byParagraph.set(paragraph, byRun);
+      }
+      const previous = byRun.get(sourceRunIndex);
+      if (previous && (
+        previous.pageIndex !== context.pageIndex
+        || previous.displayPageNumber !== context.displayPageNumber
+        || previous.pageNumberFormat !== context.pageNumberFormat
+      )) {
+        throw new Error('A generated table PAGE occurrence cannot belong to multiple destination pages');
+      }
+      byRun.set(sourceRunIndex, context);
     };
 
     const retainPageFieldOccurrence = (
@@ -4790,6 +5043,13 @@ function paginateWithHeaderFooterReserve(
               totalPages: totalPagesHint,
               resolvePageField: (paragraph, sourceRunIndex) =>
                 iterationOccurrences.get(paragraph)?.get(sourceRunIndex),
+              resolveTablePageField: (occurrenceId, paragraph, sourceRunIndex) =>
+                tablePageFieldOccurrences.get(occurrenceId)
+                  ?.get(paragraph)?.get(sourceRunIndex),
+              resolveDestinationPage: (physicalPageIndex) =>
+                destinationPageContexts[physicalPageIndex],
+              resolveTableOccurrencePage: (occurrenceId) =>
+                tableOccurrencePageContexts.get(occurrenceId),
             })
           : layoutServices
         : undefined;
@@ -4813,6 +5073,12 @@ function paginateWithHeaderFooterReserve(
       }
       const pageNumbers = computePageNumbering(pages);
       const nextOccurrences = new WeakMap<object, Map<number, PageFieldAcquisitionContext>>();
+      const nextTableOccurrences = new Map<
+        string,
+        WeakMap<object, Map<number, PageFieldAcquisitionContext>>
+      >();
+      const nextDestinationPageContexts: PageFieldAcquisitionContext[] = [];
+      const nextTableOccurrencePages = new Map<string, PageFieldAcquisitionContext>();
       pages.forEach((elements, pageIndex) => {
         const number = pageNumbers[pageIndex]
           ?? { displayNumber: pageIndex + 1, format: 'decimal' as NumberFormat };
@@ -4821,9 +5087,16 @@ function paginateWithHeaderFooterReserve(
           displayPageNumber: number.displayNumber,
           pageNumberFormat: number.format,
         });
+        nextDestinationPageContexts[pageIndex] = pageContext;
         elements.forEach((element) => {
           const placed = bodyFlowFragments.get(element as object);
-          if (placed) retainPageFieldOccurrences(placed.fragment, pageContext, nextOccurrences);
+          if (placed) retainPageFieldOccurrences(
+            placed.fragment,
+            pageContext,
+            nextOccurrences,
+            nextTableOccurrences,
+            nextTableOccurrencePages,
+          );
         });
       });
       // Footnote reserve ownership follows the page containing its body reference
@@ -4866,6 +5139,9 @@ function paginateWithHeaderFooterReserve(
         );
       });
       pageFieldOccurrences = nextOccurrences;
+      tablePageFieldOccurrences = nextTableOccurrences;
+      destinationPageContexts = Object.freeze(nextDestinationPageContexts);
+      tableOccurrencePageContexts = nextTableOccurrencePages;
       return {
         pages,
         pageCount: pages.length,
@@ -5396,11 +5672,72 @@ function buildMeasureState(
           spacing: Object.freeze({ ...fragment.spacing, beforePt: paragraph.spaceBefore }),
         });
       },
+      registerFloatingTable: (state, request) => {
+        const scale = state.scale;
+        const usesTextX = !request.positioning.horzSpecified
+          || (request.positioning.horzAnchor !== 'page'
+            && request.positioning.horzAnchor !== 'margin');
+        const usesTextY = request.positioning.vertAnchor !== 'page'
+          && request.positioning.vertAnchor !== 'margin';
+        // Page/margin coordinates are not final until the containing table is
+        // paginated. Registering them in this cell-local acquisition state would
+        // reserve a different rectangle from the later page-local paint box.
+        if (!usesTextX || !usesTextY) return null;
+        const pageHeightPt = state.pageH / scale;
+        const textFrame = {
+          xPt: state.contentX / scale,
+          yPt: state.y / scale,
+          widthPt: state.contentW / scale,
+          heightPt: request.child.advancePt,
+        };
+        const box = resolveFloatingTableBoxPt(
+          request.positioning,
+          {
+            page: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: state.pageWidth,
+              heightPt: pageHeightPt,
+            },
+            margin: {
+              xPt: state.marginLeft,
+              yPt: state.marginTop,
+              widthPt: Math.max(0, state.pageWidth - state.marginLeft - state.marginRight),
+              heightPt: Math.max(0, pageHeightPt - state.marginTop - state.marginBottom),
+            },
+            text: textFrame,
+          },
+          request.child.columnWidthsPt.reduce((sum, width) => sum + width, 0),
+          request.child.advancePt,
+        );
+        const registered = pushFloatRect(state, {
+          x: box.x * scale,
+          y: box.y * scale,
+          w: box.w * scale,
+          h: box.h * scale,
+          dl: request.positioning.leftFromTextPt * scale,
+          dr: request.positioning.rightFromTextPt * scale,
+          dt: request.positioning.topFromTextPt * scale,
+          db: request.positioning.bottomFromTextPt * scale,
+          kind: 'table',
+          mode: 'square',
+          side: 'bothSides',
+          imageKey: '',
+          drawn: true,
+          paraId: state.floatParaSeq++,
+          avoidOverlap: true,
+          allowOverlap: request.overlap !== 'never',
+        });
+        return Object.freeze({
+          xPt: registered.imageX / scale - textFrame.xPt,
+          yPt: registered.imageY / scale - textFrame.yPt,
+        });
+      },
       advanceState: (state, advancePt) => {
         state.y += advancePt;
       },
     },
-    retainedTablesBySourceIndex: new Map<number, TableLayout>(),
+    retainedTablesBySourceIndex: new Map<number, RetainedTableRecord>(),
     currentDateMs: layoutOptions?.currentDateMs,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
@@ -5643,15 +5980,11 @@ function placeParagraphFragment(
   });
 }
 
-// ===== Table layout fragments (PR 6) =====
+// ===== Retained table placement =====
 //
-// A body table emits a {@link TableFragment} at each of its placement points (the
-// whole-table push, or one slice per page from {@link splitTableAcrossPages}), attached
-// to the emitted table element in the SAME `bodyFlowFragments` side table body
-// paragraphs use — so {@link layoutDocument} collects paragraph AND table fragments from
-// one map, and the parsed `DocTable` is never mutated. Production paint is unchanged in
-// PR 6 Task 15 (fragments are produced, not yet consumed); Task 16 routes table paint
-// through them.
+// Each emitted body-table envelope points to immutable TableLayout geometry in the
+// same side table used by body paragraphs. Parsed DocTable objects remain semantic
+// sources; pagination and paint share the retained geometry without runtime stamps.
 
 /** Measure a table-cell paragraph at scale 1 in the cell story context, no page wrap
  *  oracle (a cell is isolated from page floats, §17.4.57). Mirrors the scale-1
@@ -5687,21 +6020,14 @@ function measureCellParagraphScale1(
   return { measured, context: paragraphContext };
 }
 
-/** Transitional A5 paint-band authority. Retained table geometry stores its
- * actual width separately; this map preserves the containing flow band. */
-const tableFragmentBandPt = new WeakMap<object, number>();
-
-/** Build and attach the {@link TableFragment} for one placed table (whole table or one
- *  page slice) to the emitted element's side-table entry. `table` is the emitted clone
- *  whose rows should be fragmented; its rows retain parsed identity unless pagination
- *  sliced their content. Never mutates the parsed model. */
 function attachTableFragment(
   el: PaginatedBodyElement,
   table: DocTable,
-  colWidthsPt: number[],
-  rowHeightsPt: number[],
+  _colWidthsPt: number[],
+  _rowHeightsPt: number[],
   contentWPt: number,
   measureState: RenderState,
+  sourceIndex: number,
   placement: {
     columnIndex: number;
     xPt: number;
@@ -5710,232 +6036,318 @@ function attachTableFragment(
     continuesOnNextPage: boolean;
     repeatedHeaderRowCount: number;
     sourceRowIndexOf?: (fragmentRowIndex: number) => number;
+    fragment?: TableFragmentLayout;
   },
 ): void {
-  const sourceIndex = bodySourceIndexFor(table);
-  if (sourceIndex === undefined) {
-    throw new Error('Body table source identity must be prepared before fragment acquisition');
-  }
-  const retainedLayout = placement.sourceRowIndexOf === undefined
+  const retainedRecord = measureState.retainedTablesBySourceIndex?.get(sourceIndex);
+  const retainedAcquisition = placement.sourceRowIndexOf === undefined
     && !placement.continuesFromPreviousPage
     && !placement.continuesOnNextPage
-    ? measureState.retainedTablesBySourceIndex?.get(sourceIndex)
+    ? retainedRecord?.acquisition
     : undefined;
-  if (retainedLayout && retainedLayout.rows.length === table.rows.length) {
-    const layout = retainedLayout;
-    bodyFlowFragments.set(el, Object.freeze({
-      fragment: layout,
-      columnIndex: placement.columnIndex,
-      xPt: placement.xPt,
-      yPt: placement.yPt,
-      // A placed fragment owns its available flow band; the table's actual
-      // width remains in layout.flowBounds. This is the same invariant body
-      // paragraphs use and lets the paint guard compare one canonical value.
-      widthPt: contentWPt,
-      heightPt: layout.advancePt,
-    }));
-    bodyFlowFragments.sourceIndices.set(el, sourceIndex);
-    tableFragmentBandPt.set(el as object, contentWPt);
-    return;
+  const layout = placement.fragment ?? retainedAcquisition?.layout;
+  if (!layout || (!placement.fragment && layout.rows.length !== table.rows.length)) {
+    throw new Error('Body table placement requires retained TableLayout geometry');
   }
-  const fragment = buildTableFragment({
-    table,
-    columnWidthsPt: colWidthsPt,
-    rowHeightsPt,
-    continuesFromPreviousPage: placement.continuesFromPreviousPage,
-    continuesOnNextPage: placement.continuesOnNextPage,
-    repeatedHeaderRowCount: placement.repeatedHeaderRowCount,
-    sourceRowIndexOf: placement.sourceRowIndexOf,
-    buildCellBlocks: (cell, widthPt, sourceRowIndex, cellIndex) => acquireTableCellBlocks({
-      cell,
-      table,
-      cellTotalWidthPt: widthPt,
-      outerState: measureState,
-      sourcePath: [sourceIndex, sourceRowIndex, cellIndex],
-    }, {
-      resolveContentWidthPt: (targetCell, targetTable, totalWidthPt) => {
-        const margins = effCellMargins(targetCell, targetTable);
-        return Math.max(0, totalWidthPt - margins.left - margins.right);
-      },
-      createCellState: (outerState, contentWidthPt, targetCell) => ({
-        ...withTableCellStory(outerState),
-        contentX: 0,
-        contentW: contentWidthPt,
-        y: 0,
-        containerShading: targetCell.background ?? outerState.containerShading,
-        floats: [],
-        floatParaSeq: 0,
-        pageAnchorPrescanned: new Set<DocParagraph>(),
-      }),
-      acquireParagraph: (
-        cellState,
-        paragraph,
-        contentWidthPt,
-        sourcePath,
-        paragraphBorderEdges,
-      ) => {
-        registerAnchorFloats(paragraph, cellState, cellState.y);
-        const acquiredParagraph = measureCellParagraphScale1(
-          cellState,
-          paragraph,
-          contentWidthPt,
-        );
-        const { measured } = acquiredParagraph;
-        const trailingExtentPt = Math.max(
-          measured.requestedSpaceAfterPt,
-          bottomBorderExtentPt(paragraph.borders),
-        );
-        const fullLineEnd = measured.markOnly ? 0 : measured.lines.length;
-        const lineSlice = (paragraph as unknown as {
-          lineSlice?: { start: number; end: number };
-        }).lineSlice;
-        const lineStart = lineSlice?.start ?? 0;
-        const lineEnd = lineSlice ? Math.min(lineSlice.end, fullLineEnd) : fullLineEnd;
-        const fragment = buildParagraphFragment(
-          paragraph,
-          measured,
-          lineStart,
-          lineEnd,
-          lineStart === 0,
-          lineEnd >= fullLineEnd,
-          trailingExtentPt,
-          cellState,
-          { story: 'body', storyInstance: 'body', path: [...sourcePath] },
-          'table-cell',
-          paragraphBorderEdges,
-          acquiredParagraph.context,
-        );
-        if (lineStart !== 0 || paragraph.spaceBefore === 0) return fragment;
-        return Object.freeze({
-          ...fragment,
-          flowBounds: Object.freeze({
-            ...fragment.flowBounds,
-            heightPt: fragment.flowBounds.heightPt + paragraph.spaceBefore,
-          }),
-          advancePt: fragment.advancePt + paragraph.spaceBefore,
-          spacing: Object.freeze({
-            ...fragment.spacing,
-            beforePt: paragraph.spaceBefore,
-          }),
-        });
-      },
-      acquireNestedTable: (
-        cellState,
-        inner,
-        contentWidthPt,
-        sourcePath,
-        continuation,
-        acquireNestedCellBlocks,
-      ) => {
-        const columnWidthsPt = resolveColumnWidths(inner, contentWidthPt, cellState);
-        // A nested table normally belongs to the A4 retained tree. The A5
-        // transitional row splitter is the exception: it replaces one nested
-        // table with page-local row slices and records which sides continue.
-        // Preserve that page-slice view until A5 can express continuations on
-        // TableLayout itself; treating the slice as an ordinary table here
-        // discards the continuation provenance before paint can observe it.
-        if (continuation.fromPrevious || continuation.onNext) {
-          const retainedSlice = acquireRetainedTableLayout(
-            inner,
-            columnWidthsPt,
-            contentWidthPt,
-            cellState,
-            sourcePath,
-            measureState.retainedTableAcquisition as RetainedTableAcquisitionDependencies<RenderState>,
-          );
-          return buildTableFragment({
-            table: inner,
-            columnWidthsPt,
-            rowHeightsPt: retainedSlice.rows.map((row) => row.advancePt),
-            continuesFromPreviousPage: continuation.fromPrevious,
-            continuesOnNextPage: continuation.onNext,
-            repeatedHeaderRowCount: 0,
-            buildCellBlocks: (nestedCell, nestedWidthPt, sourceRowIndex, cellIndex) =>
-              acquireNestedCellBlocks(
-                nestedCell,
-                inner,
-                nestedWidthPt,
-                cellState,
-                [...sourcePath, sourceRowIndex, cellIndex],
-              ),
-          });
-        }
-        return acquireRetainedTableLayout(
-          inner,
-          columnWidthsPt,
-          contentWidthPt,
-          cellState,
-          sourcePath,
-          measureState.retainedTableAcquisition as RetainedTableAcquisitionDependencies<RenderState>,
-        );
-      },
-      advanceState: (cellState, advancePt) => {
-        cellState.y += advancePt;
-      },
-    }),
-  });
-  bodyFlowFragments.set(
-    el,
-    Object.freeze({
-      fragment,
-      columnIndex: placement.columnIndex,
-      xPt: placement.xPt,
-      yPt: placement.yPt,
-      widthPt: contentWPt,
-      heightPt: tableFragmentHeightPt(fragment),
-    }),
-  );
+  bodyFlowFragments.set(el, Object.freeze({
+    fragment: layout,
+    columnIndex: placement.columnIndex,
+    xPt: placement.xPt,
+    yPt: placement.yPt,
+    widthPt: contentWPt,
+    heightPt: layout.advancePt,
+  }));
   bodyFlowFragments.sourceIndices.set(el, sourceIndex);
-  tableFragmentBandPt.set(el as object, contentWPt);
 }
 
-/** A table (or any table nested in its cells) stays on the LEGACY paint path when it
- *  needs placement geometry or an out-of-flow path the fragment paint does not cover:
- *   - a negative leading `tblInd` (§17.4.50) on a left-justified table widens the
- *     legacy layout budget from the column band to the page width;
- *   - a nested floating table (§17.4.57 `<w:tblpPr>`) is drawn out of flow;
- *  Supported center/bottom cells and sliced cell paragraphs are fragment-paintable:
- *  their piece-local box height and `[lineStart, lineEnd)` ranges are authoritative,
- *  so paint neither remeasures nor expands them. Recursion keeps unsupported nested
- *  placement classes on the legacy path. */
-function tableRequiresLegacyPaint(table: DocTable): boolean {
-  if (table.tblInd != null && table.tblInd < 0 && table.jc === 'left') return true;
-  for (const row of table.rows) {
-    for (const cell of row.cells) {
-      for (const ce of cell.content) {
-        if (ce.type === 'table') {
-          const nested = ce as unknown as DocTable;
-          if (nested.tblpPr != null || tableRequiresLegacyPaint(nested)) return true;
+function commitFloatRegistryDelta(
+  state: RenderState,
+  delta: FloatRegistryDeltaPt,
+  coordinateSpace: 'logical-page-points',
+  flowDomainId: string,
+): void {
+      validateFloatingTableRegistryDelta(delta, {
+        coordinateSpace,
+        flowDomainId,
+        nextParagraphId: state.floatParaSeq,
+        occurrenceIds: state.floats.map((float) => float.imageKey).filter(Boolean),
+      });
+      const scale = state.scale;
+      state.floats.push(...delta.entries.map((entry): FloatRect => ({
+        kind: entry.kind,
+        mode: 'square',
+        imageKey: entry.occurrenceId,
+        imageX: entry.bounds.xPt * scale,
+        imageY: entry.bounds.yPt * scale,
+        imageW: entry.bounds.widthPt * scale,
+        imageH: entry.bounds.heightPt * scale,
+        xLeft: entry.exclusionBounds.xPt * scale,
+        xRight: (entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt) * scale,
+        yTop: entry.exclusionBounds.yPt * scale,
+        yBottom: (entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt) * scale,
+        side: 'bothSides',
+        distLeft: (entry.bounds.xPt - entry.exclusionBounds.xPt) * scale,
+        distRight: (
+          entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt
+          - entry.bounds.xPt - entry.bounds.widthPt
+        ) * scale,
+        distTop: (entry.bounds.yPt - entry.exclusionBounds.yPt) * scale,
+        distBottom: (
+          entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt
+          - entry.bounds.yPt - entry.bounds.heightPt
+        ) * scale,
+        paraId: entry.paragraphId,
+        drawn: true,
+      })));
+  state.floatParaSeq = delta.nextParagraphId;
+}
+
+function retainedTableRecord(state: RenderState, sourceIndex: number): RetainedTableRecord {
+  const record = state.retainedTablesBySourceIndex?.get(sourceIndex);
+  if (!record) throw new Error('Table placement requires retained table acquisition');
+  return record;
+}
+
+function prepareFittingOuterFragment(
+  table: DocTable,
+  sourceIndex: number,
+  retained: RetainedTableRecord,
+  finalState: RenderState,
+  outerBox: FloatTableBox,
+): Readonly<{
+      fragment?: TableFragmentLayout;
+      floatingTableRegistryDelta?: FloatRegistryDeltaPt;
+      physicalPageIndex: number;
+      displayPageNumber: number;
+  occurrenceId: string;
+}> {
+      const services = finalState.layoutServices;
+      if (!services) throw new Error('Fitting outer table preparation requires layout services');
+      const pageHeightPt = finalState.pageH / finalState.scale;
+      const physicalPageIndex = finalState.pageIndex;
+      const displayPageNumber = finalState.displayPageNumber ?? physicalPageIndex + 1;
+      const occurrenceId = `${retained.acquisition.input.id}:fitting-outer:${physicalPageIndex}`;
+      const anchoredToPhysicalPage = table.tblpPr?.vertAnchor === 'page';
+      const containerBottomPt = anchoredToPhysicalPage
+        ? pageHeightPt
+        : pageHeightPt - finalState.marginBottom;
+      const outerTopPt = outerBox.y / finalState.scale;
+      const availableHeightPt = Math.max(0, containerBottomPt - outerTopPt);
+      const freshPageHeightPt = anchoredToPhysicalPage
+        ? pageHeightPt
+        : Math.max(0, pageHeightPt - finalState.marginTop - finalState.marginBottom);
+      const result = takeTableFragment(
+        retained.acquisition,
+        startTableFragmentCursor(),
+        {
+          availableHeightPt,
+          freshPageHeightPt,
+          placement: {
+            container: {
+              id: `logical-page:${physicalPageIndex}:fitting-outer-probe`,
+              kind: 'body',
+              bounds: {
+                xPt: 0,
+                yPt: 0,
+                widthPt: outerBox.w,
+                heightPt: availableHeightPt,
+              },
+            },
+            cursor: { xPt: 0, yPt: 0 },
+            availableBounds: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: outerBox.w,
+              heightPt: availableHeightPt,
+            },
+          },
+          services,
+          compatibility: 'word',
+          oversizedRowPolicy: 'atomic',
+          page: {
+            physicalPageIndex,
+            displayPageNumber,
+            occurrenceId,
+          },
+          floatingTableFrames: {
+            page: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: finalState.pageWidth,
+              heightPt: pageHeightPt,
+            },
+            margin: {
+              xPt: finalState.marginLeft,
+              yPt: finalState.marginTop,
+              widthPt: Math.max(
+                0,
+                finalState.pageWidth - finalState.marginLeft - finalState.marginRight,
+              ),
+              heightPt: Math.max(
+                0,
+                pageHeightPt - finalState.marginTop - finalState.marginBottom,
+              ),
+            },
+            column: {
+              xPt: finalState.contentX / finalState.scale,
+              yPt: finalState.marginTop,
+              widthPt: finalState.contentW / finalState.scale,
+              heightPt: Math.max(
+                0,
+                pageHeightPt - finalState.marginTop - finalState.marginBottom,
+              ),
+            },
+          },
+          floatingTableRegistry: {
+            coordinateSpace: 'logical-page-points',
+            flowDomainId: `logical-page:${physicalPageIndex}`,
+            entries: Object.freeze(finalState.floats.map((float, index) => Object.freeze({
+              kind: float.kind,
+              occurrenceId: float.imageKey || `page-float:${index}`,
+              paragraphId: float.paraId,
+              bounds: Object.freeze({
+                xPt: float.imageX / finalState.scale,
+                yPt: float.imageY / finalState.scale,
+                widthPt: float.imageW / finalState.scale,
+                heightPt: float.imageH / finalState.scale,
+              }),
+              exclusionBounds: Object.freeze({
+                xPt: float.xLeft / finalState.scale,
+                yPt: float.yTop / finalState.scale,
+                widthPt: (float.xRight - float.xLeft) / finalState.scale,
+                heightPt: (float.yBottom - float.yTop) / finalState.scale,
+              }),
+            }))),
+            nextParagraphId: finalState.floatParaSeq,
+          },
+          finalPlacementTranslationPt: {
+            xPt: outerBox.x / finalState.scale,
+            yPt: outerBox.y / finalState.scale,
+          },
+          reacquirePageDependentBlock: (request) => reacquirePageBlock(
+              table,
+              sourceIndex,
+              retained.acquisition,
+              finalState,
+              services,
+              request,
+            ),
+        },
+      );
+      if (result.nextCursor) {
+        return Object.freeze({
+          physicalPageIndex,
+          displayPageNumber,
+          occurrenceId,
+        });
+      }
+      if (!result.fragment) {
+        throw new Error('Fitting outer table pure preparation must produce a fragment');
+      }
+      return Object.freeze({
+        fragment: result.fragment,
+        ...(result.floatingTableRegistryDelta ? {
+          floatingTableRegistryDelta: result.floatingTableRegistryDelta,
+        } : {}),
+        physicalPageIndex,
+        displayPageNumber,
+        occurrenceId,
+      });
+}
+
+function reacquirePageBlock(
+  table: DocTable,
+  sourceIndex: number,
+  retained: RetainedTableAcquisition,
+  state: RenderState,
+  services: LayoutServices,
+  request: PageDependentTableBlockRequest,
+): ParagraphLayout | TableLayout {
+      if (request.acquired.kind !== 'paragraph') return request.acquired;
+      let nestedTable = table;
+      let offset = 1;
+      let source: Readonly<{
+        paragraph: DocParagraph;
+        cell: DocTableCell;
+        previous: DocParagraph | null;
+        next: DocParagraph | null;
+      }> | null = null;
+      if (request.acquired.source.path[0] === sourceIndex) {
+        while (offset + 2 < request.acquired.source.path.length) {
+          const rowIndex = request.acquired.source.path[offset++]!;
+          const cellIndex = request.acquired.source.path[offset++]!;
+          const blockIndex = request.acquired.source.path[offset++]!;
+          const cell = nestedTable.rows[rowIndex]?.cells[cellIndex];
+          const element = cell?.content[blockIndex];
+          if (!cell || !element) break;
+          if (element.type === 'paragraph') {
+            if (offset === request.acquired.source.path.length) {
+              const previousElement = cell.content[blockIndex - 1];
+              const nextElement = cell.content[blockIndex + 1];
+              source = {
+                paragraph: element,
+                cell,
+                previous: previousElement?.type === 'paragraph' ? previousElement : null,
+                next: nextElement?.type === 'paragraph' ? nextElement : null,
+              };
+            }
+            break;
+          }
+          nestedTable = element;
         }
       }
-    }
-  }
-  return false;
-}
-
-/** PR 6 — a block table paints from its {@link TableFragment} when the fragment is
- *  present, the table is in flow, no unsupported nested placement class requires the
- *  legacy path, the story is horizontal, and this paint's content band matches the
- *  band the fragment was resolved at. Center/bottom alignment and sliced cell ranges
- *  are owned by the fragment and therefore do not exclude the whole table. */
-function isFragmentPaintableTable(
-  table: DocTable,
-  placed: PlacedFragment | undefined,
-  state: RenderState,
-): placed is PlacedFragment {
-  if (
-    placed === undefined ||
-    placed.fragment.kind !== 'table' ||
-    table.tblpPr != null ||
-    state.verticalCJK ||
-    tableRequiresLegacyPaint(table)
-  ) {
-    return false;
-  }
-  const bandPt = tableFragmentBandPt.get(table as object);
-  if (bandPt === undefined) return false;
-  const paintBandPt = state.contentW / state.scale;
-  return Math.abs(bandPt - paintBandPt) <= 1e-6 * Math.max(1, Math.abs(paintBandPt));
+      const dependencies = state.retainedTableAcquisition;
+      if (!source || !dependencies) return request.acquired;
+      const fieldContext = fieldAcquisitionContextOf(services);
+      const destinationPage = fieldContext.resolveTableOccurrencePage?.(
+        request.page.occurrenceId,
+      ) ?? fieldContext.resolveDestinationPage?.(request.page.physicalPageIndex);
+      const occurrenceServices = createFieldAcquisitionServicesView(services, {
+        totalPages: fieldContext.totalPages,
+        resolvePageField: (paragraph, sourceRunIndex) =>
+          fieldContext.resolveTablePageField?.(
+            request.page.occurrenceId,
+            paragraph,
+            sourceRunIndex,
+          ),
+      });
+      const occurrenceState: RenderState = {
+        ...state,
+        pageIndex: destinationPage?.pageIndex ?? request.page.physicalPageIndex,
+        displayPageNumber: destinationPage?.displayPageNumber
+          ?? request.page.displayPageNumber,
+        pageNumberFormat: destinationPage?.pageNumberFormat ?? state.pageNumberFormat,
+        layoutServices: occurrenceServices,
+      };
+      const contentWidthPt = request.acquired.flowBounds.widthPt;
+      const cellState = dependencies.createCellState(
+        occurrenceState,
+        contentWidthPt,
+        source.cell,
+      );
+      if (request.floatingTableExclusions?.length) {
+        cellState.floats = request.floatingTableExclusions.map(
+          (bounds, index): FloatRect => ({
+            kind: 'table', mode: 'square',
+            imageKey: `${request.page.occurrenceId}:nested-table:${index}`,
+            imageX: bounds.xPt, imageY: bounds.yPt,
+            imageW: bounds.widthPt, imageH: bounds.heightPt,
+            xLeft: bounds.xPt, xRight: bounds.xPt + bounds.widthPt,
+            yTop: bounds.yPt, yBottom: bounds.yPt + bounds.heightPt,
+            side: 'bothSides',
+            distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
+            paraId: index, drawn: true,
+          }),
+        );
+      }
+      return dependencies.acquireParagraph(
+        cellState,
+        source.paragraph,
+        contentWidthPt,
+        request.acquired.source.path,
+        retained.input.flowDomainId,
+        resolveParagraphBorderEdges(source.previous, source.paragraph, source.next),
+      );
 }
 
 /** Measure a NON-split body paragraph at its final placement and attach its placed
@@ -5954,6 +6366,7 @@ function attachBodyParagraphFragment(
   el: PaginatedElementWithLines,
   source: DocParagraph,
   measureState: RenderState,
+  sourceIndex: number,
   placement: {
     paragraphXPt: number;
     availableWidthPt: number;
@@ -5962,10 +6375,6 @@ function attachBodyParagraphFragment(
   },
   fitMeasured?: MeasuredParagraph,
 ): void {
-  const sourceIndex = bodySourceIndexFor(source);
-  if (sourceIndex === undefined) {
-    throw new Error('Body paragraph source identity must be prepared before fragment acquisition');
-  }
   const paragraphBorderEdges = bodyParagraphBorderEdgesFor(source) ?? {
     top: 'top',
     bottom: 'bottom',
@@ -6149,6 +6558,7 @@ function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
 function splitParagraphAcrossPages(
   measureState: RenderState,
   para: DocParagraph,
+  sourceIndex: number,
   contentWPt: () => number,
   suppressSpaceBefore: boolean,
   paragraphXPt: () => number,
@@ -6202,10 +6612,6 @@ function splitParagraphAcrossPages(
    *  slices). Omitted ⇒ no stamp (the renderer's body-level fallback). */
   tagSectionTextDirection?: () => string | null,
 ): { endY: number } {
-  const sourceIndex = bodySourceIndexFor(para);
-  if (sourceIndex === undefined) {
-    throw new Error('Body paragraph source identity must be prepared before split acquisition');
-  }
   const paragraphBorderEdges = bodyParagraphBorderEdgesFor(para) ?? {
     top: 'top',
     bottom: 'bottom',
@@ -6504,8 +6910,13 @@ function splitParagraphAcrossPages(
  *  in `effCellMargins`, the §17.4.7 trailing-structural-marker drop, and the
  *  §17.3.1.33 contextual/overlap spacing collapse (via `sumCellContentHeight`), so
  *  the caller is a thin delegation. */
-function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
-  return computeTablePtLayout(state, table, contentWPt).rowHeightsPt;
+function computeTableRowHeights(
+  state: RenderState,
+  table: DocTable,
+  contentWPt: number,
+  sourceIndex?: number,
+): number[] {
+  return computeTablePtLayout(state, table, contentWPt, sourceIndex).rowHeightsPt;
 }
 
 /** The paginator's scale-1 table layout: the per-grid-column widths (pt) and the
@@ -6519,12 +6930,12 @@ function computeTablePtLayout(
   state: RenderState,
   table: DocTable,
   contentWPt: number,
+  sourceIndex?: number,
 ): { colWidthsPt: number[]; rowContentHeightsPt: number[]; rowHeightsPt: number[] } {
   const colWidthsPt = resolveColumnWidths(table, contentWPt, state);
   const dependencies = state.retainedTableAcquisition;
-  const sourceIndex = bodySourceIndexFor(table);
   if (dependencies && sourceIndex !== undefined) {
-    const retained = acquireRetainedTableLayout(
+    const retained = acquireRetainedTable(
       table,
       colWidthsPt,
       contentWPt,
@@ -6532,8 +6943,13 @@ function computeTablePtLayout(
       [sourceIndex],
       dependencies,
     );
-    state.retainedTablesBySourceIndex?.set(sourceIndex, retained);
-    const rowHeightsPt = retained.rows.map((row) => row.advancePt);
+    state.retainedTablesBySourceIndex?.set(sourceIndex, Object.freeze({
+      sourceIndex,
+      acquisition: retained,
+      contentWidthPt: contentWPt,
+      anchorYPt: state.y,
+    }));
+    const rowHeightsPt = retained.layout.rows.map((row) => row.advancePt);
     return { colWidthsPt, rowContentHeightsPt: rowHeightsPt, rowHeightsPt };
   }
   const rowContentHeightsPt = resolveTableRowContentHeights(table, colWidthsPt, 1, (cell, cellW) =>
@@ -6543,8 +6959,13 @@ function computeTablePtLayout(
   return { colWidthsPt, rowContentHeightsPt, rowHeightsPt };
 }
 
-function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
-  return computeTableRowHeights(state, table, contentWPt).reduce((s, x) => s + x, 0);
+function estimateTableHeight(
+  state: RenderState,
+  table: DocTable,
+  contentWPt: number,
+  sourceIndex?: number,
+): number {
+  return computeTableRowHeights(state, table, contentWPt, sourceIndex).reduce((s, x) => s + x, 0);
 }
 
 /**
@@ -6718,21 +7139,152 @@ function reopenMergedCellsInRow(
   return { ...row, cells };
 }
 
-/** B2 table stage 1b — stamp a table element (whole table or one page slice) with
- *  the scale-1 layout the paginator resolved, so the paint pass ({@link computeTableLayout})
- *  reuses it. `rowHeightsPt` must align 1:1 with `el.rows` (a slice passes its own
- *  rows' heights). `contentWPt` is the pt content-band width the columns were fit
- *  to; the paint gate re-derives it as `contentW / scale` and reuses the stamp only
- *  when they match. Sets the runtime-only fields on `PaginatedBodyElement`. */
+/** Frozen computePages callback seam. Floating and upright tables retain their
+ * placement here. The geometry arrays remain parameters until the computePages
+ * kernel is retired, but are never written onto parser objects. */
 function stampTableLayout(
   el: PaginatedBodyElement,
-  colWidthsPt: number[],
-  rowHeightsPt: number[],
-  contentWPt: number,
+  _colWidthsPt: number[],
+  _rowHeightsPt: number[],
+  _contentWPt: number,
+  sourceIndex: number,
+  retained: RetainedTableRecord,
+  retainedState: RenderState,
+  finalState?: RenderState,
+  preparedOuter?: Readonly<{
+    fragment: TableFragmentLayout;
+    floatingTableRegistryDelta?: FloatRegistryDeltaPt;
+    physicalPageIndex: number;
+    displayPageNumber: number;
+    occurrenceId: string;
+    box: FloatTableBox;
+  }>,
 ): void {
-  el.tableColWidthsPt = colWidthsPt;
-  el.tableRowHeightsPt = rowHeightsPt;
-  el.tableLayoutInputs = { scale: 1, contentWPt };
+  const table = el as unknown as DocTable;
+  let layout: TableLayout | TableFragmentLayout = retained.acquisition.layout;
+  const tableWidthPt = layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+  const box = preparedOuter?.box ?? (table.tblpPr
+    ? computeFloatTableBox(
+      table.tblpPr,
+      retainedState,
+      retained.anchorYPt,
+      tableWidthPt,
+      layout.advancePt,
+    )
+    : undefined);
+  const xPt = box?.x === undefined
+    ? retainedState.contentX / retainedState.scale
+    : box.x / retainedState.scale;
+  const yPt = box?.y === undefined
+    ? retained.anchorYPt / retainedState.scale
+    : box.y / retainedState.scale;
+  const placementState = finalState ?? retainedState;
+  const physical = table.tblpPr ? undefined : placementState.verticalPhys;
+  const services = placementState.layoutServices;
+  if (table.tblpPr) {
+    if (!preparedOuter) {
+      throw new Error('Fitting outer table acceptance requires a pure prepared fragment');
+    }
+    if (preparedOuter.floatingTableRegistryDelta?.entries.length) {
+      commitFloatRegistryDelta(
+        retainedState,
+        preparedOuter.floatingTableRegistryDelta,
+        'logical-page-points',
+        `logical-page:${preparedOuter.physicalPageIndex}`,
+      );
+    }
+    layout = preparedOuter.fragment;
+  } else if (physical && services) {
+    const physicalLeftPt = (
+      physical.cssWidthPx - placementState.y
+    ) / placementState.scale - tableWidthPt;
+    const physicalTopPt = placementState.contentX / placementState.scale;
+    const occurrenceId = `${retained.acquisition.input.id}:upright-page:${placementState.pageIndex}`;
+    const physicalBandHeightPt = Math.max(
+      retained.acquisition.layout.advancePt,
+      physical.pageHeight - physical.marginTop - physical.marginBottom,
+    );
+    const physicalFragment = takeTableFragment(
+      retained.acquisition,
+      startTableFragmentCursor(),
+      {
+        availableHeightPt: physicalBandHeightPt,
+        freshPageHeightPt: physicalBandHeightPt,
+        placement: {
+          container: {
+            id: `upright-physical-page:${placementState.pageIndex}`,
+            kind: 'body',
+            bounds: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: tableWidthPt,
+              heightPt: physicalBandHeightPt,
+            },
+          },
+          cursor: { xPt: 0, yPt: 0 },
+          availableBounds: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: tableWidthPt,
+            heightPt: physicalBandHeightPt,
+          },
+        },
+        services,
+        compatibility: 'word',
+        oversizedRowPolicy: 'atomic',
+        page: {
+          physicalPageIndex: placementState.pageIndex,
+          displayPageNumber: placementState.displayPageNumber ?? placementState.pageIndex + 1,
+          occurrenceId,
+        },
+        floatingTableFrames: {
+          page: { xPt: 0, yPt: 0, widthPt: physical.pageWidth, heightPt: physical.pageHeight },
+          margin: {
+            xPt: physical.marginLeft,
+            yPt: physical.marginTop,
+            widthPt: Math.max(0, physical.pageWidth - physical.marginLeft - physical.marginRight),
+            heightPt: Math.max(0, physical.pageHeight - physical.marginTop - physical.marginBottom),
+          },
+          column: {
+            xPt: physical.marginLeft,
+            yPt: physical.marginTop,
+            widthPt: Math.max(0, physical.pageWidth - physical.marginLeft - physical.marginRight),
+            heightPt: Math.max(0, physical.pageHeight - physical.marginTop - physical.marginBottom),
+          },
+        },
+        floatingTableRegistry: {
+          coordinateSpace: 'upright-physical-page-points',
+          flowDomainId: `upright-physical-page:${placementState.pageIndex}`,
+          entries: Object.freeze([]),
+          nextParagraphId: 0,
+        },
+        finalPlacementTranslationPt: { xPt: physicalLeftPt, yPt: physicalTopPt },
+        reacquirePageDependentBlock: (request) => reacquirePageBlock(
+            table,
+            sourceIndex,
+            retained.acquisition,
+            placementState,
+            services,
+            request,
+          ),
+      },
+    );
+    if (!physicalFragment.fragment || physicalFragment.nextCursor) {
+      throw new Error('Upright table final-frame layout must remain atomic');
+    }
+    layout = physicalFragment.fragment;
+  }
+  bodyFlowFragments.set(el, Object.freeze({
+    fragment: layout,
+    // computePages assigns the destination column after this protected stamp
+    // seam, so ownership must observe the emitted envelope's finalized value.
+    get columnIndex() { return el.colIndex ?? 0; },
+    xPt,
+    yPt,
+    widthPt: tableWidthPt,
+    heightPt: table.tblpPr ? layout.advancePt : tableWidthPt,
+  }));
+  bodyFlowFragments.sourceIndices.set(el, sourceIndex);
 }
 
 function measureSingleTableRowPt(
@@ -7290,8 +7842,15 @@ function splitRowsTallerThanPage(
   colWidthsPt: number[],
   pageContentHeightPt: number,
   state: RenderState,
+  sourceIndex?: number,
   rowHeightsAreContent = false,
 ): { table: DocTable; rowHs: number[]; sourceRowIndexByRow: number[] } | null {
+  if (sourceIndex !== undefined && state.retainedTablesBySourceIndex?.has(sourceIndex)) {
+    // The retained paginator owns paragraph-line, block, and nested-table
+    // continuations. Pre-slicing the parsed row here would renumber source paths
+    // and make the two pagination authorities compete.
+    return null;
+  }
   let changed = false;
   const rows: DocTableRow[] = [];
   const heights: number[] = [];
@@ -7335,32 +7894,6 @@ function splitRowsTallerThanPage(
     );
   }
   return { table: outTable, rowHs: heights, sourceRowIndexByRow };
-}
-
-/** Pick the greatest safe slice endpoint whose fully materialized height fits.
- * Endpoint heights are not monotonic: appending an exact §17.4.80 row can
- * replace the preceding auto row's wide outer-bottom footprint with a narrow
- * insideH boundary and make the longer slice shorter. The content-height scan
- * performed by each paginator already limits `endpoints` to the tentative tail;
- * walking that tail backwards therefore preserves the largest-fit contract and
- * normally resolves only the already-known last candidate. The first safe
- * endpoint is the forward-progress fallback even when one atomic row/span is
- * taller than the page. */
-function selectLastFittingSliceEndpoint<T extends { usedPt: number }>(
-  endpoints: readonly number[],
-  availablePt: number,
-  materialize: (endpoint: number) => T,
-  knownLast?: { endpoint: number; value: T },
-): { endpoint: number; value: T } {
-  if (endpoints.length === 0) throw new Error('expected at least one safe table endpoint');
-  for (let index = endpoints.length - 1; index >= 0; index--) {
-    const endpoint = endpoints[index];
-    const value = knownLast?.endpoint === endpoint
-      ? knownLast.value
-      : materialize(endpoint);
-    if (value.usedPt <= availablePt || index === 0) return { endpoint, value };
-  }
-  throw new Error('unreachable table endpoint selection');
 }
 
 /**
@@ -7410,11 +7943,9 @@ export function splitTableAcrossPages(
    *  across the split). Stamped so `computePageNumbering` sees the section's
    *  restart/format on every page a spilled table lands on. Omitted ⇒ `null`. */
   tagSectionPageNumType?: () => PageNumType | null,
-  /** B2 table stage 1b — the scale-1 layout to stamp onto each slice for paint
-   *  reuse. `colWidthsPt` is the full grid (constant across the split); each slice
-   *  gets ITS rows' heights (sliced from `rowHs`, with the repeated header rows
-   *  prepended on continuations so the stamp aligns 1:1 with the slice's rows).
-   *  Omitted (direct unit tests) ⇒ slices carry no table stamp and paint recomputes. */
+  /** Frozen paginator input retained until computePages is retired. The retained
+   * table acquisition is the geometry authority; these values only describe the
+   * containing band and no longer create parser-object stamps. */
   tableStamp?: {
     colWidthsPt: number[];
     contentWPt: number;
@@ -7428,11 +7959,9 @@ export function splitTableAcrossPages(
   /** Original parsed-table row index for each incoming `table.rows` entry. Row
    *  pieces created before this call share an index. Omitted ⇒ identity. */
   sourceRowIndexByRow?: number[],
-  /** PR 6 — invoked once per emitted slice to attach its {@link TableFragment}. The
-   *  caller closes over the column widths / measure state and builds the fragment
-   *  (the slice element carries the rows + `colIndex`); `meta` supplies the slice's
-   *  per-row heights, page-continuation flags, repeated-header count, and the
-   *  fragment→source row-index map. Omitted (direct unit tests) ⇒ no fragment. */
+  /** Frozen callback seam for registering the retained slice on its emitted
+   * envelope. Pagination has already materialized the TableFragmentLayout before
+   * this callback runs; it must not rebuild table geometry. */
   emitTableFragment?: (
     sliceEl: PaginatedBodyElement,
     meta: {
@@ -7441,296 +7970,187 @@ export function splitTableAcrossPages(
       continuesOnNextPage: boolean;
       repeatedHeaderRowCount: number;
       sourceRowIndexOf: (fragmentRowIndex: number) => number;
+      fragment: TableFragmentLayout;
     },
   ) => void,
   /** ECMA-376 §17.6.20 — the active SECTION's text direction (issue #1000),
    *  stamped in lockstep with `tagSectionGeom` (constant across the split).
    *  Omitted ⇒ no stamp (the renderer's body-level fallback). */
   tagSectionTextDirection?: () => string | null,
+  /** Body occurrence owner. Parsed table identity is not a layout-session key. */
+  sourceIndex?: number,
 ): number {
   const colTop = columnTop ?? (() => 0);
-  let workTable = table;
-  let workRows = table.rows;
-  let workRowHs = rowHs;
-  let workSourceRowIndices = sourceRowIndexByRow?.slice()
-    ?? workRows.map((_row, index) => index);
-  let n = workRows.length;
-  // Leading tblHeader rows repeat on each continuation page.
-  let headerCount = 0;
-  while (headerCount < n && workRows[headerCount].isHeader) headerCount++;
-  const headerRows = workRows.slice(0, headerCount);
-  const headerSourceRowIndices = workSourceRowIndices.slice(0, headerCount);
-  const headerHeightsPt = workRowHs.slice(0, headerCount);
-  const headerContentHeightPt = headerHeightsPt.reduce((sum, height) => sum + height, 0);
-
-  const materializeSlice = (
-    windowStart: number,
-    windowEnd: number,
-    isContinuation: boolean,
-  ): { rows: DocTableRow[]; heightsPt: number[]; usedPt: number } => {
-    const bodyRows = workRows.slice(windowStart, windowEnd);
-    // §17.4.85 — a slice that starts inside a vMerge span re-opens the merged
-    // cell so both paint and page-local boundary resolution see the same row.
-    const reopenedBody =
-      windowStart > 0 && bodyRows.length > 0 && bodyRows[0].cells.some((c) => c.vMerge === false)
-        ? [
-            reopenMergedCellsInRow(
-              workRows,
-              windowStart,
-              headerCount,
-              isContinuation,
-              workTable.colWidths.length,
+  const retainedRecord = sourceIndex === undefined
+    ? undefined
+    : rowSplit?.state.retainedTablesBySourceIndex?.get(sourceIndex);
+  const retained = retainedRecord?.acquisition;
+  const services = rowSplit?.state.layoutServices;
+  if (!retained || !services || sourceIndex === undefined || !rowSplit) {
+    throw new Error('Table pagination requires retained table acquisition');
+  }
+  {
+    let cursor = startTableFragmentCursor();
+    let y = startY;
+    let emittedAny = false;
+    for (let guard = 0; guard < 100_000; guard += 1) {
+      const availableHeightPt = Math.max(0, contentH - y);
+      const freshPageHeightPt = Math.max(0, contentH - colTop());
+      const columnIndex = tagColIndex?.() ?? 0;
+      const physicalPageIndex = pages.length - 1;
+      const activeColumn = colGeom?.[columnIndex];
+      const logicalMarginTopPt = marginTopPt ?? rowSplit.state.marginTop;
+      const pageHeightPt = rowSplit.state.pageH / rowSplit.state.scale;
+      const fieldContext = fieldAcquisitionContextOf(services);
+      const destinationPage = fieldContext.resolveDestinationPage?.(physicalPageIndex);
+      const occurrenceId = `${retained.input.id}:page:${physicalPageIndex}:column:${columnIndex}:row:${cursor.rowIndex}:fragment:${cursor.rowFragmentIndex}`;
+      const result = takeTableFragment(retained, cursor, {
+        availableHeightPt,
+        freshPageHeightPt,
+        placement: {
+          container: {
+            id: `${retained.input.flowDomainId}:page`,
+            kind: 'body',
+            bounds: { xPt: 0, yPt: 0, widthPt: tableStamp?.contentWPt ?? 0, heightPt: availableHeightPt },
+          },
+          cursor: { xPt: 0, yPt: 0 },
+          availableBounds: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: tableStamp?.contentWPt ?? 0,
+            heightPt: availableHeightPt,
+          },
+        },
+        services,
+        compatibility: 'word',
+        page: {
+          physicalPageIndex,
+          displayPageNumber: destinationPage?.displayPageNumber ?? physicalPageIndex + 1,
+          occurrenceId,
+        },
+        floatingTableFrames: {
+          page: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: rowSplit.state.pageWidth,
+            heightPt: pageHeightPt,
+          },
+          margin: {
+            xPt: rowSplit.state.marginLeft,
+            yPt: rowSplit.state.marginTop,
+            widthPt: Math.max(
+              0,
+              rowSplit.state.pageWidth
+                - rowSplit.state.marginLeft - rowSplit.state.marginRight,
             ),
-            ...bodyRows.slice(1),
-          ]
-        : bodyRows;
-    const rows = isContinuation ? [...headerRows, ...reopenedBody] : reopenedBody;
-    const baseHeights = isContinuation
-      ? [...headerHeightsPt, ...workRowHs.slice(windowStart, windowEnd)]
-      : workRowHs.slice(windowStart, windowEnd);
-    const sliceTable = { ...workTable, rows };
-    const heightsPt = tableStamp?.rowHeightsAreContent
-      ? applyTableRowBoundaryFootprints(sliceTable, baseHeights, 1)
-      : baseHeights;
-    return {
-      rows,
-      heightsPt,
-      usedPt: heightsPt.reduce((sum, height) => sum + height, 0),
-    };
-  };
-
-  let y = startY;
-  let start = 0;
-  let firstSlice = true;
-
-  while (start < n) {
-    const isContinuation = !firstSlice && headerCount > 0 && start >= headerCount;
-    const avail = contentH - y;
-    const firstRowH = materializeSlice(start, start + 1, isContinuation).usedPt;
-    const freshAvail = contentH - colTop();
-    const rowAvail = Math.max(0, workRowHs[start] + avail - firstRowH);
-    // The vMerge group starting at `start`: a restart row chained to its continue
-    // rows. This renderer keeps such a group together across page breaks (Word's
-    // observed behavior; ECMA-376 §17.4.85 defines the merge STRUCTURE but does not
-    // itself declare the span page-atomic, and §17.4.6 makes rows splittable by
-    // default). Two reliefs apply when the group overflows:
-    //   • split its (splittable) HEAD row — the group head is the restart row,
-    //     which the relaxed splitter gate accepts (PR #926 mid-row content split);
-    //   • when the group cannot fit even a FULL page's content band
-    //     (`groupH > contentH`), the atomicity invariant is impossible to honor, so
-    //     page breaks at the group's INTERIOR row boundaries are permitted (private
-    //     sample-42: a 900pt span in a 648pt band). Each continuation slice then
-    //     re-opens the merged cell (reopenMergedCellsInRow), and this same check
-    //     re-evaluates the re-opened span against the next full page. A group that
-    //     fits a full page keeps `relaxSpanBreak === false`, so its handling is
-    //     byte-identical to before this change (vMerge-free tables, and spans small
-    //     enough to stay atomic, are unaffected). NB: the threshold is `contentH`
-    //     (the full page/section content band), NOT `freshAvail` (the CURRENT
-    //     column region, which a mid-page continuous section shrinks) — a span that
-    //     merely overflows a short mid-page region still relocates whole to the next
-    //     full page rather than splitting inside the region.
-    let groupEnd = start;
-    while (groupEnd + 1 < n && !tableBreakAllowedBefore(workTable, groupEnd + 1)) groupEnd++;
-    const groupH = materializeSlice(start, groupEnd + 1, isContinuation).usedPt;
-    const relaxSpanBreak = groupH > contentH;
-    const breakAllowedBefore = (ri: number): boolean =>
-      tableBreakAllowedBefore(workTable, ri) ||
-      (relaxSpanBreak && ri > start && ri <= groupEnd);
-    if (rowSplit && (firstRowH > avail || groupH > avail) && rowAvail > 0 && start >= headerCount) {
-      const split = splitRowForHeight(workTable, workRows[start], rowSplit.colWidthsPt, rowAvail, rowSplit.state);
-      if (split && split.heights[0] <= rowAvail) {
-        const sourceRowIndex = workSourceRowIndices[start];
-        workRows = [
-          ...workRows.slice(0, start),
-          ...split.rows,
-          ...workRows.slice(start + 1),
-        ];
-        workRowHs = [
-          ...workRowHs.slice(0, start),
-          ...split.heights,
-          ...workRowHs.slice(start + 1),
-        ];
-        workSourceRowIndices = [
-          ...workSourceRowIndices.slice(0, start),
-          ...split.rows.map(() => sourceRowIndex),
-          ...workSourceRowIndices.slice(start + 1),
-        ];
-        workTable = { ...workTable, rows: workRows };
-        n = workRows.length;
-        // §17.4.85 — re-derive the span extension once over the new structure
-        // (the original heights carried it for the UNSPLIT row).
-        repairSpanExtensionAfterRowSplit(
-          workTable, workRowHs, start + split.rows.length - 1,
-          rowSplit.colWidthsPt, rowSplit.state, split.restartRemainders,
-        );
+            heightPt: Math.max(
+              0,
+              pageHeightPt - rowSplit.state.marginTop - rowSplit.state.marginBottom,
+            ),
+          },
+          column: {
+            xPt: activeColumn?.xPt ?? rowSplit.state.contentX / rowSplit.state.scale,
+            yPt: logicalMarginTopPt + colTop(),
+            widthPt: activeColumn?.wPt ?? rowSplit.state.contentW / rowSplit.state.scale,
+            heightPt: freshPageHeightPt,
+          },
+        },
+        floatingTableRegistry: {
+          coordinateSpace: 'logical-page-points',
+          flowDomainId: `logical-page:${physicalPageIndex}`,
+          entries: Object.freeze(rowSplit.state.floats.map((float, index) => Object.freeze({
+            kind: float.kind,
+            occurrenceId: float.imageKey || `page-float:${index}`,
+            paragraphId: float.paraId,
+            bounds: Object.freeze({
+              xPt: float.imageX / rowSplit.state.scale,
+              yPt: float.imageY / rowSplit.state.scale,
+              widthPt: float.imageW / rowSplit.state.scale,
+              heightPt: float.imageH / rowSplit.state.scale,
+            }),
+            exclusionBounds: Object.freeze({
+              xPt: float.xLeft / rowSplit.state.scale,
+              yPt: float.yTop / rowSplit.state.scale,
+              widthPt: (float.xRight - float.xLeft) / rowSplit.state.scale,
+              heightPt: (float.yBottom - float.yTop) / rowSplit.state.scale,
+            }),
+          }))),
+          nextParagraphId: rowSplit.state.floatParaSeq,
+        },
+        finalPlacementTranslationPt: {
+          xPt: activeColumn?.xPt ?? rowSplit.state.contentX / rowSplit.state.scale,
+          yPt: logicalMarginTopPt + y,
+        },
+        reacquirePageDependentBlock: (request) => reacquirePageBlock(
+          table,
+          sourceIndex,
+          retained,
+          rowSplit.state,
+          services,
+          request,
+        ),
+      });
+      if (result.requiresFreshPage) {
+        newPage(y);
+        y = colTop();
         continue;
       }
-    }
-    if (firstRowH > avail && y > colTop() && firstRowH <= freshAvail) {
-      newPage(y);
-      y = colTop();
-      firstSlice = false;
-      continue;
-    }
-    // In content-height mode the repeated header's bottom is not an outer edge
-    // once a body row is appended. Start from header CONTENT only; the exact
-    // endpoint materialization below supplies the header/body insideH and final
-    // outer-bottom footprints. Using a header-only materialization here can
-    // overestimate mixed atLeast/exact slices and stop one row early.
-    let used = tableStamp?.rowHeightsAreContent
-      ? (isContinuation ? headerContentHeightPt : 0)
-      : materializeSlice(start, start, isContinuation).usedPt;
-    let end = start;
-    let lastSafeEnd = start;
-    let lastSafeUsed = used;
-    const safeEnds: number[] = [];
-    // Always place at least one row to guarantee forward progress.
-    while (end < n) {
-      // Scan content heights linearly. Page-local boundary footprints are
-      // resolved only for the selected safe endpoints below; resolving the
-      // whole candidate slice for every row would make long-table pagination
-      // quadratic.
-      const candidateUsed = used + workRowHs[end];
-      if (end > start && candidateUsed > avail) {
-        if (breakAllowedBefore(end)) {
-          const candidateWithBoundaries = tableStamp?.rowHeightsAreContent
-            ? materializeSlice(start, end + 1, isContinuation).usedPt
-            : candidateUsed;
-          const remainingForNextRow = Math.max(
-            0,
-            workRowHs[end] + avail - candidateWithBoundaries,
-          );
-          if (rowSplit && remainingForNextRow > 0 && end >= headerCount) {
-            const split = splitRowForHeight(
-              workTable,
-              workRows[end],
-              rowSplit.colWidthsPt,
-              remainingForNextRow,
-              rowSplit.state,
-            );
-            if (split && split.heights[0] <= remainingForNextRow) {
-              const sourceRowIndex = workSourceRowIndices[end];
-              workRows = [
-                ...workRows.slice(0, end),
-                ...split.rows,
-                ...workRows.slice(end + 1),
-              ];
-              workRowHs = [
-                ...workRowHs.slice(0, end),
-                ...split.heights,
-                ...workRowHs.slice(end + 1),
-              ];
-              workSourceRowIndices = [
-                ...workSourceRowIndices.slice(0, end),
-                ...split.rows.map(() => sourceRowIndex),
-                ...workSourceRowIndices.slice(end + 1),
-              ];
-              workTable = { ...workTable, rows: workRows };
-              n = workRows.length;
-              // §17.4.85 — re-derive the span extension once (see site above).
-              repairSpanExtensionAfterRowSplit(
-                workTable, workRowHs, end + split.rows.length - 1,
-                rowSplit.colWidthsPt, rowSplit.state, split.restartRemainders,
-              );
-              continue;
-            }
-          }
-          break;
-        }
-        if (lastSafeEnd > start) {
-          end = lastSafeEnd;
-          used = lastSafeUsed;
-          break;
-        }
+      const fragment = result.fragment;
+      if (!fragment) {
+        if (result.nextCursor === null) return y;
+        throw new Error('Retained table pagination made no progress');
       }
-      if (end > start && breakAllowedBefore(end)) {
-        lastSafeEnd = end;
-        lastSafeUsed = used;
-        safeEnds.push(end);
-      }
-      used = candidateUsed;
-      end++;
-    }
-
-    // Content-only scanning can tentatively include a row whose page-local
-    // outer/inside rule footprint crosses the available band. Find the largest
-    // safe endpoint whose exact slice geometry fits.
-    let materialized = materializeSlice(start, end, isContinuation);
-    if (materialized.usedPt > avail && end > start + 1) {
-      const candidates = [
-        start + 1,
-        ...safeEnds.filter(
-          (candidateEnd) => candidateEnd > start + 1 && candidateEnd < end,
-        ),
-        ...(end > start + 1 ? [end] : []),
-      ];
-      const selected = selectLastFittingSliceEndpoint(
-        candidates,
-        avail,
-        (candidateEnd) => materializeSlice(start, candidateEnd, isContinuation),
-        { endpoint: end, value: materialized },
-      );
-      end = selected.endpoint;
-      materialized = selected.value;
-    }
-    const sliceRows = materialized.rows;
-    const sliceEl = { ...workTable, type: 'table', rows: sliceRows } as PaginatedBodyElement;
-    if (tagColIndex) sliceEl.colIndex = tagColIndex();
-    if (colGeom) sliceEl.colGeom = colGeom;
-    // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
-    // pass resets this slice's column cursor to it instead of the page top.
-    if (columnTop && marginTopPt != null) sliceEl.colTopPt = marginTopPt + colTop();
-    if (tagSectionHF) sliceEl.sectionHF = tagSectionHF();
-    if (tagSectionGeom) sliceEl.sectionGeom = tagSectionGeom();
-    if (tagSectionPageNumType) sliceEl.sectionPageNumType = tagSectionPageNumType();
-    if (tagSectionTextDirection) sliceEl.sectionTextDirection = tagSectionTextDirection();
-    // B2 table stage 1b — stamp this slice's own row heights (repeated header rows
-    // prepended on continuations, matching `sliceRows`) so the paint pass reuses
-    // them 1:1 instead of re-measuring the slice.
-    const sliceHeightsPt = materialized.heightsPt;
-    if (tableStamp) {
-      stampTableLayout(sliceEl, tableStamp.colWidthsPt, sliceHeightsPt, tableStamp.contentWPt);
-    }
-    if (emitTableFragment) {
-      // §17.4.78 — a continuation slice prepends the repeated header rows; the body
-      // rows begin at `start` in workRows. Map each fragment row back to its source
-      // index: repeated headers read their saved original indices; body rows read the
-      // parallel workRows provenance map, whose entries are duplicated whenever a row
-      // is split. Page continuation is derived from the slice window: it continues
-      // from a previous page whenever it does not start the table, and onto the next
-      // whenever rows remain.
-      const headerPrepend = isContinuation ? headerCount : 0;
-      emitTableFragment(sliceEl, {
-        heightsPt: sliceHeightsPt,
-        continuesFromPreviousPage: start > 0,
-        continuesOnNextPage: end < n,
-        repeatedHeaderRowCount: headerPrepend,
-        sourceRowIndexOf: (i) =>
-          i < headerPrepend
-            ? headerSourceRowIndices[i]
-            : workSourceRowIndices[start + (i - headerPrepend)],
+      const sourceRows = fragment.rows.map((row) => {
+        const sourceRow = table.rows[row.logicalRowIndex];
+        if (!sourceRow) throw new Error('Retained table fragment lost its logical row source');
+        return sourceRow;
       });
-    }
-    pages[pages.length - 1].push(sliceEl);
-
-    used = materialized.usedPt;
-    y += used;
-    start = end;
-    firstSlice = false;
-    if (start < n) {
+      const sliceEl = { ...table, type: 'table', rows: sourceRows } as PaginatedBodyElement;
+      if (tagColIndex) sliceEl.colIndex = columnIndex;
+      if (colGeom) sliceEl.colGeom = colGeom;
+      if (columnTop && marginTopPt != null) sliceEl.colTopPt = marginTopPt + colTop();
+      if (tagSectionHF) sliceEl.sectionHF = tagSectionHF();
+      if (tagSectionGeom) sliceEl.sectionGeom = tagSectionGeom();
+      if (tagSectionPageNumType) sliceEl.sectionPageNumType = tagSectionPageNumType();
+      if (tagSectionTextDirection) sliceEl.sectionTextDirection = tagSectionTextDirection();
+      const continuesOnNextPage = result.nextCursor !== null;
+      const repeatedHeaderRowCount = fragment.rows.filter(
+        (row) => row.ownership === 'repeated-header',
+      ).length;
+      emitTableFragment?.(sliceEl, {
+        heightsPt: fragment.rows.map((row) => row.advancePt),
+        continuesFromPreviousPage: emittedAny,
+        continuesOnNextPage,
+        repeatedHeaderRowCount,
+        sourceRowIndexOf: (fragmentRowIndex) =>
+          fragment.rows[fragmentRowIndex]?.logicalRowIndex ?? 0,
+        fragment,
+      });
+      pages[pages.length - 1]!.push(sliceEl);
+      if (result.floatingTableRegistryDelta) {
+        commitFloatRegistryDelta(
+          rowSplit.state,
+          result.floatingTableRegistryDelta,
+          'logical-page-points',
+          `logical-page:${physicalPageIndex}`,
+        );
+      }
+      y += fragment.advancePt;
+      emittedAny = true;
+      if (!result.nextCursor) return y;
+      cursor = result.nextCursor;
       newPage(y);
       y = colTop();
     }
+    throw new Error('Retained table pagination exceeded its progress bound');
   }
-  return y;
 }
 
 /**
  * Split a FLOATING table (ECMA-376 §17.4.57 `<w:tblpPr>`, vertAnchor="text") that
- * overflows the page bottom across page boundaries, row by row — the Word ground
- * truth for a page-overflowing floating table (issue #674; measured from
- * private/sample-18 + sample-21 Word-exported PDFs). It is the out-of-flow analogue
- * of {@link splitTableAcrossPages}:
+ * overflows the page bottom across page boundaries, row by row. ECMA-376 does
+ * not prescribe this continuation policy; it is the renderer's deterministic
+ * out-of-flow analogue of {@link splitTableAcrossPages}:
  *   • The FIRST slice sits at the table's in-flow anchor (`slice1TopOffset` below
  *     the flow cursor `y`), taking the rows that fit down to the body bottom.
  *   • Each CONTINUATION slice sits at the next page's body TOP (its tblpPr is cloned
@@ -7742,9 +8162,9 @@ export function splitTableAcrossPages(
  *     FINAL band from the terminal page's body top, so the caller sets the body
  *     cursor to that page's region top (the returned `endY`).
  *
- * `emitSlice` is invoked once per slice (on the page it landed on) to register its
- * wrap FloatRect and push it onto the current page — the caller owns the column
- * band / float bookkeeping. `advancePage` moves to the next column/page (clearing
+ * `emitSlice` is invoked once per slice (on the page it landed on) to push it and
+ * return its parent box resolved against the external pre-child registry — the
+ * caller owns the column band. `advancePage` moves to the next column/page (clearing
  * page-scoped floats there). `curY` / `regionTopY` / `contentH` are read live
  * (AFTER each `advancePage`) so multi-column regions and per-page reserves are
  * honored.
@@ -7753,8 +8173,8 @@ export function splitTableAcrossPages(
  * guarantee, mirroring splitTableAcrossPages): a single row taller than a full page
  * is placed overflowing rather than looping. When the anchor sits so low that not
  * even the first row fits the remaining band, the whole table is moved to the next
- * page FIRST (no page-1 slice) — matching Word (a floating table row is not left
- * hanging past the bottom margin when a fuller band is one page away). Breaks land
+ * page FIRST (no page-1 slice). This relocation is a compatibility policy, not a
+ * rule defined by §17.4.57. Breaks land
  * only on vMerge-safe boundaries ({@link tableBreakAllowedBefore}).
  *
  * Returns the body cursor (content-relative pt) after the final slice: the terminal
@@ -7782,122 +8202,342 @@ export function splitFloatTableAcrossPages(
   contentH: () => number,
   /** Advance to the next column / page (clears page-scoped floats there). */
   advancePage: () => void,
-  /** Push the fully-stamped slice element onto the current page (and register its
-   *  wrap float). Called once per slice, on the page it landed on. Omitted (direct
-   *  unit tests) ⇒ the slice is dropped (the test asserts geometry via a stub). */
+  /** Resolve a candidate slice's parent against the immutable external float
+   *  base. Omitted (direct unit tests) ⇒ resolve from the retained state. */
+  resolveSliceParent?: (
+    sliceTp: TblpPr,
+    tableWidthPt: number,
+    tableHeightPt: number,
+    externalRegistry: Readonly<{
+      floats: readonly FloatRect[];
+      nextParagraphId: number;
+    }>,
+  ) => FloatTableBox,
+  /** Push the fully-stamped accepted slice. Omitted (direct unit tests) ⇒ the
+   *  slice is dropped and neither child nor parent registry delta is committed. */
   emitSlice?: (sliceEl: PaginatedBodyElement) => void,
+  /** Current live physical page. The compute paginator owns page advancement;
+   *  direct unit callers may omit it and retain slice-ordinal fallback. */
+  currentPhysicalPageIndex?: () => number,
+  /** Render-session occurrence owner. Required for retained pagination. */
+  retainedContext?: Readonly<{
+    sourceIndex: number;
+    record: RetainedTableRecord;
+    state: RenderState;
+  }>,
 ): number {
-  const n = rowContentHs.length;
-  let start = 0;
-  let firstSlice = true;
-
-  const materializeSlice = (
-    windowStart: number,
-    windowEnd: number,
-    isFirstSlice: boolean,
-  ): { element: PaginatedBodyElement; heightsPt: number[]; usedPt: number } => {
-    const sliceTp: TblpPr = isFirstSlice
-      ? tp
-      : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
-    const sliceTable = {
-      ...table,
-      type: 'table',
-      rows: table.rows.slice(windowStart, windowEnd),
-      tblpPr: sliceTp,
-    } as unknown as PaginatedBodyElement;
-    const contentHeights = rowContentHs.slice(windowStart, windowEnd);
-    // §17.4.66: resolve conflicts against this emitted slice, whose first/last
-    // rows now own outer edges. §17.4.80 exact rows remain complete boxes while
-    // auto/atLeast rows receive the resolved half-boundary footprints.
-    const heightsPt = applyTableRowBoundaryFootprints(
-      sliceTable as unknown as DocTable,
-      contentHeights,
-      1,
-    );
-    return {
-      element: sliceTable,
-      heightsPt,
-      usedPt: heightsPt.reduce((sum, height) => sum + height, 0),
-    };
-  };
-
-  while (start < n) {
-    // Slice top (content-relative pt): the in-flow anchor for slice 1, else the
-    // fresh page/column region top.
-    const sliceTopRel = firstSlice ? curY() + slice1TopOffset : regionTopY();
-    const avail = contentH() - sliceTopRel;
-
-    // If not even the first row fits the remaining band AND a fuller band exists on
-    // a fresh page/column, move the whole (remaining) table there first — no slice
-    // on this page. Only possible for a slice whose top is below the region top
-    // (i.e. slice 1 low on the page); a fresh page's `avail` already equals the max
-    // band, so this never loops. (A row taller than a full page still gets placed
-    // below, since then `avail == the max band` and the guard is false.)
-    const firstRowHeight = materializeSlice(start, start + 1, firstSlice).usedPt;
-    if (firstRowHeight > avail && sliceTopRel > regionTopY()) {
-      advancePage();
-      firstSlice = false;
-      continue;
-    }
-
-    // Scan content boxes linearly. The selected safe endpoints are materialized
-    // below with their own outer/interior boundaries, avoiding both stale
-    // original-table footprints and per-candidate quadratic resolution.
-    let used = 0;
-    let end = start;
-    const safeEnds: number[] = [];
-    while (end < n) {
-      const h = rowContentHs[end];
-      if (end > start && used + h > avail && tableBreakAllowedBefore(table, end)) break;
-      used += h;
-      end++;
-      if (end === n || tableBreakAllowedBefore(table, end)) safeEnds.push(end);
-    }
-
-    let materialized = materializeSlice(start, end, firstSlice);
-    if (materialized.usedPt > avail && safeEnds.length > 1) {
-      const selected = selectLastFittingSliceEndpoint(
-        safeEnds,
-        avail,
-        (candidateEnd) => materializeSlice(start, candidateEnd, firstSlice),
-        { endpoint: end, value: materialized },
-      );
-      materialized = selected.value;
-      end = selected.endpoint;
-    }
-
-    // Build the slice element: a subset of rows, its own tblpPr (slice 1 keeps the
-    // original in-flow anchor; continuations anchor at the body top). A continuation
-    // ALWAYS starts at the fresh page's body top, so it is forced to vertAnchor="text"
-    // with tblpY=0: computeFloatTableBox then places it at paraTop (= measureState.y,
-    // which advancePage reset to the body top). For a text-anchored source this is a
-    // no-op ({ ...tp, tblpY: 0 } already vertAnchor="text"); for a page/margin source
-    // (sample-28 p.15) it is what moves the remainder to the body top instead of the
-    // absolute page/margin origin. Only the VERTICAL anchor is overridden — horzAnchor
-    // / tblpXSpec are kept so the horizontal placement (e.g. centered on the margin)
-    // is preserved across slices.
-    // §17.4.78 tblHeader repeats are DELIBERATELY not applied: no fixture shows Word
-    // repeating a floating table's header rows on continuation bands (unlike a block
-    // table), and sample-18/21 have no header rows — so the safe, observed behaviour
-    // is to carry each row exactly once (UNOBSERVED for headers; revisit with a
-    // header fixture if one surfaces).
-    const sliceEl = materialized.element;
-    // B2 stage 1b — stamp the full column grid (constant across slices) + this
-    // slice's own rows so the paint pass (renderFloatTable → computeTableLayout)
-    // reuses them 1:1 instead of re-measuring, and emitSlice's box math below reuses
-    // the same stamp.
-    stampTableLayout(sliceEl, colWidthsPt, materialized.heightsPt, contentWPt);
-
-    emitSlice?.(sliceEl);
-
-    start = end;
-    firstSlice = false;
-    if (start < n) advancePage();
+  const retainedRecord = retainedContext?.record;
+  const retainedState = retainedContext?.state;
+  const sourceIndex = retainedContext?.sourceIndex;
+  const retainedServices = retainedState?.layoutServices;
+  if (!retainedRecord || !retainedState || !retainedServices || sourceIndex === undefined) {
+    throw new Error('Floating table pagination requires retained table acquisition');
   }
+  {
+    const retained = retainedRecord.acquisition;
+    let cursor = startTableFragmentCursor();
+    let firstSlice = true;
+    let sliceOrdinal = 0;
+    pagination: for (let guard = 0; guard < 100_000; guard += 1) {
+      const sliceTopRel = firstSlice ? curY() + slice1TopOffset : regionTopY();
+      const availableHeightPt = Math.max(0, contentH() - sliceTopRel);
+      const freshPageHeightPt = Math.max(0, contentH() - regionTopY());
+      const firstRowHeightPt = retained.layout.rows[cursor.rowIndex]?.advancePt ?? 0;
+      if (firstSlice
+        && sliceTopRel > regionTopY()
+        && firstRowHeightPt > availableHeightPt + FLOAT_OVERLAP_EPS) {
+        advancePage();
+        firstSlice = false;
+        continue;
+      }
+      const occurrenceId = `${retained.input.id}:float-slice:${sliceOrdinal}:row:${cursor.rowIndex}:fragment:${cursor.rowFragmentIndex}`;
+      const iteration = fieldAcquisitionContextOf(retainedServices);
+      const livePhysicalPageIndex = currentPhysicalPageIndex?.() ?? sliceOrdinal;
+      const destinationPage = iteration.resolveTableOccurrencePage?.(occurrenceId)
+        ?? iteration.resolveDestinationPage?.(livePhysicalPageIndex);
+      const probeTp: TblpPr = firstSlice
+        ? tp
+        : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
+      const probeState = retainedState;
+      const probeScale = probeState.scale;
+      const retainedWidthPt = retained.layout.columnWidthsPt.reduce(
+        (sum, width) => sum + width,
+        0,
+      );
+      const externalRegistry = Object.freeze({
+        floats: Object.freeze(probeState.floats.map((float) => Object.freeze({ ...float }))),
+        nextParagraphId: probeState.floatParaSeq,
+      });
+      const stateAgainstExternalRegistry: RenderState = {
+        ...probeState,
+        floats: [...externalRegistry.floats],
+        floatParaSeq: externalRegistry.nextParagraphId,
+      };
+      let parentSeed = computeFloatTableBox(
+        probeTp,
+        stateAgainstExternalRegistry,
+        (probeState.marginTop + sliceTopRel) * probeScale,
+        retainedWidthPt * probeScale,
+        retained.layout.advancePt * probeScale,
+        probeTp.vertAnchor === 'page' || probeTp.vertAnchor === 'margin',
+        { allowOverlap: table.overlap !== 'never' },
+      );
+      const sliceTp: TblpPr = firstSlice
+        ? tp
+        : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
+      const takeCandidate = (
+        placementSeed: FloatTableBox,
+        probeAvailableHeightPt: number,
+      ) => takeTableFragment(retained, cursor, {
+        availableHeightPt: probeAvailableHeightPt,
+        freshPageHeightPt,
+        placement: {
+          container: {
+            id: `${retained.input.flowDomainId}:floating-page`,
+            kind: 'body',
+            bounds: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: contentWPt,
+              heightPt: probeAvailableHeightPt,
+            },
+          },
+          cursor: { xPt: 0, yPt: 0 },
+          availableBounds: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: contentWPt,
+            heightPt: probeAvailableHeightPt,
+          },
+        },
+        services: retainedServices,
+        compatibility: 'word',
+        oversizedRowPolicy: 'atomic',
+        page: {
+          physicalPageIndex: destinationPage?.pageIndex ?? livePhysicalPageIndex,
+          displayPageNumber: destinationPage?.displayPageNumber ?? livePhysicalPageIndex + 1,
+          occurrenceId,
+        },
+        floatingTableFrames: {
+          page: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: probeState.pageWidth,
+            heightPt: probeState.pageH / probeScale,
+          },
+          margin: {
+            xPt: probeState.marginLeft,
+            yPt: probeState.marginTop,
+            widthPt: Math.max(
+              0,
+              probeState.pageWidth - probeState.marginLeft - probeState.marginRight,
+            ),
+            heightPt: Math.max(
+              0,
+              probeState.pageH / probeScale
+                - probeState.marginTop - probeState.marginBottom,
+            ),
+          },
+          column: {
+            xPt: probeState.contentX / probeScale,
+            yPt: probeState.marginTop + regionTopY(),
+            widthPt: probeState.contentW / probeScale,
+            heightPt: freshPageHeightPt,
+          },
+        },
+        floatingTableRegistry: {
+          coordinateSpace: 'logical-page-points',
+          flowDomainId: `logical-page:${destinationPage?.pageIndex ?? livePhysicalPageIndex}`,
+          entries: Object.freeze(externalRegistry.floats.map((float, index) => Object.freeze({
+            kind: float.kind,
+            occurrenceId: float.imageKey || `page-float:${index}`,
+            paragraphId: float.paraId,
+            bounds: Object.freeze({
+              xPt: float.imageX / probeScale,
+              yPt: float.imageY / probeScale,
+              widthPt: float.imageW / probeScale,
+              heightPt: float.imageH / probeScale,
+            }),
+            exclusionBounds: Object.freeze({
+              xPt: float.xLeft / probeScale,
+              yPt: float.yTop / probeScale,
+              widthPt: (float.xRight - float.xLeft) / probeScale,
+              heightPt: (float.yBottom - float.yTop) / probeScale,
+            }),
+          }))),
+          nextParagraphId: externalRegistry.nextParagraphId,
+        },
+        finalPlacementTranslationPt: {
+          xPt: placementSeed.x / probeScale,
+          yPt: placementSeed.y / probeScale,
+        },
+        reacquirePageDependentBlock: (request) => reacquirePageBlock(
+          table,
+          sourceIndex,
+          retained,
+          retainedState,
+          retainedServices,
+          request,
+        ),
+      });
+      const resolveCandidateParent = (
+        candidateFragment: TableFragmentLayout,
+      ): FloatTableBox => {
+        const tableWidthPt = candidateFragment.columnWidthsPt.reduce(
+          (sum, width) => sum + width,
+          0,
+        );
+        return resolveSliceParent?.(
+          sliceTp,
+          tableWidthPt,
+          candidateFragment.advancePt,
+          externalRegistry,
+        ) ?? computeFloatTableBox(
+          sliceTp,
+          stateAgainstExternalRegistry,
+          (probeState.marginTop + sliceTopRel) * probeScale,
+          tableWidthPt * probeScale,
+          candidateFragment.advancePt * probeScale,
+          sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin',
+          { allowOverlap: table.overlap !== 'never' },
+        );
+      };
+      const candidateGeometryKey = (
+        candidate: ReturnType<typeof takeTableFragment>,
+      ): string => JSON.stringify({
+        // Retained fragments/deltas are plain-data contracts. Comparing the
+        // complete candidate prevents a stable parent box from accepting a
+        // changed row/cell owner or descendant final frame.
+        fragment: candidate.fragment,
+        floatingTableRegistryDelta: candidate.floatingTableRegistryDelta ?? null,
+      });
+      let previousGeometryKey: string | null = null;
+      let previousFreshGeometryKey: string | null = null;
+      let accepted: ReturnType<typeof takeTableFragment> | null = null;
+      let acceptedParentBox: FloatTableBox | null = null;
+      let validatedFreshPage = false;
+      // Parent placement, selected ownership, descendant reflow, and the child
+      // registry delta form one transaction. Every pass restarts at the same
+      // cursor and immutable external registry; only the parent-frame seed
+      // changes. The existing four-pass final-frame bound remains authoritative.
+      for (let pass = 0; pass < 4; pass += 1) {
+        const candidate = takeCandidate(parentSeed, availableHeightPt);
+        if (candidate.requiresFreshPage) {
+          // `requiresFreshPage` is candidate data, not a pagination side effect.
+          // Probe the fresh band only for possible slice geometry, then resolve
+          // that slice against the CURRENT page's immutable external base and
+          // retry this band from the original cursor with the resulting frame.
+          const freshCandidate = takeCandidate(parentSeed, freshPageHeightPt);
+          const freshFragment = freshCandidate.fragment;
+          if (!freshFragment) {
+            if (freshCandidate.nextCursor === null) return regionTopY();
+            throw new Error('Retained floating-table fresh-page probe made no progress');
+          }
+          const freshParentBox = resolveCandidateParent(freshFragment);
+          const freshGeometryKey = JSON.stringify({
+            currentBand: {
+              fragment: candidate.fragment,
+              nextCursor: candidate.nextCursor,
+              requiresFreshPage: candidate.requiresFreshPage,
+            },
+            freshSeed: candidateGeometryKey(freshCandidate),
+          });
+          const freshParentStable = freshParentBox.x === parentSeed.x
+            && freshParentBox.y === parentSeed.y
+            && freshParentBox.w === parentSeed.w
+            && freshParentBox.h === parentSeed.h;
+          if (freshParentStable && freshGeometryKey === previousFreshGeometryKey) {
+            validatedFreshPage = true;
+            break;
+          }
+          previousFreshGeometryKey = freshGeometryKey;
+          parentSeed = freshParentBox;
+          continue;
+        }
+        const candidateFragment = candidate.fragment;
+        if (!candidateFragment) {
+          if (candidate.nextCursor === null) return regionTopY();
+          throw new Error('Retained floating-table pagination made no progress');
+        }
+        const candidateParentBox = resolveCandidateParent(candidateFragment);
+        const geometryKey = candidateGeometryKey(candidate);
+        const parentStable = candidateParentBox.x === parentSeed.x
+          && candidateParentBox.y === parentSeed.y
+          && candidateParentBox.w === parentSeed.w
+          && candidateParentBox.h === parentSeed.h;
+        if (parentStable && geometryKey === previousGeometryKey) {
+          accepted = candidate;
+          acceptedParentBox = candidateParentBox;
+          break;
+        }
+        previousGeometryKey = geometryKey;
+        parentSeed = candidateParentBox;
+      }
+      if (validatedFreshPage) {
+        // The pure transaction proved that the stabilized actual-slice frame
+        // still cannot progress in this band. Advance exactly once; the next
+        // pagination iteration reacquires destination page fields/domain/frames.
+        advancePage();
+        firstSlice = false;
+        continue pagination;
+      }
+      if (!accepted?.fragment || !acceptedParentBox) {
+        throw new Error('Split outer table final-frame probe did not converge');
+      }
+      const result = accepted;
+      const fragment = accepted.fragment;
+      const sourceRows = fragment.rows.map((row) => {
+        const sourceRow = table.rows[row.logicalRowIndex];
+        if (!sourceRow) throw new Error('Retained floating-table fragment lost its source row');
+        return sourceRow;
+      });
+      const sliceEl = {
+        ...table,
+        type: 'table',
+        rows: sourceRows,
+        tblpPr: sliceTp,
+      } as unknown as PaginatedBodyElement;
+      const tableWidthPt = fragment.columnWidthsPt.reduce((sum, width) => sum + width, 0);
 
-  // Terminal page's region top: the anchor paragraph flows from the body top beside
-  // the final band.
-  return regionTopY();
+      emitSlice?.(sliceEl);
+      if (emitSlice && result.floatingTableRegistryDelta?.entries.length) {
+        const destinationPageIndex = destinationPage?.pageIndex ?? livePhysicalPageIndex;
+        commitFloatRegistryDelta(
+          retainedState,
+          result.floatingTableRegistryDelta,
+          'logical-page-points',
+          `logical-page:${destinationPageIndex}`,
+        );
+      }
+      if (emitSlice) {
+        registerTableFloat(
+          acceptedParentBox,
+          sliceTp,
+          retainedState,
+          floatTableWrapSide(acceptedParentBox, retainedState),
+          table.overlap !== 'never',
+          true,
+        );
+      }
+
+      bodyFlowFragments.set(sliceEl, Object.freeze({
+        fragment,
+        columnIndex: sliceEl.colIndex ?? 0,
+        xPt: acceptedParentBox.x / retainedState.scale,
+        yPt: acceptedParentBox.y / retainedState.scale,
+        widthPt: tableWidthPt,
+        heightPt: fragment.advancePt,
+      }));
+      bodyFlowFragments.sourceIndices.set(sliceEl, sourceIndex);
+
+      sliceOrdinal += 1;
+      firstSlice = false;
+      if (!result.nextCursor) return regionTopY();
+      cursor = result.nextCursor;
+      advancePage();
+    }
+    throw new Error('Retained floating-table pagination exceeded its progress bound');
+  }
 }
 
 /**
@@ -7989,16 +8629,6 @@ function measureHeaderFooterHeight(hf: HeaderFooter, base: RenderState): number 
     paintTable: renderTable,
     tableResetsParagraphFlow: (table: DocTable) => !table.tblpPr,
   })(hf, 0, state);
-}
-
-// ===== Body element dispatch =====
-
-function renderBodyElement(el: BodyElement, state: RenderState): void {
-  if (el.type === 'paragraph') {
-    renderParagraph(el as unknown as DocParagraph, state);
-  } else if (el.type === 'table') {
-    renderTable(el as unknown as DocTable, state);
-  }
 }
 
 /**
@@ -8419,25 +9049,43 @@ function renderBodyElements(
       state.y = (placedFragment.yPt + placedFragment.heightPt) * state.scale;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
-      // A floating table (ECMA-376 §17.4.57 `<w:tblpPr>`) remains on its
-      // absolute legacy paint adapter; block tables prefer retained geometry.
-      // PR 6 — a migrated block table paints from its stored fragment (geometry +
-      // cell content, no re-layout). Floating, unsupported nested-placement, and
-      // band-mismatch tables fall through to the legacy `renderTable` recompute path.
       const placedTable = bodyFragmentFor(el);
-      const fragmentPaintable = isFragmentPaintableTable(tbl, placedTable, state);
-      if (fragmentPaintable) {
-        if (placedTable.fragment.kind !== 'table') {
-          throw new Error('Body table paint requires retained table geometry');
-        }
-        if (!state.retainedTablePainter) {
-          throw new Error('Body table paint requires a retained table painter');
-        }
-        state.y = placedTable.yPt * state.scale;
-        state.retainedTablePainter(placedTable.fragment, state);
-      } else {
-        renderTable(tbl, state);
+      if (placedTable?.fragment.kind !== 'table' || !('flowBounds' in placedTable.fragment)) {
+        throw new Error('Body table paint requires retained table geometry');
       }
+      // §17.4.57 floating tables consume the same retained physical geometry,
+      // but their absolute placement does not advance the surrounding body flow.
+      if (tbl.tblpPr) {
+        const resources = state.retainedResourcePainter;
+        if (!resources) throw new Error('Floating table paint requires a retained resource painter');
+        const inFlowY = state.y;
+        const placement = {
+          xPt: placedTable.xPt,
+          yPt: placedTable.yPt,
+        };
+        const floatingTables = state.retainedNestedTableResolver?.(
+          placedTable.fragment,
+          placement,
+          state,
+        ) ?? [];
+        paintPlacedTableLayout(placedTable.fragment, placement, {
+          ctx: state.ctx,
+          scale: state.scale,
+          dpr: state.dpr,
+          defaultTextColor: state.defaultColor,
+          showTrackChanges: state.showTrackChanges,
+          resources,
+          pointToCss: state.pointToCss,
+          onTextRun: state.onTextRun,
+        }, floatingTables);
+        state.y = inFlowY;
+        continue;
+      }
+      if (!state.retainedTablePainter) {
+        throw new Error('Body table paint requires a retained table painter');
+      }
+      state.y = placedTable.yPt * state.scale;
+      state.retainedTablePainter(placedTable.fragment, state);
     }
   }
   });
@@ -10715,14 +11363,6 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
 
 // ===== Text layout =====
 
-/** B2 table stage 1b — master switch for the compute-once TABLE layout reuse
- *  (stamped column widths + row heights, {@link computeTableLayout}). Always ON in
- *  production; the characterization test flips it OFF to capture a fresh-recompute
- *  reference and assert the reuse path resolves an IDENTICAL layout (see
- *  table-layout-reuse.test.ts). Module-local so it never leaks onto the public
- *  surface. */
-let tableReuseEnabled = true;
-
 /** Fill a tab gap with its leader characters (e.g. TOC dot leaders, ECMA-376 §17.3.1.37). */
 function drawTabLeader(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -11775,21 +12415,6 @@ export const __test_isPageLevelAnchorY = (
   fromPara: boolean,
 ): boolean => isPageLevelAnchorY(rf, fromPara);
 
-/** Exported for focused fragment-paint migration-gate tests. */
-export const __test_tableRequiresLegacyPaint = (table: DocTable): boolean =>
-  tableRequiresLegacyPaint(table);
-
-/** Exported for the compute-once table-layout characterization test (B2 table
- *  stage 1b). Toggles the stamped column-width/row-height reuse in
- *  computeTableLayout so the test can resolve the SAME stamped table with reuse ON
- *  and OFF and assert the layout is identical. Returns the previous value so the
- *  test can restore it. */
-export const __test_setTableReuseEnabled = (v: boolean): boolean => {
-  const prev = tableReuseEnabled;
-  tableReuseEnabled = v;
-  return prev;
-};
-
 /** Exported for the table-layout reuse test — resolves a table's px column
  *  widths / row heights through the production {@link computeTableLayout}, so the
  *  test can drive the reuse gate against a stamped element and a stub RenderState. */
@@ -12265,6 +12890,7 @@ function computeTableLayout(
   table: DocTable,
   contentWPx: number,
   state: RenderState,
+  sourceIndex?: number,
 ): {
   colWidths: number[];
   tableW: number;
@@ -12272,80 +12898,17 @@ function computeTableLayout(
   rowHeights: number[];
 } {
   const { scale } = state;
-  const contentHeightsFromResolved = (rowHeights: number[]): number[] => {
-    const footprints = applyTableRowBoundaryFootprints(
-      table,
-      new Array<number>(table.rows.length).fill(0),
-      scale,
-    );
-    return rowHeights.map((height, index) => height - (footprints[index] ?? 0));
-  };
-
-  // B2 table stage 1b — compute-once reuse. When the paginator laid this table
-  // out it stamped the scale-1 pt column widths and per-row heights it resolved
-  // (splitTableAcrossPages per slice, or the whole-table push). Reuse them at the
-  // paint scale — skipping resolveColumnWidths (which re-measures the min-content
-  // width of every token in every cell) and resolveTableRowHeights (which re-lays
-  // out every cell paragraph) — WHEN this paint's inputs reconstruct to the
-  // paginator's scale-1 space. Both stamps are resolved purely in pt: column
-  // widths are scale-independent (resolveColumnWidths never rounds per scale) and
-  // the paginator now measures cell heights through the SAME measureCellContentHeightPx
-  // as the paint pass (stage 1a), at scale 1, so `× scale` reproduces the paint-
-  // scale layout. The gate compares in the paginator's scale-1 space with the same
-  // magnitude-relative epsilon the paragraph reuse uses (contentW/scale − colfit
-  // round-off ~1e-13 is a geometric equality, not a snap). A slice stamps only its
-  // own rows, so `tableRowHeightsPt` aligns 1:1 with `table.rows`; the column stamp
-  // is the full grid, shared by every slice.
-  // Kinsoku is deliberately NOT a gate input (unlike the paragraph reuse gate's
-  // kinsokuRulesEquivalent): the paragraph stamp re-lays lines out at paint and
-  // so must prove the layout inputs match, whereas this stamp is the finished
-  // heights — kinsoku was already applied when the paginator measured them, and
-  // both passes resolve kinsoku from the same immutable doc.settings.
-  const stamped = table as PaginatedBodyElement;
   const contentWPt1 = contentWPx / scale;
-  // PR 6 — fragment-geometry reuse. A non-split block table is no longer stamped (the
-  // stamp mutated the PARSED DocTable); its paginator-resolved geometry lives on the
-  // attached TableFragment (side-table keyed, model untouched). When THIS paint is the
-  // legacy path for such a table (fragment-paint gate exclusions: unsupported nested
-  // placement classes; a band mismatch never reaches here since the band gate below
-  // re-verifies), reuse the fragment's scale-1 column widths / row heights exactly as
-  // the removed stamp reuse did — same source values, same `× scale`, byte-identical.
-  const placedFragment = bodyFlowFragments.get(table as object);
-  const fragmentBandPt = tableFragmentBandPt.get(table as object);
-  if (
-    tableReuseEnabled &&
-    placedFragment !== undefined &&
-    placedFragment.fragment.kind === 'table' &&
-    fragmentBandPt !== undefined &&
-    placedFragment.fragment.rows.length === table.rows.length &&
-    Math.abs(fragmentBandPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1))
-  ) {
-    const fragment = placedFragment.fragment;
-    const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
-    const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
+  // Body occurrences pass their source index explicitly. Header/footer tables
+  // have no body occurrence owner and retain the B1 story calculation below.
+  if (state.retainedTableAcquisition && sourceIndex !== undefined) {
+    const retained = computeTablePtLayout(state, table, contentWPt1, sourceIndex);
+    const colWidths = retained.colWidthsPt.map((width) => width * scale);
+    const rowHeights = retained.rowHeightsPt.map((height) => height * scale);
     return {
       colWidths,
-      tableW: colWidths.reduce((s, w) => s + w, 0),
-      rowContentHeights: contentHeightsFromResolved(rowHeights),
-      rowHeights,
-    };
-  }
-  const reuseInputs = stamped.tableLayoutInputs;
-  const reuse =
-    tableReuseEnabled &&
-    reuseInputs !== undefined &&
-    stamped.tableColWidthsPt !== undefined &&
-    stamped.tableRowHeightsPt !== undefined &&
-    reuseInputs.scale === 1 &&
-    stamped.tableRowHeightsPt.length === table.rows.length &&
-    Math.abs(reuseInputs.contentWPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1));
-  if (reuse) {
-    const colWidths = (stamped.tableColWidthsPt as number[]).map((w) => w * scale);
-    const rowHeights = (stamped.tableRowHeightsPt as number[]).map((h) => h * scale);
-    return {
-      colWidths,
-      tableW: colWidths.reduce((s, w) => s + w, 0),
-      rowContentHeights: contentHeightsFromResolved(rowHeights),
+      tableW: colWidths.reduce((sum, width) => sum + width, 0),
+      rowContentHeights: retained.rowContentHeightsPt.map((height) => height * scale),
       rowHeights,
     };
   }
@@ -12435,10 +12998,6 @@ interface TableCellPaintJob {
   ri: number;
   span: number;
   lastRi: number;
-  /** PR 6 — the measured cell fragment for this cell (when the table is painted from
-   *  its {@link TableFragment}); its content is drawn from stored fragments instead of
-   *  being re-laid-out. Absent on the legacy recompute path. */
-  cellFragment?: CellFragment;
 }
 
 function drawTableRows(
@@ -12449,10 +13008,6 @@ function drawTableRows(
   tableX: number,
   startY: number,
   state: RenderState,
-  /** PR 6 — when present, cell content is painted from the matching
-   *  {@link CellFragment}s (measure-free) instead of re-laid-out by {@link renderCell}.
-   *  Aligned 1:1 with `table.rows` / `row.cells`. */
-  fragment?: TableFragment,
 ): number {
   const { scale, dryRun } = state;
   // ECMA-376 §17.4.1 `<w:bidiVisual>`: lay the grid columns right-to-left, so
@@ -12482,15 +13037,11 @@ function drawTableRows(
   let y = startY;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
-    const rowFragment = fragment?.rows[ri];
     const rowH = rowHeights[ri];
     let ci = rowGridBefore(row, colWidths.length);
     let x = tableX + colWidths.slice(0, ci).reduce((sum, width) => sum + width, 0);
-    let cellIdx = 0;
 
     for (const cell of row.cells) {
-      const cellFragment = rowFragment?.cells[cellIdx];
-      cellIdx++;
       const span = Math.min(cell.colSpan, colWidths.length - ci);
       const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
       // Physical left edge of this cell. LTR: cumulative from the left (`x`).
@@ -12532,7 +13083,7 @@ function drawTableRows(
         if (dryRun) measureCellContent(cell, table, cellW, scale, state);
         else {
           const jobIndex = jobs.length;
-          jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact, ci, ri, span, lastRi: lastRowOfCell, cellFragment });
+          jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact, ci, ri, span, lastRi: lastRowOfCell });
           // ECMA-376 §17.4.66 — record this cell's grid footprint so interior-edge
           // neighbour lookups resolve to it. A vMerge=restart cell owns every row it
           // spans; a colSpan cell owns every column in its span.
@@ -12556,7 +13107,7 @@ function drawTableRows(
   // physical side a logical border maps to, so it is consulted in the border
   // pass alone.
   for (const j of jobs) {
-    renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact, j.cellFragment);
+    renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact);
   }
 
   // ECMA-376 §17.4.66 — adjacent-cell border conflict resolution. Each SHARED
@@ -13185,9 +13736,6 @@ function renderCell(
   h: number,
   state: RenderState,
   clipExact = false,
-  /** PR 6 — when present, this cell's content and piece-local box geometry are
-   *  painted from its stored {@link CellFragment} without re-layout. */
-  cellFragment?: CellFragment,
 ): void {
   const { ctx, scale } = state;
 
@@ -13244,9 +13792,7 @@ function renderCell(
     floatParaSeq: 0,
   };
 
-  if (cellFragment) {
-    cellState.y = y + cellFragment.contentTranslationPt * scale;
-  } else if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
+  if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
     // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. When a cell's
     // visible content is a nested table, Word emits a trailing empty paragraph
     // purely as that syntactic anchor. Including it in the centering content
@@ -13361,12 +13907,10 @@ function renderCell(
     // fixture; when they are, tighten this to the logical content width.
     ctx.rect(0, y, ctx.canvas.width, h);
     ctx.clip();
-    if (cellFragment) renderCellContentFragment(cellFragment, cellState);
-    else renderCellContent(cell.content, cellState);
+    renderCellContent(cell.content, cellState);
     ctx.restore();
   } else {
-    if (cellFragment) renderCellContentFragment(cellFragment, cellState);
-    else renderCellContent(cell.content, cellState);
+    renderCellContent(cell.content, cellState);
   }
 }
 
@@ -13416,104 +13960,6 @@ function renderCellContent(content: CellElement[], state: RenderState): void {
       prevSpaceAfter = 0;
     }
   }
-}
-
-/** Retained table-cell paragraph geometry is valid only for the width domain in
- * which it was acquired. Rejecting a different paint width here prevents a
- * fragment from projecting line partitions produced under other constraints. */
-function isFragmentPaintableCellBlock(
-  block: ParagraphLayout,
-  state: RenderState,
-): boolean {
-  const paintAvailableWidthPt = state.contentW / state.scale;
-  const recordedWidthPt = block.flowBounds.widthPt;
-  return (
-    Math.abs(recordedWidthPt - paintAvailableWidthPt) <=
-    1e-6 * Math.max(1, Math.abs(paintAvailableWidthPt))
-  );
-}
-
-/**
- * PR 6 — paint a cell's content from its {@link CellFragment} blocks, WITHOUT
- * re-laying-out. Mirrors {@link renderCellContent} exactly: paragraph blocks draw from
- * their stored scale-1 line partition (rescaled through the same bridge body fragment
- * paint uses; measure-free at scale 1), nested-table blocks from their own
- * {@link TableFragment}, with the SAME §17.3.1.9 contextualSpacing / spaceBefore-after
- * overlap collapse. Every paragraph consumes its actual `[lineStart, lineEnd)` range;
- * continuation ranges also carry the first-slice suppression marker. A block the
- * per-block gate excludes ({@link isFragmentPaintableCellBlock}) receives the same
- * range through legacy `renderParagraph`, so marker / field / wrap divergences cannot
- * expand back to the full paragraph.
- */
-function renderCellContentFragment(cellFragment: CellFragment, state: RenderState): void {
-  const contentOriginY = state.y;
-  for (let index = 0; index < cellFragment.blocks.length; index += 1) {
-    const block = cellFragment.blocks[index]!;
-    const placement = cellFragment.blockPlacements[index];
-    if (!placement) throw new Error('Retained table-cell block placement is missing');
-    state.y = contentOriginY + placement.offsetPt * state.scale;
-    if (block.kind === 'paragraph') {
-      if (!isFragmentPaintableCellBlock(block, state)) {
-        throw new Error('Retained table-cell paragraph width does not match its paint flow domain');
-      }
-      const resources = state.retainedResourcePainter;
-      if (!resources) {
-        throw new Error('Table-cell paragraph paint requires a retained resource painter');
-      }
-      paintPlacedParagraphLayout(block, {
-        xPt: state.contentX / state.scale,
-        yPt: state.y / state.scale,
-      }, {
-        ctx: state.ctx,
-        scale: state.scale,
-        dpr: state.dpr,
-        defaultTextColor: state.defaultColor,
-        showTrackChanges: state.showTrackChanges,
-        resources,
-        pointToCss: state.pointToCss,
-        onTextRun: state.onTextRun,
-      });
-    } else {
-      if (!state.retainedTablePainter) {
-        throw new Error('Nested table paint requires a retained table painter');
-      }
-      state.retainedTablePainter(block, state);
-    }
-  }
-}
-
-/**
- * PR 6 — paint a block table from its {@link TableFragment}: geometry from the stored
- * scale-1 column widths + per-row heights (× scale), cell content from the cell
- * fragments (measure-free at scale 1). Mirrors {@link renderTable}'s in-flow block path
- * (ECMA-376 §17.4.63/§17.4.50 jc + positive `tblInd`, §17.4.1 bidiVisual origin);
- * negative `tblInd` and floating tables are gate-excluded ({@link isFragmentPaintableTable})
- * and stay on the legacy recompute path, so this handles only the fragment-migrated
- * class. Advances `state.y` past the table exactly as `renderTable` does.
- */
-export function renderTableFragment(fragment: TableFragment, state: RenderState): void {
-  const table = fragment.source;
-  const { contentX, contentW, scale } = state;
-  const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
-  const tableW = colWidths.reduce((s, w) => s + w, 0);
-  const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
-
-  const applyInd = table.tblInd != null && table.jc === 'left';
-  let tableX =
-    table.jc === 'center'
-      ? contentX + Math.max(0, (contentW - tableW) / 2)
-      : table.jc === 'right'
-        ? contentX + Math.max(0, contentW - tableW)
-        : contentX;
-  if (applyInd) {
-    const indPx = (table.tblInd as number) * scale;
-    tableX =
-      table.bidiVisual === true
-        ? contentX + contentW - indPx - tableW
-        : contentX + indPx;
-  }
-
-  state.y = drawTableRows(table, colWidths, tableW, rowHeights, tableX, state.y, state, fragment);
 }
 
 /** Resolve a `nil`/`none` border to "no ink". A `null` means "not set" — the

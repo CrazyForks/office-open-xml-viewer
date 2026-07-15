@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bodyFragmentFor,
   computePages,
   renderDocumentToCanvas,
   __test_verticalLayoutSection,
@@ -14,6 +15,7 @@ import type {
   SectionProps,
   BodyElement,
 } from './types';
+import type { TableFragmentLayout } from './layout/table-pagination.js';
 
 // ECMA-376 §17.6.20 + §17.4.80/§17.18.37 — issue #988 batch-3 adjudication ④:
 // a table CELL inside a vertical (tbRl) section renders like a normal
@@ -36,18 +38,26 @@ import type {
  *  `rect()` calls so the §17.4.80 exact-row clip band can be asserted, with
  *  deterministic char-count metrics. */
 interface RectCall { x: number; y: number; w: number; h: number; }
+type PaintEvent =
+  | Readonly<{ kind: 'text'; text: string }>
+  | Readonly<{ kind: 'stroke'; color: string }>;
 function makeRecordingCanvas(): {
   canvas: HTMLCanvasElement;
   rectCalls: RectCall[];
+  paintEvents: PaintEvent[];
+  measureCalls: () => number;
 } {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const rectCalls: RectCall[] = [];
+  const paintEvents: PaintEvent[] = [];
+  let measures = 0;
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
     letterSpacing: '0px',
     measureText: (s: string) => {
+      measures += 1;
       const p = px();
       return {
         width: [...s].length * p,
@@ -58,7 +68,9 @@ function makeRecordingCanvas(): {
       } as TextMetrics;
     },
     save() {}, restore() {}, beginPath() {}, closePath() {},
-    moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
+    moveTo() {}, lineTo() {}, stroke() {
+      paintEvents.push({ kind: 'stroke', color: String(ctx.strokeStyle) });
+    }, fill() {}, fillRect() {},
     strokeRect() {},
     rect(x: number, y: number, w: number, h: number) {
       rectCalls.push({ x, y, w, h });
@@ -68,7 +80,9 @@ function makeRecordingCanvas(): {
     setLineDash() {}, clearRect() {}, arc() {},
     quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
-    drawImage() {}, fillText() {}, strokeText() {},
+    drawImage() {}, fillText(text: string) {
+      paintEvents.push({ kind: 'text', text });
+    }, strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
     globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
@@ -80,7 +94,12 @@ function makeRecordingCanvas(): {
     getContext: () => ctx,
   };
   (ctx as unknown as { canvas: unknown }).canvas = canvas;
-  return { canvas: canvas as unknown as HTMLCanvasElement, rectCalls };
+  return {
+    canvas: canvas as unknown as HTMLCanvasElement,
+    rectCalls,
+    paintEvents,
+    measureCalls: () => measures,
+  };
 }
 
 function emptyBorders() {
@@ -175,6 +194,65 @@ function verticalTableDoc(): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
+function floatingTable(text: string, widthPt = 50, mixedAxis = false): BodyElement {
+  const table = fixedTable(text, 20);
+  table.colWidths = [widthPt];
+  table.rows[0]!.cells[0]!.widthPt = widthPt;
+  return {
+    ...table,
+    type: 'table',
+    tblpPr: {
+      leftFromText: 0,
+      rightFromText: 0,
+      topFromText: 0,
+      bottomFromText: 0,
+      horzAnchor: mixedAxis ? 'text' : 'page',
+      horzSpecified: true,
+      vertAnchor: 'page',
+      tblpX: mixedAxis ? 5 : 120,
+      tblpY: 20,
+    },
+    overlap: 'never',
+  } as unknown as BodyElement;
+}
+
+function verticalNestedFloatingTableDoc(
+  relocate = false,
+  twoFloats = false,
+  mixedAxis = false,
+): DocxDocumentModel {
+  const outer = fixedTable('', null);
+  outer.rows[0]!.cells[0]!.content = [
+    floatingTable('FLOAT', twoFloats ? 60 : 50, mixedAxis),
+    ...(twoFloats ? [floatingTable('FLOAT2', 60)] : []),
+    { type: 'paragraph', ...bodyParagraph('anchor text wraps around nested table') },
+  ] as unknown as DocTableCell['content'];
+  if (twoFloats) {
+    const parentBorder = { style: 'single', width: 1, color: 'ff00ff' };
+    outer.borders = {
+      top: parentBorder,
+      bottom: parentBorder,
+      left: parentBorder,
+      right: parentBorder,
+      insideH: null,
+      insideV: null,
+    };
+  }
+  const leading = fixedTable('', 20);
+  leading.colWidths = [100];
+  leading.rows[0]!.cells[0]!.widthPt = 100;
+  return {
+    section: PHYS,
+    body: [
+      ...(relocate ? [{ type: 'table', ...leading }] : []),
+      { type: 'table', ...outer },
+    ],
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    fontFamilyClasses: { 'Times New Roman': 'roman' },
+  } as unknown as DocxDocumentModel;
+}
+
 async function renderRuns(): Promise<{ runs: DocxTextRunInfo[]; rectCalls: RectCall[] }> {
   const { canvas, rectCalls } = makeRecordingCanvas();
   const runs: DocxTextRunInfo[] = [];
@@ -209,10 +287,11 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
 
   it('trHeight exact clips at the physical row height; auto grows past it', async () => {
     const { runs, rectCalls } = await renderRuns();
-    // §17.4.80 exact ⇒ a Y-only clip band at the row's PHYSICAL box:
-    // top = physical column top (20), height = 80.
+    // §17.4.80 exact ⇒ an 80 pt clip band. The retained painter submits
+    // point-space clip geometry before the canvas placement transform, while
+    // the text-run assertions below observe the resulting physical placement.
     const clipRect = rectCalls.find(
-      (r) => Math.abs(r.y - COL_TOP) < 1e-6 && Math.abs(r.h - 80) < 1e-6,
+      (r) => Math.abs(r.h - 80) < 1e-6,
     );
     expect(clipRect, 'exact row must clip at its physical Y band').toBeDefined();
     // auto ⇒ the row grows: content extends well past the 80 pt exact height.
@@ -254,5 +333,238 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     const pages = computePages(body, logicalSec, ctx, { 'Times New Roman': 'roman' });
     expect(pages.length).toBe(1);
     expect(pages[0].length).toBe(2);
+  });
+
+  it('retains upright physical geometry while the placement owns the vertical flow footprint', async () => {
+    const doc = verticalTableDoc();
+    const measure = makeRecordingCanvas();
+    const logicalSec = __test_verticalLayoutSection(PHYS);
+    const pages = computePages(
+      doc.body,
+      logicalSec,
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const tables = pages[0].filter((element) => element.type === 'table');
+    expect(tables).toHaveLength(2);
+
+    const exact = bodyFragmentFor(tables[0]);
+    const auto = bodyFragmentFor(tables[1]);
+    if (
+      exact?.fragment.kind !== 'table' || !('flowBounds' in exact.fragment) ||
+      auto?.fragment.kind !== 'table' || !('flowBounds' in auto.fragment)
+    ) {
+      throw new Error('expected retained upright table layouts');
+    }
+
+    // §17.6.20: the upright table's rows remain in physical coordinates, so
+    // the exact row owns an 80 pt physical row stack. The surrounding vertical
+    // story advances by the table's 50 pt physical width instead.
+    expect(exact.fragment.advancePt).toBeCloseTo(80, 6);
+    expect(auto.fragment.advancePt).toBeGreaterThan(80);
+    expect(exact.heightPt).toBeCloseTo(TABLE_W, 6);
+    expect(auto.heightPt).toBeCloseTo(TABLE_W, 6);
+
+    const paint = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, paint.canvas, 0, {
+      dpr: 1,
+      width: PHYS.pageWidth,
+      prebuiltPages: pages,
+    });
+    expect(paint.measureCalls()).toBe(0);
+  });
+
+  it('retains one physical nested-float box for upright wrap, pagination, and paint', async () => {
+    const doc = verticalNestedFloatingTableDoc();
+    const measure = makeRecordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYS),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const table = pages[0]!.find((element) => element.type === 'table');
+    const retained = table ? bodyFragmentFor(table) : undefined;
+    if (retained?.fragment.kind !== 'table'
+      || !('resolvedFloatingTables' in retained.fragment)) {
+      throw new Error('expected an upright retained table fragment with nested floats');
+    }
+    const fragment = retained.fragment as TableFragmentLayout;
+    const nested = fragment.resolvedFloatingTables[0];
+
+    expect(pages).toHaveLength(1);
+    expect(nested).toMatchObject({
+      bounds: { xPt: 120, yPt: 20, widthPt: 50, heightPt: 20 },
+      exclusionBounds: { xPt: 120, yPt: 20, widthPt: 50, heightPt: 20 },
+    });
+    expect(nested?.source.physicalPageIndex).toBe(0);
+    const anchorBlock = fragment.rows[0]?.cells[0]?.blocks.find(
+      (block) => block.layout.kind === 'paragraph',
+    );
+    expect(anchorBlock?.layout.kind === 'paragraph'
+      ? anchorBlock.layout.exclusions
+      : []).not.toEqual([]);
+
+    const paint = makeRecordingCanvas();
+    const runs: DocxTextRunInfo[] = [];
+    await renderDocumentToCanvas(doc, paint.canvas, 0, {
+      dpr: 1,
+      width: PHYS.pageWidth,
+      prebuiltPages: pages,
+      onTextRun: (run) => runs.push(run),
+    });
+    expect(paint.measureCalls()).toBe(0);
+    expect(runs.find((run) => run.text === 'FLOAT')).toMatchObject({
+      x: expect.closeTo(120, 0),
+      y: expect.closeTo(20, 0),
+    });
+  });
+
+  it('finalizes an upright nested float only after relocating to its destination page', async () => {
+    const doc = verticalNestedFloatingTableDoc(true);
+    const measure = makeRecordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYS),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const target = pages[1]?.find((element) => element.type === 'table');
+    const retained = target ? bodyFragmentFor(target) : undefined;
+    if (retained?.fragment.kind !== 'table'
+      || !('resolvedFloatingTables' in retained.fragment)) {
+      throw new Error('expected relocated upright retained nested float');
+    }
+    const fragment = retained.fragment as TableFragmentLayout;
+    const nested = fragment.resolvedFloatingTables[0]!;
+    const anchorBlock = fragment.rows[0]?.cells[0]?.blocks.find(
+      (block) => block.layout.kind === 'paragraph',
+    );
+    const expectedLocalExclusion = {
+      xPt: nested.exclusionBounds.xPt - nested.source.anchorBounds.xPt,
+      yPt: nested.exclusionBounds.yPt - nested.source.anchorBounds.yPt,
+      widthPt: nested.exclusionBounds.widthPt,
+      heightPt: nested.exclusionBounds.heightPt,
+    };
+
+    expect(pages).toHaveLength(2);
+    expect(fragment.floatingTableCoordinateSpace).toBe('upright-physical-page-points');
+    expect(nested.source.physicalPageIndex).toBe(1);
+    expect(anchorBlock?.layout.kind === 'paragraph'
+      ? anchorBlock.layout.exclusions
+      : []).toContainEqual(expect.objectContaining({ bounds: expectedLocalExclusion }));
+
+    const paint = makeRecordingCanvas();
+    const runs: DocxTextRunInfo[] = [];
+    await renderDocumentToCanvas(doc, paint.canvas, 1, {
+      dpr: 1,
+      width: PHYS.pageWidth,
+      prebuiltPages: pages,
+      onTextRun: (run) => runs.push(run),
+    });
+    expect(paint.measureCalls()).toBe(0);
+    expect(runs.find((run) => run.text === 'FLOAT')).toMatchObject({
+      x: expect.closeTo(nested.bounds.xPt, 0),
+      y: expect.closeTo(nested.bounds.yPt, 0),
+    });
+  });
+
+  it('resolves two upright nested floats in source order and paints each before the parent border', async () => {
+    const doc = verticalNestedFloatingTableDoc(false, true);
+    const measure = makeRecordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYS),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const table = pages[0]!.find((element) => element.type === 'table');
+    const retained = table ? bodyFragmentFor(table) : undefined;
+    if (retained?.fragment.kind !== 'table'
+      || !('resolvedFloatingTables' in retained.fragment)) {
+      throw new Error('expected two retained upright nested floats');
+    }
+    const fragment = retained.fragment as TableFragmentLayout;
+    const [first, second] = fragment.resolvedFloatingTables;
+
+    expect(fragment.floatingTableCoordinateSpace).toBe('upright-physical-page-points');
+    expect(fragment.resolvedFloatingTables).toHaveLength(2);
+    expect(first?.bounds).toEqual({ xPt: 120, yPt: 20, widthPt: 60, heightPt: 20 });
+    expect(second?.bounds).toEqual({ xPt: 120, yPt: 40, widthPt: 60, heightPt: 20 });
+
+    const paint = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, paint.canvas, 0, {
+      dpr: 1,
+      width: PHYS.pageWidth,
+      prebuiltPages: pages,
+      onTextRun: (run) => paint.paintEvents.push({ kind: 'text', text: run.text }),
+    });
+    expect(paint.measureCalls()).toBe(0);
+    const floatTextEvents = paint.paintEvents.filter(
+      (event): event is Extract<PaintEvent, { kind: 'text' }> =>
+        event.kind === 'text' && (event.text === 'FLOAT' || event.text === 'FLOAT2'),
+    );
+    expect(floatTextEvents.map((event) => event.text)).toEqual(['FLOAT', 'FLOAT2']);
+    const parentBorderIndex = paint.paintEvents.findIndex(
+      (event) => event.kind === 'stroke' && event.color === '#ff00ff',
+    );
+    const secondFloatIndex = paint.paintEvents.findIndex(
+      (event) => event.kind === 'text' && event.text === 'FLOAT2',
+    );
+    expect(parentBorderIndex).toBeGreaterThan(secondFloatIndex);
+  });
+
+  it('composes the upright cell-column X axis with the physical page Y axis', () => {
+    const doc = verticalNestedFloatingTableDoc(false, false, true);
+    const measure = makeRecordingCanvas();
+    const pages = computePages(
+      doc.body,
+      __test_verticalLayoutSection(PHYS),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      doc.fontFamilyClasses,
+    );
+    const table = pages[0]!.find((element) => element.type === 'table');
+    const retained = table ? bodyFragmentFor(table) : undefined;
+    if (retained?.fragment.kind !== 'table'
+      || !('resolvedFloatingTables' in retained.fragment)) {
+      throw new Error('expected a mixed-axis upright nested float');
+    }
+    const [placement] = (retained.fragment as TableFragmentLayout).resolvedFloatingTables;
+
+    if (!placement?.source.columnBounds) throw new Error('expected the retained cell column');
+    // Horizontal text placement composes the retained physical cell-column X
+    // with tblpX, while the independent page-relative vertical axis stays y=20.
+    expect(placement.bounds).toEqual({
+      xPt: placement.source.columnBounds.xPt + 5,
+      yPt: 20,
+      widthPt: 50,
+      heightPt: 20,
+    });
+  });
+
+  it('records the destination column on an upright retained placement', () => {
+    const wide = fixedTable('', 20);
+    wide.colWidths = [140];
+    wide.rows[0].cells[0].widthPt = 140;
+    const narrow = fixedTable('', 20);
+    const physical = {
+      ...PHYS,
+      columns: { count: 2, spacePt: 10, equalWidth: true, sep: false, cols: [] },
+    } as SectionProps;
+    const body = [
+      { type: 'table', ...wide },
+      { type: 'table', ...narrow },
+    ] as unknown as BodyElement[];
+    const measure = makeRecordingCanvas();
+    const pages = computePages(
+      body,
+      __test_verticalLayoutSection(physical),
+      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
+      { 'Times New Roman': 'roman' },
+    );
+    const tables = pages[0].filter((element) => element.type === 'table');
+    expect(tables).toHaveLength(2);
+    expect(bodyFragmentFor(tables[0])?.columnIndex).toBe(0);
+    expect(bodyFragmentFor(tables[1])?.columnIndex).toBe(1);
   });
 });
