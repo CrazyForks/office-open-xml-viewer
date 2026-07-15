@@ -7018,7 +7018,7 @@ function stampTableLayout(
     ? retained.anchorYPt / retained.state.scale
     : box.y / retained.state.scale;
   const placementState = finalState ?? retained.state;
-  const physical = placementState.verticalPhys;
+  const physical = table.tblpPr ? undefined : placementState.verticalPhys;
   const services = placementState.layoutServices;
   if (physical && services) {
     const physicalLeftPt = (
@@ -8209,18 +8209,20 @@ export function splitFloatTableAcrossPages(
         widthPt: tableWidthPt,
         },
       );
-      emitSlice?.(sliceEl);
-      if (emitSlice) {
-        if (result.floatingTableRegistryDelta) {
-          const destinationPageIndex = destinationPage?.pageIndex ?? sliceOrdinal;
-          bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
-            retainedRecord.state,
-            result.floatingTableRegistryDelta,
-            'logical-page-points',
-            `logical-page:${destinationPageIndex}`,
-          );
-        }
+      // The selected nested-float transaction was resolved before this outer
+      // slice existed in the page registry. Commit it against that exact base
+      // first; emitSlice then registers the parent with the next paragraph id,
+      // so the parent cannot displace or consume sequence ahead of its child.
+      if (emitSlice && result.floatingTableRegistryDelta?.entries.length) {
+        const destinationPageIndex = destinationPage?.pageIndex ?? sliceOrdinal;
+        bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
+          retainedRecord.state,
+          result.floatingTableRegistryDelta,
+          'logical-page-points',
+          `logical-page:${destinationPageIndex}`,
+        );
       }
+      emitSlice?.(sliceEl);
 
       // pushTagged has now supplied the destination column. Resolve the final
       // absolute wrapper without touching the already-retained table geometry.
