@@ -1,4 +1,4 @@
-import { resolveFloatOverlap, type FloatRect } from '../float-layout.js';
+import { resolveFloatOverlap } from '../float-layout.js';
 import type {
   FloatRegistryEntryPt,
   FloatRegistryDeltaPt,
@@ -126,26 +126,21 @@ export function resolveFloatingTablePlacement(
   );
 }
 
-function registryFloat(entry: FloatRegistryEntryPt): FloatRect {
+function registryBlocker(entry: FloatRegistryEntryPt): Readonly<{
+  kind: FloatRegistryEntryPt['kind'];
+  xLeft: number;
+  xRight: number;
+  yTop: number;
+  yBottom: number;
+  paraId: number;
+}> {
   return {
     kind: entry.kind,
-    mode: 'square',
-    imageKey: entry.occurrenceId,
-    imageX: entry.bounds.xPt,
-    imageY: entry.bounds.yPt,
-    imageW: entry.bounds.widthPt,
-    imageH: entry.bounds.heightPt,
     xLeft: entry.exclusionBounds.xPt,
     xRight: entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt,
     yTop: entry.exclusionBounds.yPt,
     yBottom: entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt,
-    side: 'bothSides',
-    distLeft: entry.bounds.xPt - entry.exclusionBounds.xPt,
-    distRight: endX(entry.exclusionBounds) - endX(entry.bounds),
-    distTop: entry.bounds.yPt - entry.exclusionBounds.yPt,
-    distBottom: endY(entry.exclusionBounds) - endY(entry.bounds),
     paraId: entry.paragraphId,
-    drawn: true,
   };
 }
 
@@ -163,8 +158,7 @@ export function floatingTableRegistryDelta(
   });
 }
 
-/** Convert the exact probed point-space delta into the renderer's scaled registry. */
-export function commitFloatingTableRegistryDelta(
+export function validateFloatingTableRegistryDelta(
   delta: FloatRegistryDeltaPt,
   current: Readonly<{
     coordinateSpace: FloatRegistrySnapshotPt['coordinateSpace'];
@@ -172,8 +166,7 @@ export function commitFloatingTableRegistryDelta(
     nextParagraphId: number;
     occurrenceIds: readonly string[];
   }>,
-  scale: number,
-): Readonly<{ entries: readonly FloatRect[]; nextParagraphId: number }> {
+): void {
   if (current.coordinateSpace !== delta.coordinateSpace
     || current.flowDomainId !== delta.flowDomainId
     || current.nextParagraphId !== delta.baseNextParagraphId) {
@@ -186,27 +179,6 @@ export function commitFloatingTableRegistryDelta(
   if (delta.nextParagraphId !== delta.baseNextParagraphId + delta.entries.length) {
     throw new Error('Floating table registry delta sequence mismatch');
   }
-  return Object.freeze({
-    entries: Object.freeze(delta.entries.map((entry) => {
-      const pointRect = registryFloat(entry);
-      return Object.freeze({
-        ...pointRect,
-        imageX: pointRect.imageX * scale,
-        imageY: pointRect.imageY * scale,
-        imageW: pointRect.imageW * scale,
-        imageH: pointRect.imageH * scale,
-        xLeft: pointRect.xLeft * scale,
-        xRight: pointRect.xRight * scale,
-        yTop: pointRect.yTop * scale,
-        yBottom: pointRect.yBottom * scale,
-        distLeft: pointRect.distLeft * scale,
-        distRight: pointRect.distRight * scale,
-        distTop: pointRect.distTop * scale,
-        distBottom: pointRect.distBottom * scale,
-      });
-    })),
-    nextParagraphId: delta.nextParagraphId,
-  });
 }
 
 export function beginFloatingTablePlacementTransaction(
@@ -258,7 +230,7 @@ export function resolveFloatingTablePlacementInTransaction(
     positioning.leftFromTextPt, positioning.rightFromTextPt,
     positioning.topFromTextPt, positioning.bottomFromTextPt,
     transaction.nextParagraphId, placement.overlap !== 'never', 'table',
-    endX(frames.page), registry.map(registryFloat),
+    endX(frames.page), registry.map(registryBlocker),
   );
   const finalPlacement = resolvedPlacement(placement, position.x, position.y);
   const entry = Object.freeze({

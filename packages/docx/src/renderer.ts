@@ -136,6 +136,7 @@ import {
 import { canvasFontString, justifiedPiecePositions } from '@silurus/ooxml-core';
 import type {
   LayoutServices,
+  FloatRegistryDeltaPt,
   Matrix2DData,
   ParagraphLayout,
   ResolvedFloatingTablePlacementLayout,
@@ -145,10 +146,7 @@ import type {
 } from './layout/types.js';
 import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
-import {
-  commitFloatingTableRegistryDelta,
-  resolveFloatingTablePlacementsInFreshRegistry,
-} from './layout/floating-table-transaction.js';
+import { validateFloatingTableRegistryDelta } from './layout/floating-table-transaction.js';
 import type { LayoutOptions } from './layout/options.js';
 import {
   paginatedFlowHasPaginationDependentFields,
@@ -769,7 +767,6 @@ export interface RenderState extends DeferredFrontPaintState {
     fragment: TableLayout,
     placement: Readonly<{ xPt: number; yPt: number }>,
     state: RenderState,
-    physicalPage: boolean,
   ) => readonly ResolvedFloatingTablePlacementLayout[];
   /** Renderer authorities injected into the pure recursive table acquisition. */
   retainedTableAcquisition?: RetainedTableAcquisitionDependencies<RenderState>;
@@ -2042,58 +2039,25 @@ async function renderDocumentToCanvasLeased(
     resolvedLocalFonts,
     layoutServices,
     retainedResourcePainter,
-    retainedNestedTableResolver: (fragment, placement, state, physicalPage) => {
+    retainedNestedTableResolver: (fragment, placement, state) => {
       if (!('floatingTables' in fragment)) return Object.freeze([]);
       const tableFragment = fragment as TableFragmentLayout;
+      if (tableFragment.floatingTableCoordinateSpace === 'upright-physical-page-points') {
+        throw new Error('Upright physical table fragments require the upright paint boundary');
+      }
       const retained = tableFragment.resolvedFloatingTables ?? [];
       const retainedIds = new Set(retained.map((item) => item.occurrenceId));
       const occurrences = tableFragment.floatingTables.filter(
         (occurrence) => !retainedIds.has(occurrence.occurrenceId),
       );
-      const physical = physicalPage ? state.verticalPhys : undefined;
-      const pageWidthPt = physical?.pageWidth ?? state.pageWidth;
-      const pageHeightPt = physical?.pageHeight ?? state.pageH / state.scale;
-      const marginLeftPt = physical?.marginLeft ?? state.marginLeft;
-      const marginRightPt = physical?.marginRight ?? state.marginRight;
-      const marginTopPt = physical?.marginTop ?? state.marginTop;
-      const marginBottomPt = physical?.marginBottom ?? state.marginBottom;
+      const pageWidthPt = state.pageWidth;
+      const pageHeightPt = state.pageH / state.scale;
+      const marginLeftPt = state.marginLeft;
+      const marginRightPt = state.marginRight;
+      const marginTopPt = state.marginTop;
+      const marginBottomPt = state.marginBottom;
       const dxPt = placement.xPt - fragment.flowBounds.xPt;
       const dyPt = placement.yPt - fragment.flowBounds.yPt;
-      if (physicalPage) {
-        const physicalOccurrences = [
-          ...retained.map((item) => item.source),
-          ...occurrences,
-        ].map((occurrence) => Object.freeze({
-          ...occurrence,
-          anchorBounds: Object.freeze({
-            ...occurrence.anchorBounds,
-            xPt: occurrence.anchorBounds.xPt + dxPt,
-            yPt: occurrence.anchorBounds.yPt + dyPt,
-          }),
-          ...(occurrence.columnBounds ? {
-            columnBounds: Object.freeze({
-              ...occurrence.columnBounds,
-              xPt: occurrence.columnBounds.xPt + dxPt,
-              yPt: occurrence.columnBounds.yPt + dyPt,
-            }),
-          } : {}),
-        }));
-        return resolveFloatingTablePlacementsInFreshRegistry(
-          physicalOccurrences,
-          (physicalOccurrence) => ({
-            page: { xPt: 0, yPt: 0, widthPt: pageWidthPt, heightPt: pageHeightPt },
-            margin: {
-              xPt: marginLeftPt,
-              yPt: marginTopPt,
-              widthPt: Math.max(0, pageWidthPt - marginLeftPt - marginRightPt),
-              heightPt: Math.max(0, pageHeightPt - marginTopPt - marginBottomPt),
-            },
-            text: physicalOccurrence.anchorBounds,
-          }),
-          'upright-physical-page-points',
-          `upright-physical-page:${state.pageIndex}`,
-        ).placements;
-      }
       return Object.freeze([...retained, ...occurrences.map((occurrence) => (
         resolveFloatingTablePlacement(occurrence, {
           page: { xPt: 0, yPt: 0, widthPt: pageWidthPt, heightPt: pageHeightPt },
@@ -2120,16 +2084,17 @@ async function renderDocumentToCanvasLeased(
         const tableWidthPt = fragment.columnWidthsPt.reduce((sum, width) => sum + width, 0);
         const physicalLeftPt = (cssWidthPx - state.y) / state.scale - tableWidthPt;
         const physicalTopPt = state.contentX / state.scale;
-        const placement = {
-          xPt: physicalLeftPt + fragment.flowBounds.xPt,
-          yPt: physicalTopPt + fragment.flowBounds.yPt,
-        };
-        const floatingTables = state.retainedNestedTableResolver?.(
-          fragment,
-          placement,
-          state,
-          true,
-        ) ?? [];
+        const tableFragment = 'resolvedFloatingTables' in fragment
+          ? fragment as TableFragmentLayout
+          : null;
+        if (tableFragment?.floatingTables.length) {
+          throw new Error('Upright nested floats must resolve before retained paint');
+        }
+        if (tableFragment?.resolvedFloatingTables.length
+          && tableFragment.floatingTableCoordinateSpace !== 'upright-physical-page-points') {
+          throw new Error('Upright nested float coordinate-space mismatch');
+        }
+        const floatingTables = tableFragment?.resolvedFloatingTables ?? [];
         const { ctx } = state;
         ctx.save();
         try {
@@ -2168,7 +2133,6 @@ async function renderDocumentToCanvasLeased(
         fragment,
         placement,
         state,
-        false,
       ) ?? [];
       paintPlacedTableLayout(fragment, placement, {
         ctx: state.ctx,
@@ -4454,8 +4418,18 @@ export function computePages(
           computeTablePtLayout(measureState, tbl, bandPt);
         const h = colWidthsPt.reduce((s, w) => s + w, 0);
         const tableEl = { ...tbl, type: 'table' } as PaginatedBodyElement;
-        stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);
         if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
+        withColumnBand(() => stampTableLayout(
+          tableEl,
+          colWidthsPt,
+          rowHeightsPt,
+          bandPt,
+          {
+            ...measureState,
+            pageIndex: pages.length - 1,
+            displayPageNumber: pages.length,
+          },
+        ));
         pushTagged(tableEl);
         y += h;
         measureState.y += h;
@@ -5817,6 +5791,12 @@ const bodyFlowFragments = Object.freeze(Object.assign(new WeakMap<object, Placed
         contentWidthPt: number;
         anchorYPt: number;
       }> | undefined;
+      commitFloatRegistryDelta(
+        state: RenderState,
+        delta: FloatRegistryDeltaPt,
+        coordinateSpace: 'logical-page-points',
+        flowDomainId: string,
+      ): void;
       reacquirePageBlock(
         table: DocTable,
         sourceIndex: number,
@@ -6079,6 +6059,47 @@ Object.assign(
         ?? table.rows.map((row) => bodyFlowFragments.sourceIndices
           .retainedTableMeasureBySource.get(row as object))
           .find((record) => record !== undefined);
+    },
+    commitFloatRegistryDelta(
+      state: RenderState,
+      delta: FloatRegistryDeltaPt,
+      coordinateSpace: 'logical-page-points',
+      flowDomainId: string,
+    ): void {
+      validateFloatingTableRegistryDelta(delta, {
+        coordinateSpace,
+        flowDomainId,
+        nextParagraphId: state.floatParaSeq,
+        occurrenceIds: state.floats.map((float) => float.imageKey).filter(Boolean),
+      });
+      const scale = state.scale;
+      state.floats.push(...delta.entries.map((entry): FloatRect => ({
+        kind: entry.kind,
+        mode: 'square',
+        imageKey: entry.occurrenceId,
+        imageX: entry.bounds.xPt * scale,
+        imageY: entry.bounds.yPt * scale,
+        imageW: entry.bounds.widthPt * scale,
+        imageH: entry.bounds.heightPt * scale,
+        xLeft: entry.exclusionBounds.xPt * scale,
+        xRight: (entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt) * scale,
+        yTop: entry.exclusionBounds.yPt * scale,
+        yBottom: (entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt) * scale,
+        side: 'bothSides',
+        distLeft: (entry.bounds.xPt - entry.exclusionBounds.xPt) * scale,
+        distRight: (
+          entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt
+          - entry.bounds.xPt - entry.bounds.widthPt
+        ) * scale,
+        distTop: (entry.bounds.yPt - entry.exclusionBounds.yPt) * scale,
+        distBottom: (
+          entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt
+          - entry.bounds.yPt - entry.bounds.heightPt
+        ) * scale,
+        paraId: entry.paragraphId,
+        drawn: true,
+      })));
+      state.floatParaSeq = delta.nextParagraphId;
     },
     reacquirePageBlock(
       table: DocTable,
@@ -6971,6 +6992,7 @@ function stampTableLayout(
   _colWidthsPt: number[],
   _rowHeightsPt: number[],
   _contentWPt: number,
+  finalState?: RenderState,
 ): void {
   const table = el as unknown as DocTable;
   const retained = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.forTable(table);
@@ -6978,7 +7000,7 @@ function stampTableLayout(
   if (!retained || sourceIndex === undefined) {
     throw new Error('Table placement requires retained table acquisition');
   }
-  const layout = retained.acquisition.layout;
+  let layout: TableLayout | TableFragmentLayout = retained.acquisition.layout;
   const tableWidthPt = layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const box = table.tblpPr
     ? computeFloatTableBox(
@@ -6995,6 +7017,90 @@ function stampTableLayout(
   const yPt = box?.y === undefined
     ? retained.anchorYPt / retained.state.scale
     : box.y / retained.state.scale;
+  const placementState = finalState ?? retained.state;
+  const physical = placementState.verticalPhys;
+  const services = placementState.layoutServices;
+  if (physical && services) {
+    const physicalLeftPt = (
+      physical.cssWidthPx - placementState.y
+    ) / placementState.scale - tableWidthPt;
+    const physicalTopPt = placementState.contentX / placementState.scale;
+    const occurrenceId = `${retained.acquisition.input.id}:upright-page:${placementState.pageIndex}`;
+    const physicalBandHeightPt = Math.max(
+      retained.acquisition.layout.advancePt,
+      physical.pageHeight - physical.marginTop - physical.marginBottom,
+    );
+    const physicalFragment = takeTableFragment(
+      retained.acquisition,
+      startTableFragmentCursor(),
+      {
+        availableHeightPt: physicalBandHeightPt,
+        freshPageHeightPt: physicalBandHeightPt,
+        placement: {
+          container: {
+            id: `upright-physical-page:${placementState.pageIndex}`,
+            kind: 'body',
+            bounds: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: tableWidthPt,
+              heightPt: physicalBandHeightPt,
+            },
+          },
+          cursor: { xPt: 0, yPt: 0 },
+          availableBounds: {
+            xPt: 0,
+            yPt: 0,
+            widthPt: tableWidthPt,
+            heightPt: physicalBandHeightPt,
+          },
+        },
+        services,
+        compatibility: 'word',
+        oversizedRowPolicy: 'atomic',
+        page: {
+          physicalPageIndex: placementState.pageIndex,
+          displayPageNumber: placementState.displayPageNumber ?? placementState.pageIndex + 1,
+          occurrenceId,
+        },
+        floatingTableFrames: {
+          page: { xPt: 0, yPt: 0, widthPt: physical.pageWidth, heightPt: physical.pageHeight },
+          margin: {
+            xPt: physical.marginLeft,
+            yPt: physical.marginTop,
+            widthPt: Math.max(0, physical.pageWidth - physical.marginLeft - physical.marginRight),
+            heightPt: Math.max(0, physical.pageHeight - physical.marginTop - physical.marginBottom),
+          },
+          column: {
+            xPt: physical.marginLeft,
+            yPt: physical.marginTop,
+            widthPt: Math.max(0, physical.pageWidth - physical.marginLeft - physical.marginRight),
+            heightPt: Math.max(0, physical.pageHeight - physical.marginTop - physical.marginBottom),
+          },
+        },
+        floatingTableRegistry: {
+          coordinateSpace: 'upright-physical-page-points',
+          flowDomainId: `upright-physical-page:${placementState.pageIndex}`,
+          entries: Object.freeze([]),
+          nextParagraphId: 0,
+        },
+        finalPlacementTranslationPt: { xPt: physicalLeftPt, yPt: physicalTopPt },
+        reacquirePageDependentBlock: (request) => bodyFlowFragments.sourceIndices
+          .retainedTableMeasureBySource.reacquirePageBlock(
+            table,
+            sourceIndex,
+            retained.acquisition,
+            placementState,
+            services,
+            request,
+          ),
+      },
+    );
+    if (!physicalFragment.fragment || physicalFragment.nextCursor) {
+      throw new Error('Upright table final-frame layout must remain atomic');
+    }
+    layout = physicalFragment.fragment;
+  }
   retainTableEnvelope(el, { fragment: layout, xPt, yPt, widthPt: tableWidthPt });
   bodyFlowFragments.set(el, Object.freeze({
     fragment: layout,
@@ -7854,18 +7960,12 @@ export function splitTableAcrossPages(
       });
       pages[pages.length - 1]!.push(sliceEl);
       if (result.floatingTableRegistryDelta) {
-        const committed = commitFloatingTableRegistryDelta(
+        bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
+          rowSplit.state,
           result.floatingTableRegistryDelta,
-          {
-            coordinateSpace: 'logical-page-points',
-            flowDomainId: `logical-page:${physicalPageIndex}`,
-            nextParagraphId: rowSplit.state.floatParaSeq,
-            occurrenceIds: rowSplit.state.floats.map((float) => float.imageKey).filter(Boolean),
-          },
-          rowSplit.state.scale,
+          'logical-page-points',
+          `logical-page:${physicalPageIndex}`,
         );
-        rowSplit.state.floats.push(...committed.entries);
-        rowSplit.state.floatParaSeq = committed.nextParagraphId;
       }
       y += fragment.advancePt;
       emittedAny = true;
@@ -7880,9 +7980,9 @@ export function splitTableAcrossPages(
 
 /**
  * Split a FLOATING table (ECMA-376 §17.4.57 `<w:tblpPr>`, vertAnchor="text") that
- * overflows the page bottom across page boundaries, row by row — the Word ground
- * behavior for a page-overflowing floating table. It is the out-of-flow analogue
- * of {@link splitTableAcrossPages}:
+ * overflows the page bottom across page boundaries, row by row. ECMA-376 does
+ * not prescribe this continuation policy; it is the renderer's deterministic
+ * out-of-flow analogue of {@link splitTableAcrossPages}:
  *   • The FIRST slice sits at the table's in-flow anchor (`slice1TopOffset` below
  *     the flow cursor `y`), taking the rows that fit down to the body bottom.
  *   • Each CONTINUATION slice sits at the next page's body TOP (its tblpPr is cloned
@@ -7905,8 +8005,8 @@ export function splitTableAcrossPages(
  * guarantee, mirroring splitTableAcrossPages): a single row taller than a full page
  * is placed overflowing rather than looping. When the anchor sits so low that not
  * even the first row fits the remaining band, the whole table is moved to the next
- * page FIRST (no page-1 slice) — matching Word (a floating table row is not left
- * hanging past the bottom margin when a fuller band is one page away). Breaks land
+ * page FIRST (no page-1 slice). This relocation is a compatibility policy, not a
+ * rule defined by §17.4.57. Breaks land
  * only on vMerge-safe boundaries ({@link tableBreakAllowedBefore}).
  *
  * Returns the body cursor (content-relative pt) after the final slice: the terminal
@@ -8113,19 +8213,12 @@ export function splitFloatTableAcrossPages(
       if (emitSlice) {
         if (result.floatingTableRegistryDelta) {
           const destinationPageIndex = destinationPage?.pageIndex ?? sliceOrdinal;
-          const committed = commitFloatingTableRegistryDelta(
+          bodyFlowFragments.sourceIndices.retainedTableMeasureBySource.commitFloatRegistryDelta(
+            retainedRecord.state,
             result.floatingTableRegistryDelta,
-            {
-              coordinateSpace: 'logical-page-points',
-              flowDomainId: `logical-page:${destinationPageIndex}`,
-              nextParagraphId: retainedRecord.state.floatParaSeq,
-              occurrenceIds: retainedRecord.state.floats
-                .map((float) => float.imageKey).filter(Boolean),
-            },
-            retainedRecord.state.scale,
+            'logical-page-points',
+            `logical-page:${destinationPageIndex}`,
           );
-          retainedRecord.state.floats.push(...committed.entries);
-          retainedRecord.state.floatParaSeq = committed.nextParagraphId;
         }
       }
 
@@ -8705,7 +8798,6 @@ function renderBodyElements(
           placedTable.fragment,
           placement,
           state,
-          false,
         ) ?? [];
         paintPlacedTableLayout(placedTable.fragment, placement, {
           ctx: state.ctx,

@@ -383,8 +383,8 @@ export function resolveLineFloatWindow(
  *     anchored in OTHER paragraphs only.
  *
  * EVERYTHING ELSE in this function is implementation-defined — ECMA-376 Part 1
- * does NOT specify it. This is a HEURISTIC chosen to match Word's observed
- * layout (e.g. sample-9 figure 9), not a spec requirement:
+ * does NOT specify it. This is a deterministic compatibility policy, informed
+ * by observed Office output but not a normative Word or ECMA-376 requirement:
  *   - the move DIRECTION (right first, then down),
  *   - WHICH float moves (the later/document-order float is the "new" one),
  *   - the "same-paragraph floats never displace each other" gate (the paraId
@@ -395,22 +395,26 @@ export function resolveLineFloatWindow(
  *     Using it to seat one float beside another is our own choice.
  *
  * If the §20.4.2.3 "shall be repositioned" requirement is ever satisfiable in
- * more than one way, the particular re-seating below remains a Word-mimicking
- * heuristic; keep it as such until a spec-grounded placement rule is found.
+ * more than one way, the particular re-seating below remains an implementation
+ * policy; keep it scoped as such until a specification-backed rule is found.
  *
  * We re-seat horizontally to the right of the blocking float(s) first (margins
  * may be used — Word lets a displaced float sit in the page margin), and only
  * fall back to a vertical push when no horizontal room remains.
  *
- * Coordinates are page-absolute px. (x,y) is the image box origin (no dist).
- * `pageRight` is the page width in px; `floats` is the page's active float set.
+ * Coordinates are page-absolute in one caller-selected unit (px or pt). `(x,y)`
+ * is the image box origin (no dist); every scalar and blocker must use that same
+ * unit. `pageRight` is the page edge and `floats` is the active float set.
  */
 export function resolveFloatOverlap(
   x: number, y: number, w: number, h: number,
   dl: number, dr: number, dt: number, db: number,
   paraId: number, allowOverlap: boolean,
   kind: FloatRect['kind'],
-  pageRight: number, floats: FloatRect[],
+  pageRight: number, floats: readonly Pick<
+    FloatRect,
+    'kind' | 'xLeft' | 'xRight' | 'yTop' | 'yBottom' | 'paraId'
+  >[],
 ): { x: number; y: number } {
   for (let guard = 0; guard < 16; guard++) {
     const exL = x - dl, exR = x + w + dr, exT = y - dt, exB = y + h + db;

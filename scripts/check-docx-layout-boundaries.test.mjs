@@ -63,6 +63,53 @@ export function computePages(sp: any, measureState: any) {
 export function computeTableLayout() { return []; }
 `;
 
+const computePagesUprightBaseline = `
+export function computePages() {
+  const y = 10, h = 20, tblReservePt = 0, colTopY = 0, i = 0;
+  const tableEl = {}, colWidthsPt = [], rowHeightsPt = [], bandPt = 100;
+  stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);
+  if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
+  return [];
+}
+export function computeTableLayout() { return []; }
+`;
+
+const computePagesUprightMigration = `
+export function computePages() {
+  const y = 10, h = 20, tblReservePt = 0, colTopY = 0, i = 0;
+  const tableEl = {}, colWidthsPt = [], rowHeightsPt = [], bandPt = 100;
+  if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
+  withColumnBand(() => stampTableLayout(
+    tableEl,
+    colWidthsPt,
+    rowHeightsPt,
+    bandPt,
+    {
+      ...measureState,
+      pageIndex: pages.length - 1,
+      displayPageNumber: pages.length,
+    },
+  ));
+  return [];
+}
+export function computeTableLayout() { return []; }
+`;
+
+function initializeComputePagesUprightRepository() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-upright-finalize-'));
+  write(root, 'packages/docx/src/renderer.ts', computePagesUprightBaseline);
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() { return []; }\n');
+  write(root, 'packages/docx/src/paint/canvas-page.ts', 'export function paint() {}\n');
+  git(root, 'init', '-b', 'main');
+  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
+  git(root, 'config', 'user.name', 'Boundary Test');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'base');
+  git(root, 'switch', '-c', 'a1');
+  establishA1Baseline(root);
+  return root;
+}
+
 function initializeComputePagesTableStampRepository() {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-compute-pages-table-stamp-'));
   write(root, 'packages/docx/src/renderer.ts', computePagesTableStampBaseline);
@@ -1224,6 +1271,48 @@ test('allows only the exact A5 retained slice size replacement inside computePag
   const result = runChecker(root, '--base-ref', 'main');
 
   assert.equal(result.status, 0, result.output);
+});
+
+test('allows only destination-first upright finalization inside computePages', () => {
+  const root = initializeComputePagesUprightRepository();
+  write(root, 'packages/docx/src/renderer.ts', computePagesUprightMigration);
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects altered or adjacent upright finalization edits inside computePages', () => {
+  const variants = [
+    computePagesUprightMigration.replace('pages.length - 1', 'pages.length'),
+    computePagesUprightMigration.replace('displayPageNumber: pages.length', 'displayPageNumber: 1'),
+    computePagesUprightMigration.replace('withColumnBand(() =>', 'withColumnBand(() => sideEffect(),'),
+    computePagesUprightMigration.replace('  return [];', '  sideEffect();\n  return [];'),
+  ];
+  for (const source of variants) {
+    const root = initializeComputePagesUprightRepository();
+    write(root, 'packages/docx/src/renderer.ts', source);
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, source);
+    assert.match(result.output, /LEGACY_DECLARATION_CHANGED|BASELINE_EXPANSION/);
+  }
+});
+
+test('keeps upright paint resolver-free and the table transaction point-only', () => {
+  const productionRoot = resolve(import.meta.dirname, '..');
+  const renderer = readFileSync(join(productionRoot, 'packages/docx/src/renderer.ts'), 'utf8');
+  const retainedPainter = renderer.indexOf('retainedTablePainter:');
+  const uprightStart = renderer.indexOf('if (state.verticalPhys) {', retainedPainter);
+  const uprightEnd = renderer.indexOf('      const placement = {', uprightStart);
+  assert.ok(retainedPainter >= 0 && uprightStart > retainedPainter && uprightEnd > uprightStart);
+  const uprightPaint = renderer.slice(uprightStart, uprightEnd);
+  assert.doesNotMatch(uprightPaint, /resolveFloatingTablePlacement/);
+
+  const transaction = readFileSync(
+    join(productionRoot, 'packages/docx/src/layout/floating-table-transaction.ts'),
+    'utf8',
+  );
+  assert.doesNotMatch(transaction, /\bFloatRect\b|\bscale\b|\bCanvas\w*\b|\bDPR\b|\bdpr\b/);
 });
 
 test('allows only the exact A5 retained body prefix inside computeTableLayout', () => {

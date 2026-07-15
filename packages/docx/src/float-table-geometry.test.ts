@@ -15,10 +15,10 @@ import type {
 } from './layout/types.js';
 import {
   beginFloatingTablePlacementTransaction,
-  commitFloatingTableRegistryDelta,
   floatingTableRegistryDelta,
   resolveFloatingTablePlacementInTransaction,
   resolveFloatingTablePlacementsInFreshRegistry,
+  validateFloatingTableRegistryDelta,
 } from './layout/floating-table-transaction.js';
 
 // Table-driven geometry assertions for floating tables (ECMA-376 §17.4.57
@@ -476,7 +476,7 @@ const retainedReferenceFrames: FloatingTableReferenceFramesPt = Object.freeze({
 });
 
 describe('retained floating table placement (§17.4.57)', () => {
-  it('commits the exact probed wrap box and paragraph sequence once', () => {
+  it('validates the exact probed point delta and paragraph sequence once', () => {
     const snapshot = Object.freeze({
       coordinateSpace: 'logical-page-points' as const,
       flowDomainId: 'logical-page:3',
@@ -508,22 +508,18 @@ describe('retained floating table placement (§17.4.57)', () => {
       occurrenceIds: Object.freeze([]),
     } as const;
 
-    const committed = commitFloatingTableRegistryDelta(delta, current, 2);
-
-    expect(committed.nextParagraphId).toBe(8);
-    expect(committed.entries[0]).toMatchObject({
-      imageKey: placement.occurrenceId,
-      paraId: 7,
-      imageX: resolution.placement.bounds.xPt * 2,
-      imageY: resolution.placement.bounds.yPt * 2,
-      xLeft: resolution.placement.exclusionBounds.xPt * 2,
-      yTop: resolution.placement.exclusionBounds.yPt * 2,
+    expect(() => validateFloatingTableRegistryDelta(delta, current)).not.toThrow();
+    expect(delta.entries[0]).toMatchObject({
+      occurrenceId: placement.occurrenceId,
+      paragraphId: 7,
+      bounds: resolution.placement.bounds,
+      exclusionBounds: resolution.placement.exclusionBounds,
     });
-    expect(() => commitFloatingTableRegistryDelta(delta, {
+    expect(() => validateFloatingTableRegistryDelta(delta, {
       ...current,
-      nextParagraphId: committed.nextParagraphId,
+      nextParagraphId: 8,
       occurrenceIds: [placement.occurrenceId],
-    }, 2)).toThrow('base/domain mismatch');
+    })).toThrow('base/domain mismatch');
   });
 
   it('re-resolves an upright nested float in a fresh physical-page domain', () => {

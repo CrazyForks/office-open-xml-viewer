@@ -64,6 +64,7 @@ export interface TableFragmentLayout extends TableLayout {
   readonly rows: readonly TableRowFragmentLayout[];
   readonly floatingTables: readonly FloatingTablePlacementLayout[];
   readonly resolvedFloatingTables: readonly ResolvedFloatingTablePlacementLayout[];
+  readonly floatingTableCoordinateSpace?: FloatRegistrySnapshotPt['coordinateSpace'];
 }
 
 interface TableCellFragmentCursor {
@@ -241,8 +242,11 @@ function ownsFinalFrameAxis(placement: FloatingTablePlacementLayout): boolean {
 }
 
 function remainingRowAtCursor(
+  source: RetainedTableAcquisition,
   row: TableRowLayoutInput,
   cursor: TableFragmentCursor,
+  context: TableFragmentContext,
+  requiredAnchorByCell: ReadonlyMap<string, number>,
 ): TableRowLayoutInput {
   return {
     ...row,
@@ -253,6 +257,30 @@ function remainingRowAtCursor(
       return {
         ...cell,
         blocks: cell.blocks.slice(cellCursor.blockIndex).map((block, blockOffset) => {
+          if (blockOffset === 0 && cellCursor.nestedCursor && block.layout.kind === 'table') {
+            const nested = source.nestedById[block.layout.id];
+            if (nested) {
+              const remaining = takeTableFragment(nested, cellCursor.nestedCursor, {
+                ...context,
+                availableHeightPt: context.freshPageHeightPt,
+                placement: {
+                  ...context.placement,
+                  availableBounds: {
+                    ...context.placement.availableBounds,
+                    heightPt: context.freshPageHeightPt,
+                  },
+                },
+              });
+              const requiredAnchor = requiredAnchorByCell.get(cell.id);
+              if (remaining.nextCursor && requiredAnchor !== undefined
+                && block.sourceBlockIndex < requiredAnchor) {
+                throw new Error(
+                  'Floating table anchor cannot follow an incomplete nested-table candidate',
+                );
+              }
+              if (remaining.fragment) return { ...block, layout: remaining.fragment };
+            }
+          }
           if (blockOffset !== 0
             || cellCursor.paragraphLineStart === 0
             || block.layout.kind !== 'paragraph') return block;
@@ -299,6 +327,16 @@ function finalFrameRow(
     && ownsAnchorStart(occurrence)
   ));
   if (occurrences.length === 0) return { row, resolved: [], registry, nextParagraphId };
+  const requiredAnchorByCell = new Map<string, number>();
+  for (const occurrence of occurrences) {
+    requiredAnchorByCell.set(
+      occurrence.hostCellId,
+      Math.min(
+        requiredAnchorByCell.get(occurrence.hostCellId) ?? Number.POSITIVE_INFINITY,
+        occurrence.anchorBlockIndex,
+      ),
+    );
+  }
 
   const rowPlacement: FlowBlockPlacement = {
     ...context.placement,
@@ -307,7 +345,9 @@ function finalFrameRow(
       yPt: context.placement.cursor.yPt + rowOffsetPt,
     },
   };
-  const remainingRow = remainingRowAtCursor(row, cursor);
+  const remainingRow = remainingRowAtCursor(
+    source, row, cursor, context, requiredAnchorByCell,
+  );
   const provisional = layoutTable({
     ...source.input,
     id: `${source.input.id}:float-probe:${context.page.occurrenceId}:${row.logicalRowIndex}`,
@@ -357,7 +397,9 @@ function finalFrameRow(
   };
 
   const resolveCandidate = (candidate: TableRowLayoutInput) => {
-    const remainingCandidate = remainingRowAtCursor(candidate, cursor);
+    const remainingCandidate = remainingRowAtCursor(
+      source, candidate, cursor, context, requiredAnchorByCell,
+    );
     const laidOut = candidate === row ? provisional : layoutTable({
       ...source.input,
       id: `${source.input.id}:float-converge:${context.page.occurrenceId}:${row.logicalRowIndex}`,
@@ -372,7 +414,10 @@ function finalFrameRow(
     const resolved: ResolvedFloatingTablePlacementLayout[] = [];
     for (const occurrence of occurrences) {
       const placement = placementFor(occurrence, laidOut, remainingCandidate);
-      if (!placement || !ownsFinalFrameAxis(placement)) continue;
+      if (!placement || (
+        context.floatingTableRegistry?.coordinateSpace !== 'upright-physical-page-points'
+        && !ownsFinalFrameAxis(placement)
+      )) continue;
       const resolution = resolveFloatingTablePlacementInTransaction(placement, {
         page: frames.page,
         margin: frames.margin,
@@ -462,21 +507,40 @@ function finalFrameRow(
   throw new Error('Floating table final-frame reflow did not converge');
 }
 
-function selectedOwnsResolvedPlacement(
+function selectedOwnsOccurrence(
   source: RetainedTableAcquisition,
   selection: SelectedRow,
-  placement: ResolvedFloatingTablePlacementLayout,
+  occurrence: Pick<FloatingTablePlacementLayout, 'hostCellId' | 'anchorBlockIndex'>,
 ): boolean {
   const sourceRow = source.input.rows[selection.logicalRowIndex];
   const cellIndex = sourceRow?.cells.findIndex(
-    (cell) => cell.id === placement.source.hostCellId,
+    (cell) => cell.id === occurrence.hostCellId,
   ) ?? -1;
   return cellIndex >= 0 && (selection.ranges[cellIndex]?.some((range) => (
-    range.blockIndex === placement.source.anchorBlockIndex
+    range.blockIndex === occurrence.anchorBlockIndex
       && (range.kind === 'whole'
         || (range.kind === 'paragraph' && range.lineStart === 0)
         || (range.kind === 'nested-table' && range.childFragmentIndex === 0))
   )) ?? false);
+}
+
+function occurrenceSelectionKey(
+  occurrence: Pick<FloatingTablePlacementLayout, 'hostCellId' | 'sourceBlockIndex' | 'tableId'>,
+): string {
+  return `${occurrence.hostCellId}:${occurrence.sourceBlockIndex}:${occurrence.tableId}`;
+}
+
+function selectedOccurrenceKeys(
+  source: RetainedTableAcquisition,
+  selection: SelectedRow,
+): ReadonlySet<string> {
+  return new Set(source.floatingTables.filter((occurrence) => (
+    selectedOwnsOccurrence(source, selection, occurrence)
+  )).map(occurrenceSelectionKey));
+}
+
+function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((item) => right.has(item));
 }
 
 function selectedWholeRow(
@@ -834,6 +898,9 @@ function materializeFragment(
       (placement) => !resolvedOccurrenceIds.has(placement.occurrenceId),
     )),
     resolvedFloatingTables,
+    ...(context.floatingTableRegistry ? {
+      floatingTableCoordinateSpace: context.floatingTableRegistry.coordinateSpace,
+    } : {}),
   });
 }
 
@@ -849,8 +916,7 @@ export function takeTableFragment(
   const selected: SelectedRow[] = [];
   const registrySnapshot = context.floatingTableRegistry;
   if (registrySnapshot
-    && (registrySnapshot.coordinateSpace !== 'logical-page-points'
-      || registrySnapshot.flowDomainId.length === 0)) {
+    && registrySnapshot.flowDomainId.length === 0) {
     throw new Error('Floating table registry coordinate/domain mismatch');
   }
   let floatRegistry = Object.freeze([
@@ -909,7 +975,8 @@ export function takeTableFragment(
     const rowCursor = rowIndex === cursor.rowIndex
       ? cursor
       : Object.freeze({ rowIndex, rowFragmentIndex: 0, cells: Object.freeze([]) });
-    const preparedRow = finalFrameRow(
+    const canTakeWhole = rowIndex !== cursor.rowIndex || cursor.rowFragmentIndex === 0;
+    const preparedRow = canTakeWhole ? finalFrameRow(
       source,
       acquiredRow,
       ownership,
@@ -931,10 +998,14 @@ export function takeTableFragment(
           || (cellCursor.blockIndex === anchorBlockOffset
             && cellCursor.paragraphLineStart === 0);
       },
-    );
+    ) : {
+      row: acquiredRow,
+      resolved: Object.freeze([]),
+      registry: floatRegistry,
+      nextParagraphId: floatParagraphId,
+    };
     const row = preparedRow.row;
     const wholeHeightPt = paginationRowHeightForOccurrence(source, row, rowIndex, context);
-    const canTakeWhole = rowIndex !== cursor.rowIndex || cursor.rowFragmentIndex === 0;
     if (canTakeWhole) {
       if (wholeHeightPt <= availablePt + EPSILON_PT) {
         selected.push(selectedWholeRow(row, 'source', 0, false, preparedRow.resolved));
@@ -973,7 +1044,7 @@ export function takeTableFragment(
           : null;
         break;
       }
-      // ECMA-376 §17.4.6 permits a row taller than a full page to continue;
+    // ECMA-376 §17.4.6 permits a row taller than a full page to continue;
       // only the documented Word compatibility mode clips it.
     }
 
@@ -995,16 +1066,48 @@ export function takeTableFragment(
       break;
     }
 
-    const partial = partialRow(source, row, rowCursor, availablePt, context);
-    if (partial.selected) {
-      const ownedResolved = preparedRow.resolved.filter((placement) => (
-        selectedOwnsResolvedPlacement(source, partial.selected!, placement)
-      ));
-      const ownedOccurrenceIds = new Set(ownedResolved.map((placement) => placement.occurrenceId));
-      const baseRegistryLength = floatRegistry.length;
-      const committedEntries = preparedRow.registry.slice(baseRegistryLength).filter(
-        (entry) => ownedOccurrenceIds.has(entry.occurrenceId),
+    let partial = partialRow(
+      source, acquiredRow, rowCursor, availablePt, context,
+    );
+    let selectedPrepared: ReturnType<typeof finalFrameRow> | null = null;
+    for (let ownershipPass = 0; partial.selected && ownershipPass < 4; ownershipPass += 1) {
+      const transactionInputs = selectedOccurrenceKeys(source, partial.selected);
+      selectedPrepared = finalFrameRow(
+        source,
+        acquiredRow,
+        ownership,
+        context.availableHeightPt - availablePt,
+        context,
+        floatRegistry,
+        floatParagraphId,
+        rowCursor,
+        (occurrence) => transactionInputs.has(occurrenceSelectionKey(occurrence)),
       );
+      const reselection = partialRow(
+        source, selectedPrepared.row, rowCursor, availablePt, context,
+      );
+      if (!reselection.selected) {
+        partial = reselection;
+        break;
+      }
+      const reselectedInputs = selectedOccurrenceKeys(source, reselection.selected);
+      partial = reselection;
+      if (sameStringSet(transactionInputs, reselectedInputs)) break;
+      selectedPrepared = null;
+    }
+    if (partial.selected && selectedPrepared === null) {
+      throw new Error('Floating table selected ownership did not converge');
+    }
+    if (partial.selected) {
+      const ownedResolved = selectedPrepared?.resolved ?? [];
+      if (ownedResolved.some((placement) => (
+        !selectedOwnsOccurrence(source, partial.selected!, placement.source)
+      ))) {
+        throw new Error('Floating table transaction included an unowned occurrence');
+      }
+      const baseRegistryLength = floatRegistry.length;
+      const committedEntries = (selectedPrepared?.registry ?? floatRegistry)
+        .slice(baseRegistryLength);
       selected.push({
         ...partial.selected,
         ...(ownedResolved.length
@@ -1054,15 +1157,18 @@ export function takeTableFragment(
     requiresFreshPage: false,
     floatingTablePlacements: fragment.resolvedFloatingTables,
     ...(registrySnapshot ? {
-      floatingTableRegistryDelta: floatingTableRegistryDelta(
-        registrySnapshot,
-        floatRegistry.slice(registrySnapshot.entries.length).filter((entry) => (
+      floatingTableRegistryDelta: (() => {
+        const selectedEntries = floatRegistry.slice(registrySnapshot.entries.length).filter((entry) => (
           fragment.resolvedFloatingTables.some(
             (placement) => placement.occurrenceId === entry.occurrenceId,
           )
-        )),
-        registrySnapshot.nextParagraphId + fragment.resolvedFloatingTables.length,
-      ),
+        ));
+        return floatingTableRegistryDelta(
+          registrySnapshot,
+          selectedEntries,
+          registrySnapshot.nextParagraphId + selectedEntries.length,
+        );
+      })(),
     } : {}),
   };
 }

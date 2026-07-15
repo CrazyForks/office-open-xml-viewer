@@ -963,6 +963,51 @@ function normalizedSyntaxHash(node, source) {
 function normalizedComputePagesHash(node, source) {
   const compactText = (current, currentSource) =>
     current.getText(currentSource).replace(/\s+/g, '');
+  const exactUprightRelocation =
+    'if(y+h>effContentH()-tblReservePt&&y>colTopY)nextColumnOrPage(i);';
+  const exactUprightStamp = 'withColumnBand(()=>stampTableLayout(tableEl,colWidthsPt,rowHeightsPt,bandPt,{...measureState,pageIndex:pages.length-1,displayPageNumber:pages.length,},));';
+  let uprightPair = null;
+  const findUprightPair = (current) => {
+    if (uprightPair || !ts.isBlock(current)) {
+      ts.forEachChild(current, findUprightPair);
+      return;
+    }
+    const statements = current.statements;
+    for (let index = 0; index + 1 < statements.length; index += 1) {
+      if (compactText(statements[index], source) === exactUprightRelocation
+        && compactText(statements[index + 1], source) === exactUprightStamp) {
+        uprightPair = [statements[index], statements[index + 1]];
+        return;
+      }
+    }
+    ts.forEachChild(current, findUprightPair);
+  };
+  findUprightPair(node);
+  if (uprightPair) {
+    const [relocation, stamp] = uprightPair;
+    const nodeStart = node.getStart(source);
+    const relativeStart = relocation.getStart(source) - nodeStart;
+    const relativeEnd = stamp.getEnd() - nodeStart;
+    const nodeText = node.getText(source);
+    const legacySequence = [
+      'stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);',
+      'if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);',
+    ].join('\n');
+    const virtualText = nodeText.slice(0, relativeStart)
+      + legacySequence
+      + nodeText.slice(relativeEnd);
+    const virtualSource = ts.createSourceFile(
+      'compute-pages-a5-upright-virtual.ts',
+      virtualText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const virtualNode = virtualSource.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
+    ));
+    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
+  }
   const exactRetainedSliceSize =
     'const{widthPx:tableW,heightPx:sliceH}=retainedTableSliceSize(sp,measureState.scale,);';
   const retainedSliceStatements = [];
