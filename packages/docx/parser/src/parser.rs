@@ -8785,12 +8785,7 @@ fn table_is_ordinary_flow(
     };
     let horizontal = attr_w(positioning, "horzAnchor").unwrap_or_else(|| "text".to_string());
     let vertical = attr_w(positioning, "vertAnchor").unwrap_or_else(|| "margin".to_string());
-    let ignored_zero_position = offset_is_zero("tblpX")
-        && offset_is_zero("tblpY")
-        && horizontal == "text"
-        && vertical != "text";
-
-    ignored_zero_position
+    offset_is_zero("tblpX") && offset_is_zero("tblpY") && horizontal == "text" && vertical != "text"
 }
 
 #[allow(clippy::too_many_arguments)]
