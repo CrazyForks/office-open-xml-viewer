@@ -75,7 +75,7 @@ function floatingTable(): BodyElement {
     type: 'table', colWidths: [40],
     rows: [{
       cells: [{
-        content: [paragraph()], colSpan: 1, vMerge: null,
+        content: [ordinaryParagraph('1')], colSpan: 1, vMerge: null,
         borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
         background: null, vAlign: 'top', widthPt: 40,
       }],

@@ -447,7 +447,10 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       const regionIds = new Set<string>();
       const occurrenceIds = new Set<string>();
       const bodyOwnership = new Map<string, number>();
-      let priorBlockEndPt = 0;
+      const occupiedPhysicalBodyDomains: Array<Readonly<{
+        regionId: string;
+        bounds: LayoutRect;
+      }>> = [];
       let pageWritingMode: WritingMode | undefined;
       page.sectionRegions.forEach((region, regionIndex) => {
         const path = `pages[${pageIndex}].sectionRegions[${regionIndex}]`;
@@ -507,13 +510,27 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         }
         requireFinite(region.blockStartPt, `${path}.blockStartPt`);
         requireFinite(region.blockEndPt, `${path}.blockEndPt`);
+        if (
+          region.columnFlowDirection !== 'ltr'
+          && region.columnFlowDirection !== 'rtl'
+        ) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path} has an invalid column flow direction`,
+          );
+        }
+        const sectionColumnFlowDirection = region.section.sectionBidi === true ? 'rtl' : 'ltr';
+        if (region.columnFlowDirection !== sectionColumnFlowDirection) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path} column flow direction contradicts its section bidi`,
+          );
+        }
         if (region.blockStartPt < 0
-          || region.blockStartPt < priorBlockEndPt
           || region.blockEndPt < region.blockStartPt
           || region.blockEndPt > logicalExtent.heightPt) {
           throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has an invalid block interval`);
         }
-        priorBlockEndPt = region.blockEndPt;
         const expectedCoordinateSpace = createSectionRegionCoordinateSpace(
           region.coordinateSpace.writingMode,
           page.geometry,
@@ -527,11 +544,20 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         )) {
           throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has an invalid coordinate transform`);
         }
-        if (region.flowDomainIds.length !== region.section.columns.length) {
+        const columnIndexes = region.columnIndexes;
+        if (
+          region.flowDomainIds.length !== columnIndexes.length
+          || columnIndexes.some((columnIndex, index) => (
+            !Number.isInteger(columnIndex)
+            || columnIndex < 0
+            || columnIndex >= region.section.columns.length
+            || (index > 0 && columnIndex <= columnIndexes[index - 1]!)
+          ))
+        ) {
           throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} columns contradict its section`);
         }
         let priorInlineEndPt = 0;
-        region.flowDomainIds.forEach((domainId, columnIndex) => {
+        region.flowDomainIds.forEach((domainId, columnPosition) => {
           const domain = domains.get(domainId);
           if (!domain) {
             throw new LayoutInvariantError('INVALID_REFERENCE', `${path} references missing flow domain ${domainId}`);
@@ -542,7 +568,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
           bodyOwnership.set(domainId, (bodyOwnership.get(domainId) ?? 0) + 1);
           regionByDomain.set(domainId, region);
           const bounds = domain.logicalBounds;
-          const sectionColumn = region.section.columns[columnIndex];
+          const sectionColumn = region.section.columns[columnIndexes[columnPosition]!];
           if (bounds.widthPt <= 0 || bounds.heightPt < 0
             || bounds.yPt !== region.blockStartPt
             || bounds.yPt + bounds.heightPt !== region.blockEndPt
@@ -574,6 +600,18 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
               `${domainId} physical bounds leave the upright physical page`,
             );
           }
+          if (occupiedPhysicalBodyDomains.some((prior) => (
+            prior.regionId !== region.id && overlaps(prior.bounds, domain.physicalBounds)
+          ))) {
+            throw new LayoutInvariantError(
+              'INVALID_GEOMETRY',
+              `${domainId} overlaps a body flow domain owned by another section region`,
+            );
+          }
+          occupiedPhysicalBodyDomains.push({
+            regionId: region.id,
+            bounds: domain.physicalBounds,
+          });
         });
       });
       page.flowDomains.filter((domain) => domain.kind === 'body').forEach((domain) => {

@@ -47,7 +47,9 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
           logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
           physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
         },
-        blockStartPt: 72, blockEndPt: 720, flowDomainIds: ['body'], section,
+        blockStartPt: 72, blockEndPt: 720,
+        columnFlowDirection: 'ltr', columnIndexes: [0],
+        flowDomainIds: ['body'], section,
       }],
       pageBorders: null,
       layers: {

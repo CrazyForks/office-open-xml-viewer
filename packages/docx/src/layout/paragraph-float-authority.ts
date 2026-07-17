@@ -1,4 +1,3 @@
-import type { AnchorReferenceFramesInput } from './anchor-frame.js';
 import { normalizeWrapSide, type FloatRect } from './float-wrap.js';
 import type {
   DrawingMLCollisionEntryPt,
@@ -67,56 +66,4 @@ export function paragraphAnchorCollisions(
       verticalOwnership: 'page',
     }];
   });
-}
-
-export interface ParagraphAnchorReferenceFrameSnapshot {
-  readonly pageIndex: number;
-  readonly scale: number;
-  readonly pageWidth: number;
-  readonly pageH: number;
-  readonly marginLeft: number;
-  readonly marginRight: number;
-  readonly marginTop: number;
-  readonly marginBottom: number;
-  readonly contentX: number;
-  readonly contentW: number;
-}
-
-/** Resolve the renderer's mixed legacy px/pt state at the layout boundary so
- * anchor acquisition receives one point-space reference-frame snapshot. */
-export function paragraphAnchorReferenceFrames(
-  snapshot: ParagraphAnchorReferenceFrameSnapshot,
-): Readonly<Pick<
-  AnchorReferenceFramesInput,
-  'page' | 'margin' | 'column' | 'pageParity'
->> {
-  const pageHeightPt = snapshot.pageH / snapshot.scale;
-  const blockExtentPt = Math.max(
-    0,
-    pageHeightPt - snapshot.marginTop - snapshot.marginBottom,
-  );
-  return {
-    page: {
-      xPt: 0,
-      yPt: 0,
-      widthPt: snapshot.pageWidth,
-      heightPt: pageHeightPt,
-    },
-    margin: {
-      xPt: snapshot.marginLeft,
-      yPt: snapshot.marginTop,
-      widthPt: Math.max(
-        0,
-        snapshot.pageWidth - snapshot.marginLeft - snapshot.marginRight,
-      ),
-      heightPt: blockExtentPt,
-    },
-    column: {
-      xPt: snapshot.contentX / snapshot.scale,
-      yPt: snapshot.marginTop,
-      widthPt: snapshot.contentW / snapshot.scale,
-      heightPt: blockExtentPt,
-    },
-    pageParity: snapshot.pageIndex % 2 === 0 ? 'odd' : 'even',
-  };
 }

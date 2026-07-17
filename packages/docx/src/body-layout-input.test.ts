@@ -113,6 +113,48 @@ describe('canonical body layout input', () => {
     expect(JSON.stringify(input)).not.toContain('__sectionPlacement');
   });
 
+  it('projects parser-private sectPr bidi into the retained section context', () => {
+    const endingSection = {
+      type: 'sectionBreak',
+      kind: 'nextColumn',
+      geom: finalSection(),
+      columns: {
+        count: 2,
+        spacePt: 20,
+        equalWidth: true,
+        sep: false,
+        cols: [],
+      },
+      textDirection: null,
+      pageNumType: null,
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      titlePage: false,
+      __sectionPlacement: {
+        sectionId: 'section:rtl',
+        sectionBidi: true,
+      },
+    } as unknown as BodyElement;
+    const document = {
+      body: [paragraph('first'), endingSection, paragraph('second')],
+      section: finalSection(),
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as DocxDocumentModel;
+
+    const input = createBodyLayoutInput(document);
+    const nextSection = input.sequence.find((entry) => entry.kind === 'begin-section');
+
+    expect(input.initialSection.context.sectionBidi).toBe(true);
+    expect(nextSection).toMatchObject({
+      kind: 'begin-section',
+      section: { context: { sectionBidi: false } },
+    });
+    expect(structuredClone(input)).toEqual(input);
+    expect(JSON.stringify(input)).not.toContain('__sectionPlacement');
+  });
+
   it('retains parity only on authored page breaks during acquisition', () => {
     const document = {
       body: [

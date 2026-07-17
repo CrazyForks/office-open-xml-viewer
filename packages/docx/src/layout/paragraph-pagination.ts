@@ -32,6 +32,7 @@ export function selectParagraphFragment(
   policy: Readonly<{ keepLines: boolean; widowControl: boolean }>,
   additionalReserveFor?: (fragment: ParagraphLayout) => number,
   uniformRubyAdvancePt?: number,
+  additionalReserveFits?: (reservePt: number) => boolean,
 ): ParagraphFragmentSelection {
   if (![availableBlockExtentPt, freshFlowRegionBlockExtentPt].every(
     (value) => Number.isFinite(value) && value >= 0,
@@ -53,9 +54,13 @@ export function selectParagraphFragment(
     }
     return reserve;
   };
+  const reserveFits = (reservePt: number): boolean => additionalReserveFits?.(reservePt) ?? true;
   if (total === 0) {
     const reserve = reserveFor(acquired);
-    if (canRelocate && acquired.advancePt + reserve > availableBlockExtentPt
+    if (canRelocate && (
+      acquired.advancePt + reserve > availableBlockExtentPt
+      || !reserveFits(reserve)
+    )
       && acquired.advancePt + reserve <= freshFlowRegionBlockExtentPt) {
       return {
         fragment: null, nextCursor: cursor,
@@ -70,7 +75,10 @@ export function selectParagraphFragment(
   }
   const completeReserve = reserveFor(acquired);
   if (cursor.boundary === null && policy.keepLines && canRelocate
-    && acquired.advancePt + completeReserve > availableBlockExtentPt
+    && (
+      acquired.advancePt + completeReserve > availableBlockExtentPt
+      || !reserveFits(completeReserve)
+    )
     && acquired.advancePt + completeReserve <= freshFlowRegionBlockExtentPt) {
     return {
       fragment: null, nextCursor: cursor,
@@ -80,7 +88,10 @@ export function selectParagraphFragment(
   let end = selectLargestFittingEnd(0, total, availableBlockExtentPt, (lineEnd) => (
     (() => {
       const candidate = slice(lineEnd);
-      return candidate.advancePt + reserveFor(candidate);
+      const reserve = reserveFor(candidate);
+      return reserveFits(reserve)
+        ? candidate.advancePt + reserve
+        : availableBlockExtentPt + 1;
     })()
   )).end;
   if (end === 0) {
@@ -90,20 +101,23 @@ export function selectParagraphFragment(
     };
     end = 1;
   }
-  const widow = adjustForWidowOrphan({
-    widowControl: policy.widowControl,
-    start: 0,
-    end,
-    totalLines: total,
-    canRelocate,
-  });
-  if (widow.kind === 'relocate') {
-    return {
-      fragment: null, nextCursor: cursor,
-      requiresFreshFlowRegion: true, additionalReservePt: 0, admittedBlockExtentPt: 0,
-    };
+  for (;;) {
+    const widow = adjustForWidowOrphan({
+      widowControl: policy.widowControl,
+      start: 0,
+      end,
+      totalLines: total,
+      canRelocate,
+    });
+    if (widow.kind === 'relocate') {
+      return {
+        fragment: null, nextCursor: cursor,
+        requiresFreshFlowRegion: true, additionalReservePt: 0, admittedBlockExtentPt: 0,
+      };
+    }
+    if (widow.kind !== 'dropLastLine') break;
+    end -= 1;
   }
-  if (widow.kind === 'dropLastLine') end -= 1;
   const fragment = slice(end);
   const nextBoundary = end < total ? lineEndBoundaries[end - 1]! : null;
   if (

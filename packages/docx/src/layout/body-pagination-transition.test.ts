@@ -3,7 +3,11 @@ import type { SectionLayoutContext } from '../layout-context.js';
 import type { PageBorders } from '../types.js';
 import { createPageFlowSectionContext } from './context.js';
 import { finalizeLayoutPage } from './page-factory.js';
-import { createPageFlowState, advanceColumnOrPage } from './paginator.js';
+import {
+  advanceColumnOrPage,
+  beginSection,
+  createPageFlowState,
+} from './paginator.js';
 import {
   addPageFootnoteReserve,
   commitPageFlowTransition,
@@ -95,7 +99,7 @@ describe('immutable canonical page transitions', () => {
     const next = commitPageFlowTransition(original, transition, {
       openContentPage: (event) => ({ page: draft(event.pageIndex), flow: transition.state }),
       openParityBlankPage: () => { throw new Error('unused'); },
-      openContinuousSectionRegion: () => { throw new Error('unused'); },
+      openSamePageSectionRegion: () => { throw new Error('unused'); },
     });
 
     expect(original.pages).toEqual([originalPage]);
@@ -108,5 +112,69 @@ describe('immutable canonical page transitions', () => {
     expect(Object.isFrozen(next)).toBe(true);
     expect(Object.isFrozen(next.pages)).toBe(true);
     expect(next).not.toBe(original);
+  });
+
+  it('dispatches a same-page-column section event without treating it as a block transition', () => {
+    const columns = [{ xPt: 10, wPt: 80 }, { xPt: 110, wPt: 80 }];
+    const outgoingSection = { ...section, columns };
+    const incomingSection = { ...section, columns };
+    const outgoingFlowSection = createPageFlowSectionContext({
+      sectionOccurrenceId: 'section:outgoing',
+      geometry: outgoingSection.geometry,
+      columns,
+      textDirection: outgoingSection.textDirection,
+    });
+    const incomingFlowSection = createPageFlowSectionContext({
+      sectionOccurrenceId: 'section:incoming',
+      geometry: incomingSection.geometry,
+      columns,
+      textDirection: incomingSection.textDirection,
+    });
+    const page = createCanonicalPageDraft({
+      kind: 'content',
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 200, heightPt: 100, contentTopPt: 10, contentBottomPt: 90,
+      },
+      sectionOccurrenceId: 'section:outgoing',
+      section: outgoingSection,
+      region: {
+        id: 'region:outgoing',
+        sectionOccurrenceId: 'section:outgoing',
+        section: outgoingSection,
+        writingMode: 'horizontal-tb',
+        blockStartPt: 10,
+        blockEndPt: 90,
+        columns: [
+          { inlineStartPt: 10, inlineExtentPt: 80 },
+          { inlineStartPt: 110, inlineExtentPt: 80 },
+        ],
+      },
+    });
+    const flow = createPageFlowState(outgoingFlowSection, {
+      columnIndex: 0,
+      cursorBlockPt: 40,
+      deepestColumnBlockPt: 40,
+    });
+    const original = createBodyPaginationState(flow, page);
+    const transition = beginSection(flow, incomingFlowSection, 'nextColumn');
+    let placement: string | undefined;
+
+    const next = commitPageFlowTransition(original, transition, {
+      openContentPage: () => { throw new Error('unused'); },
+      openParityBlankPage: () => { throw new Error('unused'); },
+      openSamePageSectionRegion: (current, event) => {
+        placement = 'placement' in event ? event.placement : undefined;
+        return current;
+      },
+    });
+
+    expect(placement).toBe('same-page-column');
+    expect(next.flow).toMatchObject({
+      pageIndex: 0,
+      columnIndex: 1,
+      columnSubset: [1],
+      section: { sectionOccurrenceId: 'section:incoming' },
+    });
   });
 });

@@ -121,7 +121,7 @@ import {
   resolveTableRowHeights,
   resolveSingleRowHeight,
 } from './table-geometry.js';
-import { adjustForWidowOrphan, selectLargestFittingEnd } from './line-fit-policy.js';
+import { selectLargestFittingEnd } from './line-fit-policy.js';
 import {
   computeSectionColumns as computeColumns,
   enterTableCellStoryContext,
@@ -371,9 +371,9 @@ import {
 import { acquireRegisteredParagraph } from './layout/registered-paragraph-acquisition.js';
 import {
   paragraphAnchorCollisions,
-  paragraphAnchorReferenceFrames,
   paragraphWrapExclusions,
 } from './layout/paragraph-float-authority.js';
+import { paragraphAnchorReferenceFrames } from './paragraph-anchor-frame-adapter.js';
 import {
   applyDrawingMLCollisionRegistryDelta,
   createDrawingMLCollisionRegistry,
@@ -3316,14 +3316,17 @@ function createConcreteBodyLayoutKernel(
               throw new Error('Body frame acquisition cannot continue across flow regions');
             }
             let acquiredGroup: ReturnType<typeof acquireRetainedFrameGroup> | undefined;
+            const frameGroup = bodyFrameGroupFor(paragraph);
             const box = resolveFrameBox(
               paragraph,
               state,
               frameAnchorLineHeightPx(doc.body, paragraph, state),
               (acquired) => { acquiredGroup = acquired; },
             );
-            const member = acquiredGroup?.members.find((candidate) => candidate.paragraph === paragraph);
+            if (!acquiredGroup) throw new Error('Body frame acquisition omitted its retained group');
+            const member = acquiredGroup.members.find((candidate) => candidate.paragraph === paragraph);
             if (!member) throw new Error('Body frame acquisition omitted its retained member');
+            if (!frameGroup) throw new Error('Body frame acquisition omitted its adjacency group');
             const absoluteVertical = paragraph.framePr.vAnchor === 'page'
               || paragraph.framePr.vAnchor === 'margin';
             const frameOccurrenceId = box.exclusionId
@@ -3356,6 +3359,14 @@ function createConcreteBodyLayoutKernel(
                 yPt: member.fragment.flowBounds.yPt,
                 sectionFlowOwnership: absoluteVertical ? 'page' as const : 'host-flow' as const,
               }),
+              ...(paragraph === frameGroup.owner ? {
+                // §17.3.1.11 makes identical adjacent framePr paragraphs one frame,
+                // so page admission belongs to the owner before any member is painted.
+                retainedFootnoteReferenceIds: Object.freeze([...new Set(
+                  acquiredGroup.members.flatMap((candidate) =>
+                    footnoteIdsInRetainedSlice(candidate.fragment)),
+                )]),
+              } : {}),
               ...(!absoluteVertical ? {
                 relocationBlockExtentPt: Math.max(
                   0,
@@ -5286,26 +5297,7 @@ function resolveFrameBox(
           }),
         });
       },
-      anchorFrames: {
-        page: {
-          xPt: 0, yPt: 0,
-          widthPt: state.pageWidth,
-          heightPt: state.pageH / state.scale,
-        },
-        margin: {
-          xPt: state.marginLeft,
-          yPt: state.marginTop,
-          widthPt: Math.max(0, state.pageWidth - state.marginLeft - state.marginRight),
-          heightPt: Math.max(0, state.pageH / state.scale - state.marginTop - state.marginBottom),
-        },
-        column: {
-          xPt: state.contentX / state.scale,
-          yPt: state.marginTop,
-          widthPt: state.contentW / state.scale,
-          heightPt: Math.max(0, state.pageH / state.scale - state.marginTop - state.marginBottom),
-        },
-        pageParity: state.pageIndex % 2 === 0 ? 'odd' : 'even',
-      },
+      anchorFrames: paragraphAnchorReferenceFrames(state),
     });
     onAcquired?.(acquired);
     const box: FrameBox = {

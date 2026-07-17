@@ -39,6 +39,7 @@ import {
 } from './occurrence-projection.js';
 import {
   advanceColumnOrPage,
+  advanceToPage,
   applyAuthoredBreak,
   beginSection,
   createPageFlowState,
@@ -85,6 +86,23 @@ import type {
   SourceRef,
   TableLayout,
 } from './types.js';
+
+class FootnoteAdmissionOverflowError extends Error {
+  readonly code = 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE' as const;
+
+  constructor(
+    readonly reservePt: number,
+    readonly placedAdmissionChargePt: number,
+    readonly freshPageExtentPt: number,
+  ) {
+    super(
+      'Placed paragraph footnote admission cannot fit a fresh physical page '
+      + `(reserve: ${reservePt}, charge: ${placedAdmissionChargePt}, `
+      + `fresh page: ${freshPageExtentPt})`,
+    );
+    this.name = 'FootnoteAdmissionOverflowError';
+  }
+}
 
 function nestedFloatingOccurrenceIds(layout: TableLayout): ReadonlySet<string> {
   const ids = new Set<string>();
@@ -175,6 +193,8 @@ function flowSection(owner: BodySectionLayoutInput, pageIndex: number) {
     geometry: context.geometry,
     columns: context.columns,
     textDirection: context.textDirection,
+    sectionBidi: context.sectionBidi === true,
+    grid: context.grid,
   });
 }
 
@@ -183,6 +203,8 @@ function pageRegion(
   pageIndex: number,
   interval: ReservedBodyInterval,
   blockStartPt = interval.blockStartPt,
+  columnIndexes: readonly number[] = sectionContextForPage(owner, pageIndex)
+    .columns.map((_, index) => index),
 ): PageSectionRegionInput {
   const context = sectionContextForPage(owner, pageIndex);
   return Object.freeze({
@@ -193,10 +215,16 @@ function pageRegion(
     writingMode: writingModeFromTextDirection(context.textDirection),
     blockStartPt,
     blockEndPt: interval.blockEndPt,
-    columns: Object.freeze(context.columns.map((column) => Object.freeze({
-      inlineStartPt: column.xPt,
-      inlineExtentPt: column.wPt,
-    }))),
+    columnFlowDirection: context.sectionBidi === true ? 'rtl' : 'ltr',
+    columnIndexes: Object.freeze([...columnIndexes]),
+    columns: Object.freeze(columnIndexes.map((columnIndex) => {
+      const column = context.columns[columnIndex];
+      if (!column) throw new Error('Missing authored section column');
+      return Object.freeze({
+        inlineStartPt: column.xPt,
+        inlineExtentPt: column.wPt,
+      });
+    })),
   });
 }
 
@@ -255,7 +283,12 @@ function activeRegion(state: BodyPaginationState): PageSectionRegionInput {
 
 function activeBlockEndPt(state: BodyPaginationState): number {
   const region = activeRegion(state);
-  const isLastColumn = state.flow.columnIndex >= region.columns.length - 1;
+  const columnIndexes = region.columnIndexes
+    ?? region.section.columns.map((_, index) => index);
+  const populationOrder = region.columnFlowDirection === 'rtl'
+    ? [...columnIndexes].reverse()
+    : [...columnIndexes];
+  const isLastColumn = populationOrder.at(-1) === state.flow.columnIndex;
   return state.balanceTargetPt === null || isLastColumn
     ? region.blockEndPt
     : Math.min(region.blockEndPt, region.blockStartPt + state.balanceTargetPt);
@@ -263,7 +296,9 @@ function activeBlockEndPt(state: BodyPaginationState): number {
 
 function acquisitionLocation(state: BodyPaginationState): BodyAcquisitionLocation {
   const region = activeRegion(state);
-  const column = region.columns[state.flow.columnIndex];
+  const columnIndexes = region.columnIndexes
+    ?? region.section.columns.map((_, index) => index);
+  const column = region.columns[columnIndexes.indexOf(state.flow.columnIndex)];
   if (!column) throw new Error('Missing active body column');
   return Object.freeze({
     pageIndex: state.flow.pageIndex,
@@ -298,7 +333,9 @@ function transitionFactory(
       const reserve = reserves[event.pageIndex] ?? { top: 0, bottom: 0 };
       const interval = pageBodyInterval(nextOwner, event.pageIndex, reserve);
       const flow = createPageFlowState(flowSection(nextOwner, event.pageIndex), {
-        pageIndex: event.pageIndex, pageContentStartBlockPt: interval.blockStartPt,
+        pageIndex: event.pageIndex,
+        pageContentStartBlockPt: interval.blockStartPt,
+        pageContentEndBlockPt: interval.blockEndPt,
       });
       return { page: openDraft(nextOwner, event.pageIndex, interval), flow };
     },
@@ -318,18 +355,40 @@ function transitionFactory(
         pageBorders: blankOwner.pageBordersAuthored ? blankOwner.pageBorders : null,
       });
     },
-    openContinuousSectionRegion(page, event, flow) {
+    openSamePageSectionRegion(page, event, flow) {
       const nextOwner = owner(event.section.sectionOccurrenceId);
       const priorRegions = page.accumulator.sectionRegions;
       const prior = priorRegions.at(-1);
-      if (!prior) throw new Error('A continuous section requires a prior region');
+      if (!prior || !('placement' in event)) {
+        throw new Error('A same-page section requires explicit retained placement');
+      }
       const pageInterval = Object.freeze({
         blockStartPt: page.accumulator.sectionRegions[0]!.blockStartPt,
         blockEndPt: prior.blockEndPt,
       });
+      const constrainedPrior = event.placement === 'same-page-block'
+        ? Object.freeze({ ...prior, blockEndPt: flow.regionStartBlockPt })
+        : (() => {
+            const outgoingColumnIndexes = event.outgoingColumnSubset;
+            if (!outgoingColumnIndexes || outgoingColumnIndexes.length === 0) {
+              throw new Error('A same-page-column transition requires outgoing column ownership');
+            }
+            return Object.freeze({
+              ...prior,
+              columnIndexes: Object.freeze([...outgoingColumnIndexes]),
+              columns: Object.freeze(outgoingColumnIndexes.map((columnIndex) => {
+                const column = prior.section.columns[columnIndex];
+                if (!column) throw new Error('Missing outgoing authored column');
+                return Object.freeze({
+                  inlineStartPt: column.xPt,
+                  inlineExtentPt: column.wPt,
+                });
+              })),
+            });
+          })();
       const constrainedRegions = Object.freeze([
         ...priorRegions.slice(0, -1),
-        Object.freeze({ ...prior, blockEndPt: flow.regionStartBlockPt }),
+        constrainedPrior,
       ]);
       return Object.freeze({
         ...page,
@@ -340,6 +399,7 @@ function transitionFactory(
             flow.pageIndex,
             pageInterval,
             flow.regionStartBlockPt,
+            event.columnSubset,
           ),
         ),
       });
@@ -365,7 +425,9 @@ function acceptNode(
   const page = state.pages.at(-1);
   if (!page || page.kind !== 'content') throw new Error('Body content requires an active page');
   const region = activeRegion(state);
-  const column = region.columns[state.flow.columnIndex]!;
+  const columnIndexes = region.columnIndexes
+    ?? region.section.columns.map((_, index) => index);
+  const column = region.columns[columnIndexes.indexOf(state.flow.columnIndex)]!;
   const flowDomainId = bodyFlowDomainId(state.flow.pageIndex, region.id, state.flow.columnIndex);
   const occurrenceId = bodyOccurrenceKey(source, flowDomainId, fragmentStartKey);
   if (acceptedOccurrenceIds.has(occurrenceId)) {
@@ -503,11 +565,6 @@ function tableFragmentStartKey(cursor: BodyTableContinuationCursor | undefined):
   )}`;
 }
 
-function freshPageExtent(state: BodyPaginationState): number {
-  const region = activeRegion(state);
-  return activeBlockEndPt(state) - region.blockStartPt;
-}
-
 function locationAfter(
   location: BodyAcquisitionLocation,
   blockExtentPt: number,
@@ -592,6 +649,7 @@ function paginateBodyPass(
   const initialInterval = pageBodyInterval(input.initialSection, 0, initialReserve);
   const initialFlow = createPageFlowState(flowSection(input.initialSection, 0), {
     pageContentStartBlockPt: initialInterval.blockStartPt,
+    pageContentEndBlockPt: initialInterval.blockEndPt,
   });
   let state = createBodyPaginationState(
     initialFlow,
@@ -603,6 +661,22 @@ function paginateBodyPass(
     section: input.initialSection.context,
     initialLocation: acquisitionLocation(state),
   }, services, options);
+  const freshPageExtent = (target: BodyPaginationState): number => {
+    const owner = owners.get(target.flow.section.sectionOccurrenceId);
+    if (!owner) {
+      throw new Error(`Unknown body section ${target.flow.section.sectionOccurrenceId}`);
+    }
+    const nextPageIndex = target.flow.pageIndex + 1;
+    const interval = pageBodyInterval(
+      owner,
+      nextPageIndex,
+      reserves[nextPageIndex] ?? { top: 0, bottom: 0 },
+    );
+    // A same-page §17.18.77 region may begin below the physical body origin.
+    // Fresh-page admission is governed by the next page's complete reserved
+    // interval, not by that reduced current-page section band.
+    return interval.blockEndPt - interval.blockStartPt;
+  };
   const pageStartAnchors = (target: BodyPaginationState, startIndex: number) => {
     if (anchorDestinations !== null) {
       const location = acquisitionLocation(target);
@@ -698,6 +772,11 @@ function paginateBodyPass(
     nextOwner?: BodySectionLayoutInput,
   ) => {
     const previousPageIndex = state.flow.pageIndex;
+    const opensSamePageColumnRegion = transition.events.some((event) => (
+      event.type === 'begin-section'
+      && 'placement' in event
+      && event.placement === 'same-page-column'
+    ));
     state = commitPageFlowTransition(state, transition, factory);
     if (nextOwner) {
       state = setBodyBalanceTarget(
@@ -711,22 +790,36 @@ function paginateBodyPass(
       prescanPageAnchors(state, nextEntryIndex);
     } else {
       session.moveAcquisitionCursor(nextLocation);
+      // §17.18.77 keeps the physical page but opens a distinct flow domain.
+      // The outgoing source scan intentionally stopped at the section mark, so
+      // acquire incoming page-owned wrap authority before its first paragraph.
+      if (opensSamePageColumnRegion) {
+        prescanPageAnchors(state, nextEntryIndex);
+      }
     }
   };
   const footnoteIdsByPage = new Map<number, Set<string>>();
+  // §17.18.77 observes committed references even when their measured reserve is zero;
+  // footnoteReservePt remains only the page-local geometry charge.
+  const hasFootnoteReferenceOnPage = (pageIndex: number): boolean => (
+    (footnoteIdsByPage.get(pageIndex)?.size ?? 0) > 0
+  );
   const footnoteAdmission = (
     candidate: ParagraphLayout | TableLayout,
     inlineExtentPt: number,
+    retainedReferenceIds?: readonly string[],
   ): Readonly<{ ids: readonly string[]; reservePt: number }> => {
     const retained = footnoteIdsByPage.get(state.flow.pageIndex) ?? new Set<string>();
-    const ids = footnoteIdsInRetainedSlice(candidate)
+    const ids = [...new Set(
+      retainedReferenceIds ?? footnoteIdsInRetainedSlice(candidate),
+    )]
       .filter((id) => !retained.has(id));
     return Object.freeze({
       ids: Object.freeze(ids),
       reservePt: session.measureFootnoteReserve({
         referenceIds: ids,
         availableInlineExtentPt: inlineExtentPt,
-        firstOnPage: state.footnoteReservePt === 0,
+        firstOnPage: retained.size === 0,
       }),
     });
   };
@@ -739,6 +832,18 @@ function paginateBodyPass(
     ids.forEach((id) => retained!.add(id));
     state = addPageFootnoteReserve(state, reservePt);
   };
+  // §17.11.21 / §17.18.34 assign each note to the physical page that paints
+  // its reference. Growing that page-wide band must not clip a deeper column
+  // that the immutable paginator has already committed.
+  const additionalFootnoteReserveCapacityPt = (): number => Math.max(
+    0,
+    activeBlockEndPt(state)
+      - state.footnoteReservePt
+      - state.flow.deepestColumnBlockPt,
+  );
+  const footnoteReserveInvadesCommittedPageContent = (reservePt: number): boolean => (
+    reservePt > additionalFootnoteReserveCapacityPt()
+  );
   let previousParagraph: BodyParagraphSourceInput | null = null;
   const activeColumnBreakIndexes = wordActiveColumnBreakIndexes(input.sequence);
 
@@ -781,12 +886,21 @@ function paginateBodyPass(
           || currentPhysical.heightPt !== incomingPhysical.heightPt)
         ? 'nextPage'
         : entry.section.startType;
+      const incomingInterval = pageBodyInterval(
+        entry.section,
+        state.flow.pageIndex,
+        reserves[state.flow.pageIndex] ?? { top: 0, bottom: 0 },
+      );
       commitTransition(
         beginSection(
           state.flow,
           flowSection(entry.section, state.flow.pageIndex),
           effectiveStartType,
-          { hasFootnoteReferenceOnCurrentPage: state.footnoteReservePt > 0 },
+          {
+            hasFootnoteReferenceOnCurrentPage: hasFootnoteReferenceOnPage(state.flow.pageIndex),
+            incomingPageContentStartBlockPt: incomingInterval.blockStartPt,
+            incomingPageContentEndBlockPt: incomingInterval.blockEndPt,
+          },
         ),
         entryIndex + 1,
         entry.section,
@@ -840,20 +954,45 @@ function paginateBodyPass(
           continuation: cursor,
         });
         if (acquired.placement) {
+          const notes = footnoteAdmission(
+            acquired.layout,
+            location.availableBounds.widthPt,
+            acquired.retainedFootnoteReferenceIds,
+          );
           const relocationExtentPt = acquired.relocationBlockExtentPt;
+          const admissionChargePt = acquired.placement.sectionFlowOwnership === 'page'
+            ? notes.reservePt
+            : (relocationExtentPt ?? acquired.blockExtentPt) + notes.reservePt;
+          const freshExtentPt = freshPageExtent(state);
+          // The footnote band is physical-page global; spare room in the active
+          // column cannot authorize a reserve that clips a deeper prior column.
+          const reserveInvadesCommittedPageContent =
+            footnoteReserveInvadesCommittedPageContent(notes.reservePt);
+          if (notes.reservePt > 0 && admissionChargePt > freshExtentPt) {
+            throw new FootnoteAdmissionOverflowError(
+              notes.reservePt,
+              admissionChargePt,
+              freshExtentPt,
+            );
+          }
           if (
-            acquired.placement.sectionFlowOwnership === 'host-flow'
-            && relocationExtentPt != null
-            && relocationExtentPt > location.availableBounds.heightPt
-            && relocationExtentPt <= freshPageExtent(state)
+            (
+              admissionChargePt > location.availableBounds.heightPt
+              || reserveInvadesCommittedPageContent
+            )
+            && admissionChargePt <= freshExtentPt
             && state.flow.pageHasContent
           ) {
             commitTransition(
-              advanceColumnOrPage(state.flow, 'overflow'),
+              reserveInvadesCommittedPageContent
+                ? advanceToPage(state.flow, state.flow.section, 'overflow')
+                : advanceColumnOrPage(state.flow, 'overflow'),
               entryIndex,
             );
             continue;
           }
+          // A placed frame still paints its retained references despite a zero flow
+          // charge, so note ownership is committed with the accepted occurrence.
           state = acceptNode(
             state,
             acquired.layout,
@@ -864,6 +1003,7 @@ function paginateBodyPass(
             allocations,
             acquired.placement,
           );
+          commitFootnotes(notes.ids, notes.reservePt);
           if (acquired.flowRegistryDelta) {
             session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
           }
@@ -1005,6 +1145,7 @@ function paginateBodyPass(
             location.availableBounds.widthPt,
           ).reservePt,
           acquired.uniformRubyAdvancePt,
+          (reservePt) => !footnoteReserveInvadesCommittedPageContent(reservePt),
         );
         if (selected.requiresFreshFlowRegion) {
           commitTransition(
@@ -1124,6 +1265,19 @@ function paginateBodyPass(
           if (rebasesFloatingTableOnFreshFrame) continue;
           commitTransition(
             advanceColumnOrPage(state.flow, 'overflow'),
+            entryIndex,
+          );
+          continue;
+        }
+        if (
+          footnoteReserveInvadesCommittedPageContent(notes.reservePt)
+          && state.flow.pageHasContent
+        ) {
+          // The acquired table is already a coherent row fragment. A fresh
+          // physical page preserves it; another same-page column cannot create
+          // more room for the page-wide note band.
+          commitTransition(
+            advanceToPage(state.flow, state.flow.section, 'overflow'),
             entryIndex,
           );
           continue;

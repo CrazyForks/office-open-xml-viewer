@@ -17,6 +17,22 @@ const paragraph = (): ParagraphLayout => ({
 });
 
 describe('paragraph page-local reserve selection', () => {
+  it('re-evaluates widow removal until the fragment satisfies orphan control', () => {
+    const selected = selectParagraphFragment(
+      paragraph(), { boundary: null }, [
+        { segIndex: 0, charOffset: 1 },
+        { segIndex: 0, charOffset: 2 },
+        { segIndex: 0, charOffset: 3 },
+      ], 20, 40, true, { keepLines: false, widowControl: true },
+    );
+
+    expect(selected).toMatchObject({
+      fragment: null,
+      nextCursor: { boundary: null },
+      requiresFreshFlowRegion: true,
+    });
+  });
+
   it('admits only the fresh-region extent when an indivisible first line must make progress', () => {
     const selected = selectParagraphFragment(
       paragraph(), { boundary: null }, [
@@ -38,6 +54,22 @@ describe('paragraph page-local reserve selection', () => {
         { segIndex: 0, charOffset: 3 },
       ], 25, 40, false, { keepLines: false, widowControl: false },
       (fragment) => fragment.lines.length >= 2 ? 10 : 0,
+    );
+
+    expect(selected.fragment?.lines).toHaveLength(1);
+    expect(selected.additionalReservePt).toBe(0);
+  });
+
+  it('keeps a note-bearing slice out of a page whose global reserve cannot grow', () => {
+    const selected = selectParagraphFragment(
+      paragraph(), { boundary: null }, [
+        { segIndex: 0, charOffset: 1 },
+        { segIndex: 0, charOffset: 2 },
+        { segIndex: 0, charOffset: 3 },
+      ], 40, 40, false, { keepLines: false, widowControl: false },
+      (fragment) => fragment.lines.length >= 2 ? 10 : 0,
+      undefined,
+      (reservePt) => reservePt <= 5,
     );
 
     expect(selected.fragment?.lines).toHaveLength(1);

@@ -1,7 +1,14 @@
 import {
+  sectionContentEndBlockPt,
   sectionContentStartBlockPt,
   type PageFlowSectionContext,
 } from './context.js';
+import {
+  createSectionRegionCoordinateSpace,
+  transformRect,
+  uprightPhysicalExtent,
+  writingModeFromTextDirection,
+} from './coordinate-space.js';
 import type { PaintNode } from './types.js';
 
 export type PageAdvanceReason =
@@ -33,11 +40,20 @@ export class UnsupportedPageFlowTransitionError extends Error {
     readonly outgoingColumnIndex: number,
     readonly outgoingColumnCount: number,
     readonly incomingColumnCount: number,
+    readonly reason:
+      | 'page-extent'
+      | 'writing-mode'
+      | 'block-band'
+      | 'grid'
+      | 'no-successor'
+      | 'physical-overlap'
+      | 'physical-column' = 'no-successor',
   ) {
     super(
       'nextColumn requires a following column on the current page, '
       + `but column ${outgoingColumnIndex + 1} is unavailable `
-      + `(outgoing columns: ${outgoingColumnCount}, incoming columns: ${incomingColumnCount})`,
+      + `(outgoing columns: ${outgoingColumnCount}, incoming columns: ${incomingColumnCount}, `
+      + `reason: ${reason})`,
     );
     this.name = 'UnsupportedPageFlowTransitionError';
   }
@@ -45,6 +61,8 @@ export class UnsupportedPageFlowTransitionError extends Error {
 
 export interface SectionBoundaryOptions {
   readonly hasFootnoteReferenceOnCurrentPage?: boolean;
+  readonly incomingPageContentStartBlockPt?: number;
+  readonly incomingPageContentEndBlockPt?: number;
 }
 
 export interface PageFlowState {
@@ -56,8 +74,13 @@ export interface PageFlowState {
   readonly cursorBlockPt: number;
   /** Logical block origin of the physical page's body content. */
   readonly pageContentStartBlockPt: number;
+  readonly pageContentEndBlockPt: number;
   /** Logical block origin shared by every column in the active section region. */
   readonly regionStartBlockPt: number;
+  /** Logical block end shared by every column in the active section region. */
+  readonly regionEndBlockPt: number;
+  /** Authored section-column indexes owned by the active region, in physical order. */
+  readonly columnSubset: readonly number[];
   /** Deepest block edge reached by any completed/current column in the region. */
   readonly deepestColumnBlockPt: number;
   readonly section: PageFlowSectionContext;
@@ -78,11 +101,29 @@ export type PageFlowEvent =
       sectionOccurrenceId: string;
       parityBlank: boolean;
     }>
-  | Readonly<{ type: 'begin-section'; section: PageFlowSectionContext }>;
+  | Readonly<{
+      type: 'begin-section';
+      section: PageFlowSectionContext;
+    }>
+  | Readonly<{
+      type: 'begin-section';
+      placement: 'same-page-block' | 'same-page-column';
+      section: PageFlowSectionContext;
+      targetColumnOrdinal: number;
+      columnSubset: readonly number[];
+      outgoingColumnSubset?: readonly number[];
+    }>;
 
 export interface PageFlowTransition {
   readonly state: PageFlowState;
   readonly events: readonly PageFlowEvent[];
+}
+
+function columnPopulationOrder(
+  section: PageFlowSectionContext,
+  columnSubset: readonly number[],
+): readonly number[] {
+  return section.sectionBidi ? [...columnSubset].reverse() : [...columnSubset];
 }
 
 export function createPageFlowState(
@@ -90,29 +131,57 @@ export function createPageFlowState(
   overrides: Partial<Omit<PageFlowState, 'section'>> = {},
 ): PageFlowState {
   const contentStart = sectionContentStartBlockPt(section);
+  const contentEnd = sectionContentEndBlockPt(section);
   const pageContentStartBlockPt = overrides.pageContentStartBlockPt ?? contentStart;
+  const pageContentEndBlockPt = overrides.pageContentEndBlockPt ?? contentEnd;
   const regionStartBlockPt = overrides.regionStartBlockPt ?? pageContentStartBlockPt;
+  const regionEndBlockPt = overrides.regionEndBlockPt ?? pageContentEndBlockPt;
   const cursorBlockPt = overrides.cursorBlockPt ?? regionStartBlockPt;
   const deepestColumnBlockPt = overrides.deepestColumnBlockPt ?? cursorBlockPt;
   const pageIndex = overrides.pageIndex ?? 0;
-  const columnIndex = overrides.columnIndex ?? 0;
+  const columnSubset = Object.freeze([
+    ...(overrides.columnSubset ?? section.columns.map((_, index) => index)),
+  ]);
+  const populationOrder = columnPopulationOrder(section, columnSubset);
+  const columnIndex = overrides.columnIndex ?? populationOrder[0] ?? -1;
   if (!Number.isInteger(pageIndex) || pageIndex < 0) {
     throw new RangeError('Page index must be a non-negative integer');
   }
   if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= section.columns.length) {
     throw new RangeError('Column index must identify a column in the active section');
   }
-  if (![pageContentStartBlockPt, regionStartBlockPt, cursorBlockPt, deepestColumnBlockPt]
-    .every(Number.isFinite)) {
-    throw new RangeError('Page-flow cursors must be finite');
+  if (
+    columnSubset.length === 0
+    || columnSubset.some((index, position) => (
+      !Number.isInteger(index)
+      || index < 0
+      || index >= section.columns.length
+      || (position > 0 && index <= columnSubset[position - 1]!)
+    ))
+    || !columnSubset.includes(columnIndex)
+  ) {
+    throw new RangeError('Column subset must be ordered, unique, and contain the active column');
+  }
+  if (![
+    pageContentStartBlockPt,
+    pageContentEndBlockPt,
+    regionStartBlockPt,
+    regionEndBlockPt,
+    cursorBlockPt,
+    deepestColumnBlockPt,
+  ].every(Number.isFinite)) {
+    throw new RangeError('Page-flow cursors and bounds must be finite');
   }
   if (
     pageContentStartBlockPt > regionStartBlockPt
+    || regionStartBlockPt > regionEndBlockPt
+    || regionEndBlockPt > pageContentEndBlockPt
     || regionStartBlockPt > cursorBlockPt
+    || cursorBlockPt > regionEndBlockPt
     || cursorBlockPt > deepestColumnBlockPt
   ) {
     throw new RangeError(
-      'Page-flow cursors must be ordered page start <= region start <= cursor <= deepest edge',
+      'Page-flow bounds must contain the region and live cursor',
     );
   }
   return Object.freeze({
@@ -121,7 +190,10 @@ export function createPageFlowState(
     pageHasContent: overrides.pageHasContent ?? false,
     cursorBlockPt,
     pageContentStartBlockPt,
+    pageContentEndBlockPt,
     regionStartBlockPt,
+    regionEndBlockPt,
+    columnSubset,
     deepestColumnBlockPt,
     section,
   });
@@ -168,10 +240,13 @@ export function advanceColumnOrPage(
     state.deepestColumnBlockPt,
     state.cursorBlockPt,
   );
-  if (state.columnIndex + 1 < state.section.columns.length) {
+  const populationOrder = columnPopulationOrder(state.section, state.columnSubset);
+  const currentOrdinal = populationOrder.indexOf(state.columnIndex);
+  const nextColumnIndex = populationOrder[currentOrdinal + 1];
+  if (nextColumnIndex !== undefined) {
     return transition(Object.freeze({
       ...state,
-      columnIndex: state.columnIndex + 1,
+      columnIndex: nextColumnIndex,
       cursorBlockPt: state.regionStartBlockPt,
       deepestColumnBlockPt,
     }), [{ type: 'next-column' }]);
@@ -187,10 +262,156 @@ export function advanceColumnOrPage(
   }]);
 }
 
-function advanceToPage(
+interface NextColumnDestination {
+  readonly targetColumnIndex: number;
+  readonly targetColumnOrdinal: number;
+  readonly columnSubset: readonly number[];
+  readonly outgoingColumnSubset: readonly number[];
+}
+
+function sameGrid(
+  left: PageFlowSectionContext['grid'],
+  right: PageFlowSectionContext['grid'],
+): boolean {
+  return left.kind === right.kind
+    && left.linePitchPt === right.linePitchPt
+    && left.charSpacePt === right.charSpacePt;
+}
+
+function sameRect(
+  left: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>,
+  right: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>,
+): boolean {
+  return left.xPt === right.xPt
+    && left.yPt === right.yPt
+    && left.widthPt === right.widthPt
+    && left.heightPt === right.heightPt;
+}
+
+function rectsOverlap(
+  left: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>,
+  right: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>,
+): boolean {
+  return left.xPt < right.xPt + right.widthPt
+    && right.xPt < left.xPt + left.widthPt
+    && left.yPt < right.yPt + right.heightPt
+    && right.yPt < left.yPt + left.heightPt;
+}
+
+/** Resolve §17.18.77 against retained physical bands. Column indexes are not
+ * transferable between section occurrences because §17.6.4 permits each
+ * occurrence to author a different grid. */
+function resolveNextColumnDestination(
   state: PageFlowState,
   section: PageFlowSectionContext,
-  reason: Extract<PageAdvanceReason, 'explicit-break' | 'page-break-before' | 'section-break'>,
+  options: SectionBoundaryOptions,
+): NextColumnDestination {
+  const reject = (
+    reason: UnsupportedPageFlowTransitionError['reason'],
+  ): never => {
+    throw new UnsupportedPageFlowTransitionError(
+      state.columnIndex,
+      state.section.columns.length,
+      section.columns.length,
+      reason,
+    );
+  };
+  const outgoingWritingMode = writingModeFromTextDirection(state.section.textDirection);
+  const incomingWritingMode = writingModeFromTextDirection(section.textDirection);
+  if (outgoingWritingMode !== incomingWritingMode) reject('writing-mode');
+  const outgoingPage = uprightPhysicalExtent({
+    widthPt: state.section.geometry.pageWidth,
+    heightPt: state.section.geometry.pageHeight,
+  }, outgoingWritingMode);
+  const incomingPage = uprightPhysicalExtent({
+    widthPt: section.geometry.pageWidth,
+    heightPt: section.geometry.pageHeight,
+  }, incomingWritingMode);
+  if (
+    outgoingPage.widthPt !== incomingPage.widthPt
+    || outgoingPage.heightPt !== incomingPage.heightPt
+  ) reject('page-extent');
+  const incomingContentStart = options.incomingPageContentStartBlockPt
+    ?? sectionContentStartBlockPt(section);
+  const incomingContentEnd = options.incomingPageContentEndBlockPt
+    ?? sectionContentEndBlockPt(section);
+  if (
+    incomingContentStart !== state.pageContentStartBlockPt
+    || incomingContentEnd !== state.pageContentEndBlockPt
+  ) reject('block-band');
+  if (!sameGrid(state.section.grid, section.grid)) reject('grid');
+
+  const outgoingPopulation = columnPopulationOrder(state.section, state.columnSubset);
+  const currentOrdinal = outgoingPopulation.indexOf(state.columnIndex);
+  const successorIndex = outgoingPopulation[currentOrdinal + 1];
+  if (successorIndex === undefined) reject('no-successor');
+  const coordinateSpace = createSectionRegionCoordinateSpace(
+    outgoingWritingMode,
+    outgoingPage,
+  );
+  const outgoingColumn = state.section.columns[successorIndex]!;
+  const outgoingPhysicalBand = transformRect(coordinateSpace.logicalToPhysical, {
+    xPt: outgoingColumn.xPt,
+    yPt: state.regionStartBlockPt,
+    widthPt: outgoingColumn.wPt,
+    heightPt: state.regionEndBlockPt - state.regionStartBlockPt,
+  });
+  const targetColumnIndex = section.columns.findIndex((column) => (
+    sameRect(outgoingPhysicalBand, transformRect(coordinateSpace.logicalToPhysical, {
+      xPt: column.xPt,
+      yPt: state.regionStartBlockPt,
+      widthPt: column.wPt,
+      heightPt: state.regionEndBlockPt - state.regionStartBlockPt,
+    }))
+  ));
+  if (targetColumnIndex < 0) reject('physical-column');
+  const incomingPopulation = columnPopulationOrder(
+    section,
+    section.columns.map((_, index) => index),
+  );
+  const targetColumnOrdinal = incomingPopulation.indexOf(targetColumnIndex);
+  if (targetColumnOrdinal < 0) reject('physical-column');
+  const columnSubset = Object.freeze(
+    incomingPopulation.slice(targetColumnOrdinal).sort((left, right) => left - right),
+  );
+  const outgoingColumnSubset = Object.freeze(
+    outgoingPopulation.slice(0, currentOrdinal + 1).sort((left, right) => left - right),
+  );
+  const physicalBand = (
+    owner: PageFlowSectionContext,
+    columnIndex: number,
+  ) => {
+    const column = owner.columns[columnIndex]!;
+    return transformRect(coordinateSpace.logicalToPhysical, {
+      xPt: column.xPt,
+      yPt: state.regionStartBlockPt,
+      widthPt: column.wPt,
+      heightPt: state.regionEndBlockPt - state.regionStartBlockPt,
+    });
+  };
+  const outgoingOwnedBands = outgoingColumnSubset.map((columnIndex) =>
+    physicalBand(state.section, columnIndex));
+  if (columnSubset.some((columnIndex) => {
+    const incomingBand = physicalBand(section, columnIndex);
+    return outgoingOwnedBands.some((outgoingBand) => rectsOverlap(outgoingBand, incomingBand));
+  })) {
+    reject('physical-overlap');
+  }
+  return Object.freeze({
+    targetColumnIndex,
+    targetColumnOrdinal,
+    columnSubset,
+    outgoingColumnSubset,
+  });
+}
+
+export function advanceToPage(
+  state: PageFlowState,
+  section: PageFlowSectionContext,
+  reason: Extract<
+    PageAdvanceReason,
+    'overflow' | 'explicit-break' | 'page-break-before' | 'section-break'
+  >,
 ): PageFlowTransition {
   const pageIndex = state.pageIndex + 1;
   return transition(createPageFlowState(section, { pageIndex }), [{
@@ -254,7 +475,7 @@ export function applyAuthoredBreak(
   if (
     authoredBreak === 'pageBreakBefore'
     && !state.pageHasContent
-    && state.columnIndex === 0
+    && state.columnIndex === columnPopulationOrder(state.section, state.columnSubset)[0]
     && state.cursorBlockPt === state.pageContentStartBlockPt
   ) {
     // §17.3.1.23 requires the paragraph to begin on a new page. A paragraph
@@ -281,43 +502,44 @@ export function beginSection(
     return transition(createPageFlowState(section, {
       pageIndex: state.pageIndex,
       pageContentStartBlockPt: state.pageContentStartBlockPt,
+      pageContentEndBlockPt: state.pageContentEndBlockPt,
       cursorBlockPt: regionTop,
       regionStartBlockPt: regionTop,
+      regionEndBlockPt: state.pageContentEndBlockPt,
       deepestColumnBlockPt: regionTop,
       pageHasContent: state.pageHasContent,
-    }), [{ type: 'begin-section', section }]);
+    }), [{
+      type: 'begin-section',
+      placement: 'same-page-block',
+      section,
+      targetColumnOrdinal: 0,
+      columnSubset: section.columns.map((_, index) => index),
+    }]);
   }
 
   if (startType === 'nextColumn') {
-    const followingColumnIndex = state.columnIndex + 1;
-    if (
-      followingColumnIndex < state.section.columns.length
-      && followingColumnIndex < section.columns.length
-    ) {
-      return transition(Object.freeze({
-        ...state,
-        columnIndex: followingColumnIndex,
-        cursorBlockPt: state.pageContentStartBlockPt,
-        regionStartBlockPt: state.pageContentStartBlockPt,
-        deepestColumnBlockPt: Math.max(
-          state.deepestColumnBlockPt,
-          state.cursorBlockPt,
-        ),
+    const destination = resolveNextColumnDestination(state, section, options);
+    return transition(Object.freeze({
+      ...state,
+      columnIndex: destination.targetColumnIndex,
+      columnSubset: destination.columnSubset,
+      cursorBlockPt: state.regionStartBlockPt,
+      deepestColumnBlockPt: Math.max(
+        state.deepestColumnBlockPt,
+        state.cursorBlockPt,
+      ),
+      section,
+    }), [
+      { type: 'next-column' },
+      {
+        type: 'begin-section',
+        placement: 'same-page-column',
         section,
-      }), [
-        { type: 'next-column' },
-        { type: 'begin-section', section },
-      ]);
-    }
-
-    // §17.18.77 only defines nextColumn when a following column exists on this
-    // page. No normative rule selects another page when that destination is
-    // absent, so the caller must surface the unsupported transition explicitly.
-    throw new UnsupportedPageFlowTransitionError(
-      state.columnIndex,
-      state.section.columns.length,
-      section.columns.length,
-    );
+        targetColumnOrdinal: destination.targetColumnOrdinal,
+        columnSubset: destination.columnSubset,
+        outgoingColumnSubset: destination.outgoingColumnSubset,
+      },
+    ]);
   }
 
   if (startType === 'continuous') {

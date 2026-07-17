@@ -1229,6 +1229,22 @@ describe('layoutPages — line-boundary splitting + widowControl (C1: §17.3.1.4
     });
   });
 
+  it('relocates a three-line paragraph when widow removal would create an orphan', () => {
+    const pages = layoutPages([
+      para({ text: 'あ', fontSize: 60, widowControl: false }),
+      para({ text: 'あ'.repeat(24), fontSize: 20 }),
+    ], section(), makeCtx());
+
+    expect(pages).toHaveLength(2);
+    expect(pages[0]!.layers.body).toHaveLength(1);
+    expect(continuationOf(pages[1]!.layers.body[0])).toMatchObject({
+      lineStart: 0,
+      lineEnd: 3,
+      continuesFromPrevious: false,
+      continuesOnNext: false,
+    });
+  });
+
   it('honors w:widowControl="off": the trailing single line is allowed (matches sample-9)', () => {
     const pages = layoutPages([para({ text: sixLineText, widowControl: false })], section(), makeCtx());
     expect(pages.length).toBe(2);

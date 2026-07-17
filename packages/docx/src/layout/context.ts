@@ -10,6 +10,7 @@ import type {
 import {
   computeSectionColumns,
   type SectionLayoutContext,
+  type SectionGridContext,
 } from '../layout-context.js';
 import type { DeepReadonly } from './types.js';
 
@@ -23,6 +24,9 @@ export interface PageFlowSectionContext {
   readonly geometry: Readonly<SectionGeom>;
   readonly columns: readonly Readonly<ColumnGeom>[];
   readonly textDirection: string;
+  /** §17.6.1 section direction controls newspaper-column population order. */
+  readonly sectionBidi: boolean;
+  readonly grid: Readonly<SectionGridContext>;
 }
 
 export function createPageFlowSectionContext(input: Readonly<{
@@ -30,6 +34,8 @@ export function createPageFlowSectionContext(input: Readonly<{
   geometry: SectionGeom;
   columns: readonly Readonly<ColumnGeom>[];
   textDirection: string;
+  sectionBidi?: boolean;
+  grid?: Readonly<SectionGridContext>;
 }>): PageFlowSectionContext {
   if (input.sectionOccurrenceId.length === 0) {
     throw new RangeError('Section occurrence id must not be empty');
@@ -42,6 +48,12 @@ export function createPageFlowSectionContext(input: Readonly<{
     geometry: Object.freeze({ ...input.geometry }),
     columns: Object.freeze(input.columns.map((column) => Object.freeze({ ...column }))),
     textDirection: input.textDirection,
+    sectionBidi: input.sectionBidi ?? false,
+    grid: Object.freeze(input.grid ?? {
+      kind: 'none',
+      linePitchPt: null,
+      charSpacePt: null,
+    }),
   });
 }
 
@@ -49,6 +61,10 @@ export function createPageFlowSectionContext(input: Readonly<{
  * from the page edge; the sign controls header/footer overlap separately. */
 export function sectionContentStartBlockPt(section: PageFlowSectionContext): number {
   return sectionBodyInsetPt(section.geometry.marginTop);
+}
+
+export function sectionContentEndBlockPt(section: PageFlowSectionContext): number {
+  return section.geometry.pageHeight - sectionBodyInsetPt(section.geometry.marginBottom);
 }
 
 /** Signed top/bottom margins retain overlap policy; body placement uses distance. */
@@ -149,6 +165,7 @@ export function resolveSectionContextForPage(
 
 export interface SectionPlacementFacts {
   readonly sectionId: string;
+  readonly sectionBidi: boolean;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
   readonly docGridType: string | null;
@@ -186,6 +203,7 @@ export interface BodySectionOccurrence {
   readonly headers: HeadersFooters;
   readonly footers: HeadersFooters;
   readonly titlePage: boolean;
+  readonly sectionBidi: boolean;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
   readonly docGridType: string | null;
@@ -235,6 +253,7 @@ export function defaultSectionGeometry(): SectionGeom {
  * document wrapper across the canonical layout boundary. */
 export function resolveAcquiredSectionLayoutContext(
   section: SectionProps,
+  sectionBidi = false,
 ): SectionLayoutContext {
   const gridKind = section.docGridType === 'lines'
     || section.docGridType === 'linesAndChars'
@@ -251,6 +270,7 @@ export function resolveAcquiredSectionLayoutContext(
       charSpacePt: section.docGridCharSpace == null ? null : section.docGridCharSpace / 4096,
     }),
     textDirection: section.textDirection ?? 'lrTb',
+    sectionBidi,
     verticalAlignment: section.vAlign ?? 'top',
     ...(section.lineNumbering === null || section.lineNumbering === undefined
       ? {}

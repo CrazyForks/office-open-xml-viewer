@@ -1,6 +1,6 @@
 import {
   prepareFloatWrap,
-  resolvePreparedLineFloatWindow,
+  computePreparedLineFloatWindow,
   skipPastTopAndBottom,
   type FloatRect,
   type LineFloatReference,
@@ -53,7 +53,7 @@ export function createFloatWrapOracle(
       columnXPt,
       columnWidthPt,
     }) => {
-      const window = resolvePreparedLineFloatWindow(
+      const window = computePreparedLineFloatWindow(
         topYPt,
         minimumStartWidthPt,
         probeHeightPt,

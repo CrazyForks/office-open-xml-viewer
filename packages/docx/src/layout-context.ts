@@ -49,6 +49,8 @@ export interface SectionLayoutContext {
   readonly columnSeparator: boolean;
   readonly grid: SectionGridContext;
   readonly textDirection: string;
+  /** Internal retention of §17.6.1 section-level column population direction. */
+  readonly sectionBidi?: boolean;
   readonly verticalAlignment: string;
   readonly lineNumbering?: LineNumbering;
 }
@@ -235,6 +237,7 @@ export function resolveSectionLayoutContext(
         section.docGridCharSpace == null ? null : section.docGridCharSpace / 4096,
     },
     textDirection: section.textDirection ?? 'lrTb',
+    sectionBidi: false,
     verticalAlignment: section.vAlign ?? 'top',
     lineNumbering: section.lineNumbering ?? undefined,
   };

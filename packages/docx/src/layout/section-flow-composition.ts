@@ -94,8 +94,11 @@ export function composeCanonicalSectionFlow(
       const flowBottomPt = ownedAllocations.length === 0
         ? flowTopPt
         : Math.max(...ownedAllocations.map((allocation) => allocation.blockEndPt));
-      const bandBottomPt = page.sectionRegions[regionIndex + 1]?.blockStartPt
-        ?? region.blockEndPt;
+      // A nextColumn boundary can retain two section regions over the same
+      // block interval while assigning disjoint physical column domains. Each
+      // section's §17.6.23 alignment therefore uses its own retained band, not
+      // the next region's block origin.
+      const bandBottomPt = region.blockEndPt;
       const bandHeightPt = Math.max(0, bandBottomPt - region.blockStartPt);
       const bodyHeightPt = Math.max(0, flowBottomPt - flowTopPt);
       const alignment = region.section.verticalAlignment;

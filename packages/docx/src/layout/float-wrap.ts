@@ -462,7 +462,7 @@ export function resolveLineFloatWindow(
     readingDirection: 'ltr',
   },
 ): { topY: number; xOffset: number; maxWidth: number } {
-  return resolvePreparedLineFloatWindow(
+  return computePreparedLineFloatWindow(
     topY,
     requiredWidth,
     probeH,
@@ -1106,7 +1106,7 @@ function nextLocalSweepEvent(
  * finite affine arrangement. This proves termination without a global all-pairs
  * candidate set, sampling, bisection, or a pass cap.
  */
-function resolvePreparedLineFloatWindowCore(
+function computePreparedLineFloatWindowCore(
   topY: number,
   polygonRequiredWidth: number,
   probeH: number,
@@ -1172,7 +1172,7 @@ function resolvePreparedLineFloatWindowCore(
   throw new Error('Finite float line-window event sweep found no usable terminal Y');
 }
 
-export function resolvePreparedLineFloatWindow(
+export function computePreparedLineFloatWindow(
   topY: number,
   polygonRequiredWidth: number,
   probeH: number,
@@ -1188,14 +1188,14 @@ export function resolvePreparedLineFloatWindow(
   },
   squareRequiredWidth: number = polygonRequiredWidth,
 ): { topY: number; xOffset: number; maxWidth: number } {
-  return resolvePreparedLineFloatWindowCore(
+  return computePreparedLineFloatWindowCore(
     topY, polygonRequiredWidth, probeH, paraX, maxWidth, prepared,
     columnXLeftPt, columnXRightPt, reference, squareRequiredWidth,
   );
 }
 
 /** Internal instrumentation for deterministic solver-complexity regression tests. */
-export function resolvePreparedLineFloatWindowWithDiagnostics(
+export function computePreparedLineFloatWindowWithDiagnostics(
   topY: number,
   polygonRequiredWidth: number,
   probeH: number,
@@ -1224,7 +1224,7 @@ export function resolvePreparedLineFloatWindowWithDiagnostics(
     localRootEventCount: 0,
     evaluatedYCount: 0,
   };
-  const window = resolvePreparedLineFloatWindowCore(
+  const window = computePreparedLineFloatWindowCore(
     topY, polygonRequiredWidth, probeH, paraX, maxWidth, prepared,
     columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, diagnostics,
   );

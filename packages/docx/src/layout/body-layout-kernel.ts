@@ -77,6 +77,8 @@ export interface AcquiredParagraphBlock {
     yPt: number;
     sectionFlowOwnership: 'host-flow' | 'page';
   }>;
+  /** §17.3.1.11 admits identical adjacent framePr members with their owner. */
+  readonly retainedFootnoteReferenceIds?: readonly string[];
   readonly relocationBlockExtentPt?: number;
 }
 

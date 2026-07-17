@@ -12,15 +12,22 @@ export function columnSeparatorSegments(
 ): readonly ColumnSeparatorLayout[] {
   const segments: ColumnSeparatorLayout[] = [];
   for (const region of regions) {
-    // The current region model owns every normalized section column; until
-    // column-subset regions exist, its section remains the decoration authority.
     const { columns, columnSeparator } = region.section;
     if (!columnSeparator
       || columns.length < 2
       || region.blockEndPt <= region.blockStartPt) continue;
-    for (let index = 0; index < columns.length - 1; index += 1) {
-      const left = columns[index]!;
-      const right = columns[index + 1]!;
+    const ownedColumns = new Set(region.columnIndexes);
+    const populationOrder = region.columnFlowDirection === 'rtl'
+      ? columns.map((_, index) => index).reverse()
+      : columns.map((_, index) => index);
+    for (let ordinal = 0; ordinal < populationOrder.length - 1; ordinal += 1) {
+      const populatedColumnIndex = populationOrder[ordinal]!;
+      if (!ownedColumns.has(populatedColumnIndex)) continue;
+      const followingColumnIndex = populationOrder[ordinal + 1]!;
+      const leftIndex = Math.min(populatedColumnIndex, followingColumnIndex);
+      const rightIndex = Math.max(populatedColumnIndex, followingColumnIndex);
+      const left = columns[leftIndex]!;
+      const right = columns[rightIndex]!;
       const inlinePt = (left.xPt + left.wPt + right.xPt) / 2;
       segments.push(Object.freeze({
         start: freezePoint(transformPoint(region.coordinateSpace.logicalToPhysical, {

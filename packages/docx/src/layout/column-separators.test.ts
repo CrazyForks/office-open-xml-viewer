@@ -33,6 +33,8 @@ const region = (
   },
   blockStartPt: 30,
   blockEndPt: 150,
+  columnFlowDirection: 'ltr',
+  columnIndexes: [0, 1, 2],
   flowDomainIds: ['column:0', 'column:1', 'column:2'],
   section: { ...section, ...sectionOverrides },
   ...overrides,
@@ -74,6 +76,46 @@ describe('columnSeparatorSegments', () => {
     ])).toEqual([
       { start: { xPt: 70, yPt: 70 }, end: { xPt: 70, yPt: 140 } },
       { start: { xPt: 120, yPt: 70 }, end: { xPt: 120, yPt: 140 } },
+    ]);
+  });
+
+  it('partitions separator ownership across same-band authored column subsets', () => {
+    expect(columnSeparatorSegments([
+      region({
+        id: 'region:outgoing',
+        columnIndexes: [0],
+        flowDomainIds: ['outgoing:0'],
+      }),
+      region({
+        id: 'region:incoming',
+        sectionOccurrenceId: 'section:incoming',
+        columnIndexes: [1, 2],
+        flowDomainIds: ['incoming:1', 'incoming:2'],
+      }),
+    ])).toEqual([
+      { start: { xPt: 70, yPt: 30 }, end: { xPt: 70, yPt: 150 } },
+      { start: { xPt: 120, yPt: 30 }, end: { xPt: 120, yPt: 150 } },
+    ]);
+  });
+
+  it('partitions RTL separator ownership by population predecessor', () => {
+    expect(columnSeparatorSegments([
+      region({
+        id: 'region:outgoing',
+        columnFlowDirection: 'rtl',
+        columnIndexes: [2],
+        flowDomainIds: ['outgoing:2'],
+      }, { sectionBidi: true }),
+      region({
+        id: 'region:incoming',
+        sectionOccurrenceId: 'section:incoming',
+        columnFlowDirection: 'rtl',
+        columnIndexes: [0, 1],
+        flowDomainIds: ['incoming:0', 'incoming:1'],
+      }, { sectionBidi: true }),
+    ])).toEqual([
+      { start: { xPt: 120, yPt: 30 }, end: { xPt: 120, yPt: 150 } },
+      { start: { xPt: 70, yPt: 30 }, end: { xPt: 70, yPt: 150 } },
     ]);
   });
 });

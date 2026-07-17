@@ -33,7 +33,7 @@ export interface BodyPageTransitionFactory {
     flow: PageFlowState,
   ): Readonly<{ page: CanonicalPageDraft; flow: PageFlowState }>;
   openParityBlankPage(event: NextPageEvent): CanonicalPageDraft;
-  openContinuousSectionRegion(
+  openSamePageSectionRegion(
     page: CanonicalPageDraft,
     event: BeginSectionEvent,
     flow: PageFlowState,
@@ -127,7 +127,7 @@ export function commitPageFlowTransition(
       if (!current || current.kind !== 'content') {
         throw new Error('A continuous section requires an active content page');
       }
-      pages[pages.length - 1] = factory.openContinuousSectionRegion(
+      pages[pages.length - 1] = factory.openSamePageSectionRegion(
         current,
         event,
         activeFlow,

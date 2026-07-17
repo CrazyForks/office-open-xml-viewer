@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
+import { createLayoutServices, layoutDocument } from './renderer.js';
 import type { LayoutPage, PaintNode } from './layout/types.js';
 import type {
   BodyElement,
   DocParagraph,
+  DocxDocumentModel,
   DocxTextRun,
   FramePr,
   SectionProps,
@@ -91,12 +93,20 @@ function para(opts: { text?: string; fontSize?: number } = {}): BodyElement {
 }
 
 /** A frame paragraph (`w:framePr`) carrying a single text run. */
-function framePara(fp: FramePr, opts: { text?: string; fontSize?: number } = {}): BodyElement {
+function framePara(
+  fp: FramePr,
+  opts: { text?: string; fontSize?: number; footnoteId?: string } = {},
+): BodyElement {
   const fontSize = opts.fontSize ?? 20;
+  const run = textRun(opts.text ?? 'F', fontSize);
+  if (run.type === 'text' && opts.footnoteId !== undefined) {
+    run.noteRef = { kind: 'footnote', id: opts.footnoteId };
+    run.vertAlign = 'super';
+  }
   const p: DocParagraph = {
     alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
     spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
-    runs: [textRun(opts.text ?? 'F', fontSize)],
+    runs: [run],
     defaultFontSize: fontSize, defaultFontFamily: 'NotInMetrics',
     framePr: fp,
   };
@@ -193,6 +203,46 @@ describe('canonical body layout — text-frame keep-with-anchor (§17.3.1.11)', 
     if (anchor?.kind !== 'paragraph') throw new Error('expected anchor layout');
     expect(anchor.exclusions.filter((item) => item.id.includes('frame')))
       .toHaveLength(1);
+  });
+
+  it('admits a later frame-member footnote with the group owner', () => {
+    const shared = frame({
+      vAnchor: 'page',
+      hAnchor: 'page',
+      hRule: 'exact',
+      h: 20,
+      w: 50,
+      y: 0,
+    });
+    const body = [
+      para({ text: 'a' }),
+      para({ text: 'b' }),
+      para({ text: 'c' }),
+      para({ text: 'd' }),
+      framePara({ ...shared }, { text: 'F1' }),
+      framePara({ ...shared }, { text: 'F2', footnoteId: 'later' }),
+      para({ text: 'anchor' }),
+    ];
+    const model = {
+      body,
+      section: section(),
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [{ id: 'later', content: [para({ text: 'note' })] }],
+      endnotes: [],
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(model, { measureContext: makeCtx() });
+
+    const pages = layoutDocument(model, services, { currentDateMs: 0 }).pages
+      .map((page) => page.layers.body);
+
+    expect(pages).toHaveLength(2);
+    expect(pages[0].filter((element) =>
+      element.kind === 'paragraph' && !element.ordinaryFlow)).toEqual([]);
+    expect(pages[1].filter((element) =>
+      element.kind === 'paragraph' && !element.ordinaryFlow)
+      .map((element) => element.source.path[0])).toEqual([4, 5]);
   });
 
   it('relocates an overflowing frame to the NEXT COLUMN (not a new page) in a multi-column section', () => {

@@ -182,7 +182,9 @@ function page(
         writingMode: 'horizontal-tb', logicalToPhysical,
         physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
       },
-      blockStartPt: 0, blockEndPt: 100, flowDomainIds: ['body'],
+      blockStartPt: 0, blockEndPt: 100,
+      columnFlowDirection: 'ltr', columnIndexes: [0],
+      flowDomainIds: ['body'],
     }],
     pageBorders: null,
     layers: {

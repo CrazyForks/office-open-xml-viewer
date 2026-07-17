@@ -157,6 +157,7 @@ export function documentPageLayoutSettingsInput(
 
 interface InternalSectionPlacementWire {
   readonly sectionId: string;
+  readonly sectionBidi?: boolean;
   readonly vAlign?: string | null;
   readonly lineNumbering?: LineNumbering | null;
   readonly docGridType?: string | null;
@@ -190,6 +191,7 @@ type InternalSectionProps = DocxDocumentModel['section'] & {
  * outside BodyElement/DocxDocumentModel's stable declaration surface. */
 export interface SectionPlacementInput {
   readonly sectionId: string;
+  readonly sectionBidi: boolean;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
   readonly docGridType: string | null;
@@ -1093,6 +1095,7 @@ function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): Document
     const wire = (element as InternalSectionBreak).__sectionPlacement;
     endingSections.set(bodyIndex, snapshotPlainData({
       sectionId: wire?.sectionId ?? `section:${ordinal}`,
+      sectionBidi: wire?.sectionBidi === true,
       vAlign: wire?.vAlign ?? null,
       lineNumbering: wire?.lineNumbering ?? null,
       docGridType: wire?.docGridType ?? null,
@@ -1111,6 +1114,7 @@ function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): Document
     endingSections,
     finalSection: snapshotPlainData({
       sectionId: finalWire?.sectionId ?? `section:${ordinal}`,
+      sectionBidi: finalWire?.sectionBidi === true,
       // Resource-only entry points (for example image preloading) historically
       // accept a partial document projection with no section. Section placement
       // is irrelevant there, so preserve that compatibility with neutral facts.
@@ -1207,6 +1211,7 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
       headers: element.headers ?? EMPTY_SECTION_HEADERS_FOOTERS,
       footers: element.footers ?? EMPTY_SECTION_HEADERS_FOOTERS,
       titlePage: element.titlePage ?? false,
+      sectionBidi: placement.sectionBidi,
       vAlign: placement.vAlign,
       lineNumbering: placement.lineNumbering,
       docGridType: placement.docGridType,
@@ -1239,6 +1244,7 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
     headers: doc.headers ?? EMPTY_SECTION_HEADERS_FOOTERS,
     footers: doc.footers ?? EMPTY_SECTION_HEADERS_FOOTERS,
     titlePage: doc.section.titlePage,
+    sectionBidi: placement.sectionBidi,
     vAlign: placement.vAlign,
     lineNumbering: placement.lineNumbering,
     docGridType: placement.docGridType,

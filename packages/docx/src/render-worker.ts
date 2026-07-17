@@ -17,16 +17,17 @@ import {
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types';
-import { renderDocumentToCanvas, createLayoutServices, layoutDocument, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { renderDocumentToCanvas, createLayoutServices, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
-import type { LayoutServices } from './layout/types.js';
-import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
-import type { LayoutVariantStore } from './layout/variant-store.js';
 import type { RenderWorkerRequest, RenderWorkerResponse, DocumentMeta } from './worker-protocol';
 import { normalizeInternalDocumentModel } from './parser-model.js';
+import {
+  retainRenderWorkerDocumentLayout,
+  type RetainedRenderWorkerDocumentLayout,
+} from './render-worker-layout.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
 // embedded-font read) recycles the instance so the next document renders on
@@ -37,12 +38,7 @@ const host = new WasmParserHost<DocxArchive>(init, {
   // wasm-bindgen singleton). `reinit` forces fresh linear memory after a trap.
   reinit,
 });
-let doc: {
-  model: DocxDocumentModel;
-  layoutServices: LayoutServices;
-  layoutVariants: LayoutVariantStore;
-  defaultCurrentDateMs: number;
-} | null = null;
+let doc: RetainedRenderWorkerDocumentLayout | null = null;
 let localMetricFontFaces: FontFace[] = [];
 const imageCache = new Map<string, Promise<Blob>>();
 
@@ -140,19 +136,12 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         embeddedFaces,
         googleFaces,
       });
-      const variants = attachDocumentLayoutVariants({
-        model,
-        services: layoutServices,
-        defaultCurrentDateMs: req.defaultCurrentDateMs,
-        buildLayout: (options) => layoutDocument(model, layoutServices, options),
-      });
-      doc = {
+      doc = retainRenderWorkerDocumentLayout(
         model,
         layoutServices,
-        layoutVariants: variants.store,
-        defaultCurrentDateMs: req.defaultCurrentDateMs,
-      };
-      const layout = variants.store.defaultLayout;
+        req.defaultCurrentDateMs,
+      );
+      const layout = doc.layoutVariants.defaultLayout;
       const pageSizes = layout.pages.map((page) => ({
         widthPt: page.geometry.widthPt,
         heightPt: page.geometry.heightPt,

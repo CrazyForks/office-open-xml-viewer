@@ -229,7 +229,7 @@ describe('retained anchor frame geometry', () => {
     });
   });
 
-  it('preserves exact zero percent positioning and relative sizing', () => {
+  it('preserves exact zero percent positioning', () => {
     const result = resolved(resolveAnchorFrame(input(anchor({
       horizontal: {
         relativeFrom: 'margin',
@@ -241,6 +241,22 @@ describe('retained anchor frame geometry', () => {
         relativeFromStatus: 'valid',
         choice: { kind: 'percent', fraction: 0 },
       },
+    }))));
+
+    expect(result.geometry.objectFrame).toEqual({
+      xPt: 60,
+      yPt: 20,
+      widthPt: 20,
+      heightPt: 10,
+    });
+    expect(result.axes.horizontal).toMatchObject({
+      choiceKind: 'percent',
+      choiceValue: 0,
+    });
+  });
+
+  it('uses wp:extent when Word does not support an exact-zero relative size', () => {
+    const result = resolved(resolveAnchorFrame(input(anchor({
       relativeSize: {
         horizontal: {
           relativeFrom: 'page',
@@ -252,21 +268,35 @@ describe('retained anchor frame geometry', () => {
       },
     }))));
 
-    expect(result.geometry.objectFrame).toEqual({
-      xPt: 60,
-      yPt: 20,
-      widthPt: 0,
-      heightPt: 10,
-    });
-    expect(result.geometry.size.horizontal).toMatchObject({
-      source: 'relative',
+    expect(result.geometry.objectFrame.widthPt).toBe(20);
+    expect(result.geometry.size.horizontal).toEqual({
+      source: 'extent',
+      valuePt: 20,
+      relativeFrom: 'page',
+      referenceFrame: null,
       fraction: 0,
-      valuePt: 0,
+      compatibilityFallback: 'word-zero-relative-size',
     });
-    expect(result.axes.horizontal).toMatchObject({
-      choiceKind: 'percent',
-      choiceValue: 0,
-    });
+  });
+
+  it('rejects a negative relative size instead of treating it as an extent fallback', () => {
+    const result = resolveAnchorFrame(input(anchor({
+      relativeSize: {
+        horizontal: {
+          relativeFrom: 'page',
+          relativeFromStatus: 'valid',
+          fraction: -0.1,
+          fractionStatus: 'valid',
+        },
+        vertical: null,
+      },
+    })));
+
+    expect(result.status).toBe('unsupported');
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      code: 'invalid-relative-size-fraction',
+      path: 'relativeSize.horizontal.fraction',
+    }));
   });
 
   it('uses simple positioning only when explicitly enabled', () => {

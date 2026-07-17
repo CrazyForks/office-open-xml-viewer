@@ -168,7 +168,10 @@ function sectionInput(
           path: Object.freeze([markerBodyIndex]),
         }),
     startType: normalizeSectionStartType(occurrence.startType),
-    context: Object.freeze(resolveAcquiredSectionLayoutContext(sectionProps(occurrence))),
+    context: Object.freeze(resolveAcquiredSectionLayoutContext(
+      sectionProps(occurrence),
+      occurrence.sectionBidi,
+    )),
     pageNumbering: Object.freeze({
       start: occurrence.pageNumType?.start ?? null,
       format: occurrence.pageNumType?.fmt ?? null,

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   prepareFloatWrap,
   resolveLineFloatWindow,
-  resolvePreparedLineFloatWindow,
+  computePreparedLineFloatWindow,
   skipPastTopAndBottom,
   wordMinLineStartPx,
   WORD_MIN_LINE_START_PT,
@@ -200,7 +200,7 @@ describe('resolveLineFloatWindow — Word 1-inch line-start gate (issue #676)', 
       imageW: 5,
     };
 
-    expect(resolvePreparedLineFloatWindow(
+    expect(computePreparedLineFloatWindow(
       50, 1, 10, 0, 100,
       prepareFloatWrap([notch, containedSquare]),
       0, 100,
@@ -224,7 +224,7 @@ describe('resolveLineFloatWindow — Word 1-inch line-start gate (issue #676)', 
       imageW: 10,
     };
 
-    expect(resolvePreparedLineFloatWindow(
+    expect(computePreparedLineFloatWindow(
       50, 1, 10, 0, 100,
       prepareFloatWrap([notch, gapBoundingSquare]),
       0, 100,
@@ -242,7 +242,7 @@ describe('resolveLineFloatWindow — Word 1-inch line-start gate (issue #676)', 
     ]);
     const square = { ...leftBand(80, 100), imageKey: 'square-boundary' };
 
-    const result = resolvePreparedLineFloatWindow(
+    const result = computePreparedLineFloatWindow(
       50, 1, 0.5, 0, 200,
       prepareFloatWrap([square, opening]),
       0, 200,
@@ -291,7 +291,7 @@ describe('resolveLineFloatWindow — Word 1-inch line-start gate (issue #676)', 
       { xPt: 60, yPt: 0 }, { xPt: 70, yPt: 0 },
       { xPt: 20, yPt: 100 }, { xPt: 10, yPt: 100 },
     ], { side: 'largest' })]);
-    const resolve = (topY: number) => resolvePreparedLineFloatWindow(
+    const resolve = (topY: number) => computePreparedLineFloatWindow(
       topY, 1, 10, 0, 100, asymmetric,
       0, 100,
       { xLeftPt: 0, xRightPt: 100, readingDirection: 'ltr' },

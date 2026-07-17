@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   paragraphAnchorCollisions,
-  paragraphAnchorReferenceFrames,
   paragraphWrapExclusions,
 } from './paragraph-float-authority.js';
 import type { FloatRect } from './float-wrap.js';
@@ -61,25 +60,5 @@ describe('paragraph float authority projection', () => {
       anchorOccurrenceId: 'shape:0',
       verticalOwnership: 'page',
     }]);
-  });
-
-  it('derives point-space anchor frames from a minimal acquisition snapshot', () => {
-    expect(paragraphAnchorReferenceFrames({
-      pageIndex: 1,
-      scale: 2,
-      pageWidth: 600,
-      pageH: 1600,
-      marginLeft: 40,
-      marginRight: 50,
-      marginTop: 60,
-      marginBottom: 70,
-      contentX: 100,
-      contentW: 400,
-    })).toEqual({
-      page: { xPt: 0, yPt: 0, widthPt: 600, heightPt: 800 },
-      margin: { xPt: 40, yPt: 60, widthPt: 510, heightPt: 670 },
-      column: { xPt: 50, yPt: 60, widthPt: 200, heightPt: 670 },
-      pageParity: 'even',
-    });
   });
 });

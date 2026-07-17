@@ -2280,6 +2280,7 @@ fn section_placement_wire(
     let Some(sect_pr) = sect_pr else {
         return SectionPlacementWire {
             section_id,
+            section_bidi: false,
             v_align: None,
             line_numbering: None,
             doc_grid_type: None,
@@ -2294,6 +2295,12 @@ fn section_placement_wire(
     };
     SectionPlacementWire {
         section_id,
+        section_bidi: child_w(sect_pr, "bidi").is_some_and(|node| {
+            attr_w(node, "val")
+                .as_deref()
+                .and_then(parse_on_off)
+                .unwrap_or(true)
+        }),
         v_align: child_w(sect_pr, "vAlign")
             .and_then(|node| attr_w(node, "val"))
             .filter(|value| value != "top"),
@@ -2324,11 +2331,8 @@ fn section_placement_wire(
 /// (ECMA-376 §17.6.x). Carries the section's `<w:cols>` (§17.6.4, via
 /// `parse_columns` ⇒ `None` for a single column) and its ST_SectionMark kind
 /// (§17.18.79), normalized: an absent/unknown `<w:type>` ⇒ "nextPage" (the spec
-/// default). `nextColumn` is normalized to "nextPage" — a section-level
-/// nextColumn break is not modeled distinctly (column breaks within a section
-/// come from `<w:br w:type="column"/>` ⇒ `ColumnBreak`); the renderer would
-/// otherwise have no defined column geometry to advance into across a section
-/// boundary.
+/// default). `nextColumn` remains distinct because §17.18.77 starts the incoming
+/// section in the following physical column on the current page.
 fn section_break_element(
     sect_pr: roxmltree::Node,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
@@ -16716,6 +16720,22 @@ mod column_tests {
         );
         let doc = roxmltree::Document::parse(&xml).unwrap();
         parse_columns(doc.root_element())
+    }
+
+    #[test]
+    fn section_placement_retains_bidi_column_population_direction() {
+        let parse = |sect: &str| {
+            let xml = format!(
+                r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#,
+                ns = W_NS,
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            section_placement_wire(Some(doc.root_element()), "section:test".to_string())
+        };
+
+        assert!(parse(r#"<w:bidi/>"#).section_bidi);
+        assert!(!parse(r#"<w:bidi w:val="0"/>"#).section_bidi);
+        assert!(!parse(r#"<w:cols w:num="2"/>"#).section_bidi);
     }
 
     /// Parse a minimal `<w:body>` document through the real body-parse path so we

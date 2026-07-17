@@ -809,6 +809,9 @@ export interface PageSectionRegion {
   readonly coordinateSpace: SectionRegionCoordinateSpace;
   readonly blockStartPt: number;
   readonly blockEndPt: number;
+  readonly columnFlowDirection: 'ltr' | 'rtl';
+  /** Authored §17.6.4 column indexes owned by this physical region. */
+  readonly columnIndexes: readonly number[];
   readonly flowDomainIds: readonly string[];
   readonly section: DeepReadonly<SectionLayoutContext>;
 }

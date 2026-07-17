@@ -211,6 +211,8 @@ export function layoutParseErrorPage(
         },
         blockStartPt: padPt,
         blockEndPt: size.heightPt - padPt,
+        columnFlowDirection: 'ltr',
+        columnIndexes: [0],
         flowDomainIds: ['parse-error'],
         section,
       }],

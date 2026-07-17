@@ -19,7 +19,9 @@ const canonicalPageMeta = (section: SectionLayoutContext) => ({
       logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
       physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
     },
-    blockStartPt: 10, blockEndPt: 190, flowDomainIds: ['body'],
+    blockStartPt: 10, blockEndPt: 190,
+    columnFlowDirection: 'ltr' as const, columnIndexes: [0],
+    flowDomainIds: ['body'],
   }],
   pageBorders: null,
 });

@@ -109,18 +109,39 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + '}\n');
   write(root, 'packages/docx/src/paint/canvas-page.ts',
     'export function paintLayoutPage(page) { return page; }\n');
-  write(root, 'packages/docx/src/render-worker.ts',
-    "import { renderDocumentToCanvas, layoutDocument } from './renderer.js';\n"
+  write(root, 'packages/docx/src/render-worker-layout.ts',
+    "import { layoutDocument } from './renderer.js';\n"
       + "import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';\n"
-      + 'export function initializeWorker(model, layoutServices) {\n'
-      + '  return attachDocumentLayoutVariants({ model, services: layoutServices,\n'
+      + 'export interface RetainedRenderWorkerDocumentLayout {\n'
+      + '  model; layoutServices; layoutVariants; defaultCurrentDateMs;\n'
+      + '}\n'
+      + 'export function retainRenderWorkerDocumentLayout(model, layoutServices, defaultCurrentDateMs) {\n'
+      + '  const variants = attachDocumentLayoutVariants({ model, services: layoutServices,\n'
+      + '    defaultCurrentDateMs,\n'
       + '    buildLayout: (options) => layoutDocument(model, layoutServices, options) });\n'
+      + '  return { model, layoutServices, layoutVariants: variants.store, defaultCurrentDateMs };\n'
+      + '}\n');
+  write(root, 'packages/docx/src/render-worker.ts',
+    "import { renderDocumentToCanvas } from './renderer.js';\n"
+      + "import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';\n"
+      + 'export function initializeWorker(model, layoutServices, req) {\n'
+      + '  const doc = retainRenderWorkerDocumentLayout(model, layoutServices, req.defaultCurrentDateMs);\n'
+      + '  const layout = doc.layoutVariants.defaultLayout;\n'
+      + '  const pageSizes = layout.pages.map((page) => page.geometry);\n'
+      + '  const meta = { pageCount: layout.pages.length,\n'
+      + '    pageSizes,\n'
+      + '    bookmarkPages: [...buildBookmarkPageMap(layout)] };\n'
+      + '  return { doc, meta };\n'
       + '}\n'
-      + 'export function renderWorkerPage(model, canvas, pageIndex, options) {\n'
-      + '  return renderDocumentToCanvas(model, canvas, pageIndex, { ...options, layoutServices });\n'
+      + 'export function renderWorkerPage(doc, canvas, pageIndex, options) {\n'
+      + '  return renderDocumentToCanvas(doc.model, canvas, pageIndex, { ...options,\n'
+      + '    layoutServices: doc.layoutServices,\n'
+      + '    defaultCurrentDateMs: doc.defaultCurrentDateMs });\n'
       + '}\n'
-      + 'export function collectWorkerRuns(model, canvas, pageIndex, options) {\n'
-      + '  return renderDocumentToCanvas(model, canvas, pageIndex, { ...options, layoutServices });\n'
+      + 'export function collectWorkerRuns(doc, canvas, pageIndex, options) {\n'
+      + '  return renderDocumentToCanvas(doc.model, canvas, pageIndex, { ...options,\n'
+      + '    layoutServices: doc.layoutServices,\n'
+      + '    defaultCurrentDateMs: doc.defaultCurrentDateMs });\n'
       + '}\n');
   write(root, 'packages/docx/src/renderer.ts', canonicalRenderer);
   return root;
@@ -181,6 +202,27 @@ function initializeBodyLayoutAdapterFixture(prefix = 'docx-layout-boundary-input
       + 'export function projectBodyLayoutInput(value) { return value; }\n');
   write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter);
   return root;
+}
+
+const canonicalParagraphAnchorFrameAdapter =
+  "import type { AnchorReferenceFramesInput } from './layout/anchor-frame.js';\n"
+  + 'export interface ParagraphAnchorReferenceFrameSnapshot { readonly scale: number }\n'
+  + 'export function paragraphAnchorReferenceFrames(snapshot: ParagraphAnchorReferenceFrameSnapshot): '
+  + "Readonly<Pick<AnchorReferenceFramesInput, 'page'>> {\n"
+  + '  return { page: { xPt: 0, yPt: 0, widthPt: snapshot.scale, heightPt: 1 } };\n'
+  + '}\n';
+
+function installParagraphAnchorFrameAdapter(root) {
+  write(root, 'packages/docx/src/layout/anchor-frame.ts',
+    'export interface AnchorReferenceFramesInput { page: unknown }\n');
+  write(root, 'packages/docx/src/paragraph-anchor-frame-adapter.ts',
+    canonicalParagraphAnchorFrameAdapter);
+  const rendererPath = join(root, 'packages/docx/src/renderer.ts');
+  write(root, 'packages/docx/src/renderer.ts',
+    "import { paragraphAnchorReferenceFrames } from './paragraph-anchor-frame-adapter.js';\n"
+      + readFileSync(rendererPath, 'utf8')
+        .replace('return { doc, ctx, localMetrics };',
+          'paragraphAnchorReferenceFrames({ scale: 1 });\n  return { doc, ctx, localMetrics };'));
 }
 
 function initializeTransitionalRepository() {
@@ -660,6 +702,52 @@ test('body-layout input adapter rejects any body other than the exact projection
     'return projectBodyLayoutInput(document);',
   ));
   expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_BODY', 'non-acquisition body', '--final');
+});
+
+test('paragraph anchor frame adapter is an exact transition-only renderer seam', () => {
+  const root = initializeTransitionalRepository();
+  installParagraphAnchorFrameAdapter(root);
+
+  const result = runChecker(root, '--base-ref', 'main');
+  assert.equal(result.status, 0, result.output);
+});
+
+test('paragraph anchor frame adapter rejects extra declarations, imports, exports, and consumers', () => {
+  for (const [name, mutate, diagnostic] of [
+    ['declaration', (source) => `${source}\nfunction hiddenConversion() {}\n`,
+      'PARAGRAPH_ANCHOR_ADAPTER_DECLARATION'],
+    ['import', (source) => `import type { Extra } from './extra.js';\n${source}`,
+      'PARAGRAPH_ANCHOR_ADAPTER_IMPORT'],
+    ['default export', (source) => `${source}\nexport default paragraphAnchorReferenceFrames;\n`,
+      'PARAGRAPH_ANCHOR_ADAPTER_EXPORT'],
+  ]) {
+    const root = initializeTransitionalRepository();
+    installParagraphAnchorFrameAdapter(root);
+    write(root, 'packages/docx/src/extra.ts', 'export interface Extra {}\n');
+    write(root, 'packages/docx/src/paragraph-anchor-frame-adapter.ts',
+      mutate(canonicalParagraphAnchorFrameAdapter));
+    expectDiagnostic(root, diagnostic, name, '--base-ref', 'main');
+  }
+
+  const root = initializeTransitionalRepository();
+  installParagraphAnchorFrameAdapter(root);
+  write(root, 'packages/docx/src/foreign-consumer.ts',
+    "import { paragraphAnchorReferenceFrames } from './paragraph-anchor-frame-adapter.js';\n"
+      + 'export const frames = paragraphAnchorReferenceFrames({ scale: 1 });\n');
+  expectDiagnostic(
+    root,
+    'PARAGRAPH_ANCHOR_ADAPTER_CONSUMER',
+    'non-renderer consumer',
+    '--base-ref',
+    'main',
+  );
+});
+
+test('paragraph anchor frame adapter is rejected from the final architecture', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-final-paragraph-anchor-adapter-');
+  installParagraphAnchorFrameAdapter(root);
+
+  expectDiagnostic(root, 'FINAL_PARAGRAPH_ANCHOR_ADAPTER', 'final adapter', '--final');
 });
 
 test('retained body paint cannot reacquire layout while legacy story layout stays scoped outside it', () => {
@@ -1197,4 +1285,95 @@ test('worker selection validates call ownership rather than only call counts', (
       + 'export function renderWorkerPage() { return renderDocumentToCanvas(); }\n'
       + 'export function collectWorkerRuns() { return renderDocumentToCanvas(); }\n');
   expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', 'wrong worker call ownership', '--final');
+});
+
+test('worker render calls require the exact retained worker layout authority', () => {
+  for (const [name, from, to] of [
+    ['foreign services', 'layoutServices: doc.layoutServices', 'layoutServices: foreignServices'],
+    ['derived services', 'layoutServices: doc.layoutServices', 'layoutServices: servicesFor(doc)'],
+    ['foreign default date', 'defaultCurrentDateMs: doc.defaultCurrentDateMs', 'defaultCurrentDateMs: foreignDefaultCurrentDateMs'],
+    ['derived default date', 'defaultCurrentDateMs: doc.defaultCurrentDateMs', 'defaultCurrentDateMs: defaultDateFor(doc)'],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-worker-retained-${name}-`);
+    const workerPath = join(root, 'packages/docx/src/render-worker.ts');
+    const source = readFileSync(workerPath, 'utf8');
+    write(root, 'packages/docx/src/render-worker.ts', source.replace(from, to));
+    expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', name, '--final');
+  }
+});
+
+test('worker construction requires the canonical retained-layout wiring seam', () => {
+  for (const [name, from, to] of [
+    ['foreign model', 'retainRenderWorkerDocumentLayout(model, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(foreignModel, layoutServices, req.defaultCurrentDateMs)'],
+    ['foreign retained services', 'retainRenderWorkerDocumentLayout(model, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(model, foreignServices, req.defaultCurrentDateMs)'],
+    ['foreign retained default date', 'retainRenderWorkerDocumentLayout(model, layoutServices, req.defaultCurrentDateMs)', 'retainRenderWorkerDocumentLayout(model, layoutServices, foreignDefaultCurrentDateMs)'],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-worker-construction-${name}-`);
+    const workerPath = join(root, 'packages/docx/src/render-worker.ts');
+    const source = readFileSync(workerPath, 'utf8');
+    write(root, 'packages/docx/src/render-worker.ts', source.replace(from, to));
+    expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', name, '--final');
+  }
+});
+
+test('worker retention attaches the exact parameter identities', () => {
+  for (const [name, mutate] of [
+    ['foreign attachment model', (source) => source
+      .replace('{ model, services: layoutServices,', '{ model: foreignModel, services: layoutServices,')
+      .replace('layoutDocument(model, layoutServices, options)', 'layoutDocument(foreignModel, layoutServices, options)')],
+    ['foreign attachment services', (source) => source
+      .replace('{ model, services: layoutServices,', '{ model, services: foreignServices,')
+      .replace('layoutDocument(model, layoutServices, options)', 'layoutDocument(model, foreignServices, options)')],
+    ['foreign attachment default date', (source) => source.replace(
+      '    defaultCurrentDateMs,',
+      '    defaultCurrentDateMs: foreignDefaultCurrentDateMs,',
+    )],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-worker-attachment-${name}-`);
+    const path = join(root, 'packages/docx/src/render-worker-layout.ts');
+    write(root, 'packages/docx/src/render-worker-layout.ts',
+      mutate(readFileSync(path, 'utf8')));
+    expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', name, '--final');
+  }
+});
+
+test('worker retention returns exactly the retained parameter identities and attached store', () => {
+  for (const [name, from, to] of [
+    ['foreign returned model', 'return { model, layoutServices,', 'return { model: foreignModel, layoutServices,'],
+    ['foreign returned services', 'return { model, layoutServices,', 'return { model, layoutServices: foreignServices,'],
+    ['foreign returned store', 'layoutVariants: variants.store', 'layoutVariants: foreignStore'],
+    ['foreign returned default date', 'defaultCurrentDateMs };', 'defaultCurrentDateMs: foreignDefaultCurrentDateMs };'],
+    ['missing retained field', 'layoutVariants: variants.store, ', ''],
+    ['extra retained field', 'defaultCurrentDateMs };', 'defaultCurrentDateMs, duplicateStore: variants.store };'],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-worker-return-${name}-`);
+    const path = join(root, 'packages/docx/src/render-worker-layout.ts');
+    write(root, 'packages/docx/src/render-worker-layout.ts',
+      readFileSync(path, 'utf8').replace(from, to));
+    expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', name, '--final');
+  }
+});
+
+test('worker retention rejects declarations outside its exact ownership seam', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-worker-extra-declaration-');
+  const path = join(root, 'packages/docx/src/render-worker-layout.ts');
+  write(root, 'packages/docx/src/render-worker-layout.ts',
+    `${readFileSync(path, 'utf8')}\nfunction alternateWorkerLayout() {}\n`);
+  expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', 'extra worker declaration', '--final');
+});
+
+test('worker parse metadata comes from the retained default layout route', () => {
+  for (const [name, from, to] of [
+    ['foreign metadata layout', 'doc.layoutVariants.defaultLayout', 'foreignLayout'],
+    ['derived metadata layout', 'doc.layoutVariants.defaultLayout', 'layoutForMetadata(doc)'],
+    ['foreign metadata page count', 'pageCount: layout.pages.length', 'pageCount: foreignLayout.pages.length'],
+    ['foreign metadata page sizes', 'const pageSizes = layout.pages.map', 'const pageSizes = foreignLayout.pages.map'],
+    ['foreign metadata bookmarks', 'buildBookmarkPageMap(layout)', 'buildBookmarkPageMap(foreignLayout)'],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-worker-metadata-${name}-`);
+    const path = join(root, 'packages/docx/src/render-worker.ts');
+    write(root, 'packages/docx/src/render-worker.ts',
+      readFileSync(path, 'utf8').replace(from, to));
+    expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', name, '--final');
+  }
 });

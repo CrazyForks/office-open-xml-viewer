@@ -488,6 +488,9 @@ pub struct ColSpec {
 #[serde(rename_all = "camelCase")]
 pub struct SectionPlacementWire {
     pub section_id: String,
+    /// §17.6.1 `<w:bidi>` controls section-level presentation, including
+    /// newspaper-column population order, without changing paragraph bidi.
+    pub section_bidi: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub v_align: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

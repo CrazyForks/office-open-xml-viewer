@@ -55,7 +55,7 @@ import {
   type FloatRect,
   MIN_LINE_GAP,
   prepareFloatWrap,
-  resolvePreparedLineFloatWindow,
+  computePreparedLineFloatWindow,
   wordMinLineStartPx,
   type PreparedFloatWrap,
 } from './float-layout.js';
@@ -3058,7 +3058,7 @@ export function layoutLines(
       lineXOffset = win.xOffsetPt;
       lineMaxWidth = win.maximumWidthPt;
     } else {
-      const win = resolvePreparedLineFloatWindow(
+      const win = computePreparedLineFloatWindow(
         currentLineTopY,
         MIN_LINE_GAP,
         probeH,

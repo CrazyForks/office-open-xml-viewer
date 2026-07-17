@@ -138,6 +138,7 @@ function regionLayout(): DocumentLayout {
           physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
         },
         blockStartPt: 72, blockEndPt: 720,
+        columnFlowDirection: 'ltr', columnIndexes: [0],
         flowDomainIds: ['body'], section: horizontalSection,
       }],
     }],
@@ -194,6 +195,8 @@ function twoRegionLayout(
               },
           blockStartPt: 300,
           blockEndPt: secondIsVertical ? 540 : 720,
+          columnFlowDirection: 'ltr',
+          columnIndexes: [0],
           flowDomainIds: [secondDomain.id],
           section: secondSection,
         },
@@ -268,7 +271,9 @@ function documentWith(
           logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
           physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
         },
-        blockStartPt: 72, blockEndPt: 720, flowDomainIds: ['body'], section: horizontalSection,
+        blockStartPt: 72, blockEndPt: 720,
+        columnFlowDirection: 'ltr', columnIndexes: [0],
+        flowDomainIds: ['body'], section: horizontalSection,
       }],
       pageBorders: null,
       layers: {
@@ -565,6 +570,8 @@ describe('assertDocumentLayout', () => {
           },
           blockStartPt: 72,
           blockEndPt: 720,
+          columnFlowDirection: 'ltr',
+          columnIndexes: [],
           flowDomainIds: [],
           section: noColumnSection,
         }],
@@ -598,6 +605,7 @@ describe('assertDocumentLayout', () => {
             physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
           },
           blockStartPt: 72, blockEndPt: 540,
+          columnFlowDirection: 'ltr', columnIndexes: [0],
           flowDomainIds: ['vertical-body'], section: strictVerticalSection,
         }],
       }],
@@ -628,6 +636,7 @@ describe('assertDocumentLayout', () => {
             physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
           },
           blockStartPt: 72, blockEndPt: 540,
+          columnFlowDirection: 'ltr', columnIndexes: [0],
           flowDomainIds: ['vertical-body'], section: verticalSection,
         }],
       }],
@@ -656,6 +665,7 @@ describe('assertDocumentLayout', () => {
             physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
           },
           blockStartPt: 72, blockEndPt: 540,
+          columnFlowDirection: 'ltr', columnIndexes: [0],
           flowDomainIds: ['vertical-body'], section: verticalSection,
         }],
       }],
@@ -691,6 +701,7 @@ describe('assertDocumentLayout', () => {
         physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
       },
       blockStartPt: 72, blockEndPt: 720,
+      columnFlowDirection: 'ltr' as const, columnIndexes: [0],
       flowDomainIds: ['body'], section: horizontalSection,
     };
     const page = {
@@ -721,6 +732,19 @@ describe('assertDocumentLayout', () => {
   it('rejects clone data whose region direction or columns contradict its section', () => {
     const valid = regionLayout();
     expect(() => assertDocumentLayout(valid)).not.toThrow();
+    const rtlSection = { ...horizontalSection, sectionBidi: true };
+    expect(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!,
+        section: rtlSection,
+        sectionRegions: [{
+          ...valid.pages[0]!.sectionRegions![0]!,
+          section: rtlSection,
+          columnFlowDirection: 'ltr',
+        }],
+      }],
+    })).toThrow(/column flow direction contradicts/);
     expectInvalidGeometry(() => assertDocumentLayout({
       ...valid,
       pages: [{

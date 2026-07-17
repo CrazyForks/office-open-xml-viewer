@@ -615,6 +615,137 @@ describe('createLayoutPage', () => {
     });
   });
 
+  it('retains overlapping block bands when section regions own disjoint authored columns', () => {
+    const columns = [
+      { xPt: 72, wPt: 142 },
+      { xPt: 235, wPt: 142 },
+      { xPt: 398, wPt: 142 },
+    ];
+    const outgoing = section('lrTb', columns);
+    const incoming = section('lrTb', columns);
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:outgoing',
+      section: outgoing,
+      sectionRegions: [
+        {
+          id: 'region:outgoing',
+          sectionOccurrenceId: 'section:outgoing',
+          section: outgoing,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 240,
+          blockEndPt: 720,
+          columnIndexes: [0],
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 142 }],
+        },
+        {
+          id: 'region:incoming',
+          sectionOccurrenceId: 'section:incoming',
+          section: incoming,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 240,
+          blockEndPt: 720,
+          columnIndexes: [1, 2],
+          columns: [
+            { inlineStartPt: 235, inlineExtentPt: 142 },
+            { inlineStartPt: 398, inlineExtentPt: 142 },
+          ],
+        },
+      ],
+      paint: [],
+      readingOrder: [],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:outgoing',
+      },
+    });
+
+    expect(page.sectionRegions.map((region) => region.columnIndexes)).toEqual([
+      [0],
+      [1, 2],
+    ]);
+    expect(page.flowDomains.map((domain) => domain.id)).toEqual([
+      bodyFlowDomainId(0, 'region:outgoing', 0),
+      bodyFlowDomainId(0, 'region:incoming', 1),
+      bodyFlowDomainId(0, 'region:incoming', 2),
+    ]);
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
+
+    expect(() => createLayoutPage({
+      ...page,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionRegions: [
+        {
+          id: 'region:outgoing',
+          sectionOccurrenceId: 'section:outgoing',
+          section: outgoing,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 240,
+          blockEndPt: 720,
+          columnIndexes: [0],
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 142 }],
+        },
+        {
+          id: 'region:incoming',
+          sectionOccurrenceId: 'section:incoming',
+          section: incoming,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 240,
+          blockEndPt: 720,
+          columnIndexes: [0],
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 142 }],
+        },
+      ],
+      paint: [],
+      readingOrder: [],
+    })).toThrow(RangeError);
+  });
+
+  it('requires retained column population direction to agree with sectPr bidi', () => {
+    const rtlSection = {
+      ...section('lrTb', [
+        { xPt: 72, wPt: 224 },
+        { xPt: 316, wPt: 224 },
+      ]),
+      sectionBidi: true,
+    };
+
+    expect(() => createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:rtl',
+      section: rtlSection,
+      sectionRegions: [{
+        id: 'region:rtl',
+        sectionOccurrenceId: 'section:rtl',
+        section: rtlSection,
+        writingMode: 'horizontal-tb',
+        blockStartPt: 72,
+        blockEndPt: 720,
+        columnFlowDirection: 'ltr',
+        columns: [
+          { inlineStartPt: 72, inlineExtentPt: 224 },
+          { inlineStartPt: 316, inlineExtentPt: 224 },
+        ],
+      }],
+      paint: [],
+      readingOrder: [],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:rtl',
+      },
+    })).toThrow(/column flow direction/i);
+  });
+
   it('retains section column separator geometry on the completed page', () => {
     const separated = {
       ...section('lrTb', [

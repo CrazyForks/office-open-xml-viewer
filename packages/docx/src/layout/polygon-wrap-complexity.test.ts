@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   prepareFloatWrap,
-  resolvePreparedLineFloatWindowWithDiagnostics,
+  computePreparedLineFloatWindowWithDiagnostics,
   type FloatRect,
 } from './float-wrap.js';
 import {
@@ -596,7 +596,7 @@ describe('polygon line-window active sweep complexity', () => {
       drawn: false,
     }]);
 
-    const { window, diagnostics } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window, diagnostics } = computePreparedLineFloatWindowWithDiagnostics(
       base,
       requiredWidth,
       probeHeight,
@@ -641,7 +641,7 @@ describe('polygon line-window active sweep complexity', () => {
       drawn: false,
     }]);
 
-    const { window } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window } = computePreparedLineFloatWindowWithDiagnostics(
       0, 6, 0.005, 0, 13, prepared, 0, 13,
     );
 
@@ -674,7 +674,7 @@ describe('polygon line-window active sweep complexity', () => {
       paraId: 1,
       drawn: false,
     }]);
-    const { window: secondWindow } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window: secondWindow } = computePreparedLineFloatWindowWithDiagnostics(
       0, 5, 0.005, 0, 11, secondPrepared, 0, 11,
     );
 
@@ -710,7 +710,7 @@ describe('polygon line-window active sweep complexity', () => {
       drawn: false,
     }]);
 
-    const { window } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window } = computePreparedLineFloatWindowWithDiagnostics(
       1.3333333333333333,
       1,
       0.0004,
@@ -747,7 +747,7 @@ describe('polygon line-window active sweep complexity', () => {
       drawn: false,
     }]);
 
-    const { window } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window } = computePreparedLineFloatWindowWithDiagnostics(
       1,
       1,
       2 ** -54,
@@ -788,7 +788,7 @@ describe('polygon line-window active sweep complexity', () => {
       paraId: 1,
       drawn: false,
     }]);
-    const { window: rightGap } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window: rightGap } = computePreparedLineFloatWindowWithDiagnostics(
       2, 0.1, 0.1, 0, 3, rightGapPrepared, 0, 3,
     );
 
@@ -821,7 +821,7 @@ describe('polygon line-window active sweep complexity', () => {
       paraId: 1,
       drawn: false,
     }]);
-    const { window: leftGap } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window: leftGap } = computePreparedLineFloatWindowWithDiagnostics(
       11, 0.1, 0.1, 0, 5, leftGapPrepared, 0, 5,
     );
 
@@ -871,7 +871,7 @@ describe('polygon line-window active sweep complexity', () => {
       ], 20),
     ]);
 
-    const { window } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window } = computePreparedLineFloatWindowWithDiagnostics(
       0, 1, 3, 0, 20, prepared, 0, 20,
     );
 
@@ -883,7 +883,7 @@ describe('polygon line-window active sweep complexity', () => {
     const vertexCount = 31;
     const prepared = prepareFloatWrap([denseStar(vertexCount, 15)]);
 
-    const { window, diagnostics } = resolvePreparedLineFloatWindowWithDiagnostics(
+    const { window, diagnostics } = computePreparedLineFloatWindowWithDiagnostics(
       95, 195, 0.5, 0, 200, prepared,
     );
 
