@@ -16725,10 +16725,7 @@ mod column_tests {
     #[test]
     fn section_placement_retains_bidi_column_population_direction() {
         let parse = |sect: &str| {
-            let xml = format!(
-                r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#,
-                ns = W_NS,
-            );
+            let xml = format!(r#"<w:sectPr xmlns:w="{ns}">{sect}</w:sectPr>"#, ns = W_NS,);
             let doc = roxmltree::Document::parse(&xml).unwrap();
             section_placement_wire(Some(doc.root_element()), "section:test".to_string())
         };
