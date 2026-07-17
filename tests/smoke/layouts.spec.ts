@@ -5,6 +5,7 @@ const EXPECTED = {
   pptx: 9,   // packages/pptx/public/demo/sample-1.pptx
   docx: 6,   // packages/docx/public/demo/sample-1.docx (see docx visual.spec.ts)
 };
+const DOCX_TERMINAL_TIMEOUT_MS = 25_000;
 
 type StoryId =
   | 'pptxviewer-examples--scroll-view'
@@ -76,13 +77,14 @@ async function expectDocxLoaded(
     const handle = await page.waitForFunction(
       () => {
         for (const el of Array.from(document.querySelectorAll('div'))) {
+          if (el.childElementCount !== 0) continue;
           const text = (el.textContent ?? '').trim();
-          if (/^(Loaded \d+ pages|Error:)/.test(text)) return text;
+          if (/^Loaded \d+ pages$/.test(text) || text.startsWith('Error:')) return text;
         }
         return null;
       },
       null,
-      { timeout: 25_000 },
+      { timeout: DOCX_TERMINAL_TIMEOUT_MS },
     );
     status = await handle.jsonValue() as string;
   } catch (error) {
@@ -90,7 +92,7 @@ async function expectDocxLoaded(
       ? browserErrors.join('\n')
       : '<no pageerror or console.error events>';
     throw new Error(
-      `DOCX story did not reach a terminal status within 25000ms.\nBrowser errors:\n${diagnostics}`,
+      `DOCX story did not reach a terminal status within ${DOCX_TERMINAL_TIMEOUT_MS}ms.\nBrowser errors:\n${diagnostics}`,
       { cause: error },
     );
   }

@@ -7,7 +7,12 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+  type DocxRendererModule,
+} from './test-imports';
 
 // skia-canvas is a devDependency, so `pnpm install` provides it in CI as well as
 // locally; the private journal samples are git-ignored (not redistributable), so
@@ -26,14 +31,14 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
 // The WASM-backed docx parser + renderer are only loaded when skia is present.
 // Both statically import git-ignored WASM glue, so they need `pnpm build:wasm`
 // first; under OOXML_REQUIRE_SKIA=1 a failure to load is a hard error.
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
+
+type DocxLayout = ReturnType<DocxRendererModule['layoutDocument']>;
+type RetainedBodyNode = DocxLayout['pages'][number]['layers']['body'][number];
 
 const samplePath = (n: number) =>
   resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
@@ -56,11 +61,10 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
       restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
         const { parseDocx } = docxMod!;
-        const { paginateDocument } = rendererMod as {
-          paginateDocument: (doc: unknown) => unknown[][];
-        };
+        const { createLayoutServices, layoutDocument } = rendererMod!;
         const doc = parseDocx(readFileSync(samplePath(n)));
-        return paginateDocument(doc);
+        const layoutServices = createLayoutServices(doc);
+        return layoutDocument(doc, layoutServices, { currentDateMs: 0 });
       } finally {
         restore.forEach((r) => r());
       }
@@ -70,24 +74,21 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
     // mid-page multi-column section starts at the region top, not the page top —
     // so the overprint is gone and sample-12 flows across its 3 Word pages.
     it('sample-12 paginates to 3 pages (Word ground truth)', () => {
-      expect(paginate(12).length).toBe(3);
+      expect(paginate(12).pages.length).toBe(3);
     });
 
-    // Text of a paginated body element (paragraph runs / field fallbacks). Enough
-    // to locate a caption / heading paragraph by content; tables not needed here.
-    const elementText = (el: unknown): string => {
-      const out: string[] = [];
-      const runs = (el as { runs?: Array<Record<string, unknown>> }).runs;
-      for (const r of runs ?? []) {
-        if (r == null) continue;
-        if (typeof r.text === 'string') out.push(r.text);
-        else if (typeof r.fallbackText === 'string') out.push(r.fallbackText);
-      }
-      return out.join('');
-    };
-    const findParaPage = (pages: unknown[][], startsWith: string): number =>
-      pages.findIndex((p) =>
-        p.some((el) => elementText(el).replace(/\s+/g, ' ').trim().startsWith(startsWith)),
+    // Text of a retained paragraph's placements. Enough to locate a caption /
+    // heading paragraph by content; tables not needed here.
+    const elementText = (el: RetainedBodyNode): string =>
+      el.kind === 'paragraph'
+        ? el.lines.flatMap((line) => line.placements)
+            .flatMap((placement) => placement.kind === 'text' ? [placement.text] : [])
+            .join('')
+        : '';
+    const findParaPage = (layout: DocxLayout, startsWith: string): number =>
+      layout.pages.findIndex((page) =>
+        page.layers.body.some((el) =>
+          elementText(el).replace(/\s+/g, ' ').trim().startsWith(startsWith)),
       );
 
     // ECMA-376 §17.3.1.29 + §20.4.2.17 (regression from #676): the
@@ -113,7 +114,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
     // real root — a PageBreak after the "Cover Pages" building block (§17.5.2) —
     // instead of forcing every nextPage→continuous boundary to break a page.
     it('sample-13 paginates to 5 pages (Word ground truth)', () => {
-      expect(paginate(13).length).toBe(5);
+      expect(paginate(13).pages.length).toBe(5);
     });
 
     // sample-5 (夢十夜): the cover is a "Cover Pages" building block (§17.5.2)
@@ -124,7 +125,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
     // 7 pages. Were the cover detection to fail, the continuous body would flow
     // up onto page 1 and the document would collapse to 6 pages.
     it('sample-5 cover page stands alone — 7 pages (Word ground truth)', () => {
-      expect(paginate(5).length).toBe(7);
+      expect(paginate(5).pages.length).toBe(7);
     });
   },
 );

@@ -1,4 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
+import { fileURLToPath } from 'node:url';
+
+const REPOSITORY_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 export default defineConfig({
   testDir: '.',
@@ -42,7 +45,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'pnpm storybook --port 6007 --no-open',
+    command: 'pnpm exec storybook dev --port 6007 --no-open',
+    cwd: REPOSITORY_ROOT,
     url: 'http://localhost:6007/iframe.html',
     // Locally, reuse a Storybook already serving on 6007; in CI always boot a
     // fresh one so the run never binds to a stale/unrelated server.

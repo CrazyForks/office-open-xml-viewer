@@ -194,11 +194,11 @@ describe('PAGE field renders the per-section displayed number (footer)', () => {
     return texts;
   }
 
-  async function continuousFooterTexts(
+  async function continuousDecimalPageFieldTexts(
     doc: DocxDocumentModel,
     pageIndex: number,
   ): Promise<string[]> {
-    return (await footerTexts(doc, pageIndex)).filter((text) => !/^S[12]-/.test(text));
+    return (await footerTexts(doc, pageIndex)).filter((text) => /^\d+$/.test(text));
   }
 
   it('paints i, ii, then restarts to 1, 2 across the two sections', async () => {
@@ -224,11 +224,13 @@ describe('PAGE field renders the per-section displayed number (footer)', () => {
   it('restarts a spilling continuous section after its shared first page', async () => {
     const doc = continuousSpilloverDoc({ start: 50 }, 3, 9);
     const layout = layoutDocument(doc);
+    expect(layout.pages).toHaveLength(3);
     const sharedRegions = layout.pages[0]!.sectionRegions;
+
+    expect(sharedRegions).toHaveLength(2);
     const outgoingOwner = sharedRegions[0]!.sectionOccurrenceId;
     const incomingOwner = sharedRegions[1]!.sectionOccurrenceId;
 
-    expect(layout.pages).toHaveLength(3);
     expect(sharedRegions.map((region) => region.sectionOccurrenceId)).toEqual([
       outgoingOwner,
       incomingOwner,
@@ -239,16 +241,17 @@ describe('PAGE field renders the per-section displayed number (footer)', () => {
       incomingOwner,
     ]);
     expect(layout.pages.map((page) => page.pageNumber.displayNumber)).toEqual([1, 51, 52]);
-    expect(await Promise.all(layout.pages.map((_, pageIndex) => continuousFooterTexts(doc, pageIndex))))
+    expect(await Promise.all(layout.pages.map((_, pageIndex) =>
+      continuousDecimalPageFieldTexts(doc, pageIndex))))
       .toEqual([['1'], ['51'], ['52']]);
   });
 
   it('keeps a continuous restart page-wide when both sections fit the shared page', async () => {
     const doc = continuousSpilloverDoc({ start: 99 }, 2, 2);
     const layout = layoutDocument(doc);
+    expect(layout.pages).toHaveLength(1);
     const sharedRegions = layout.pages[0]!.sectionRegions;
 
-    expect(layout.pages).toHaveLength(1);
     expect(sharedRegions).toHaveLength(2);
     expect(layout.pages[0]!.sectionOccurrenceId).toBe(sharedRegions[0]!.sectionOccurrenceId);
     expect(layout.pages[0]!.sectionOccurrenceId).not.toBe(sharedRegions[1]!.sectionOccurrenceId);
@@ -257,7 +260,7 @@ describe('PAGE field renders the per-section displayed number (footer)', () => {
       format: 'decimal',
       sectionOccurrenceId: sharedRegions[0]!.sectionOccurrenceId,
     });
-    expect(await continuousFooterTexts(doc, 0)).toEqual(['1']);
+    expect(await continuousDecimalPageFieldTexts(doc, 0)).toEqual(['1']);
   });
 
   it('field \\* switch overrides the section fmt (PAGE \\* Roman on a decimal section)', async () => {

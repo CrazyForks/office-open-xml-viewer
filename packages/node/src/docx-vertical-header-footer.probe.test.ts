@@ -24,16 +24,13 @@ import { describe, it, expect } from 'vitest';
 import { crc32 } from 'node:zlib';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import { importForTests, loadDocxRendererForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)');
-const rendererMod = await importForTests(
-  () => import('./../../docx/src/renderer.ts'),
-  'packages/docx/src/renderer.ts',
-);
+const rendererMod = await loadDocxRendererForTests();
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -166,7 +163,7 @@ interface Run { t: string; x: number; y: number; w: number; h: number; tr?: stri
 
 async function renderRuns(): Promise<{ runs: Run[] }> {
   const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
-  const { renderDocumentToCanvas } = rendererMod as Any;
+  const { renderDocumentToCanvas } = rendererMod!;
   const doc = parseDocx(verticalHeaderFooterDocx({ hf: true }));
   // Physical letter portrait: width 612 (=pageWidth), height 792 (=pageHeight).
   const canvas = new Canvas(Math.round(doc.section.pageWidth), Math.round(doc.section.pageHeight));
@@ -174,7 +171,7 @@ async function renderRuns(): Promise<{ runs: Run[] }> {
   const restoreImg = installImageBitmapShim(factory);
   const restoreOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, {
+    await renderDocumentToCanvas(doc, canvas as Any, 0, {
       dpr: 1,
       width: doc.section.pageWidth, // scale 1 px/pt on the physical page
       onTextRun: (r: Any) =>
@@ -231,9 +228,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       // pages the paint (reserve 0) does not expect. Assert the page count is the
       // same with and without the header/footer, on an asymmetric-margin page.
       const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
-      const { layoutDocument } = rendererMod as {
-        layoutDocument: (doc: Any) => { pages: readonly unknown[] };
-      };
+      const { layoutDocument } = rendererMod!;
       const margins =
         'w:top="2880" w:right="720" w:bottom="2880" w:left="720" w:header="360" w:footer="360" w:gutter="0"';
       const withHF = parseDocx(verticalHeaderFooterDocx({ hf: true, paras: 40, pgMar: margins }));

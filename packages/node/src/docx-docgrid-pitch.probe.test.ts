@@ -25,16 +25,13 @@ import { describe, it, expect } from 'vitest';
 import { crc32 } from 'node:zlib';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import { importForTests, loadDocxRendererForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)');
-const rendererMod = await importForTests(
-  () => import('./../../docx/src/renderer.ts'),
-  'packages/docx/src/renderer.ts',
-);
+const rendererMod = await loadDocxRendererForTests();
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -147,15 +144,15 @@ function sectPr(opts: { vertical?: boolean; pitchTw?: number; gridType?: string 
  *  physical y for horizontal pages, physical x (column advance, right→left
  *  page rotated to +x order) for vertical ones. */
 async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x', marker = '国境'): Promise<number> {
-  const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
-  const { createLayoutServices, renderDocumentToCanvas } = rendererMod as Any;
+  const { parseDocx } = docxMod!;
+  const { createLayoutServices, renderDocumentToCanvas } = rendererMod!;
   const doc = parseDocx(bytes);
   const canvas = new Canvas(10, 10);
   const lineHeightRatio = (2257 * 1.3) / 2048;
   const localMetrics = Object.fromEntries(['Yu Mincho', '游明朝'].flatMap((family) => {
     const key = family.toLowerCase();
     const metric = {
-      family: 'serif', requestedFamily: family, weight: 400, style: 'normal',
+      family: 'serif', requestedFamily: family, weight: 400, style: 'normal' as const,
       ...(family === '游明朝' ? { lineHeightRatio } : {}),
       sourceIdentity: 'test-fixture:node-skia-generic-serif',
       synthesized: false,
@@ -164,13 +161,13 @@ async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x', marker = '国境
   }));
   const layoutServices = createLayoutServices(doc, {
     localMetrics,
-    measureContext: canvas.getContext('2d'),
+    measureContext: canvas.getContext('2d') as unknown as CanvasRenderingContext2D,
   });
   const pos: number[] = [];
   const rImg = installImageBitmapShim(factory);
   const rOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, {
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0, {
       dpr: 1,
       width: doc.section.pageWidth,
       onTextRun: (r: Any) => {

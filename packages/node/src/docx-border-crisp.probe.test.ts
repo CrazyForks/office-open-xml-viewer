@@ -37,7 +37,7 @@ import { dirname, resolve } from 'node:path';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
 import type { DocxDocumentModel, DocParagraph, BodyElement } from '@silurus/ooxml-docx';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import { importForTests, loadDocxRendererForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
@@ -60,16 +60,9 @@ const factory: NodeCanvasFactory = {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
 const SAMPLE = resolve(ROOT, 'packages/docx/public/demo/sample-1.docx');
-// Load the renderer from source by absolute path. The @silurus/ooxml-docx package
-// ships no built entry (source-only in the monorepo), so importing the package
-// specifier at runtime fails to resolve — mirror the xlsx probe, which imports
-// render-orchestrator.ts directly by path (the type-only import above still uses
-// the package specifier, resolved by TS for typecheck and erased at runtime).
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-const rendererMod = await importForTests(
-  () => import(RENDERER_PATH),
-  'packages/docx/src/renderer.ts',
-);
+// The package specifier has no built runtime entry in this source-only probe.
+// The shared loader keeps the source import executable without erasing its type.
+const rendererMod = await loadDocxRendererForTests();
 // Opt-in diagnostics: set PROBE_OUT to a directory to dump the full render plus
 // an 8x crop of the measured border. Null by default → the test writes no files.
 const OUT_DIR = process.env.PROBE_OUT ?? null;
@@ -147,14 +140,7 @@ async function renderInjected(dpr: number): Promise<{
   canvas: InstanceType<typeof Canvas>;
 }> {
   const doc = buildInjected();
-  const { renderDocumentToCanvas } = rendererMod as {
-    renderDocumentToCanvas: (
-      doc: DocxDocumentModel,
-      canvas: unknown,
-      pageIndex: number,
-      opts: { dpr: number; width: number },
-    ) => Promise<void>;
-  };
+  const { renderDocumentToCanvas } = rendererMod!;
   // Render at scale = 1 px/pt so the 1 pt border = lineWidth 1 logical px.
   const widthPx = doc.section.pageWidth; // pt → px at scale 1
   const heightPx = doc.section.pageHeight;
@@ -162,7 +148,10 @@ async function renderInjected(dpr: number): Promise<{
   const restoreImg = installImageBitmapShim(factory);
   const restoreOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, { dpr, width: widthPx });
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0, {
+      dpr,
+      width: widthPx,
+    });
   } finally {
     restoreOff();
     restoreImg();

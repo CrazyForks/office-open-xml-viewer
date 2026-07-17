@@ -7,7 +7,11 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+} from './test-imports';
 
 /**
  * IX2 findText END-TO-END on the real (committed) demo docx: parse → retain →
@@ -32,14 +36,11 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
 const FIND_PATH = resolve(ROOT, 'packages/docx/src/find.ts');
 const HIGHLIGHT_PATH = resolve(ROOT, 'packages/docx/src/find-highlight-layer.ts');
 
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
 const findMod = skia ? await importForTests(() => import(FIND_PATH), 'packages/docx/src/find.ts') : null;
 const highlightMod = skia
   ? await importForTests(() => import(HIGHLIGHT_PATH), 'packages/docx/src/find-highlight-layer.ts')
@@ -95,29 +96,20 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
     async function collectAllPages(): Promise<{ pages: Run[][]; controller: unknown }> {
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
-        const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => unknown };
-        const { createLayoutServices, layoutDocument, renderDocumentToCanvas } = rendererMod as {
-          createLayoutServices: (doc: unknown) => unknown;
-          layoutDocument: (
-            doc: unknown,
-            services: unknown,
-            options: { currentDateMs: number },
-          ) => { pages: unknown[] };
-          renderDocumentToCanvas: (
-            doc: unknown,
-            canvas: unknown,
-            pageIndex: number,
-            opts: Record<string, unknown>,
-          ) => Promise<void>;
-        };
+        const { parseDocx } = docxMod!;
+        const { createLayoutServices, layoutDocument, renderDocumentToCanvas } = rendererMod!;
         const doc = parseDocx(readFileSync(DEMO));
         const layoutServices = createLayoutServices(doc);
+        // layoutDocument consumes the normalized internal epoch value, while
+        // renderDocumentToCanvas accepts the public Date|number override plus
+        // the load-time default used to key its retained-layout variant store.
+        // Pin all three views of the same instant so this probe is deterministic.
         const layout = layoutDocument(doc, layoutServices, { currentDateMs: 0 });
         const perPage: Run[][] = [];
         for (let p = 0; p < layout.pages.length; p++) {
           const canvas = new Canvas(800, 1000);
           const runs: Run[] = [];
-          await renderDocumentToCanvas(doc, canvas, p, {
+          await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, p, {
             width: 800,
             dpr: 1,
             layoutServices,

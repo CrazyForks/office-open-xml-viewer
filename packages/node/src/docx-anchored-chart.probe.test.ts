@@ -7,7 +7,12 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+  type DocxLayoutServices,
+} from './test-imports';
 
 // skia-canvas is a devDependency; the private chart sample is git-ignored.
 // absent → skip cleanly (local), OOXML_REQUIRE_SKIA=1 (CI) → hard failure.
@@ -24,12 +29,8 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
 const SAMPLE_24 = resolve(ROOT, 'packages/docx/public/private/sample-24.docx');
 const haveSample = existsSync(SAMPLE_24);
@@ -63,22 +64,22 @@ async function renderPage(
   doc: Any,
   pageIndex: number,
   dpr = 1,
+  layoutServices?: DocxLayoutServices,
 ): Promise<{ data: Uint8ClampedArray; w: number; h: number }> {
-  const { renderDocumentToCanvas } = rendererMod as {
-    renderDocumentToCanvas: (
-      doc: Any,
-      canvas: unknown,
-      pageIndex: number,
-      opts: { dpr: number; width: number },
-    ) => Promise<void>;
-  };
+  const { createLayoutServices, renderDocumentToCanvas } = rendererMod!;
   const widthPx = doc.section.pageWidth;
   const heightPx = doc.section.pageHeight;
   const canvas = new Canvas(Math.round(widthPx * dpr), Math.round(heightPx * dpr));
   const restoreImg = installImageBitmapShim(factory);
   const restoreOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, pageIndex, { dpr, width: widthPx });
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, pageIndex, {
+      dpr,
+      width: widthPx,
+      layoutServices: layoutServices ?? createLayoutServices(doc),
+      currentDate: 0,
+      defaultCurrentDateMs: 0,
+    });
   } finally {
     restoreOff();
     restoreImg();
@@ -142,17 +143,18 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSample)(
       const restoreImg = installImageBitmapShim(factory);
       const restoreOff = installOffscreenCanvasShim(factory);
       let pageCount: number;
+      let layoutServices: DocxLayoutServices;
       try {
-        pageCount = (
-          rendererMod as { paginateDocument: (d: Any) => Any[][] }
-        ).paginateDocument(doc).length;
+        const { createLayoutServices, layoutDocument } = rendererMod!;
+        layoutServices = createLayoutServices(doc);
+        pageCount = layoutDocument(doc, layoutServices, { currentDateMs: 0 }).pages.length;
       } finally {
         restoreOff();
         restoreImg();
       }
       let totalInk = 0;
       for (let p = 0; p < pageCount; p++) {
-        const { data, w, h } = await renderPage(doc, p);
+        const { data, w, h } = await renderPage(doc, p, 1, layoutServices);
         totalInk += nonWhiteInRect(data, w, h, 0, 0, w, h);
       }
       // A blank multi-chart document would be near-zero; charts + text draw

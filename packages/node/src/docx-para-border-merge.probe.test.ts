@@ -38,7 +38,7 @@ import type {
   DocxTextRun,
   ParaBorderEdge,
 } from '@silurus/ooxml-docx';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import { importForTests, loadDocxRendererForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
@@ -49,11 +49,7 @@ const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
 const SAMPLE = resolve(ROOT, 'packages/docx/public/demo/sample-1.docx');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-const rendererMod = await importForTests(
-  () => import(RENDERER_PATH),
-  'packages/docx/src/renderer.ts',
-);
+const rendererMod = await loadDocxRendererForTests();
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>
@@ -157,21 +153,17 @@ function buildDoc(body: BodyElement[]): DocxDocumentModel {
 }
 
 async function render(doc: DocxDocumentModel, widthPx: number): Promise<{ data: Uint8ClampedArray; w: number; h: number }> {
-  const { renderDocumentToCanvas } = rendererMod as {
-    renderDocumentToCanvas: (
-      doc: DocxDocumentModel,
-      canvas: unknown,
-      pageIndex: number,
-      opts: { dpr: number; width: number },
-    ) => Promise<void>;
-  };
+  const { renderDocumentToCanvas } = rendererMod!;
   const scale = widthPx / doc.section.pageWidth;
   const heightPx = Math.round(doc.section.pageHeight * scale);
   const canvas = new Canvas(widthPx, heightPx);
   const restoreImg = installImageBitmapShim(factory);
   const restoreOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: widthPx });
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0, {
+      dpr: 1,
+      width: widthPx,
+    });
   } finally {
     restoreOff();
     restoreImg();

@@ -1,0 +1,56 @@
+id: require-typed-docx-renderer-loader-in-node-tests
+valid:
+  - |
+    const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)')
+    const parsed = docxMod?.parseDocx(bytes)
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    const { layoutDocument } = rendererMod!
+  - |
+    const rendererMod = skia ? await loadDocxRendererForTests() : null
+    const { renderDocumentToCanvas } = rendererMod!
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    const doc = value as Any
+    renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0)
+invalid:
+  - |
+    const rendererMod = null
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    const duplicate = await importForTests(
+      () => import('../../docx/src/renderer.ts'),
+      'packages/docx/src/renderer.ts',
+    )
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts')
+    const load = importForTests
+    const duplicate = await load(
+      () => import(RENDERER_PATH),
+      'packages/docx/src/renderer.ts',
+    )
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    const duplicate = await import('../../docx/src/renderer.ts')
+  - |
+    const renderer = await import('./../../docx/src/renderer.ts')
+  - |
+    import * as duplicate from '../../docx/src/renderer.ts'
+    const rendererMod = await loadDocxRendererForTests()
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    interface RendererMod {
+      layoutDocument: (doc: unknown) => unknown
+    }
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    type RendererMod = {
+      renderDocumentToCanvas: (...args: unknown[]) => Promise<void>
+    }
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    const renderer = rendererMod as RendererMod
+  - |
+    const rendererMod = await loadDocxRendererForTests()
+    const renderer = rendererMod as unknown as RendererMod
