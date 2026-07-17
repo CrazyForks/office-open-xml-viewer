@@ -42,6 +42,31 @@ function ordinaryBodyParagraph(text: string): BodyElement {
   return ordinaryParagraph(text) as unknown as BodyElement;
 }
 
+function pageOwnedWrappingParagraph(): BodyElement {
+  const result = ordinaryParagraph('');
+  result.runs = [{
+    type: 'shape',
+    widthPt: 30,
+    heightPt: 20,
+    anchorXPt: 0,
+    anchorYPt: 0,
+    anchorXFromMargin: true,
+    anchorYFromPara: false,
+    zOrder: 0,
+    subpaths: [],
+    presetGeometry: 'rect',
+    fill: { fillType: 'solid', color: 'FFFFFF' },
+    stroke: null,
+    wrapMode: 'square',
+    wrapSide: 'bothSides',
+    distTop: 0,
+    distBottom: 0,
+    distLeft: 0,
+    distRight: 0,
+  }] as DocParagraph['runs'];
+  return result as unknown as BodyElement;
+}
+
 function sectionBreak(): BodyElement {
   return {
     type: 'sectionBreak', kind: 'continuous', columns: null,
@@ -169,6 +194,40 @@ describe('canonical producer with a real document model', () => {
       kind: 'paragraph', ordinaryFlow: true,
       flowDomainId: layout.pages[1]!.sectionRegions[0]!.flowDomainIds[0],
     });
+  });
+
+  it('retains page-owned wrap authority across a same-page nextColumn section cutover', () => {
+    const columns = { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] };
+    const section = {
+      pageWidth: 200, pageHeight: 100,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextColumn', columns,
+    } as SectionProps;
+    const endingSection = {
+      type: 'sectionBreak',
+      kind: 'nextPage',
+      geom: { ...section, sectionStart: 'nextPage' },
+      columns,
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      titlePage: false,
+    } as unknown as BodyElement;
+    const model = {
+      section,
+      body: [ordinaryBodyParagraph('before'), endingSection, pageOwnedWrappingParagraph()],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+    expect(layout.pages).toHaveLength(1);
+    expect(layout.pages[0]!.sectionRegions).toHaveLength(2);
+    expect(layout.pages[0]!.layers.body.some((node) =>
+      node.kind === 'paragraph' && node.drawings.length > 0)).toBe(true);
   });
 
   it.each([

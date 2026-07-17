@@ -384,7 +384,11 @@ const pageBreak = (): BodyElement => ({ type: 'pageBreak' } as BodyElement);
 const sectionBreak = (
   kind: 'continuous' | 'nextPage' | 'oddPage' | 'evenPage',
   columns: SectionProps['columns'] = null,
-): BodyElement => ({ type: 'sectionBreak', kind, columns } as BodyElement);
+  geom?: SectionProps,
+): BodyElement => ({
+  type: 'sectionBreak', kind, columns,
+  ...(geom === undefined ? {} : { geom }),
+} as BodyElement);
 
 /** Text of a paragraph element (joins its text runs). */
 const textOf = (node: PaintNode): string =>
@@ -1903,13 +1907,18 @@ describe('layoutPages — newspaper column balancing (§17.6.4, non-final contin
     // section(): content height 100, content width 160, 2-col ⇒ col width 70.
     // 6 single-line paras × 20px = 120px total. Balanced = 60px/col = 3 paras each.
     // Greedy (the bug) would put 5 in col0 (fills to 100px) and 1 in col1.
-    // The 2-col section ENDS with a continuous break ⇒ non-final ⇒ balanced.
+    // The following final section STARTS continuously, so §17.18.77 balances
+    // the outgoing 2-column section.
     const body: BodyElement[] = [
       ...Array.from({ length: 6 }, (_, i) => para({ text: `p${i}`, fontSize: 20 })),
-      sectionBreak('continuous', twoColSpec),
+      sectionBreak('nextPage', twoColSpec, section()),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = layoutPages(body, section(), makeCtx()); // final section = 1-col
+    const pages = layoutPages(
+      body,
+      section({ sectionStart: 'continuous' }),
+      makeCtx(),
+    ); // final section = 1-col
     const colByText: Record<string, number | undefined> = {};
     for (const e of pages[0].layers.body) {
       const t = textOf(e);
@@ -1920,20 +1929,100 @@ describe('layoutPages — newspaper column balancing (§17.6.4, non-final contin
     expect([colByText.p3, colByText.p4, colByText.p5]).toEqual([1, 1, 1]);
   });
 
+  it('does not balance an outgoing section merely because that occurrence starts continuously', () => {
+    const body: BodyElement[] = [
+      ...Array.from({ length: 6 }, (_, index) =>
+        para({ text: `p${index}`, fontSize: 20 })),
+      sectionBreak('continuous', twoColSpec),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = layoutPages(body, section(), makeCtx());
+    const outgoing = pages[0]!.layers.body
+      .filter((node) => /^p\d+$/u.test(textOf(node)));
+
+    // The final section starts on the next page. The outgoing occurrence's own
+    // continuous start describes its relationship to an earlier predecessor,
+    // not permission to balance before this boundary.
+    expect(outgoing.filter((node) => colOf(node) === 0).map(textOf))
+      .toEqual(['p0', 'p1', 'p2', 'p3', 'p4']);
+    expect(outgoing.filter((node) => colOf(node) === 1).map(textOf)).toEqual(['p5']);
+  });
+
+  it('chooses the smallest legal indivisible partition rather than the arithmetic mean', () => {
+    const body: BodyElement[] = [
+      para({ text: 'p0', fontSize: 30 }),
+      para({ text: 'p1', fontSize: 20 }),
+      para({ text: 'p2', fontSize: 20 }),
+      para({ text: 'p3', fontSize: 20 }),
+      sectionBreak('nextPage', twoColSpec, section()),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
+    const colByText = Object.fromEntries(pages[0]!.layers.body.flatMap((node) => {
+      const text = textOf(node);
+      return text.startsWith('p') ? [[text, colOf(node) ?? 0]] : [];
+    }));
+
+    // 90 / 2 = 45 cannot contain the first legal 30+20 partition. The exact
+    // minimum satisfying the indivisible paragraph boundaries is 50.
+    expect(colByText).toMatchObject({ p0: 0, p1: 0, p2: 1, p3: 1 });
+  });
+
+  it('keeps an authored column break as a hard partition constraint', () => {
+    const body: BodyElement[] = [
+      para({ text: 'p0', fontSize: 20 }),
+      colBreak(),
+      para({ text: 'p1', fontSize: 20 }),
+      para({ text: 'p2', fontSize: 20 }),
+      sectionBreak('nextPage', twoColSpec, section()),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
+    const colByText = Object.fromEntries(pages[0]!.layers.body.flatMap((node) => {
+      const text = textOf(node);
+      return text.startsWith('p') ? [[text, colOf(node) ?? 0]] : [];
+    }));
+
+    expect(colByText).toMatchObject({ p0: 0, p1: 1, p2: 1 });
+  });
+
+  it('balances only the outgoing section tail page after earlier full pages', () => {
+    const body: BodyElement[] = [
+      ...Array.from({ length: 12 }, (_, index) =>
+        para({ text: `p${index}`, fontSize: 20 })),
+      sectionBreak('nextPage', twoColSpec, section()),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
+    const columnFor = (pageIndex: number, text: string) => {
+      const node = pages[pageIndex]!.layers.body.find((candidate) => textOf(candidate) === text);
+      return node === undefined ? undefined : colOf(node) ?? 0;
+    };
+
+    expect([columnFor(0, 'p0'), columnFor(0, 'p4'), columnFor(0, 'p5'), columnFor(0, 'p9')])
+      .toEqual([0, 0, 1, 1]);
+    expect([columnFor(1, 'p10'), columnFor(1, 'p11')]).toEqual([0, 1]);
+  });
+
   it('splits a LONG paragraph across balanced columns at the LINE level (not packed whole into col0)', () => {
     // section(): content height 100, 2-col ⇒ col width 70, ~3 CJK chars/line at
     // 20px, 20px/line. A 24-char paragraph = 8 lines = 160px. The 2-col section
-    // ends with a continuous break ⇒ balanced ⇒ balanceColH = 160/2 = 80px = 4
+    // is followed by a continuous section ⇒ balanced ⇒ 4 lines per column
     // lines. The paragraph must SPLIT — ~4 lines in col0, the rest in col1 — not
     // pack all 8 lines into col0 (the sample-12 p.2 bug: a long first paragraph
     // left column 0 full and column 1 nearly empty).
     const body: BodyElement[] = [
       para({ text: 'あ'.repeat(24), fontSize: 20 }),
-      sectionBreak('continuous', twoColSpec),
+      sectionBreak('nextPage', twoColSpec, section()),
       para({ text: 'x', fontSize: 20 }),
     ];
-    const pages = layoutPages(body, section(), makeCtx()); // final section = 1-col
-    const slices = pages[0].layers.body.filter((e) => e.kind === 'paragraph' && continuationOf(e));
+    const pages = layoutPages(
+      body,
+      section({ sectionStart: 'continuous' }),
+      makeCtx(),
+    ); // final section = 1-col
+    const slices = pages[0].layers.body.filter((e) =>
+      e.kind === 'paragraph' && e.source.path[0] === 0 && continuationOf(e));
     const col0 = slices.filter((e) => (colOf(e) ?? 0) === 0);
     const col1 = slices.filter((e) => colOf(e) === 1);
     // One slice per column — the paragraph spans the balance boundary.
@@ -1958,10 +2047,10 @@ describe('layoutPages — newspaper column balancing (§17.6.4, non-final contin
     const body: BodyElement[] = [
       para({ text: 'x', fontSize: 20 }),
       para({ text: 'あ'.repeat(9), fontSize: 20, keepLines: true }), // 9 / 3 = 3 lines
-      sectionBreak('continuous', twoColSpec),
+      sectionBreak('nextPage', twoColSpec, section()),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = layoutPages(body, section(), makeCtx());
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
     const keep = pages[0].layers.body.find((e) => textOf(e).startsWith('あ'));
     expect(keep).toBeDefined();
     expect(colOf(keep) ?? 0).toBe(1); // moved to col1
@@ -2004,18 +2093,17 @@ describe('layoutPages — keepNext at a balanced column boundary (§17.3.1.15)',
       para({ text: 'p1', fontSize: 20, keepNext: true }),
       para({ text: 'p2', fontSize: 20 }),
       para({ text: 'p3', fontSize: 20 }),
-      sectionBreak('continuous', twoColSpec),
+      sectionBreak('nextPage', twoColSpec, section()),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = layoutPages(body, section(), makeCtx());
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
     const colByText: Record<string, number | undefined> = {};
     for (const e of pages[0].layers.body) {
       const t = textOf(e);
       if (t.startsWith('p')) colByText[t] = colOf(e) ?? 0;
     }
-    // keepNext p1 and its successor p2 land in the SAME column (col1), not split.
-    expect(colByText.p1).toBe(1);
-    expect(colByText.p2).toBe(1);
+    // The exact minimum target may choose either equal-height partition; the
+    // normative constraint is that the kept pair remains in one column.
     expect(colByText.p1).toBe(colByText.p2);
   });
 
@@ -2028,17 +2116,16 @@ describe('layoutPages — keepNext at a balanced column boundary (§17.3.1.15)',
       para({ text: 'p1', fontSize: 20, keepNext: true }),
       fixedTable([20]),
       para({ text: 'p3', fontSize: 20 }),
-      sectionBreak('continuous', twoColSpec),
+      sectionBreak('nextPage', twoColSpec, section()),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = layoutPages(body, section(), makeCtx());
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
     const p1 = pages[0].layers.body.find((e) => textOf(e) === 'p1');
     const tbl = pages[0].layers.body.find((e) => e.kind === 'table');
     expect(p1).toBeDefined();
     expect(tbl).toBeDefined();
-    expect(colOf(p1) ?? 0).toBe(1);
-    // The table follows p1 in the SAME column.
-    expect(colOf(tbl) ?? 0).toBe(1);
+    // The table follows p1 in the SAME column at the exact legal target.
+    expect(colOf(p1) ?? 0).toBe(colOf(tbl) ?? 0);
   });
 
   it('does NOT move a paragraph WITHOUT keepNext (unchanged greedy-to-target fill)', () => {
@@ -2050,10 +2137,10 @@ describe('layoutPages — keepNext at a balanced column boundary (§17.3.1.15)',
       para({ text: 'p1', fontSize: 20 }),
       para({ text: 'p2', fontSize: 20 }),
       para({ text: 'p3', fontSize: 20 }),
-      sectionBreak('continuous', twoColSpec),
+      sectionBreak('nextPage', twoColSpec, section()),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = layoutPages(body, section(), makeCtx());
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
     const colByText: Record<string, number | undefined> = {};
     for (const e of pages[0].layers.body) {
       const t = textOf(e);
@@ -2075,10 +2162,10 @@ describe('layoutPages — keepNext at a balanced column boundary (§17.3.1.15)',
       para({ text: 'p1', fontSize: 20, keepNext: true }),
       para({ text: 'あ'.repeat(9), fontSize: 20 }), // 9/3 = 3 lines = 60px
       para({ text: 'p3', fontSize: 20 }),
-      sectionBreak('continuous', twoColSpec),
+      sectionBreak('nextPage', twoColSpec, section()),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = layoutPages(body, section(), makeCtx());
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
     const p1 = pages[0].layers.body.find((e) => textOf(e) === 'p1');
     expect(p1).toBeDefined();
     expect(colOf(p1) ?? 0).toBe(0); // stays in col0

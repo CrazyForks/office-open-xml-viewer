@@ -120,6 +120,10 @@ export interface FollowingBodyBlockMeasurementInput {
 export interface FollowingBodyBlockMeasurement {
   readonly fullExtentPt: number;
   readonly leadContentExtentPt: number;
+  /** References painted when the complete block is retained with a keep chain. */
+  readonly fullFootnoteReferenceIds?: readonly string[];
+  /** References painted by the first indivisible content admitted with keepNext. */
+  readonly leadFootnoteReferenceIds?: readonly string[];
 }
 
 export interface PageAnchorPrescanInput {

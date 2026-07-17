@@ -54,6 +54,7 @@ import { uprightPhysicalExtent, writingModeFromTextDirection } from './coordinat
 import { selectParagraphFragment, type ParagraphFragmentCursor } from './paragraph-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { footnoteIdsInRetainedSlice } from './note-reference-ownership.js';
+import { minimumColumnBalanceTarget } from './column-balancing.js';
 import { composeCanonicalSectionFlow } from './section-flow-composition.js';
 import type { BodyFlowAllocation } from './section-flow-composition.js';
 import {
@@ -92,15 +93,36 @@ class FootnoteAdmissionOverflowError extends Error {
 
   constructor(
     readonly reservePt: number,
-    readonly placedAdmissionChargePt: number,
+    readonly admissionChargePt: number,
     readonly freshPageExtentPt: number,
   ) {
     super(
-      'Placed paragraph footnote admission cannot fit a fresh physical page '
-      + `(reserve: ${reservePt}, charge: ${placedAdmissionChargePt}, `
+      'Body footnote admission cannot fit a fresh physical page '
+      + `(reserve: ${reservePt}, charge: ${admissionChargePt}, `
       + `fresh page: ${freshPageExtentPt})`,
     );
     this.name = 'FootnoteAdmissionOverflowError';
+  }
+}
+
+interface BodyBalanceTarget {
+  readonly pageIndex: number;
+  readonly targetPt: number;
+}
+
+type BodyBalancePlan = ReadonlyMap<string, BodyBalanceTarget>;
+
+function assertFreshPageFootnoteAdmission(
+  reservePt: number,
+  admissionChargePt: number,
+  freshPageExtentPt: number,
+): void {
+  if (reservePt > 0 && admissionChargePt > freshPageExtentPt) {
+    throw new FootnoteAdmissionOverflowError(
+      reservePt,
+      admissionChargePt,
+      freshPageExtentPt,
+    );
   }
 }
 
@@ -635,10 +657,12 @@ function paginateBodyPass(
     pageIndex: number;
     flowDomainId: string;
   }>> | null,
+  balancePlan: BodyBalancePlan,
 ): Readonly<{
   layout: DocumentLayout;
   session: BodyLayoutSession;
   allocations: readonly BodyFlowAllocation[];
+  footnoteReserveByPage: ReadonlyMap<number, number>;
 }> {
   const kernel = bodyLayoutKernelOf(services);
   if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
@@ -655,6 +679,11 @@ function paginateBodyPass(
     initialFlow,
     openDraft(input.initialSection, 0, initialInterval),
   );
+  const balanceTargetFor = (target: BodyPaginationState): number | null => {
+    const planned = balancePlan.get(target.flow.section.sectionOccurrenceId);
+    return planned?.pageIndex === target.flow.pageIndex ? planned.targetPt : null;
+  };
+  state = setBodyBalanceTarget(state, balanceTargetFor(state));
   const factory = transitionFactory(owners, reserves);
   const session = kernel.openBodyLayoutSession({
     source: input.source,
@@ -718,58 +747,9 @@ function paginateBodyPass(
     if (delta) session.commitFlowRegistryDelta(delta);
   };
   prescanPageAnchors(state, 0);
-  const approximateBalanceTarget = (
-    startIndex: number,
-    owner: BodySectionLayoutInput,
-  ): number | null => {
-    const region = activeRegion(state);
-    if (owner.startType !== 'continuous' || region.columns.length < 2) return null;
-    const location = acquisitionLocation(state);
-    const physicalExtentPt = region.blockEndPt - region.blockStartPt;
-    let totalExtentPt = 0;
-    let priorParagraph: BodyParagraphSourceInput | null = null;
-    let terminated = false;
-    for (let index = startIndex; index < input.sequence.length; index += 1) {
-      const entry = input.sequence[index]!;
-      if (entry.kind === 'begin-section') {
-        terminated = true;
-        break;
-      }
-      if (entry.kind === 'consume-source') continue;
-      if (entry.kind === 'authored-break') {
-        if (entry.break !== 'column') return null;
-        priorParagraph = null;
-        continue;
-      }
-      const candidate = entry.kind === 'adjacent-table-group' ? entry : entry.block;
-      if (candidate.kind === 'paragraph' && candidate.pageBreakBefore) return null;
-      const measured = session.measureFollowingBlock({
-        input: candidate,
-        location,
-        availableInlineExtentPt: location.availableBounds.widthPt,
-      });
-      if (candidate.kind === 'paragraph') {
-        const spacing = paragraphGapAdjustment(
-          priorParagraph,
-          candidate,
-          priorParagraph?.spaceAfterPt ?? 0,
-          candidate.spaceBeforePt,
-        );
-        totalExtentPt += measured.fullExtentPt - spacing.overlap;
-        priorParagraph = candidate;
-      } else {
-        totalExtentPt += measured.fullExtentPt;
-        priorParagraph = null;
-      }
-    }
-    if (!terminated || totalExtentPt > region.columns.length * physicalExtentPt) return null;
-    return totalExtentPt / region.columns.length;
-  };
-  state = setBodyBalanceTarget(state, approximateBalanceTarget(0, input.initialSection));
   const commitTransition = (
     transition: ReturnType<typeof applyAuthoredBreak>,
     nextEntryIndex: number,
-    nextOwner?: BodySectionLayoutInput,
   ) => {
     const previousPageIndex = state.flow.pageIndex;
     const opensSamePageColumnRegion = transition.events.some((event) => (
@@ -778,12 +758,7 @@ function paginateBodyPass(
       && event.placement === 'same-page-column'
     ));
     state = commitPageFlowTransition(state, transition, factory);
-    if (nextOwner) {
-      state = setBodyBalanceTarget(
-        state,
-        approximateBalanceTarget(nextEntryIndex, nextOwner),
-      );
-    }
+    state = setBodyBalanceTarget(state, balanceTargetFor(state));
     const nextLocation = acquisitionLocation(state);
     if (state.flow.pageIndex !== previousPageIndex) {
       session.resetPageAcquisition(nextLocation);
@@ -799,6 +774,7 @@ function paginateBodyPass(
     }
   };
   const footnoteIdsByPage = new Map<number, Set<string>>();
+  const footnoteReserveByPage = new Map<number, number>();
   // §17.18.77 observes committed references even when their measured reserve is zero;
   // footnoteReservePt remains only the page-local geometry charge.
   const hasFootnoteReferenceOnPage = (pageIndex: number): boolean => (
@@ -808,11 +784,16 @@ function paginateBodyPass(
     candidate: ParagraphLayout | TableLayout,
     inlineExtentPt: number,
     retainedReferenceIds?: readonly string[],
+  ): Readonly<{ ids: readonly string[]; reservePt: number }> => footnoteAdmissionForIds(
+    retainedReferenceIds ?? footnoteIdsInRetainedSlice(candidate),
+    inlineExtentPt,
+  );
+  const footnoteAdmissionForIds = (
+    retainedReferenceIds: readonly string[],
+    inlineExtentPt: number,
   ): Readonly<{ ids: readonly string[]; reservePt: number }> => {
     const retained = footnoteIdsByPage.get(state.flow.pageIndex) ?? new Set<string>();
-    const ids = [...new Set(
-      retainedReferenceIds ?? footnoteIdsInRetainedSlice(candidate),
-    )]
+    const ids = [...new Set(retainedReferenceIds)]
       .filter((id) => !retained.has(id));
     return Object.freeze({
       ids: Object.freeze(ids),
@@ -830,6 +811,10 @@ function paginateBodyPass(
       footnoteIdsByPage.set(state.flow.pageIndex, retained);
     }
     ids.forEach((id) => retained!.add(id));
+    footnoteReserveByPage.set(
+      state.flow.pageIndex,
+      (footnoteReserveByPage.get(state.flow.pageIndex) ?? 0) + reservePt,
+    );
     state = addPageFootnoteReserve(state, reservePt);
   };
   // §17.11.21 / §17.18.34 assign each note to the physical page that paints
@@ -903,7 +888,6 @@ function paginateBodyPass(
           },
         ),
         entryIndex + 1,
-        entry.section,
       );
       continue;
     }
@@ -968,13 +952,11 @@ function paginateBodyPass(
           // column cannot authorize a reserve that clips a deeper prior column.
           const reserveInvadesCommittedPageContent =
             footnoteReserveInvadesCommittedPageContent(notes.reservePt);
-          if (notes.reservePt > 0 && admissionChargePt > freshExtentPt) {
-            throw new FootnoteAdmissionOverflowError(
-              notes.reservePt,
-              admissionChargePt,
-              freshExtentPt,
-            );
-          }
+          assertFreshPageFootnoteAdmission(
+            notes.reservePt,
+            admissionChargePt,
+            freshExtentPt,
+          );
           if (
             (
               admissionChargePt > location.availableBounds.heightPt
@@ -1013,6 +995,7 @@ function paginateBodyPass(
         }
         if (cursor.boundary === null && block.keepNext && state.flow.pageHasContent) {
           let keepSetExtentPt = acquired.blockExtentPt;
+          const keepSetReferenceIds = new Set(footnoteIdsInRetainedSlice(acquired.layout));
           let hasTerminalBlock = false;
           for (let nextIndex = entryIndex + 1; nextIndex < input.sequence.length; nextIndex += 1) {
             const nextEntry = input.sequence[nextIndex]!;
@@ -1031,15 +1014,24 @@ function paginateBodyPass(
             keepSetExtentPt += continues
               ? following.fullExtentPt
               : following.leadContentExtentPt;
+            const referenceIds = continues
+              ? following.fullFootnoteReferenceIds
+              : following.leadFootnoteReferenceIds;
+            referenceIds?.forEach((id) => keepSetReferenceIds.add(id));
             if (!continues) {
               hasTerminalBlock = true;
               break;
             }
           }
+          const keepSetReservePt = footnoteAdmissionForIds(
+            [...keepSetReferenceIds],
+            location.availableBounds.widthPt,
+          ).reservePt;
+          const keepSetAdmissionPt = keepSetExtentPt + keepSetReservePt;
           if (
             hasTerminalBlock
-            && keepSetExtentPt > location.availableBounds.heightPt
-            && keepSetExtentPt <= freshPageExtent(state)
+            && keepSetAdmissionPt > location.availableBounds.heightPt
+            && keepSetAdmissionPt <= freshPageExtent(state)
           ) {
             commitTransition(
               advanceColumnOrPage(state.flow, 'overflow'),
@@ -1169,6 +1161,11 @@ function paginateBodyPass(
           selected.fragment,
           location.availableBounds.widthPt,
         );
+        assertFreshPageFootnoteAdmission(
+          notes.reservePt,
+          selected.fragment.advancePt + notes.reservePt,
+          freshPageExtent(state),
+        );
         commitFootnotes(notes.ids, notes.reservePt);
         if (acquired.flowRegistryDelta) {
           const acceptedDelta = paragraphFlowRegistryDeltaForAcceptedFragment(
@@ -1226,6 +1223,10 @@ function paginateBodyPass(
               acquired.layout,
               location.availableBounds.widthPt,
             );
+        let lastFootnoteAdmission = Object.freeze({
+          reservePt: notes.reservePt,
+          chargePt: acquired.blockExtentPt + notes.reservePt,
+        });
         const seenCandidates = new Set<string>();
         while (
           !acquired.requiresFreshFlowRegion
@@ -1238,6 +1239,11 @@ function paginateBodyPass(
             reservePt: notes.reservePt,
           });
           if (seenCandidates.has(fingerprint)) {
+            assertFreshPageFootnoteAdmission(
+              lastFootnoteAdmission.reservePt,
+              lastFootnoteAdmission.chargePt,
+              freshPageExtent(state),
+            );
             throw new Error('Table footnote admission did not converge');
           }
           seenCandidates.add(fingerprint);
@@ -1252,8 +1258,19 @@ function paginateBodyPass(
                 acquired.layout,
                 location.availableBounds.widthPt,
               );
+          if (!acquired.requiresFreshFlowRegion) {
+            lastFootnoteAdmission = Object.freeze({
+              reservePt: notes.reservePt,
+              chargePt: acquired.blockExtentPt + notes.reservePt,
+            });
+          }
         }
         if (acquired.requiresFreshFlowRegion) {
+          assertFreshPageFootnoteAdmission(
+            lastFootnoteAdmission.reservePt,
+            lastFootnoteAdmission.chargePt,
+            freshPageExtent(state),
+          );
           const rebasesFloatingTableOnFreshFrame = !state.flow.pageHasContent
             && acquired.nextCursor?.kind === 'table'
             && acquired.nextCursor.floatingContinuationFrame === 'fresh-text'
@@ -1316,6 +1333,7 @@ function paginateBodyPass(
     layout: finalize(state, owners),
     session,
     allocations: Object.freeze(allocations),
+    footnoteReserveByPage,
   });
 }
 
@@ -1407,6 +1425,7 @@ function paginateBodyWithAnchorConvergence(
   services: LayoutServices,
   options: LayoutOptions,
   reserves: readonly HeaderFooterReserve[],
+  balancePlan: BodyBalancePlan,
 ) {
   const hasPageOwnedAnchors = input.sequence.some((entry) => (
     entry.kind === 'body-block'
@@ -1416,7 +1435,7 @@ function paginateBodyWithAnchorConvergence(
   let plan: ReturnType<typeof pageAnchorDestinationPlan> | null = null;
   const seen = new Set<string>();
   while (true) {
-    const pass = paginateBodyPass(input, services, options, reserves, plan);
+    const pass = paginateBodyPass(input, services, options, reserves, plan, balancePlan);
     const nextPlan = pageAnchorDestinationPlan(pass.layout);
     if (!hasPageOwnedAnchors) return pass;
     const nextIdentity = anchorPlanIdentity(nextPlan);
@@ -1429,13 +1448,158 @@ function paginateBodyWithAnchorConvergence(
   }
 }
 
+function continuousBalanceBoundaries(input: BodyLayoutInput): readonly Readonly<{
+  outgoingSectionOccurrenceId: string;
+  incomingSectionOccurrenceId: string;
+}>[] {
+  const boundaries: Array<Readonly<{
+    outgoingSectionOccurrenceId: string;
+    incomingSectionOccurrenceId: string;
+  }>> = [];
+  let outgoing = input.initialSection;
+  for (const entry of input.sequence) {
+    if (entry.kind !== 'begin-section') continue;
+    if (entry.section.startType === 'continuous') {
+      boundaries.push(Object.freeze({
+        outgoingSectionOccurrenceId: outgoing.sectionOccurrenceId,
+        incomingSectionOccurrenceId: entry.section.sectionOccurrenceId,
+      }));
+    }
+    outgoing = entry.section;
+  }
+  return Object.freeze(boundaries);
+}
+
+function sharedContinuousBoundaryPage(
+  layout: DocumentLayout,
+  outgoingSectionOccurrenceId: string,
+  incomingSectionOccurrenceId: string,
+) {
+  for (const page of layout.pages) {
+    for (let index = 0; index + 1 < page.sectionRegions.length; index += 1) {
+      const outgoing = page.sectionRegions[index]!;
+      const incoming = page.sectionRegions[index + 1]!;
+      if (outgoing.sectionOccurrenceId === outgoingSectionOccurrenceId
+        && incoming.sectionOccurrenceId === incomingSectionOccurrenceId) {
+        return Object.freeze({ page, outgoing });
+      }
+    }
+  }
+  return null;
+}
+
+function paginateBodyWithColumnBalancing(
+  input: BodyLayoutInput,
+  services: LayoutServices,
+  options: LayoutOptions,
+  reserves: readonly HeaderFooterReserve[],
+) {
+  let plan: BodyBalancePlan = new Map();
+  let pass = paginateBodyWithAnchorConvergence(
+    input,
+    services,
+    options,
+    reserves,
+    plan,
+  );
+  for (const boundary of continuousBalanceBoundaries(input)) {
+    const baseline = sharedContinuousBoundaryPage(
+      pass.layout,
+      boundary.outgoingSectionOccurrenceId,
+      boundary.incomingSectionOccurrenceId,
+    );
+    if (baseline === null || baseline.outgoing.flowDomainIds.length < 2) continue;
+    const pageIndex = baseline.page.pageIndex;
+    const maximumTargetPt = baseline.outgoing.blockEndPt - baseline.outgoing.blockStartPt;
+    const targetPt = minimumColumnBalanceTarget(maximumTargetPt, (candidatePt) => {
+      const candidatePlan = new Map(plan);
+      candidatePlan.set(boundary.outgoingSectionOccurrenceId, Object.freeze({
+        pageIndex,
+        targetPt: candidatePt,
+      }));
+      const candidate = paginateBodyWithAnchorConvergence(
+        input,
+        services,
+        options,
+        reserves,
+        candidatePlan,
+      );
+      const shared = sharedContinuousBoundaryPage(
+        candidate.layout,
+        boundary.outgoingSectionOccurrenceId,
+        boundary.incomingSectionOccurrenceId,
+      );
+      const targetPage = candidate.layout.pages.find((page) => page.pageIndex === pageIndex);
+      const outgoing = targetPage?.sectionRegions.find((region) =>
+        region.sectionOccurrenceId === boundary.outgoingSectionOccurrenceId);
+      if (!targetPage || !outgoing) {
+        return Object.freeze({
+          fits: false,
+          requiredTargetPt: 0,
+          thresholdsPt: Object.freeze([]),
+        });
+      }
+      const domains = new Set(outgoing.flowDomainIds);
+      const reservePt = candidate.footnoteReserveByPage.get(pageIndex) ?? 0;
+      const thresholdsPt = [
+        ...candidate.allocations
+          .filter((allocation) => domains.has(allocation.flowDomainId))
+          .flatMap((allocation) => [
+            allocation.blockStartPt - outgoing.blockStartPt + reservePt,
+            allocation.blockEndPt - outgoing.blockStartPt + reservePt,
+          ]),
+        ...targetPage.layers.body
+          .filter((node) => domains.has(node.flowDomainId))
+          .flatMap((node) => {
+            if (node.kind === 'paragraph') {
+              return node.lines.map((line) =>
+                line.bounds.yPt + line.advancePt - outgoing.blockStartPt + reservePt);
+            }
+            if (node.kind === 'table') {
+              return node.rows.map((row) =>
+                row.flowBounds.yPt + row.advancePt - outgoing.blockStartPt + reservePt);
+            }
+            return [];
+          }),
+      ].filter((threshold) => threshold >= 0 && threshold <= maximumTargetPt);
+      const occupiedBoundaryPt = candidate.allocations
+        .filter((allocation) => domains.has(allocation.flowDomainId))
+        .reduce((maximum, allocation) => Math.max(
+          maximum,
+          allocation.blockEndPt - outgoing.blockStartPt,
+        ), 0);
+      const requiredTargetPt = occupiedBoundaryPt + reservePt;
+      const fits = shared?.page.pageIndex === pageIndex && requiredTargetPt <= candidatePt;
+      return Object.freeze({
+        fits,
+        requiredTargetPt,
+        thresholdsPt: Object.freeze([...new Set(thresholdsPt)]),
+      });
+    });
+    const nextPlan = new Map(plan);
+    nextPlan.set(boundary.outgoingSectionOccurrenceId, Object.freeze({
+      pageIndex,
+      targetPt,
+    }));
+    plan = nextPlan;
+    pass = paginateBodyWithAnchorConvergence(
+      input,
+      services,
+      options,
+      reserves,
+      plan,
+    );
+  }
+  return pass;
+}
+
 export function paginateBody(
   input: BodyLayoutInput,
   services: LayoutServices,
   options: LayoutOptions,
 ): DocumentLayout {
   const owners = ownerMap(input);
-  const seed = paginateBodyWithAnchorConvergence(input, services, options, []);
+  const seed = paginateBodyWithColumnBalancing(input, services, options, []);
   const converged = convergeHeaderFooterReserves({
     seed,
     measure: (pass) => headerFooterReserves(pass, owners),
@@ -1449,7 +1613,7 @@ export function paginateBody(
         totalPages: current.layout.pages.length,
         resolveDestinationPage: (pageIndex) => contexts[pageIndex],
       });
-      return paginateBodyWithAnchorConvergence(input, iterationServices, options, reserves);
+      return paginateBodyWithColumnBalancing(input, iterationServices, options, reserves);
     },
     identity: (pass) => pass.layout,
     requiresConvergence: seed.session.hasPaginationFields,

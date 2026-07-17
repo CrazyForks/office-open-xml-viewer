@@ -217,7 +217,10 @@ import {
   selectDocumentLayoutPage,
 } from './layout/document-layout-variants.js';
 import { selectedHeaderFooterStory } from './layout/header-footer-reserve.js';
-import { footnoteIdsInRetainedSlice } from './layout/note-reference-ownership.js';
+import {
+  footnoteIdsInRetainedLines,
+  footnoteIdsInRetainedSlice,
+} from './layout/note-reference-ownership.js';
 import { isFirstSectionOwnedPage } from './layout/section-page-identity.js';
 import type {
   BodyAcquisitionLocation,
@@ -1659,17 +1662,7 @@ function isAllRotatedVerticalTextDirection(td: string | null | undefined): boole
 function verticalLayoutSection(phys: SectionProps): SectionProps {
   return {
     ...phys,
-    pageWidth: phys.pageHeight,
-    pageHeight: phys.pageWidth,
-    marginLeft: phys.marginTop,
-    marginTop: phys.marginRight,
-    marginRight: phys.marginBottom,
-    marginBottom: phys.marginLeft,
-    // header/footer distances follow the top/bottom margins into the logical
-    // top/bottom (left/right in physical); vertical docs in scope carry no
-    // header/footer so this is a best-effort mapping, not yet exercised.
-    headerDistance: phys.headerDistance,
-    footerDistance: phys.footerDistance,
+    ...logicalGeomOf(phys),
   };
 }
 
@@ -1697,12 +1690,7 @@ function verticalLayoutDoc(doc: DocxDocumentModel): DocxDocumentModel {
 function physicalLayoutSection(logical: SectionProps): SectionProps {
   return {
     ...logical,
-    pageWidth: logical.pageHeight,
-    pageHeight: logical.pageWidth,
-    marginTop: logical.marginLeft,
-    marginRight: logical.marginTop,
-    marginBottom: logical.marginRight,
-    marginLeft: logical.marginBottom,
+    ...physicalGeomOf(logical),
   };
 }
 
@@ -3115,15 +3103,16 @@ function createConcreteBodyLayoutKernel(
         }
       });
       let location = input.initialLocation;
+      const pageRegistryFlowDomainId = (pageIndex: number) => `body:page:${pageIndex}:registry`;
       let floatRegistry: FloatRegistrySnapshotPt = Object.freeze({
         coordinateSpace: 'logical-page-points' as const,
-        flowDomainId: location.flowDomainId,
+        flowDomainId: pageRegistryFlowDomainId(location.pageIndex),
         entries: Object.freeze([]) as readonly FloatRegistryEntryPt[],
         nextParagraphId: 0,
       });
       let drawingCollisionRegistry: DrawingMLCollisionRegistrySnapshotPt =
         createDrawingMLCollisionRegistry(
-          location.flowDomainId,
+          pageRegistryFlowDomainId(location.pageIndex),
           'logical-page-points',
         );
       const applyLocationTo = (target: RenderState, next: BodyAcquisitionLocation) => {
@@ -4049,6 +4038,11 @@ function createConcreteBodyLayoutKernel(
             return Object.freeze({
               fullExtentPt: layout.advancePt,
               leadContentExtentPt: layout.rows[0]?.advancePt ?? layout.advancePt,
+              fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
+              leadFootnoteReferenceIds: footnoteIdsInRetainedSlice({
+                ...layout,
+                rows: layout.rows.slice(0, 1),
+              }),
             });
           }
           const element = sourceElement(request.input.source);
@@ -4072,6 +4066,10 @@ function createConcreteBodyLayoutKernel(
               leadContentExtentPt: firstLine
                 ? firstLine.bounds.yPt + firstLine.advancePt - layout.flowBounds.yPt
                 : layout.advancePt,
+              fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
+              leadFootnoteReferenceIds: firstLine
+                ? footnoteIdsInRetainedLines([firstLine])
+                : [],
             });
           }
           if (element.type !== 'table') throw new Error('Following table source kind mismatch');
@@ -4081,6 +4079,11 @@ function createConcreteBodyLayoutKernel(
           return Object.freeze({
             fullExtentPt: layout.advancePt,
             leadContentExtentPt: layout.rows[0]?.advancePt ?? layout.advancePt,
+            fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
+            leadFootnoteReferenceIds: footnoteIdsInRetainedSlice({
+              ...layout,
+              rows: layout.rows.slice(0, 1),
+            }),
           });
         },
         prescanPageAnchors(request: PageAnchorPrescanInput) {
@@ -4214,7 +4217,10 @@ function createConcreteBodyLayoutKernel(
           return Object.freeze({
             floats: Object.freeze({
               coordinateSpace: 'logical-page-points' as const,
-              flowDomainId: request.location.flowDomainId,
+              // Page-owned wrap exclusions survive same-page column/section
+              // cutovers, so their transaction identity belongs to the physical
+              // page rather than the active body flow domain.
+              flowDomainId: floatRegistry.flowDomainId,
               baseEntries: floatRegistry.entries,
               baseNextParagraphId: floatRegistry.nextParagraphId,
               nextParagraphId: floatRegistry.nextParagraphId + entries.length,
@@ -4249,12 +4255,12 @@ function createConcreteBodyLayoutKernel(
           state.pageAnchorPrescanned = new Set();
           floatRegistry = Object.freeze({
             coordinateSpace: 'logical-page-points' as const,
-            flowDomainId: next.flowDomainId,
+            flowDomainId: pageRegistryFlowDomainId(next.pageIndex),
             entries: Object.freeze([]),
             nextParagraphId: 0,
           });
           drawingCollisionRegistry = createDrawingMLCollisionRegistry(
-            next.flowDomainId,
+            pageRegistryFlowDomainId(next.pageIndex),
             'logical-page-points',
           );
           applyLocation(next);

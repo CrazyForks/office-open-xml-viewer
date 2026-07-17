@@ -1112,22 +1112,12 @@ fn parse_even_and_odd_headers(settings_xml: &str) -> bool {
 fn parse_page_layout_settings(settings_xml: &str) -> Option<crate::types::PageLayoutSettingsWire> {
     let doc = parse_guarded(settings_xml).ok()?;
     let root = doc.root_element();
-    let authored = |name: &str| {
-        root.descendants()
-            .find(|node| node.is_element() && node.tag_name().name() == name)
-            .map(|node| {
-                attr_w(node, "val")
-                    .as_deref()
-                    .and_then(parse_on_off)
-                    .unwrap_or(true)
-            })
-    };
     let result = crate::types::PageLayoutSettingsWire {
-        mirror_margins: authored("mirrorMargins"),
-        gutter_at_top: authored("gutterAtTop"),
-        book_fold_printing: authored("bookFoldPrinting"),
-        book_fold_rev_printing: authored("bookFoldRevPrinting"),
-        print_two_on_one: authored("printTwoOnOne"),
+        mirror_margins: bool_prop(root, "mirrorMargins"),
+        gutter_at_top: bool_prop(root, "gutterAtTop"),
+        book_fold_printing: bool_prop(root, "bookFoldPrinting"),
+        book_fold_rev_printing: bool_prop(root, "bookFoldRevPrinting"),
+        print_two_on_one: bool_prop(root, "printTwoOnOne"),
     };
     if result.mirror_margins.is_none()
         && result.gutter_at_top.is_none()
@@ -1138,6 +1128,45 @@ fn parse_page_layout_settings(settings_xml: &str) -> Option<crate::types::PageLa
         None
     } else {
         Some(result)
+    }
+}
+
+#[cfg(test)]
+mod page_layout_settings_tests {
+    use super::*;
+    use ooxml_common::ns::wordprocessingml;
+
+    #[test]
+    fn reads_only_direct_wordprocessingml_settings_children() {
+        for namespace in [wordprocessingml::TRANSITIONAL, wordprocessingml::STRICT] {
+            let xml = format!(
+                r#"<w:settings xmlns:w="{namespace}" xmlns:x="urn:foreign">
+                     <w:mirrorMargins/>
+                     <w:gutterAtTop w:val="0"/>
+                     <x:bookFoldPrinting/>
+                     <w:compat><w:bookFoldRevPrinting/></w:compat>
+                   </w:settings>"#,
+            );
+
+            let settings = parse_page_layout_settings(&xml).expect("authored page settings");
+            assert_eq!(settings.mirror_margins, Some(true));
+            assert_eq!(settings.gutter_at_top, Some(false));
+            assert_eq!(settings.book_fold_printing, None);
+            assert_eq!(settings.book_fold_rev_printing, None);
+            assert_eq!(settings.print_two_on_one, None);
+        }
+    }
+
+    #[test]
+    fn ignores_foreign_settings_with_normative_local_names() {
+        let xml = r#"<w:settings
+                       xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                       xmlns:x="urn:foreign">
+                     <x:mirrorMargins/>
+                     <x:gutterAtTop x:val="1"/>
+                   </w:settings>"#;
+
+        assert!(parse_page_layout_settings(xml).is_none());
     }
 }
 

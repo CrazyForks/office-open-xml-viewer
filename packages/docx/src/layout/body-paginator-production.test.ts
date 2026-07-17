@@ -1514,6 +1514,136 @@ describe('canonical body producer', () => {
     }));
   });
 
+  it('rejects an ordinary paragraph footnote reserve that cannot fit a fresh physical page', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => ({
+          layout: paragraphWithFootnote('oversized-note', input.source, 10, 'too-tall'),
+          blockExtentPt: 10,
+          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+        }),
+        measureTable: () => { throw new Error('unused'); },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: ({ referenceIds }) => referenceIds.includes('too-tall') ? 81 : 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input: BodyLayoutInput = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [{
+        kind: 'body-block',
+        block: {
+          kind: 'paragraph', source: source(0), pageBreakBefore: false,
+          keepLines: false, keepNext: false, widowControl: true,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        },
+      }],
+    };
+
+    expect(() => paginateBody(input, services, { currentDateMs: 0 })).toThrow(expect.objectContaining({
+      code: 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE',
+    }));
+  });
+
+  it('rejects a table fragment and footnote reserve that cannot fit a fresh physical page', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: ({ input }) => ({
+          layout: tableWithFootnote('oversized-note', input.source, 10, 'too-tall'),
+          blockExtentPt: 10,
+        }),
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: ({ referenceIds }) => referenceIds.includes('too-tall') ? 71 : 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input: BodyLayoutInput = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [{
+        kind: 'body-block',
+        block: { kind: 'table', source: source(0) },
+      }],
+    };
+
+    expect(() => paginateBody(input, services, { currentDateMs: 0 })).toThrow(expect.objectContaining({
+      code: 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE',
+    }));
+  });
+
+  it('keeps a paragraph with its note-bearing successor when the pair only fits a fresh page', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => {
+          const index = input.source.path[0]!;
+          const retained = index === 2
+            ? paragraphWithFootnote('successor', input.source, 10, 'successor-note')
+            : paragraph(`p${index}`, input.source, index === 0 ? 20 : 10);
+          return {
+            layout: retained,
+            blockExtentPt: retained.advancePt,
+            lineEndBoundaries: index === 2 ? [{ segIndex: 0, charOffset: 1 }] : [],
+          };
+        },
+        measureTable: () => { throw new Error('unused'); },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: ({ referenceIds }) =>
+          referenceIds.includes('successor-note') ? 50 : 0,
+        measureFollowingBlock: ({ input }) => ({
+          fullExtentPt: input.source.path[0] === 0 ? 20 : 10,
+          leadContentExtentPt: input.source.path[0] === 0 ? 20 : 10,
+          leadFootnoteReferenceIds: input.source.path[0] === 2 ? ['successor-note'] : [],
+        }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input: BodyLayoutInput = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [0, 1, 2].map((index) => ({
+        kind: 'body-block' as const,
+        block: {
+          kind: 'paragraph' as const, source: source(index), pageBreakBefore: false,
+          keepLines: false, keepNext: index === 1, widowControl: true,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        },
+      })),
+    };
+
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+
+    expect(layout.pages.map((page) => page.layers.body.map((node) => node.source.path[0])))
+      .toEqual([[0], [1, 2]]);
+  });
+
   it('admits nextColumn footnote relocation against the complete next-page interval', () => {
     const twoColumnSection: SectionLayoutContext = {
       ...section,
@@ -1937,7 +2067,7 @@ describe('canonical body producer', () => {
       .toEqual([[0], [1, 2, 3]]);
   });
 
-  it('preserves the current equal-height approximation for a non-final multi-column section', () => {
+  it('balances the outgoing multi-column section before an incoming continuous section', () => {
     const balancedSection: SectionLayoutContext = {
       ...section,
       columns: [{ xPt: 10, wPt: 80 }, { xPt: 110, wPt: 80 }],
@@ -1989,8 +2119,8 @@ describe('canonical body producer', () => {
         printTwoOnOne: false,
       },
     });
-    const first = owner('section:balanced', balancedSection, 'continuous');
-    const final = owner('section:final', section, 'nextPage');
+    const first = owner('section:balanced', balancedSection, 'nextPage');
+    const final = owner('section:final', section, 'continuous');
     const blocks = Array.from({ length: 6 }, (_, index) => ({
       kind: 'body-block' as const,
       block: {
