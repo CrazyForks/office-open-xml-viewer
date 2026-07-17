@@ -171,6 +171,7 @@ export function layoutParseErrorPage(
       footerDistance: 0,
     },
     columns: [{ xPt: padPt, wPt: frame.widthPt }],
+    columnSeparator: false,
     grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
     textDirection: 'lrTb',
     verticalAlignment: 'top',

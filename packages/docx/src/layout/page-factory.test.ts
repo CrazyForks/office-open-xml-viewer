@@ -52,6 +52,7 @@ function section(
       footerDistance: 36,
     },
     columns,
+    columnSeparator: false,
     grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
     textDirection,
     verticalAlignment: 'top',
@@ -438,6 +439,7 @@ describe('createLayoutPage', () => {
     const mismatches: SectionLayoutContext[] = [
       { ...first, geometry: { ...first.geometry, marginLeft: 73 } },
       { ...first, columns: [{ xPt: 73, wPt: 468 }] },
+      { ...first, columnSeparator: true },
       { ...first, textDirection: 'lrTbV' },
       { ...first, grid: { ...first.grid, kind: 'lines' } },
       { ...first, verticalAlignment: 'center' },

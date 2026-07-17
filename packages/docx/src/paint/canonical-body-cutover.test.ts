@@ -17,7 +17,7 @@ describe('retained canonical body paint', () => {
       flowDomains: [],
       section: {
         geometry: { pageWidth: 100, pageHeight: 100, marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10, headerDistance: 5, footerDistance: 5 },
-        columns: [{ xPt: 10, wPt: 80 }], grid: { kind: 'none', linePitchPt: null, charSpacePt: null }, textDirection: 'lrTb', verticalAlignment: 'top',
+        columns: [{ xPt: 10, wPt: 80 }], columnSeparator: false, grid: { kind: 'none', linePitchPt: null, charSpacePt: null }, textDirection: 'lrTb', verticalAlignment: 'top',
       },
       sectionOccurrenceId: 'section:0', parityBlank: false, bookmarkStarts: [],
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },

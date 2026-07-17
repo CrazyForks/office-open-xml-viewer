@@ -156,6 +156,7 @@ export function sectionLayoutContextsEqual(
     && left.geometry.headerDistance === right.geometry.headerDistance
     && left.geometry.footerDistance === right.geometry.footerDistance
     && equalColumns(left.columns, right.columns)
+    && left.columnSeparator === right.columnSeparator
     && left.textDirection === right.textDirection
     && left.grid.kind === right.grid.kind
     && left.grid.linePitchPt === right.grid.linePitchPt

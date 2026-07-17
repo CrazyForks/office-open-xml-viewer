@@ -5,6 +5,8 @@ import type {
   PaintNode,
   PaintResourceKind,
 } from '../layout/types.js';
+import { columnSeparatorSegments } from '../layout/column-separators.js';
+import { rasterizeColumnSeparator } from './column-separator-raster.js';
 import {
   enqueueDeferredFrontPaint,
   withDeferredFrontPaintSession,
@@ -134,6 +136,23 @@ function applyRegionTransform(
 
 type PagePaintEntry = LayoutPage['layers']['paintSequence'][number];
 
+function paintColumnSeparators(page: LayoutPage, context: CanvasPaintContext): void {
+  const segments = columnSeparatorSegments(page.sectionRegions);
+  if (segments.length === 0) return;
+  const { ctx } = context;
+  ctx.save();
+  ctx.strokeStyle = '#000000';
+  for (const segment of segments) {
+    const raster = rasterizeColumnSeparator(segment, context.scale, context.dpr);
+    ctx.lineWidth = raster.widthPt;
+    ctx.beginPath();
+    ctx.moveTo(raster.segment.start.xPt, raster.segment.start.yPt);
+    ctx.lineTo(raster.segment.end.xPt, raster.segment.end.yPt);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function paintInEntryRegion(
   entry: PagePaintEntry,
   context: CanvasPaintContext,
@@ -178,28 +197,37 @@ export function paintLayoutPageContent(
     region.flowDomainIds.map((domainId) => [domainId, region] as const)
   )));
   const entries = page.layers.paintSequence;
-  const firstBodyEntry = entries.findIndex((entry) => entry.layer === 'body');
-  if (firstBodyEntry === -1) {
-    for (const entry of entries) {
+  const firstNonLeadingEntry = entries.findIndex((entry) => (
+    entry.layer !== 'background' && entry.layer !== 'behindText' && entry.layer !== 'header'
+  ));
+  const decorationIndex = firstNonLeadingEntry === -1 ? entries.length : firstNonLeadingEntry;
+  const paintEntries = (retainedEntries: readonly PagePaintEntry[]): void => {
+    for (const entry of retainedEntries) {
       paintInEntryRegion(entry, context, regionByDomain, (entryContext) => {
         paintNode(entry.node, entryContext);
       });
     }
+  };
+  paintEntries(entries.slice(0, decorationIndex));
+  paintColumnSeparators(page, context);
+
+  // Retained order after the decoration boundary is authoritative. In
+  // particular, page-front entries may intentionally precede the body run.
+  const remainingEntries = entries.slice(decorationIndex);
+  const firstBodyEntry = remainingEntries.findIndex((entry) => entry.layer === 'body');
+  if (firstBodyEntry === -1) {
+    paintEntries(remainingEntries);
     return;
   }
   let lastBodyEntry = firstBodyEntry;
-  while (entries[lastBodyEntry + 1]?.layer === 'body') lastBodyEntry += 1;
-  for (const entry of entries.slice(0, firstBodyEntry)) {
-    paintInEntryRegion(entry, context, regionByDomain, (entryContext) => {
-      paintNode(entry.node, entryContext);
-    });
-  }
+  while (remainingEntries[lastBodyEntry + 1]?.layer === 'body') lastBodyEntry += 1;
+  paintEntries(remainingEntries.slice(0, firstBodyEntry));
   const behind: Array<Readonly<{
     drawing: import('../layout/types.js').DrawingLayout;
     paint: () => void;
     encounterOrder: number;
   }>> = [];
-  for (const entry of entries.slice(firstBodyEntry, lastBodyEntry + 1)) {
+  for (const entry of remainingEntries.slice(firstBodyEntry, lastBodyEntry + 1)) {
     // Discovery walks immutable retained geometry only. Keep the section frame
     // in deferred replay wrappers, but do not apply it to this ink-free walk;
     // normal paint is the destination-final logical-to-physical owner.
@@ -227,7 +255,7 @@ export function paintLayoutPageContent(
 
   const frontState: DeferredFrontPaintState = {};
   withDeferredFrontPaintSession(frontState, () => {
-    for (const entry of entries.slice(firstBodyEntry, lastBodyEntry + 1)) {
+    for (const entry of remainingEntries.slice(firstBodyEntry, lastBodyEntry + 1)) {
       paintInEntryRegion(entry, context, regionByDomain, (entryContext) => {
         if (entry.layer !== 'body') {
           paintNode(entry.node, entryContext);
@@ -249,11 +277,7 @@ export function paintLayoutPageContent(
       });
     }
   });
-  for (const entry of entries.slice(lastBodyEntry + 1)) {
-    paintInEntryRegion(entry, context, regionByDomain, (entryContext) => {
-      paintNode(entry.node, entryContext);
-    });
-  }
+  paintEntries(remainingEntries.slice(lastBodyEntry + 1));
 }
 
 export async function paintLayoutPage(

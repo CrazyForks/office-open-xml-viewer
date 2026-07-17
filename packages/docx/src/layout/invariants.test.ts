@@ -76,6 +76,7 @@ const horizontalSection: SectionLayoutContext = {
     headerDistance: 36, footerDistance: 36,
   },
   columns: [{ xPt: 72, wPt: 468 }],
+  columnSeparator: false,
   grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
   textDirection: 'lrTb',
   verticalAlignment: 'top',

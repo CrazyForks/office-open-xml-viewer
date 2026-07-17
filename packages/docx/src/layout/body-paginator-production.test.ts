@@ -17,6 +17,7 @@ const section: SectionLayoutContext = {
     headerDistance: 5, footerDistance: 5,
   },
   columns: [{ xPt: 10, wPt: 180 }],
+  columnSeparator: false,
   grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
   textDirection: 'lrTb', verticalAlignment: 'top',
 };

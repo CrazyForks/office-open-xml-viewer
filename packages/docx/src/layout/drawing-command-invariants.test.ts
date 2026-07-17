@@ -7,6 +7,7 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
   const section: DocumentLayout['pages'][number]['section'] = {
     geometry: { pageWidth: 612, pageHeight: 792, marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72, headerDistance: 36, footerDistance: 36 },
     columns: [{ xPt: 72, wPt: 468 }],
+    columnSeparator: false,
     grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
     textDirection: 'lrTb', verticalAlignment: 'top',
   };

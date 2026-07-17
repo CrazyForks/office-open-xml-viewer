@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeFill, TextPath, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, DocNote, NumberingInfo, ColumnGeom, ColumnsSpec, FramePr, TblpPr, DocSettings,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, DocNote, NumberingInfo, ColumnsSpec, FramePr, TblpPr, DocSettings,
 } from './types';
 import { docxRenderedFontFamilies } from './document-content.js';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
@@ -2255,11 +2255,6 @@ async function renderDocumentToCanvasLeased(
     }
   }
 
-  // Body. ECMA-376 §17.6.4: lay out body text in EACH section's newspaper columns
-  // (per-section columns). `columns` is the body-level (final) section's geometry,
-  // used as the fallback for stories without a per-section region (single-
-  // section docs, where it equals the whole-body geometry — unchanged path).
-  const columns = [...retainedBodyPage.section.columns];
   // §17.6.11: canonical pagination already resolved the effective main-story edge.
   const bodyTopY = retainedBodyPage.geometry.contentTopPt * scale;
   const bodyState: RenderState = { ...baseState, y: bodyTopY };
@@ -2280,28 +2275,6 @@ async function renderDocumentToCanvasLeased(
       } finally {
         ctx.restore();
       }
-    }
-  }
-  // Optional column separator rules (`<w:cols w:sep="1">`), drawn before the text
-  // so glyphs sit on top. A thin rule is centred in each inter-column gap and
-  // spans the content height. With per-section columns a page can carry more than
-  // one section's geometry (a continuous break), so draw separators for each
-  // DISTINCT multi-column geometry actually present on this page (derived from the
-  // canonical section regions), falling back to the page-level `columns` when an
-  // element carries none. The `sep` flag is the final section's
-  // (`sec.columns?.sep`); threading a per-section sep toggle is unnecessary until a
-  // document mixes differing sep settings across sections sharing a page (rare,
-  // untested — both bundled samples use sep:false).
-  if (sec.columns?.sep && columns.length > 1) {
-    ctx.save();
-    try {
-      if (vertical) {
-        ctx.translate(cssWidth, 0);
-        ctx.rotate(Math.PI / 2);
-      }
-      drawColumnSeparators(ctx, columns, sec, scale);
-    } finally {
-      ctx.restore();
     }
   }
   ctx.save();
@@ -4977,35 +4950,6 @@ export function sumCellContentHeight(
     }
   }
   return h;
-}
-
-/** ECMA-376 §17.6.4 `<w:cols w:sep="1">` — draw a thin vertical rule centred in
- *  each inter-column gap, spanning the section's content height. The spec does
- *  not prescribe a width/colour; Word draws a hairline, so we use ~0.5pt in the
- *  default text colour (matching the footnote separator convention). */
-function drawColumnSeparators(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  columns: ColumnGeom[],
-  sec: SectionProps,
-  scale: number,
-): void {
-  // §17.6.11: the separators span the body content band, whose top/bottom are inset from
-  // the page edges by the margins' MAGNITUDE (bodyMarginInsetPt). Identity for non-negative.
-  const topY = bodyMarginInsetPt(sec.marginTop) * scale;
-  const botY = (sec.pageHeight - bodyMarginInsetPt(sec.marginBottom)) * scale;
-  ctx.save();
-  ctx.strokeStyle = '#000000';
-  ctx.lineWidth = Math.max(1, Math.round(0.5 * scale));
-  for (let i = 0; i < columns.length - 1; i++) {
-    const gapStart = columns[i].xPt + columns[i].wPt;
-    const gapEnd = columns[i + 1].xPt;
-    const midX = Math.round(((gapStart + gapEnd) / 2) * scale) + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(midX, topY);
-    ctx.lineTo(midX, botY);
-    ctx.stroke();
-  }
-  ctx.restore();
 }
 
 function renderParaList(paras: DocParagraph[], state: RenderState): void {

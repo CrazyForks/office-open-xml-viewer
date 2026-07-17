@@ -244,6 +244,7 @@ export function resolveAcquiredSectionLayoutContext(
   return Object.freeze({
     geometry: Object.freeze(sectionPageBox(section)),
     columns: Object.freeze(computeSectionColumns(section).map((column) => Object.freeze(column))),
+    columnSeparator: section.columns?.sep === true,
     grid: Object.freeze({
       kind: gridKind,
       linePitchPt: section.docGridLinePitch ?? null,

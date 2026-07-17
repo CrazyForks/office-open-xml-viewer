@@ -82,6 +82,17 @@ const cellStory: StoryContext = {
 };
 
 describe('layout context resolvers', () => {
+  it('retains the section column separator fact', () => {
+    const settings = resolveDocumentLayoutSettings(documentModel());
+
+    expect(resolveSectionLayoutContext(settings, section({
+      columns: { count: 2, spacePt: 18, equalWidth: true, sep: true, cols: [] },
+    })).columnSeparator).toBe(true);
+    expect(resolveSectionLayoutContext(settings, section({
+      columns: { count: 2, spacePt: 18, equalWidth: true, sep: false, cols: [] },
+    })).columnSeparator).toBe(false);
+  });
+
   it('preserves nested table-cell container depth', () => {
     const outerCell = enterTableCellStoryContext(bodyStory);
     const innerCell = enterTableCellStoryContext(outerCell);

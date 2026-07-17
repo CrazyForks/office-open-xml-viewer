@@ -46,6 +46,7 @@ export interface SectionGridContext {
 export interface SectionLayoutContext {
   readonly geometry: SectionGeom;
   readonly columns: readonly ColumnGeom[];
+  readonly columnSeparator: boolean;
   readonly grid: SectionGridContext;
   readonly textDirection: string;
   readonly verticalAlignment: string;
@@ -226,6 +227,7 @@ export function resolveSectionLayoutContext(
       footerDistance: section.footerDistance,
     },
     columns: computeSectionColumns(section),
+    columnSeparator: section.columns?.sep === true,
     grid: {
       kind: normalizeGridKind(section.docGridType),
       linePitchPt: section.docGridLinePitch ?? null,
