@@ -54,7 +54,7 @@ import { uprightPhysicalExtent, writingModeFromTextDirection } from './coordinat
 import { selectParagraphFragment, type ParagraphFragmentCursor } from './paragraph-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { footnoteIdsInRetainedSlice } from './note-reference-ownership.js';
-import { minimumColumnBalanceTarget } from './column-balancing.js';
+import { exactRetainedColumnBalanceTarget } from './column-balance-frontier.js';
 import { composeCanonicalSectionFlow } from './section-flow-composition.js';
 import type { BodyFlowAllocation } from './section-flow-composition.js';
 import {
@@ -1510,72 +1510,13 @@ function paginateBodyWithColumnBalancing(
     );
     if (baseline === null || baseline.outgoing.flowDomainIds.length < 2) continue;
     const pageIndex = baseline.page.pageIndex;
-    const maximumTargetPt = baseline.outgoing.blockEndPt - baseline.outgoing.blockStartPt;
-    const targetPt = minimumColumnBalanceTarget(maximumTargetPt, (candidatePt) => {
-      const candidatePlan = new Map(plan);
-      candidatePlan.set(boundary.outgoingSectionOccurrenceId, Object.freeze({
-        pageIndex,
-        targetPt: candidatePt,
-      }));
-      const candidate = paginateBodyWithAnchorConvergence(
-        input,
-        services,
-        options,
-        reserves,
-        candidatePlan,
-      );
-      const shared = sharedContinuousBoundaryPage(
-        candidate.layout,
-        boundary.outgoingSectionOccurrenceId,
-        boundary.incomingSectionOccurrenceId,
-      );
-      const targetPage = candidate.layout.pages.find((page) => page.pageIndex === pageIndex);
-      const outgoing = targetPage?.sectionRegions.find((region) =>
-        region.sectionOccurrenceId === boundary.outgoingSectionOccurrenceId);
-      if (!targetPage || !outgoing) {
-        return Object.freeze({
-          fits: false,
-          requiredTargetPt: 0,
-          thresholdsPt: Object.freeze([]),
-        });
-      }
-      const domains = new Set(outgoing.flowDomainIds);
-      const reservePt = candidate.footnoteReserveByPage.get(pageIndex) ?? 0;
-      const thresholdsPt = [
-        ...candidate.allocations
-          .filter((allocation) => domains.has(allocation.flowDomainId))
-          .flatMap((allocation) => [
-            allocation.blockStartPt - outgoing.blockStartPt + reservePt,
-            allocation.blockEndPt - outgoing.blockStartPt + reservePt,
-          ]),
-        ...targetPage.layers.body
-          .filter((node) => domains.has(node.flowDomainId))
-          .flatMap((node) => {
-            if (node.kind === 'paragraph') {
-              return node.lines.map((line) =>
-                line.bounds.yPt + line.advancePt - outgoing.blockStartPt + reservePt);
-            }
-            if (node.kind === 'table') {
-              return node.rows.map((row) =>
-                row.flowBounds.yPt + row.advancePt - outgoing.blockStartPt + reservePt);
-            }
-            return [];
-          }),
-      ].filter((threshold) => threshold >= 0 && threshold <= maximumTargetPt);
-      const occupiedBoundaryPt = candidate.allocations
-        .filter((allocation) => domains.has(allocation.flowDomainId))
-        .reduce((maximum, allocation) => Math.max(
-          maximum,
-          allocation.blockEndPt - outgoing.blockStartPt,
-        ), 0);
-      const requiredTargetPt = occupiedBoundaryPt + reservePt;
-      const fits = shared?.page.pageIndex === pageIndex && requiredTargetPt <= candidatePt;
-      return Object.freeze({
-        fits,
-        requiredTargetPt,
-        thresholdsPt: Object.freeze([...new Set(thresholdsPt)]),
-      });
-    });
+    const targetPt = exactRetainedColumnBalanceTarget(
+      input,
+      pass.allocations,
+      pass.footnoteReserveByPage,
+      baseline.page,
+      baseline.outgoing,
+    );
     const nextPlan = new Map(plan);
     nextPlan.set(boundary.outgoingSectionOccurrenceId, Object.freeze({
       pageIndex,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { bodySectionIndexInput } from '../parser-model.js';
 import {
   createBodySectionIndex,
+  effectivePhysicalSectionGeometry,
   logicalSectionGeometry,
   sectionPageBox,
   sectionBodyInsetPt,
@@ -294,6 +295,40 @@ describe('pre-indexed body section ownership', () => {
 });
 
 describe('section geometry coordinate boundary', () => {
+  const pagePolicy = (
+    overrides: Partial<Parameters<typeof effectivePhysicalSectionGeometry>[0]> = {},
+  ): Parameters<typeof effectivePhysicalSectionGeometry>[0] => ({
+    physicalGeometry: geometry({ pageWidth: 792, pageHeight: 612 }),
+    columns: null,
+    textDirection: 'lrTb',
+    gutterPt: 18,
+    rtlGutter: false,
+    mirrorMargins: false,
+    gutterAtTop: false,
+    bookFoldPrinting: false,
+    bookFoldRevPrinting: false,
+    printTwoOnOne: false,
+    ...overrides,
+  });
+
+  it.each([
+    ['book fold', { bookFoldPrinting: true }, {
+      pageWidth: 396, pageHeight: 612, marginRight: 90, marginTop: 72,
+    }],
+    ['reverse book fold', { bookFoldRevPrinting: true }, {
+      pageWidth: 396, pageHeight: 612, marginRight: 90, marginTop: 72,
+    }],
+    ['two-on-one', { printTwoOnOne: true }, {
+      pageWidth: 792, pageHeight: 306, marginRight: 72, marginTop: 90,
+    }],
+  ] as const)(
+    'applies the authored gutter to the automatic %s imposition edge',
+    (_label, settings, expected) => {
+      expect(effectivePhysicalSectionGeometry(pagePolicy(settings), 0))
+        .toMatchObject(expected);
+    },
+  );
+
   it('round-trips a physical page box through the vertical logical frame', () => {
     const physical = geometry({
       pageWidth: 612,

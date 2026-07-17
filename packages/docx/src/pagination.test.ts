@@ -1968,6 +1968,20 @@ describe('layoutPages — newspaper column balancing (§17.6.4, non-final contin
     expect(colByText).toMatchObject({ p0: 0, p1: 0, p2: 1, p3: 1 });
   });
 
+  it('uses retained row boundaries inside an otherwise unsplit table', () => {
+    const body: BodyElement[] = [
+      fixedTable([30, 20, 20, 20]),
+      sectionBreak('nextPage', twoColSpec, section()),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+
+    const pages = layoutPages(body, section({ sectionStart: 'continuous' }), makeCtx());
+    const fragments = pages[0]!.layers.body.filter((node) => node.kind === 'table');
+
+    expect(fragments.map((fragment) => colOf(fragment) ?? 0)).toEqual([0, 1]);
+    expect(fragments.map((fragment) => fragment.rows.length)).toEqual([2, 2]);
+  });
+
   it('keeps an authored column break as a hard partition constraint', () => {
     const body: BodyElement[] = [
       para({ text: 'p0', fontSize: 20 }),

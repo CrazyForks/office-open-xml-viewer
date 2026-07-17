@@ -1,6 +1,6 @@
 import type { SourceRef } from './types.js';
 
-function sourceKey(source: SourceRef): string {
+export function sourceKey(source: SourceRef): string {
   return `${source.story}:${encodeURIComponent(source.storyInstance)}:${source.path.join('.')}`;
 }
 

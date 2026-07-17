@@ -2139,6 +2139,122 @@ describe('canonical body producer', () => {
     expect(balancedNodes.map((node) => node.flowBounds.xPt)).toEqual([10, 10, 10, 110, 110, 110]);
   });
 
+  it.each([16, 64, 256])(
+    'uses a constant number of full-document passes for %i balance boundaries',
+    (boundaryCount) => {
+      const contentHeightPt = boundaryCount + 20;
+      const balancedSection: SectionLayoutContext = {
+        ...section,
+        geometry: {
+          ...section.geometry,
+          pageHeight: contentHeightPt + 20,
+        },
+        columns: [{ xPt: 10, wPt: 80 }, { xPt: 110, wPt: 80 }],
+      };
+      let openedSessions = 0;
+      const services = Object.freeze({
+        text: { fingerprint: 'text' },
+        images: { fingerprint: 'images' },
+        math: { fingerprint: 'math' },
+      }) as LayoutServices;
+      attachBodyLayoutKernel(services, {
+        openBodyLayoutSession: () => {
+          openedSessions += 1;
+          return {
+            hasPaginationFields: false,
+            measureParagraph: ({ input }) => {
+              const layout = paragraph(`p${input.source.path[0]}`, input.source, 1);
+              return {
+                layout: {
+                  ...layout,
+                  flowBounds: { ...layout.flowBounds, widthPt: 80 },
+                  inkBounds: { ...layout.inkBounds, widthPt: 80 },
+                },
+                blockExtentPt: 1,
+                lineEndBoundaries: [],
+              };
+            },
+            measureTable: () => { throw new Error('unused'); },
+            measureStoryExtent: () => 0,
+            measureFootnoteReserve: () => 0,
+            measureFollowingBlock: () => ({ fullExtentPt: 1, leadContentExtentPt: 1 }),
+            measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+            resetPageAcquisition: () => undefined,
+            moveAcquisitionCursor: () => undefined,
+            flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+            commitFlowRegistryDelta: () => undefined,
+          };
+        },
+      });
+      const owner = (
+        id: string,
+        context: SectionLayoutContext,
+        startType: 'continuous' | 'nextPage',
+      ) => ({
+        sectionOccurrenceId: id,
+        source: source(boundaryCount + 1),
+        startType,
+        context,
+        pageNumbering: { start: null, format: null },
+        titlePage: false,
+        evenAndOddHeaders: false,
+        headers: { default: null, first: null, even: null },
+        footers: { default: null, first: null, even: null },
+        pageBordersAuthored: false,
+        pageBorders: null,
+        pageLayout: {
+          physicalGeometry: context.geometry,
+          columns: context === balancedSection
+            ? { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] }
+            : null,
+          textDirection: 'lrTb' as const,
+          gutterPt: 0,
+          rtlGutter: false,
+          mirrorMargins: false,
+          gutterAtTop: false,
+          bookFoldPrinting: false,
+          bookFoldRevPrinting: false,
+          printTwoOnOne: false,
+        },
+      });
+      const incomingContext: SectionLayoutContext = {
+        ...section,
+        geometry: balancedSection.geometry,
+      };
+      const outgoing = owner('section:balanced', balancedSection, 'nextPage');
+      const incoming = owner('section:final', incomingContext, 'continuous');
+      const blocks = Array.from({ length: boundaryCount }, (_, index) => ({
+        kind: 'body-block' as const,
+        block: {
+          kind: 'paragraph' as const,
+          source: source(index),
+          pageBreakBefore: false,
+          keepLines: false,
+          keepNext: false,
+          widowControl: true,
+          spaceBeforePt: 0,
+          spaceAfterPt: 0,
+          contextualSpacing: false,
+          styleId: null,
+        },
+      }));
+
+      const layout = paginateBody({
+        source: { story: 'body', storyInstance: 'body', path: [] },
+        initialSection: outgoing,
+        sequence: [
+          ...blocks,
+          { kind: 'begin-section' as const, source: source(boundaryCount), section: incoming },
+        ],
+      }, services, { currentDateMs: 0 });
+
+      expect(openedSessions).toBe(2);
+      expect(layout.pages[0]!.layers.body.filter((node) => (
+        node.flowDomainId === layout.pages[0]!.sectionRegions[0]!.flowDomainIds[0]
+      ))).toHaveLength(Math.ceil(boundaryCount / 2));
+    },
+  );
+
   it('commits page-owned anchor exclusions before measuring earlier page content', () => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },

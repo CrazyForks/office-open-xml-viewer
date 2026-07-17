@@ -127,19 +127,37 @@ export function effectivePhysicalSectionGeometry(
   if (!Number.isInteger(pageIndex) || pageIndex < 0) {
     throw new RangeError('Physical page index must be a non-negative integer');
   }
+  let { pageWidth, pageHeight } = policy.physicalGeometry;
   let { marginTop, marginRight, marginBottom, marginLeft } = policy.physicalGeometry;
-  const imposed = policy.bookFoldPrinting
-    || policy.bookFoldRevPrinting
-    || policy.printTwoOnOne;
-  if (!imposed) {
+  const bookFold = policy.bookFoldPrinting || policy.bookFoldRevPrinting;
+  if (bookFold) {
+    pageWidth /= 2;
+    // ECMA-376 §§17.15.1.11/.13 define a half-sheet editing page and automatic
+    // gutter placement. Word places the bisector on the right-margin side
+    // ([MS-OI29500] §§2.1.389/.391), so the authored gutter belongs there.
+    marginRight += policy.gutterPt;
+  } else if (policy.printTwoOnOne) {
+    pageHeight /= 2;
+    // §17.15.1.64 places each editing page on a half-sheet with its top margin
+    // at the bisector; §17.15.1.50 therefore makes that the automatic gutter edge.
+    marginTop += policy.gutterPt;
+  } else {
     if (policy.gutterAtTop && !policy.mirrorMargins) marginTop += policy.gutterPt;
     else if (policy.rtlGutter) marginRight += policy.gutterPt;
     else marginLeft += policy.gutterPt;
   }
-  if (policy.mirrorMargins && pageIndex % 2 === 1) {
+  if (!bookFold && !policy.printTwoOnOne && policy.mirrorMargins && pageIndex % 2 === 1) {
     [marginLeft, marginRight] = [marginRight, marginLeft];
   }
-  return { ...policy.physicalGeometry, marginTop, marginRight, marginBottom, marginLeft };
+  return {
+    ...policy.physicalGeometry,
+    pageWidth,
+    pageHeight,
+    marginTop,
+    marginRight,
+    marginBottom,
+    marginLeft,
+  };
 }
 
 export function resolveSectionContextForPage(
