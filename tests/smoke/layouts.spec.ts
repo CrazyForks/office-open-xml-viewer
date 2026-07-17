@@ -55,6 +55,51 @@ async function waitForLoaded(page: import('@playwright/test').Page, text: RegExp
   );
 }
 
+function captureBrowserErrors(page: import('@playwright/test').Page): string[] {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => {
+    errors.push(`pageerror: ${error.stack ?? error.message}`);
+  });
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(`console.error: ${message.text()}`);
+  });
+  return errors;
+}
+
+async function expectDocxLoaded(
+  page: import('@playwright/test').Page,
+  expectedPages: number,
+  browserErrors: readonly string[],
+): Promise<void> {
+  let status: string;
+  try {
+    const handle = await page.waitForFunction(
+      () => {
+        for (const el of Array.from(document.querySelectorAll('div'))) {
+          const text = (el.textContent ?? '').trim();
+          if (/^(Loaded \d+ pages|Error:)/.test(text)) return text;
+        }
+        return null;
+      },
+      null,
+      { timeout: 25_000 },
+    );
+    status = await handle.jsonValue() as string;
+  } catch (error) {
+    const diagnostics = browserErrors.length > 0
+      ? browserErrors.join('\n')
+      : '<no pageerror or console.error events>';
+    throw new Error(
+      `DOCX story did not reach a terminal status within 25000ms.\nBrowser errors:\n${diagnostics}`,
+      { cause: error },
+    );
+  }
+  const diagnostics = browserErrors.length > 0
+    ? `\nBrowser errors:\n${browserErrors.join('\n')}`
+    : '';
+  expect(status, `DOCX terminal status${diagnostics}`).toBe(`Loaded ${expectedPages} pages`);
+}
+
 async function openStory(page: import('@playwright/test').Page, id: StoryId): Promise<void> {
   const res = await page.goto(`/iframe.html?id=${id}&viewMode=story`);
   expect(res?.status(), `HTTP status for ${id}`).toBeLessThan(400);
@@ -115,8 +160,9 @@ async function countInkedCanvases(page: import('@playwright/test').Page, total: 
 
 test.describe('Layouts smoke — docx', () => {
   test('ScrollView renders every page', async ({ page }) => {
+    const browserErrors = captureBrowserErrors(page);
     await openStory(page, 'docxviewer-examples--scroll-view');
-    await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.docx} pages`));
+    await expectDocxLoaded(page, EXPECTED.docx, browserErrors);
     const count = await page.locator('canvas').count();
     expect(count).toBe(EXPECTED.docx);
     // first page must have ink; majority of pages must render non-blank.
@@ -125,8 +171,9 @@ test.describe('Layouts smoke — docx', () => {
   });
 
   test('ThumbnailGrid renders every page', async ({ page }) => {
+    const browserErrors = captureBrowserErrors(page);
     await openStory(page, 'docxviewer-examples--thumbnail-grid');
-    await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.docx} pages`));
+    await expectDocxLoaded(page, EXPECTED.docx, browserErrors);
     const count = await page.locator('canvas').count();
     expect(count).toBe(EXPECTED.docx);
     expect(await canvasHasInk(page, 0)).toBe(true);
@@ -134,8 +181,9 @@ test.describe('Layouts smoke — docx', () => {
   });
 
   test('MasterDetail renders thumbs + large preview', async ({ page }) => {
+    const browserErrors = captureBrowserErrors(page);
     await openStory(page, 'docxviewer-examples--master-detail');
-    await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.docx} pages`));
+    await expectDocxLoaded(page, EXPECTED.docx, browserErrors);
     const count = await page.locator('canvas').count();
     // N thumbs + 1 detail = N+1 canvases (but trailing page may be blank)
     expect(count).toBe(EXPECTED.docx + 1);

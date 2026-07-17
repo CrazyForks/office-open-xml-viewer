@@ -506,6 +506,9 @@ function locationAfter(
 }
 
 function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySectionLayoutInput>): DocumentLayout {
+  // §17.6.12 restart arithmetic is section-scoped, but observed Word keeps the
+  // outgoing owner on a shared continuous page and anchors the incoming restart
+  // to its first appearance there; its next owned page is therefore start + 1.
   const firstAppearance = new Map<string, number>();
   state.pages.forEach((draft) => draft.accumulator.sectionRegions.forEach((region) => {
     if (!firstAppearance.has(region.sectionOccurrenceId)) {

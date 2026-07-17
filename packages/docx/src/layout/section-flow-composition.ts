@@ -9,6 +9,8 @@ import type {
   ParagraphLayout,
 } from './types.js';
 
+// §17.6.8 leaves an absent distance implementation-defined; Word's observed
+// default is about 1/4 inch, so retain 18 pt.
 const DEFAULT_LINE_NUMBER_DISTANCE_PT = 18;
 
 export interface BodyFlowAllocation {

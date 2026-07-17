@@ -10,7 +10,7 @@ import {
 import { importForTests, loadSkiaForTests } from './test-imports';
 
 /**
- * IX2 findText END-TO-END on the real (committed) demo docx: parse → paginate →
+ * IX2 findText END-TO-END on the real (committed) demo docx: parse → retain →
  * render each page capturing the real `onTextRun` runs → DocxFindController →
  * find a known word → assert its `{ page }` location + reconstructed text, then
  * feed the real match slices to buildDocxHighlightLayer with a REAL skia
@@ -96,8 +96,13 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
         const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => unknown };
-        const { paginateDocument, renderDocumentToCanvas } = rendererMod as {
-          paginateDocument: (doc: unknown) => unknown[][];
+        const { createLayoutServices, layoutDocument, renderDocumentToCanvas } = rendererMod as {
+          createLayoutServices: (doc: unknown) => unknown;
+          layoutDocument: (
+            doc: unknown,
+            services: unknown,
+            options: { currentDateMs: number },
+          ) => { pages: unknown[] };
           renderDocumentToCanvas: (
             doc: unknown,
             canvas: unknown,
@@ -106,16 +111,18 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
           ) => Promise<void>;
         };
         const doc = parseDocx(readFileSync(DEMO));
-        const pages = paginateDocument(doc);
+        const layoutServices = createLayoutServices(doc);
+        const layout = layoutDocument(doc, layoutServices, { currentDateMs: 0 });
         const perPage: Run[][] = [];
-        for (let p = 0; p < pages.length; p++) {
+        for (let p = 0; p < layout.pages.length; p++) {
           const canvas = new Canvas(800, 1000);
           const runs: Run[] = [];
           await renderDocumentToCanvas(doc, canvas, p, {
             width: 800,
             dpr: 1,
-            prebuiltPages: pages,
-            totalPages: pages.length,
+            layoutServices,
+            currentDate: 0,
+            defaultCurrentDateMs: 0,
             onTextRun: (r: Run) => runs.push(r),
           });
           perPage.push(runs);

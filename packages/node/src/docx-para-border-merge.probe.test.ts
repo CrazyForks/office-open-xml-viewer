@@ -33,8 +33,9 @@ import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts'
 import type { NodeCanvasFactory } from './render.ts';
 import type {
   DocxDocumentModel,
-  DocParagraph,
   BodyElement,
+  DocRun,
+  DocxTextRun,
   ParaBorderEdge,
 } from '@silurus/ooxml-docx';
 import { importForTests, loadSkiaForTests } from './test-imports';
@@ -68,6 +69,24 @@ function lum(r: number, g: number, b: number): number {
 
 const SINGLE = (): ParaBorderEdge => ({ style: 'single', color: '000000', width: 1, space: 0 });
 
+function textRun(text: string, fontFamily: string): DocRun {
+  const run: DocxTextRun = {
+    text,
+    fontSize: 11,
+    bold: false,
+    italic: false,
+    underline: false,
+    strikethrough: false,
+    color: null,
+    fontFamily,
+    isLink: false,
+    background: null,
+    vertAlign: null,
+    hyperlink: null,
+  };
+  return { type: 'text', ...run };
+}
+
 /** One code-block line carrying ONLY a black bottom border (like sample-13's
  *  code-style paragraphs). A run of single-character text keeps the line box
  *  tall enough to isolate adjacent rules. */
@@ -83,9 +102,9 @@ function codeLine(text: string): BodyElement {
     lineSpacing: null,
     numbering: null,
     tabStops: [],
-    runs: [{ type: 'text', text, fontSize: 11, bold: false, italic: false, color: null, fontFamily: 'Courier New' }],
+    runs: [textRun(text, 'Courier New')],
     borders: { top: null, bottom: SINGLE(), left: null, right: null, between: null },
-  } as unknown as DocParagraph as unknown as BodyElement;
+  };
 }
 
 function caption(text: string): BodyElement {
@@ -100,10 +119,10 @@ function caption(text: string): BodyElement {
     lineSpacing: null,
     numbering: null,
     tabStops: [],
-    runs: [{ type: 'text', text, fontSize: 11, bold: false, italic: false, color: null, fontFamily: 'Times New Roman' }],
+    runs: [textRun(text, 'Times New Roman')],
     // Caption box differs from the code lines: it has BOTH top and bottom.
     borders: { top: SINGLE(), bottom: SINGLE(), left: null, right: null, between: null },
-  } as unknown as DocParagraph as unknown as BodyElement;
+  };
 }
 
 function plain(text: string): BodyElement {
@@ -118,9 +137,9 @@ function plain(text: string): BodyElement {
     lineSpacing: null,
     numbering: null,
     tabStops: [],
-    runs: text ? [{ type: 'text', text, fontSize: 11, bold: false, italic: false, color: null, fontFamily: 'Times New Roman' }] : [],
+    runs: text ? [textRun(text, 'Times New Roman')] : [],
     borders: null,
-  } as unknown as DocParagraph as unknown as BodyElement;
+  };
 }
 
 function buildDoc(body: BodyElement[]): DocxDocumentModel {
@@ -238,9 +257,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
         lineSpacing: null,
         numbering: null,
         tabStops: [],
-        runs: [{ type: 'text', text: 'boxed', fontSize: 11, bold: false, italic: false, color: null, fontFamily: 'Times New Roman' }],
+        runs: [textRun('boxed', 'Times New Roman')],
         borders: { top: SINGLE(), bottom: SINGLE(), left: SINGLE(), right: SINGLE(), between: null },
-      } as unknown as DocParagraph as unknown as BodyElement;
+      };
       const doc = buildDoc([plain('above'), boxed, plain('below')]);
       const { data, w, h } = await render(doc, 600);
       const rules = findHorizontalRules(data, w, h);

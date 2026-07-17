@@ -266,7 +266,11 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
     const chartBottom = 216;
 
     it('retains one chart command at the exact margin/right paragraph frame', () => {
-      const paragraph = layout.pages[0]?.fragments[0]?.fragment;
+      const paragraph = layout.pages[0]?.layers.body.find((node: Any) =>
+        node.kind === 'paragraph'
+        && node.source.story === 'body'
+        && node.source.storyInstance === 'body'
+        && node.source.path[0] === 0);
       expect(paragraph?.drawings).toHaveLength(1);
       expect(paragraph?.drawings[0]).toMatchObject({
         flowBounds: {

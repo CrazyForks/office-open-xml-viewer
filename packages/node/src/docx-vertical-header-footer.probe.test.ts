@@ -231,7 +231,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       // pages the paint (reserve 0) does not expect. Assert the page count is the
       // same with and without the header/footer, on an asymmetric-margin page.
       const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
-      const { paginateDocument } = rendererMod as Any;
+      const { layoutDocument } = rendererMod as {
+        layoutDocument: (doc: Any) => { pages: readonly unknown[] };
+      };
       const margins =
         'w:top="2880" w:right="720" w:bottom="2880" w:left="720" w:header="360" w:footer="360" w:gutter="0"';
       const withHF = parseDocx(verticalHeaderFooterDocx({ hf: true, paras: 40, pgMar: margins }));
@@ -241,8 +243,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       let withPages = 0;
       let noPages = 0;
       try {
-        withPages = paginateDocument(withHF).length;
-        noPages = paginateDocument(noHF).length;
+        withPages = layoutDocument(withHF).pages.length;
+        noPages = layoutDocument(noHF).pages.length;
       } finally {
         rOff();
         rImg();
