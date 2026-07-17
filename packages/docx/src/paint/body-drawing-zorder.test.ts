@@ -185,7 +185,9 @@ function page(
     }],
     pageBorders: null,
     layers: {
-      paintOrder: body.map((node) => ({ layer: 'body' as const, nodeId: node.id })),
+      paintSequence: body.map((node) => ({
+        layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,
+      })),
       background: [], behindText: [], header: [], body, notes: [], front: [], footer: [],
     },
     readingOrder: body.map((node) => node.id),
@@ -279,10 +281,10 @@ describe('canonical body drawing z-order', () => {
       layers: {
         ...base.layers,
         header: [header], footer: [footer],
-        paintOrder: [
-          { layer: 'header', nodeId: header.id },
-          { layer: 'body', nodeId: body.id },
-          { layer: 'footer', nodeId: footer.id },
+        paintSequence: [
+          { layer: 'header', node: header, coordinateSpace: 'section-logical' },
+          { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+          { layer: 'footer', node: footer, coordinateSpace: 'section-logical' },
         ],
       },
     };
@@ -559,9 +561,9 @@ describe('canonical body drawing z-order', () => {
       layers: {
         ...base.layers,
         front: [front],
-        paintOrder: [
-          { layer: 'front', nodeId: front.id },
-          { layer: 'body', nodeId: body.id },
+        paintSequence: [
+          { layer: 'front', node: front, coordinateSpace: 'section-logical' },
+          { layer: 'body', node: body, coordinateSpace: 'section-logical' },
         ],
       },
     };
@@ -572,7 +574,7 @@ describe('canonical body drawing z-order', () => {
     expect(operations).toEqual(['drawing:front', 'text:BODY']);
   });
 
-  it('rejects a later re-entry into the body run instead of reordering its interval', () => {
+  it('relies on the completed contract while preserving a contiguous body run', () => {
     const firstBody = paragraph('p1', 'FIRST');
     const footer = drawing('footer', 'footer', false, 0, 0);
     const secondBody = paragraph('p2', 'SECOND');
@@ -582,16 +584,17 @@ describe('canonical body drawing z-order', () => {
       layers: {
         ...base.layers,
         footer: [footer],
-        paintOrder: [
-          { layer: 'body', nodeId: firstBody.id },
-          { layer: 'footer', nodeId: footer.id },
-          { layer: 'body', nodeId: secondBody.id },
+        paintSequence: [
+          { layer: 'body', node: firstBody, coordinateSpace: 'section-logical' },
+          { layer: 'body', node: secondBody, coordinateSpace: 'section-logical' },
+          { layer: 'footer', node: footer, coordinateSpace: 'section-logical' },
         ],
       },
     };
-    const { context } = recordingPaintContext();
+    const { context, operations } = recordingPaintContext();
 
-    expect(() => paintLayoutPageContent(layout, context)).toThrow(/contiguous body paint run/i);
+    paintLayoutPageContent(layout, context);
+    expect(operations).toEqual(['text:FIRST', 'text:SECOND', 'drawing:footer']);
   });
 
   it.each(['textbox', 'note'] as const)('fails loudly for unsupported %s page nodes', (kind) => {

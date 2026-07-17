@@ -43,6 +43,21 @@ describe('paintLayoutPage', () => {
       height: 0,
       getContext: () => context,
     } as unknown as HTMLCanvasElement;
+    const node = {
+      kind: 'drawing' as const,
+      id: 'drawing-1',
+      source: { story: 'body' as const, storyInstance: 'body', path: [0] },
+      flowBounds: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
+      inkBounds: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
+      advancePt: 40,
+      ordinaryFlow: true,
+      flowDomainId: 'body',
+      commands: [{
+        kind: 'fill-rect' as const,
+        rect: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
+        fill: '#ff0000',
+      }],
+    };
     const layout: DocumentLayout = {
       pages: [{
         pageIndex: 0,
@@ -63,25 +78,11 @@ describe('paintLayoutPage', () => {
         section: {} as SectionLayoutContext,
         ...canonicalPageMeta({} as SectionLayoutContext),
         layers: {
-          paintOrder: [{ layer: 'body', nodeId: 'drawing-1' }],
+          paintSequence: [{ layer: 'body', node, coordinateSpace: 'section-logical' }],
           background: [],
           behindText: [],
           header: [],
-          body: [{
-            kind: 'drawing',
-            id: 'drawing-1',
-            source: { story: 'body', storyInstance: 'body', path: [0] },
-            flowBounds: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
-            inkBounds: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
-            advancePt: 40,
-            ordinaryFlow: true,
-            flowDomainId: 'body',
-            commands: [{
-              kind: 'fill-rect',
-              rect: { xPt: 10, yPt: 20, widthPt: 30, heightPt: 40 },
-              fill: '#ff0000',
-            }],
-          }],
+          body: [node],
           notes: [],
           front: [],
           footer: [],
@@ -95,7 +96,7 @@ describe('paintLayoutPage', () => {
     expect(fills).toEqual([{ fill: '#ff0000', args: [10, 20, 30, 40] }]);
   });
 
-  it('rejects missing and duplicate paint references instead of dropping content', async () => {
+  it('consumes the completed sequence without dereferencing page layer arrays', async () => {
     const context = {
       save() {}, restore() {}, setTransform() {}, clearRect() {}, fillRect() {},
       fillStyle: '',
@@ -123,22 +124,19 @@ describe('paintLayoutPage', () => {
       section: {} as SectionLayoutContext,
       ...canonicalPageMeta({} as SectionLayoutContext),
       layers: {
-        paintOrder: [{ layer: 'body' as const, nodeId: 'missing' }],
-        background: [], behindText: [], header: [], body: [node], notes: [], front: [], footer: [],
+        paintSequence: [{
+          layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,
+        }],
+        background: [], behindText: [], header: [],
+        get body(): never { throw new Error('paint dereferenced the body layer'); },
+        notes: [], front: [], footer: [],
       },
       readingOrder: [node.id],
     };
-    const missing: DocumentLayout = { pages: [page], diagnostics: [] };
-    await expect(paintLayoutPage(missing, 0, target, { scale: 1, dpr: 1 })).rejects.toThrow(/missing/i);
+    const layout: DocumentLayout = { pages: [page], diagnostics: [] };
 
-    const duplicate: DocumentLayout = {
-      pages: [{ ...page, layers: { ...page.layers, body: [node, node], paintOrder: [
-        { layer: 'body', nodeId: node.id },
-        { layer: 'body', nodeId: node.id },
-      ] } }],
-      diagnostics: [],
-    };
-    await expect(paintLayoutPage(duplicate, 0, target, { scale: 1, dpr: 1 })).rejects.toThrow(/duplicate/i);
+    await expect(paintLayoutPage(layout, 0, target, { scale: 1, dpr: 1 }))
+      .resolves.toBeUndefined();
   });
 
   it('dispatches retained tables through the canonical page painter', async () => {
@@ -190,7 +188,7 @@ describe('paintLayoutPage', () => {
         section: {} as SectionLayoutContext,
         ...canonicalPageMeta({} as SectionLayoutContext),
         layers: {
-          paintOrder: [{ layer: 'body', nodeId: 'table-0' }],
+          paintSequence: [{ layer: 'body', node: table, coordinateSpace: 'section-logical' }],
           background: [], behindText: [], header: [], body: [table], notes: [], front: [], footer: [],
         },
         readingOrder: ['table-0'],

@@ -49,7 +49,7 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
       }],
       pageBorders: null,
       layers: {
-        paintOrder: [{ layer: 'front', nodeId: drawing.id }],
+        paintSequence: [{ layer: 'front', node: drawing, coordinateSpace: 'section-logical' }],
         background: [], behindText: [], header: [], body: [], notes: [],
         front: [drawing], footer: [],
       },

@@ -796,9 +796,9 @@ describe('createLayoutPage', () => {
 
     expect(page.layers.behindText).toEqual([behind]);
     expect(page.layers.body).toEqual([paragraph]);
-    expect(page.layers.paintOrder).toEqual([
-      { layer: 'behindText', nodeId: 'drawing-1' },
-      { layer: 'body', nodeId: 'paragraph-3' },
+    expect(page.layers.paintSequence).toEqual([
+      { layer: 'behindText', node: behind, coordinateSpace: 'section-logical' },
+      { layer: 'body', node: paragraph, coordinateSpace: 'section-logical' },
     ]);
     expect(page.readingOrder).toEqual(['paragraph-3']);
     expect(page.bookmarkStarts).toEqual([{
@@ -1104,7 +1104,7 @@ describe('createLayoutPage', () => {
         ...page,
         bookmarkStarts: [],
         layers: {
-          paintOrder: [], background: [], behindText: [], header: [], body: [],
+          paintSequence: [], background: [], behindText: [], header: [], body: [],
           notes: [], front: [], footer: [],
         },
         readingOrder: [],
@@ -1169,7 +1169,7 @@ describe('createParityBlankLayoutPage', () => {
     expect(page.sectionOccurrenceId).toBe('section:outgoing');
     expect(page.sectionRegions).toEqual([]);
     expect(page.flowDomains).toEqual([]);
-    expect(page.layers.paintOrder).toEqual([]);
+    expect(page.layers.paintSequence).toEqual([]);
     expect(page.readingOrder).toEqual([]);
     expect(page.bookmarkStarts).toEqual([]);
     expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();

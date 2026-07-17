@@ -354,7 +354,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       page.flowDomains.length > 0
       || (page.sectionRegions?.length ?? 0) > 0
       || pageLayerNodes(page).length > 0
-      || page.layers.paintOrder.length > 0
+      || page.layers.paintSequence.length > 0
       || page.readingOrder.length > 0
       || (page.bookmarkStarts?.length ?? 0) > 0
     )) {

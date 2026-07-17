@@ -298,7 +298,6 @@ function paintBoundaryViolations(root) {
   const graph = dependencyGraph(root);
   const paintRoot = resolve(root, PAINT_SOURCE);
   const layoutTypes = resolve(root, LAYOUT_SOURCE, 'types.ts');
-  const pageGraph = resolve(root, LAYOUT_SOURCE, 'page-graph.ts');
   const entries = [...graph.keys()].filter((path) => path.startsWith(`${paintRoot}${sep}`));
   const violations = [];
   const nonLiteral = [];
@@ -338,12 +337,12 @@ function paintBoundaryViolations(root) {
         }
         const chain = [...current.chain, dependency];
         const insidePaint = dependency.startsWith(`${paintRoot}${sep}`);
-        const allowedContract = (edge.typeOnly && dependency === layoutTypes) || dependency === pageGraph;
+        const allowedContract = edge.typeOnly && dependency === layoutTypes;
         if (!insidePaint && !allowedContract) {
           violations.push(chain.map((path) => posixPath(relative(root, path))));
           continue;
         }
-        if ((insidePaint || dependency === pageGraph) && !visited.has(dependency)) {
+        if (insidePaint && !visited.has(dependency)) {
           visited.add(dependency);
           stack.push({ path: dependency, chain });
         }

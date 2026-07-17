@@ -5,7 +5,6 @@ import type {
   PaintNode,
   PaintResourceKind,
 } from '../layout/types.js';
-import { orderedPagePaintEntries } from '../layout/page-graph.js';
 import {
   enqueueDeferredFrontPaint,
   withDeferredFrontPaintSession,
@@ -133,11 +132,7 @@ function applyRegionTransform(
   }
 }
 
-type PagePaintEntry = Readonly<{
-  node: PaintNode;
-  layer: LayoutPage['layers']['paintOrder'][number]['layer'];
-  coordinateSpace: 'section-logical' | 'upright-physical';
-}>;
+type PagePaintEntry = LayoutPage['layers']['paintSequence'][number];
 
 function paintInEntryRegion(
   entry: PagePaintEntry,
@@ -182,11 +177,7 @@ export function paintLayoutPageContent(
   const regionByDomain = new Map(page.sectionRegions.flatMap((region) => (
     region.flowDomainIds.map((domainId) => [domainId, region] as const)
   )));
-  const ordered = orderedPagePaintEntries(page);
-  const entries: readonly PagePaintEntry[] = ordered.map((entry, index) => ({
-    ...entry,
-    layer: page.layers.paintOrder[index]!.layer,
-  }));
+  const entries = page.layers.paintSequence;
   const firstBodyEntry = entries.findIndex((entry) => entry.layer === 'body');
   if (firstBodyEntry === -1) {
     for (const entry of entries) {

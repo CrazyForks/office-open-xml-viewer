@@ -243,7 +243,9 @@ function documentWith(
       }],
       pageBorders: null,
       layers: {
-        paintOrder: nodes.map((node) => ({ layer: 'body' as const, nodeId: node.id })),
+        paintSequence: nodes.map((node) => ({
+          layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,
+        })),
         background: [],
         behindText: [],
         header: [],
@@ -309,9 +311,9 @@ describe('assertDocumentLayout', () => {
         ],
         layers: {
           ...base.pages[0]!.layers,
-          paintOrder: [
-            { layer: 'body', nodeId: body.id },
-            { layer: 'footer', nodeId: footer.id },
+          paintSequence: [
+            { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+            { layer: 'footer', node: footer, coordinateSpace: 'section-logical' },
           ],
           body: [body],
           footer: [footer],
@@ -357,7 +359,14 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!,
-        layers: { ...base.pages[0]!.layers, paintOrder: [{ layer: 'body', nodeId: 'unknown' }] },
+        layers: {
+          ...base.pages[0]!.layers,
+          paintSequence: [{
+            layer: 'body',
+            node: drawing('unknown', rect(72, 100, 200, 30)),
+            coordinateSpace: 'section-logical',
+          }],
+        },
       }],
     };
     expect(() => assertDocumentLayout(badPaint)).toThrow(/INVALID_REFERENCE/);
@@ -382,9 +391,9 @@ describe('assertDocumentLayout', () => {
         ...base.pages[0]!,
         layers: {
           ...base.pages[0]!.layers,
-          paintOrder: [
-            { layer: 'body', nodeId: 'n1' },
-            { layer: 'body', nodeId: 'n1' },
+          paintSequence: [
+            { layer: 'body', node: base.pages[0]!.layers.body[0]!, coordinateSpace: 'section-logical' },
+            { layer: 'body', node: base.pages[0]!.layers.body[0]!, coordinateSpace: 'section-logical' },
           ],
         },
       }],

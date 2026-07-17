@@ -408,19 +408,11 @@ test('paint boundary follows transitive edges and rejects sibling or public pack
   }
 });
 
-test('paint may consume the retained page graph but its dependencies remain audited', () => {
-  const allowed = initializeCanonicalFixture('docx-layout-boundary-page-graph-allowed-');
-  write(allowed, 'packages/docx/src/paint/graph.ts',
-    "import { PAGE_LAYER_IDS } from '../layout/page-graph.js';\nexport const paint = PAGE_LAYER_IDS;\n");
-  assert.equal(runChecker(allowed, '--final').status, 0);
-
-  const rejected = initializeCanonicalFixture('docx-layout-boundary-page-graph-transitive-');
+test('paint cannot import the retained page graph implementation', () => {
+  const rejected = initializeCanonicalFixture('docx-layout-boundary-page-graph-');
   write(rejected, 'packages/docx/src/paint/graph.ts',
     "import { PAGE_LAYER_IDS } from '../layout/page-graph.js';\nexport const paint = PAGE_LAYER_IDS;\n");
-  write(rejected, 'packages/docx/src/layout/page-graph.ts',
-    "import { measure } from '../paragraph-measure.js';\nexport const PAGE_LAYER_IDS = measure;\n");
-  write(rejected, 'packages/docx/src/paragraph-measure.ts', 'export const measure = 1;\n');
-  expectDiagnostic(rejected, 'FORBIDDEN_PAINT_EDGE', 'page graph transitive edge', '--final');
+  expectDiagnostic(rejected, 'FORBIDDEN_PAINT_EDGE', 'page graph edge', '--final');
 });
 
 test('layout-only treatment stays outside paint while layout resource implementations stay forbidden', () => {

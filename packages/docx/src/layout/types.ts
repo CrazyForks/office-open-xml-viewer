@@ -723,14 +723,16 @@ export type PageLayerId =
   | 'front'
   | 'footer';
 
-export interface PagePaintEntry {
+export interface PagePaintSequenceEntry {
   readonly layer: PageLayerId;
-  readonly nodeId: LayoutNodeId;
-  readonly coordinateSpace?: 'section-logical' | 'upright-physical';
+  readonly node: PaintNode;
+  readonly coordinateSpace: 'section-logical' | 'upright-physical';
 }
 
 export interface PageLayers {
-  readonly paintOrder: readonly PagePaintEntry[];
+  /** Completed layout-owned sequence. Paint consumes it without graph lookup,
+   * ordering, or validation. */
+  readonly paintSequence: readonly PagePaintSequenceEntry[];
   readonly background: readonly PaintNode[];
   readonly behindText: readonly PaintNode[];
   readonly header: readonly PaintNode[];

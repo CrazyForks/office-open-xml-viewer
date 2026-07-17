@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { DrawingLayout, LayoutPage, PageLayerId } from './types.js';
-import { orderedPagePaintNodes } from './page-graph.js';
+import {
+  createPageLayers,
+  orderedPagePaintNodes,
+  replacePageLayerNodes,
+} from './page-graph.js';
 
 const bounds = { xPt: 0, yPt: 0, widthPt: 10, heightPt: 10 } as const;
 
@@ -19,7 +23,9 @@ function page(entries: readonly Readonly<{ layer: PageLayerId; node: DrawingLayo
     .map((entry) => entry.node);
   return {
     layers: {
-      paintOrder: entries.map((entry) => ({ layer: entry.layer, nodeId: entry.node.id })),
+      paintSequence: entries.map((entry) => ({
+        ...entry, coordinateSpace: 'section-logical' as const,
+      })),
       background: byLayer('background'),
       behindText: byLayer('behindText'),
       header: byLayer('header'),
@@ -32,6 +38,19 @@ function page(entries: readonly Readonly<{ layer: PageLayerId; node: DrawingLayo
 }
 
 describe('orderedPagePaintNodes body run', () => {
+  it('creates a frozen completed sequence with a concrete default coordinate space', () => {
+    const body = drawing('body');
+    const layers = createPageLayers([{ layer: 'body', node: body }]);
+
+    expect(layers.paintSequence).toEqual([
+      { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+    ]);
+    expect(layers.paintSequence[0]!.node).toBe(layers.body[0]);
+    expect(Object.isFrozen(layers)).toBe(true);
+    expect(Object.isFrozen(layers.paintSequence)).toBe(true);
+    expect(Object.isFrozen(layers.paintSequence[0])).toBe(true);
+  });
+
   it('preserves arbitrary non-body order around one body run', () => {
     const front = drawing('front');
     const body = drawing('body');
@@ -52,5 +71,35 @@ describe('orderedPagePaintNodes body run', () => {
       { layer: 'footer', node: footer },
       { layer: 'body', node: second },
     ]))).toThrow(/contiguous body paint run/i);
+  });
+
+  it('rejects a sequence node that only shares the retained node ID', () => {
+    const retained = drawing('body');
+    const stale = drawing('body');
+    const layout = page([{ layer: 'body', node: retained }]);
+    const invalid = {
+      ...layout,
+      layers: {
+        ...layout.layers,
+        paintSequence: [{
+          layer: 'body' as const, node: stale, coordinateSpace: 'section-logical' as const,
+        }],
+      },
+    };
+
+    expect(() => orderedPagePaintNodes(invalid)).toThrow(/not the retained body node/i);
+  });
+
+  it('rejects duplicate and missing replacement identities', () => {
+    const first = drawing('first');
+    const second = drawing('second');
+    const layers = createPageLayers([
+      { layer: 'body', node: first },
+      { layer: 'body', node: second },
+    ]);
+
+    expect(() => replacePageLayerNodes(layers, 'body', [first, first])).toThrow(/unique/i);
+    expect(() => replacePageLayerNodes(layers, 'body', [first, drawing('other')]))
+      .toThrow(/missing replacement/i);
   });
 });

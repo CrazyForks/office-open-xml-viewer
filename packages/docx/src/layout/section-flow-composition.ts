@@ -1,4 +1,5 @@
 import { translateBodyOccurrence } from './occurrence-projection.js';
+import { replacePageLayerNodes } from './page-graph.js';
 import type { BodyLayoutSession } from './body-layout-kernel.js';
 import type {
   DocumentLayout,
@@ -141,7 +142,7 @@ export function composeCanonicalSectionFlow(
     }
     return Object.freeze({
       ...page,
-      layers: Object.freeze({ ...page.layers, body: Object.freeze(body) }),
+      layers: replacePageLayerNodes(page.layers, 'body', body),
     });
   });
   return Object.freeze({ ...layout, pages: Object.freeze(pages) });

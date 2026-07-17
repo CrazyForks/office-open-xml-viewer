@@ -36,6 +36,11 @@ export interface FontInventoryFace {
   readonly style?: FontStyle;
 }
 
+export interface FontResolverOptions {
+  /** Stable DOCX fallback routes derived from document metadata and rendered faces. */
+  readonly nativeFamilyLists?: Readonly<Record<string, string>>;
+}
+
 function normalizeFamily(value: string): string {
   return value.trim().toLocaleLowerCase('en-US');
 }
@@ -63,7 +68,10 @@ function cssFamilyList(family: string, generic: FontResolution['genericFamily'])
  * generic result is carried as an explicit diagnostic instead of being hidden
  * in paragraph geometry.
  */
-export function createFontResolver(inventory: readonly FontInventoryFace[]): FontResolver {
+export function createFontResolver(
+  inventory: readonly FontInventoryFace[],
+  options: Readonly<FontResolverOptions> = {},
+): FontResolver {
   const sourcePriority: Readonly<Record<FontInventoryFace['source'], number>> = {
     embedded: 0,
     local: 1,
@@ -89,7 +97,13 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
     const key = normalizeFamily(face.requestedFamily);
     byFamily.set(key, [...(byFamily.get(key) ?? []), face]);
   }
-  const fingerprint = stableFingerprint('fonts', faces);
+  const nativeFamilyLists = Object.freeze(Object.fromEntries(
+    Object.entries(options.nativeFamilyLists ?? {})
+      .filter(([family, familyList]) => family.trim() && familyList.trim())
+      .map(([family, familyList]) => [normalizeFamily(family), familyList] as const)
+      .sort(([a], [b]) => a.localeCompare(b)),
+  ));
+  const fingerprint = stableFingerprint('fonts', { faces, nativeFamilyLists });
 
   return Object.freeze({
     fingerprint,
@@ -123,7 +137,8 @@ export function createFontResolver(inventory: readonly FontInventoryFace[]): Fon
       const generic = request.genericFamily ?? 'sans-serif';
       const authored = request.requestedFamily?.trim();
       if (authored) {
-        const familyList = cssFamilyList(authored, generic);
+        const familyList = nativeFamilyLists[normalizeFamily(authored)]
+          ?? cssFamilyList(authored, generic);
         return freezeResolution({
           requestedFamily,
           resolvedFamily: authored,

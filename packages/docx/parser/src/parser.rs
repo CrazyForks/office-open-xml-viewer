@@ -1109,9 +1109,7 @@ fn parse_even_and_odd_headers(settings_xml: &str) -> bool {
     bool_prop(doc.root_element(), "evenAndOddHeaders").unwrap_or(false)
 }
 
-fn parse_page_layout_settings(
-    settings_xml: &str,
-) -> Option<crate::types::PageLayoutSettingsWire> {
+fn parse_page_layout_settings(settings_xml: &str) -> Option<crate::types::PageLayoutSettingsWire> {
     let doc = parse_guarded(settings_xml).ok()?;
     let root = doc.root_element();
     let authored = |name: &str| {
@@ -2248,14 +2246,30 @@ fn section_page_geometry_wire(sect_pr: roxmltree::Node) -> Option<SectionPageGeo
         return None;
     }
     Some(SectionPageGeometryWire {
-        page_width: page_size.and_then(|node| attr_w(node, "w")).map(|value| twips_to_pt(&value)),
-        page_height: page_size.and_then(|node| attr_w(node, "h")).map(|value| twips_to_pt(&value)),
-        margin_top: margins.and_then(|node| attr_w(node, "top")).map(|value| twips_to_pt(&value)),
-        margin_right: margins.and_then(|node| attr_w(node, "right")).map(|value| twips_to_pt(&value)),
-        margin_bottom: margins.and_then(|node| attr_w(node, "bottom")).map(|value| twips_to_pt(&value)),
-        margin_left: margins.and_then(|node| attr_w(node, "left")).map(|value| twips_to_pt(&value)),
-        header_distance: margins.and_then(|node| attr_w(node, "header")).map(|value| twips_to_pt(&value)),
-        footer_distance: margins.and_then(|node| attr_w(node, "footer")).map(|value| twips_to_pt(&value)),
+        page_width: page_size
+            .and_then(|node| attr_w(node, "w"))
+            .map(|value| twips_to_pt(&value)),
+        page_height: page_size
+            .and_then(|node| attr_w(node, "h"))
+            .map(|value| twips_to_pt(&value)),
+        margin_top: margins
+            .and_then(|node| attr_w(node, "top"))
+            .map(|value| twips_to_pt(&value)),
+        margin_right: margins
+            .and_then(|node| attr_w(node, "right"))
+            .map(|value| twips_to_pt(&value)),
+        margin_bottom: margins
+            .and_then(|node| attr_w(node, "bottom"))
+            .map(|value| twips_to_pt(&value)),
+        margin_left: margins
+            .and_then(|node| attr_w(node, "left"))
+            .map(|value| twips_to_pt(&value)),
+        header_distance: margins
+            .and_then(|node| attr_w(node, "header"))
+            .map(|value| twips_to_pt(&value)),
+        footer_distance: margins
+            .and_then(|node| attr_w(node, "footer"))
+            .map(|value| twips_to_pt(&value)),
     })
 }
 
@@ -17450,8 +17464,11 @@ mod column_tests {
         let body = body_from(
             r#"<w:p><w:pPr><w:sectPr><w:type w:val="nextColumn"/></w:sectPr></w:pPr></w:p>"#,
         );
-        match body.iter().find(|element| matches!(element, BodyElement::SectionBreak { .. }))
-            .expect("section break") {
+        match body
+            .iter()
+            .find(|element| matches!(element, BodyElement::SectionBreak { .. }))
+            .expect("section break")
+        {
             BodyElement::SectionBreak { kind, .. } => assert_eq!(kind, "nextColumn"),
             other => panic!("expected SectionBreak, got {other:?}"),
         }
@@ -17486,9 +17503,8 @@ mod column_tests {
 
     #[test]
     fn section_rtl_gutter_retains_explicit_off() {
-        let body = body_from(
-            r#"<w:p><w:pPr><w:sectPr><w:rtlGutter w:val="0"/></w:sectPr></w:pPr></w:p>"#,
-        );
+        let body =
+            body_from(r#"<w:p><w:pPr><w:sectPr><w:rtlGutter w:val="0"/></w:sectPr></w:pPr></w:p>"#);
         let wire = serde_json::to_value(&body[1]).expect("section break serializes");
         assert_eq!(wire["__sectionPlacement"]["rtlGutter"], false);
     }

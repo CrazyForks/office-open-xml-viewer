@@ -7,7 +7,7 @@ import {
   writingModeFromTextDirection,
   type PhysicalPageExtent,
 } from './coordinate-space.js';
-import { PAGE_LAYER_IDS, type PageLayerNode } from './page-graph.js';
+import { createPageLayers, type PageLayerNode } from './page-graph.js';
 import type { BodyOccurrenceDestination } from './occurrence-projection.js';
 import type {
   DeepReadonly,
@@ -15,7 +15,6 @@ import type {
   LayoutPage,
   LayoutRect,
   PageBookmarkStart,
-  PageLayers,
   PageNumberMetadata,
   PageSectionRegion,
   PaintNode,
@@ -312,25 +311,6 @@ export function bodyOccurrenceDestinationFor(
   };
 }
 
-function buildLayers(entries: readonly PageLayerNode[]): PageLayers {
-  const nodes = new Map(PAGE_LAYER_IDS.map((layer) => [layer, [] as PaintNode[]]));
-  for (const entry of entries) nodes.get(entry.layer)!.push(entry.node);
-  return {
-    paintOrder: entries.map(({ layer, node, coordinateSpace }) => ({
-      layer,
-      nodeId: node.id,
-      ...(coordinateSpace ? { coordinateSpace } : {}),
-    })),
-    background: nodes.get('background')!,
-    behindText: nodes.get('behindText')!,
-    header: nodes.get('header')!,
-    body: nodes.get('body')!,
-    notes: nodes.get('notes')!,
-    front: nodes.get('front')!,
-    footer: nodes.get('footer')!,
-  };
-}
-
 function visitBookmarkParagraphs(
   node: PaintNode,
   visit: (paragraph: ParagraphLayout) => void,
@@ -427,7 +407,7 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
     pageNumber: input.pageNumber,
     sectionRegions: regions,
     pageBorders: firstRegion?.pageBorders ?? input.pageBorders ?? null,
-    layers: buildLayers(input.paint),
+    layers: createPageLayers(input.paint),
     readingOrder: input.readingOrder.map((node) => node.id),
   };
 }
@@ -493,7 +473,7 @@ export function createParityBlankLayoutPage(
     pageNumber: input.pageNumber,
     sectionRegions: [],
     pageBorders: input.pageBorders ?? null,
-    layers: buildLayers([]),
+    layers: createPageLayers([]),
     readingOrder: [],
   };
 }

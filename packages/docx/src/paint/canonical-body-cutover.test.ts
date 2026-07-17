@@ -23,7 +23,7 @@ describe('retained canonical body paint', () => {
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
       sectionRegions: [],
       pageBorders: null,
-      layers: { paintOrder: [], background: [], behindText: [], header: [], body: [], notes: [], front: [], footer: [] },
+      layers: { paintSequence: [], background: [], behindText: [], header: [], body: [], notes: [], front: [], footer: [] },
       readingOrder: [],
     } satisfies LayoutPage;
 

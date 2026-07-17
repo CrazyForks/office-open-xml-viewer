@@ -13,9 +13,7 @@ rule:
         - kind: import_statement
         - regex: "from\\s+['\"]\\.\\./layout/"
         - not:
-            any:
-              - regex: "^import\\s+type\\b[\\s\\S]*from\\s+['\"]\\.\\./layout/types(?:\\.js)?['\"]\\s*;?$"
-              - regex: "^import\\s*\\{\\s*orderedPagePaintNodes\\s*\\}\\s*from\\s*['\"]\\.\\./layout/page-graph(?:\\.js)?['\"]\\s*;?$"
+            regex: "^import\\s+type\\b[\\s\\S]*from\\s+['\"]\\.\\./layout/types(?:\\.js)?['\"]\\s*;?$"
     - all:
         - kind: import_statement
         - regex: "from\\s+['\"]\\.\\./(types|renderer|layout-context|line-layout|paragraph-measure|table-geometry|table-fragments|layout-fragments)(\\.js)?['\"]"

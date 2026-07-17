@@ -1,6 +1,7 @@
 import type { SectionLayoutContext } from '../layout-context.js';
 import type { TextLayoutService } from './text.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
+import { createPageLayers } from './page-graph.js';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -211,10 +212,7 @@ export function layoutParseErrorPage(
         flowDomainIds: ['parse-error'],
         section,
       }],
-      layers: {
-        paintOrder: [{ layer: 'body', nodeId: node.id }],
-        background: [], behindText: [], header: [], body: [node], notes: [], front: [], footer: [],
-      },
+      layers: createPageLayers([{ layer: 'body', node }]),
       readingOrder: [node.id],
     }],
     diagnostics: [{

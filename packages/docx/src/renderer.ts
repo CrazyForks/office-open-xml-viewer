@@ -3,6 +3,7 @@ import type {
   DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeFill, TextPath, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, DocNote, NumberingInfo, ColumnGeom, ColumnsSpec, FramePr, TblpPr, DocSettings,
 } from './types';
+import { docxRenderedFontFamilies } from './document-content.js';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import { textRunPaintInfo } from './paint/text-run-info.js';
 import {
@@ -292,6 +293,7 @@ import {
   isGridLineRule,
   layoutLines,
   lineBoxHeight,
+  normalizeFontFamilyUncached,
   paragraphMarkLineHeight,
   paragraphSegsStateSensitive,
   rescaleLayoutLines,
@@ -553,17 +555,30 @@ export function createLayoutServices(
     : typeof document !== 'undefined'
       ? document.createElement('canvas').getContext('2d')
       : null);
+  const routedFontFamilies = [...new Set([
+    ...Object.keys(doc.fontFamilyClasses ?? {}),
+    ...Object.keys(doc.fontFamilyPitches ?? {}),
+    ...docxRenderedFontFamilies(doc),
+    ...(doc.majorFont ? [doc.majorFont] : []),
+    ...(doc.minorFont ? [doc.minorFont] : []),
+  ])];
   const textBase = createTextLayoutService({
-    fonts: createFontResolver(inventory),
+    fonts: createFontResolver(inventory, {
+      nativeFamilyLists: Object.fromEntries(
+        routedFontFamilies.map((family) => [
+          family,
+          normalizeFontFamilyUncached(
+            family,
+            doc.fontFamilyClasses ?? {},
+            doc.fontFamilyPitches ?? {},
+          ),
+        ]),
+      ),
+    }),
     localMetrics,
     eastAsiaFontCharsets: fontFamilyCharsets,
     genericFamilies: Object.fromEntries(
-      [...new Set([
-        ...Object.keys(doc.fontFamilyClasses ?? {}),
-        ...Object.keys(doc.fontFamilyPitches ?? {}),
-        ...(doc.majorFont ? [doc.majorFont] : []),
-        ...(doc.minorFont ? [doc.minorFont] : []),
-      ])].map((family) => [
+      routedFontFamilies.map((family) => [
         family,
         classifyDocxFontGeneric(family, doc.fontFamilyClasses, doc.fontFamilyPitches),
       ]),
