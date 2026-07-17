@@ -293,6 +293,19 @@ test('coordinate-space and page-factory accept only their explicit dependencies'
   }
 });
 
+test('page-factory may retain section decoration geometry through its dedicated layout helper', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-page-decoration-');
+  write(root, 'packages/docx/src/layout/column-separators.ts',
+    'export const columnSeparatorSegments = () => [];\n');
+  write(root, 'packages/docx/src/layout/page-factory.ts',
+    "import { coordinate } from './coordinate-space.js';\n"
+      + "import { columnSeparatorSegments } from './column-separators.js';\n"
+      + "import { PAGE_LAYER_IDS } from './page-graph.js';\n"
+      + 'export const pageFactory = [coordinate, columnSeparatorSegments, PAGE_LAYER_IDS] satisfies unknown;\n');
+
+  assert.equal(runChecker(root, '--final').status, 0);
+});
+
 test('occurrence projection accepts only translation and plain-data runtime dependencies', () => {
   for (const [name, path, source] of [
     ['external layout', 'occurrence-projection.ts', "import { value } from '../paragraph-measure.js';\nexport const project = value;\n"],

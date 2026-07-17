@@ -5,9 +5,9 @@ import type { ParagraphFragmentCursor } from './paragraph-pagination.js';
 import type { TableFragmentCursor } from './table-pagination.js';
 import type { BodyAdjacentTableGroupInput } from './body-layout-input.js';
 import type {
+  BodyFlowRegistryDeltaPt,
+  BodyFlowRegistrySnapshotPt,
   DeepReadonly,
-  FloatRegistryDeltaPt,
-  FloatRegistrySnapshotPt,
   LayoutRect,
   LayoutServices,
   ParagraphLayout,
@@ -70,7 +70,7 @@ export interface AcquiredParagraphBlock {
   readonly lineEndBoundaries: readonly LineBoundary[];
   readonly uniformRubyAdvancePt?: number;
   readonly markBelowBaselinePt?: number;
-  readonly floatRegistryDelta?: FloatRegistryDeltaPt;
+  readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;
   readonly placement?: Readonly<{
     coordinateSpace: 'logical-body';
     xPt: number;
@@ -84,7 +84,7 @@ export interface AcquiredTableBlock {
   readonly layout: TableLayout;
   readonly blockExtentPt: number;
   readonly nextCursor?: BodyTableContinuationCursor | null;
-  readonly floatRegistryDelta?: FloatRegistryDeltaPt;
+  readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;
   readonly requiresFreshFlowRegion?: boolean;
   readonly retryAtBlockStartPt?: number;
   readonly placement?: Readonly<{
@@ -143,12 +143,12 @@ export interface BodyLayoutSession {
   measureStoryExtent(request: StoryExtentMeasurementInput): number;
   measureFootnoteReserve(request: FootnoteReserveMeasurementInput): number;
   measureFollowingBlock(request: FollowingBodyBlockMeasurementInput): FollowingBodyBlockMeasurement;
-  prescanPageAnchors?(request: PageAnchorPrescanInput): FloatRegistryDeltaPt | null;
+  prescanPageAnchors?(request: PageAnchorPrescanInput): BodyFlowRegistryDeltaPt | null;
   measureLineNumberGlyph(text: string): LineNumberGlyphMetrics;
   resetPageAcquisition(location: BodyAcquisitionLocation): void;
   moveAcquisitionCursor(location: BodyAcquisitionLocation): void;
-  floatRegistrySnapshot(): FloatRegistrySnapshotPt;
-  commitFloatRegistryDelta(delta: FloatRegistryDeltaPt): void;
+  flowRegistrySnapshot(): BodyFlowRegistrySnapshotPt;
+  commitFlowRegistryDelta(delta: BodyFlowRegistryDeltaPt): void;
 }
 
 /** Document-private acquisition adapter. Page construction and transition

@@ -653,7 +653,15 @@ describe('projectBodyOccurrence', () => {
       insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
     };
     const retained = {
-      ...paragraph(), anchorFrames: [anchorFrame], textBoxes: [verticalBox],
+      ...paragraph(),
+      anchorFrames: [anchorFrame],
+      anchorCollisions: [{
+        occurrenceId: anchorFrame.occurrenceId,
+        bounds: rect(4, 5),
+        horizontalOwnership: 'host' as const,
+        verticalOwnership: 'host' as const,
+      }],
+      textBoxes: [verticalBox],
       lineNumbers: [{ lineIndex: 0, counterValue: 12, bounds: rect(0, 2),
         paintOps: [{ kind: 'text' as const, text: '12', origin: { xPt: 0, yPt: 10 },
           font: '10pt serif', color: '#000000', textAlign: 'right' as const }] }],
@@ -665,6 +673,12 @@ describe('projectBodyOccurrence', () => {
       occurrenceId: 'page 2/header/anchor/frame-occurrence',
       axes: { horizontal: { resolvedOriginPt: 24 }, vertical: { resolvedOriginPt: 35 } },
       geometry: { objectFrame: { xPt: 24, yPt: 35 } },
+    });
+    expect(projected.anchorCollisions![0]).toEqual({
+      occurrenceId: 'page 2/header/anchor/frame-occurrence',
+      bounds: rect(24, 35),
+      horizontalOwnership: 'host',
+      verticalOwnership: 'host',
     });
     expect(projected.lineNumbers![0]).toMatchObject({ bounds: { xPt: 20, yPt: 32 },
       paintOps: [{ origin: { xPt: 20, yPt: 40 } }] });

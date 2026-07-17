@@ -114,7 +114,8 @@ function parserAnchor(
     widthPt?: number;
     heightPt?: number;
     verticalRelativeFrom?: 'margin' | 'paragraph';
-    wrap?: 'square' | 'topAndBottom';
+    wrap?: 'square' | 'topAndBottom' | 'none';
+    allowOverlap?: boolean;
   }> = {},
 ): AnchorAcquisitionInput {
   const wrap = overrides.wrap ?? 'square';
@@ -143,7 +144,9 @@ function parserAnchor(
     relativeSize: { horizontal: null, vertical: null },
     wrap: {
       kind: wrap,
-      authoredKinds: [wrap === 'square' ? 'wrapSquare' : 'wrapTopAndBottom'],
+      authoredKinds: [wrap === 'square'
+        ? 'wrapSquare'
+        : wrap === 'topAndBottom' ? 'wrapTopAndBottom' : 'wrapNone'],
       side: wrap === 'square' ? 'bothSides' : null,
       distances: missingAnchorEdges(), effectExtent: null, polygon: null,
     },
@@ -151,7 +154,7 @@ function parserAnchor(
       behindDoc: false, behindDocStatus: 'valid',
       relativeHeight: 1, relativeHeightStatus: 'valid',
       locked: false, lockedStatus: 'valid',
-      allowOverlap: true, allowOverlapStatus: 'valid',
+      allowOverlap: overrides.allowOverlap ?? true, allowOverlapStatus: 'valid',
       layoutInCell: true, layoutInCellStatus: 'valid',
     },
     group: null,
@@ -410,9 +413,122 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
     ]);
     expect(new Set(canonical.map((exclusion) => exclusion.anchorOccurrenceId)).size).toBe(2);
   });
+
+  it('does not let a future prescanned text float displace an earlier object', () => {
+    const earlier = parserAnchor('earlier-object', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 60,
+      verticalRelativeFrom: 'paragraph', wrap: 'none', allowOverlap: false,
+    });
+    const future = parserAnchor('future-wrapped-object', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 60,
+      wrap: 'square',
+    });
+    const text = 'あ'.repeat(32);
+    const baseline = canonicalLayout([
+      paraWith([...parserAnchoredImage(earlier), textRun(text, 20)]),
+    ]);
+    const withFuture = canonicalLayout([
+      paraWith([...parserAnchoredImage(earlier), textRun(text, 20)]),
+      paraWith(parserAnchoredImage(future)),
+    ]);
+    const baselineEarlier = sourceParagraphs(baseline, 0)[0]!;
+    const prescannedEarlier = sourceParagraphs(withFuture, 0)[0]!;
+
+    expect(prescannedEarlier.drawings[0]?.flowBounds)
+      .toEqual(baselineEarlier.drawings[0]?.flowBounds);
+    expect(prescannedEarlier.lines.length).toBeGreaterThan(baselineEarlier.lines.length);
+    expect(prescannedEarlier.exclusions).toEqual([
+      expect.objectContaining({
+        anchorOccurrenceId: expect.stringContaining('future-wrapped-object'),
+      }),
+    ]);
+  });
+
+  it('starts page-owned object collision authority only after source acceptance', () => {
+    const future = parserAnchor('accepted-page-object', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 100,
+      wrap: 'square',
+    });
+    const later = parserAnchor('later-object', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 20,
+      verticalRelativeFrom: 'paragraph', wrap: 'none', allowOverlap: false,
+    });
+    const layout = canonicalLayout([
+      para({ text: '前', fontSize: 20 }),
+      paraWith(parserAnchoredImage(future)),
+      paraWith(parserAnchoredImage(later)),
+    ]);
+    const blocker = sourceParagraphs(layout, 1)
+      .flatMap((paragraph) => paragraph.drawings)
+      .find((drawing) => drawing.anchorLayer?.occurrenceId.endsWith('accepted-page-object'));
+    const moving = sourceParagraphs(layout, 2)
+      .flatMap((paragraph) => paragraph.drawings)
+      .find((drawing) => drawing.anchorLayer?.occurrenceId.endsWith('later-object'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.flowBounds.yPt).toBe(
+      blocker!.flowBounds.yPt + blocker!.flowBounds.heightPt,
+    );
+  });
 });
 
 describe('canonical paragraph-owned anchor registry (§20.4.2.3/.20 + §20.4.3.5)', () => {
+  it('clears accepted object collisions at a physical page transition', () => {
+    const firstPage = parserAnchor('first-page-wrap-none', {
+      xPt: 0, yPt: 0, widthPt: 80, heightPt: 60,
+      verticalRelativeFrom: 'paragraph', wrap: 'none',
+    });
+    const secondPage = parserAnchor('second-page-moving', {
+      xPt: 0, yPt: 0, widthPt: 80, heightPt: 40,
+      verticalRelativeFrom: 'paragraph', wrap: 'none', allowOverlap: false,
+    });
+    const baseline = canonicalLayout([
+      paraWith(parserAnchoredImage(secondPage)),
+    ]);
+    const paginated = canonicalLayout([
+      paraWith(parserAnchoredImage(firstPage)),
+      { type: 'pageBreak' } as BodyElement,
+      paraWith(parserAnchoredImage(secondPage)),
+    ]);
+    const baselineBounds = sourceParagraphs(baseline, 0)[0]!.drawings[0]!.flowBounds;
+    const secondPageBounds = sourceParagraphs(paginated, 2)[0]!.drawings[0]!.flowBounds;
+
+    expect(secondPageBounds.xPt).toBe(baselineBounds.xPt);
+    expect(secondPageBounds.yPt).toBe(baselineBounds.yPt);
+  });
+
+  it('paginates parser-owned square-anchor text from the final reflowed line boundaries', () => {
+    const occurrenceId = 'same-paragraph-square-pagination';
+    const square = parserAnchor(occurrenceId, {
+      xPt: 100, yPt: 0, widthPt: 40, heightPt: 60,
+      verticalRelativeFrom: 'paragraph', wrap: 'square',
+    });
+    const none = parserAnchor(occurrenceId, {
+      xPt: 100, yPt: 0, widthPt: 40, heightPt: 60,
+      verticalRelativeFrom: 'paragraph', wrap: 'none',
+    });
+    const text = 'あ'.repeat(80);
+    const acquire = (anchor: AnchorAcquisitionInput) => canonicalLayout([
+      paraWith([...parserAnchoredImage(anchor), textRun(text, 20)]),
+    ]);
+
+    const wrappedLayout = acquire(square);
+    const noneLayout = acquire(none);
+    const wrapped = sourceParagraphs(wrappedLayout, 0);
+    const unwrapped = sourceParagraphs(noneLayout, 0);
+
+    expect(wrapped.flatMap((paragraph) => paragraph.lines).length)
+      .toBeGreaterThan(unwrapped.flatMap((paragraph) => paragraph.lines).length);
+    expect(retainedText(wrapped)).toBe(text);
+    expect(wrapped.flatMap((paragraph) => paragraph.drawings)).toHaveLength(1);
+    expect(wrapped.flatMap((paragraph) => paragraph.exclusions)).toHaveLength(1);
+    expect(wrapped.every((paragraph, index) => index === 0
+      ? paragraph.continuation?.continuesFromPrevious !== true
+      : paragraph.continuation?.continuesFromPrevious === true)).toBe(true);
+    expect(wrapped.length).toBeGreaterThan(1);
+  });
+
   it('commits a parser-owned topAndBottom exclusion for following paragraphs', () => {
     const paragraphOwned = parserAnchor('paragraph-owned-top-bottom', {
       xPt: 0,
@@ -472,6 +588,76 @@ describe('canonical paragraph-owned anchor registry (§20.4.2.3/.20 + §20.4.3.5
     expect(carriesOccurrenceExclusion(anchored[1]!)).toBe(true);
     expect(following).toHaveLength(2);
     expect(layout.pages).toHaveLength(3);
+  });
+
+  it('measures an anchored keepNext successor through the same reflow acquisition', () => {
+    const paragraphOwned = parserAnchor('keep-next-successor-square', {
+      xPt: 0,
+      yPt: 0,
+      widthPt: 160,
+      heightPt: 60,
+      verticalRelativeFrom: 'paragraph',
+      wrap: 'topAndBottom',
+    });
+    const kept = {
+      ...para({ text: 'keep', fontSize: 20 }),
+      keepNext: true,
+    } as BodyElement;
+    const anchoredSuccessor = {
+      ...paraWith([
+        ...parserAnchoredImage(paragraphOwned),
+        textRun('後'.repeat(8), 20),
+      ]),
+      keepNext: true,
+    } as BodyElement;
+    const layout = canonicalLayout([
+      para({ text: '前'.repeat(40), fontSize: 20 }),
+      kept,
+      anchoredSuccessor,
+      para({ text: '終', fontSize: 20 }),
+    ]);
+    const sourcePages = (bodyIndex: number) => layout.pages.flatMap((page, pageIndex) =>
+      page.layers.body.some((node) => node.kind === 'paragraph'
+        && node.source.story === 'body'
+        && node.source.path[0] === bodyIndex)
+        ? [pageIndex]
+        : []);
+
+    expect(sourcePages(1)).toEqual([1]);
+    expect(sourcePages(2)).toEqual([1]);
+    expect(sourcePages(3)).toEqual([1]);
+  });
+
+  it('includes anchor displacement in the terminal successor lead extent', () => {
+    const paragraphOwned = parserAnchor('keep-next-terminal-top-bottom', {
+      xPt: 0,
+      yPt: 0,
+      widthPt: 160,
+      heightPt: 60,
+      verticalRelativeFrom: 'paragraph',
+      wrap: 'topAndBottom',
+    });
+    const kept = {
+      ...para({ text: 'keep', fontSize: 20 }),
+      keepNext: true,
+    } as BodyElement;
+    const layout = canonicalLayout([
+      para({ text: '前'.repeat(40), fontSize: 20 }),
+      kept,
+      paraWith([
+        ...parserAnchoredImage(paragraphOwned),
+        textRun('後'.repeat(8), 20),
+      ]),
+    ]);
+    const sourcePages = (bodyIndex: number) => layout.pages.flatMap((page, pageIndex) =>
+      page.layers.body.some((node) => node.kind === 'paragraph'
+        && node.source.story === 'body'
+        && node.source.path[0] === bodyIndex)
+        ? [pageIndex]
+        : []);
+
+    expect(sourcePages(1)).toEqual([1]);
+    expect(sourcePages(2)).toEqual([1]);
   });
 
 });

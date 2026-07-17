@@ -434,6 +434,9 @@ function assertCoordinateSpaceRuntimeDependencies(root) {
 
   const runtimeTargets = new Set([
     resolve(root, LAYOUT_SOURCE, 'coordinate-space.ts'),
+    // Page finalization owns retained section decoration geometry so paint
+    // cannot reconstruct section bands from layout policy.
+    resolve(root, LAYOUT_SOURCE, 'column-separators.ts'),
     resolve(root, LAYOUT_SOURCE, 'page-graph.ts'),
   ]);
   for (const edge of moduleEdges(pageFactory)) {

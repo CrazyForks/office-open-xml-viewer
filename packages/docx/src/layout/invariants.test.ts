@@ -9,6 +9,7 @@ import type {
   FlowDomain,
   LayoutRect,
   LayoutServices,
+  ParagraphLayout,
   PaintNode,
   SourceRef,
   TableEdgeInputs,
@@ -59,6 +60,32 @@ function drawing(
     ordinaryFlow: options.ordinaryFlow ?? true,
     flowDomainId: options.flowDomainId ?? 'body',
     commands: [],
+  };
+}
+
+function paragraphWithCollisions(
+  collisions: ParagraphLayout['anchorCollisions'],
+): ParagraphLayout {
+  const bounds = rect(72, 100, 200, 20);
+  return {
+    kind: 'paragraph',
+    id: 'paragraph-collisions',
+    source: source(0),
+    flowDomainId: 'body',
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: 20,
+    ordinaryFlow: true,
+    spacing: { beforePt: 0, afterPt: 0 },
+    contextualSpacing: false,
+    lines: [],
+    borders: [],
+    resources: [],
+    drawings: [],
+    textBoxes: [],
+    events: [],
+    exclusions: [],
+    anchorCollisions: collisions,
   };
 }
 
@@ -233,6 +260,7 @@ function documentWith(
       parityBlank: false,
       bookmarkStarts: [],
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      columnSeparators: [],
       sectionRegions: [{
         id: 'region:0', sectionOccurrenceId: 'section:0',
         coordinateSpace: {
@@ -262,6 +290,80 @@ function documentWith(
 }
 
 describe('assertDocumentLayout', () => {
+  it('rejects duplicate or invalid retained DrawingML collision geometry', () => {
+    const collision = {
+      occurrenceId: 'same',
+      bounds: rect(10, 20, 30, 40),
+      horizontalOwnership: 'page' as const,
+      verticalOwnership: 'host' as const,
+    };
+
+    expect(() => assertDocumentLayout(documentWith([
+      paragraphWithCollisions([collision, collision]),
+    ]))).toThrow(/anchorCollisions.*duplicated/);
+    expect(() => assertDocumentLayout(documentWith([
+      paragraphWithCollisions([{
+        ...collision,
+        occurrenceId: 'negative',
+        bounds: rect(10, 20, -1, 40),
+      }]),
+    ]))).toThrow(/negative extent/);
+  });
+
+  it('rejects invalid retained table-cell containment geometry', () => {
+    const paragraph = {
+      ...paragraphWithCollisions([]),
+      cellContainmentBounds: rect(10, 20, 30, -1),
+    } as ParagraphLayout;
+
+    expectInvalidGeometry(() => assertDocumentLayout(documentWith([paragraph])));
+  });
+
+  it('requires retained cell-containment bounds and marked drawings to agree', () => {
+    const markedDrawing = {
+      ...drawing('cell-contained-drawing', rect(10, 20, 30, 40), {
+        ordinaryFlow: false,
+      }),
+      anchorLayer: {
+        occurrenceId: 'cell-contained',
+        behindDoc: false,
+        relativeHeight: 0,
+        sourceOrder: 0,
+        horizontalOwnership: 'host' as const,
+        verticalOwnership: 'host' as const,
+        cellContainment: true as const,
+      },
+    };
+    const base = {
+      ...paragraphWithCollisions([]),
+      drawings: [markedDrawing],
+    } as ParagraphLayout;
+
+    expectInvalidGeometry(() => assertDocumentLayout(documentWith([base])));
+    expectInvalidGeometry(() => assertDocumentLayout(documentWith([{
+      ...base,
+      cellContainmentBounds: rect(10, 20, 30, 39),
+    }])));
+    expectInvalidGeometry(() => assertDocumentLayout(documentWith([{
+      ...paragraphWithCollisions([]),
+      cellContainmentBounds: rect(10, 20, 30, 40),
+    } as ParagraphLayout])));
+  });
+
+  it('rejects column separator ink not derived from the retained section regions', () => {
+    const valid = documentWith([]);
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!,
+        columnSeparators: [{
+          start: { xPt: 100, yPt: 72 },
+          end: { xPt: 100, yPt: 720 },
+        }],
+      }],
+    }));
+  });
+
   it('rejects overlapping ordinary flow allocations', () => {
     const layout = documentWith([
       drawing('n1', rect(72, 100, 200, 30)),

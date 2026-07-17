@@ -64,6 +64,7 @@ describe('DocumentLayout data boundary', () => {
         parityBlank: false,
         bookmarkStarts: [],
         pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+        columnSeparators: [],
         sectionRegions: [],
         pageBorders: null,
         layers: {

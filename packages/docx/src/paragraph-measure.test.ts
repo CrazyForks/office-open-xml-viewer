@@ -117,6 +117,54 @@ const measuredTextSequence = (
   .join(''));
 
 describe('measureParagraph', () => {
+  it('chooses the globally widest gap from one oracle containing every float', () => {
+    const float = (id: string, xLeft: number, xRight: number): FloatRect => ({
+      kind: 'shape', mode: 'square', imageKey: id,
+      imageX: xLeft, imageY: 0, imageW: xRight - xLeft, imageH: 20,
+      xLeft, xRight, yTop: 0, yBottom: 20,
+      side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
+      paraId: 0, drawn: false,
+    });
+    const oracle = createFloatWrapOracle([
+      float('A', 40, 60),
+      float('B', 0, 35),
+    ]);
+
+    expect(oracle.lineWindow({
+      topYPt: 0, minimumStartWidthPt: 1, probeHeightPt: 10,
+      paragraphXPt: 0, maximumWidthPt: 100,
+      columnXPt: 0, columnWidthPt: 100,
+    })).toEqual({ topYPt: 0, xOffsetPt: 60, maximumWidthPt: 40 });
+  });
+
+  it('snapshots compiled polygon geometry once at oracle acquisition', () => {
+    const points = [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 0 },
+      { xPt: 90, yPt: 80 }, { xPt: 80, yPt: 80 },
+      { xPt: 80, yPt: 20 }, { xPt: 20, yPt: 20 },
+      { xPt: 20, yPt: 80 }, { xPt: 10, yPt: 80 },
+    ];
+    const oracle = createFloatWrapOracle([{
+      kind: 'shape', mode: 'square', authoredWrap: 'through', wrapPolygon: points,
+      imageKey: 'compiled-through', imageX: 10, imageY: 0, imageW: 80, imageH: 80,
+      xLeft: 10, xRight: 90, yTop: 0, yBottom: 80,
+      side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
+      paraId: 0, drawn: false,
+    }]);
+    const query = () => oracle.lineWindow({
+      topYPt: 30, minimumStartWidthPt: 1, probeHeightPt: 10,
+      paragraphXPt: 0, maximumWidthPt: 100,
+      columnXPt: 0, columnWidthPt: 100,
+    });
+    const acquired = query();
+
+    points[4]!.xPt = 50;
+    points[5]!.xPt = 50;
+
+    expect(query()).toEqual(acquired);
+    expect(acquired).toEqual({ topYPt: 30, xOffsetPt: 20, maximumWidthPt: 60 });
+  });
+
   it('measures intrinsic width against the authored anchor band without a sentinel width', () => {
     const doc = paragraph({
       spaceBefore: 0,

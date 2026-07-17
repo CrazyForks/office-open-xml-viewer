@@ -615,6 +615,53 @@ describe('createLayoutPage', () => {
     });
   });
 
+  it('retains section column separator geometry on the completed page', () => {
+    const separated = {
+      ...section('lrTb', [
+        { xPt: 72, wPt: 220 },
+        { xPt: 320, wPt: 220 },
+      ]),
+      columnSeparator: true,
+    };
+
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612,
+        heightPt: 792,
+        contentTopPt: 72,
+        contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:separated',
+      section: separated,
+      sectionRegions: [{
+        id: 'region:separated',
+        sectionOccurrenceId: 'section:separated',
+        section: separated,
+        writingMode: 'horizontal-tb',
+        blockStartPt: 72,
+        blockEndPt: 330,
+        columns: [
+          { inlineStartPt: 72, inlineExtentPt: 220 },
+          { inlineStartPt: 320, inlineExtentPt: 220 },
+        ],
+      }],
+      paint: [],
+      readingOrder: [],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:separated',
+      },
+    });
+
+    expect(page.columnSeparators).toEqual([{
+      start: { xPt: 306, yPt: 72 },
+      end: { xPt: 306, yPt: 330 },
+    }]);
+    expect(Object.isFrozen(page.columnSeparators)).toBe(true);
+  });
+
   it('retains an empty continuous region only for out-of-flow occurrence ownership', () => {
     const first = section('lrTb', [{ xPt: 72, wPt: 468 }]);
     const second = section('lrTb', [{ xPt: 72, wPt: 468 }]);

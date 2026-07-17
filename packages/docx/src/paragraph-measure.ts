@@ -1,10 +1,5 @@
 import type { ParagraphLayoutContext } from './layout-context.js';
 import {
-  resolveLineFloatWindow,
-  skipPastTopAndBottom,
-  type FloatRect,
-} from './float-layout.js';
-import {
   buildSegments,
   getDefaultFontSize,
   isGridLineRule,
@@ -20,76 +15,16 @@ import {
   type WrapLayoutCtx,
 } from './line-layout.js';
 import type { DocParagraph } from './types.js';
+import type { WrapOracle } from './layout/float-wrap-oracle.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
 
 export type { LineLayoutEnvironment } from './line-layout.js';
+export { createFloatWrapOracle } from './layout/float-wrap-oracle.js';
+export type { WrapOracle } from './layout/float-wrap-oracle.js';
 
 export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly documentHasEastAsianText: boolean;
   readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
-}
-
-export interface WrapOracle {
-  lineWindow(input: {
-    readonly topYPt: number;
-    readonly minimumStartWidthPt: number;
-    readonly probeHeightPt: number;
-    readonly paragraphXPt: number;
-    readonly maximumWidthPt: number;
-    /** The paragraph's COLUMN band, scoping the topAndBottom gate (§20.4.2.20 /
-     *  §17.6.4) to the column the float is anchored in — NOT the indented text
-     *  band `paragraphXPt`/`maximumWidthPt` the square side-gap math uses. */
-    readonly columnXPt: number;
-    readonly columnWidthPt: number;
-  }): {
-    readonly topYPt: number;
-    readonly xOffsetPt: number;
-    readonly maximumWidthPt: number;
-  };
-  skipTopAndBottomBands(input: {
-    readonly yPt: number;
-    /** The paragraph's COLUMN band (colX()/colW()), used to scope a topAndBottom
-     *  float to the column it is anchored in (§20.4.2.20 / §17.6.4) — NOT the
-     *  indented text band `lineWindow` uses. */
-    readonly columnXPt: number;
-    readonly columnWidthPt: number;
-  }): number;
-}
-
-/** Adapt registered scale-1 float rectangles to the placement-aware paragraph
- * measurement boundary. Float discovery, registration, and compatibility
- * behavior remain owned by the renderer. */
-export function createFloatWrapOracle(floats: readonly FloatRect[]): WrapOracle {
-  const activeFloats = [...floats];
-  return {
-    lineWindow: ({
-      topYPt,
-      minimumStartWidthPt,
-      probeHeightPt,
-      paragraphXPt,
-      maximumWidthPt,
-      columnXPt,
-      columnWidthPt,
-    }) => {
-      const window = resolveLineFloatWindow(
-        topYPt,
-        minimumStartWidthPt,
-        probeHeightPt,
-        paragraphXPt,
-        maximumWidthPt,
-        activeFloats,
-        columnXPt,
-        columnXPt + columnWidthPt,
-      );
-      return {
-        topYPt: window.topY,
-        xOffsetPt: window.xOffset,
-        maximumWidthPt: window.maxWidth,
-      };
-    },
-    skipTopAndBottomBands: ({ yPt, columnXPt, columnWidthPt }) =>
-      skipPastTopAndBottom(yPt, activeFloats, columnXPt, columnXPt + columnWidthPt),
-  };
 }
 
 export interface TextMeasurer {
@@ -196,19 +131,6 @@ export function measureParagraph(
 
   const measureMarkOnly = (): MeasuredParagraph => {
     let markTopPt = cursorPt;
-    if (placement.wrap) {
-      markTopPt = placement.wrap.lineWindow({
-        topYPt: markTopPt,
-        minimumStartWidthPt: getDefaultFontSize(paragraph),
-        probeHeightPt: 10,
-        paragraphXPt,
-        maximumWidthPt: paragraphWidthPt,
-        // §20.4.2.20 / §17.6.4 column scope: the topAndBottom gate sees the raw
-        // COLUMN band, not the indented mark band above.
-        columnXPt: placement.paragraphXPt,
-        columnWidthPt: placement.availableWidthPt,
-      }).topYPt;
-    }
     const markAdvancePt = paragraphMarkLineHeight(
       paragraph,
       1,
@@ -222,6 +144,20 @@ export function measureParagraph(
       environment.layoutServices?.text,
       environment.paragraphMarkShapeInput,
     );
+    if (placement.wrap) {
+      markTopPt = placement.wrap.lineWindow({
+        topYPt: markTopPt,
+        minimumStartWidthPt: getDefaultFontSize(paragraph),
+        squareMinimumStartWidthPt: getDefaultFontSize(paragraph),
+        probeHeightPt: markAdvancePt,
+        paragraphXPt,
+        maximumWidthPt: paragraphWidthPt,
+        // §20.4.2.20 / §17.6.4 column scope: the topAndBottom gate sees the raw
+        // COLUMN band, not the indented mark band above.
+        columnXPt: placement.paragraphXPt,
+        columnWidthPt: placement.availableWidthPt,
+      }).topYPt;
+    }
     return {
       lines: [],
       markOnly: true,

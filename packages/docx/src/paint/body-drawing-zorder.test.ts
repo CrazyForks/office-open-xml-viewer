@@ -175,6 +175,7 @@ function page(
     section: {} as LayoutPage['section'], sectionOccurrenceId: 'section:0', parityBlank: false,
     bookmarkStarts: [],
     pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+    columnSeparators: [],
     sectionRegions: [{
       id: 'region:0', sectionOccurrenceId: 'section:0', section: {} as LayoutPage['section'],
       coordinateSpace: {

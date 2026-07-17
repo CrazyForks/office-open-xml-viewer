@@ -1,0 +1,750 @@
+import { describe, expect, it } from 'vitest';
+import type { AnchorAcquisitionInput, AnchorEdgesInput } from './layout/anchor-input.js';
+import type { ParagraphLayout } from './layout/types.js';
+import { createLayoutServices, layoutDocument } from './renderer.js';
+import type {
+  BodyElement,
+  DocParagraph,
+  DocTable,
+  DocTableCell,
+  DocTableRow,
+  DocxDocumentModel,
+  DocxTextRun,
+  FieldRun,
+  SectionProps,
+} from './types.js';
+
+function makeCtx(): CanvasRenderingContext2D {
+  let font = '10px serif';
+  const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+  return {
+    get font() { return font; },
+    set font(value: string) { font = value; },
+    measureText(text: string) {
+      const size = px();
+      return {
+        width: [...text].length * size,
+        fontBoundingBoxAscent: size * 0.8,
+        fontBoundingBoxDescent: size * 0.2,
+        actualBoundingBoxAscent: size * 0.8,
+        actualBoundingBoxDescent: size * 0.2,
+      } as TextMetrics;
+    },
+    save() {}, restore() {}, fillText() {}, strokeText() {}, beginPath() {},
+    moveTo() {}, lineTo() {}, stroke() {}, fillRect() {}, drawImage() {},
+    fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'left' as CanvasTextAlign,
+    direction: 'ltr' as CanvasDirection,
+  } as unknown as CanvasRenderingContext2D;
+}
+
+function textRun(text: string): DocParagraph['runs'][number] {
+  const run: DocxTextRun = {
+    text,
+    bold: false,
+    italic: false,
+    underline: false,
+    strikethrough: false,
+    fontSize: 20,
+    color: null,
+    fontFamily: 'NotInMetrics',
+    isLink: false,
+    background: null,
+    vertAlign: null,
+    hyperlink: null,
+  };
+  return { type: 'text', ...run } as DocParagraph['runs'][number];
+}
+
+function pageFieldRun(): DocParagraph['runs'][number] {
+  const run: FieldRun = {
+    fieldType: 'page',
+    instruction: 'PAGE',
+    fallbackText: '?',
+    bold: false,
+    italic: false,
+    underline: false,
+    strikethrough: false,
+    fontSize: 20,
+    color: null,
+    fontFamily: 'NotInMetrics',
+    background: null,
+    vertAlign: null,
+  };
+  return { type: 'field', ...run } as DocParagraph['runs'][number];
+}
+
+const missingEdges = (): AnchorEdgesInput => ({
+  topPt: null, topStatus: 'missing',
+  rightPt: null, rightStatus: 'missing',
+  bottomPt: null, bottomStatus: 'missing',
+  leftPt: null, leftStatus: 'missing',
+});
+
+function anchoredImageRuns(options: Readonly<{
+  occurrenceId?: string;
+  verticalRelativeFrom?: 'line' | 'paragraph';
+  horizontalOffsetPt?: number;
+  widthPt?: number;
+  heightPt?: number;
+  allowOverlap?: boolean;
+  wrapKind?: 'none' | 'square';
+}> = {}): DocParagraph['runs'] {
+  const occurrenceId = options.occurrenceId ?? 'cell-later';
+  const verticalRelativeFrom = options.verticalRelativeFrom ?? 'line';
+  const horizontalOffsetPt = options.horizontalOffsetPt ?? 80;
+  const widthPt = options.widthPt ?? 80;
+  const heightPt = options.heightPt ?? 40;
+  const allowOverlap = options.allowOverlap ?? true;
+  const wrapKind = options.wrapKind ?? 'square';
+  const acquisition: AnchorAcquisitionInput = {
+    occurrenceId,
+    simplePosition: {
+      enabled: false, status: 'valid',
+      xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid',
+    },
+    horizontal: {
+      relativeFrom: 'column', relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: horizontalOffsetPt },
+    },
+    vertical: {
+      relativeFrom: verticalRelativeFrom, relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: 0 },
+    },
+    extent: {
+      widthPt, heightPt,
+      widthStatus: 'valid', heightStatus: 'valid',
+    },
+    parentEffectExtent: missingEdges(),
+    anchorDistances: missingEdges(),
+    relativeSize: { horizontal: null, vertical: null },
+    wrap: {
+      kind: wrapKind,
+      authoredKinds: [wrapKind === 'none' ? 'wrapNone' : 'wrapSquare'],
+      side: 'bothSides',
+      distances: missingEdges(),
+      effectExtent: null,
+      polygon: null,
+    },
+    behavior: {
+      behindDoc: false, behindDocStatus: 'valid',
+      relativeHeight: 1, relativeHeightStatus: 'valid',
+      locked: false, lockedStatus: 'valid',
+      allowOverlap, allowOverlapStatus: 'valid',
+      layoutInCell: true, layoutInCellStatus: 'valid',
+    },
+    group: null,
+  };
+  return [
+    {
+      type: 'anchorHost',
+      fontSize: 20,
+      __anchorOccurrenceId: occurrenceId,
+    } as unknown as DocParagraph['runs'][number],
+    {
+      type: 'image',
+      imagePath: 'word/media/cell-anchor.png',
+      mimeType: 'image/png',
+      widthPt,
+      heightPt,
+      anchor: true,
+      anchorXPt: horizontalOffsetPt,
+      anchorXRelativeFrom: 'column',
+      anchorYPt: 0,
+      anchorYRelativeFrom: verticalRelativeFrom,
+      anchorYFromPara: true,
+      wrapMode: wrapKind,
+      wrapSide: 'bothSides',
+      layoutInCell: true,
+      __anchorAcquisition: acquisition,
+    } as unknown as DocParagraph['runs'][number],
+  ];
+}
+
+function noBorders() {
+  return {
+    top: null, right: null, bottom: null, left: null,
+    insideH: null, insideV: null,
+  };
+}
+
+function paragraph(runs: DocParagraph['runs']): DocParagraph {
+  return {
+    type: 'paragraph', alignment: 'left',
+    indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+    numbering: null, tabStops: [], runs,
+    defaultFontSize: 20, defaultFontFamily: 'NotInMetrics',
+  } as unknown as DocParagraph;
+}
+
+function model(paragraphs: DocParagraph[] = [
+  paragraph([
+    textRun('A'.repeat(9)),
+    ...anchoredImageRuns(),
+    textRun('B'.repeat(8)),
+  ]),
+], cellWidthPt = 160): DocxDocumentModel {
+  const cell = {
+    content: paragraphs,
+    colSpan: 1,
+    vMerge: null,
+    borders: noBorders(),
+    background: null,
+    vAlign: 'top',
+    widthPt: cellWidthPt,
+  } as unknown as DocTableCell;
+  const row = {
+    cells: [cell],
+    rowHeight: null,
+    rowHeightRule: 'auto',
+    isHeader: false,
+  } as unknown as DocTableRow;
+  const table = {
+    type: 'table',
+    colWidths: [cellWidthPt],
+    rows: [row],
+    borders: noBorders(),
+    cellMarginTop: 0,
+    cellMarginRight: 0,
+    cellMarginBottom: 0,
+    cellMarginLeft: 0,
+    jc: 'left',
+    layout: 'fixed',
+  } as unknown as DocTable;
+  const section: SectionProps = {
+    pageWidth: 200, pageHeight: 200,
+    marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+    headerDistance: 0, footerDistance: 0,
+    titlePage: false, evenAndOddHeaders: false,
+    sectionStart: 'nextPage', columns: null,
+  };
+  return {
+    section,
+    body: [table as unknown as BodyElement],
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    footnotes: [],
+    endnotes: [],
+    fontFamilyClasses: {},
+  } as unknown as DocxDocumentModel;
+}
+
+function cellParagraphs(document = model()): ParagraphLayout[] {
+  const layout = layoutDocument(
+    document,
+    createLayoutServices(document, { measureContext: makeCtx() }),
+    { currentDateMs: 0 },
+  );
+  const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
+  if (!table || table.kind !== 'table') throw new Error('Expected retained table');
+  return table.rows[0]?.cells[0]?.blocks.flatMap((block) =>
+    block.layout.kind === 'paragraph' ? [block.layout] : []) ?? [];
+}
+
+function bodyParagraphs(paragraphs: DocParagraph[]): ParagraphLayout[] {
+  const document = model();
+  document.body = paragraphs as unknown as BodyElement[];
+  const layout = layoutDocument(
+    document,
+    createLayoutServices(document, { measureContext: makeCtx() }),
+    { currentDateMs: 0 },
+  );
+  return layout.pages.flatMap((page) => page.layers.body.flatMap((node) =>
+    node.kind === 'paragraph' ? [node] : []));
+}
+
+describe('table-cell parser-owned anchor reflow', () => {
+  it('measures and retains the same occurrence-keyed exclusion fixed point', () => {
+    const paragraph = cellParagraphs()[0]!;
+    const lineTexts = paragraph.lines.map((line) => line.placements
+      .filter((placement) => placement.kind === 'text')
+      .map((placement) => placement.text)
+      .join(''));
+    const exclusion = paragraph.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-later'));
+
+    expect(lineTexts).toEqual(['AAAAAAAA', 'A', 'BBBB', 'BBBB']);
+    expect(exclusion).toBeDefined();
+    expect(exclusion!.bounds).toMatchObject({
+      xPt: 80,
+      yPt: paragraph.flowBounds.yPt + 20,
+      widthPt: 80,
+      heightPt: 40,
+    });
+  });
+
+  it('carries a retained host exclusion into the following cell paragraph', () => {
+    const [anchored, following] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-following',
+          verticalRelativeFrom: 'paragraph',
+          heightPt: 60,
+        }),
+        textRun('A'),
+      ]),
+      paragraph([textRun('B'.repeat(8))]),
+    ]));
+    const followingLines = following!.lines.map((line) => line.placements
+      .filter((placement) => placement.kind === 'text')
+      .map((placement) => placement.text)
+      .join(''));
+
+    expect(anchored!.exclusions).toHaveLength(1);
+    expect(following!.flowBounds.yPt).toBe(20);
+    expect(followingLines).toEqual(['BBBB', 'BBBB']);
+    expect(following!.exclusions.map((candidate) =>
+      candidate.anchorOccurrenceId)).toEqual([
+      anchored!.exclusions[0]!.anchorOccurrenceId,
+    ]);
+  });
+
+  it('preserves inherited anchor authority during page-dependent cell reacquisition', () => {
+    const [anchored, following] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-page-dependent-prior',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 60,
+          wrapKind: 'none',
+        }),
+        textRun('A'),
+      ]),
+      paragraph([
+        pageFieldRun(),
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-page-dependent-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          wrapKind: 'none',
+          allowOverlap: false,
+        }),
+        textRun('B'.repeat(8)),
+      ]),
+    ]));
+    const blocker = anchored!.drawings.find((drawing) =>
+      drawing.anchorLayer?.occurrenceId.endsWith('cell-page-dependent-prior'));
+    const moving = following!.drawings.find((drawing) =>
+      drawing.anchorLayer?.occurrenceId.endsWith('cell-page-dependent-moving'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.flowBounds.xPt).toBe(
+      blocker!.flowBounds.xPt + blocker!.flowBounds.widthPt,
+    );
+    expect(following!.anchorCollisions?.map((entry) => entry.occurrenceId))
+      .toEqual(expect.arrayContaining([
+        anchored!.anchorCollisions![0]!.occurrenceId,
+        expect.stringContaining('cell-page-dependent-moving'),
+      ]));
+  });
+
+  it('repositions a later parser-owned anchor when allowOverlap is false', () => {
+    const [first, second] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-blocker',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 60,
+        }),
+        textRun('A'),
+      ]),
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: false,
+        }),
+        textRun('B'),
+      ]),
+    ]));
+    const firstExclusion = first!.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-blocker'));
+    const secondExclusion = second!.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-moving'));
+
+    expect(firstExclusion).toBeDefined();
+    expect(secondExclusion).toBeDefined();
+    expect(secondExclusion!.bounds.xPt).toBe(
+      firstExclusion!.bounds.xPt + firstExclusion!.bounds.widthPt,
+    );
+    expect(secondExclusion!.bounds.yPt).toBe(second!.flowBounds.yPt);
+  });
+
+  it('preserves prior-paragraph collision avoidance when allowOverlap permits overlap', () => {
+    const [first, second] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-observed-blocker',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 60,
+        }),
+        textRun('A'),
+      ]),
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-observed-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: true,
+        }),
+        textRun('B'),
+      ]),
+    ]));
+    const firstExclusion = first!.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-observed-blocker'));
+    const secondExclusion = second!.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-observed-moving'));
+
+    expect(firstExclusion).toBeDefined();
+    expect(secondExclusion).toBeDefined();
+    expect(secondExclusion!.bounds.xPt).toBe(
+      firstExclusion!.bounds.xPt + firstExclusion!.bounds.widthPt,
+    );
+  });
+
+  it('applies allowOverlap=false between anchors hosted by the same paragraph', () => {
+    const [layout] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-same-blocker',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+        }),
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-same-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: false,
+        }),
+        textRun('A'),
+      ]),
+    ]));
+    const blocker = layout!.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-same-blocker'));
+    const moving = layout!.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-same-moving'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.bounds.xPt).toBe(blocker!.bounds.xPt + blocker!.bounds.widthPt);
+  });
+
+  it('allows anchors hosted by the same paragraph to overlap when permitted', () => {
+    const [layout] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-same-permitted-blocker',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+        }),
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-same-permitted-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: true,
+        }),
+        textRun('A'),
+      ]),
+    ]));
+    const blocker = layout!.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-same-permitted-blocker'));
+    const moving = layout!.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('cell-same-permitted-moving'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.bounds).toEqual(blocker!.bounds);
+  });
+
+  it('uses a wrapNone DrawingML object as an allowOverlap=false blocker', () => {
+    const [layout] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-wrap-none-blocker',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          wrapKind: 'none',
+        }),
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-wrapped-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: false,
+        }),
+        textRun('A'),
+      ]),
+    ]));
+    const blocker = layout!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-wrap-none-blocker'));
+    const moving = layout!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-wrapped-moving'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.flowBounds.xPt).toBe(
+      blocker!.flowBounds.xPt + blocker!.flowBounds.widthPt,
+    );
+  });
+
+  it('repositions a wrapNone allowOverlap=false object around a wrapped blocker', () => {
+    const [layout] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-wrapped-blocker',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+        }),
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-wrap-none-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          wrapKind: 'none',
+          allowOverlap: false,
+        }),
+        textRun('A'),
+      ]),
+    ]));
+    const blocker = layout!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-wrapped-blocker'));
+    const moving = layout!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-wrap-none-moving'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.flowBounds.xPt).toBe(
+      blocker!.flowBounds.xPt + blocker!.flowBounds.widthPt,
+    );
+  });
+
+  it('carries a wrapNone collision blocker into the following cell paragraph', () => {
+    const [first, second] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-prior-wrap-none',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 60,
+          wrapKind: 'none',
+        }),
+        textRun('A'),
+      ]),
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-later-wrapped',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: false,
+        }),
+        textRun('B'),
+      ]),
+    ]));
+    const blocker = first!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-prior-wrap-none'));
+    const moving = second!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-later-wrapped'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.flowBounds.xPt).toBe(
+      blocker!.flowBounds.xPt + blocker!.flowBounds.widthPt,
+    );
+  });
+
+  it('keeps layoutInCell collision displacement inside the owning cell', () => {
+    const [layout] = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-narrow-blocker',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+        }),
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-narrow-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: false,
+        }),
+        textRun('A'),
+      ]),
+    ], 100));
+    const blocker = layout!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-narrow-blocker'));
+    const moving = layout!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-narrow-moving'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.flowBounds.xPt).toBe(0);
+    expect(moving!.flowBounds.yPt).toBe(
+      blocker!.flowBounds.yPt + blocker!.flowBounds.heightPt,
+    );
+    expect(moving!.flowBounds.xPt + moving!.flowBounds.widthPt).toBeLessThanOrEqual(100);
+  });
+
+  it('grows an automatic row to contain a displaced layoutInCell wrapNone object', () => {
+    const document = model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-containment-blocker',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          wrapKind: 'none',
+        }),
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-containment-moving',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: false,
+          wrapKind: 'none',
+        }),
+        textRun('A'),
+      ]),
+    ], 100);
+    const result = layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: makeCtx() }),
+      { currentDateMs: 0 },
+    );
+    const table = result.pages[0]!.layers.body.find((node) => node.kind === 'table');
+    if (!table || table.kind !== 'table') throw new Error('Expected retained table');
+    const row = table.rows[0]!;
+    const cell = row.cells[0]!;
+    const paragraphBlock = cell.blocks[0]!;
+    if (paragraphBlock.layout.kind !== 'paragraph') {
+      throw new Error('Expected retained cell paragraph');
+    }
+    const paragraphLayout = paragraphBlock.layout;
+    const moving = paragraphLayout.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-containment-moving'));
+    expect(moving).toBeDefined();
+    const placedMovingBottomPt = cell.flowBounds.yPt
+      + paragraphBlock.offsetPt
+      + moving!.flowBounds.yPt
+      - paragraphLayout.flowBounds.yPt
+      + moving!.flowBounds.heightPt;
+
+    expect(cell.flowBounds.yPt + cell.flowBounds.heightPt).toBeGreaterThanOrEqual(
+      placedMovingBottomPt,
+    );
+    expect(row.flowBounds.yPt + row.flowBounds.heightPt).toBeGreaterThanOrEqual(
+      placedMovingBottomPt,
+    );
+  });
+});
+
+describe('body parser-owned anchor collision carry', () => {
+  it('retains wrapNone collision authority without creating a text exclusion', () => {
+    const baseline = bodyParagraphs([
+      paragraph([textRun('following text')]),
+    ])[0]!;
+    const [, following] = bodyParagraphs([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'body-wrap-none-text-neutral',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 60,
+          wrapKind: 'none',
+        }),
+        textRun('A'),
+      ]),
+      paragraph([textRun('following text')]),
+    ]);
+    const relativeLines = (layout: ParagraphLayout) => layout.lines.map((line) => ({
+      xPt: line.bounds.xPt,
+      yPt: line.bounds.yPt - layout.flowBounds.yPt,
+      widthPt: line.bounds.widthPt,
+      advancePt: line.advancePt,
+      text: line.placements.flatMap((placement) =>
+        placement.kind === 'text' ? [placement.text] : []).join(''),
+    }));
+
+    expect(following?.anchorCollisions).toEqual([
+      expect.objectContaining({
+        occurrenceId: expect.stringContaining('body-wrap-none-text-neutral'),
+      }),
+    ]);
+    expect(following?.exclusions).toEqual([]);
+    expect(relativeLines(following!)).toEqual(relativeLines(baseline));
+  });
+
+  it('carries a wrapNone blocker into the following body paragraph', () => {
+    const [first, second] = bodyParagraphs([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'body-prior-wrap-none',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 60,
+          wrapKind: 'none',
+        }),
+        textRun('A'),
+      ]),
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'body-later-wrapped',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          allowOverlap: false,
+        }),
+        textRun('B'),
+      ]),
+    ]);
+    const blocker = first!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('body-prior-wrap-none'));
+    const moving = second!.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('body-later-wrapped'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.flowBounds.xPt).toBe(
+      blocker!.flowBounds.xPt + blocker!.flowBounds.widthPt,
+    );
+  });
+});

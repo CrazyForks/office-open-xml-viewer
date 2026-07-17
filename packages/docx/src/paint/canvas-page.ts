@@ -5,7 +5,6 @@ import type {
   PaintNode,
   PaintResourceKind,
 } from '../layout/types.js';
-import { columnSeparatorSegments } from '../layout/column-separators.js';
 import { rasterizeColumnSeparator } from './column-separator-raster.js';
 import {
   enqueueDeferredFrontPaint,
@@ -137,7 +136,7 @@ function applyRegionTransform(
 type PagePaintEntry = LayoutPage['layers']['paintSequence'][number];
 
 function paintColumnSeparators(page: LayoutPage, context: CanvasPaintContext): void {
-  const segments = columnSeparatorSegments(page.sectionRegions);
+  const segments = page.columnSeparators;
   if (segments.length === 0) return;
   const { ctx } = context;
   ctx.save();

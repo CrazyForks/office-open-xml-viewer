@@ -7,6 +7,7 @@ import {
   writingModeFromTextDirection,
   type PhysicalPageExtent,
 } from './coordinate-space.js';
+import { columnSeparatorSegments } from './column-separators.js';
 import { createPageLayers, type PageLayerNode } from './page-graph.js';
 import type { BodyOccurrenceDestination } from './occurrence-projection.js';
 import type {
@@ -407,6 +408,7 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
     ),
     pageNumber: input.pageNumber,
     sectionRegions: regions,
+    columnSeparators: columnSeparatorSegments(regions),
     pageBorders: firstRegion?.pageBorders ?? input.pageBorders ?? null,
     layers: createPageLayers(input.paint),
     readingOrder: input.readingOrder.map((node) => node.id),
@@ -473,6 +475,7 @@ export function createParityBlankLayoutPage(
     bookmarkStarts: [],
     pageNumber: input.pageNumber,
     sectionRegions: [],
+    columnSeparators: [],
     pageBorders: input.pageBorders ?? null,
     layers: createPageLayers([]),
     readingOrder: [],

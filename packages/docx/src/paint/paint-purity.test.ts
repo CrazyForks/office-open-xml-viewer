@@ -11,6 +11,7 @@ const canonicalPageMeta = (section: SectionLayoutContext) => ({
   parityBlank: false,
   bookmarkStarts: [],
   pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+  columnSeparators: [],
   sectionRegions: [{
     id: 'region:0', sectionOccurrenceId: 'section:0', section,
     coordinateSpace: {

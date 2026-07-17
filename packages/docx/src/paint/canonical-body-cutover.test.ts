@@ -21,6 +21,7 @@ describe('retained canonical body paint', () => {
       },
       sectionOccurrenceId: 'section:0', parityBlank: false, bookmarkStarts: [],
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      columnSeparators: [],
       sectionRegions: [],
       pageBorders: null,
       layers: { paintSequence: [], background: [], behindText: [], header: [], body: [], notes: [], front: [], footer: [] },

@@ -6,6 +6,20 @@ import { attachBodyLayoutKernel } from './runtime-state.js';
 import { paginateBody } from './body-paginator.js';
 import type { LayoutServices, ParagraphLayout, SourceRef, TableLayout } from './types.js';
 
+const emptyFlowRegistrySnapshot = () => ({
+  floats: {
+    coordinateSpace: 'logical-page-points' as const,
+    flowDomainId: 'body',
+    entries: [],
+    nextParagraphId: 0,
+  },
+  drawingCollisions: {
+    coordinateSpace: 'logical-page-points' as const,
+    flowDomainId: 'body',
+    entries: [],
+  },
+});
+
 const source = (index: number): SourceRef => ({
   story: 'body', storyInstance: 'body', path: [index],
 });
@@ -105,11 +119,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body',
-          entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     };
     attachBodyLayoutKernel(services, kernel);
@@ -148,6 +159,94 @@ describe('canonical body producer', () => {
     expect(Object.isFrozen(layout)).toBe(true);
   });
 
+  it('commits neither registry component for a rejected body candidate', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const baseFloatEntries = Object.freeze([]);
+    const baseCollisionEntries = Object.freeze([]);
+    const commits: unknown[] = [];
+    let secondMeasurements = 0;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: (request) => {
+          const index = request.input.source.path[0]!;
+          if (index === 0) {
+            return { layout: table('first', request.input.source, 60), blockExtentPt: 60 };
+          }
+          secondMeasurements += 1;
+          const flowRegistryDelta = {
+            floats: {
+              coordinateSpace: 'logical-page-points' as const,
+              flowDomainId: request.location.flowDomainId,
+              baseEntries: baseFloatEntries,
+              baseNextParagraphId: 0,
+              nextParagraphId: 1,
+              entries: [{
+                kind: 'shape' as const,
+                occurrenceId: 'candidate-float',
+                paragraphId: 0,
+                bounds: { xPt: 0, yPt: 0, widthPt: 10, heightPt: 10 },
+                exclusionBounds: { xPt: 0, yPt: 0, widthPt: 10, heightPt: 10 },
+              }],
+            },
+            drawingCollisions: {
+              coordinateSpace: 'logical-page-points' as const,
+              flowDomainId: request.location.flowDomainId,
+              baseEntries: baseCollisionEntries,
+              baseEntryCount: 0,
+              entries: [{
+                occurrenceId: 'candidate-collision',
+                bounds: { xPt: 0, yPt: 0, widthPt: 10, heightPt: 10 },
+                horizontalOwnership: 'page' as const,
+                verticalOwnership: 'page' as const,
+              }],
+            },
+          };
+          return request.availableBlockExtentPt < 40
+            ? {
+                layout: table('rejected', request.input.source, 40),
+                blockExtentPt: 40,
+                requiresFreshFlowRegion: true,
+                flowRegistryDelta,
+              }
+            : {
+                layout: table('accepted', request.input.source, 40),
+                blockExtentPt: 40,
+                flowRegistryDelta,
+              };
+        },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: (delta) => { commits.push(delta); },
+      }),
+    });
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [0, 1].map((index) => ({
+        kind: 'body-block',
+        block: { kind: 'table', source: source(index) },
+      })),
+    } as unknown as BodyLayoutInput;
+
+    paginateBody(input, services, { currentDateMs: 0 });
+
+    expect(secondMeasurements).toBe(2);
+    expect(commits).toHaveLength(1);
+    expect(commits[0]).toMatchObject({
+      floats: { entries: [{ occurrenceId: 'candidate-float' }] },
+      drawingCollisions: { entries: [{ occurrenceId: 'candidate-collision' }] },
+    });
+  });
+
   it('acquires an adjacent-table sequence as one cursor-bearing logical table', () => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
@@ -167,10 +266,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     });
     const owner = {
@@ -234,10 +331,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     });
     const legacySourceWideInput = {
@@ -279,10 +374,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     });
     const legacySourceWideInput = {
@@ -321,10 +414,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     });
     const owner = (id: string, startType: 'nextPage' | 'continuous', start: number | null) => ({
@@ -383,10 +474,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     });
     const owner = {
@@ -462,10 +551,8 @@ describe('canonical body producer', () => {
           measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
           resetPageAcquisition: () => undefined,
           moveAcquisitionCursor: () => undefined,
-          floatRegistrySnapshot: () => ({
-            coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-          }),
-          commitFloatRegistryDelta: () => undefined,
+          flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+          commitFlowRegistryDelta: () => undefined,
         }),
       });
       const owner = {
@@ -525,10 +612,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     });
     const owner = {
@@ -580,10 +665,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     });
     const owner = {
@@ -643,10 +726,8 @@ describe('canonical body producer', () => {
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
       }),
     });
     const owner = (
@@ -710,22 +791,23 @@ describe('canonical body producer', () => {
         prescanPageAnchors: ({ anchors, location }) => {
           events.push(`prescan:${anchors.map((anchor) => anchor.paragraphSource.path[0]).join(',')}`);
           return {
-            coordinateSpace: 'logical-page-points', flowDomainId: location.flowDomainId,
-            baseNextParagraphId: 0, nextParagraphId: 1,
-            entries: [{
-              kind: 'shape', occurrenceId: anchors[0]!.occurrenceId, paragraphId: 0,
-              bounds: { xPt: 100, yPt: 10, widthPt: 20, heightPt: 20 },
-              exclusionBounds: { xPt: 100, yPt: 10, widthPt: 20, heightPt: 20 },
-            }],
+            floats: {
+              coordinateSpace: 'logical-page-points', flowDomainId: location.flowDomainId,
+              baseEntries: [],
+              baseNextParagraphId: 0, nextParagraphId: 1,
+              entries: [{
+                kind: 'shape', occurrenceId: anchors[0]!.occurrenceId, paragraphId: 0,
+                bounds: { xPt: 100, yPt: 10, widthPt: 20, heightPt: 20 },
+                exclusionBounds: { xPt: 100, yPt: 10, widthPt: 20, heightPt: 20 },
+              }],
+            },
           };
         },
         measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
         resetPageAcquisition: () => undefined,
         moveAcquisitionCursor: () => undefined,
-        floatRegistrySnapshot: () => ({
-          coordinateSpace: 'logical-page-points', flowDomainId: 'body', entries: [], nextParagraphId: 0,
-        }),
-        commitFloatRegistryDelta: () => { events.push('commit'); },
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => { events.push('commit'); },
       }),
     });
     const owner = {

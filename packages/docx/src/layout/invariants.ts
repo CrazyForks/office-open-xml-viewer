@@ -6,6 +6,7 @@ import {
   uprightPhysicalExtent,
   writingModeFromTextDirection,
 } from './coordinate-space.js';
+import { columnSeparatorSegments } from './column-separators.js';
 import { orderedPagePaintNodes, pageLayerNodes, PageGraphError } from './page-graph.js';
 import {
   derivePageBookmarkStarts,
@@ -25,6 +26,7 @@ import type {
   SectionRegionCoordinateSpace,
   WritingMode,
 } from './types.js';
+import { unionLayoutRects } from './rect-union.js';
 
 function assertPlainData(value: unknown, path: string, ancestors = new WeakSet<object>()): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
@@ -259,6 +261,70 @@ function collectRetainedNodeIds(
   }
 }
 
+function requireRetainedCollisionGeometry(node: PaintNode, path: string): void {
+  if (node.kind === 'paragraph') {
+    const expectedCellContainmentBounds = unionLayoutRects(
+      node.drawings
+        .filter((drawing) => drawing.anchorLayer?.cellContainment === true)
+        .map((drawing) => drawing.flowBounds),
+    );
+    if (node.cellContainmentBounds) {
+      requireRect(node.cellContainmentBounds, `${path}.cellContainmentBounds`);
+    }
+    if (
+      (expectedCellContainmentBounds === null) !== (node.cellContainmentBounds === undefined)
+      || (
+        expectedCellContainmentBounds
+        && node.cellContainmentBounds
+        && !equalRect(expectedCellContainmentBounds, node.cellContainmentBounds)
+      )
+    ) {
+      throw new LayoutInvariantError(
+        'INVALID_GEOMETRY',
+        `${path}.cellContainmentBounds does not match its retained layoutInCell drawings`,
+      );
+    }
+    const occurrenceIds = new Set<string>();
+    (node.anchorCollisions ?? []).forEach((entry, index) => {
+      const entryPath = `${path}.anchorCollisions[${index}]`;
+      if (entry.occurrenceId.length === 0 || occurrenceIds.has(entry.occurrenceId)) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `${entryPath}.occurrenceId is empty or duplicated`,
+        );
+      }
+      occurrenceIds.add(entry.occurrenceId);
+      requireRect(entry.bounds, `${entryPath}.bounds`);
+      if (
+        (entry.horizontalOwnership !== 'page' && entry.horizontalOwnership !== 'host')
+        || (entry.verticalOwnership !== 'page' && entry.verticalOwnership !== 'host')
+      ) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `${entryPath} has invalid axis ownership`,
+        );
+      }
+    });
+    node.textBoxes.forEach((textBox, index) =>
+      requireRetainedCollisionGeometry(textBox, `${path}.textBoxes[${index}]`));
+    return;
+  }
+  if (node.kind === 'table') {
+    node.rows.forEach((row, rowIndex) =>
+      row.cells.forEach((cell, cellIndex) =>
+        cell.blocks.forEach((block, blockIndex) =>
+          requireRetainedCollisionGeometry(
+            block.layout,
+            `${path}.rows[${rowIndex}].cells[${cellIndex}].blocks[${blockIndex}]`,
+          ))));
+    return;
+  }
+  if (node.kind === 'textbox') {
+    node.paragraphs.forEach((paragraph, index) =>
+      requireRetainedCollisionGeometry(paragraph, `${path}.paragraphs[${index}]`));
+  }
+}
+
 function requireDrawingGeometry(node: DrawingLayout, path: string): void {
   if (node.transform) {
     for (const key of ['a', 'b', 'c', 'd', 'e', 'f'] as const) {
@@ -353,6 +419,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
     if (page.parityBlank && (
       page.flowDomains.length > 0
       || (page.sectionRegions?.length ?? 0) > 0
+      || (page.columnSeparators?.length ?? 0) > 0
       || pageLayerNodes(page).length > 0
       || page.layers.paintSequence.length > 0
       || page.readingOrder.length > 0
@@ -534,6 +601,22 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         }
       }
     }
+    const expectedColumnSeparators = columnSeparatorSegments(page.sectionRegions ?? []);
+    if (!Array.isArray(page.columnSeparators)
+      || page.columnSeparators.length !== expectedColumnSeparators.length
+      || page.columnSeparators.some((segment, index) => {
+        const expected = expectedColumnSeparators[index];
+        return expected === undefined
+          || segment.start.xPt !== expected.start.xPt
+          || segment.start.yPt !== expected.start.yPt
+          || segment.end.xPt !== expected.end.xPt
+          || segment.end.yPt !== expected.end.yPt;
+      })) {
+      throw new LayoutInvariantError(
+        'INVALID_GEOMETRY',
+        `pages[${pageIndex}].columnSeparators contradict the retained section regions`,
+      );
+    }
     for (const domain of page.flowDomains) {
       if (!regionByDomain.has(domain.id) && !equalRect(domain.logicalBounds, domain.physicalBounds)) {
         throw new LayoutInvariantError(
@@ -577,6 +660,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       const path = `pages[${pageIndex}].nodes[${nodeIndex}]`;
       nodes.set(node.id, node);
       collectRetainedNodeIds(node, retainedNodeIds, documentRetainedNodeIds);
+      requireRetainedCollisionGeometry(node, path);
       requireRect(node.flowBounds, `${path}.flowBounds`);
       requireRect(node.inkBounds, `${path}.inkBounds`);
       if (node.clipBounds) requireRect(node.clipBounds, `${path}.clipBounds`);

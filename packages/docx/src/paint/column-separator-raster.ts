@@ -1,7 +1,7 @@
-import type { ColumnSeparatorSegment } from '../layout/column-separators.js';
+import type { ColumnSeparatorLayout } from '../layout/types.js';
 
 export interface RasterizedColumnSeparator {
-  readonly segment: ColumnSeparatorSegment;
+  readonly segment: ColumnSeparatorLayout;
   readonly widthPt: number;
 }
 
@@ -20,7 +20,7 @@ function snapNormal(valuePt: number, deviceScale: number, widthDevicePx: number)
 /** Raster alignment belongs to paint: retained geometry stays in exact points,
  * while the stroke is aligned to its actual device-pixel width here. */
 export function rasterizeColumnSeparator(
-  segment: ColumnSeparatorSegment,
+  segment: ColumnSeparatorLayout,
   scale: number,
   dpr: number,
 ): RasterizedColumnSeparator {

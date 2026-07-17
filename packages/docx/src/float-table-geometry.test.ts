@@ -537,8 +537,8 @@ describe('retained floating table placement (§17.4.57)', () => {
     const current = {
       coordinateSpace: snapshot.coordinateSpace,
       flowDomainId: snapshot.flowDomainId,
+      entries: snapshot.entries,
       nextParagraphId: snapshot.nextParagraphId,
-      occurrenceIds: Object.freeze([]),
     } as const;
 
     expect(() => validateFloatingTableRegistryDelta(delta, current)).not.toThrow();
@@ -551,7 +551,6 @@ describe('retained floating table placement (§17.4.57)', () => {
     expect(() => validateFloatingTableRegistryDelta(delta, {
       ...current,
       nextParagraphId: 8,
-      occurrenceIds: [placement.occurrenceId],
     })).toThrow('base/domain mismatch');
   });
 

@@ -263,6 +263,12 @@ export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
         ...(exclusion.anchorOccurrenceId
           ? { anchorOccurrenceId: anchorId(exclusion.anchorOccurrenceId) } : {}),
       })),
+      ...(paragraph.anchorCollisions ? {
+        anchorCollisions: paragraph.anchorCollisions.map((entry) => ({
+          ...entry,
+          occurrenceId: anchorId(entry.occurrenceId),
+        })),
+      } : {}),
       ...(paragraph.anchorFrames ? { anchorFrames: paragraph.anchorFrames.map((frame) => ({
         ...frame, occurrenceId: anchorId(frame.occurrenceId),
       })) } : {}),

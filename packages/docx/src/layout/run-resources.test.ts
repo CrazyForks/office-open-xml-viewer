@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
-import { acquireParagraphLayout, layoutParagraph } from './paragraph.js';
-import type { AcquiredParagraphLayoutInput, InlineResourceLayout, LayoutServices, ParagraphPlacement } from './types.js';
+import { acquireParagraphLayout, layoutParagraph, sliceParagraphLayout } from './paragraph.js';
+import type { AcquiredParagraphLayoutInput, InlineResourceLayout, LayoutServices, ParagraphPlacement, WrapExclusion } from './types.js';
 import type { DocParagraph, DocRun, DocxTextRun } from '../types.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
 import { paragraphAcquisitionInput } from '../parser-model.js';
 import { paintParagraphLayout } from '../paint/canvas-text.js';
 import type { CanvasPaintResourcePainter } from '../paint/types.js';
+import type { AnchorAcquisitionInput } from './anchor-input.js';
+import type { WrapOracle } from '../paragraph-measure.js';
 
 const source = { story: 'body', storyInstance: 'body', path: [0] } as const;
 const bounds = { xPt: 10, yPt: 20, widthPt: 12, heightPt: 10 } as const;
@@ -16,6 +18,180 @@ const noPaintResources: CanvasPaintResourcePainter = {
     throw new Error(`Unexpected ${kind} paint resource: ${resourceKey}`);
   },
 };
+
+const validEdges = (topPt: number, rightPt: number, bottomPt: number, leftPt: number) => ({
+  topPt, topStatus: 'valid', rightPt, rightStatus: 'valid',
+  bottomPt, bottomStatus: 'valid', leftPt, leftStatus: 'valid',
+} as const);
+
+function sameParagraphAnchor(
+  occurrenceId: string,
+  wrap: AnchorAcquisitionInput['wrap'],
+): AnchorAcquisitionInput {
+  return {
+    occurrenceId,
+    simplePosition: {
+      enabled: false, status: 'valid', xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid',
+    },
+    horizontal: {
+      relativeFrom: 'column', relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: 82 },
+    },
+    vertical: {
+      relativeFrom: 'paragraph', relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: 0 },
+    },
+    extent: { widthPt: 30, widthStatus: 'valid', heightPt: 20, heightStatus: 'valid' },
+    parentEffectExtent: validEdges(2, 3, 4, 1),
+    anchorDistances: validEdges(5, 6, 7, 8),
+    relativeSize: { horizontal: null, vertical: null },
+    wrap,
+    behavior: {
+      behindDoc: false, behindDocStatus: 'valid',
+      relativeHeight: 1, relativeHeightStatus: 'valid',
+      locked: false, lockedStatus: 'valid',
+      allowOverlap: true, allowOverlapStatus: 'valid',
+      layoutInCell: true, layoutInCellStatus: 'valid',
+    },
+    group: null,
+  };
+}
+
+const sameParagraphContext: ParagraphLayoutContext = {
+  lineGrid: { active: false, pitchPt: null }, characterGrid: { active: false, deltaPt: 0 },
+  physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+  lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0, baseRtl: false,
+  isJustified: false, stretchLastLine: false, tabStops: [], hasRuby: false,
+  hasEastAsianText: false, kinsoku: DEFAULT_KINSOKU_RULES, defaultTabPt: 36,
+};
+
+let sameParagraphFont = '10px Test Sans';
+const sameParagraphMeasureContext = {
+  get font() { return sameParagraphFont; }, set font(value: string) { sameParagraphFont = value; },
+  letterSpacing: '0px', fontKerning: 'auto',
+  measureText(value: string) {
+    return { width: [...value].length * 5, actualBoundingBoxAscent: 8,
+      actualBoundingBoxDescent: 2, fontBoundingBoxAscent: 8,
+      fontBoundingBoxDescent: 2 } as TextMetrics;
+  },
+} as unknown as CanvasRenderingContext2D;
+
+const sameParagraphTextRun = (value: string): DocRun => ({
+  type: 'text', text: value, bold: false, italic: false, underline: false,
+  strikethrough: false, fontSize: 10, color: null, fontFamily: 'Test Sans',
+  isLink: false, background: null, vertAlign: null, hyperlink: null,
+} as DocxTextRun & { type: 'text' });
+
+const sameParagraphTextService: LayoutServices['text'] = {
+  fingerprint: 'same-paragraph-fixed-width', localMetrics: {},
+  resolve(request) {
+    const requestedFamily = request.fonts.ascii ?? 'Test Sans';
+    return {
+      requestedFamily, resolvedFamily: requestedFamily, route: fontRoute,
+      source: 'native', weight: request.weight ?? 400, style: request.style ?? 'normal',
+      diagnostics: [], genericFamily: 'sans-serif',
+    };
+  },
+  shape(request) {
+    let offset = 0;
+    const clusters = [...request.text].map((character) => {
+      const start = offset;
+      offset += character.length;
+      return { range: { start, end: offset }, offsetPt: start * 5, advancePt: 5 };
+    });
+    return {
+      text: request.text, advancePt: clusters.length * 5, ascentPt: 8, descentPt: 2,
+      spans: [{
+        text: request.text, start: 0, end: request.text.length, script: 'ascii',
+        breakBefore: true,
+        font: {
+          requestedFamily: 'Test Sans', resolvedFamily: 'Test Sans', route: fontRoute,
+          source: 'native', weight: request.weight ?? 400, style: request.style ?? 'normal',
+          diagnostics: [], genericFamily: 'sans-serif',
+        },
+        fontRoute, advancePt: clusters.length * 5, ascentPt: 8, descentPt: 2,
+      }],
+      graphemeBoundaries: [0, ...clusters.map((cluster) => cluster.range.end)],
+      clusters, diagnostics: [],
+    };
+  },
+};
+
+const sameParagraphOccurrenceId = 'anchor:body:body:0:same-paragraph';
+
+function acquireSameParagraph(
+  anchorAcquisitionInput: AnchorAcquisitionInput,
+  overrides: Readonly<{
+    wrap?: WrapOracle;
+    exclusions?: Parameters<typeof acquireParagraphLayout>[1]['exclusions'];
+  }> | undefined = undefined,
+) {
+  const paragraph: DocParagraph = {
+    alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
+    runs: [
+      { type: 'anchorHost', fontSize: 10, fontFamily: 'Test Sans', anchorOccurrenceId: sameParagraphOccurrenceId },
+      {
+        type: 'image', imagePath: 'word/media/owned.png', mimeType: 'image/png',
+        widthPt: 30, heightPt: 20, anchor: true, anchorAcquisitionInput,
+      },
+      sameParagraphTextRun('abcdefghijklmnopqrstuvwxyzabcdefghi'),
+    ] as DocRun[],
+  };
+  return acquireParagraphLayout(paragraphAcquisitionInput(paragraph, source), {
+    id: `same-paragraph:${anchorAcquisitionInput.wrap.kind}`,
+    source, flowDomainId: 'body', ordinaryFlow: true,
+    context: sameParagraphContext,
+    placement: {
+      startYPt: 10, paragraphXPt: 10, availableWidthPt: 100,
+      maximumYPt: 300, suppressSpaceBefore: false,
+      ...(overrides?.wrap ? { wrap: overrides.wrap } : {}),
+    },
+    measurer: { context: sameParagraphMeasureContext, fontFamilyClasses: {} },
+    environment: {
+      pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+      layoutServices: {
+        text: sameParagraphTextService,
+        images: {
+          fingerprint: 'images',
+          resolve: () => ({ widthPt: 30, heightPt: 20, mimeType: 'image/png' }),
+        },
+        math: {
+          fingerprint: 'math',
+          resolve: (resourceKey) => ({
+            resourceKey, widthEm: 1, ascentEm: .8, descentEm: .2, diagnostics: [],
+          }),
+        },
+      },
+    },
+    exclusions: overrides?.exclusions ?? [],
+    anchorFrames: {
+      page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+      margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 280 },
+      column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 280 },
+      pageParity: 'odd',
+    },
+  });
+}
+
+function externalExclusion(
+  id: string,
+  bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>,
+  anchorOccurrenceId?: string,
+): WrapExclusion {
+  return {
+    id,
+    wrap: 'topAndBottom',
+    bounds,
+    polygon: [
+      { xPt: bounds.xPt, yPt: bounds.yPt },
+      { xPt: bounds.xPt + bounds.widthPt, yPt: bounds.yPt },
+      { xPt: bounds.xPt + bounds.widthPt, yPt: bounds.yPt + bounds.heightPt },
+      { xPt: bounds.xPt, yPt: bounds.yPt + bounds.heightPt },
+    ],
+    ...(anchorOccurrenceId ? { anchorOccurrenceId, verticalOwnership: 'page' as const } : {}),
+  };
+}
 
 const cases: ReadonlyArray<readonly [string, ParagraphPlacement | undefined, InlineResourceLayout | undefined, string | undefined]> = [
   ['text', { kind: 'text', text: 'a', range: { start: 0, end: 1 }, origin: { xPt: 10, yPt: 30 }, bounds, advancePt: 6, clusters: [{ range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 }, advancePt: 6 }], paintOps: [{ text: 'a', range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 }, letterSpacingPt: 0, scaleX: 1, direction: 'ltr', kerning: 'auto', writingMode: 'horizontal-tb' }], color: { kind: 'explicit', color: '#000' }, fontRoute, fontSizePt: 10, fontWeight: 400, fontStyle: 'normal', direction: 'ltr', decorations: [] }, undefined, undefined],
@@ -31,6 +207,150 @@ const cases: ReadonlyArray<readonly [string, ParagraphPlacement | undefined, Inl
 ];
 
 describe('paragraph run resource projection', () => {
+  it('reflows a host paragraph around its parser-owned square anchor to a fixed point', () => {
+    const missingEdges = validEdges(0, 0, 0, 0);
+    const square = sameParagraphAnchor(sameParagraphOccurrenceId, {
+      kind: 'square', authoredKinds: ['wrapSquare'], side: 'bothSides',
+      distances: validEdges(5, 6, 7, 8),
+      effectExtent: validEdges(2, 3, 4, 1), polygon: null,
+    });
+    const none = sameParagraphAnchor(sameParagraphOccurrenceId, {
+      kind: 'none', authoredKinds: ['wrapNone'], side: 'bothSides',
+      distances: missingEdges, effectExtent: null, polygon: null,
+    });
+    const wrapped = acquireSameParagraph(square);
+    const unwrapped = acquireSameParagraph(none);
+
+    expect(wrapped.lines.length).toBeGreaterThan(unwrapped.lines.length);
+    expect(wrapped.advancePt).toBeGreaterThan(unwrapped.advancePt);
+    expect(wrapped.drawings).toHaveLength(1);
+    expect(wrapped.exclusions).toHaveLength(1);
+    expect(wrapped.drawings[0]?.anchorLayer?.occurrenceId).toBe(sameParagraphOccurrenceId);
+    expect(wrapped.exclusions[0]).toMatchObject({
+      anchorOccurrenceId: sameParagraphOccurrenceId,
+      bounds: { xPt: 83, yPt: 3, widthPt: 48, heightPt: 38 },
+    });
+    expect(new Set(wrapped.drawings.map((drawing) =>
+      drawing.anchorLayer?.occurrenceId))).toEqual(new Set([sameParagraphOccurrenceId]));
+    expect(new Set(wrapped.exclusions.map((exclusion) => exclusion.anchorOccurrenceId)))
+      .toEqual(new Set([sameParagraphOccurrenceId]));
+  });
+
+  it('remeasures square wrapping with the authored left, right, and largest side', () => {
+    const acquireSide = (side: 'left' | 'right' | 'largest') => acquireSameParagraph(
+      sameParagraphAnchor(sameParagraphOccurrenceId, {
+        kind: 'square', authoredKinds: ['wrapSquare'], side,
+        distances: validEdges(5, 6, 7, 8),
+        effectExtent: validEdges(2, 3, 4, 1), polygon: null,
+      }),
+    );
+
+    const left = acquireSide('left');
+    const right = acquireSide('right');
+    const largest = acquireSide('largest');
+
+    expect(left.exclusions[0]).toMatchObject({ wrapSide: 'left' });
+    expect(right.exclusions[0]).toMatchObject({ wrapSide: 'right' });
+    expect(largest.exclusions[0]).toMatchObject({ wrapSide: 'largest' });
+    expect(left.lines[0]?.bounds.yPt).toBe(10);
+    expect(largest.lines.map((line) => line.bounds)).toEqual(left.lines.map((line) => line.bounds));
+    expect(right.lines[0]?.bounds.yPt).toBeGreaterThanOrEqual(41);
+  });
+
+  it('rejects conflicting placement and retained exclusion wrap authorities', () => {
+    const square = sameParagraphAnchor(sameParagraphOccurrenceId, {
+      kind: 'square', authoredKinds: ['wrapSquare'], side: 'bothSides',
+      distances: validEdges(5, 6, 7, 8),
+      effectExtent: validEdges(2, 3, 4, 1), polygon: null,
+    });
+    const passThrough: WrapOracle = {
+      lineWindow: (input) => ({
+        topYPt: input.topYPt,
+        xOffsetPt: 0,
+        maximumWidthPt: input.maximumWidthPt,
+      }),
+      skipTopAndBottomBands: ({ yPt }) => yPt,
+    };
+
+    expect(() => acquireSameParagraph(square, { wrap: passThrough }))
+      .toThrow(/conflicting paragraph wrap authorities/i);
+  });
+
+  it('measures and retains externally authoritative geometry for a matching occurrence ID', () => {
+    const square = sameParagraphAnchor(sameParagraphOccurrenceId, {
+      kind: 'square', authoredKinds: ['wrapSquare'], side: 'bothSides',
+      distances: validEdges(0, 0, 0, 0), effectExtent: null, polygon: null,
+    });
+    const external = externalExclusion(
+      'external-matching-occurrence',
+      { xPt: 10, yPt: 10, widthPt: 100, heightPt: 50 },
+      sameParagraphOccurrenceId,
+    );
+
+    const acquired = acquireSameParagraph(square, { exclusions: [external] });
+
+    expect(acquired.lines[0]?.bounds.yPt).toBeGreaterThanOrEqual(60);
+    expect(acquired.exclusions).toEqual([external]);
+  });
+
+  it('preserves externally authoritative page geometry in continuation slices', () => {
+    const square = sameParagraphAnchor(sameParagraphOccurrenceId, {
+      kind: 'square', authoredKinds: ['wrapSquare'], side: 'bothSides',
+      distances: validEdges(0, 0, 0, 0), effectExtent: null, polygon: null,
+    });
+    const external = externalExclusion(
+      'external-continuation-occurrence',
+      { xPt: 10, yPt: 10, widthPt: 100, heightPt: 50 },
+      sameParagraphOccurrenceId,
+    );
+    const acquired = acquireSameParagraph(square, { exclusions: [external] });
+
+    const continuation = sliceParagraphLayout(acquired, {
+      lineStart: 1,
+      lineEnd: acquired.lines.length,
+      continuesFromPrevious: true,
+      continuesOnNext: false,
+    });
+
+    expect(continuation.drawings).toEqual([]);
+    expect(continuation.exclusions).toEqual([external]);
+  });
+
+  it('rejects duplicate externally authoritative occurrence IDs', () => {
+    const square = sameParagraphAnchor(sameParagraphOccurrenceId, {
+      kind: 'square', authoredKinds: ['wrapSquare'], side: 'bothSides',
+      distances: validEdges(0, 0, 0, 0), effectExtent: null, polygon: null,
+    });
+    const first = externalExclusion(
+      'external-first', { xPt: 10, yPt: 200, widthPt: 10, heightPt: 10 },
+      sameParagraphOccurrenceId,
+    );
+    const duplicate = externalExclusion(
+      'external-duplicate', { xPt: 30, yPt: 200, widthPt: 10, heightPt: 10 },
+      sameParagraphOccurrenceId,
+    );
+
+    expect(() => acquireSameParagraph(square, { exclusions: [first, duplicate] }))
+      .toThrow(/duplicate external paragraph exclusion occurrence.*same-paragraph/i);
+  });
+
+  it('preserves mixed keyed and unkeyed external exclusion order', () => {
+    const square = sameParagraphAnchor(sameParagraphOccurrenceId, {
+      kind: 'square', authoredKinds: ['wrapSquare'], side: 'bothSides',
+      distances: validEdges(0, 0, 0, 0), effectExtent: null, polygon: null,
+    });
+    const exclusions = [
+      externalExclusion('unkeyed-before', { xPt: 0, yPt: 200, widthPt: 5, heightPt: 5 }),
+      externalExclusion('keyed-matching', { xPt: 10, yPt: 200, widthPt: 5, heightPt: 5 }, sameParagraphOccurrenceId),
+      externalExclusion('unkeyed-after', { xPt: 20, yPt: 200, widthPt: 5, heightPt: 5 }),
+      externalExclusion('keyed-other', { xPt: 30, yPt: 200, widthPt: 5, heightPt: 5 }, 'external:other'),
+    ];
+
+    const acquired = acquireSameParagraph(square, { exclusions });
+
+    expect(acquired.exclusions).toEqual(exclusions);
+  });
+
   it.each(cases)('retains the %s arm without a DocRun reference', (_name, placement, resource, event) => {
     const input: AcquiredParagraphLayoutInput = {
       kind: 'paragraph', id: `p-${_name}`, source, flowDomainId: 'body', ordinaryFlow: true,

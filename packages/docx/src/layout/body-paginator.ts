@@ -76,6 +76,7 @@ import {
 } from './header-footer-reserve.js';
 import type { LayoutOptions } from './options.js';
 import type {
+  BodyFlowRegistryDeltaPt,
   DeepReadonly,
   DocumentLayout,
   LayoutServices,
@@ -83,7 +84,6 @@ import type {
   ParagraphLayout,
   SourceRef,
   TableLayout,
-  FloatRegistryDeltaPt,
 } from './types.js';
 
 function nestedFloatingOccurrenceIds(layout: TableLayout): ReadonlySet<string> {
@@ -98,42 +98,60 @@ function nestedFloatingOccurrenceIds(layout: TableLayout): ReadonlySet<string> {
   return ids;
 }
 
-function bindTableFloatDeltaToAcceptedOccurrence(
-  delta: FloatRegistryDeltaPt,
+function bindTableFlowRegistryDeltaToAcceptedOccurrence(
+  delta: BodyFlowRegistryDeltaPt,
   layout: TableLayout,
   ownerOccurrenceId: string,
-): FloatRegistryDeltaPt {
+): BodyFlowRegistryDeltaPt {
+  if (!delta.floats) {
+    throw new Error('Accepted floating table omitted its float registry delta');
+  }
   const nestedIds = nestedFloatingOccurrenceIds(layout);
   return Object.freeze({
     ...delta,
-    entries: Object.freeze(delta.entries.map((entry) => {
-      const occurrenceId = nestedIds.has(entry.occurrenceId)
-        ? projectedNestedOccurrenceId(ownerOccurrenceId, entry.occurrenceId)
-        : layout.ordinaryFlow
-          ? null
-          : ownerOccurrenceId;
-      if (occurrenceId === null) return entry;
-      return Object.freeze({ ...entry, occurrenceId, exclusionId: occurrenceId });
-    })),
+    floats: Object.freeze({
+      ...delta.floats,
+      entries: Object.freeze(delta.floats.entries.map((entry) => {
+        const occurrenceId = nestedIds.has(entry.occurrenceId)
+          ? projectedNestedOccurrenceId(ownerOccurrenceId, entry.occurrenceId)
+          : layout.ordinaryFlow
+            ? null
+            : ownerOccurrenceId;
+        if (occurrenceId === null) return entry;
+        return Object.freeze({ ...entry, occurrenceId, exclusionId: occurrenceId });
+      })),
+    }),
   });
 }
 
-function paragraphFloatDeltaForAcceptedFragment(
-  delta: FloatRegistryDeltaPt,
+function paragraphFlowRegistryDeltaForAcceptedFragment(
+  delta: BodyFlowRegistryDeltaPt,
   fragment: ParagraphLayout,
-): FloatRegistryDeltaPt | null {
+): BodyFlowRegistryDeltaPt | null {
   const acceptedAnchorOccurrenceIds = new Set(fragment.drawings.flatMap((drawing) => {
     const occurrenceId = drawing.anchorLayer?.acquisitionOccurrenceId
       ?? drawing.anchorLayer?.occurrenceId;
     return occurrenceId === undefined ? [] : [occurrenceId];
   }));
-  const entries = delta.entries.filter((entry) =>
-    acceptedAnchorOccurrenceIds.has(entry.occurrenceId));
-  if (entries.length === 0) return null;
+  const floatEntries = delta.floats?.entries.filter((entry) =>
+    acceptedAnchorOccurrenceIds.has(entry.occurrenceId)) ?? [];
+  const collisionEntries = delta.drawingCollisions?.entries.filter((entry) =>
+    acceptedAnchorOccurrenceIds.has(entry.occurrenceId)) ?? [];
+  if (floatEntries.length === 0 && collisionEntries.length === 0) return null;
   return Object.freeze({
-    ...delta,
-    entries: Object.freeze(entries),
-    nextParagraphId: delta.baseNextParagraphId + entries.length,
+    ...(delta.floats && floatEntries.length > 0 ? {
+      floats: Object.freeze({
+        ...delta.floats,
+        entries: Object.freeze(floatEntries),
+        nextParagraphId: delta.floats.baseNextParagraphId + floatEntries.length,
+      }),
+    } : {}),
+    ...(delta.drawingCollisions && collisionEntries.length > 0 ? {
+      drawingCollisions: Object.freeze({
+        ...delta.drawingCollisions,
+        entries: Object.freeze(collisionEntries),
+      }),
+    } : {}),
   });
 }
 
@@ -623,7 +641,7 @@ function paginateBodyPass(
       location,
       availableInlineExtentPt: location.availableBounds.widthPt,
     });
-    if (delta) session.commitFloatRegistryDelta(delta);
+    if (delta) session.commitFlowRegistryDelta(delta);
   };
   prescanPageAnchors(state, 0);
   const approximateBalanceTarget = (
@@ -846,8 +864,8 @@ function paginateBodyPass(
             allocations,
             acquired.placement,
           );
-          if (acquired.floatRegistryDelta) {
-            session.commitFloatRegistryDelta(acquired.floatRegistryDelta);
+          if (acquired.flowRegistryDelta) {
+            session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
           }
           cursor = null;
           session.moveAcquisitionCursor(acquisitionLocation(state));
@@ -948,8 +966,8 @@ function paginateBodyPass(
               acceptedOccurrenceIds,
               allocations,
             );
-            if (acquired.floatRegistryDelta) {
-              session.commitFloatRegistryDelta(acquired.floatRegistryDelta);
+            if (acquired.flowRegistryDelta) {
+              session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
             }
             cursor = null;
             session.moveAcquisitionCursor(acquisitionLocation(state));
@@ -1011,12 +1029,12 @@ function paginateBodyPass(
           location.availableBounds.widthPt,
         );
         commitFootnotes(notes.ids, notes.reservePt);
-        if (acquired.floatRegistryDelta) {
-          const acceptedDelta = paragraphFloatDeltaForAcceptedFragment(
-            acquired.floatRegistryDelta,
+        if (acquired.flowRegistryDelta) {
+          const acceptedDelta = paragraphFlowRegistryDeltaForAcceptedFragment(
+            acquired.flowRegistryDelta,
             selected.fragment,
           );
-          if (acceptedDelta) session.commitFloatRegistryDelta(acceptedDelta);
+          if (acceptedDelta) session.commitFlowRegistryDelta(acceptedDelta);
         }
         cursor = selected.nextCursor;
         if (cursor) {
@@ -1121,9 +1139,9 @@ function paginateBodyPass(
           acquired.placement,
         );
         commitFootnotes(notes.ids, notes.reservePt);
-        if (acquired.floatRegistryDelta) {
-          session.commitFloatRegistryDelta(bindTableFloatDeltaToAcceptedOccurrence(
-            acquired.floatRegistryDelta,
+        if (acquired.flowRegistryDelta) {
+          session.commitFlowRegistryDelta(bindTableFlowRegistryDeltaToAcceptedOccurrence(
+            acquired.flowRegistryDelta,
             acquired.layout,
             bodyOccurrenceKey(block.source, location.flowDomainId, fragmentStartKey),
           ));

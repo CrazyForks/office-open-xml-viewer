@@ -200,6 +200,7 @@ export function layoutParseErrorPage(
         format: 'decimal',
         sectionOccurrenceId: 'parse-error-section',
       },
+      columnSeparators: [],
       sectionRegions: [{
         id: 'parse-error-region',
         sectionOccurrenceId: 'parse-error-section',

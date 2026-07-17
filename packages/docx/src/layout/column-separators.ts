@@ -1,17 +1,16 @@
 import { transformPoint } from './coordinate-space.js';
-import type { PageSectionRegion, PointPt } from './types.js';
+import type { ColumnSeparatorLayout, PageSectionRegion, PointPt } from './types.js';
 
-export interface ColumnSeparatorSegment {
-  readonly start: PointPt;
-  readonly end: PointPt;
+function freezePoint(point: PointPt): PointPt {
+  return Object.freeze(point);
 }
 
 /** Geometry follows the retained section band because ink bounds cannot prove
  * where Word terminates a section-scoped column rule. */
 export function columnSeparatorSegments(
   regions: readonly PageSectionRegion[],
-): readonly ColumnSeparatorSegment[] {
-  const segments: ColumnSeparatorSegment[] = [];
+): readonly ColumnSeparatorLayout[] {
+  const segments: ColumnSeparatorLayout[] = [];
   for (const region of regions) {
     // The current region model owns every normalized section column; until
     // column-subset regions exist, its section remains the decoration authority.
@@ -23,17 +22,17 @@ export function columnSeparatorSegments(
       const left = columns[index]!;
       const right = columns[index + 1]!;
       const inlinePt = (left.xPt + left.wPt + right.xPt) / 2;
-      segments.push({
-        start: transformPoint(region.coordinateSpace.logicalToPhysical, {
+      segments.push(Object.freeze({
+        start: freezePoint(transformPoint(region.coordinateSpace.logicalToPhysical, {
           xPt: inlinePt,
           yPt: region.blockStartPt,
-        }),
-        end: transformPoint(region.coordinateSpace.logicalToPhysical, {
+        })),
+        end: freezePoint(transformPoint(region.coordinateSpace.logicalToPhysical, {
           xPt: inlinePt,
           yPt: region.blockEndPt,
-        }),
-      });
+        })),
+      }));
     }
   }
-  return segments;
+  return Object.freeze(segments);
 }

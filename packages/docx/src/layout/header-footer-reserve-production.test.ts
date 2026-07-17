@@ -10,6 +10,20 @@ import { paginateBody } from './body-paginator.js';
 import { attachBodyLayoutKernel } from './runtime-state.js';
 import type { LayoutServices, ParagraphLayout, SourceRef } from './types.js';
 
+const emptyFlowRegistrySnapshot = () => ({
+  floats: {
+    coordinateSpace: 'logical-page-points' as const,
+    flowDomainId: 'body',
+    entries: [],
+    nextParagraphId: 0,
+  },
+  drawingCollisions: {
+    coordinateSpace: 'logical-page-points' as const,
+    flowDomainId: 'body',
+    entries: [],
+  },
+});
+
 const bodySource = (index: number): SourceRef => ({
   story: 'body', storyInstance: 'body', path: [index],
 });
@@ -141,13 +155,8 @@ function paginate(input: Readonly<{
     measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
     resetPageAcquisition: () => undefined,
     moveAcquisitionCursor: () => undefined,
-    floatRegistrySnapshot: () => ({
-      coordinateSpace: 'logical-page-points',
-      flowDomainId: 'body',
-      entries: [],
-      nextParagraphId: 0,
-    }),
-    commitFloatRegistryDelta: () => undefined,
+    flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+    commitFlowRegistryDelta: () => undefined,
   };
   const services = Object.freeze({
     text: { fingerprint: 'text' },

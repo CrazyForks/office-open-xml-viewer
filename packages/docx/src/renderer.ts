@@ -136,18 +136,21 @@ import {
 } from './layout-context.js';
 import { canvasFontString, justifiedPiecePositions } from '@silurus/ooxml-core';
 import type {
+  BodyFlowRegistryDeltaPt,
+  BodyFlowRegistrySnapshotPt,
+  DrawingMLCollisionRegistrySnapshotPt,
   LayoutServices,
   FloatRegistryEntryPt,
   FloatRegistrySnapshotPt,
   FloatingTablePlacementLayout,
   FloatRegistryDeltaPt,
   Matrix2DData,
+  DrawingMLCollisionEntryPt,
   ParagraphLayout,
   ResolvedFloatingTablePlacementLayout,
   SourceRef,
   TableLayout,
   TableLayoutInput,
-  WrapExclusion,
 } from './layout/types.js';
 import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
@@ -352,6 +355,7 @@ import {
   resolveParagraphBorderEdges,
 } from './layout/paragraph-border-adjacency.js';
 import {
+  acquireParagraphResult,
   acquireRetainedFrameGroup,
   acquireShapeTextBoxLayout,
   bodyFrameGroupFor,
@@ -359,6 +363,23 @@ import {
   paragraphLayoutFromMeasurement,
   sliceParagraphLayout,
 } from './layout/paragraph.js';
+import {
+  ownedParagraphAnchorCollisions,
+  inheritedParagraphAuthorityForReacquisition,
+  TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX,
+} from './layout/paragraph-wrap-registry.js';
+import { acquireRegisteredParagraph } from './layout/registered-paragraph-acquisition.js';
+import {
+  paragraphAnchorCollisions,
+  paragraphAnchorReferenceFrames,
+  paragraphWrapExclusions,
+} from './layout/paragraph-float-authority.js';
+import {
+  applyDrawingMLCollisionRegistryDelta,
+  createDrawingMLCollisionRegistry,
+  drawingMLCollisionRegistryDelta,
+  validateDrawingMLCollisionRegistryDelta,
+} from './layout/drawingml-collision-registry.js';
 import { resolveAnchorFrame } from './layout/anchor-frame.js';
 import {
   drawVerticalRun,
@@ -2735,42 +2756,80 @@ function buildMeasureState(
         paragraphPath,
         flowDomainId,
         paragraphBorderEdges,
+        inheritedAuthority,
       ) => {
-        registerAnchorFloats(paragraph, cellState, cellState.y);
-        const acquiredParagraph = measureCellParagraphScale1(
+        const source = {
+          story: 'body' as const,
+          storyInstance: 'body',
+          path: [...paragraphPath],
+        };
+        const publicRuns = paragraph.runs.filter((run, runIndex) =>
+          publicAnchorBridge(run, source, runIndex) !== null);
+        if (publicRuns.length > 0) {
+          // Hand-built compatibility runs have no parser anchor/host acquisition
+          // facts, so their paragraph-top projection stays outside the parser
+          // fixed point until the public bridge is removed.
+          registerAnchorFloats(
+            { ...paragraph, runs: publicRuns },
+            cellState,
+            cellState.y,
+          );
+        }
+        const context = resolveStateParagraphLayoutContext(cellState, paragraph);
+        const layout = acquireRegisteredParagraph(
           cellState,
-          paragraph,
-          paragraphWidthPt,
-        );
-        const { measured } = acquiredParagraph;
-        const trailingExtentPt = Math.max(
-          measured.requestedSpaceAfterPt,
-          bottomBorderExtentPt(paragraph.borders),
-        );
-        const fullLineEnd = measured.markOnly ? 0 : measured.lines.length;
-        const fragment = buildParagraphFragment(
-          paragraph,
-          measured,
-          0,
-          fullLineEnd,
-          true,
-          true,
-          trailingExtentPt,
-          cellState,
-          { story: 'body', storyInstance: 'body', path: [...paragraphPath] },
-          flowDomainId,
-          paragraphBorderEdges,
-          acquiredParagraph.context,
-        );
-        if (paragraph.spaceBefore === 0) return fragment;
+          paragraphAcquisitionInput(paragraph, source),
+          {
+            id: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
+            source,
+            flowDomainId,
+            ordinaryFlow: true,
+            context,
+            placement: {
+              startYPt: cellState.y,
+              paragraphXPt: 0,
+              availableWidthPt: paragraphWidthPt,
+              maximumYPt: cellState.pageH,
+              suppressSpaceBefore: true,
+            },
+            measurer: {
+              context: cellState.ctx,
+              fontFamilyClasses: cellState.fontFamilyClasses,
+            },
+            environment: paragraphMeasurementEnvironment(cellState),
+            exclusions: paragraphWrapExclusions(cellState.floats, flowDomainId),
+            anchorCollisions: paragraphAnchorCollisions(cellState.floats),
+            anchorCellBounds: {
+              xPt: 0,
+              yPt: 0,
+              widthPt: paragraphWidthPt,
+              heightPt: cellState.pageH / cellState.scale,
+            },
+            containerShading: cellState.containerShading,
+            ...(paragraphBorderEdges ? { paragraphBorderEdges } : {}),
+            trailingExtentPt: Math.max(
+              context.spaceAfterPt,
+              paragraphBorderEdges?.bottom === 'none'
+                ? 0
+                : bottomBorderExtentPt(paragraph.borders),
+            ),
+            continuesFromPrevious: false,
+            anchorFrames: paragraphAnchorReferenceFrames(cellState),
+          },
+          inheritedAuthority,
+        ).layout;
+        if (paragraph.spaceBefore === 0) return layout;
         return Object.freeze({
-          ...fragment,
+          ...layout,
           flowBounds: Object.freeze({
-            ...fragment.flowBounds,
-            heightPt: fragment.flowBounds.heightPt + paragraph.spaceBefore,
+            ...layout.flowBounds,
+            heightPt: layout.flowBounds.heightPt + paragraph.spaceBefore,
           }),
-          advancePt: fragment.advancePt + paragraph.spaceBefore,
-          spacing: Object.freeze({ ...fragment.spacing, beforePt: paragraph.spaceBefore }),
+          advancePt: layout.advancePt + paragraph.spaceBefore,
+          spacing: Object.freeze({
+            ...layout.spacing,
+            beforePt: paragraph.spaceBefore,
+          }),
         });
       },
       registerFloatingTable: (state, request) => {
@@ -2948,6 +3007,66 @@ function createConcreteBodyLayoutKernel(
     }
     return element;
   };
+  /** Body acquisition stays at the kernel adapter because it resolves legacy
+   * renderer state into retained paragraph inputs; layout-owned projections
+   * below it receive only immutable structural values. */
+  const acquireBodyParagraphAtLocation = (
+    state: RenderState,
+    paragraph: DocParagraph,
+    source: SourceRef,
+    location: BodyAcquisitionLocation,
+    availableInlineExtentPt: number,
+    suppressSpaceBefore: boolean,
+    continuation: BodyParagraphAcquisitionInput['continuation'] = Object.freeze({
+      boundary: null,
+    }),
+    retainedAnchorCollisions?: readonly DrawingMLCollisionEntryPt[],
+  ) => {
+    const edges = bodyParagraphBorderEdgesFor(paragraph) ?? {
+      top: 'top' as const,
+      bottom: 'bottom' as const,
+    };
+    const context = resolveBodyParagraphLayoutContext(state, paragraph);
+    return acquireParagraphResult(
+      paragraphAcquisitionInput(paragraph, source),
+      {
+        id: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
+        source,
+        flowDomainId: location.flowDomainId,
+        ordinaryFlow: true,
+        context,
+        placement: {
+          startYPt: state.y,
+          paragraphXPt: location.availableBounds.xPt,
+          availableWidthPt: availableInlineExtentPt,
+          maximumYPt: state.pageH,
+          suppressSpaceBefore,
+        },
+        measurer: { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
+        environment: paragraphMeasurementEnvironment(state),
+        exclusions: paragraphWrapExclusions(state.floats, location.flowDomainId),
+        anchorCollisions: retainedAnchorCollisions
+          ?? paragraphAnchorCollisions(state.floats),
+        containerShading: state.containerShading,
+        paragraphBorderEdges: edges,
+        trailingExtentPt: Math.max(
+          context.spaceAfterPt,
+          edges.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders),
+        ),
+        continuesFromPrevious: continuation.boundary !== null,
+        ...(continuation.sourceRangeStart === undefined ? {} : {
+          sourceRangeStart: continuation.sourceRangeStart,
+        }),
+        anchorFrames: paragraphAnchorReferenceFrames(state),
+      },
+      continuation.boundary === null ? undefined : {
+        boundary: continuation.boundary,
+        ...(continuation.uniformRubyAdvancePt === undefined ? {} : {
+          uniformRubyAdvancePt: continuation.uniformRubyAdvancePt,
+        }),
+      },
+    );
+  };
   return Object.freeze({
     openBodyLayoutSession(
       input: import('./layout/body-layout-kernel.js').BodyLayoutSessionInput,
@@ -3002,6 +3121,11 @@ function createConcreteBodyLayoutKernel(
         entries: Object.freeze([]) as readonly FloatRegistryEntryPt[],
         nextParagraphId: 0,
       });
+      let drawingCollisionRegistry: DrawingMLCollisionRegistrySnapshotPt =
+        createDrawingMLCollisionRegistry(
+          location.flowDomainId,
+          'logical-page-points',
+        );
       const applyLocationTo = (target: RenderState, next: BodyAcquisitionLocation) => {
         const geometry = next.section.geometry;
         target.sectionLayout = next.section as SectionLayoutContext;
@@ -3092,7 +3216,7 @@ function createConcreteBodyLayoutKernel(
         layout: ParagraphLayout,
       ): readonly FloatRegistryEntryPt[] => {
         const hostFrames = new Map((layout.anchorFrames ?? []).flatMap((frame) => {
-          if (frame.status !== 'resolved' || frame.geometry.wrap.kind === 'none') return [];
+          if (frame.status !== 'resolved') return [];
           const isHostAxis = (axis: typeof frame.axes.horizontal) => axis.status === 'resolved'
             && (axis.referenceFrame === 'paragraph'
               || axis.referenceFrame === 'line'
@@ -3102,23 +3226,28 @@ function createConcreteBodyLayoutKernel(
             : [];
         }));
         if (hostFrames.size === 0) return Object.freeze([]);
-        const drawings = new Map(layout.drawings.flatMap((drawing) => {
-          const occurrenceId = drawing.anchorLayer?.acquisitionOccurrenceId
-            ?? drawing.anchorLayer?.occurrenceId;
-          return occurrenceId === undefined ? [] : [[occurrenceId, drawing] as const];
-        }));
-        return Object.freeze(layout.exclusions.flatMap((exclusion): FloatRegistryEntryPt[] => {
-          const occurrenceId = exclusion.anchorOccurrenceId;
-          const frame = occurrenceId === undefined ? undefined : hostFrames.get(occurrenceId);
-          const drawing = occurrenceId === undefined ? undefined : drawings.get(occurrenceId);
-          if (!occurrenceId || !frame || !drawing || frame.geometry.wrap.kind === 'none') return [];
+        const exclusions = new Map(layout.exclusions.flatMap((exclusion) =>
+          exclusion.anchorOccurrenceId
+            ? [[exclusion.anchorOccurrenceId, exclusion] as const]
+            : []));
+        return Object.freeze((layout.anchorCollisions ?? []).flatMap(
+          (collision): FloatRegistryEntryPt[] => {
+          const frame = hostFrames.get(collision.occurrenceId);
+          if (!frame) return [];
+          if (frame.geometry.wrap.kind === 'none') return [];
+          const exclusion = exclusions.get(collision.occurrenceId);
+          if (!exclusion) {
+            throw new Error(`Wrapped anchor omitted exclusion geometry: ${collision.occurrenceId}`);
+          }
           return [Object.freeze({
             kind: 'shape' as const,
-            occurrenceId,
-            exclusionId: occurrenceId,
+            occurrenceId: collision.occurrenceId,
+            exclusionId: collision.occurrenceId,
             paragraphId: floatRegistry.nextParagraphId,
-            bounds: drawing.flowBounds,
+            bounds: collision.bounds,
             exclusionBounds: exclusion.bounds,
+            horizontalOwnership: collision.horizontalOwnership,
+            verticalOwnership: collision.verticalOwnership,
             wrap: frame.geometry.wrap.kind,
             wrapSide: frame.geometry.wrap.side,
             wrapDistances: frame.geometry.wrap.distances,
@@ -3143,7 +3272,8 @@ function createConcreteBodyLayoutKernel(
           contentW: request.acquired.flowBounds.widthPt * scale,
           y: request.acquired.flowBounds.yPt,
           floats: (request.floatingTableExclusions ?? []).map((bounds, index): FloatRect => ({
-            kind: 'table', mode: 'square', imageKey: `table-final-frame:${index}`,
+            kind: 'table', mode: 'square',
+            imageKey: `${TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX}${index}`,
             imageX: bounds.xPt * scale, imageY: bounds.yPt * scale,
             imageW: bounds.widthPt * scale, imageH: bounds.heightPt * scale,
             xLeft: bounds.xPt * scale,
@@ -3156,39 +3286,21 @@ function createConcreteBodyLayoutKernel(
           floatParaSeq: request.floatingTableExclusions?.length ?? 0,
           pageAnchorPrescanned: new Set<DocParagraph>(),
         };
-        const acquired = measureCellParagraphScale1(
+        const inheritedAuthority =
+          inheritedParagraphAuthorityForReacquisition(request.acquired);
+        const tableAcquisition = state.retainedTableAcquisition;
+        if (!tableAcquisition) {
+          throw new Error('Table paragraph re-acquisition requires retained dependencies');
+        }
+        return tableAcquisition.acquireParagraph(
           candidate,
           source,
           request.acquired.flowBounds.widthPt,
-        );
-        const trailingExtentPt = Math.max(
-          acquired.measured.requestedSpaceAfterPt,
-          bottomBorderExtentPt(source.borders),
-        );
-        const fragment = buildParagraphFragment(
-          source,
-          acquired.measured,
-          0,
-          acquired.measured.markOnly ? 0 : acquired.measured.lines.length,
-          true,
-          true,
-          trailingExtentPt,
-          candidate,
-          request.acquired.source,
+          request.acquired.source.path,
           request.acquired.flowDomainId,
           undefined,
-          acquired.context,
+          inheritedAuthority,
         );
-        if (source.spaceBefore === 0) return fragment;
-        return Object.freeze({
-          ...fragment,
-          flowBounds: Object.freeze({
-            ...fragment.flowBounds,
-            heightPt: fragment.flowBounds.heightPt + source.spaceBefore,
-          }),
-          advancePt: fragment.advancePt + source.spaceBefore,
-          spacing: Object.freeze({ ...fragment.spacing, beforePt: source.spaceBefore }),
-        });
       };
       const session: BodyLayoutSession = {
         hasPaginationFields: paginatedFlowHasPaginationDependentFields(
@@ -3251,11 +3363,13 @@ function createConcreteBodyLayoutKernel(
                 ),
               } : {}),
               ...(box.registerExclusion === false ? {} : {
-                floatRegistryDelta: floatingTableRegistryDelta(
-                  floatRegistry,
-                  Object.freeze([frameEntry]),
-                  floatRegistry.nextParagraphId + 1,
-                ),
+                flowRegistryDelta: Object.freeze({
+                  floats: floatingTableRegistryDelta(
+                    floatRegistry,
+                    Object.freeze([frameEntry]),
+                    floatRegistry.nextParagraphId + 1,
+                  ),
+                }),
               }),
             });
           }
@@ -3268,49 +3382,29 @@ function createConcreteBodyLayoutKernel(
           const publicFloats = request.continuation.boundary === null
             ? publicParagraphFloatAcquisition(paragraph, request.input.source, candidate)
             : Object.freeze([]);
-          const measured = measureBodyParagraphAtCursor(
+          const acquired = acquireBodyParagraphAtLocation(
             candidate,
             paragraph,
+            request.input.source,
+            request.location,
             request.availableInlineExtentPt,
             request.suppressSpaceBefore,
-            request.location.availableBounds.xPt,
-            request.continuation.boundary === null ? undefined : {
-              boundary: request.continuation.boundary,
-              ...(request.continuation.uniformRubyAdvancePt === undefined ? {} : {
-                uniformRubyAdvancePt: request.continuation.uniformRubyAdvancePt,
-              }),
-            },
+            request.continuation,
+            drawingCollisionRegistry.entries,
           );
-          const edges = bodyParagraphBorderEdgesFor(paragraph) ?? {
-            top: 'top' as const,
-            bottom: 'bottom' as const,
-          };
-          const trailing = Math.max(
-            measured.requestedSpaceAfterPt,
-            edges.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders),
-          );
+          const { measured, layout } = acquired;
           const allBoundaries = measured.lines.map((line) => {
             const boundary = line.layout.consumedEnd;
             if (!boundary) throw new Error('Measured line omitted its source boundary');
             return boundary;
           });
-          const layout = buildParagraphFragment(
-            paragraph,
-            measured,
-            0,
-            measured.markOnly ? 0 : measured.lines.length,
-            request.continuation.boundary === null,
-            true,
-            trailing,
-            candidate,
-            request.input.source,
-            request.location.flowDomainId,
-            edges,
-            undefined,
-            request.continuation.sourceRangeStart,
-          );
           const retainedFloats = retainedParagraphFloatEntries(layout);
           const floatEntries = Object.freeze([...publicFloats, ...retainedFloats]);
+          // This accepted-collision path is intentionally parser-owned. Hand-built
+          // public-model anchors still use the compatibility float bridge (and a
+          // public wrapNone run therefore has no collision entry) until the Series
+          // B/C bridge removal migrates those runs to the retained OOXML contract.
+          const collisionEntries = ownedParagraphAnchorCollisions(layout);
           return Object.freeze({
             layout,
             blockExtentPt: layout.advancePt,
@@ -3321,14 +3415,24 @@ function createConcreteBodyLayoutKernel(
             ...(measured.uniformRubyAdvancePt == null
               ? {}
               : { uniformRubyAdvancePt: measured.uniformRubyAdvancePt }),
-            ...(floatEntries.length === 0
+            ...(floatEntries.length === 0 && collisionEntries.length === 0
               ? {}
               : {
-                  floatRegistryDelta: floatingTableRegistryDelta(
-                    floatRegistry,
-                    floatEntries,
-                    floatRegistry.nextParagraphId + floatEntries.length,
-                  ),
+                  flowRegistryDelta: Object.freeze({
+                    ...(floatEntries.length === 0 ? {} : {
+                      floats: floatingTableRegistryDelta(
+                        floatRegistry,
+                        floatEntries,
+                        floatRegistry.nextParagraphId + floatEntries.length,
+                      ),
+                    }),
+                    ...(collisionEntries.length === 0 ? {} : {
+                      drawingCollisions: drawingMLCollisionRegistryDelta(
+                        drawingCollisionRegistry,
+                        collisionEntries,
+                      ),
+                    }),
+                  }),
                 }),
           });
         },
@@ -3449,7 +3553,11 @@ function createConcreteBodyLayoutKernel(
                 ? Object.freeze({ kind: 'adjacent-table-group' as const, cursor: nextGroupCursor })
                 : null,
               ...(result.floatingTableRegistryDelta
-                ? { floatRegistryDelta: result.floatingTableRegistryDelta }
+                ? {
+                    flowRegistryDelta: Object.freeze({
+                      floats: result.floatingTableRegistryDelta,
+                    }),
+                  }
                 : {}),
             });
           }
@@ -3664,11 +3772,13 @@ function createConcreteBodyLayoutKernel(
                     floatingContinuationFrame: 'fresh-text' as const,
                   })
                 : null,
-              floatRegistryDelta: floatingTableRegistryDelta(
-                floatRegistry,
-                Object.freeze([...nestedEntries, ...resolved.transaction.delta]),
-                resolved.transaction.nextParagraphId,
-              ),
+              flowRegistryDelta: Object.freeze({
+                floats: floatingTableRegistryDelta(
+                  floatRegistry,
+                  Object.freeze([...nestedEntries, ...resolved.transaction.delta]),
+                  resolved.transaction.nextParagraphId,
+                ),
+              }),
               placement: Object.freeze({
                 coordinateSpace: 'logical-body' as const,
                 xPt: resolved.placement.xPt,
@@ -3847,7 +3957,11 @@ function createConcreteBodyLayoutKernel(
               ? Object.freeze({ kind: 'table' as const, cursor: result.nextCursor })
               : null,
             ...(result.floatingTableRegistryDelta
-              ? { floatRegistryDelta: result.floatingTableRegistryDelta }
+              ? {
+                  flowRegistryDelta: Object.freeze({
+                    floats: result.floatingTableRegistryDelta,
+                  }),
+                }
               : {}),
           });
         },
@@ -3929,28 +4043,24 @@ function createConcreteBodyLayoutKernel(
           const element = sourceElement(request.input.source);
           if (request.input.kind === 'paragraph') {
             if (element.type !== 'paragraph') throw new Error('Following paragraph source kind mismatch');
-            const measured = measureBodyParagraphAtCursor(
+            const { layout } = acquireBodyParagraphAtLocation(
               candidate,
               element,
+              request.input.source,
+              request.location,
               request.availableInlineExtentPt,
               false,
-              request.location.availableBounds.xPt,
+              undefined,
+              drawingCollisionRegistry.entries,
             );
-            const edges = bodyParagraphBorderEdgesFor(element) ?? {
-              top: 'top' as const, bottom: 'bottom' as const,
-            };
-            const trailing = Math.max(
-              measured.requestedSpaceAfterPt,
-              edges.bottom === 'none' ? 0 : bottomBorderExtentPt(element.borders),
-            );
-            const layout = buildParagraphFragment(
-              element, measured, 0, measured.markOnly ? 0 : measured.lines.length,
-              true, true, trailing, candidate, request.input.source,
-              request.location.flowDomainId, edges,
-            );
+            const firstLine = layout.lines[0];
             return Object.freeze({
               fullExtentPt: layout.advancePt,
-              leadContentExtentPt: layout.lines[0]?.advancePt ?? layout.advancePt,
+              // keepNext admits the successor's first content line, including
+              // any retained wrap displacement before that line begins.
+              leadContentExtentPt: firstLine
+                ? firstLine.bounds.yPt + firstLine.advancePt - layout.flowBounds.yPt
+                : layout.advancePt,
             });
           }
           if (element.type !== 'table') throw new Error('Following table source kind mismatch');
@@ -3990,13 +4100,14 @@ function createConcreteBodyLayoutKernel(
           const paragraphKey = (source: SourceRef) =>
             `${source.story}:${source.storyInstance}:${source.path.join('.')}`;
           const paragraphIds = new Map<string, number>();
-          request.anchors.forEach(({ paragraphSource }) => {
-            const key = paragraphKey(paragraphSource);
+          const paragraphIdFor = (source: SourceRef): number => {
+            const key = paragraphKey(source);
             if (!paragraphIds.has(key)) {
               paragraphIds.set(key, floatRegistry.nextParagraphId + paragraphIds.size);
             }
-          });
-          const entries = request.anchors.map((anchor): FloatRegistryEntryPt => {
+            return paragraphIds.get(key)!;
+          };
+          const entries = request.anchors.flatMap((anchor): readonly FloatRegistryEntryPt[] => {
             const paragraph = sourceElement(anchor.paragraphSource);
             if (paragraph.type !== 'paragraph') {
               throw new Error('Page-anchor prescan source kind mismatch');
@@ -4028,6 +4139,12 @@ function createConcreteBodyLayoutKernel(
                 publicAnchorBridge(run, anchor.paragraphSource, runIndex)?.occurrenceId
                   === anchor.occurrenceId);
               if (publicRun) {
+                if (
+                  (publicRun.type === 'image'
+                    || publicRun.type === 'chart'
+                    || publicRun.type === 'shape')
+                  && publicRun.wrapMode === 'none'
+                ) return [];
                 const candidate: RenderState = {
                   ...state,
                   floats: [...state.floats],
@@ -4039,13 +4156,13 @@ function createConcreteBodyLayoutKernel(
                   anchor.paragraphSource,
                   candidate,
                   new Set([anchor.occurrenceId]),
-                  paragraphIds.get(paragraphKey(anchor.paragraphSource))!,
+                  paragraphIdFor(anchor.paragraphSource),
                 );
                 if (publicEntries.length !== 1) {
                   throw new Error(`Public page-anchor prescan occurrence mismatch: ${anchor.occurrenceId}`);
                 }
                 publicParagraphs.add(paragraph);
-                return publicEntries[0]!;
+                return publicEntries;
               }
               throw new Error(`Page-anchor prescan occurrence acquisition mismatch: ${anchor.occurrenceId}`);
             }
@@ -4058,7 +4175,7 @@ function createConcreteBodyLayoutKernel(
             }
             const wrapBounds = result.geometry.wrapBounds;
             if (wrapBounds === null || result.geometry.wrap.kind === 'none') {
-              throw new Error(`Page-anchor prescan occurrence has no exclusion: ${anchor.occurrenceId}`);
+              return [];
             }
             const polygon = result.geometry.wrap.polygon?.points ?? Object.freeze([
               Object.freeze({ xPt: wrapBounds.xPt, yPt: wrapBounds.yPt }),
@@ -4069,26 +4186,29 @@ function createConcreteBodyLayoutKernel(
               }),
               Object.freeze({ xPt: wrapBounds.xPt, yPt: wrapBounds.yPt + wrapBounds.heightPt }),
             ]);
-            return Object.freeze({
+            return [Object.freeze({
               kind: 'shape' as const,
               occurrenceId: anchor.occurrenceId,
-              paragraphId: paragraphIds.get(paragraphKey(anchor.paragraphSource))!,
+              paragraphId: paragraphIdFor(anchor.paragraphSource),
               bounds: result.geometry.objectFrame,
               exclusionBounds: wrapBounds,
               wrap: result.geometry.wrap.kind,
               wrapSide: result.geometry.wrap.side,
               wrapDistances: result.geometry.wrap.distances,
               wrapPolygon: Object.freeze([...polygon]),
-            });
+            })];
           });
           publicParagraphs.forEach((paragraph) => state.pageAnchorPrescanned?.add(paragraph));
           if (entries.length === 0) return null;
           return Object.freeze({
-            coordinateSpace: 'logical-page-points' as const,
-            flowDomainId: request.location.flowDomainId,
-            baseNextParagraphId: floatRegistry.nextParagraphId,
-            nextParagraphId: floatRegistry.nextParagraphId + entries.length,
-            entries: Object.freeze(entries),
+            floats: Object.freeze({
+              coordinateSpace: 'logical-page-points' as const,
+              flowDomainId: request.location.flowDomainId,
+              baseEntries: floatRegistry.entries,
+              baseNextParagraphId: floatRegistry.nextParagraphId,
+              nextParagraphId: floatRegistry.nextParagraphId + entries.length,
+              entries: Object.freeze(entries),
+            }),
           });
         },
         measureLineNumberGlyph(text) {
@@ -4122,21 +4242,45 @@ function createConcreteBodyLayoutKernel(
             entries: Object.freeze([]),
             nextParagraphId: 0,
           });
+          drawingCollisionRegistry = createDrawingMLCollisionRegistry(
+            next.flowDomainId,
+            'logical-page-points',
+          );
           applyLocation(next);
         },
         moveAcquisitionCursor: applyLocation,
-        floatRegistrySnapshot() {
-          return floatRegistry;
-        },
-        commitFloatRegistryDelta(delta) {
-          validateFloatingTableRegistryDelta(delta, {
-            coordinateSpace: floatRegistry.coordinateSpace,
-            flowDomainId: floatRegistry.flowDomainId,
-            nextParagraphId: floatRegistry.nextParagraphId,
-            occurrenceIds: floatRegistry.entries.map((entry) => entry.occurrenceId),
+        flowRegistrySnapshot(): BodyFlowRegistrySnapshotPt {
+          return Object.freeze({
+            floats: floatRegistry,
+            drawingCollisions: drawingCollisionRegistry,
           });
+        },
+        commitFlowRegistryDelta(delta: BodyFlowRegistryDeltaPt) {
+          if (!delta.floats && !delta.drawingCollisions) {
+            throw new Error('Body flow registry delta must update at least one registry');
+          }
+          if (delta.floats) {
+            validateFloatingTableRegistryDelta(delta.floats, {
+              coordinateSpace: floatRegistry.coordinateSpace,
+              flowDomainId: floatRegistry.flowDomainId,
+              entries: floatRegistry.entries,
+              nextParagraphId: floatRegistry.nextParagraphId,
+            });
+          }
+          if (delta.drawingCollisions) {
+            validateDrawingMLCollisionRegistryDelta(
+              drawingCollisionRegistry,
+              delta.drawingCollisions,
+            );
+          }
+          const nextDrawingCollisionRegistry = delta.drawingCollisions
+            ? applyDrawingMLCollisionRegistryDelta(
+                drawingCollisionRegistry,
+                delta.drawingCollisions,
+              )
+            : drawingCollisionRegistry;
           const scale = state.scale;
-          for (const entry of delta.entries) {
+          const retainedFloats = (delta.floats?.entries ?? []).map((entry): FloatRect => {
             const left = entry.wrapDistances?.leftPt
               ?? entry.bounds.xPt - entry.exclusionBounds.xPt;
             const top = entry.wrapDistances?.topPt
@@ -4147,13 +4291,15 @@ function createConcreteBodyLayoutKernel(
             const bottom = entry.wrapDistances?.bottomPt
               ?? entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt
                 - entry.bounds.yPt - entry.bounds.heightPt;
-            state.floats.push({
+            return {
               kind: entry.kind,
               mode: entry.wrap === 'topAndBottom' ? 'topAndBottom' : 'square',
-              ...(entry.wrap ? {
-                authoredWrap: entry.wrap,
+              ...(entry.kind === 'shape' ? {
                 anchorOccurrenceId: entry.occurrenceId,
                 acquisitionOccurrenceId: entry.occurrenceId,
+              } : {}),
+              ...(entry.wrap ? {
+                authoredWrap: entry.wrap,
                 wrapPolygon: entry.wrapPolygon,
               } : {}),
               imageKey: entry.exclusionId
@@ -4168,14 +4314,18 @@ function createConcreteBodyLayoutKernel(
               distLeft: left * scale, distRight: right * scale,
               distTop: top * scale, distBottom: bottom * scale,
               paraId: entry.paragraphId, drawn: true,
-            });
-          }
-          floatRegistry = Object.freeze({
-            ...floatRegistry,
-            entries: Object.freeze([...floatRegistry.entries, ...delta.entries]),
-            nextParagraphId: delta.nextParagraphId,
+            };
           });
-          state.floatParaSeq = delta.nextParagraphId;
+          if (delta.floats) {
+            state.floats.push(...retainedFloats);
+            floatRegistry = Object.freeze({
+              ...floatRegistry,
+              entries: Object.freeze([...floatRegistry.entries, ...delta.floats.entries]),
+              nextParagraphId: delta.floats.nextParagraphId,
+            });
+            state.floatParaSeq = delta.floats.nextParagraphId;
+          }
+          drawingCollisionRegistry = nextDrawingCollisionRegistry;
         },
       };
       return Object.freeze(session);
@@ -4246,31 +4396,7 @@ function buildParagraphFragment(
   acquiredContext?: ParagraphLayoutContext,
   sourceRangeStart?: number,
 ): ParagraphLayout {
-  const exclusions: WrapExclusion[] = state.floats.map((float, index) => ({
-    id: float.imageKey || `${flowDomainId}:float:${index}`,
-    wrap: float.authoredWrap
-      ?? (float.mode === 'topAndBottom' ? 'topAndBottom' : 'square'),
-    bounds: {
-      xPt: float.xLeft, yPt: float.yTop,
-      widthPt: Math.max(0, float.xRight - float.xLeft),
-      heightPt: Math.max(0, float.yBottom - float.yTop),
-    },
-    polygon: float.wrapPolygon ?? [
-      { xPt: float.xLeft, yPt: float.yTop },
-      { xPt: float.xRight, yPt: float.yTop },
-      { xPt: float.xRight, yPt: float.yBottom },
-      { xPt: float.xLeft, yPt: float.yBottom },
-    ],
-    ...(float.kind === 'table' && !float.anchorOccurrenceId
-      ? { verticalOwnership: 'page' as const }
-      : {}),
-    ...(float.anchorOccurrenceId
-      ? {
-          anchorOccurrenceId: float.anchorOccurrenceId,
-          verticalOwnership: 'page' as const,
-        }
-      : {}),
-  }));
+  const exclusions = paragraphWrapExclusions(state.floats, flowDomainId);
   const id = `${sourceRef.story}:${sourceRef.storyInstance}:${sourceRef.path.join('.')}`;
   const whole = paragraphLayoutFromMeasurement(
     paragraphAcquisitionInput(source, sourceRef),
@@ -4289,26 +4415,7 @@ function buildParagraphFragment(
       trailingExtentPt,
       continuesFromPrevious: !isFirstSlice,
       ...(sourceRangeStart === undefined ? {} : { sourceRangeStart }),
-      anchorFrames: {
-        page: {
-          xPt: 0, yPt: 0,
-          widthPt: state.pageWidth,
-          heightPt: state.pageH / state.scale,
-        },
-        margin: {
-          xPt: state.marginLeft,
-          yPt: state.marginTop,
-          widthPt: Math.max(0, state.pageWidth - state.marginLeft - state.marginRight),
-          heightPt: Math.max(0, state.pageH / state.scale - state.marginTop - state.marginBottom),
-        },
-        column: {
-          xPt: state.contentX / state.scale,
-          yPt: state.marginTop,
-          widthPt: state.contentW / state.scale,
-          heightPt: Math.max(0, state.pageH / state.scale - state.marginTop - state.marginBottom),
-        },
-        pageParity: state.pageIndex % 2 === 0 ? 'odd' : 'even',
-      },
+      anchorFrames: paragraphAnchorReferenceFrames(state),
     },
     measured,
   );
@@ -4321,36 +4428,6 @@ function buildParagraphFragment(
     continuesFromPrevious: !isFirstSlice,
     continuesOnNext: !isFinalSlice,
   });
-}
-
-/** Place a paragraph fragment at page-absolute scale-1 coordinates. `heightPt` is the
- *  cursor advancement (leadingSpacePt + measured line advances + trailingSpacePt). */
-function measureCellParagraphScale1(
-  cellState: RenderState,
-  para: DocParagraph,
-  contentWPt: number,
-): Readonly<{ measured: MeasuredParagraph; context: ParagraphLayoutContext }> {
-  const paragraphContext = resolveStateParagraphLayoutContext(cellState, para);
-  const measured = measureParagraph(
-    para,
-    paragraphContext,
-    {
-      startYPt: cellState.y,
-      paragraphXPt: 0,
-      availableWidthPt: contentWPt,
-      maximumYPt: cellState.pageH,
-      suppressSpaceBefore: true,
-      wrap: cellState.floats.length > 0
-        ? createFloatWrapOracle(cellState.floats)
-        : undefined,
-    },
-    {
-      context: cellState.ctx,
-      fontFamilyClasses: cellState.fontFamilyClasses,
-    },
-    paragraphMeasurementEnvironment(cellState),
-  );
-  return { measured, context: paragraphContext };
 }
 
 function retainedTableRecord(state: RenderState, sourceIndex: number): RetainedTableRecord {
@@ -4381,7 +4458,11 @@ function measureBodyParagraphAtCursor(
       maximumYPt: state.pageH,
       suppressSpaceBefore,
       wrap: state.floats.length > 0
-        ? createFloatWrapOracle(state.floats)
+        ? createFloatWrapOracle(state.floats, {
+            xLeftPt: 0,
+            xRightPt: state.pageWidth,
+            readingDirection: paragraphContext.baseRtl ? 'rtl' : 'ltr',
+          })
         : undefined,
     },
     {
@@ -5680,19 +5761,36 @@ function renderParagraph(
   // stay pinned inside the band. We resolve the mark line's flowed top here and
   // use it for the mark advance, the shading/border rect, and the
   // paragraph-relative base of any wrapNone anchor image drawn below.
+  const markProbeHeight = paragraphMarkLineHeight(
+    para,
+    scale,
+    grid,
+    paraHasRuby,
+    state.docEastAsian,
+    ctx,
+    state.fontFamilyClasses,
+    para.lineSpacing,
+    state.resolvedLocalFonts,
+    state.layoutServices?.text,
+    paragraphMarkShapeInput(para),
+  );
   const resolveEmptyMarkTop = (): number => {
     if (state.floats.length === 0) return textAreaTopY;
     // Required side-gap for the mark line: the pilcrow's em width
     // (paragraphMarkEmPx) — the empty-mark threshold, NOT the 1-inch content-line
     // rule (issue #676). A gap narrower than the pilcrow cannot hold the
     // mark, so it flows below the band.
-    const probeH = 10 * scale;
     const win = resolveLineFloatWindow(
-      textAreaTopY, paragraphMarkEmPx(para, scale), probeH, paraX, paraW, state.floats,
+      textAreaTopY, paragraphMarkEmPx(para, scale), markProbeHeight, paraX, paraW, state.floats,
       // Raw COLUMN band for the topAndBottom gate (§20.4.2.20 / §17.6.4): an
       // empty mark under a topAndBottom float in this column's indent margin
       // still flows below it, matching the measure pass (measureMarkOnly).
       contentX, contentX + contentW,
+      {
+        xLeftPt: 0,
+        xRightPt: state.pageWidth * scale,
+        readingDirection: baseRtl ? 'rtl' : 'ltr',
+      },
     );
     return win.topY;
   };
@@ -5719,6 +5817,9 @@ function renderParagraph(
     // column by the paint loop), matching the measure pass.
     columnXPt: contentX,
     columnWidthPt: contentW,
+    referenceXPt: 0,
+    referenceWidthPt: state.pageWidth * scale,
+    readingDirection: baseRtl ? 'rtl' : 'ltr',
     floats: state.floats,
     paragraphMarkLineStartWidth: paragraphMarkEmPx(para, scale),
     lineBoxH: (a, d, _h, is, ea, gc) => lineBoxHeight(

@@ -406,8 +406,8 @@ describe('retained table pagination', () => {
       {
         coordinateSpace: snapshot.coordinateSpace,
         flowDomainId: snapshot.flowDomainId,
+        entries: snapshot.entries,
         nextParagraphId: snapshot.nextParagraphId,
-        occurrenceIds: [occurrenceId],
       },
     )).not.toThrow();
   });
@@ -481,8 +481,8 @@ describe('retained table pagination', () => {
       {
         coordinateSpace: snapshot.coordinateSpace,
         flowDomainId: snapshot.flowDomainId,
+        entries: snapshot.entries,
         nextParagraphId: snapshot.nextParagraphId,
-        occurrenceIds: [baseOccurrenceId],
       },
     )).not.toThrow();
   });
@@ -515,6 +515,7 @@ describe('retained table pagination', () => {
     expect(beforeAnchor.floatingTableRegistryDelta).toEqual({
       coordinateSpace: 'logical-page-points',
       flowDomainId: source.input.flowDomainId,
+      baseEntries: [],
       baseNextParagraphId: 0,
       nextParagraphId: 0,
       entries: [],
@@ -527,9 +528,13 @@ describe('retained table pagination', () => {
     ]);
     expect(atAnchor.floatingTablePlacements).toHaveLength(1);
     expect(atAnchor.floatingTablePlacements?.[0]?.source.anchorBounds.yPt).toBe(20);
-    expect(structuredClone(atAnchor.floatingTableRegistryDelta)).toEqual(
-      atAnchor.floatingTableRegistryDelta,
-    );
+    const clonedDelta = structuredClone(atAnchor.floatingTableRegistryDelta!);
+    expect(() => validateFloatingTableRegistryDelta(clonedDelta, {
+      coordinateSpace: atAnchor.floatingTableRegistryDelta!.coordinateSpace,
+      flowDomainId: atAnchor.floatingTableRegistryDelta!.flowDomainId,
+      entries: atAnchor.floatingTableRegistryDelta!.baseEntries,
+      nextParagraphId: atAnchor.floatingTableRegistryDelta!.baseNextParagraphId,
+    })).toThrow('base/domain mismatch');
     expect(atAnchor.floatingTableRegistryDelta).toMatchObject({
       coordinateSpace: 'logical-page-points',
       flowDomainId: source.input.flowDomainId,

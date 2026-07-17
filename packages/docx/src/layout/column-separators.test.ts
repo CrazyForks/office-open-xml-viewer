@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { PageSectionRegion } from './types.js';
 import type { SectionLayoutContext } from '../layout-context.js';
 import { columnSeparatorSegments } from './column-separators.js';
+import type { PageSectionRegion } from './types.js';
 
 const section: SectionLayoutContext = {
   geometry: {

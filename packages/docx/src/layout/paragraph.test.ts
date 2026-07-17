@@ -388,6 +388,7 @@ describe('layoutParagraph', () => {
       anchorLayer: {
         occurrenceId: 'anchor:host', behindDoc: false, relativeHeight: 1,
         sourceOrder: 1, horizontalOwnership: 'host' as const, verticalOwnership: 'host' as const,
+        cellContainment: true as const,
       },
     } as const;
     const pageDrawing = {
@@ -400,8 +401,10 @@ describe('layoutParagraph', () => {
         rect: { xPt: 70, yPt: 40, widthPt: 20, heightPt: 10 }, fill: '#000000',
       }],
       anchorLayer: {
-        ...hostDrawing.anchorLayer,
         occurrenceId: 'anchor:page',
+        behindDoc: hostDrawing.anchorLayer.behindDoc,
+        relativeHeight: hostDrawing.anchorLayer.relativeHeight,
+        sourceOrder: hostDrawing.anchorLayer.sourceOrder,
         horizontalOwnership: 'page' as const,
         verticalOwnership: 'page' as const,
       },
@@ -423,6 +426,7 @@ describe('layoutParagraph', () => {
         ],
       }, base.lines[1]!],
       drawings: [hostDrawing, pageDrawing],
+      cellContainmentBounds: hostDrawing.flowBounds,
       exclusions: [{
         id: 'page-exclusion', wrap: 'square',
         bounds: pageDrawing.flowBounds,
@@ -445,6 +449,7 @@ describe('layoutParagraph', () => {
     expect(translated.drawings[0]?.commands[0]).toMatchObject({ rect: { xPt: 35, yPt: 45 } });
     expect(translated.drawings[1]?.flowBounds).toMatchObject({ xPt: 70, yPt: 40 });
     expect(translated.drawings[1]?.commands[0]).toMatchObject({ rect: { xPt: 70, yPt: 40 } });
+    expect(translated.cellContainmentBounds).toEqual(translated.drawings[0]!.flowBounds);
     expect(translated.lines[0]?.placements.at(-2)).toMatchObject({ bounds: { xPt: 35, yPt: 45 } });
     expect(translated.lines[0]?.placements.at(-1)).toMatchObject({ bounds: { xPt: 70, yPt: 40 } });
     expect(translated.exclusions[0]?.bounds).toMatchObject({ xPt: 70, yPt: 40 });
@@ -459,6 +464,11 @@ describe('layoutParagraph', () => {
       flowDomainId: 'body', ordinaryFlow: false,
       flowBounds: { xPt: 0, yPt: 0, widthPt: 5, heightPt: 5 },
       inkBounds: { xPt: 0, yPt: 0, widthPt: 5, heightPt: 5 }, advancePt: 0, commands: [],
+      anchorLayer: {
+        occurrenceId: 'anchor:first', behindDoc: false, relativeHeight: 1,
+        sourceOrder: 1, horizontalOwnership: 'host' as const, verticalOwnership: 'host' as const,
+        cellContainment: true as const,
+      },
     } as const;
     const textBox = {
       kind: 'textbox', id: 'textbox:first', source: drawing.source,
@@ -483,6 +493,7 @@ describe('layoutParagraph', () => {
     const whole = layoutParagraph(input({
       lines: [firstLine, secondLine], resources: [firstResource, secondResource],
       drawings: [drawing], textBoxes: [textBox],
+      cellContainmentBounds: drawing.flowBounds,
       events: [
         { kind: 'break', breakKind: 'page', offset: 2 },
         { kind: 'break', breakKind: 'column', offset: 7 },
@@ -500,6 +511,8 @@ describe('layoutParagraph', () => {
     expect(second.resources.map((resource) => resource.resourceKey)).toEqual(['chart:second']);
     expect(first.drawings.map((item) => item.id)).toEqual(['drawing:first']);
     expect(second.drawings).toEqual([]);
+    expect(first.cellContainmentBounds).toEqual(first.drawings[0]!.flowBounds);
+    expect(second.cellContainmentBounds).toBeUndefined();
     expect(first.textBoxes.map((item) => item.id)).toEqual(['textbox:first']);
     expect(second.textBoxes).toEqual([]);
     expect(first.events.map((event) => event.offset)).toEqual([2]);

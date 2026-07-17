@@ -21,6 +21,20 @@ import type {
   SourceRef,
 } from './types.js';
 
+const emptyFlowRegistrySnapshot = () => ({
+  floats: {
+    coordinateSpace: 'logical-page-points' as const,
+    flowDomainId: 'body',
+    entries: [],
+    nextParagraphId: 0,
+  },
+  drawingCollisions: {
+    coordinateSpace: 'logical-page-points' as const,
+    flowDomainId: 'body',
+    entries: [],
+  },
+});
+
 const bodySource = (index: number): SourceRef => ({
   story: 'body', storyInstance: 'body', path: [index],
 });
@@ -176,13 +190,8 @@ function createServices(input: Readonly<{
       measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
       resetPageAcquisition: () => undefined,
       moveAcquisitionCursor: () => undefined,
-      floatRegistrySnapshot: () => ({
-        coordinateSpace: 'logical-page-points',
-        flowDomainId: 'body',
-        entries: [],
-        nextParagraphId: 0,
-      }),
-      commitFloatRegistryDelta: () => undefined,
+      flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+      commitFlowRegistryDelta: () => undefined,
     }),
   };
   attachBodyLayoutKernel(services, kernel);
