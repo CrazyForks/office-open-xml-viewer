@@ -20,13 +20,8 @@ export type CanonicalPageDraftInput = LayoutPageAccumulatorInput & Readonly<{
 export interface BodyPaginationState {
   readonly flow: PageFlowState;
   readonly pages: readonly CanonicalPageDraft[];
-  readonly pageHasConsumedSource: boolean;
   readonly footnoteReservePt: number;
   readonly balanceTargetPt: number | null;
-  readonly spacingMemory: Readonly<{
-    paragraphBodyIndex: number | null;
-    spaceAfterPt: number;
-  }>;
 }
 
 type NextPageEvent = Extract<PageFlowEvent, { type: 'next-page' }>;
@@ -49,7 +44,6 @@ function retain(input: BodyPaginationState): BodyPaginationState {
   return Object.freeze({
     ...input,
     pages: Object.freeze([...input.pages]),
-    spacingMemory: Object.freeze({ ...input.spacingMemory }),
   });
 }
 
@@ -76,10 +70,8 @@ export function createBodyPaginationState(
   return retain({
     flow,
     pages: [firstPage],
-    pageHasConsumedSource: false,
     footnoteReservePt: 0,
     balanceTargetPt: null,
-    spacingMemory: { paragraphBodyIndex: null, spaceAfterPt: 0 },
   });
 }
 
@@ -91,10 +83,6 @@ export function setBodyBalanceTarget(
     throw new RangeError('A body balance target must be finite and non-negative');
   }
   return retain({ ...state, balanceTargetPt });
-}
-
-export function markBodySourceConsumed(state: BodyPaginationState): BodyPaginationState {
-  return state.pageHasConsumedSource ? state : retain({ ...state, pageHasConsumedSource: true });
 }
 
 export function addPageFootnoteReserve(
@@ -154,11 +142,7 @@ export function commitPageFlowTransition(
     ...state,
     flow: activeFlow,
     pages,
-    pageHasConsumedSource: openedPage ? false : state.pageHasConsumedSource,
     footnoteReservePt: openedPage ? 0 : state.footnoteReservePt,
     balanceTargetPt: openedPage ? null : state.balanceTargetPt,
-    spacingMemory: transition.events.some((event) => event.type !== 'place')
-      ? { paragraphBodyIndex: null, spaceAfterPt: 0 }
-      : state.spacingMemory,
   });
 }

@@ -5,9 +5,11 @@ import { createPageFlowSectionContext } from './context.js';
 import { finalizeLayoutPage } from './page-factory.js';
 import { createPageFlowState, advanceColumnOrPage } from './paginator.js';
 import {
+  addPageFootnoteReserve,
   commitPageFlowTransition,
   createBodyPaginationState,
   createCanonicalPageDraft,
+  setBodyBalanceTarget,
 } from './body-pagination.js';
 
 const section: SectionLayoutContext = {
@@ -80,7 +82,13 @@ describe('immutable canonical page transitions', () => {
       textDirection: section.textDirection,
     });
     const originalPage = draft(0);
-    const original = createBodyPaginationState(createPageFlowState(flowSection), originalPage);
+    const original = setBodyBalanceTarget(
+      addPageFootnoteReserve(
+        createBodyPaginationState(createPageFlowState(flowSection), originalPage),
+        12,
+      ),
+      48,
+    );
     const transition = advanceColumnOrPage(original.flow, 'overflow');
 
     const next = commitPageFlowTransition(original, transition, {
@@ -90,8 +98,14 @@ describe('immutable canonical page transitions', () => {
     });
 
     expect(original.pages).toEqual([originalPage]);
+    expect(original.footnoteReservePt).toBe(12);
+    expect(original.balanceTargetPt).toBe(48);
     expect(next.pages.map((page) => page.accumulator.pageIndex)).toEqual([0, 1]);
     expect(next.flow.pageIndex).toBe(1);
+    expect(next.footnoteReservePt).toBe(0);
+    expect(next.balanceTargetPt).toBeNull();
+    expect(Object.isFrozen(next)).toBe(true);
+    expect(Object.isFrozen(next.pages)).toBe(true);
     expect(next).not.toBe(original);
   });
 });

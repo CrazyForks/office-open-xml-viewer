@@ -541,13 +541,6 @@ export interface LineLayoutEnvironment {
   readonly verticalCJK?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
   readonly layoutServices?: LayoutServices;
-  /** Iteration-local PAGE context keyed by the field run occurrence. */
-  readonly resolvePageFieldContext?: (
-    sourceRunIndex: number,
-  ) => Readonly<Pick<
-    LineLayoutEnvironment,
-    'pageIndex' | 'displayPageNumber' | 'pageNumberFormat'
-  >> | undefined;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
@@ -2675,13 +2668,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // page/column breaks handled at the document level (splitPages)
     } else if (run.type === 'field') {
       const f = run as unknown as FieldRun & { type: 'field' };
-      // PAGE is defined by the physical page containing this field occurrence,
-      // which can differ between runs of one paragraph after line splitting.
-      const pageContext = environment.resolvePageFieldContext?.(runIndex);
-      const text = resolveFieldText(
-        f,
-        pageContext === undefined ? environment : { ...environment, ...pageContext },
-      );
+      const text = resolveFieldText(f, environment);
       if (text) pushTextPiece(text, f, f.vertAlign, runIndex);
     } else if (run.type === 'math') {
       // The parser resolves the paragraph font size; fall back to a nearby run only

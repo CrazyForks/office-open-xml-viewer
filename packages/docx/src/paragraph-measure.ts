@@ -19,7 +19,6 @@ import {
   type LineLayoutEnvironment,
   type WrapLayoutCtx,
 } from './line-layout.js';
-import { fieldAcquisitionContextOf } from './layout/runtime-state.js';
 import type { DocParagraph } from './types.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
 
@@ -247,17 +246,7 @@ export function measureParagraph(
     };
   };
 
-  const fieldContext = environment.layoutServices
-    ? fieldAcquisitionContextOf(environment.layoutServices)
-    : undefined;
-  const measurementEnvironment = fieldContext?.resolvePageField
-    ? {
-        ...environment,
-        resolvePageFieldContext: (sourceRunIndex: number) =>
-          fieldContext.resolvePageField?.(paragraph, sourceRunIndex),
-      }
-    : environment;
-  const segments = buildSegments(paragraph.runs, measurementEnvironment);
+  const segments = buildSegments(paragraph.runs, environment);
   if (segments.length === 0) return measureMarkOnly();
 
   const wrapContext: WrapLayoutCtx | undefined = placement.wrap

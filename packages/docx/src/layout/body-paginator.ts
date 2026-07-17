@@ -15,7 +15,6 @@ import {
   createBodyPaginationState,
   createCanonicalPageDraft,
   addPageFootnoteReserve,
-  markBodySourceConsumed,
   setBodyBalanceTarget,
   type BodyPageTransitionFactory,
   type BodyPaginationState,
@@ -425,7 +424,6 @@ function acceptNode(
     ...state,
     flow: transition.state,
     pages: Object.freeze(pages),
-    pageHasConsumedSource: true,
   });
 }
 
@@ -729,7 +727,6 @@ function paginateBodyPass(
   for (let entryIndex = 0; entryIndex < input.sequence.length; entryIndex += 1) {
     const entry = input.sequence[entryIndex]!;
     if (entry.kind === 'consume-source') {
-      state = markBodySourceConsumed(state);
       continue;
     }
     if (entry.kind === 'authored-break') {
@@ -781,7 +778,6 @@ function paginateBodyPass(
     const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
     if (block.kind === 'paragraph') {
       if (block.continuousSectionRole === 'collapse-mark') {
-        state = markBodySourceConsumed(state);
         continue;
       }
       if (block.pageBreakBefore) {

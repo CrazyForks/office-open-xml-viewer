@@ -162,7 +162,6 @@ import {
   paginatedFlowHasPaginationDependentFields,
   paginationFieldGeometryFingerprint,
   paginationFieldFlowGeometry,
-  recordStoryPageFieldOccurrences,
   resolvePaginationFieldLayout,
 } from './layout/pagination-fields.js';
 import {

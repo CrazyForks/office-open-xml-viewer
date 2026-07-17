@@ -144,23 +144,9 @@ const paintResourceRegistries = new WeakMap<object, PaintResourceRegistry>();
 
 export interface FieldAcquisitionContext {
   readonly totalPages: number;
-  /** Resolve one PAGE field occurrence from the preceding pagination iteration. */
-  readonly resolvePageField?: (
-    paragraph: object,
-    sourceRunIndex: number,
-  ) => PageFieldAcquisitionContext | undefined;
-  /** Resolve a generated table-row occurrence from the preceding iteration. */
-  readonly resolveTablePageField?: (
-    occurrenceId: string,
-    paragraph: object,
-    sourceRunIndex: number,
-  ) => PageFieldAcquisitionContext | undefined;
   /** Page numbering is finalized only after one pagination iteration. */
   readonly resolveDestinationPage?: (
     physicalPageIndex: number,
-  ) => PageFieldAcquisitionContext | undefined;
-  readonly resolveTableOccurrencePage?: (
-    occurrenceId: string,
   ) => PageFieldAcquisitionContext | undefined;
 }
 
