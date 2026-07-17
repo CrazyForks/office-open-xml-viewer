@@ -1,6 +1,6 @@
 import { convergeLayout, type LayoutIteration } from './convergence.js';
 import { stableFingerprint } from './fingerprint.js';
-import type { FlowFragment } from '../layout-fragments.js';
+import type { FlowFragment } from './flow-fragment.js';
 import type { TableRowFragmentLayout } from './table-pagination.js';
 import type {
   BodyElement,
@@ -50,7 +50,7 @@ function storyHasPaginationFields(elements: readonly (BodyElement | CellElement)
 }
 
 /**
- * Whether `computePages` has a field feedback edge that requires another pass.
+ * Whether canonical body pagination has a field feedback edge that requires another pass.
  * Body PAGE needs its destination occurrence from the preceding pass. A footnote
  * PAGE likewise feeds its owning page's formatted number into note height and the
  * body reserve. Body and footnote NUMPAGES can feed measured width back into the

@@ -96,6 +96,7 @@ function regionLayout(): DocumentLayout {
       ...base.pages[0]!,
       section: horizontalSection,
       sectionOccurrenceId: 'section:body',
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
       flowDomains: [{
         id: 'body', kind: 'body',
         logicalBounds: rect(72, 72, 468, 648),
@@ -226,7 +227,21 @@ function documentWith(
         contentBottomPt: 720,
       },
       flowDomains: [bodyDomain],
-      section: {} as SectionLayoutContext,
+      section: horizontalSection,
+      sectionOccurrenceId: 'section:0',
+      parityBlank: false,
+      bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      sectionRegions: [{
+        id: 'region:0', sectionOccurrenceId: 'section:0',
+        coordinateSpace: {
+          writingMode: 'horizontal-tb',
+          logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        },
+        blockStartPt: 72, blockEndPt: 720, flowDomainIds: ['body'], section: horizontalSection,
+      }],
+      pageBorders: null,
       layers: {
         paintOrder: nodes.map((node) => ({ layer: 'body' as const, nodeId: node.id })),
         background: [],
@@ -317,6 +332,7 @@ describe('assertDocumentLayout', () => {
       pages: [{
         ...base.pages[0]!,
         flowDomains: [
+          bodyDomain,
           {
             id: 'cell:1', kind: 'tableCell',
             logicalBounds: rect(90, 90, 100, 40), physicalBounds: rect(90, 90, 100, 40),
@@ -456,6 +472,7 @@ describe('assertDocumentLayout', () => {
         ...base.pages[0]!,
         section: strictVerticalSection,
         sectionOccurrenceId: 'section:vertical',
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:vertical' },
         flowDomains: [{
           id: 'vertical-body', kind: 'body',
           logicalBounds: rect(72, 72, 648, 468),
@@ -486,6 +503,7 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!, section: verticalSection, sectionOccurrenceId: 'section:vertical',
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:vertical' },
         flowDomains: [{
           id: 'vertical-body', kind: 'body',
           logicalBounds: rect(72, 72, 648, 468), physicalBounds: rect(72, 72, 468, 648),
@@ -513,6 +531,7 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!, section: verticalSection, sectionOccurrenceId: 'section:vertical',
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:vertical' },
         flowDomains: [{
           id: 'vertical-body', kind: 'body',
           logicalBounds: rect(72, 72, 648, 468), physicalBounds: rect(0, 0, 1, 1),
@@ -533,7 +552,7 @@ describe('assertDocumentLayout', () => {
     expect(() => assertDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
   });
 
-  it('requires equal dual-space bounds on transitional pages without regions', () => {
+  it('requires retained dual-space bounds to match their canonical region transform', () => {
     const base = documentWith([]);
     const unequal: DocumentLayout = {
       ...base,
@@ -565,6 +584,7 @@ describe('assertDocumentLayout', () => {
     const page = {
       ...base.pages[0]!, section: horizontalSection,
       sectionOccurrenceId: 'section:first', sectionRegions: [region],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:first' },
     };
 
     expect(() => assertDocumentLayout({ ...base, pages: [page] })).not.toThrow();

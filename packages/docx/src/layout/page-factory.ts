@@ -40,6 +40,7 @@ export interface PageSectionRegionInput {
   readonly id: string;
   readonly sectionOccurrenceId: string;
   readonly section: DeepReadonly<SectionLayoutContext>;
+  readonly pageBorders?: DeepReadonly<import('../types.js').PageBorders> | null;
   readonly writingMode: WritingMode;
   readonly blockStartPt: number;
   readonly blockEndPt: number;
@@ -51,6 +52,7 @@ export interface LayoutPageAccumulatorInput {
   readonly physicalPage: PhysicalPageInput;
   readonly sectionOccurrenceId: string;
   readonly section: DeepReadonly<SectionLayoutContext>;
+  readonly pageBorders?: DeepReadonly<import('../types.js').PageBorders> | null;
 }
 
 export interface LayoutPageAccumulator extends LayoutPageAccumulatorInput {
@@ -72,6 +74,7 @@ export interface ParityBlankLayoutPageInput {
   readonly sectionOccurrenceId: string;
   readonly section: DeepReadonly<SectionLayoutContext>;
   readonly pageNumber: PageNumberMetadata;
+  readonly pageBorders?: DeepReadonly<import('../types.js').PageBorders> | null;
 }
 
 export function bodyFlowDomainId(
@@ -228,13 +231,15 @@ function buildRegions(
     }, input.writingMode);
     if (expectedPhysicalExtent.widthPt !== physicalPage.widthPt
       || expectedPhysicalExtent.heightPt !== physicalPage.heightPt) {
-      throw new RangeError('Section regions on one physical page must use the same page box');
+      throw new RangeError(
+        `Section regions on one physical page must use the same page box: expected ${expectedPhysicalExtent.widthPt}x${expectedPhysicalExtent.heightPt}, got ${physicalPage.widthPt}x${physicalPage.heightPt}`,
+      );
     }
     const logicalExtent = logicalPageExtent(physicalPage, input.writingMode);
     const logicalInlineExtent = logicalExtent.widthPt;
     const logicalBlockExtent = logicalExtent.heightPt;
     if (!Number.isFinite(input.blockStartPt) || !Number.isFinite(input.blockEndPt)
-      || input.blockStartPt < 0 || input.blockEndPt <= input.blockStartPt
+      || input.blockStartPt < 0 || input.blockEndPt < input.blockStartPt
       || input.blockEndPt > logicalBlockExtent || input.blockStartPt < priorBlockEndPt) {
       throw new RangeError('Section regions must be ordered, disjoint, and inside the logical page');
     }
@@ -311,7 +316,11 @@ function buildLayers(entries: readonly PageLayerNode[]): PageLayers {
   const nodes = new Map(PAGE_LAYER_IDS.map((layer) => [layer, [] as PaintNode[]]));
   for (const entry of entries) nodes.get(entry.layer)!.push(entry.node);
   return {
-    paintOrder: entries.map(({ layer, node }) => ({ layer, nodeId: node.id })),
+    paintOrder: entries.map(({ layer, node, coordinateSpace }) => ({
+      layer,
+      nodeId: node.id,
+      ...(coordinateSpace ? { coordinateSpace } : {}),
+    })),
     background: nodes.get('background')!,
     behindText: nodes.get('behindText')!,
     header: nodes.get('header')!,
@@ -417,6 +426,7 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
     ),
     pageNumber: input.pageNumber,
     sectionRegions: regions,
+    pageBorders: firstRegion?.pageBorders ?? input.pageBorders ?? null,
     layers: buildLayers(input.paint),
     readingOrder: input.readingOrder.map((node) => node.id),
   };
@@ -482,6 +492,7 @@ export function createParityBlankLayoutPage(
     bookmarkStarts: [],
     pageNumber: input.pageNumber,
     sectionRegions: [],
+    pageBorders: input.pageBorders ?? null,
     layers: buildLayers([]),
     readingOrder: [],
   };

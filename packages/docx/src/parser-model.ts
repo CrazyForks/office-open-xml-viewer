@@ -52,10 +52,18 @@ import {
   multiplyExactLengthKeys,
 } from './layout/exact-length.js';
 import {
-  sectionGeometry,
+  defaultSectionGeometry,
+  sectionPageBox,
   type BodySectionIndexInput,
   type BodySectionOccurrence,
 } from './layout/context.js';
+import { normalizeAdjacentTables } from './layout/adjacent-tables.js';
+import { isWrapFloat } from './float-layout.js';
+import type {
+  BodyLayoutAcquisitionInput,
+  BodyLayoutSequenceEntryFor,
+} from './layout/body-layout-input.js';
+import { isInklessParagraph } from './layout/paragraph-visibility.js';
 
 export interface InternalRunFontSlots {
   readonly direct: TextFontSlots;
@@ -117,15 +125,64 @@ export type InternalMathRun = Extract<DocRun, { type: 'math' }> & {
 
 export interface InternalDocxDocumentModel extends DocxDocumentModel {
   fontFamilyCharsets?: Record<string, string>;
+  readonly __pageLayoutSettings?: Readonly<{
+    mirrorMargins?: boolean;
+    gutterAtTop?: boolean;
+    bookFoldPrinting?: boolean;
+    bookFoldRevPrinting?: boolean;
+    printTwoOnOne?: boolean;
+  }>;
+}
+
+export interface DocumentPageLayoutSettingsInput {
+  readonly mirrorMargins: boolean;
+  readonly gutterAtTop: boolean;
+  readonly bookFoldPrinting: boolean;
+  readonly bookFoldRevPrinting: boolean;
+  readonly printTwoOnOne: boolean;
+}
+
+export function documentPageLayoutSettingsInput(
+  doc: DocxDocumentModel,
+): DocumentPageLayoutSettingsInput {
+  const settings = (doc as InternalDocxDocumentModel).__pageLayoutSettings;
+  return snapshotPlainData({
+    mirrorMargins: settings?.mirrorMargins === true,
+    gutterAtTop: settings?.gutterAtTop === true,
+    bookFoldPrinting: settings?.bookFoldPrinting === true,
+    bookFoldRevPrinting: settings?.bookFoldRevPrinting === true,
+    printTwoOnOne: settings?.printTwoOnOne === true,
+  }, 'DOCX page layout settings input');
 }
 
 interface InternalSectionPlacementWire {
   readonly sectionId: string;
   readonly vAlign?: string | null;
   readonly lineNumbering?: LineNumbering | null;
+  readonly docGridType?: string | null;
+  readonly docGridLinePitch?: number | null;
+  readonly docGridCharSpace?: number | null;
+  readonly gutterPt?: number | null;
+  readonly rtlGutter?: boolean | null;
+  readonly pageBordersAuthored?: boolean;
+  readonly pageBorders?: import('./types.js').PageBorders | null;
+  readonly pageGeometry?: Readonly<{
+    pageWidth?: number | null;
+    pageHeight?: number | null;
+    marginTop?: number | null;
+    marginRight?: number | null;
+    marginBottom?: number | null;
+    marginLeft?: number | null;
+    headerDistance?: number | null;
+    footerDistance?: number | null;
+  }> | null;
 }
 
 type InternalSectionBreak = Extract<BodyElement, { type: 'sectionBreak' }> & {
+  readonly __sectionPlacement?: InternalSectionPlacementWire;
+};
+
+type InternalSectionProps = DocxDocumentModel['section'] & {
   readonly __sectionPlacement?: InternalSectionPlacementWire;
 };
 
@@ -135,11 +192,35 @@ export interface SectionPlacementInput {
   readonly sectionId: string;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
+  readonly docGridType: string | null;
+  readonly docGridLinePitch: number | null;
+  readonly docGridCharSpace: number | null;
+  readonly gutterPt: number | null;
+  readonly rtlGutter: boolean | null;
+  readonly pageBordersAuthored: boolean;
+  readonly pageBorders: Readonly<import('./types.js').PageBorders> | null;
+  readonly pageGeometry: InternalSectionPlacementWire['pageGeometry'];
 }
 
 interface DocumentSectionPlacementInputs {
   readonly endingSections: ReadonlyMap<number, SectionPlacementInput>;
   readonly finalSection: SectionPlacementInput;
+}
+
+function normalizeSectionGeometryWire(
+  geometry: InternalSectionPlacementWire['pageGeometry'],
+): Readonly<Partial<import('./types.js').SectionGeom>> {
+  if (!geometry) return Object.freeze({});
+  return Object.freeze(Object.fromEntries(Object.entries(geometry).filter(
+    (entry): entry is [string, number] => typeof entry[1] === 'number',
+  )) as Partial<import('./types.js').SectionGeom>);
+}
+
+function sectionPlacementFacts(input: SectionPlacementInput): import('./layout/context.js').SectionPlacementFacts {
+  return Object.freeze({
+    ...input,
+    pageGeometry: normalizeSectionGeometryWire(input.pageGeometry),
+  });
 }
 
 const sectionPlacementInputsByDocument = new WeakMap<object, DocumentSectionPlacementInputs>();
@@ -585,6 +666,144 @@ export function adjacentTableSequenceInput(
   }));
 }
 
+type AcquiredBodySectionReference = Readonly<{
+  sectionOccurrenceId: string;
+  startType: string;
+}>;
+
+const bodySourceAt = (bodyIndex: number): SourceRef => Object.freeze({
+  story: 'body', storyInstance: 'body', path: Object.freeze([bodyIndex]),
+});
+
+export interface PublicAnchorBridge {
+  readonly occurrenceId: string;
+  readonly pageOwned: boolean;
+}
+
+const PUBLIC_HOST_RELATIVE_ANCHOR_FRAMES = new Set(['paragraph', 'line', 'character']);
+
+/** Compatibility projection for hand-built public anchor runs. Parser-owned
+ * DrawingML facts always win and therefore never enter this fallback bridge. */
+export function publicAnchorBridge(
+  run: Readonly<DocRun>,
+  source: SourceRef,
+  runIndex: number,
+): PublicAnchorBridge | null {
+  if (
+    (run.type !== 'shape' && run.type !== 'image' && run.type !== 'chart')
+    || anchorAcquisitionInput(run) !== undefined
+    || !isWrapFloat(run.wrapMode)
+    || (run.type !== 'shape' && !run.anchor)
+    || run.widthPt <= 0
+    || run.heightPt <= 0
+  ) return null;
+  const horizontalReference = run.anchorXRelativeFrom
+    ?? (run.anchorXFromMargin ? 'margin' : 'page');
+  const verticalReference = run.anchorYRelativeFrom
+    ?? (run.anchorYFromPara ? 'paragraph' : 'page');
+  const paragraphId = `${source.story}:${source.storyInstance}:${source.path.join('.')}`;
+  return Object.freeze({
+    occurrenceId: run.type === 'shape'
+      ? `public-shape:${paragraphId}:${runIndex}`
+      : `public-anchor:${paragraphId}:${runIndex}`,
+    pageOwned: !PUBLIC_HOST_RELATIVE_ANCHOR_FRAMES.has(horizontalReference)
+      && !PUBLIC_HOST_RELATIVE_ANCHOR_FRAMES.has(verticalReference),
+  });
+}
+
+function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
+  const hostRelative = new Set(['paragraph', 'line', 'character']);
+  const pageOwnedAnchorOccurrenceIds = Object.freeze([...new Set(paragraph.runs.flatMap((run, runIndex) => {
+    if (run.type !== 'shape' && run.type !== 'image' && run.type !== 'chart') return [];
+    const acquisition = anchorAcquisitionInput(run);
+    if (!acquisition) {
+      const bridge = publicAnchorBridge(run, source, runIndex);
+      return bridge?.pageOwned ? [bridge.occurrenceId] : [];
+    }
+    if (acquisition.horizontal.relativeFromStatus !== 'valid'
+      || acquisition.vertical.relativeFromStatus !== 'valid'
+      || acquisition.horizontal.relativeFrom === null
+      || acquisition.vertical.relativeFrom === null
+      || acquisition.wrap.kind === 'none'
+      || hostRelative.has(acquisition.horizontal.relativeFrom)
+      || hostRelative.has(acquisition.vertical.relativeFrom)) return [];
+    return [anchorOccurrenceKey(source, acquisition.occurrenceId)];
+  }))]);
+  return Object.freeze({
+    kind: 'paragraph' as const,
+    source,
+    pageBreakBefore: paragraph.pageBreakBefore === true,
+    keepLines: paragraph.keepLines === true,
+    keepNext: paragraph.keepNext === true,
+    widowControl: paragraph.widowControl !== false,
+    spaceBeforePt: paragraph.spaceBefore ?? 0,
+    spaceAfterPt: paragraph.spaceAfter ?? 0,
+    contextualSpacing: paragraph.contextualSpacing === true,
+    styleId: paragraph.styleId ?? null,
+    inkless: isInklessParagraph(paragraph),
+    ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
+  });
+}
+
+function acquiredBodyTable(source: SourceRef) {
+  return Object.freeze({
+    kind: 'table' as const,
+    source,
+  });
+}
+
+function bodyLayoutSequenceInput(
+  body: readonly BodyElement[],
+  sectionAtMarker: (bodyIndex: number) => AcquiredBodySectionReference,
+): readonly BodyLayoutSequenceEntryFor<AcquiredBodySectionReference>[] {
+  let bodyIndex = 0;
+  return Object.freeze(normalizeAdjacentTables(adjacentTableSequenceInput(body)).map((entry) => {
+    if (entry.kind === 'adjacent-table-group') {
+      const firstIndex = bodyIndex;
+      bodyIndex += entry.tables.length;
+      return Object.freeze({
+        kind: 'adjacent-table-group' as const,
+        logicalSequenceId: entry.logicalSequenceId,
+        source: bodySourceAt(firstIndex),
+        tables: Object.freeze(entry.tables.map((table, tableIndex) => Object.freeze({
+          ...acquiredBodyTable(bodySourceAt(firstIndex + tableIndex)),
+          rowCount: table.rows.length,
+        }))),
+      });
+    }
+    const element = entry.element;
+    const entryBodyIndex = bodyIndex;
+    const source = bodySourceAt(entryBodyIndex);
+    bodyIndex += 1;
+    if (element.type === 'paragraph') {
+      return element.markVanish === true && isInklessParagraph(element)
+        ? Object.freeze({ kind: 'consume-source' as const, source, reason: 'hidden-paragraph' as const })
+        : Object.freeze({ kind: 'body-block' as const, block: acquiredBodyParagraph(element, source) });
+    }
+    if (element.type === 'table') {
+      return Object.freeze({
+        kind: 'body-block' as const,
+        block: acquiredBodyTable(source),
+      });
+    }
+    if (element.type === 'pageBreak' || element.type === 'columnBreak') {
+      return Object.freeze({
+        kind: 'authored-break' as const,
+        source,
+        break: element.type === 'pageBreak' ? 'page' as const : 'column' as const,
+      });
+    }
+    if (element.type === 'sectionBreak') {
+      return Object.freeze({
+        kind: 'begin-section' as const,
+        source,
+        section: sectionAtMarker(entryBodyIndex),
+      });
+    }
+    throw new Error(`Unsupported body layout source at ${entryBodyIndex}`);
+  }));
+}
+
 export interface CellIntrinsicWidths {
   readonly minWidthPt: number;
   readonly maxWidthPt: number;
@@ -873,18 +1092,36 @@ function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): Document
       sectionId: wire?.sectionId ?? `section:${ordinal}`,
       vAlign: wire?.vAlign ?? null,
       lineNumbering: wire?.lineNumbering ?? null,
+      docGridType: wire?.docGridType ?? null,
+      docGridLinePitch: wire?.docGridLinePitch ?? null,
+      docGridCharSpace: wire?.docGridCharSpace ?? null,
+      gutterPt: wire?.gutterPt ?? null,
+      rtlGutter: wire?.rtlGutter ?? null,
+      pageBordersAuthored: wire?.pageBordersAuthored ?? false,
+      pageBorders: wire?.pageBorders ?? null,
+      pageGeometry: wire?.pageGeometry ?? element.geom ?? {},
     }, 'DOCX ending-section placement input'));
     ordinal += 1;
   });
+  const finalWire = (doc.section as InternalSectionProps | undefined)?.__sectionPlacement;
   return Object.freeze({
     endingSections,
     finalSection: snapshotPlainData({
-      sectionId: `section:${ordinal}`,
+      sectionId: finalWire?.sectionId ?? `section:${ordinal}`,
       // Resource-only entry points (for example image preloading) historically
       // accept a partial document projection with no section. Section placement
       // is irrelevant there, so preserve that compatibility with neutral facts.
-      vAlign: doc.section?.vAlign ?? null,
-      lineNumbering: doc.section?.lineNumbering ?? null,
+      vAlign: finalWire?.vAlign ?? doc.section?.vAlign ?? null,
+      lineNumbering: finalWire?.lineNumbering ?? doc.section?.lineNumbering ?? null,
+      docGridType: finalWire?.docGridType ?? doc.section?.docGridType ?? null,
+      docGridLinePitch: finalWire?.docGridLinePitch ?? doc.section?.docGridLinePitch ?? null,
+      docGridCharSpace: finalWire?.docGridCharSpace ?? doc.section?.docGridCharSpace ?? null,
+      gutterPt: finalWire?.gutterPt ?? null,
+      rtlGutter: finalWire?.rtlGutter ?? null,
+      pageBordersAuthored: finalWire?.pageBordersAuthored ?? doc.section?.pageBorders != null,
+      pageBorders: finalWire?.pageBorders ?? doc.section?.pageBorders ?? null,
+      pageGeometry: finalWire?.pageGeometry
+        ?? (doc.section ? sectionPageBox(doc.section) : {}),
     }, 'DOCX final-section placement input'),
   });
 }
@@ -940,15 +1177,19 @@ const EMPTY_SECTION_HEADERS_FOOTERS: HeadersFooters = Object.freeze({
  * layout receives no document-model scanning capability or parser-private wire.
  */
 export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexInput {
-  const inheritedGeometry = sectionGeometry(doc.section);
-  const occurrences: BodySectionOccurrence[] = [];
+  type PendingOccurrence = Omit<BodySectionOccurrence, 'geometry' | 'gutterPt'> & {
+    readonly authoredGeometry: Readonly<Partial<import('./types.js').SectionGeom>>;
+    readonly authoredGutterPt: number | null;
+  };
+  const pending: PendingOccurrence[] = [];
+  const placements = projectSectionPlacementInputs(doc as InternalDocxDocumentModel);
   let startBodyIndex = 0;
 
   doc.body.forEach((element, bodyIndex) => {
     if (element.type !== 'sectionBreak') return;
-    const placement = sectionPlacementInputFromBody(doc.body, doc.section, bodyIndex);
-    const ordinal = occurrences.length;
-    occurrences.push({
+    const placement = placements.endingSections.get(bodyIndex) ?? placements.finalSection;
+    const ordinal = pending.length;
+    pending.push({
       sectionOccurrenceId: placement.sectionId,
       ordinal,
       startBodyIndex,
@@ -957,9 +1198,7 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
       final: false,
       startType: element.kind ?? 'nextPage',
       columns: element.columns ?? null,
-      // A paragraph-owned sectPr can omit pgSz/pgMar; inherit the final
-      // physical page box rather than manufacturing defaults after acquisition.
-      geometry: element.geom ?? inheritedGeometry,
+      authoredGeometry: normalizeSectionGeometryWire(placement.pageGeometry),
       textDirection: element.textDirection ?? null,
       pageNumType: element.pageNumType ?? null,
       headers: element.headers ?? EMPTY_SECTION_HEADERS_FOOTERS,
@@ -967,22 +1206,31 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
       titlePage: element.titlePage ?? false,
       vAlign: placement.vAlign,
       lineNumbering: placement.lineNumbering,
-      placement,
+      docGridType: placement.docGridType,
+      docGridLinePitch: placement.docGridLinePitch,
+      docGridCharSpace: placement.docGridCharSpace,
+      authoredGutterPt: placement.gutterPt,
+      rtlGutter: placement.rtlGutter === true,
+      pageBordersAuthored: placement.pageBordersAuthored,
+      pageBorders: placement.pageBorders,
+      placement: sectionPlacementFacts(placement),
     });
     startBodyIndex = bodyIndex + 1;
   });
 
-  const placement = sectionPlacementInputFromBody(doc.body, doc.section, doc.body.length);
-  occurrences.push({
+  const placement = placements.finalSection;
+  pending.push({
     sectionOccurrenceId: placement.sectionId,
-    ordinal: occurrences.length,
+    ordinal: pending.length,
     startBodyIndex,
     endBodyIndex: doc.body.length - 1,
     markerBodyIndex: null,
     final: true,
     startType: doc.section.sectionStart ?? 'nextPage',
     columns: doc.section.columns ?? null,
-    geometry: inheritedGeometry,
+    authoredGeometry: placement.pageGeometry == null
+      ? sectionPageBox(doc.section)
+      : normalizeSectionGeometryWire(placement.pageGeometry),
     textDirection: doc.section.textDirection ?? null,
     pageNumType: doc.section.pageNumType ?? null,
     headers: doc.headers ?? EMPTY_SECTION_HEADERS_FOOTERS,
@@ -990,13 +1238,81 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
     titlePage: doc.section.titlePage,
     vAlign: placement.vAlign,
     lineNumbering: placement.lineNumbering,
-    placement,
+    docGridType: placement.docGridType,
+    docGridLinePitch: placement.docGridLinePitch,
+    docGridCharSpace: placement.docGridCharSpace,
+    authoredGutterPt: placement.gutterPt,
+    rtlGutter: placement.rtlGutter === true,
+    pageBordersAuthored: placement.pageBordersAuthored,
+    pageBorders: placement.pageBorders,
+    placement: sectionPlacementFacts(placement),
   });
+
+  const occurrences = new Array<BodySectionOccurrence>(pending.length);
+  let followingGeometry: import('./types.js').SectionGeom | null = null;
+  let followingGutterPt: number | null = null;
+  for (let index = pending.length - 1; index >= 0; index -= 1) {
+    const occurrence = pending[index]!;
+    // §17.6.22: only a continuous section inherits omitted page-level facts
+    // from the following sectPr. Other section starts resolve omissions from
+    // the ECMA defaults instead of silently adopting the next page box.
+    const fallback: import('./types.js').SectionGeom =
+      occurrence.startType === 'continuous' && followingGeometry !== null
+        ? followingGeometry
+        : defaultSectionGeometry();
+    const authored = occurrence.authoredGeometry;
+    const geometry: import('./types.js').SectionGeom = {
+      pageWidth: authored.pageWidth ?? fallback.pageWidth,
+      pageHeight: authored.pageHeight ?? fallback.pageHeight,
+      marginTop: authored.marginTop ?? fallback.marginTop,
+      marginRight: authored.marginRight ?? fallback.marginRight,
+      marginBottom: authored.marginBottom ?? fallback.marginBottom,
+      marginLeft: authored.marginLeft ?? fallback.marginLeft,
+      headerDistance: authored.headerDistance ?? fallback.headerDistance,
+      footerDistance: authored.footerDistance ?? fallback.footerDistance,
+    };
+    const gutterPt: number = occurrence.authoredGutterPt
+      ?? (occurrence.startType === 'continuous' ? followingGutterPt : null)
+      ?? 0;
+    const {
+      authoredGeometry: _authoredGeometry,
+      authoredGutterPt: _authoredGutterPt,
+      ...facts
+    } = occurrence;
+    occurrences[index] = { ...facts, geometry, gutterPt };
+    followingGeometry = geometry;
+    followingGutterPt = gutterPt;
+  }
 
   return snapshotPlainData({
     bodyLength: doc.body.length,
     occurrences,
   }, 'DOCX body section index input') as BodySectionIndexInput;
+}
+
+/** Consume parser-owned document nodes and private settings into one clone-safe
+ * structural value before layout resolves section contexts. */
+export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAcquisitionInput {
+  const sectionIndex = bodySectionIndexInput(doc);
+  const incomingByMarker = new Map<number, BodySectionOccurrence>();
+  for (const occurrence of sectionIndex.occurrences) {
+    if (occurrence.startBodyIndex === 0) continue;
+    incomingByMarker.set(occurrence.startBodyIndex - 1, occurrence);
+  }
+  const sequence = bodyLayoutSequenceInput(doc.body, (markerBodyIndex) => {
+    const occurrence = incomingByMarker.get(markerBodyIndex);
+    if (!occurrence) throw new Error(`Missing incoming body section at ${markerBodyIndex}`);
+    return Object.freeze({
+      sectionOccurrenceId: occurrence.sectionOccurrenceId,
+      startType: occurrence.startType,
+    });
+  });
+  return snapshotPlainData({
+    sectionIndex,
+    evenAndOddHeaders: doc.section.evenAndOddHeaders,
+    pageLayoutSettings: documentPageLayoutSettingsInput(doc),
+    sequence,
+  }, 'DOCX body layout acquisition input') as BodyLayoutAcquisitionInput;
 }
 
 /** Resolved transitional VML facts emitted by the parser in addition to the

@@ -1,8 +1,8 @@
 import type { CellElement, DocParagraph, DocTable, DocTableCell } from '../types.js';
-import type { FlowFragment } from '../layout-fragments.js';
+import type { FlowFragment } from './flow-fragment.js';
 import type { ParagraphLayout } from './types.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
-import { paragraphFragmentAdvancePt } from '../layout-fragments.js';
+import { paragraphFragmentAdvancePt } from './flow-fragment.js';
 import {
   resolveParagraphBorderEdges,
   type ParagraphBorderEdges,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CellElement, DocParagraph, DocTable, DocTableCell } from '../types.js';
-import type { FlowFragment } from '../layout-fragments.js';
+import type { FlowFragment } from './flow-fragment.js';
 import type { ParagraphLayout, TableLayout } from './types.js';
 import { acquireTableCellBlocks, resolveRetainedCellBlockPlacement } from './table-cell-blocks.js';
 

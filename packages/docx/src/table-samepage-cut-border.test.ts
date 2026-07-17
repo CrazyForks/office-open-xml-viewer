@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { bodyFragmentFor, paginateDocument, renderDocumentToCanvas } from './renderer.js';
+import { layoutDocument } from './renderer.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,
   CellElement,
@@ -7,8 +8,7 @@ import type {
   DocTable,
   DocTableRow,
   DocxDocumentModel,
-  PaginatedBodyElement,
-  SectionProps,
+    SectionProps,
   BorderSpec,
 } from './types';
 import type { TableFragmentLayout } from './layout/table-pagination.js';
@@ -58,7 +58,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; strokes: StrokeSeg[
     stroke() {
       if (pending) strokes.push({ ...pending, width: lineWidth, color: strokeStyle });
     },
-    fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, setTransform() {},
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     fillText() {}, strokeText() {},
@@ -130,9 +130,9 @@ function twoTallRowsDoc(pageHeight: number): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
-async function renderPage(model: DocxDocumentModel, pages: PaginatedBodyElement[][], pageIndex: number): Promise<StrokeSeg[]> {
+async function renderPage(layout: ReturnType<typeof layoutDocument>, pageIndex: number): Promise<StrokeSeg[]> {
   const { canvas, strokes, measured } = makeRecordingCanvas();
-  await renderDocumentToCanvas(model, canvas, pageIndex, { dpr: 1, width: 160, prebuiltPages: pages });
+  await paintLayoutPage(layout, pageIndex, canvas, { dpr: 1, scale: 1 });
   expect(measured()).toBe(0);
   return strokes;
 }
@@ -141,23 +141,17 @@ const horizontals = (strokes: StrokeSeg[]) =>
   strokes.filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && Math.abs(s.x2 - s.x1) > 10);
 
 /** Find a retained fragment whose final logical row continues on a later page. */
-function findSamePageCutPage(pages: PaginatedBodyElement[][]): {
+function findSamePageCutPage(layout: ReturnType<typeof layoutDocument>): {
   pageIndex: number;
   colTopPt: number;
   rowHeightsPt: number[];
   cutFlags: boolean[];
 } | null {
-  const retained = pages.map((page) => page.flatMap((element) => {
-    if (element.type !== 'table') return [];
-    const placed = bodyFragmentFor(element);
-    if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
-      throw new Error('expected retained TableFragmentLayout');
-    }
-    expect(element).not.toHaveProperty('tableColWidthsPt');
-    expect(element).not.toHaveProperty('tableRowHeightsPt');
-    return [{ placed, fragment: placed.fragment as TableFragmentLayout }];
+  const retained = layout.pages.map((page) => page.layers.body.flatMap((node) => {
+    if (node.kind !== 'table') return [];
+    return [{ node, fragment: node as TableFragmentLayout }];
   }));
-  for (let pi = 0; pi < pages.length; pi++) {
+  for (let pi = 0; pi < layout.pages.length; pi++) {
     const entry = retained[pi]?.[0];
     if (!entry) continue;
     const cutFlags = entry.fragment.rows.map((tableRow) => retained.slice(pi + 1).some((page) =>
@@ -167,7 +161,7 @@ function findSamePageCutPage(pages: PaginatedBodyElement[][]): {
     if (cutFlags.some(Boolean)) {
       return {
         pageIndex: pi,
-        colTopPt: entry.placed.yPt,
+        colTopPt: entry.node.flowBounds.yPt,
         rowHeightsPt: entry.fragment.rows.map((tableRow) => tableRow.advancePt),
         cutFlags,
       };
@@ -186,8 +180,8 @@ const nearFullWidth = (h: StrokeSeg[], y: number, pageW: number, tol = 1.2) =>
 describe('#986 same-page intra-row cut border', () => {
   it('keeps an intra-row cut at the retained fragment boundary and paints measure-free', async () => {
     const model = twoTallRowsDoc(120);
-    const pages = paginateDocument(model);
-    const hit = findSamePageCutPage(pages);
+    const layout = layoutDocument(model);
+    const hit = findSamePageCutPage(layout);
 
     // The old same-page runtime-marker state is obsolete: retained pagination
     // guarantees that a continuing row is the final row in its page fragment.
@@ -200,7 +194,7 @@ describe('#986 same-page intra-row cut border', () => {
     const topY = colTopPt;
     const pageEndY = colTopPt + rowHeightsPt.reduce((s, v) => s + v, 0);
 
-    const h = horizontals(await renderPage(model, pages, pageIndex));
+    const h = horizontals(await renderPage(layout, pageIndex));
 
     // The table's own OUTER top edge (slice top) is still drawn.
     expect(nearFullWidth(h, topY, 160).length).toBeGreaterThanOrEqual(1);

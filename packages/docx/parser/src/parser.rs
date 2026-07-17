@@ -403,6 +403,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         })
         .unwrap_or_else(|| "word/settings.xml".to_string());
     let mut document_settings: Option<crate::types::DocumentSettings> = None;
+    let mut page_layout_settings: Option<crate::types::PageLayoutSettingsWire> = None;
     // §17.10.1 even/odd headers is a settings.xml flag (not a sectPr property), so
     // capture it here and stamp it onto the section below.
     let mut even_and_odd_headers = false;
@@ -411,6 +412,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
             theme.apply_theme_font_langs(&langs);
         }
         document_settings = parse_document_settings(&settings_xml);
+        page_layout_settings = parse_page_layout_settings(&settings_xml);
         even_and_odd_headers = parse_even_and_odd_headers(&settings_xml);
     }
 
@@ -527,6 +529,14 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         &theme,
         &section_hf,
     );
+    let final_section_ordinal = body
+        .iter()
+        .filter(|element| matches!(element, BodyElement::SectionBreak { .. }))
+        .count();
+    section.section_placement = Some(Box::new(section_placement_wire(
+        sect_pr,
+        format!("section:{final_section_ordinal}"),
+    )));
 
     let headers = body_headers;
     let footers = body_footers;
@@ -622,6 +632,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         footnotes,
         endnotes,
         settings: document_settings,
+        page_layout_settings,
         // Healthy document: no degradation (RB7). Only `degraded_document` sets this.
         parse_error: None,
     })
@@ -1096,6 +1107,40 @@ fn parse_even_and_odd_headers(settings_xml: &str) -> bool {
         return false;
     };
     bool_prop(doc.root_element(), "evenAndOddHeaders").unwrap_or(false)
+}
+
+fn parse_page_layout_settings(
+    settings_xml: &str,
+) -> Option<crate::types::PageLayoutSettingsWire> {
+    let doc = parse_guarded(settings_xml).ok()?;
+    let root = doc.root_element();
+    let authored = |name: &str| {
+        root.descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == name)
+            .map(|node| {
+                attr_w(node, "val")
+                    .as_deref()
+                    .and_then(parse_on_off)
+                    .unwrap_or(true)
+            })
+    };
+    let result = crate::types::PageLayoutSettingsWire {
+        mirror_margins: authored("mirrorMargins"),
+        gutter_at_top: authored("gutterAtTop"),
+        book_fold_printing: authored("bookFoldPrinting"),
+        book_fold_rev_printing: authored("bookFoldRevPrinting"),
+        print_two_on_one: authored("printTwoOnOne"),
+    };
+    if result.mirror_margins.is_none()
+        && result.gutter_at_top.is_none()
+        && result.book_fold_printing.is_none()
+        && result.book_fold_rev_printing.is_none()
+        && result.print_two_on_one.is_none()
+    {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Parse the typography settings the renderer needs from `word/settings.xml`.
@@ -2196,6 +2241,71 @@ fn section_geom(sect_pr: roxmltree::Node) -> Option<SectionGeom> {
     Some(geom)
 }
 
+fn section_page_geometry_wire(sect_pr: roxmltree::Node) -> Option<SectionPageGeometryWire> {
+    let page_size = child_w(sect_pr, "pgSz");
+    let margins = child_w(sect_pr, "pgMar");
+    if page_size.is_none() && margins.is_none() {
+        return None;
+    }
+    Some(SectionPageGeometryWire {
+        page_width: page_size.and_then(|node| attr_w(node, "w")).map(|value| twips_to_pt(&value)),
+        page_height: page_size.and_then(|node| attr_w(node, "h")).map(|value| twips_to_pt(&value)),
+        margin_top: margins.and_then(|node| attr_w(node, "top")).map(|value| twips_to_pt(&value)),
+        margin_right: margins.and_then(|node| attr_w(node, "right")).map(|value| twips_to_pt(&value)),
+        margin_bottom: margins.and_then(|node| attr_w(node, "bottom")).map(|value| twips_to_pt(&value)),
+        margin_left: margins.and_then(|node| attr_w(node, "left")).map(|value| twips_to_pt(&value)),
+        header_distance: margins.and_then(|node| attr_w(node, "header")).map(|value| twips_to_pt(&value)),
+        footer_distance: margins.and_then(|node| attr_w(node, "footer")).map(|value| twips_to_pt(&value)),
+    })
+}
+
+fn section_placement_wire(
+    sect_pr: Option<roxmltree::Node>,
+    section_id: String,
+) -> SectionPlacementWire {
+    let Some(sect_pr) = sect_pr else {
+        return SectionPlacementWire {
+            section_id,
+            v_align: None,
+            line_numbering: None,
+            doc_grid_type: None,
+            doc_grid_line_pitch: None,
+            doc_grid_char_space: None,
+            gutter_pt: None,
+            rtl_gutter: None,
+            page_borders_authored: None,
+            page_borders: None,
+            page_geometry: None,
+        };
+    };
+    SectionPlacementWire {
+        section_id,
+        v_align: child_w(sect_pr, "vAlign")
+            .and_then(|node| attr_w(node, "val"))
+            .filter(|value| value != "top"),
+        line_numbering: parse_line_numbering(sect_pr),
+        doc_grid_type: child_w(sect_pr, "docGrid").and_then(|node| attr_w(node, "type")),
+        doc_grid_line_pitch: child_w(sect_pr, "docGrid")
+            .and_then(|node| attr_w(node, "linePitch"))
+            .map(|value| twips_to_pt(&value)),
+        doc_grid_char_space: child_w(sect_pr, "docGrid")
+            .and_then(|node| attr_w(node, "charSpace"))
+            .and_then(|value| value.parse::<f64>().ok()),
+        gutter_pt: child_w(sect_pr, "pgMar")
+            .and_then(|node| attr_w(node, "gutter"))
+            .map(|value| twips_to_pt(&value)),
+        rtl_gutter: child_w(sect_pr, "rtlGutter").map(|node| {
+            attr_w(node, "val")
+                .as_deref()
+                .and_then(parse_on_off)
+                .unwrap_or(true)
+        }),
+        page_borders_authored: child_w(sect_pr, "pgBorders").map(|_| true),
+        page_borders: parse_page_borders(sect_pr),
+        page_geometry: section_page_geometry_wire(sect_pr).map(Box::new),
+    }
+}
+
 /// Build a `BodyElement::SectionBreak` for a sectPr that ENDS a section
 /// (ECMA-376 §17.6.x). Carries the section's `<w:cols>` (§17.6.4, via
 /// `parse_columns` ⇒ `None` for a single column) and its ST_SectionMark kind
@@ -2212,6 +2322,7 @@ fn section_break_element(
 ) -> BodyElement {
     let kind = match read_section_break_type(sect_pr).as_deref() {
         Some("continuous") => "continuous",
+        Some("nextColumn") => "nextColumn",
         Some("oddPage") => "oddPage",
         Some("evenPage") => "evenPage",
         _ => "nextPage",
@@ -2234,13 +2345,7 @@ fn section_break_element(
         // ECMA-376 §17.6.20 — this ending section's flow direction (issue #1000
         // per-section mixing); lrTb/absent ⇒ None, others verbatim.
         text_direction: read_text_direction(sect_pr),
-        section_placement: Box::new(SectionPlacementWire {
-            section_id,
-            v_align: child_w(sect_pr, "vAlign")
-                .and_then(|node| attr_w(node, "val"))
-                .filter(|value| value != "top"),
-            line_numbering: parse_line_numbering(sect_pr),
-        }),
+        section_placement: Box::new(section_placement_wire(Some(sect_pr), section_id)),
     }
 }
 
@@ -2505,6 +2610,7 @@ fn parse_section(
         page_borders: None,
         line_numbering: None,
         v_align: None,
+        section_placement: None,
     };
 
     let Some(sp) = sect_pr else {
@@ -17340,6 +17446,18 @@ mod column_tests {
     }
 
     #[test]
+    fn section_break_preserves_next_column_start_type() {
+        let body = body_from(
+            r#"<w:p><w:pPr><w:sectPr><w:type w:val="nextColumn"/></w:sectPr></w:pPr></w:p>"#,
+        );
+        match body.iter().find(|element| matches!(element, BodyElement::SectionBreak { .. }))
+            .expect("section break") {
+            BodyElement::SectionBreak { kind, .. } => assert_eq!(kind, "nextColumn"),
+            other => panic!("expected SectionBreak, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn non_final_section_break_emits_private_flow_placement_wire() {
         let body = body_from(
             r#"<w:p>
@@ -17364,6 +17482,15 @@ mod column_tests {
             wire["__sectionPlacement"]["lineNumbering"]["restart"],
             "newSection"
         );
+    }
+
+    #[test]
+    fn section_rtl_gutter_retains_explicit_off() {
+        let body = body_from(
+            r#"<w:p><w:pPr><w:sectPr><w:rtlGutter w:val="0"/></w:sectPr></w:pPr></w:p>"#,
+        );
+        let wire = serde_json::to_value(&body[1]).expect("section break serializes");
+        assert_eq!(wire["__sectionPlacement"]["rtlGutter"], false);
     }
 
     /// ECMA-376 §17.6.13 `<w:pgSz>` / §17.6.11 `<w:pgMar>` — a mid-body section

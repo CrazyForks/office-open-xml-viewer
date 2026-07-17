@@ -38,6 +38,12 @@ describe('DocumentLayout data boundary', () => {
           textDirection: 'lrTb',
           verticalAlignment: 'top',
         } satisfies SectionLayoutContext,
+        sectionOccurrenceId: 'section:0',
+        parityBlank: false,
+        bookmarkStarts: [],
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+        sectionRegions: [],
+        pageBorders: null,
         layers: {
           paintOrder: [{ layer: 'front', nodeId: 'drawing-1' }],
           background: [],

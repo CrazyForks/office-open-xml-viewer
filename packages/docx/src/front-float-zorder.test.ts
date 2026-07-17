@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, ShapeRun } from './types';
 
-// ECMA-376 §20.4.2.10 — a wp:anchor with behindDoc="0" floats IN FRONT of the
+// ECMA-376 Part 1 §20.4.2.3 and §20.4.2.15 — a wp:anchor with behindDoc="0"
+// and wrapNone floats IN FRONT of the
 // inline text/image flow. Since the flow is painted in document order, a
 // front-anchored shape in an EARLY paragraph must NOT be overpainted by a LATER
 // paragraph's content (sample-13: the "Journal homepage" text box, anchored to
@@ -114,7 +115,7 @@ function twoShapePara(): DocParagraph {
   } as unknown as DocParagraph;
 }
 
-describe('front float z-order (§20.4.2.10)', () => {
+describe('front float z-order (§20.4.2.3, §20.4.2.15)', () => {
   it('a front-anchored shape paints ON TOP of a following paragraph (after it)', async () => {
     const section: SectionProps = {
       pageWidth: 400, pageHeight: 600,

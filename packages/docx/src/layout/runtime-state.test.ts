@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  attachBodyLayoutKernel,
   attachDocumentLayoutRuntime,
   attachPaintResourceRegistry,
   attachPrivateResourceLookup,
@@ -11,7 +12,14 @@ import {
   privateResourceLookupOf,
 } from './runtime-state.js';
 import { createPaintResourceRegistry } from './paint-resources.js';
+import type { BodyLayoutKernel } from './body-layout-kernel.js';
 import type { LayoutServices } from './types.js';
+
+function attachUnusedKernel(services: LayoutServices): void {
+  attachBodyLayoutKernel(services, {
+    openBodyLayoutSession() { throw new Error('unused'); },
+  } as BodyLayoutKernel);
+}
 
 describe('document layout runtime state', () => {
   it('requires explicit deterministic attachment', () => {
@@ -66,6 +74,7 @@ describe('document layout runtime state', () => {
     const services = {
       text: {}, images: {}, math: {},
     } as unknown as LayoutServices;
+    attachUnusedKernel(services);
     const first = createFieldAcquisitionServicesView(services, { totalPages: 2 });
     const second = createFieldAcquisitionServicesView(services, { totalPages: 12 });
 
@@ -85,6 +94,7 @@ describe('document layout runtime state', () => {
     const services = {
       text: {}, images: {}, math: {},
     } as unknown as LayoutServices;
+    attachUnusedKernel(services);
     const paragraph = {};
     const first = createFieldAcquisitionServicesView(services, {
       totalPages: 2,
@@ -120,5 +130,14 @@ describe('document layout runtime state', () => {
     expect(fieldAcquisitionContextOf(second).resolvePageField?.(paragraph, 3)).toBeUndefined();
     expect(fieldAcquisitionContextOf(services).resolvePageField).toBeUndefined();
     expect(fieldAcquisitionContextOf(services).resolveTablePageField).toBeUndefined();
+  });
+
+  it('rejects a field-acquisition view without a body layout owner', () => {
+    const services = {
+      text: {}, images: {}, math: {},
+    } as unknown as LayoutServices;
+
+    expect(() => createFieldAcquisitionServicesView(services, { totalPages: 2 }))
+      .toThrow(/kernel is not attached/i);
   });
 });

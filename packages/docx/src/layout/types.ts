@@ -95,6 +95,7 @@ export interface FlowOwnership {
   readonly clipBounds?: LayoutRect;
   readonly advancePt: number;
   readonly ordinaryFlow: boolean;
+  readonly sectionFlowOwnership?: 'host-flow' | 'page';
 }
 
 interface LayoutNodeBase extends FlowOwnership {
@@ -310,6 +311,7 @@ export interface TextPlacement {
   readonly sourceRunIndex?: number;
   readonly role?: 'content' | 'numbering-marker' | 'field-result';
   readonly dependency?: 'page' | 'total-pages' | 'date' | 'time' | 'document';
+  readonly noteReference?: Readonly<{ kind: 'footnote' | 'endnote'; id: string }>;
   readonly range: TextRange;
   readonly origin: PointPt;
   readonly bounds: LayoutRect;
@@ -604,6 +606,11 @@ export interface TableLayout extends LayoutNodeBase {
   readonly columnWidthsPt: readonly number[];
   readonly rows: readonly TableRowLayout[];
   readonly borders: readonly ResolvedBorderSegment[];
+  readonly floatingTables?: readonly FloatingTablePlacementLayout[];
+  readonly resolvedFloatingTables?: readonly ResolvedFloatingTablePlacementLayout[];
+  /** Point space already owned by `resolvedFloatingTables`; occurrence projection
+   * must not translate those final frames a second time. */
+  readonly resolvedFloatingTableCoordinateSpace?: FloatRegistryCoordinateSpace;
 }
 
 /**
@@ -644,6 +651,19 @@ export interface FloatRegistryEntryPt {
   readonly paragraphId: number;
   readonly bounds: LayoutRect;
   readonly exclusionBounds: LayoutRect;
+  /** Stable retained-graph identity for exclusions owned by an accepted occurrence. */
+  readonly exclusionId?: string;
+  /** Parser-authored DrawingML wrap facts. Ordinary tables/frames omit these
+   * and retain their established square exclusion semantics. */
+  readonly wrap?: WrapExclusion['wrap'];
+  readonly wrapSide?: string | null;
+  readonly wrapDistances?: Readonly<{
+    topPt: number;
+    rightPt: number;
+    bottomPt: number;
+    leftPt: number;
+  }>;
+  readonly wrapPolygon?: readonly PointPt[];
 }
 
 export type FloatRegistryCoordinateSpace = Exclude<
@@ -706,6 +726,7 @@ export type PageLayerId =
 export interface PagePaintEntry {
   readonly layer: PageLayerId;
   readonly nodeId: LayoutNodeId;
+  readonly coordinateSpace?: 'section-logical' | 'upright-physical';
 }
 
 export interface PageLayers {
@@ -720,7 +741,8 @@ export interface PageLayers {
 }
 
 /** One section-owned body-flow region on a physical page. A continuous section
- * may add another region below existing content without creating a new page. */
+ * may add another region below existing content without creating a new page;
+ * an occurrence owning only out-of-flow content has an empty region. */
 export interface PageSectionRegion {
   readonly id: string;
   readonly sectionOccurrenceId: string;
@@ -750,14 +772,12 @@ export interface LayoutPage {
   readonly geometry: PageGeometry;
   readonly flowDomains: readonly FlowDomain[];
   readonly section: DeepReadonly<SectionLayoutContext>;
-  /** Transitional optionals keep pre-A6 producers compiling while the canonical
-   * page factory becomes the sole producer; A6 removes that migration latitude. */
-  readonly sectionOccurrenceId?: string;
-  readonly parityBlank?: boolean;
-  readonly bookmarkStarts?: readonly PageBookmarkStart[];
-  readonly pageNumber?: PageNumberMetadata;
-  /** Transitional until A6's canonical page producer is the only producer. */
-  readonly sectionRegions?: readonly PageSectionRegion[];
+  readonly sectionOccurrenceId: string;
+  readonly parityBlank: boolean;
+  readonly bookmarkStarts: readonly PageBookmarkStart[];
+  readonly pageNumber: PageNumberMetadata;
+  readonly sectionRegions: readonly PageSectionRegion[];
+  readonly pageBorders: DeepReadonly<import('../types.js').PageBorders> | null;
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
 }

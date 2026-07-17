@@ -12,6 +12,7 @@ import type {
   SectionProps,
 } from '../types.js';
 import { stableFingerprint } from './fingerprint.js';
+import { createLayoutServicesRuntimeView } from './runtime-state.js';
 import type { TextLayoutService, TextShapeRequest } from './text.js';
 import type {
   FlowBlockPlacement,
@@ -132,7 +133,7 @@ function countingServices(model: DocxDocumentModel): {
       return base.text.shape(request);
     },
   });
-  return { services: Object.freeze({ ...base, text }), finalAcquisitions: counts };
+  return { services: createLayoutServicesRuntimeView(base, { text }), finalAcquisitions: counts };
 }
 
 function retainedParagraph(
@@ -265,11 +266,8 @@ describe('retained table layout', () => {
     const services = createLayoutServices(model, { measureContext: measuringContext() });
 
     const result = layoutDocument(model, services);
-    const placed = result.pages.flatMap((page) => page.fragments)
-      .find((item) => item.fragment.kind === 'table');
-    const retained = placed?.fragment.kind === 'table' && 'flowBounds' in placed.fragment
-      ? placed.fragment
-      : undefined;
+    const retained = result.pages.flatMap((page) => page.layers.body)
+      .find((node): node is TableLayout => node.kind === 'table');
 
     expect(retained).toBeDefined();
     expect(retained?.rows[0]?.advancePt).toBe(12);

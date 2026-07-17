@@ -3,6 +3,23 @@ import type { SectionLayoutContext } from '../layout-context.js';
 import type { DocumentLayout } from '../layout/types.js';
 import { paintLayoutPage } from './canvas-page.js';
 
+const canonicalPageMeta = (section: SectionLayoutContext) => ({
+  sectionOccurrenceId: 'section:0',
+  parityBlank: false,
+  bookmarkStarts: [],
+  pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+  sectionRegions: [{
+    id: 'region:0', sectionOccurrenceId: 'section:0', section,
+    coordinateSpace: {
+      writingMode: 'horizontal-tb' as const,
+      logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+    },
+    blockStartPt: 10, blockEndPt: 190, flowDomainIds: ['body'],
+  }],
+  pageBorders: null,
+});
+
 describe('paintLayoutPage', () => {
   it('paints retained geometry without measuring text', async () => {
     const fills: Array<{ fill: string; args: number[] }> = [];
@@ -44,6 +61,7 @@ describe('paintLayoutPage', () => {
           physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
         }],
         section: {} as SectionLayoutContext,
+        ...canonicalPageMeta({} as SectionLayoutContext),
         layers: {
           paintOrder: [{ layer: 'body', nodeId: 'drawing-1' }],
           background: [],
@@ -103,6 +121,7 @@ describe('paintLayoutPage', () => {
         physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
       }],
       section: {} as SectionLayoutContext,
+      ...canonicalPageMeta({} as SectionLayoutContext),
       layers: {
         paintOrder: [{ layer: 'body' as const, nodeId: 'missing' }],
         background: [], behindText: [], header: [], body: [node], notes: [], front: [], footer: [],
@@ -169,6 +188,7 @@ describe('paintLayoutPage', () => {
           physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
         }],
         section: {} as SectionLayoutContext,
+        ...canonicalPageMeta({} as SectionLayoutContext),
         layers: {
           paintOrder: [{ layer: 'body', nodeId: 'table-0' }],
           background: [], behindText: [], header: [], body: [table], notes: [], front: [], footer: [],

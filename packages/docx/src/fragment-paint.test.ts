@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { createLayoutServices, renderDocumentToCanvas, paginateDocument } from './renderer.js';
+import { createLayoutServices, layoutDocument, renderDocumentToCanvas } from './renderer.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,
   CellElement,
@@ -9,10 +10,8 @@ import type {
   DocTableRow,
   DocxDocumentModel,
   FramePr,
-  PaginatedBodyElement,
-  SectionProps,
+    SectionProps,
 } from './types';
-import { bodyFragmentFor } from './renderer.js';
 import type { TableFragmentLayout } from './layout/table-pagination.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,7 +80,7 @@ function makeThrowingPaintCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; 
     },
     save() {}, restore() {}, beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {},
+    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {}, setTransform() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     drawImage() {},
@@ -112,7 +111,7 @@ function makeMeasuringPaintCanvas(): { canvas: HTMLCanvasElement; calls: Call[] 
     },
     save() {}, restore() {}, beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
-    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {},
+    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, rotate() {}, setTransform() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     drawImage() {},
@@ -204,19 +203,19 @@ describe('table fragment paint purity (PR 6 Task 16)', () => {
       [60, 100],
     );
     const model = doc([outer as unknown as BodyElement]);
-    const pages = paginateDocument(model);
-    const placed = bodyFragmentFor(pages[0]![0]!);
-    expect(placed?.fragment.kind).toBe('table');
-    if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+    const layout = layoutDocument(model);
+    const table = layout.pages[0]?.layers.body[0];
+    expect(table?.kind).toBe('table');
+    if (table?.kind !== 'table') {
       throw new Error('expected retained TableLayout/TableFragmentLayout');
     }
-    const nestedLayouts = placed.fragment.rows.flatMap((tableRow) => tableRow.cells.flatMap((tableCell) =>
+    const nestedLayouts = table.rows.flatMap((tableRow) => tableRow.cells.flatMap((tableCell) =>
       tableCell.blocks.map((block) => block.layout).filter((layout) => layout.kind === 'table')));
     expect(nestedLayouts).toHaveLength(1);
     expect(nestedLayouts[0]!.rows.length).toBeGreaterThan(0);
     const paint = makeThrowingPaintCanvas();
     await expect(
-      renderDocumentToCanvas(model, paint.canvas, 0, { dpr: 1, width: 200, prebuiltPages: pages }),
+      paintLayoutPage(layout, 0, paint.canvas, { dpr: 1, scale: 1 }),
     ).resolves.not.toThrow();
     expect(paint.measured()).toBe(0);
     // Non-vacuity: outer + inner cell text were drawn.
@@ -228,32 +227,30 @@ describe('table fragment paint purity (PR 6 Task 16)', () => {
     const bodyRows = Array.from({ length: 12 }, (_v, i) => trow([textCell(`row ${i}`)]));
     const rows = [trow([textCell('HEADER')], { isHeader: true }), ...bodyRows];
     const model = doc([tbl(rows, [120]) as unknown as BodyElement], 120);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const retained = pages.map((page) => {
-      const tableElement = page.find((element) => element.type === 'table');
-      expect(tableElement).toBeDefined();
-      const placed = bodyFragmentFor(tableElement!);
-      if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const retained = layout.pages.map((page) => {
+      const table = page.layers.body.find((node) => node.kind === 'table');
+      if (table?.kind !== 'table') {
         throw new Error('expected retained TableFragmentLayout');
       }
-      return placed.fragment as TableFragmentLayout;
+      return table as TableFragmentLayout;
     });
     for (const fragment of retained.slice(1)) {
       expect(fragment.rows[0]?.ownership).toBe('repeated-header');
       expect(fragment.rows[0]?.logicalRowIndex).toBe(0);
     }
-    for (let p = 0; p < pages.length; p++) {
+    for (let p = 0; p < layout.pages.length; p++) {
       const paint = makeThrowingPaintCanvas();
       await expect(
-        renderDocumentToCanvas(model, paint.canvas, p, { dpr: 1, width: 200, prebuiltPages: pages }),
+        paintLayoutPage(layout, p, paint.canvas, { dpr: 1, scale: 1 }),
       ).resolves.not.toThrow();
       expect(paint.measured()).toBe(0);
       expect(paint.calls.length).toBeGreaterThan(0);
     }
     // The header text is repeated on the continuation page.
     const paint2 = makeThrowingPaintCanvas();
-    await renderDocumentToCanvas(model, paint2.canvas, 1, { dpr: 1, width: 200, prebuiltPages: pages });
+    await paintLayoutPage(layout, 1, paint2.canvas, { dpr: 1, scale: 1 });
     expect(paint2.calls.some((c) => c.text.includes('HEADER'))).toBe(true);
   });
 });
@@ -267,12 +264,9 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
         ...para('legacy header frame', { framePr: frame({ w: 80, hRule: 'auto' }) }),
       } as unknown as BodyElement],
     };
-    const pages = paginateDocument(model);
     const paint = makeMeasuringPaintCanvas();
 
-    await renderDocumentToCanvas(model, paint.canvas, 0, {
-      dpr: 1, width: 200, prebuiltPages: pages,
-    });
+    await renderDocumentToCanvas(model, paint.canvas, 0, { dpr: 1, width: 200 });
 
     expect(paint.calls.map((call) => call.text).join('')).toContain('legacy header frame');
   });
@@ -285,26 +279,25 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
       framed as unknown as BodyElement,
       para('anchor paragraph') as unknown as BodyElement,
     ]);
-    const pages = paginateDocument(model);
-    const placed = bodyFragmentFor(pages[0]![0]!);
-    expect(placed?.fragment.kind).toBe('paragraph');
-    expect(placed?.heightPt).toBe(0);
-    if (placed?.fragment.kind !== 'paragraph') throw new Error('expected frame paragraph layout');
-    expect(placed.fragment.ordinaryFlow).toBe(false);
-    expect(placed.fragment.lines.length).toBeGreaterThan(0);
-    expect(placed.fragment.lines.flatMap((line) => line.placements)).not.toHaveLength(0);
+    const layout = layoutDocument(model);
+    const placed = layout.pages[0]?.layers.body[0];
+    if (placed?.kind !== 'paragraph') throw new Error('expected frame paragraph layout');
+    expect(placed.advancePt).toBe(0);
+    expect(placed.ordinaryFlow).toBe(false);
+    expect(placed.lines.length).toBeGreaterThan(0);
+    expect(placed.lines.flatMap((line) => line.placements)).not.toHaveLength(0);
 
-    const retainedLines = placed.fragment.lines;
+    const retainedLines = placed.lines;
     const partition = retainedLines.map((line) => line.range);
     for (const width of [200, 400]) {
       const paint = makeThrowingPaintCanvas();
       await expect(
-        renderDocumentToCanvas(model, paint.canvas, 0, { dpr: 1, width, prebuiltPages: pages }),
+        paintLayoutPage(layout, 0, paint.canvas, { dpr: 1, scale: width / 200 }),
       ).resolves.not.toThrow();
       expect(paint.measured()).toBe(0);
       expect(paint.calls.map((call) => call.text).join('')).toContain('retained frame');
-      expect(placed.fragment.lines).toBe(retainedLines);
-      expect(placed.fragment.lines.map((line) => line.range)).toEqual(partition);
+      expect(placed.lines).toBe(retainedLines);
+      expect(placed.lines.map((line) => line.range)).toEqual(partition);
     }
   });
 
@@ -315,12 +308,11 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
     ]);
     const base = createLayoutServices(model);
     const custom = { text: base.text, images: base.images, math: base.math };
-    const pages = paginateDocument(model, custom);
-    const placed = bodyFragmentFor(pages[0]![0]!);
+    const placed = layoutDocument(model, custom, { currentDateMs: 0 }).pages[0]?.layers.body[0];
 
-    expect(placed?.fragment.kind).toBe('paragraph');
-    if (placed?.fragment.kind !== 'paragraph') throw new Error('expected frame paragraph layout');
-    expect(placed.fragment.ordinaryFlow).toBe(false);
+    expect(placed?.kind).toBe('paragraph');
+    if (placed?.kind !== 'paragraph') throw new Error('expected frame paragraph layout');
+    expect(placed.ordinaryFlow).toBe(false);
   });
 
   it('retains identical adjacent framePr paragraphs as one stacked frame and one exclusion', () => {
@@ -330,21 +322,17 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
       para('frame second', { framePr: { ...shared } }) as unknown as BodyElement,
       para('anchor') as unknown as BodyElement,
     ]);
-    const pages = paginateDocument(model);
-    const first = bodyFragmentFor(pages[0]![0]!);
-    const second = bodyFragmentFor(pages[0]![1]!);
-    const anchor = bodyFragmentFor(pages[0]![2]!);
-    expect(first?.fragment.kind).toBe('paragraph');
-    expect(second?.fragment.kind).toBe('paragraph');
-    expect(first?.heightPt).toBe(0);
-    expect(second?.heightPt).toBe(0);
-    if (first?.fragment.kind !== 'paragraph' || second?.fragment.kind !== 'paragraph') {
+    const nodes = layoutDocument(model).pages[0]?.layers.body ?? [];
+    const [first, second, anchor] = nodes;
+    if (first?.kind !== 'paragraph' || second?.kind !== 'paragraph') {
       throw new Error('expected frame paragraph layouts');
     }
-    expect(second!.yPt).toBeGreaterThanOrEqual(first!.yPt + first!.fragment.advancePt);
-    expect(anchor?.fragment.kind).toBe('paragraph');
-    if (anchor?.fragment.kind !== 'paragraph') throw new Error('expected anchor paragraph layout');
-    expect(anchor.fragment.exclusions.filter((exclusion) => exclusion.id.includes('frame'))).toHaveLength(1);
+    expect(first.advancePt).toBe(0);
+    expect(second.advancePt).toBe(0);
+    expect(second.flowBounds.yPt)
+      .toBeGreaterThanOrEqual(first.flowBounds.yPt + first.flowBounds.heightPt);
+    if (anchor?.kind !== 'paragraph') throw new Error('expected anchor paragraph layout');
+    expect(anchor.exclusions).toHaveLength(1);
   });
 
   it('uses final-width reflow to determine an automatic frame height', () => {
@@ -352,16 +340,11 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
       para('abcdefghij', { framePr: frame({ w: 20, hRule: 'auto' }) }) as unknown as BodyElement,
       para('anchor') as unknown as BodyElement,
     ]);
-    const pages = paginateDocument(model);
-    const framed = bodyFragmentFor(pages[0]![0]!);
-    const anchor = bodyFragmentFor(pages[0]![1]!);
-    expect(framed?.fragment.kind).toBe('paragraph');
-    if (framed?.fragment.kind !== 'paragraph') throw new Error('expected frame paragraph layout');
-    expect(framed.fragment.lines.length).toBeGreaterThan(1);
-    expect(anchor?.fragment.kind).toBe('paragraph');
-    if (anchor?.fragment.kind !== 'paragraph') throw new Error('expected anchor paragraph layout');
-    expect(anchor.fragment.exclusions[0]?.bounds.heightPt)
-      .toBeCloseTo(framed.fragment.advancePt, 6);
+    const [framed, anchor] = layoutDocument(model).pages[0]?.layers.body ?? [];
+    if (framed?.kind !== 'paragraph' || anchor?.kind !== 'paragraph') throw new Error('expected paragraph layouts');
+    expect(framed.lines.length).toBeGreaterThan(1);
+    expect(framed.advancePt).toBe(0);
+    expect(anchor.exclusions[0]?.bounds.heightPt).toBeCloseTo(framed.flowBounds.heightPt, 6);
   });
 
   it('uses the larger of authored and final-content height for hRule=atLeast', () => {
@@ -373,19 +356,16 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
       para('x', { framePr: frame({ w: 20, hRule: 'atLeast', h: 80 }) }) as unknown as BodyElement,
       para('anchor two') as unknown as BodyElement,
     ]);
-    const contentPages = paginateDocument(contentDriven);
-    const authoredPages = paginateDocument(authoredDriven);
-    const contentFrame = bodyFragmentFor(contentPages[0]![0]!)!;
-    const contentAnchor = bodyFragmentFor(contentPages[0]![1]!)!;
-    const authoredAnchor = bodyFragmentFor(authoredPages[0]![1]!)!;
-    if (contentFrame.fragment.kind !== 'paragraph'
-      || contentAnchor.fragment.kind !== 'paragraph'
-      || authoredAnchor.fragment.kind !== 'paragraph') throw new Error('expected paragraph layouts');
+    const [contentFrame, contentAnchor] = layoutDocument(contentDriven).pages[0]?.layers.body ?? [];
+    const authoredAnchor = layoutDocument(authoredDriven).pages[0]?.layers.body[1];
+    if (contentFrame?.kind !== 'paragraph'
+      || contentAnchor?.kind !== 'paragraph'
+      || authoredAnchor?.kind !== 'paragraph') throw new Error('expected paragraph layouts');
 
-    expect(contentAnchor.fragment.exclusions[0]?.bounds.heightPt)
-      .toBeCloseTo(contentFrame.fragment.advancePt, 6);
-    expect(contentAnchor.fragment.exclusions[0]?.bounds.heightPt).toBeGreaterThan(5);
-    expect(authoredAnchor.fragment.exclusions[0]?.bounds.heightPt).toBeCloseTo(80, 6);
+    expect(contentFrame.advancePt).toBe(0);
+    expect(contentAnchor.exclusions[0]?.bounds.heightPt).toBeCloseTo(contentFrame.flowBounds.heightPt, 6);
+    expect(contentAnchor.exclusions[0]?.bounds.heightPt).toBeGreaterThan(5);
+    expect(authoredAnchor.exclusions[0]?.bounds.heightPt).toBeCloseTo(80, 6);
   });
 
   it('retains one authored outer clip on every member of an hRule=exact frame group', () => {
@@ -395,22 +375,19 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
       para('second frame member', { framePr: { ...shared } }) as unknown as BodyElement,
       para('anchor') as unknown as BodyElement,
     ]);
-    const pages = paginateDocument(model);
-    const first = bodyFragmentFor(pages[0]![0]!)!;
-    const second = bodyFragmentFor(pages[0]![1]!)!;
-    const anchor = bodyFragmentFor(pages[0]![2]!)!;
-    if (first.fragment.kind !== 'paragraph'
-      || second.fragment.kind !== 'paragraph'
-      || anchor.fragment.kind !== 'paragraph') throw new Error('expected paragraph layouts');
+    const [first, second, anchor] = layoutDocument(model).pages[0]?.layers.body ?? [];
+    if (first?.kind !== 'paragraph'
+      || second?.kind !== 'paragraph'
+      || anchor?.kind !== 'paragraph') throw new Error('expected paragraph layouts');
 
-    expect(first.fragment.clipBounds).toEqual(second.fragment.clipBounds);
-    expect(first.fragment.clipBounds).toEqual({
-      xPt: first.fragment.clipBounds?.xPt,
-      yPt: first.fragment.clipBounds?.yPt,
+    expect(first.clipBounds).toEqual(second.clipBounds);
+    expect(first.clipBounds).toEqual({
+      xPt: first.clipBounds?.xPt,
+      yPt: first.clipBounds?.yPt,
       widthPt: 30,
       heightPt: 25,
     });
-    expect(anchor.fragment.exclusions[0]?.bounds.heightPt).toBeCloseTo(25, 6);
+    expect(anchor.exclusions[0]?.bounds.heightPt).toBeCloseTo(25, 6);
   });
 
   it('folds contextual spacing once across a three-paragraph frame group', () => {
@@ -421,22 +398,20 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
       para('three', { framePr: { ...shared }, styleId: 's', spaceBefore: 8, spaceAfter: 3 }) as unknown as BodyElement,
       para('anchor') as unknown as BodyElement,
     ]);
-    const pages = paginateDocument(model);
-    const first = bodyFragmentFor(pages[0]![0]!)!;
-    const second = bodyFragmentFor(pages[0]![1]!)!;
-    const third = bodyFragmentFor(pages[0]![2]!)!;
-    const anchor = bodyFragmentFor(pages[0]![3]!)!;
+    const [first, second, third, anchor] = layoutDocument(model).pages[0]?.layers.body ?? [];
     if (
-      first.fragment.kind !== 'paragraph'
-      || second.fragment.kind !== 'paragraph'
-      || third.fragment.kind !== 'paragraph'
+      first?.kind !== 'paragraph'
+      || second?.kind !== 'paragraph'
+      || third?.kind !== 'paragraph'
     ) throw new Error('expected frame paragraph layouts');
-    expect(second.yPt - first.yPt).toBeCloseTo(first.fragment.advancePt, 6);
+    expect(first.advancePt).toBe(0);
+    expect(second.advancePt).toBe(0);
+    expect(second.flowBounds.yPt - first.flowBounds.yPt).toBeCloseTo(first.flowBounds.heightPt, 6);
     // p2 after=5 is replaced by the contextual gap 3 before p3.
-    expect(third.yPt - second.yPt).toBeCloseTo(second.fragment.advancePt - 2, 6);
-    if (anchor.fragment.kind !== 'paragraph') throw new Error('expected anchor paragraph layout');
-    expect(anchor.fragment.exclusions[0]?.bounds.heightPt).toBeCloseTo(
-      third.yPt + third.fragment.advancePt - (first.yPt - 2),
+    expect(third.flowBounds.yPt - second.flowBounds.yPt).toBeCloseTo(second.flowBounds.heightPt - 2, 6);
+    if (anchor?.kind !== 'paragraph') throw new Error('expected anchor paragraph layout');
+    expect(anchor.exclusions[0]?.bounds.heightPt).toBeCloseTo(
+      third.flowBounds.yPt + third.flowBounds.heightPt - (first.flowBounds.yPt - 2),
       6,
     );
   });
@@ -450,32 +425,31 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
       para('two', { framePr: { ...shared }, borders, spaceBefore: 0, spaceAfter: 0 }) as unknown as BodyElement,
       para('anchor') as unknown as BodyElement,
     ]);
-    const pages = paginateDocument(model);
-    const first = bodyFragmentFor(pages[0]![0]!)!;
-    const second = bodyFragmentFor(pages[0]![1]!)!;
-    const anchor = bodyFragmentFor(pages[0]![2]!)!;
-    if (first.fragment.kind !== 'paragraph' || second.fragment.kind !== 'paragraph') {
+    const [first, second, anchor] = layoutDocument(model).pages[0]?.layers.body ?? [];
+    if (first?.kind !== 'paragraph' || second?.kind !== 'paragraph') {
       throw new Error('expected frame paragraph layouts');
     }
-    expect(first.fragment.borders.some((border) => border.edge === 'bottom')).toBe(false);
-    expect(second.fragment.borders.some((border) => border.edge === 'bottom')).toBe(true);
-    expect(second.yPt).toBeCloseTo(first.yPt + first.fragment.advancePt, 6);
-    if (anchor.fragment.kind !== 'paragraph') throw new Error('expected anchor paragraph layout');
-    expect(anchor.fragment.exclusions[0]?.bounds.heightPt).toBeCloseTo(
-      second.yPt + second.fragment.advancePt - first.yPt,
+    expect(first.borders.some((border) => border.edge === 'bottom')).toBe(false);
+    expect(second.borders.some((border) => border.edge === 'bottom')).toBe(true);
+    expect(first.advancePt).toBe(0);
+    expect(second.advancePt).toBe(0);
+    expect(second.flowBounds.yPt).toBeCloseTo(first.flowBounds.yPt + first.flowBounds.heightPt, 6);
+    if (anchor?.kind !== 'paragraph') throw new Error('expected anchor paragraph layout');
+    expect(anchor.exclusions[0]?.bounds.heightPt).toBeCloseTo(
+      second.flowBounds.yPt + second.flowBounds.heightPt - first.flowBounds.yPt,
       6,
     );
   });
 
   it('paints a premeasured body paragraph at scale 1 without ever calling measureText', async () => {
     const model = doc([para('hello world one two three') as unknown as BodyElement]);
-    const pages = paginateDocument(model); // measured with the normal OffscreenCanvas
+    const layout = layoutDocument(model); // measured with the normal OffscreenCanvas
     const paint = makeThrowingPaintCanvas();
 
     // Paint scale 1 (render width == page width). A migrated paragraph draws its
     // stored fragment lines; nothing measures.
     await expect(
-      renderDocumentToCanvas(model, paint.canvas, 0, { dpr: 1, width: 200, prebuiltPages: pages }),
+      paintLayoutPage(layout, 0, paint.canvas, { dpr: 1, scale: 1 }),
     ).resolves.not.toThrow();
 
     expect(paint.measured()).toBe(0);
@@ -489,15 +463,17 @@ describe('fragment paint purity (PR 5 Task 13)', () => {
     // the shared measured fragment window without remeasuring.
     const long = Array.from({ length: 120 }, () => 'w').join(' ');
     const model = doc([para(long) as unknown as BodyElement], 60);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const split = pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice));
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const split = layout.pages.some((page) => page.layers.body.some((node) => (
+      node.kind === 'paragraph' && node.continuation?.continuesOnNext
+    )));
     expect(split).toBe(true);
 
-    for (let p = 0; p < pages.length; p++) {
+    for (let p = 0; p < layout.pages.length; p++) {
       const paint = makeThrowingPaintCanvas();
       await expect(
-        renderDocumentToCanvas(model, paint.canvas, p, { dpr: 1, width: 200, prebuiltPages: pages }),
+        paintLayoutPage(layout, p, paint.canvas, { dpr: 1, scale: 1 }),
       ).resolves.not.toThrow();
       expect(paint.measured()).toBe(0);
       expect(paint.calls.length).toBeGreaterThan(0);

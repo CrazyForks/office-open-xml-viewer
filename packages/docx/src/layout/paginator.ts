@@ -138,12 +138,13 @@ function transition(
 export function placeFlowNode(
   state: PageFlowState,
   node: PaintNode,
+  flowChargePt: number,
 ): PageFlowTransition {
-  if (!Number.isFinite(node.advancePt) || node.advancePt < 0) {
-    throw new RangeError('A flow node block advance must be a finite non-negative value');
+  if (!Number.isFinite(flowChargePt) || flowChargePt < 0) {
+    throw new RangeError('A flow node charge must be a finite non-negative value');
   }
   const blockStartPt = state.cursorBlockPt;
-  const blockEndPt = blockStartPt + node.advancePt;
+  const blockEndPt = blockStartPt + flowChargePt;
   return transition(Object.freeze({
     ...state,
     pageHasContent: true,
@@ -242,7 +243,9 @@ export function beginSection(
   if (startType === 'continuous' && !options.hasFootnoteReferenceOnCurrentPage) {
     // §17.6.4: a section following newspaper columns begins below the deepest
     // column, not merely below the last column visited by source order.
-    const regionTop = Math.max(state.cursorBlockPt, state.deepestColumnBlockPt);
+    const regionTop = state.section.columns.length > 1
+      ? Math.max(state.cursorBlockPt, state.deepestColumnBlockPt)
+      : state.cursorBlockPt;
     return transition(createPageFlowState(section, {
       pageIndex: state.pageIndex,
       pageContentStartBlockPt: state.pageContentStartBlockPt,

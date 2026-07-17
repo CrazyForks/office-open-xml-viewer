@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { bodyFragmentFor, computePages, paginateDocument, renderDocumentToCanvas } from './renderer.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement, DocParagraph, DocxTextRun, SectionProps, DocxDocumentModel,
-  SectionGeom, PaginatedBodyElement, HeaderFooter,
+  SectionGeom, HeaderFooter,
   DocTable, DocTableRow, DocTableCell,
 } from './types';
-import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
+import { attachDocumentLayoutRuntime, documentLayoutRuntimeOf } from './layout/runtime-state.js';
+import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
+import { createLayoutServices, layoutDocument } from './renderer.js';
 
 // ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — page geometry is
 // PER-SECTION. A mid-body SectionBreak carries its ending section's `geom`; the
@@ -39,11 +41,11 @@ function makeCtx(): CanvasRenderingContext2D {
   return ctx as unknown as CanvasRenderingContext2D;
 }
 
-// `paginateDocument` builds its measure ctx from `new OffscreenCanvas(...)`, which
+// Canonical layout builds its default measure ctx from `new OffscreenCanvas(...)`, which
 // the node test env lacks. Polyfill it with the SAME deterministic stub (line
 // height = fontPx) so the HF-reserve paginator runs headless and its page-fit
 // arithmetic is exact. (The paginator-stamp/renderer tests above inject their ctx
-// directly via computePages/renderDocumentToCanvas and don't need this.)
+// directly through production layout/paint and don't need this.)
 (globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas = class {
   getContext() { return makeCtx(); }
 };
@@ -94,18 +96,26 @@ function mixedDoc(): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
+function canonicalLayout(doc: DocxDocumentModel) {
+  return layoutDocument(doc, createLayoutServices(doc, { measureContext: makeCtx() }), { currentDateMs: 0 });
+}
+
+const retainedText = (node: import('./layout/types.js').PaintNode): string => node.kind === 'paragraph'
+  ? node.lines.flatMap((line) => line.placements)
+      .filter((placement) => placement.kind === 'text')
+      .map((placement) => placement.text).join('')
+  : '';
+
 describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => {
   it('stamps each element with its section geometry', () => {
     const doc = mixedDoc();
-    const pages = computePages(doc.body, doc.section, makeCtx());
+    const pages = canonicalLayout(doc).pages;
     // Page 0 = portrait section (the first section, ended by the nextPage break).
-    const p0 = pages[0].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    expect(p0.sectionGeom?.pageWidth).toBe(200);
-    expect(p0.sectionGeom?.pageHeight).toBe(140);
+    expect(pages[0].section.geometry.pageWidth).toBe(200);
+    expect(pages[0].section.geometry.pageHeight).toBe(140);
     // Page 1 = landscape body section (no following break ⇒ body-level geometry).
-    const p1 = pages[1].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    expect(p1.sectionGeom?.pageWidth).toBe(140);
-    expect(p1.sectionGeom?.pageHeight).toBe(200);
+    expect(pages[1].section.geometry.pageWidth).toBe(140);
+    expect(pages[1].section.geometry.pageHeight).toBe(200);
   });
 
   // Height-sensitive spill — proves the const→arrow conversion of the page frame.
@@ -138,31 +148,25 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
       footers: { default: null, first: null, even: null },
       fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = computePages(doc.body, doc.section, makeCtx());
+    const pages = canonicalLayout(doc).pages;
     const texts = pages.map((page) =>
-      page
-        .filter((e) => e.type === 'paragraph')
-        .map((e) => (e as unknown as { runs: { text: string }[] }).runs.map((r) => r.text).join('')),
+      page.layers.body.filter((node) => node.kind === 'paragraph').map(retainedText),
     );
     // Portrait content height 100 ⇒ A1..A5 on page 0, A6 spills to page 1 (still the
     // portrait section), then the break opens page 2 for the landscape section.
     expect(texts).toEqual([['A1', 'A2', 'A3', 'A4', 'A5'], ['A6'], ['B1']]);
     // The spilled A6 still carries the portrait section geometry (it precedes the
     // break); B1 carries the body-level landscape geometry.
-    const a6 = pages[1].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    expect(a6.sectionGeom?.pageWidth).toBe(200);
-    expect(a6.sectionGeom?.pageHeight).toBe(140);
-    const b1 = pages[2].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    expect(b1.sectionGeom?.pageWidth).toBe(140);
-    expect(b1.sectionGeom?.pageHeight).toBe(200);
+    expect(pages[1].section.geometry.pageWidth).toBe(200);
+    expect(pages[1].section.geometry.pageHeight).toBe(140);
+    expect(pages[2].section.geometry.pageWidth).toBe(140);
+    expect(pages[2].section.geometry.pageHeight).toBe(200);
   });
 
-  // Geom-less middle break — exercises `e.geom ?? bodySectionGeom`. Three sections:
-  // break1 carries geom, break2 does NOT. `sectionGeomFrom` walks FORWARD, so the
-  // element BETWEEN the two breaks (S2) belongs to the section ENDING at break2,
-  // which has no geom ⇒ it falls back to the body-level geometry. S1 (before break1)
-  // gets break1's geom; S3 (after break2, the final section) gets the body geometry.
-  it('falls back to body geometry for a section whose break carries no geom', () => {
+  // §17.6.22 gives following-section inheritance only to continuous breaks.
+  // A next-page section with omitted pgSz/pgMar therefore uses the ECMA defaults;
+  // the document-level sectPr still owns the final section's authored page box.
+  it('uses defaults for omitted non-continuous geometry without changing the final section', () => {
     const geom1: SectionGeom = {
       pageWidth: 300, pageHeight: 400,
       marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
@@ -177,7 +181,7 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
       para('S1'),
       { type: 'sectionBreak', kind: 'nextPage', geom: geom1 } as BodyElement,
       para('S2'),
-      // No `geom`: this section inherits pgSz/pgMar ⇒ bodySectionGeom fallback.
+      // No `geom`: this non-continuous section uses the page-box defaults.
       { type: 'sectionBreak', kind: 'nextPage' } as BodyElement,
       para('S3'),
     ];
@@ -187,19 +191,40 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
       footers: { default: null, first: null, even: null },
       fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = computePages(doc.body, doc.section, makeCtx());
-    const s1 = pages[0].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    const s2 = pages[1].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    const s3 = pages[2].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    const pages = canonicalLayout(doc).pages;
     // S1: section ending at break1 ⇒ break1's geom.
-    expect(s1.sectionGeom?.pageWidth).toBe(300);
-    expect(s1.sectionGeom?.pageHeight).toBe(400);
-    // S2: section ending at break2, which has NO geom ⇒ body-level geometry.
-    expect(s2.sectionGeom?.pageWidth).toBe(140);
-    expect(s2.sectionGeom?.pageHeight).toBe(200);
+    expect(pages[0].section.geometry.pageWidth).toBe(300);
+    expect(pages[0].section.geometry.pageHeight).toBe(400);
+    // S2: section ending at break2, which has NO geom ⇒ ECMA defaults.
+    expect(pages[1].section.geometry.pageWidth).toBe(612);
+    expect(pages[1].section.geometry.pageHeight).toBe(792);
     // S3: final section ⇒ body-level geometry.
-    expect(s3.sectionGeom?.pageWidth).toBe(140);
-    expect(s3.sectionGeom?.pageHeight).toBe(200);
+    expect(pages[2].section.geometry.pageWidth).toBe(140);
+    expect(pages[2].section.geometry.pageHeight).toBe(200);
+  });
+
+  it('does not inherit omitted non-continuous geometry across an incoming continuous boundary', () => {
+    const bodySection: SectionProps = {
+      pageWidth: 140, pageHeight: 200,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+      sectionStart: 'continuous',
+    } as SectionProps;
+    const doc = {
+      section: bodySection,
+      body: [
+        para('DEFAULTED'),
+        { type: 'sectionBreak', kind: 'nextPage' } as BodyElement,
+        para('CONTINUOUS'),
+      ],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+
+    const pages = canonicalLayout(doc).pages;
+    expect(pages[0].section.geometry).toMatchObject({ pageWidth: 612, pageHeight: 792 });
+    expect(pages[1].section.geometry).toMatchObject({ pageWidth: 140, pageHeight: 200 });
   });
 
   it('single-section document stamps the body-level geometry on every element', () => {
@@ -214,12 +239,10 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
       footers: { default: null, first: null, even: null },
       fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = computePages(doc.body, doc.section, makeCtx());
+    const pages = canonicalLayout(doc).pages;
     for (const page of pages) {
-      for (const el of page) {
-        expect((el as PaginatedBodyElement).sectionGeom?.pageWidth).toBe(200);
-        expect((el as PaginatedBodyElement).sectionGeom?.pageHeight).toBe(140);
-      }
+      expect(page.section.geometry.pageWidth).toBe(200);
+      expect(page.section.geometry.pageHeight).toBe(140);
     }
   });
 });
@@ -270,10 +293,9 @@ describe('per-section HF reserves (§17.6.11) — paginator', () => {
       footers: { default: FOOTER_40PT, first: null, even: null },
       fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = paginateDocument(doc);
+    const pages = canonicalLayout(doc).pages;
     const textsOn = (i: number) =>
-      (pages[i] ?? []).filter((e) => e.type === 'paragraph')
-        .map((e) => ((e as { runs?: { text?: string }[] }).runs ?? []).map((r) => r.text).join(''));
+      (pages[i]?.layers.body ?? []).filter((node) => node.kind === 'paragraph').map(retainedText);
     // All five A-paragraphs fit page 0 (reserve 0 under ITS section's marginBottom 60).
     expect(textsOn(0)).toEqual(['A1', 'A2', 'A3', 'A4', 'A5']);
     expect(textsOn(1)).toEqual(['B1']);
@@ -375,16 +397,13 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — renderer', () => {
   });
 });
 
-describe('page-size fact (§17.6.13/§17.6.11) — paginateDocument sectionGeom', () => {
-  it('exposes per-page width/height via the first element sectionGeom', () => {
-    // paginateDocument is the shared primitive DocxDocument.pageSize (main mode)
-    // and render-worker's pageSizes[] both read. Each page's first element carries
-    // its section geometry.
+describe('page-size fact (§17.6.13/§17.6.11) — canonical page geometry', () => {
+  it('exposes per-page width/height directly on each retained page', () => {
     const doc = mixedDoc();
-    const pages = paginateDocument(doc);
+    const pages = canonicalLayout(doc).pages;
     const sizeOf = (i: number) => {
-      const g = (pages[i]?.[0] as PaginatedBodyElement | undefined)?.sectionGeom;
-      return { widthPt: g?.pageWidth ?? doc.section.pageWidth, heightPt: g?.pageHeight ?? doc.section.pageHeight };
+      const geometry = pages[i]?.geometry;
+      return { widthPt: geometry?.widthPt ?? doc.section.pageWidth, heightPt: geometry?.heightPt ?? doc.section.pageHeight };
     };
     expect(sizeOf(0)).toEqual({ widthPt: 200, heightPt: 140 });
     expect(sizeOf(1)).toEqual({ widthPt: 140, heightPt: 200 });
@@ -403,6 +422,18 @@ describe('page-size fact (§17.6.13/§17.6.11) — paginateDocument sectionGeom'
       const d = Object.create(DocxDocument.prototype) as Doc;
       attachDocumentLayoutRuntime(d, 0);
       Object.assign(d, { _meta: null, _document: null, _pages: null, _mode: 'main' }, state);
+      const model = (d as unknown as { _document: DocxDocumentModel | null })._document;
+      if (model) {
+        const runtime = documentLayoutRuntimeOf(d);
+        const services = createLayoutServices(model);
+        runtime.services = services;
+        attachDocumentLayoutVariants({
+          model,
+          services,
+          defaultCurrentDateMs: runtime.defaultCurrentDateMs,
+          buildLayout: (options) => layoutDocument(model, services, options),
+        });
+      }
       return d;
     };
 
@@ -506,12 +537,10 @@ describe('per-section newspaper-column band (§17.6.11/§17.6.13) — paginator'
       footers: { default: null, first: null, even: null },
       fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = computePages(doc.body, doc.section, makeCtx());
-    const tbl = pages[0].find((e) => e.type === 'table') as PaginatedBodyElement;
-    const placed = bodyFragmentFor(tbl);
-    expect(placed?.fragment.kind).toBe('table');
-    const resolvedTotal = placed?.fragment.kind === 'table'
-      ? placed.fragment.columnWidthsPt.reduce((s, w) => s + w, 0)
+    const table = canonicalLayout(doc).pages[0].layers.body.find((node) => node.kind === 'table');
+    expect(table?.kind).toBe('table');
+    const resolvedTotal = table?.kind === 'table'
+      ? table.columnWidthsPt.reduce((s, w) => s + w, 0)
       : 0;
     // The table belongs to the first section (band 550), so its columns sum to 550 —
     // NOT the body-level band 450 the bug clamps them to.

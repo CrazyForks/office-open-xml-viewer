@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, paginateDocument } from './renderer.js';
+import { createLayoutServices, layoutDocument } from './renderer.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type {
   BodyElement,
@@ -104,21 +104,22 @@ function doc(body: BodyElement[], pageHeight: number): DocxDocumentModel {
 }
 
 const B = (...ps: DocParagraph[]): BodyElement[] => ps.map((p) => p as unknown as BodyElement);
-const paginate = (model: DocxDocumentModel) => paginateDocument(
+const bodyPages = (model: DocxDocumentModel) => layoutDocument(
   model,
   createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }),
-);
+  { currentDateMs: 0 },
+).pages.map((page) => page.layers.body);
 
 // Content band = pageHeight − 2·margin = 57pt holds four single-line paragraphs
 // (~12pt each → y = 48) exactly; the fifth element's ~12pt box then spans [48, 60],
 // overflowing the band bottom (57) while its baseline (57) is still within it.
 const PAGE_HEIGHT = 77;
 
-describe('paginateDocument — trailing empty-paragraph mark grazes the bottom margin (issue #981)', () => {
+describe('canonical body layout — trailing empty-paragraph mark grazes the bottom margin (issue #981)', () => {
   it('KEEPS an inkless empty paragraph on the page when ink-bearing content follows and only its below-baseline whitespace overflows', () => {
     // a,b,c,d fill page 1; the empty grazes the bottom (baseline within the band) and
     // is KEPT (page 1 = a,b,c,d,empty = 5); the following visible "e" flows to page 2.
-    const pages = paginate(doc(B(para('a'), para('b'), para('c'), para('d'), para(''), para('e')), PAGE_HEIGHT));
+    const pages = bodyPages(doc(B(para('a'), para('b'), para('c'), para('d'), para(''), para('e')), PAGE_HEIGHT));
     expect(pages.length).toBe(2);
     expect(pages[0].length).toBe(5); // was 4 before the fix (empty pushed to page 2 top)
     expect(pages[1].length).toBe(1);
@@ -128,7 +129,7 @@ describe('paginateDocument — trailing empty-paragraph mark grazes the bottom m
     // No visible content follows the empty, so pushing it changes nothing observable;
     // the empty is paginated normally (pushed to page 2). This preserves Word's
     // trailing blank page — the allowance must not silently drop terminal pages.
-    const pages = paginate(doc(B(para('a'), para('b'), para('c'), para('d'), para('')), PAGE_HEIGHT));
+    const pages = bodyPages(doc(B(para('a'), para('b'), para('c'), para('d'), para('')), PAGE_HEIGHT));
     expect(pages.length).toBe(2);
     expect(pages[0].length).toBe(4);
   });
@@ -136,7 +137,7 @@ describe('paginateDocument — trailing empty-paragraph mark grazes the bottom m
   it('does NOT graze an empty paragraph that paints shading (its box paints ink)', () => {
     // A shaded empty paragraph fills its whole mark box, so grazing would push visible
     // fill into the bottom margin. It is treated as a normal box: pushed to page 2.
-    const pages = paginate(doc(B(para('a'), para('b'), para('c'), para('d'), para('', { shading: 'ff0000' }), para('e')), PAGE_HEIGHT));
+    const pages = bodyPages(doc(B(para('a'), para('b'), para('c'), para('d'), para('', { shading: 'ff0000' }), para('e')), PAGE_HEIGHT));
     expect(pages.length).toBe(2);
     expect(pages[0].length).toBe(4);
   });
@@ -144,7 +145,7 @@ describe('paginateDocument — trailing empty-paragraph mark grazes the bottom m
   it('does NOT graze a VISIBLE last line — its glyphs must fit the full box', () => {
     // The fifth element carries text, so it is not a mark line; it must fit its full
     // box and is pushed to page 2 (proving the allowance is scoped to empty marks).
-    const pages = paginate(doc(B(para('a'), para('b'), para('c'), para('d'), para('e'), para('f')), PAGE_HEIGHT));
+    const pages = bodyPages(doc(B(para('a'), para('b'), para('c'), para('d'), para('e'), para('f')), PAGE_HEIGHT));
     expect(pages.length).toBe(2);
     expect(pages[0].length).toBe(4);
   });
@@ -156,7 +157,7 @@ describe('paginateDocument — trailing empty-paragraph mark grazes the bottom m
     // the look-ahead would find "e" past the break and wrongly graze the empty
     // (page 1 = a,b,c,d,empty). (Codex review of the #981 fix.)
     const pageBreak = { type: 'pageBreak' } as unknown as BodyElement;
-    const pages = paginate(
+    const pages = bodyPages(
       doc([...B(para('a'), para('b'), para('c'), para('d'), para('')), pageBreak, ...B(para('e'))], PAGE_HEIGHT),
     );
     expect(pages[0].length).toBe(4);

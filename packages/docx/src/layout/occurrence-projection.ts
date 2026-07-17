@@ -9,6 +9,7 @@ import {
 import type {
   DrawingLayout,
   FloatingTablePlacementLayout,
+  LayoutCoordinateSpace,
   ParagraphLayout,
   ParagraphPlacement,
   ResolvedFloatingTablePlacementLayout,
@@ -16,7 +17,6 @@ import type {
   TableLayout,
   TableRowLayout,
   TextBoxLayout,
-  LayoutCoordinateSpace,
 } from './types.js';
 
 export interface BodyOccurrenceDestination {
@@ -30,10 +30,13 @@ export interface BodyOccurrenceProjectionOptions {
   readonly destination: BodyOccurrenceDestination;
 }
 
-type OccurrenceTableLayout = TableLayout & Readonly<{
-  floatingTables?: readonly FloatingTablePlacementLayout[];
-  resolvedFloatingTables?: readonly ResolvedFloatingTablePlacementLayout[];
-}>;
+export function projectedNestedOccurrenceId(
+  ownerOccurrenceId: string,
+  sourceOccurrenceId: string,
+): string {
+  const component = encodeURIComponent(sourceOccurrenceId).replaceAll('%3A', ':');
+  return `${ownerOccurrenceId}/occurrence/${component}`;
+}
 
 function validateTranslation(translation: LayoutTranslation): void {
   if (!Number.isFinite(translation.xPt) || !Number.isFinite(translation.yPt)) {
@@ -71,9 +74,8 @@ function assertAcyclicLayoutGraph(root: ParagraphLayout | TableLayout): void {
       for (const row of layout.rows) for (const cell of row.cells) {
         for (const block of cell.blocks) visit(block.layout);
       }
-      const table = layout as OccurrenceTableLayout;
-      for (const placement of table.floatingTables ?? []) visit(placement.child);
-      for (const placement of table.resolvedFloatingTables ?? []) {
+      for (const placement of layout.floatingTables ?? []) visit(placement.child);
+      for (const placement of layout.resolvedFloatingTables ?? []) {
         visit(placement.source.child);
         visit(placement.child);
       }
@@ -100,34 +102,50 @@ function translateOccurrenceGeometry<T extends ParagraphLayout | TableLayout>(
       if (prior.key !== key) throw new Error('incompatible projection ownership');
       return prior.value;
     }
-    const translated = translateCompleteParagraphLayout(paragraph, delta);
+    const translatedBase = translateCompleteParagraphLayout(paragraph, delta);
+    const translated = Object.freeze({
+      ...translatedBase,
+      ...(paragraph.sectionFlowOwnership === undefined
+        ? {} : { sectionFlowOwnership: paragraph.sectionFlowOwnership }),
+    });
     paragraphMemo.set(paragraph, { key, value: translated });
     return translated;
   };
 
-  const translateTable = (retainedTable: OccurrenceTableLayout, delta: LayoutTranslation): TableLayout => {
+  const translateTable = (retainedTable: TableLayout, delta: LayoutTranslation): TableLayout => {
     const key = keyFor(delta);
     const prior = tableMemo.get(retainedTable);
     if (prior) {
       if (prior.key !== key) throw new Error('incompatible projection ownership');
       return prior.value;
     }
-    const translated: OccurrenceTableLayout = translateTableLayout(retainedTable, delta);
+    const translated: TableLayout = {
+      ...translateTableLayout(retainedTable, delta),
+      ...(retainedTable.sectionFlowOwnership === undefined
+        ? {} : { sectionFlowOwnership: retainedTable.sectionFlowOwnership }),
+    };
     tableMemo.set(retainedTable, { key, value: translated });
 
     const resolvedDeltaBySource = new Map<FloatingTablePlacementLayout, LayoutTranslation>();
+    const finalFrameSources = new Set<FloatingTablePlacementLayout>();
     for (const resolved of retainedTable.resolvedFloatingTables ?? []) {
-      resolvedDeltaBySource.set(resolved.source, resolvedFloatingDelta(resolved.source, delta));
+      const finalFrame = retainedTable.resolvedFloatingTableCoordinateSpace !== undefined;
+      resolvedDeltaBySource.set(
+        resolved.source,
+        finalFrame ? { xPt: 0, yPt: 0 } : resolvedFloatingDelta(resolved.source, delta),
+      );
+      if (finalFrame) finalFrameSources.add(resolved.source);
     }
     const sourceMemo = new Map<FloatingTablePlacementLayout, FloatingTablePlacementLayout>();
     const translateSource = (source: FloatingTablePlacementLayout): FloatingTablePlacementLayout => {
       const priorSource = sourceMemo.get(source);
       if (priorSource) return priorSource;
       const childDelta = resolvedDeltaBySource.get(source) ?? delta;
+      const anchorDelta = finalFrameSources.has(source) ? { xPt: 0, yPt: 0 } : delta;
       const result: FloatingTablePlacementLayout = {
         ...source,
-        anchorBounds: translateRect(source.anchorBounds, delta),
-        ...(source.columnBounds ? { columnBounds: translateRect(source.columnBounds, delta) } : {}),
+        anchorBounds: translateRect(source.anchorBounds, anchorDelta),
+        ...(source.columnBounds ? { columnBounds: translateRect(source.columnBounds, anchorDelta) } : {}),
         child: translateTable(source.child, childDelta),
       };
       sourceMemo.set(source, result);
@@ -136,7 +154,8 @@ function translateOccurrenceGeometry<T extends ParagraphLayout | TableLayout>(
     const floatingTables = (retainedTable.floatingTables ?? []).map(translateSource);
     const resolvedFloatingTables = (retainedTable.resolvedFloatingTables ?? []).map((resolved) => {
       const source = translateSource(resolved.source);
-      const ownedDelta = resolvedFloatingDelta(resolved.source, delta);
+      const ownedDelta = resolvedDeltaBySource.get(resolved.source)
+        ?? resolvedFloatingDelta(resolved.source, delta);
       return {
         ...resolved,
         xPt: resolved.xPt + ownedDelta.xPt,
@@ -182,7 +201,7 @@ export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
   const nodeId = (sourceId: string) => `${options.occurrenceId}/node/${encodeURIComponent(sourceId)}`;
   const anchorId = (sourceId: string) => `${options.occurrenceId}/anchor/${encodeURIComponent(sourceId)}`;
   const occurrenceId = (sourceId: string) =>
-    `${options.occurrenceId}/occurrence/${encodeURIComponent(sourceId)}`;
+    projectedNestedOccurrenceId(options.occurrenceId, sourceId);
   const nestedDomain = (kind: 'cell' | 'textbox', sourceId: string) =>
     `${options.destination.flowDomainId}/occurrence/${encodedOccurrence}/${kind}/${encodeURIComponent(sourceId)}`;
 
@@ -237,7 +256,10 @@ export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
       drawings: paragraph.drawings.map((drawing) => projectDrawing(drawing, domain)),
       textBoxes: paragraph.textBoxes.map(projectTextBox),
       exclusions: paragraph.exclusions.map((exclusion) => ({
-        ...exclusion, id: nodeId(exclusion.id),
+        ...exclusion,
+        id: exclusion.verticalOwnership === 'page' && !exclusion.anchorOccurrenceId
+          ? exclusion.id
+          : nodeId(exclusion.id),
         ...(exclusion.anchorOccurrenceId
           ? { anchorOccurrenceId: anchorId(exclusion.anchorOccurrenceId) } : {}),
       })),
@@ -268,16 +290,16 @@ export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
       occurrenceId: occurrenceId(source.occurrenceId),
       hostCellId: nodeId(source.hostCellId),
       tableId: nodeId(source.tableId),
-      child: projectTable(source.child as OccurrenceTableLayout, childDomain),
+    child: projectTable(source.child, childDomain),
     };
   };
-  const projectTable = (table: OccurrenceTableLayout, domain: string): TableLayout => {
+  const projectTable = (table: TableLayout, domain: string): TableLayout => {
     const prior = tableMemo.get(table);
     if (prior) {
       if (prior.domain !== domain) throw new Error('incompatible projection ownership');
       return prior.value;
     }
-    const projected: OccurrenceTableLayout = {
+    const projected: TableLayout = {
       ...table, id: nodeId(table.id), flowDomainId: domain,
       rows: table.rows.map((row) => projectRow(row, domain)),
     };
@@ -314,5 +336,12 @@ export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
   }
 
   const projected = projectBlock(translated, options.destination.flowDomainId);
-  return snapshotPlainData(projected, 'DOCX body occurrence projection') as T;
+  const snapshot = snapshotPlainData(projected, 'DOCX body occurrence projection') as T;
+  if (snapshot.kind !== 'table' || retained.kind !== 'table') return snapshot;
+  // Pagination fragments rebuild occurrence-local rows, while their acquisition-owned
+  // track vector is one canonical geometry value shared by every split occurrence.
+  const columnWidthsPt = Object.isFrozen(retained.columnWidthsPt)
+    ? retained.columnWidthsPt
+    : Object.freeze([...retained.columnWidthsPt]);
+  return Object.freeze({ ...snapshot, columnWidthsPt }) as unknown as T;
 }

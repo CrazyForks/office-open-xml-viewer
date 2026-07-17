@@ -1,9 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  paginateDocument,
-  renderDocumentToCanvas,
-} from './renderer.js';
-import { createLayoutServices } from './renderer.js';
+import { createLayoutServices, layoutDocument, renderDocumentToCanvas } from './renderer.js';
 import { paragraphMarkBelowBaselinePt, paragraphMarkLineHeight } from './line-layout.js';
 import { paragraphMarkShapeInput } from './parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
@@ -388,19 +384,18 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
       // Three 15pt local-face line boxes do not fit in the 40pt content band.
       // Before the fix the empty mark used the authored fallback's 10pt box, so
       // all three paragraphs were incorrectly packed onto one page.
-      const pages = paginateDocument(model, services);
-      expect(pages).toHaveLength(2);
-      expect(pages[0]).toHaveLength(2);
-      expect(pages[1]).toHaveLength(1);
+      const layout = layoutDocument(model, services, { currentDateMs: 0 });
+      expect(layout.pages).toHaveLength(2);
+      expect(layout.pages[0].layers.body).toHaveLength(2);
+      expect(layout.pages[1].layers.body).toHaveLength(1);
 
       const painted = [] as ReturnType<typeof makeResolvedMetricCanvas>[];
-      for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex++) {
         const recording = makeResolvedMetricCanvas();
         painted.push(recording);
         await renderDocumentToCanvas(model, recording.canvas, pageIndex, {
           dpr: 1,
           width: 200,
-          prebuiltPages: pages,
           layoutServices: services,
         });
       }

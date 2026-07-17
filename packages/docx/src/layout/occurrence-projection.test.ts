@@ -402,6 +402,36 @@ describe('projectBodyOccurrence', () => {
     expect(result.child).toBe(result.source.child);
   });
 
+  it('projects a final-frame resolved float to the page exactly once', () => {
+    const nested = table('final-frame-child');
+    const sourcePlacement: FloatingTablePlacementLayout = {
+      kind: 'floating-table-placement', occurrenceId: 'final-frame', ownership: 'source',
+      physicalPageIndex: 0, displayPageNumber: 1, hostCellId: 'table-cell', sourceBlockIndex: 0,
+      anchorBlockIndex: 0, tableId: nested.id, overlap: 'overlap',
+      positioning: floatingPosition({ horzAnchor: 'text', horzSpecified: true, vertAnchor: 'text' }),
+      anchorBounds: rect(23, 34), columnBounds: rect(20, 30), child: nested,
+    };
+    const resolved: ResolvedFloatingTablePlacementLayout = {
+      kind: 'resolved-floating-table-placement', occurrenceId: sourcePlacement.occurrenceId,
+      xPt: 25, yPt: 36, bounds: rect(25, 36), exclusionBounds: rect(24, 35, 12, 12),
+      overlap: 'overlap', child: nested, source: sourcePlacement,
+    };
+    const retained = Object.assign(table(), {
+      floatingTables: [] as FloatingTablePlacementLayout[],
+      resolvedFloatingTables: [resolved],
+      resolvedFloatingTableCoordinateSpace: 'logical-page-points' as const,
+    });
+
+    const projected = translateBodyOccurrence(retained, { xPt: 20, yPt: 30 });
+    const result = projected.resolvedFloatingTables[0]!;
+
+    expect(projected.flowBounds).toMatchObject({ xPt: 25, yPt: 36 });
+    expect(result.bounds).toEqual(rect(25, 36));
+    expect(result.exclusionBounds).toEqual(rect(24, 35, 12, 12));
+    expect(result.source.anchorBounds).toEqual(rect(23, 34));
+    expect(result.source.columnBounds).toEqual(rect(20, 30));
+  });
+
   it('preserves PAGE and NUMPAGES dependency/source-run metadata verbatim', () => {
     const retained = paragraph();
     const page = retained.lines[0]!.placements[0] as TextPlacement;
@@ -502,7 +532,7 @@ describe('projectBodyOccurrence', () => {
     const fragment: TableFragmentLayout = {
       ...base,
       rows: [fragmentRow('header-row', 0, 0, 'repeated-header'), fragmentRow('split-row', 3, 2, 'source')],
-      floatingTables: [], resolvedFloatingTables: [], floatingTableCoordinateSpace: 'logical-page-points',
+      floatingTables: [], resolvedFloatingTables: [], resolvedFloatingTableCoordinateSpace: 'logical-page-points',
     };
 
     const projected = projectBodyOccurrence(fragment, options) as TableFragmentLayout;

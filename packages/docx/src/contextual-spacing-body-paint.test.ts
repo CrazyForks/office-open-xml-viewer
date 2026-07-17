@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { paginateDocument, renderDocumentToCanvas } from './renderer.js';
+import { layoutDocument, renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
 // ECMA-376 §17.3.1.9 contextualSpacing — BODY paginator + paint integration pin
 // for the Word-adjudicated per-side semantics (issue #1015, sample-57 ground
 // truth). The unit tests cover the shared kernel through the cell/text-box
-// helpers; this test drives the real body path end-to-end (paginateDocument →
-// prebuiltPages → renderDocumentToCanvas) so a regression in EITHER the
+// helpers; this test drives the real canonical layout and selected-page paint path
+// end-to-end so a regression in EITHER the
 // paginator's gap arithmetic or the paint pass's mirrored recompute (they must
 // stay in lockstep) moves a painted baseline and fails here.
 //
@@ -99,10 +99,10 @@ function doc(body: BodyElement[]): DocxDocumentModel {
 /** Paint a two-paragraph body at scale 1 and return yCURR − yPREV (baseline pt). */
 async function baselineDelta(prev: DocParagraph, curr: DocParagraph): Promise<number> {
   const model = doc([prev, curr] as unknown as BodyElement[]);
-  const pages = paginateDocument(model);
-  expect(pages.length).toBe(1);
+  const layout = layoutDocument(model);
+  expect(layout.pages.length).toBe(1);
   const { canvas, calls } = makeRecordingCanvas();
-  await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 400, prebuiltPages: pages });
+  await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 400 });
   const yPrev = calls.find((c) => c.text.includes('PREV'))?.y;
   const yCurr = calls.find((c) => c.text.includes('CURR'))?.y;
   expect(yPrev).toBeTypeOf('number');

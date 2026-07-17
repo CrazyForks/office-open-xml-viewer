@@ -1,15 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { bodyFragmentFor, computePages, computeColumns } from './renderer.js';
+import { computeColumns, createLayoutServices, layoutDocument } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
+import type { LayoutPage, PaintNode } from './layout/types.js';
 import type {
   BlockContinuationRange,
   TableCellFragmentLayout,
   TableFragmentLayout,
 } from './layout/table-pagination.js';
 import type {
-  BodyElement, CellElement, DocParagraph, DocTableCell, DocxTextRun, ShapeRun, SectionProps, PaginatedBodyElement, DocTable, DocTableRow,
+  BodyElement, CellElement, DocParagraph, DocTableCell, DocxDocumentModel, DocxTextRun, ShapeRun, SectionProps, DocTable, DocTableRow,
 } from './types';
 
-// Unit tests for computePages pagination behaviour that the renderer-path VRT
+// Unit tests for canonical pagination behaviour that the renderer-path VRT
 // (local-only, private samples) cannot guard in CI. A deterministic stub canvas
 // makes line wrapping and line heights predictable: glyph advance = charCount ×
 // fontPx, and the font box = 0.8/0.2 em (so a single line is exactly fontPx tall
@@ -146,6 +148,16 @@ function inlineImageRun(widthPt: number, heightPt: number): DocRun {
     heightPt,
     anchor: false,
   } as DocRun;
+}
+
+function inlineChartRun(widthPt: number, heightPt: number): DocRun {
+  return {
+    type: 'chart',
+    chart: {},
+    widthPt,
+    heightPt,
+    anchor: false,
+  } as unknown as DocRun;
 }
 
 /** A single-column block table whose rows each have a fixed `exact` height (pt),
@@ -330,10 +342,38 @@ function autoTableWithNestedFixedTable(rowHeightsPt: number[]): BodyElement {
   return { type: 'table', ...t } as BodyElement;
 }
 
-const sliceOf = (el: PaginatedBodyElement) =>
-  (el as { lineSlice?: { start: number; end: number } }).lineSlice;
+const continuationOf = (node: PaintNode | undefined) =>
+  node?.kind === 'paragraph' ? node.continuation : undefined;
 
-const colOf = (el: PaginatedBodyElement) => el.colIndex;
+function layoutPages(
+  body: BodyElement[],
+  pageSection: SectionProps,
+  measureContext: CanvasRenderingContext2D,
+  fontFamilyClasses: Record<string, string> = {},
+): readonly LayoutPage[] {
+  return layoutBodyModel(body, pageSection, measureContext, fontFamilyClasses).pages;
+}
+
+const colOf = (node: PaintNode | undefined): number | undefined => {
+  const column = node && /:column:(\d+)$/u.exec(node.flowDomainId)?.[1];
+  return column === undefined ? undefined : Number(column);
+};
+
+const columnTopOf = (page: LayoutPage, node: PaintNode): number =>
+  page.flowDomains.find((candidate) => candidate.id === node.flowDomainId)
+    ?.logicalBounds.yPt ?? page.geometry.contentTopPt;
+
+const columnGeometryOf = (page: LayoutPage, node: PaintNode): { xPt: number; wPt: number }[] => {
+  const region = page.sectionRegions.find((candidate) =>
+    candidate.flowDomainIds.includes(node.flowDomainId));
+  return region?.flowDomainIds.flatMap((id) => {
+    const domain = page.flowDomains.find((candidate) => candidate.id === id);
+    return domain === undefined ? [] : [{
+      xPt: domain.logicalBounds.xPt,
+      wPt: domain.logicalBounds.widthPt,
+    }];
+  }) ?? [];
+};
 
 /** A body-level column break (ECMA-376 §17.3.1.20, hoisted by the parser). */
 const colBreak = (): BodyElement => ({ type: 'columnBreak' } as BodyElement);
@@ -347,52 +387,55 @@ const sectionBreak = (
 ): BodyElement => ({ type: 'sectionBreak', kind, columns } as BodyElement);
 
 /** Text of a paragraph element (joins its text runs). */
-const textOf = (el: PaginatedBodyElement): string =>
-  el.type === 'paragraph'
-    ? (el as unknown as DocParagraph).runs
-        .filter((r) => r.type === 'text')
-        .map((r) => (r as DocxTextRun).text)
+const textOf = (node: PaintNode): string =>
+  node.kind === 'paragraph'
+    ? node.lines.flatMap((line) => line.placements)
+        .filter((placement) => placement.kind === 'text')
+        .map((placement) => placement.text)
         .join('')
     : '';
 
 const paragraphOccurrenceWithRun = (
-  page: PaginatedBodyElement[],
+  page: LayoutPage,
+  body: readonly BodyElement[],
   run: DocRun,
-): PaginatedBodyElement | undefined => page.find(
-  (element) => element.type === 'paragraph'
-    && (element as unknown as DocParagraph).runs.includes(run),
-);
+): PaintNode | undefined => {
+  const sourceIndex = body.findIndex((element) =>
+    element.type === 'paragraph'
+    && (element as unknown as DocParagraph).runs.includes(run));
+  return page.layers.body.find((node) =>
+    node.kind === 'paragraph' && node.source.path[0] === sourceIndex);
+};
 
-function retainedTableOn(page: PaginatedBodyElement[]) {
-  const element = page.find((el) => el.type === 'table');
+function retainedTableOn(page: LayoutPage) {
+  const element = page.layers.body.find((node) => node.kind === 'table');
   if (!element) return undefined;
-  const placed = bodyFragmentFor(element);
-  if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+  if (element.kind !== 'table') {
     throw new Error('expected a retained table fragment');
   }
-  return { element, placed, fragment: placed.fragment as TableFragmentLayout };
+  return { element, fragment: element as TableFragmentLayout };
 }
 
-function bodyPaginationGeometry(pages: PaginatedBodyElement[][]) {
+function bodyPaginationGeometry(pages: readonly LayoutPage[]) {
   return {
     pageCount: pages.length,
-    pages: pages.map((page) => page.map((el) => {
-      const placed = bodyFragmentFor(el);
-      const paragraph = placed?.fragment.kind === 'paragraph' ? placed.fragment : undefined;
+    pages: pages.map((page) => page.layers.body.map((node) => {
+      const paragraph = node.kind === 'paragraph' ? node : undefined;
       return {
-        type: el.type,
-        lineSlice: sliceOf(el) ?? null,
-        columnIndex: el.colIndex ?? null,
-        columnTopPt: el.colTopPt ?? null,
-        measuredLineTopsPt: paragraph?.lines.map((line) => line.bounds.yPt ?? null) ?? null,
+        type: node.kind,
+        sourceBodyIndex: node.source.path[0] ?? null,
+        continuation: continuationOf(node) ?? null,
+        columnIndex: colOf(node) ?? null,
+        columnTopPt: columnTopOf(page, node),
+        destinationLineTopsPt: paragraph?.lines.map((line) => line.bounds.yPt ?? null) ?? null,
         measuredWithFloats: paragraph ? paragraph.exclusions.length > 0 : null,
       };
     })),
   };
 }
 
-describe('computePages — shared paragraph measurement migration geometry', () => {
-  it('preserves body page count, line ranges, and measured float top placement', () => {
+describe('canonical layout — shared paragraph measurement geometry', () => {
+  it('projects retained continuation lines into each destination page while preserving line partition', () => {
     const longText = 'あ'.repeat(72);
     const followingText = '終'.repeat(16);
     const body = [
@@ -408,26 +451,22 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       }),
       para({ text: followingText, fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     const geometry = bodyPaginationGeometry(pages);
 
     expect(geometry.pageCount).toBe(3);
-    expect(geometry.pages.map((page) => page.map((el) => el.lineSlice))).toEqual([
-      [null, { start: 0, end: 2 }],
-      [{ start: 2, end: 7 }],
-      [{ start: 7, end: 9 }, null],
-    ]);
+    const longParagraph = geometry.pages.map((page) =>
+      page.filter((element) => element.sourceBodyIndex === 1));
+    expect(longParagraph.map((page) => page.map((element) =>
+      element.destinationLineTopsPt?.length))).toEqual([[2], [5], [2]]);
     expect(geometry.pages.flatMap((page) => page)
-      .filter((el) => el.lineSlice !== null)
-      .map((el) => el.measuredLineTopsPt)).toEqual([
+      .filter((element) => element.sourceBodyIndex === 1)
+      .map((el) => el.destinationLineTopsPt)).toEqual([
       [80, 100],
-      // A continuation owns page-local retained geometry. Carrying the source
-      // paragraph's absolute Y values into later pages made its ink overlap the
-      // next story even though the paginator advanced by the correct slice.
-      [75, 95, 115, 135, 155],
-      [75, 95],
+      [20, 40, 60, 80, 100],
+      [20, 40],
     ]);
-    expect(pages.findIndex((page) => page.some((el) => textOf(el) === followingText))).toBe(2);
+    expect(pages.findIndex((page) => page.layers.body.some((el) => textOf(el) === followingText))).toBe(2);
   });
 
   it('remeasures destination placement when the first line cannot fit beside a page float', () => {
@@ -444,14 +483,14 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       }),
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     const geometry = bodyPaginationGeometry(pages);
-    const target = geometry.pages[1]?.find((el) => el.lineSlice?.start === 0);
+    const target = geometry.pages[1]?.find((el) => el.continuation?.lineStart === 0);
 
     expect(geometry.pageCount).toBe(2);
-    expect(target?.lineSlice).toEqual({ start: 0, end: 2 });
+    expect(target?.continuation).toMatchObject({ lineStart: 0, lineEnd: 2 });
     expect(target?.measuredWithFloats).toBe(false);
-    expect(target?.measuredLineTopsPt).toEqual([50, 70]);
+    expect(target?.destinationLineTopsPt).toEqual([50, 70]);
   });
 
   it('remeasures an unplaced paragraph at the next unequal-width column', () => {
@@ -474,16 +513,15 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       para({ text: targetText, fontSize: 20, widowControl: false }),
     ];
 
-    const pages = computePages(body, unequalColumns, makeCtx());
-    const target = pages[0]?.find((el) => textOf(el) === targetText);
-    const placed = target ? bodyFragmentFor(target) : undefined;
-    const retained = placed?.fragment.kind === 'paragraph' ? placed.fragment : undefined;
+    const pages = layoutPages(body, unequalColumns, makeCtx());
+    const target = pages[0]?.layers.body.find((node) => textOf(node) === targetText);
+    const retained = target?.kind === 'paragraph' ? target : undefined;
 
     expect(pages).toHaveLength(1);
-    expect(target?.colIndex).toBe(1);
-    expect(target?.colTopPt).toBe(20);
-    expect(target?.lineSlice).toEqual({ start: 0, end: 2 });
-    expect(placed?.widthPt).toBe(48);
+    expect(target ? colOf(target) : undefined).toBe(1);
+    expect(target ? columnTopOf(pages[0], target) : undefined).toBe(20);
+    expect(continuationOf(target)).toMatchObject({ lineStart: 0, lineEnd: 2 });
+    expect(target?.flowBounds.widthPt).toBe(48);
     expect(retained?.lines.map((line) => line.bounds.yPt ?? null)).toEqual([20, 40]);
   });
 
@@ -526,14 +564,14 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     // (chars 25–34, 10 glyphs) continues into col1 and MUST re-wrap to 2/line.
     const body = [para({ text: 'あ'.repeat(35), fontSize: 20, widowControl: false })];
 
-    const pages = computePages(body, unequalColumns, makeCtx());
+    const pages = layoutPages(body, unequalColumns, makeCtx());
     expect(pages).toHaveLength(1);
 
     // Every slice of the (single) paragraph, with its retained line geometry.
     const slices = paragraphSlices(pages);
 
-    const col0Lines = slices.filter((s) => s.colIndex === 0).flatMap(paintedLines);
-    const col1Lines = slices.filter((s) => s.colIndex === 1).flatMap(paintedLines);
+    const col0Lines = slices.filter((node) => colOf(node) === 0).flatMap(paintedLines);
+    const col1Lines = slices.filter((node) => colOf(node) === 1).flatMap(paintedLines);
 
     // The paragraph genuinely spans both columns (precondition, not the assertion
     // under test): col0 filled its 5 lines, and there IS continuation in col1.
@@ -555,8 +593,8 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     // All 35 glyphs are still placed (10 in col1), and the continuation records the
     // NARROW column width (no stale wide-column measurement leaks through).
     expect(col1Lines.reduce((sum, l) => sum + lineChars(l), 0)).toBe(10);
-    for (const s of slices.filter((sl) => sl.colIndex === 1)) {
-      expect(bodyFragmentFor(s)?.widthPt).toBe(48);
+    for (const node of slices.filter((candidate) => colOf(candidate) === 1)) {
+      expect(node.flowBounds.widthPt).toBe(48);
     }
   });
 
@@ -584,16 +622,16 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
     });
 
-    const slices = paragraphSlices(computePages(
+    const slices = paragraphSlices(layoutPages(
       [fieldPara as unknown as BodyElement],
       unequalColumns,
       makeCtx(),
     ));
-    const col1Slices = slices.filter((slice) => slice.colIndex === 1);
+    const col1Slices = slices.filter((node) => colOf(node) === 1);
 
     expect(col1Slices.length).toBeGreaterThan(0);
-    expect.soft(slices.every((slice) => slice.lineSlice?.continues === undefined)).toBe(true);
-    expect.soft(col1Slices.every((slice) => (slice.lineSlice?.start ?? 0) > 0)).toBe(true);
+    expect.soft(col1Slices.every((node) => node.continuation?.continuesFromPrevious)).toBe(true);
+    expect.soft(col1Slices.every((slice) => slice.continuation?.lineStart === 0)).toBe(true);
   });
 
   it('keeps numbered continuations on the original partition', () => {
@@ -619,26 +657,24 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       indentLeft: 0, tab: 18, suff: 'tab', jc: 'left',
     } as unknown as DocParagraph['numbering'];
 
-    const slices = paragraphSlices(computePages(
+    const slices = paragraphSlices(layoutPages(
       [numberedPara as unknown as BodyElement],
       unequalColumns,
       makeCtx(),
     ));
-    const col1Slices = slices.filter((slice) => slice.colIndex === 1);
+    const col1Slices = slices.filter((node) => colOf(node) === 1);
 
     expect(col1Slices.length).toBeGreaterThan(0);
-    expect.soft(slices.every((slice) => slice.lineSlice?.continues === undefined)).toBe(true);
-    expect.soft(col1Slices.every((slice) => (slice.lineSlice?.start ?? 0) > 0)).toBe(true);
+    expect.soft(col1Slices.every((node) => node.continuation?.continuesFromPrevious)).toBe(true);
+    expect.soft(col1Slices.every((slice) => slice.continuation?.lineStart === 0)).toBe(true);
   });
 
-  type RuntimeLine = NonNullable<ReturnType<typeof retainedParagraphOf>>['lines'][number];
-  type RuntimeSlice = PaginatedBodyElement;
-  const retainedParagraphOf = (slice: RuntimeSlice) => {
-    const placed = bodyFragmentFor(slice);
-    return placed?.fragment.kind === 'paragraph' ? placed.fragment : undefined;
-  };
-  const paragraphSlices = (pages: PaginatedBodyElement[][]): RuntimeSlice[] =>
-    pages.flat().filter((el) => el.type === 'paragraph') as RuntimeSlice[];
+  type RuntimeSlice = Extract<PaintNode, { kind: 'paragraph' }>;
+  type RuntimeLine = RuntimeSlice['lines'][number];
+  const retainedParagraphOf = (node: RuntimeSlice) => node;
+  const paragraphSlices = (pages: readonly LayoutPage[]): RuntimeSlice[] =>
+    pages.flatMap((page) => page.layers.body)
+      .filter((node): node is RuntimeSlice => node.kind === 'paragraph');
   const paintedLines = (slice: RuntimeSlice): RuntimeLine[] => {
     const paragraph = retainedParagraphOf(slice);
     return [...(paragraph?.lines ?? [])];
@@ -665,22 +701,22 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       },
     });
     const sharedWidth = computeColumns(equalColumns)[0].wPt;
-    const pages = computePages(
+    const pages = layoutPages(
       [para({ text: 'あ'.repeat(35), fontSize: 20, widowControl: false })],
       equalColumns,
       makeCtx(),
     );
     const slices = paragraphSlices(pages);
-    const col1Slices = slices.filter((slice) => slice.colIndex === 1);
+    const col1Slices = slices.filter((node) => colOf(node) === 1);
 
     expect(col1Slices.length).toBeGreaterThan(0);
-    expect(col1Slices.every((slice) => (slice.lineSlice?.start ?? 0) > 0)).toBe(true);
-    expect(slices.every((slice) => slice.lineSlice?.continues === undefined)).toBe(true);
+    expect(col1Slices.every((slice) => slice.continuation?.lineStart === 0)).toBe(true);
+    expect(col1Slices.every((node) => node.continuation?.continuesFromPrevious)).toBe(true);
     expect(slices.every((slice) => {
-      const range = slice.lineSlice;
-      return range === undefined || paintedLines(slice).length === range.end - range.start;
+      const range = slice.continuation;
+      return range === undefined || paintedLines(slice).length === range.lineEnd - range.lineStart;
     })).toBe(true);
-    expect(slices.every((slice) => bodyFragmentFor(slice)?.widthPt === sharedWidth)).toBe(true);
+    expect(slices.every((node) => node.flowBounds.widthPt === sharedWidth)).toBe(true);
   });
 
   it('composes remainder boundaries across three unequal-width columns', () => {
@@ -699,14 +735,14 @@ describe('computePages — shared paragraph measurement migration geometry', () 
         ],
       },
     });
-    const pages = computePages(
+    const pages = layoutPages(
       [para({ text: 'あ'.repeat(40), fontSize: 20, widowControl: false })],
       unequalColumns,
       makeCtx(),
     );
     const slices = paragraphSlices(pages);
-    const col1Lines = slices.filter((slice) => slice.colIndex === 1).flatMap(paintedLines);
-    const col2Slices = slices.filter((slice) => slice.colIndex === 2);
+    const col1Lines = slices.filter((node) => colOf(node) === 1).flatMap(paintedLines);
+    const col2Slices = slices.filter((node) => colOf(node) === 2);
     const col2Lines = col2Slices.flatMap(paintedLines);
 
     expect(col1Lines.length).toBeGreaterThan(0);
@@ -714,7 +750,7 @@ describe('computePages — shared paragraph measurement migration geometry', () 
     expect(col1Lines.every((line) => lineWidth(line) <= 48 + 1e-6)).toBe(true);
     expect(col2Lines.every((line) => lineWidth(line) <= 30 + 1e-6)).toBe(true);
     expect(slices.flatMap(paintedLines).reduce((sum, line) => sum + lineChars(line), 0)).toBe(40);
-    expect(col2Slices.every((slice) => bodyFragmentFor(slice)?.widthPt === 30)).toBe(true);
+    expect(col2Slices.every((node) => node.flowBounds.widthPt === 30)).toBe(true);
   });
 
   it('does not re-apply first-line indent when re-wrapping a continuation', () => {
@@ -730,7 +766,7 @@ describe('computePages — shared paragraph measurement migration geometry', () 
         ],
       },
     });
-    const pages = computePages(
+    const pages = layoutPages(
       [para({
         text: 'あ'.repeat(35),
         fontSize: 20,
@@ -741,7 +777,7 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       makeCtx(),
     );
     const col1Lines = paragraphSlices(pages)
-      .filter((slice) => slice.colIndex === 1)
+      .filter((node) => colOf(node) === 1)
       .flatMap(paintedLines);
     const glyphCounts = col1Lines.map(lineChars);
 
@@ -763,7 +799,7 @@ describe('computePages — shared paragraph measurement migration geometry', () 
         ],
       },
     });
-    const pages = computePages(
+    const pages = layoutPages(
       [para({
         text: 'あ'.repeat(35),
         fontSize: 20,
@@ -773,72 +809,70 @@ describe('computePages — shared paragraph measurement migration geometry', () 
       unequalColumns,
       makeCtx(),
     );
-    const firstCol1Slice = paragraphSlices(pages).find((slice) => slice.colIndex === 1);
-    const placed = firstCol1Slice ? bodyFragmentFor(firstCol1Slice) : undefined;
+    const firstCol1Slice = paragraphSlices(pages).find((node) => colOf(node) === 1);
 
-    expect(firstCol1Slice?.lineSlice?.continues).toBe(true);
-    expect(placed?.fragment.kind).toBe('paragraph');
-    if (placed?.fragment.kind === 'paragraph') {
-      expect(placed.fragment.spacing.beforePt).toBe(0);
-    }
+    expect(firstCol1Slice?.continuation?.continuesFromPrevious).toBe(true);
+    expect(firstCol1Slice?.spacing.beforePt).toBe(0);
   });
 });
 
-describe('computePages — empty-paragraph relocation (C2: §17.3.1.29)', () => {
+describe('layoutPages — empty-paragraph relocation (C2: §17.3.1.29)', () => {
   it('moves an unsplittable mark-only paragraph to the next page instead of overflowing the bottom margin', () => {
     // content height = 140 - 40 = 100; each empty mark = 20px → exactly 5 per page.
     const body = Array.from({ length: 7 }, () => para()); // 7 empty paragraphs
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(2);
-    expect(pages[0].length).toBe(5); // page 1 fills exactly
-    expect(pages[1].length).toBe(2); // overflow relocated, NOT clipped onto page 1
+    expect(pages[0].layers.body.length).toBe(5); // page 1 fills exactly
+    expect(pages[1].layers.body.length).toBe(2); // overflow relocated, NOT clipped onto page 1
     // no page holds more than its 5-line capacity (would mean an overflow)
-    for (const p of pages) expect(p.length).toBeLessThanOrEqual(5);
+    for (const page of pages) expect(page.layers.body.length).toBeLessThanOrEqual(5);
   });
 });
 
-describe('computePages — tall header/footer reserve indexing (§17.6.11)', () => {
+describe('layoutPages — tall header/footer reserve indexing (§17.6.11)', () => {
   it('applies a uniform reserve to EVERY page, not just those in the array (pass-2 page growth)', () => {
-    // The two-pass paginator computes reserves from pass 1, then re-paginates; a tall
-    // header shrinks every page from the top, so pass 2 routinely has MORE pages than
-    // pass 1. A page index past the reserve array must clamp to the last entry (the
-    // uniform reserve), not fall to zero — else later pages stay un-reserved, over-pack,
-    // and the down-shifted body overflows the bottom margin.
-    // content height = 100; empty mark = 20px → 5/page bare, 4/page with a 20px top reserve.
     const body = Array.from({ length: 14 }, () => para());
-    const reserve = { top: 20, bottom: 0 };
-    // A single-entry array expresses "uniform 20px top reserve" (one page measured).
-    const short = computePages(body, section(), makeCtx(), {}, undefined, [], [reserve]);
-    // The same reserve spelled out for more pages than the body can ever need.
-    const full = computePages(body, section(), makeCtx(), {}, undefined, [], Array.from({ length: 14 }, () => reserve));
-    // The short (clamped) array must paginate identically to the fully-specified one.
-    expect(short.map((p) => p.length)).toEqual(full.map((p) => p.length));
-    // Non-triviality: the reserve really is in force (4 per page, not the bare 5) and
-    // the body genuinely spans several pages where the clamp matters.
-    expect(short[0].length).toBe(4);
-    expect(short.length).toBeGreaterThanOrEqual(4);
+    const model = {
+      body,
+      section: section(),
+      headers: {
+        default: { body: [para({ text: 'h1' }), para({ text: 'h2' })] },
+        first: null,
+        even: null,
+      },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+      footnotes: [],
+      endnotes: [],
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(model, createLayoutServices(model, {
+      measureContext: makeCtx(),
+    }), { currentDateMs: 0 });
+
+    expect(layout.pages[0].layers.body.length).toBe(4);
+    expect(layout.pages).toHaveLength(4);
+    expect(layout.pages.every((page) =>
+      page.layers.body.every((node) => node.flowBounds.yPt >= 40))).toBe(true);
   });
 });
 
-describe('computePages — Word-effective table flow ([MS-OI29500] 2.1.162(b-c))', () => {
+describe('layoutPages — Word-effective table flow ([MS-OI29500] 2.1.162(b-c))', () => {
   it('charges an authored but ignored tblpPr as ordinary block-table flow', () => {
-    const pages = computePages([
+    const pages = layoutPages([
       wordIgnoredPositionedTable([40]),
       para({ text: 'after', fontSize: 20 }),
     ], section(), makeCtx());
-    const tableOccurrence = pages[0]?.find((element) => element.type === 'table');
-    const paragraphOccurrence = pages[0]?.find((element) => element.type === 'paragraph');
-    const tablePlacement = tableOccurrence ? bodyFragmentFor(tableOccurrence) : undefined;
-    const paragraphPlacement = paragraphOccurrence ? bodyFragmentFor(paragraphOccurrence) : undefined;
+    const tableOccurrence = pages[0]?.layers.body.find((node) => node.kind === 'table');
+    const paragraphOccurrence = pages[0]?.layers.body.find((node) => node.kind === 'paragraph');
 
-    expect(tablePlacement).toBeDefined();
-    expect(paragraphPlacement?.yPt).toBeGreaterThanOrEqual(
-      (tablePlacement?.yPt ?? 0) + (tablePlacement?.heightPt ?? 0),
+    expect(tableOccurrence).toBeDefined();
+    expect(paragraphOccurrence?.flowBounds.yPt).toBeGreaterThanOrEqual(
+      (tableOccurrence?.flowBounds.yPt ?? 0) + (tableOccurrence?.flowBounds.heightPt ?? 0),
     );
   });
 });
 
-describe('computePages — over-tall table row splitting (§17.4 table pagination)', () => {
+describe('layoutPages — over-tall table row splitting (§17.4 table pagination)', () => {
   const paragraphContinuation = (cell: TableCellFragmentLayout, blockIndex = 0) => {
     const block = cell.blocks.find((candidate) => (
       candidate.layout.kind === 'paragraph'
@@ -850,7 +884,7 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
   };
 
   it('splits an auto-height row by cell block boundaries instead of overflowing the footer band', () => {
-    const pages = computePages([autoTableWithTallRow(8)], section(), makeCtx());
+    const pages = layoutPages([autoTableWithTallRow(8)], section(), makeCtx());
     const tables = pages.map(retainedTableOn).filter((table) => table !== undefined);
 
     expect(tables.length).toBeGreaterThan(1);
@@ -861,12 +895,12 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
         kind: 'paragraph', blockIndex, lineStart: 0, lineEnd: 1,
       })));
     for (const table of tables) {
-      expect(table.placed.heightPt).toBeLessThanOrEqual(100);
+      expect(table.fragment.flowBounds.heightPt).toBeLessThanOrEqual(100);
     }
   });
 
   it('splits a splittable auto-height row into the remaining page band before continuing', () => {
-    const pages = computePages([para(), para(), autoTableWithTallRow(4)], section(), makeCtx());
+    const pages = layoutPages([para(), para(), autoTableWithTallRow(4)], section(), makeCtx());
     const firstPageTable = retainedTableOn(pages[0]);
     const secondPageTable = retainedTableOn(pages[1]);
 
@@ -885,9 +919,9 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
   });
 
   it('keeps a cantSplit row intact when it does not fit the remaining page band', () => {
-    const pages = computePages([para(), para(), autoTableWithTallRow(4, { cantSplit: true })], section(), makeCtx());
+    const pages = layoutPages([para(), para(), autoTableWithTallRow(4, { cantSplit: true })], section(), makeCtx());
 
-    expect(pages[0].some((el) => el.type === 'table')).toBe(false);
+    expect(pages[0].layers.body.some((node) => node.kind === 'table')).toBe(false);
     const secondPageTable = retainedTableOn(pages[1]);
     expect(secondPageTable?.fragment.rows[0]?.cells[0]?.contentRanges).toEqual(
       Array.from({ length: 4 }, (_, blockIndex) => ({ kind: 'whole', blockIndex })),
@@ -895,7 +929,7 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
   });
 
   it('splits a single cell paragraph in a splittable row at line boundaries', () => {
-    const pages = computePages([para(), para(), autoTableWithSingleWrappedParagraph(32)], section(), makeCtx());
+    const pages = layoutPages([para(), para(), autoTableWithSingleWrappedParagraph(32)], section(), makeCtx());
     const firstPageTable = retainedTableOn(pages[0]);
     const secondPageTable = retainedTableOn(pages[1]);
 
@@ -919,7 +953,7 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
   });
 
   it('splits the next row when it overflows after earlier rows filled part of the page', () => {
-    const pages = computePages([autoTableWithIntroRowThenSingleWrappedParagraph(32)], section(), makeCtx());
+    const pages = layoutPages([autoTableWithIntroRowThenSingleWrappedParagraph(32)], section(), makeCtx());
     const firstPageTable = retainedTableOn(pages[0]);
     const secondPageTable = retainedTableOn(pages[1]);
 
@@ -937,7 +971,7 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
   });
 
   it('uses collapsed paragraph spacing when fitting a cell paragraph line into a split row', () => {
-    const pages = computePages([autoTableWithIntroRowThenSpacedWrappedParagraph()], section(), makeCtx());
+    const pages = layoutPages([autoTableWithIntroRowThenSpacedWrappedParagraph()], section(), makeCtx());
     const firstPageTable = retainedTableOn(pages[0]);
     const continuationTables = pages.slice(1).map(retainedTableOn)
       .filter((table) => table !== undefined);
@@ -958,7 +992,7 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
   });
 
   it('splits a nested table inside a cell at inner row boundaries', () => {
-    const pages = computePages([autoTableWithNestedFixedTable([30, 30, 30, 30])], section(), makeCtx());
+    const pages = layoutPages([autoTableWithNestedFixedTable([30, 30, 30, 30])], section(), makeCtx());
     expect(pages.length).toBe(2);
     const firstPageTable = retainedTableOn(pages[0]);
     const secondPageTable = retainedTableOn(pages[1]);
@@ -988,7 +1022,7 @@ describe('computePages — over-tall table row splitting (§17.4 table paginatio
 // ownership needed when a continuation row starts a page; pagination never
 // rewrites a continuation into an authored restart.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('computePages — mid-page split of rows with vMerge restart cells (§17.4.84 + §17.4.6)', () => {
+describe('layoutPages — mid-page split of rows with vMerge restart cells (§17.4.84 + §17.4.6)', () => {
   const emptyBorders = () => ({ top: null, bottom: null, left: null, right: null, insideH: null, insideV: null });
   const mkCell = (content: CellElement[], vMerge: boolean | null, vAlign: 'top' | 'center' | 'bottom' = 'top'): DocTableCell => ({
     content, colSpan: 1, vMerge, borders: emptyBorders(), background: null, vAlign, widthPt: null,
@@ -1026,7 +1060,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
   it('splits a restart-cell row mid-page without changing its semantic merge role', () => {
     // 2 filler paragraphs (40pt) leave 60pt: the content cell fits 3 of its 4
     // lines; the 2-paragraph label (40pt) fits page 1 entirely.
-    const pages = computePages([para(), para(), restartSpanTable(2)], section(), makeCtx());
+    const pages = layoutPages([para(), para(), restartSpanTable(2)], section(), makeCtx());
 
     const first = retainedTableOn(pages[0]);
     const continuations = pages.slice(1).map(retainedTableOn)
@@ -1068,7 +1102,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
   it('splits the restart cell content itself when it exceeds the page-1 band', () => {
     // 6 label paragraphs (120pt) cannot fit the 60pt band: 3 land on page 1 and
     // 3 continue in a second fragment with the same authored restart semantics.
-    const pages = computePages([para(), para(), restartSpanTable(6)], section(), makeCtx());
+    const pages = layoutPages([para(), para(), restartSpanTable(6)], section(), makeCtx());
 
     const first = retainedTableOn(pages[0]);
     const second = retainedTableOn(pages[1]);
@@ -1082,7 +1116,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
     ]);
     for (const pg of pages) {
       const table = retainedTableOn(pg);
-      if (table) expect(table.placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+      if (table) expect(table.fragment.flowBounds.heightPt).toBeLessThanOrEqual(100 + 1e-6);
     }
   });
 
@@ -1094,12 +1128,12 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
     // restart content, not left in place while the pieces also carry the
     // fitted content — the double count overflowed the body band and leaked
     // an extra page.
-    const pages = computePages([restartSpanTable(10)], section(), makeCtx());
+    const pages = layoutPages([restartSpanTable(10)], section(), makeCtx());
     const tables = pages.map(retainedTableOn).filter((table) => table !== undefined);
 
     // Every page's table charges at most the 100pt body band.
     for (const table of tables) {
-      expect(table.placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+      expect(table.fragment.flowBounds.heightPt).toBeLessThanOrEqual(100 + 1e-6);
     }
 
     // Stable source block/line ranges prove that every label paragraph and
@@ -1120,7 +1154,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
 
   it('preserves center vAlign on every retained piece of a split restart cell', () => {
     for (const labelParas of [2, 6]) {
-      const pages = computePages([para(), para(), restartSpanTable(labelParas, 'center')], section(), makeCtx());
+      const pages = layoutPages([para(), para(), restartSpanTable(labelParas, 'center')], section(), makeCtx());
       const tables = pages.map(retainedTableOn).filter((table) => table !== undefined);
       const restartPieces = tables.flatMap((table) => table.fragment.rows)
         .filter((row) => row.logicalRowIndex === 0);
@@ -1135,7 +1169,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
       expect(restartPieces.flatMap((row) => sourceBlockIndices(row.cells[0])))
         .toEqual(Array.from({ length: labelParas }, (_v, index) => index));
       for (const table of tables) {
-        expect(table.placed.heightPt).toBeLessThanOrEqual(100 + 1e-6);
+        expect(table.fragment.flowBounds.heightPt).toBeLessThanOrEqual(100 + 1e-6);
       }
     }
   });
@@ -1160,7 +1194,7 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
       cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
       jc: 'left', layout: 'fixed',
     } as unknown as DocTable;
-    const pages = computePages(
+    const pages = layoutPages(
       [para(), para(), para(), para(), { type: 'table', ...t } as BodyElement],
       section(),
       makeCtx(),
@@ -1178,28 +1212,36 @@ describe('computePages — mid-page split of rows with vMerge restart cells (§1
   });
 });
 
-describe('computePages — line-boundary splitting + widowControl (C1: §17.3.1.44)', () => {
+describe('layoutPages — line-boundary splitting + widowControl (C1: §17.3.1.44)', () => {
   // contentW = 160, glyph advance = fontPx; at 20px → 8 chars/line. 48 chars → 6 lines.
   // content height = 100 → 5 lines (100px) fit per page.
   const sixLineText = 'あ'.repeat(48);
 
   it('avoids a widow: a single trailing line is not stranded on the next page (default widowControl on)', () => {
-    const pages = computePages([para({ text: sixLineText })], section(), makeCtx());
+    const pages = layoutPages([para({ text: sixLineText })], section(), makeCtx());
     expect(pages.length).toBe(2);
     // Greedy fit is 5 lines on page 1; widowControl pulls one down so ≥2 carry over.
-    expect(sliceOf(pages[0][0])).toEqual({ start: 0, end: 4 });
-    expect(sliceOf(pages[1][0])).toEqual({ start: 4, end: 6 });
+    expect(continuationOf(pages[0].layers.body[0])).toMatchObject({ lineStart: 0, lineEnd: 4 });
+    expect(continuationOf(pages[1].layers.body[0])).toMatchObject({
+      lineStart: 0,
+      lineEnd: 2,
+      continuesFromPrevious: true,
+    });
   });
 
   it('honors w:widowControl="off": the trailing single line is allowed (matches sample-9)', () => {
-    const pages = computePages([para({ text: sixLineText, widowControl: false })], section(), makeCtx());
+    const pages = layoutPages([para({ text: sixLineText, widowControl: false })], section(), makeCtx());
     expect(pages.length).toBe(2);
-    expect(sliceOf(pages[0][0])).toEqual({ start: 0, end: 5 }); // greedy 5 lines
-    expect(sliceOf(pages[1][0])).toEqual({ start: 5, end: 6 }); // lone widow line allowed
+    expect(continuationOf(pages[0].layers.body[0])).toMatchObject({ lineStart: 0, lineEnd: 5 }); // greedy 5 lines
+    expect(continuationOf(pages[1].layers.body[0])).toMatchObject({
+      lineStart: 0,
+      lineEnd: 1,
+      continuesFromPrevious: true,
+    }); // lone widow line allowed
   });
 });
 
-describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)', () => {
+describe('layoutPages — anchored wrap-shape float exclusion (B: §20.4.2.16)', () => {
   // A topAndBottom anchored text-box SHAPE must reserve a float band exactly
   // like an anchored image does, so body text in following paragraphs flows
   // BELOW it instead of overlapping. Geometry: page content height =
@@ -1217,14 +1259,11 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
       paraWith([shapeRun({ widthPt: 160, heightPt: 50, wrapMode: 'topAndBottom' })]),
       para({ text: 'あ'.repeat(16), fontSize: 20 }), // 160/20 = 8 chars/line → 2 lines
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(2);
     // The text paragraph (with its float-displaced first line) is pushed to the
     // second page; page 1 holds only the shape-anchoring paragraph.
-    const onPage2 = pages[1].some(
-      (el) => el.type === 'paragraph' &&
-        (el as unknown as DocParagraph).runs.some((r) => r.type === 'text'),
-    );
+    const onPage2 = pages[1].layers.body.some((node) => textOf(node).length > 0);
     expect(onPage2).toBe(true);
   });
 
@@ -1235,7 +1274,7 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
       paraWith([shapeRun({ widthPt: 160, heightPt: 50, wrapMode: 'none' })]),
       para({ text: 'あ'.repeat(16), fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages.length).toBe(1);
   });
 
@@ -1246,12 +1285,13 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
       imagePara,
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages).toHaveLength(1);
-    expect(pages[0].some((el) =>
-      el.type === 'paragraph' &&
-      (el as unknown as DocParagraph).runs.some((r) => r.type === 'image'),
-    )).toBe(true);
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (imagePara as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
   });
 
   it('does not let a wrapNone callout shape force a page break', () => {
@@ -1265,7 +1305,7 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
       imagePara,
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages).toHaveLength(1);
   });
 
@@ -1281,15 +1321,16 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
       calloutAnchor,
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages).toHaveLength(1);
     const occurrence = paragraphOccurrenceWithRun(
       pages[0],
+      body,
       (calloutAnchor as unknown as DocParagraph).runs[0]!,
     );
     expect(occurrence).toBeDefined();
     expect(occurrence).not.toBe(calloutAnchor);
-    expect(occurrence ? bodyFragmentFor(occurrence)?.fragment.source.path[0] : undefined).toBe(4);
+    expect(occurrence?.source.path[0]).toBe(4);
   });
 
   it('does not count a front wrapNone shape as flow height when grouping following inline images', () => {
@@ -1302,21 +1343,21 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
       photo,
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages).toHaveLength(1);
     const smallImageOccurrence = paragraphOccurrenceWithRun(
       pages[0],
+      body,
       (smallImage as unknown as DocParagraph).runs[0]!,
     );
     expect(smallImageOccurrence).toBeDefined();
     expect(smallImageOccurrence).not.toBe(smallImage);
-    expect(smallImageOccurrence
-      ? bodyFragmentFor(smallImageOccurrence)?.fragment.source.path[0]
-      : undefined).toBe(1);
-    expect(pages[0].some((el) =>
-      el.type === 'paragraph' &&
-      (el as unknown as DocParagraph).runs.some((r) => r.type === 'image'),
-    )).toBe(true);
+    expect(smallImageOccurrence?.source.path[0]).toBe(1);
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (photo as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
   });
 
   it('moves an inline-image paragraph to a fresh page when it no longer fits', () => {
@@ -1326,17 +1367,22 @@ describe('computePages — anchored wrap-shape float exclusion (B: §20.4.2.16)'
       photo,
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages).toHaveLength(2);
-    expect(pages[0]).not.toContain(photo as PaginatedBodyElement);
-    expect(pages[1].some((el) =>
-      el.type === 'paragraph' &&
-      (el as unknown as DocParagraph).runs.some((r) => r.type === 'image'),
-    )).toBe(true);
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (photo as unknown as DocParagraph).runs[0]!,
+    )).toBeUndefined();
+    expect(paragraphOccurrenceWithRun(
+      pages[1],
+      body,
+      (photo as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
   });
 });
 
-describe('computePages — paragraph anchor before explicit page break (§20.4.3.5 + §17.3.1.20)', () => {
+describe('layoutPages — paragraph anchor before explicit page break (§20.4.3.5 + §17.3.1.20)', () => {
   it('keeps a paragraph-anchored wrapNone shape on the pre-break page when a hard page break follows', () => {
     // Four empty paragraphs consume 80pt of the 100pt body. The following
     // wrapNone callout is 50pt tall from its paragraph top, so the generic
@@ -1355,10 +1401,14 @@ describe('computePages — paragraph anchor before explicit page break (§20.4.3
       para({ text: 'after', fontSize: 20 }),
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages).toHaveLength(2);
-    expect(pages[0]).toContain(anchorPara as PaginatedBodyElement);
-    expect(textOf(pages[1][0])).toBe('after');
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (anchorPara as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
+    expect(textOf(pages[1].layers.body[0])).toBe('after');
   });
 
   it('does not push an anchor-only pre-break paragraph to a new page just for its empty mark', () => {
@@ -1372,10 +1422,14 @@ describe('computePages — paragraph anchor before explicit page break (§20.4.3
       para({ text: 'after', fontSize: 20 }),
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages).toHaveLength(2);
-    expect(pages[0]).toContain(anchorPara as PaginatedBodyElement);
-    expect(textOf(pages[1][0])).toBe('after');
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (anchorPara as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
+    expect(textOf(pages[1].layers.body[0])).toBe('after');
   });
 
   it('moves a preceding image with its pre-break callout when the pair only fits fresh', () => {
@@ -1391,18 +1445,83 @@ describe('computePages — paragraph anchor before explicit page break (§20.4.3
       para({ text: 'after', fontSize: 20 }),
     ];
 
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     expect(pages).toHaveLength(3);
     const imageRun = (imagePara as unknown as DocParagraph).runs[0]!;
-    expect(paragraphOccurrenceWithRun(pages[0], imageRun)).toBeUndefined();
-    const imageOccurrence = paragraphOccurrenceWithRun(pages[1], imageRun);
+    expect(paragraphOccurrenceWithRun(pages[0], body, imageRun)).toBeUndefined();
+    const imageOccurrence = paragraphOccurrenceWithRun(pages[1], body, imageRun);
     expect(imageOccurrence).toBeDefined();
     expect(imageOccurrence).not.toBe(imagePara);
-    expect(imageOccurrence
-      ? bodyFragmentFor(imageOccurrence)?.fragment.source.path[0]
-      : undefined).toBe(3);
-    expect(pages[1]).toContain(anchorPara as PaginatedBodyElement);
-    expect(textOf(pages[2][0])).toBe('after');
+    expect(imageOccurrence?.source.path[0]).toBe(3);
+    expect(paragraphOccurrenceWithRun(
+      pages[1],
+      body,
+      (anchorPara as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
+    expect(textOf(pages[2].layers.body[0])).toBe('after');
+  });
+
+  it('does not group a preceding image with a page-owned pre-break drawing', () => {
+    const imagePara = paraWith([inlineImageRun(80, 40)]);
+    const pageOwned = paraWith([
+      shapeRun({
+        widthPt: 80,
+        heightPt: 20,
+        anchorYPt: 120,
+        anchorYFromPara: false,
+        wrapMode: 'none',
+      }),
+    ]);
+    const body = [
+      para(),
+      para(),
+      imagePara,
+      pageOwned,
+      pageBreak(),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+
+    const pages = layoutPages(body, section(), makeCtx());
+
+    expect(pages).toHaveLength(2);
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (imagePara as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (pageOwned as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
+  });
+
+  it('groups an inline chart with its host-owned pre-break drawing', () => {
+    const chartPara = paraWith([inlineChartRun(80, 40)]);
+    const anchorPara = paraWith([
+      shapeRun({ widthPt: 80, heightPt: 50, wrapMode: 'none', anchorYFromPara: true }),
+    ]);
+    const body = [
+      ...Array.from({ length: 3 }, () => para()),
+      chartPara,
+      anchorPara,
+      pageBreak(),
+      para({ text: 'after', fontSize: 20 }),
+    ];
+
+    const pages = layoutPages(body, section(), makeCtx());
+
+    expect(pages).toHaveLength(3);
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (chartPara as unknown as DocParagraph).runs[0]!,
+    )).toBeUndefined();
+    expect(paragraphOccurrenceWithRun(
+      pages[1],
+      body,
+      (chartPara as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
   });
 });
 
@@ -1462,7 +1581,7 @@ describe('computeColumns — geometry (§17.6.4)', () => {
   });
 });
 
-describe('computePages — newspaper column flow (§17.6.4)', () => {
+describe('layoutPages — newspaper column flow (§17.6.4)', () => {
   const twoCol = (): SectionProps =>
     section({ columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] } });
 
@@ -1472,33 +1591,38 @@ describe('computePages — newspaper column flow (§17.6.4)', () => {
   it('overflowing paragraphs flow into column 1 on the SAME page (pages.length unchanged)', () => {
     // 7 single-line paragraphs: 5 fill column 0, 2 spill into column 1 — still 1 page.
     const body = Array.from({ length: 7 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
-    const pages = computePages(body, twoCol(), makeCtx());
+    const pages = layoutPages(body, twoCol(), makeCtx());
     expect(pages.length).toBe(1);
-    expect(pages[0]).toHaveLength(7);
+    expect(pages[0].layers.body).toHaveLength(7);
     // First 5 in column 0, last 2 in column 1.
-    expect(pages[0].slice(0, 5).map(colOf)).toEqual([0, 0, 0, 0, 0]);
-    expect(pages[0].slice(5).map(colOf)).toEqual([1, 1]);
+    expect(pages[0].layers.body.slice(0, 5).map(colOf)).toEqual([0, 0, 0, 0, 0]);
+    expect(pages[0].layers.body.slice(5).map(colOf)).toEqual([1, 1]);
   });
 
   it('fills both columns before starting a new page', () => {
     // 11 single-line paras: col0=5, col1=5, then the 11th starts page 2 col0.
     const body = Array.from({ length: 11 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
-    const pages = computePages(body, twoCol(), makeCtx());
+    const pages = layoutPages(body, twoCol(), makeCtx());
     expect(pages.length).toBe(2);
-    expect(pages[0]).toHaveLength(10);
-    expect(pages[0].slice(0, 5).every((el) => colOf(el) === 0)).toBe(true);
-    expect(pages[0].slice(5).every((el) => colOf(el) === 1)).toBe(true);
-    expect(pages[1]).toHaveLength(1);
-    expect(colOf(pages[1][0])).toBe(0); // new page resets to column 0
+    expect(pages[0].layers.body).toHaveLength(10);
+    expect(pages[0].layers.body.slice(0, 5).every((el) => colOf(el) === 0)).toBe(true);
+    expect(pages[0].layers.body.slice(5).every((el) => colOf(el) === 1)).toBe(true);
+    expect(pages[1].layers.body).toHaveLength(1);
+    expect(colOf(pages[1].layers.body[0])).toBe(0); // new page resets to column 0
   });
 
   it('measures at the column width: a paragraph wraps to MORE lines than at full width', () => {
     // 6 CJK chars. Full width (160 → 8/line) = 1 line. Column width (70 → 3/line) = 2 lines.
     const sixChars = 'あ'.repeat(6);
     // Single-column baseline: one line, easily 1 page.
-    const single = computePages([para({ text: sixChars, fontSize: 20 })], section(), makeCtx());
+    const single = layoutPages([para({ text: sixChars, fontSize: 20 })], section(), makeCtx());
     expect(single.length).toBe(1);
-    expect(sliceOf(single[0][0])).toBeUndefined(); // not split — fits on one line
+    expect(continuationOf(single[0].layers.body[0])).toMatchObject({
+      lineStart: 0,
+      lineEnd: 1,
+      continuesFromPrevious: false,
+      continuesOnNext: false,
+    });
 
     // Two-column: 70/20 = 3 chars/line ⇒ the same paragraph needs 2 lines. Fill
     // column 0 with 4 single-line paras (4 lines), so only 1 line is left in
@@ -1507,13 +1631,13 @@ describe('computePages — newspaper column flow (§17.6.4)', () => {
       ...Array.from({ length: 4 }, (_, i) => para({ text: `p${i}`, fontSize: 20 })),
       para({ text: sixChars, fontSize: 20 }),
     ];
-    const pages = computePages(body, twoCol(), makeCtx());
+    const pages = layoutPages(body, twoCol(), makeCtx());
     expect(pages.length).toBe(1);
     // The 2-line paragraph (proof it wrapped to >1 line at column width) moved to
     // column 1 because only one line of room remained in column 0.
-    const wrapped = pages[0].find((el) => textOf(el) === sixChars);
+    const wrapped = pages[0].layers.body.find((el) => textOf(el) === sixChars);
     expect(wrapped).toBeDefined();
-    expect(colOf(wrapped as PaginatedBodyElement)).toBe(1);
+    expect(colOf(wrapped)).toBe(1);
   });
 
   it('a long paragraph splits across columns of the same page', () => {
@@ -1521,17 +1645,21 @@ describe('computePages — newspaper column flow (§17.6.4)', () => {
     // splits: 5 lines in column 0, 1 line in column 1 (widowControl off to keep the
     // greedy split deterministic) — both on page 1.
     const body = [para({ text: 'あ'.repeat(18), fontSize: 20, widowControl: false })];
-    const pages = computePages(body, twoCol(), makeCtx());
+    const pages = layoutPages(body, twoCol(), makeCtx());
     expect(pages.length).toBe(1);
-    expect(pages[0]).toHaveLength(2);
-    expect(sliceOf(pages[0][0])).toEqual({ start: 0, end: 5 });
-    expect(colOf(pages[0][0])).toBe(0);
-    expect(sliceOf(pages[0][1])).toEqual({ start: 5, end: 6 });
-    expect(colOf(pages[0][1])).toBe(1);
+    expect(pages[0].layers.body).toHaveLength(2);
+    expect(continuationOf(pages[0].layers.body[0])).toMatchObject({ lineStart: 0, lineEnd: 5 });
+    expect(colOf(pages[0].layers.body[0])).toBe(0);
+    expect(continuationOf(pages[0].layers.body[1])).toMatchObject({
+      lineStart: 0,
+      lineEnd: 1,
+      continuesFromPrevious: true,
+    });
+    expect(colOf(pages[0].layers.body[1])).toBe(1);
   });
 });
 
-describe('computePages — explicit column break (§17.3.1.20)', () => {
+describe('layoutPages — explicit column break (§17.3.1.20)', () => {
   const twoCol = (): SectionProps =>
     section({ columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] } });
 
@@ -1541,10 +1669,10 @@ describe('computePages — explicit column break (§17.3.1.20)', () => {
       colBreak(),
       para({ text: 'b', fontSize: 20 }),
     ];
-    const pages = computePages(body, twoCol(), makeCtx());
+    const pages = layoutPages(body, twoCol(), makeCtx());
     expect(pages.length).toBe(1);
     // The break is consumed (not emitted as a body element); two paragraphs remain.
-    const paras = pages[0].filter((el) => el.type === 'paragraph');
+    const paras = pages[0].layers.body.filter((el) => el.kind === 'paragraph');
     expect(paras).toHaveLength(2);
     expect(colOf(paras[0])).toBe(0);
     expect(colOf(paras[1])).toBe(1);
@@ -1558,12 +1686,12 @@ describe('computePages — explicit column break (§17.3.1.20)', () => {
       colBreak(), // last column → page 2, column 0
       para({ text: 'c', fontSize: 20 }),
     ];
-    const pages = computePages(body, twoCol(), makeCtx());
+    const pages = layoutPages(body, twoCol(), makeCtx());
     expect(pages.length).toBe(2);
-    expect(colOf(pages[0].filter((e) => e.type === 'paragraph')[0])).toBe(0); // a
-    expect(colOf(pages[0].filter((e) => e.type === 'paragraph')[1])).toBe(1); // b
-    expect(textOf(pages[1][0])).toBe('c');
-    expect(colOf(pages[1][0])).toBe(0); // c on page 2, column 0
+    expect(colOf(pages[0].layers.body.filter((e) => e.kind === 'paragraph')[0])).toBe(0); // a
+    expect(colOf(pages[0].layers.body.filter((e) => e.kind === 'paragraph')[1])).toBe(1); // b
+    expect(textOf(pages[1].layers.body[0])).toBe('c');
+    expect(colOf(pages[1].layers.body[0])).toBe(0); // c on page 2, column 0
   });
 
   it('ignores a trailing column break when no following content exists', () => {
@@ -1573,53 +1701,73 @@ describe('computePages — explicit column break (§17.3.1.20)', () => {
       para({ text: 'b', fontSize: 20 }),
       colBreak(),
     ];
-    const pages = computePages(body, twoCol(), makeCtx());
+    const pages = layoutPages(body, twoCol(), makeCtx());
     expect(pages.length).toBe(1);
-    const paras = pages[0].filter((e) => e.type === 'paragraph');
+    const paras = pages[0].layers.body.filter((e) => e.kind === 'paragraph');
     expect(paras.map(textOf)).toEqual(['a', 'b']);
     expect(colOf(paras[0])).toBe(0);
     expect(colOf(paras[1])).toBe(1);
   });
+
+  it('ignores a terminal last-column break before a hard page boundary', () => {
+    const body = [
+      para({ text: 'a', fontSize: 20 }),
+      colBreak(),
+      para({ text: 'b', fontSize: 20 }),
+      colBreak(),
+      pageBreak(),
+      para({ text: 'c', fontSize: 20 }),
+    ];
+    const pages = layoutPages(body, twoCol(), makeCtx());
+
+    expect(pages).toHaveLength(2);
+    expect(pages[0].layers.body.map(textOf)).toEqual(['a', 'b']);
+    expect(pages[1].layers.body.map(textOf)).toEqual(['c']);
+  });
 });
 
-describe('computePages — single-column regression (§17.6.4 absent)', () => {
+describe('layoutPages — single-column regression (§17.6.4 absent)', () => {
   it('a single-column section paginates identically (no colIndex > 0, full width)', () => {
     // Reuse the empty-paragraph relocation scenario: 7 empty paras, 5/page.
     const body = Array.from({ length: 7 }, () => para());
-    const withCols = computePages(body, section(), makeCtx());
+    const withCols = layoutPages(body, section(), makeCtx());
     expect(withCols.length).toBe(2);
-    expect(withCols[0].length).toBe(5);
-    expect(withCols[1].length).toBe(2);
+    expect(withCols[0].layers.body.length).toBe(5);
+    expect(withCols[1].layers.body.length).toBe(2);
     // Every placed element is column 0 (or untagged) — never a higher column.
     for (const page of withCols) {
-      for (const el of page) expect(colOf(el) ?? 0).toBe(0);
+      for (const node of page.layers.body) expect(colOf(node) ?? 0).toBe(0);
     }
   });
 
   it('a wrapping paragraph splits the same way single-column as before', () => {
     // 48 CJK chars at full width (8/line) = 6 lines; 5 fit per page; widowControl
     // off ⇒ greedy 5 + 1. Identical to the pre-column behavior (guards no regression).
-    const pages = computePages(
+    const pages = layoutPages(
       [para({ text: 'あ'.repeat(48), fontSize: 20, widowControl: false })],
       section(),
       makeCtx(),
     );
     expect(pages.length).toBe(2);
-    expect(sliceOf(pages[0][0])).toEqual({ start: 0, end: 5 });
-    expect(sliceOf(pages[1][0])).toEqual({ start: 5, end: 6 });
-    expect(colOf(pages[0][0]) ?? 0).toBe(0);
-    expect(colOf(pages[1][0]) ?? 0).toBe(0);
+    expect(continuationOf(pages[0].layers.body[0])).toMatchObject({ lineStart: 0, lineEnd: 5 });
+    expect(continuationOf(pages[1].layers.body[0])).toMatchObject({
+      lineStart: 0,
+      lineEnd: 1,
+      continuesFromPrevious: true,
+    });
+    expect(colOf(pages[0].layers.body[0]) ?? 0).toBe(0);
+    expect(colOf(pages[1].layers.body[0]) ?? 0).toBe(0);
   });
 });
 
-describe('computePages — per-section columns (§17.6.4, regression)', () => {
+describe('layoutPages — per-section columns (§17.6.4, regression)', () => {
   // The sample-5 shape: section 1 is single-column (no <w:cols num>), only the
   // FINAL section is 2-column. Section 1's content MUST lay out in ONE full-width
   // column — not in the final section's 2-column grid. `section.columns` carries
   // the FINAL (body-level) section's columns; each mid-body section's columns ride
   // on its SectionBreak marker (here None ⇒ single column).
-  const colGeomOf = (el: PaginatedBodyElement): { xPt: number; wPt: number }[] | undefined =>
-    (el as { colGeom?: { xPt: number; wPt: number }[] }).colGeom;
+  const colGeomOf = (page: LayoutPage, node: PaintNode): { xPt: number; wPt: number }[] =>
+    columnGeometryOf(page, node);
 
   const finalTwoCol = (): SectionProps =>
     section({ columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] } });
@@ -1630,20 +1778,25 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
     // SectionBreak (cols None). Final section = one 2-col para.
     const body: BodyElement[] = [
       para({ text: 'あ'.repeat(8), fontSize: 20 }),
-      sectionBreak('nextPage', null),
+      { ...sectionBreak('nextPage', null), geom: section() } as BodyElement,
       para({ text: 'final', fontSize: 20 }),
     ];
-    const pages = computePages(body, finalTwoCol(), makeCtx());
+    const pages = layoutPages(body, finalTwoCol(), makeCtx());
     // SectionBreak is consumed (not emitted); section 1 on page 1, final on page 2.
     expect(pages.length).toBe(2);
-    const sec1Para = pages[0][0];
+    const sec1Para = pages[0].layers.body[0];
     // Full-width single column ⇒ NOT split (still one line) and colGeom length 1.
-    expect(sliceOf(sec1Para)).toBeUndefined();
+    expect(continuationOf(sec1Para)).toMatchObject({
+      lineStart: 0,
+      lineEnd: 1,
+      continuesFromPrevious: false,
+      continuesOnNext: false,
+    });
     expect(colOf(sec1Para) ?? 0).toBe(0);
-    expect(colGeomOf(sec1Para)).toEqual([{ xPt: 20, wPt: 160 }]);
+    expect(colGeomOf(pages[0], sec1Para)).toEqual([{ xPt: 20, wPt: 160 }]);
     // The FINAL section's paragraph gets the 2-column geometry.
-    const finalPara = pages[1][0];
-    expect(colGeomOf(finalPara)).toEqual([
+    const finalPara = pages[1].layers.body[0];
+    expect(colGeomOf(pages[1], finalPara)).toEqual([
       { xPt: 20, wPt: 70 },
       { xPt: 110, wPt: 70 },
     ]);
@@ -1655,14 +1808,14 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
     // they would have been squeezed into 2-col width and the flow would differ.
     const body: BodyElement[] = [
       ...Array.from({ length: 5 }, (_, i) => para({ text: `s${i}`, fontSize: 20 })),
-      sectionBreak('nextPage', null),
+      { ...sectionBreak('nextPage', null), geom: section() } as BodyElement,
       para({ text: 'final', fontSize: 20 }),
     ];
-    const pages = computePages(body, finalTwoCol(), makeCtx());
-    expect(pages[0]).toHaveLength(5);
-    for (const el of pages[0]) {
+    const pages = layoutPages(body, finalTwoCol(), makeCtx());
+    expect(pages[0].layers.body).toHaveLength(5);
+    for (const el of pages[0].layers.body) {
       expect(colOf(el) ?? 0).toBe(0);
-      expect(colGeomOf(el)).toEqual([{ xPt: 20, wPt: 160 }]);
+      expect(colGeomOf(pages[0], el)).toEqual([{ xPt: 20, wPt: 160 }]);
     }
   });
 
@@ -1681,13 +1834,13 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
       sectionBreak('continuous', null), // ends section B ⇒ B begins continuously (A→B same page)
       para({ text: 'final', fontSize: 20 }),
     ];
-    const pages = computePages(body, finalTwoCol(), makeCtx());
+    const pages = layoutPages(body, finalTwoCol(), makeCtx());
     expect(pages.length).toBe(2);
     // A and B share page 1 (B continuous), final on page 2 (final section nextPage).
-    expect(pages[0].map(textOf)).toEqual(['A', 'B']);
-    expect(pages[1].map(textOf)).toEqual(['final']);
-    for (const el of pages[0]) {
-      expect(colGeomOf(el)).toEqual([{ xPt: 20, wPt: 160 }]);
+    expect(pages[0].layers.body.map(textOf)).toEqual(['A', 'B']);
+    expect(pages[1].layers.body.map(textOf)).toEqual(['final']);
+    for (const el of pages[0].layers.body) {
+      expect(colGeomOf(pages[0], el)).toEqual([{ xPt: 20, wPt: 160 }]);
     }
   });
 
@@ -1698,27 +1851,28 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
     // sample-13, where Word keeps the 2-col body on the title page.
     const body: BodyElement[] = [
       para({ text: 'title', fontSize: 20 }),
-      sectionBreak('nextPage', null), // ends the title section (its own start type)
+      { ...sectionBreak('nextPage', null), geom: section() } as BodyElement,
+      // The marker ends the title section (and carries its own page box/start type).
       para({ text: 'body', fontSize: 20 }),
     ];
     const sec = { ...finalTwoCol(), columns: null, sectionStart: 'continuous' };
-    const pages = computePages(body, sec, makeCtx());
+    const pages = layoutPages(body, sec, makeCtx());
     expect(pages.length).toBe(1);
-    expect(pages[0].map(textOf)).toEqual(['title', 'body']);
+    expect(pages[0].layers.body.map(textOf)).toEqual(['title', 'body']);
   });
 
   it('single-section 2-col docs are UNCHANGED (no SectionBreak markers ⇒ whole body uses section.columns)', () => {
     // Guard: with NO section breaks, columns = section.columns for the whole body,
     // identical to the pre-fix global-columns behavior (sample-10's case).
     const body = Array.from({ length: 7 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
-    const pages = computePages(body, finalTwoCol(), makeCtx());
+    const pages = layoutPages(body, finalTwoCol(), makeCtx());
     // 5 fill col0, 2 spill into col1 — one page (the existing newspaper-flow test).
     expect(pages.length).toBe(1);
-    expect(pages[0].slice(0, 5).map(colOf)).toEqual([0, 0, 0, 0, 0]);
-    expect(pages[0].slice(5).map(colOf)).toEqual([1, 1]);
+    expect(pages[0].layers.body.slice(0, 5).map(colOf)).toEqual([0, 0, 0, 0, 0]);
+    expect(pages[0].layers.body.slice(5).map(colOf)).toEqual([1, 1]);
     // Every element carries the same 2-col geometry (the body-level section's).
-    for (const el of pages[0]) {
-      expect(colGeomOf(el)).toEqual([
+    for (const el of pages[0].layers.body) {
+      expect(colGeomOf(pages[0], el)).toEqual([
         { xPt: 20, wPt: 70 },
         { xPt: 110, wPt: 70 },
       ]);
@@ -1726,7 +1880,7 @@ describe('computePages — per-section columns (§17.6.4, regression)', () => {
   });
 });
 
-describe('computePages — newspaper column balancing (§17.6.4, non-final continuous sections)', () => {
+describe('layoutPages — newspaper column balancing (§17.6.4, non-final continuous sections)', () => {
   const twoColSpec = { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] };
 
   it('balances a SHORT non-final 2-col section across both columns (not greedy col0)', () => {
@@ -1739,9 +1893,9 @@ describe('computePages — newspaper column balancing (§17.6.4, non-final conti
       sectionBreak('continuous', twoColSpec),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx()); // final section = 1-col
+    const pages = layoutPages(body, section(), makeCtx()); // final section = 1-col
     const colByText: Record<string, number | undefined> = {};
-    for (const e of pages[0]) {
+    for (const e of pages[0].layers.body) {
       const t = textOf(e);
       if (t.startsWith('p')) colByText[t] = colOf(e);
     }
@@ -1762,36 +1916,45 @@ describe('computePages — newspaper column balancing (§17.6.4, non-final conti
       sectionBreak('continuous', twoColSpec),
       para({ text: 'x', fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx()); // final section = 1-col
-    const slices = pages[0].filter((e) => e.type === 'paragraph' && sliceOf(e));
+    const pages = layoutPages(body, section(), makeCtx()); // final section = 1-col
+    const slices = pages[0].layers.body.filter((e) => e.kind === 'paragraph' && continuationOf(e));
     const col0 = slices.filter((e) => (colOf(e) ?? 0) === 0);
     const col1 = slices.filter((e) => colOf(e) === 1);
     // One slice per column — the paragraph spans the balance boundary.
     expect(col0).toHaveLength(1);
     expect(col1).toHaveLength(1);
-    const s0 = sliceOf(col0[0]) as { start: number; end: number };
-    const s1 = sliceOf(col1[0]) as { start: number; end: number };
-    expect(s0.start).toBe(0);
-    expect(s0.end).toBe(4); // balance target = 4 lines
-    expect(s1).toEqual({ start: 4, end: 8 }); // remainder in col1
+    const s0 = continuationOf(col0[0]) as { lineStart: number; lineEnd: number };
+    const s1 = continuationOf(col1[0]) as { lineStart: number; lineEnd: number };
+    expect(s0.lineStart).toBe(0);
+    expect(s0.lineEnd).toBe(4); // balance target = 4 lines
+    expect(s1).toMatchObject({
+      lineStart: 0,
+      lineEnd: 4,
+      continuesFromPrevious: true,
+    }); // the destination node owns a re-wrapped local range
   });
 
   it('moves a keepLines paragraph WHOLE to balance (does not split it across columns)', () => {
     // A keepLines paragraph (§17.3.1.14) cannot be split, so balancing falls back
     // to the whole-paragraph move. Short para (1 line) fills col0; the 3-line
     // keepLines paragraph exceeds the balance target (4 lines total ⇒ 2-line
-    // target) and moves WHOLE into col1 — intact, no lineSlice.
+    // target) and moves WHOLE into col1 — intact, no continuation.
     const body: BodyElement[] = [
       para({ text: 'x', fontSize: 20 }),
       para({ text: 'あ'.repeat(9), fontSize: 20, keepLines: true }), // 9 / 3 = 3 lines
       sectionBreak('continuous', twoColSpec),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx());
-    const keep = pages[0].find((e) => textOf(e).startsWith('あ'));
+    const pages = layoutPages(body, section(), makeCtx());
+    const keep = pages[0].layers.body.find((e) => textOf(e).startsWith('あ'));
     expect(keep).toBeDefined();
-    expect(colOf(keep as PaginatedBodyElement) ?? 0).toBe(1); // moved to col1
-    expect(sliceOf(keep as PaginatedBodyElement)).toBeUndefined(); // whole, not split
+    expect(colOf(keep) ?? 0).toBe(1); // moved to col1
+    expect(continuationOf(keep)).toMatchObject({
+      lineStart: 0,
+      lineEnd: 3,
+      continuesFromPrevious: false,
+      continuesOnNext: false,
+    });
   });
 
   it('does NOT balance the FINAL (body) section — it fills col0 greedily', () => {
@@ -1800,13 +1963,13 @@ describe('computePages — newspaper column balancing (§17.6.4, non-final conti
     // observation: the last page packs the left column). Greedy: col0 holds 5
     // (100px), col1 holds 1.
     const body: BodyElement[] = Array.from({ length: 6 }, (_, i) => para({ text: `p${i}`, fontSize: 20 }));
-    const pages = computePages(body, section({ columns: twoColSpec }), makeCtx());
-    const col0 = pages[0].filter((e) => colOf(e) === 0).map(textOf);
+    const pages = layoutPages(body, section({ columns: twoColSpec }), makeCtx());
+    const col0 = pages[0].layers.body.filter((e) => colOf(e) === 0).map(textOf);
     expect(col0).toEqual(['p0', 'p1', 'p2', 'p3', 'p4']); // greedy fill, NOT balanced
   });
 });
 
-describe('computePages — keepNext at a balanced column boundary (§17.3.1.15)', () => {
+describe('layoutPages — keepNext at a balanced column boundary (§17.3.1.15)', () => {
   const twoColSpec = { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] };
 
   // section(): content height 100, content width 160, 2-col ⇒ col width 70. Every
@@ -1828,9 +1991,9 @@ describe('computePages — keepNext at a balanced column boundary (§17.3.1.15)'
       sectionBreak('continuous', twoColSpec),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     const colByText: Record<string, number | undefined> = {};
-    for (const e of pages[0]) {
+    for (const e of pages[0].layers.body) {
       const t = textOf(e);
       if (t.startsWith('p')) colByText[t] = colOf(e) ?? 0;
     }
@@ -1852,14 +2015,14 @@ describe('computePages — keepNext at a balanced column boundary (§17.3.1.15)'
       sectionBreak('continuous', twoColSpec),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx());
-    const p1 = pages[0].find((e) => textOf(e) === 'p1');
-    const tbl = pages[0].find((e) => e.type === 'table');
+    const pages = layoutPages(body, section(), makeCtx());
+    const p1 = pages[0].layers.body.find((e) => textOf(e) === 'p1');
+    const tbl = pages[0].layers.body.find((e) => e.kind === 'table');
     expect(p1).toBeDefined();
     expect(tbl).toBeDefined();
-    expect(colOf(p1 as PaginatedBodyElement) ?? 0).toBe(1);
+    expect(colOf(p1) ?? 0).toBe(1);
     // The table follows p1 in the SAME column.
-    expect(colOf(tbl as PaginatedBodyElement) ?? 0).toBe(1);
+    expect(colOf(tbl) ?? 0).toBe(1);
   });
 
   it('does NOT move a paragraph WITHOUT keepNext (unchanged greedy-to-target fill)', () => {
@@ -1874,9 +2037,9 @@ describe('computePages — keepNext at a balanced column boundary (§17.3.1.15)'
       sectionBreak('continuous', twoColSpec),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = layoutPages(body, section(), makeCtx());
     const colByText: Record<string, number | undefined> = {};
-    for (const e of pages[0]) {
+    for (const e of pages[0].layers.body) {
       const t = textOf(e);
       if (t.startsWith('p')) colByText[t] = colOf(e) ?? 0;
     }
@@ -1899,14 +2062,14 @@ describe('computePages — keepNext at a balanced column boundary (§17.3.1.15)'
       sectionBreak('continuous', twoColSpec),
       para({ text: 'after', fontSize: 20 }),
     ];
-    const pages = computePages(body, section(), makeCtx());
-    const p1 = pages[0].find((e) => textOf(e) === 'p1');
+    const pages = layoutPages(body, section(), makeCtx());
+    const p1 = pages[0].layers.body.find((e) => textOf(e) === 'p1');
     expect(p1).toBeDefined();
-    expect(colOf(p1 as PaginatedBodyElement) ?? 0).toBe(0); // stays in col0
+    expect(colOf(p1) ?? 0).toBe(0); // stays in col0
   });
 });
 
-describe('computePages — vanished (hidden) empty-paragraph mark collapse (§17.3.2.41 / §17.3.1.29)', () => {
+describe('layoutPages — vanished (hidden) empty-paragraph mark collapse (§17.3.2.41 / §17.3.1.29)', () => {
   // ECMA-376 §17.3.1.29: a paragraph's mark has run properties. §17.3.2.41
   // `w:vanish` hides a run in the normal/print view (hidden-text off, the view a
   // Word PDF export renders). An INKLESS paragraph whose MARK is vanished is
@@ -1927,12 +2090,12 @@ describe('computePages — vanished (hidden) empty-paragraph mark collapse (§17
   ];
 
   it('collapses inkless vanished-mark paragraphs to zero height (identical to their absence)', () => {
-    const reference = computePages(
+    const reference = layoutPages(
       [...visible().slice(0, 4), visible()[4]], // 5 visible paragraphs, no empties
       section(),
       makeCtx(),
     );
-    const withVanish = computePages(
+    const withVanish = layoutPages(
       [
         ...visible().slice(0, 4),
         para({ markVanish: true, spaceAfter: 8, fontSize: 20 }),
@@ -1948,11 +2111,11 @@ describe('computePages — vanished (hidden) empty-paragraph mark collapse (§17
     expect(reference.length).toBe(1);
     expect(withVanish.length).toBe(reference.length);
     // The fifth visible paragraph ('e') is on the first (only) page.
-    expect(withVanish[0].some((el) => textOf(el) === 'e')).toBe(true);
+    expect(withVanish[0].layers.body.some((el) => textOf(el) === 'e')).toBe(true);
   });
 
   it('control: ORDINARY empty paragraphs (mark not vanished) still reserve height and add a page', () => {
-    const withOrdinaryEmpties = computePages(
+    const withOrdinaryEmpties = layoutPages(
       [
         ...visible().slice(0, 4),
         para({ spaceAfter: 8, fontSize: 20 }),

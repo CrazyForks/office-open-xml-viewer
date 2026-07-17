@@ -2103,9 +2103,8 @@ export function layoutBidiTabStops(
 
 /** Value equivalence of two resolved kinsoku rule sets, with a reference fast
  *  path. The reuse gate cannot rely on `===` alone: `resolveKinsokuRules` builds
- *  a FRESH object (fresh Sets) on every call, and the prebuiltPages production
- *  path (DocxDocument.renderPage) resolves it independently in paginateDocument
- *  and in renderDocumentToCanvas — same `doc.settings`, different references.
+ *  a FRESH object (fresh Sets) on every call, and canonical layout variants
+ *  resolve it independently — same `doc.settings`, different references.
  *  Both derive from the same immutable settings so they are value-equal there;
  *  this check is pure defense so a genuinely different rule set (which would
  *  change CJK retract decisions in layoutLines) can never reuse stale lines. */
@@ -2605,6 +2604,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         const label = noteText != null ? String(noteText) : (t.text || '');
         if (label.length > 0) {
           pushTextPiece(label, t, t.vertAlign ?? 'super', runIndex, 0);
+        }
+        for (let index = emittedStart; index < segs.length; index += 1) {
+          segs[index].sourceRunIndex = runIndex;
         }
         continue;
       }

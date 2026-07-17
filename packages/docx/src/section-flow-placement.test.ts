@@ -1,8 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { layoutDocument } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, LineNumbering, SectionProps } from './types.js';
-import type { ParagraphLayout } from './layout/types.js';
-import type { PlacedFragment } from './layout-fragments.js';
+import type { ParagraphLayout, TableLayout } from './layout/types.js';
+
+interface PlacedFragment {
+  readonly fragment: ParagraphLayout | TableLayout;
+  readonly columnIndex: number;
+  readonly xPt: number;
+  readonly yPt: number;
+  readonly widthPt: number;
+  readonly heightPt: number;
+}
 
 const FONT = 'Synthetic Untabled Serif';
 
@@ -67,6 +75,11 @@ function para(text: string, overrides: Partial<DocParagraph> = {}): BodyElement 
 function marker(kind: string, placement: PrivateSectionPlacementWire): BodyElement {
   return {
     type: 'sectionBreak', kind, columns: null,
+    geom: {
+      pageWidth: 200, pageHeight: 200,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 40,
+      headerDistance: 0, footerDistance: 0,
+    },
     headers: { default: null, first: null, even: null },
     footers: { default: null, first: null, even: null },
     titlePage: false,
@@ -95,13 +108,28 @@ function doc(body: BodyElement[], finalSection: SectionProps): DocxDocumentModel
 }
 
 function fragments(model: DocxDocumentModel): PlacedFragment[][] {
-  return (layoutDocument(model) as unknown as { pages: Array<{ fragments: PlacedFragment[] }> })
-    .pages.map((page) => page.fragments);
+  return layoutDocument(model).pages.map((page) => page.layers.body.flatMap((node) => {
+    if (node.kind !== 'paragraph' && node.kind !== 'table') return [];
+    return [{
+      fragment: node,
+      columnIndex: Number(/:column:(\d+)$/u.exec(node.flowDomainId)?.[1] ?? 0),
+      xPt: node.flowBounds.xPt,
+      yPt: node.flowBounds.yPt,
+      widthPt: node.flowBounds.widthPt,
+      heightPt: node.advancePt,
+    }];
+  }));
 }
 
 function paragraphFragments(page: readonly PlacedFragment[]): Array<PlacedFragment & { fragment: ParagraphLayout }> {
   return page.filter((placed): placed is PlacedFragment & { fragment: ParagraphLayout } =>
     placed.fragment.kind === 'paragraph');
+}
+
+function paragraphIntrinsicAdvancePt(paragraph: ParagraphLayout): number {
+  return paragraph.spacing.beforePt
+    + paragraph.lines.reduce((sum, line) => sum + line.advancePt, 0)
+    + paragraph.spacing.afterPt;
 }
 
 describe('retained per-section flow placement', () => {
@@ -181,7 +209,9 @@ describe('retained per-section flow placement', () => {
 
     expect(frame.fragment.lineNumbers).toBeUndefined();
     expect(body.fragment.lineNumbers?.map((line) => line.counterValue)).toEqual([1]);
-    expect(frame.heightPt).toBe(0);
+    expect(frame.fragment.advancePt).toBe(0);
+    expect(frame.fragment.flowBounds.heightPt)
+      .toBeCloseTo(paragraphIntrinsicAdvancePt(frame.fragment), 6);
     // A text-anchored frame follows the same retained vAlign translation as its
     // host flow; its own height does not enlarge that alignment calculation.
     expect(frame.yPt).toBeGreaterThan(100);
@@ -219,7 +249,9 @@ describe('retained per-section flow placement', () => {
     ], section({ vAlign: 'bottom' })))[0]!);
     const frame = page.find(({ fragment }) => !fragment.ordinaryFlow)!;
 
-    expect(frame.heightPt).toBe(0);
+    expect(frame.fragment.advancePt).toBe(0);
+    expect(frame.fragment.flowBounds.heightPt)
+      .toBeCloseTo(paragraphIntrinsicAdvancePt(frame.fragment), 6);
     expect(frame.yPt).toBeLessThan(50);
   });
 

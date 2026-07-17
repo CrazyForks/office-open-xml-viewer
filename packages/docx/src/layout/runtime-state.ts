@@ -1,10 +1,11 @@
-import type { DeepReadonly, DocumentLayout, LayoutServices } from './types.js';
+import type { LayoutServices } from './types.js';
 import type { PaintResourceRegistry } from './types.js';
 import type { NumberFormat } from '@silurus/ooxml-core';
+import type { BodyLayoutKernel } from './body-layout-kernel.js';
+import type { LayoutVariantStore } from './variant-store.js';
 
 export interface DocumentLayoutRuntimeState {
   services: LayoutServices | null;
-  retainedErrorLayout: DeepReadonly<DocumentLayout> | null;
   readonly defaultCurrentDateMs: number;
 }
 
@@ -22,7 +23,7 @@ export function attachDocumentLayoutRuntime(
     configurable: false,
     enumerable: false,
     writable: false,
-    value: { services: null, retainedErrorLayout: null, defaultCurrentDateMs },
+    value: { services: null, defaultCurrentDateMs },
   });
 }
 
@@ -52,6 +53,68 @@ export function createImmutableResourceLookup<T>(entries: ReadonlyMap<string, T>
 }
 
 const privateResourceLookups = new WeakMap<object, ImmutableResourceLookup<unknown>>();
+type LayoutServicesRuntimeOwner = object;
+
+const layoutServicesRuntimeOwners = new WeakMap<object, LayoutServicesRuntimeOwner>();
+const bodyLayoutKernels = new WeakMap<LayoutServicesRuntimeOwner, BodyLayoutKernel>();
+const layoutVariantStores = new WeakMap<LayoutServices, LayoutVariantStore>();
+
+/** Service views may replace one component, but mixing components already owned
+ * by different documents must fail before acquisition can use a foreign kernel. */
+function layoutServicesRuntimeOwner(
+  services: LayoutServices,
+  create: boolean,
+): LayoutServicesRuntimeOwner | undefined {
+  const components = [services.text, services.images, services.math];
+  const owners = new Set(components.flatMap((component) => {
+    const owner = layoutServicesRuntimeOwners.get(component);
+    return owner ? [owner] : [];
+  }));
+  if (owners.size > 1) {
+    throw new Error('Layout services combine foreign runtime owners');
+  }
+  const owner = owners.values().next().value as LayoutServicesRuntimeOwner | undefined;
+  const unowned = components.filter((component) => !layoutServicesRuntimeOwners.has(component));
+  if (owner && unowned.length > 1) {
+    throw new Error('Layout services are missing service lineage for multiple components');
+  }
+  if (!owner && !create) return undefined;
+  const resolved = owner ?? {};
+  for (const component of components) {
+    const existing = layoutServicesRuntimeOwners.get(component);
+    if (existing && existing !== resolved) {
+      throw new Error('Layout services combine foreign runtime owners');
+    }
+    layoutServicesRuntimeOwners.set(component, resolved);
+  }
+  return resolved;
+}
+
+export function attachBodyLayoutKernel(
+  services: LayoutServices,
+  kernel: BodyLayoutKernel,
+): void {
+  const owner = layoutServicesRuntimeOwner(services, true)!;
+  if (bodyLayoutKernels.has(owner)) throw new Error('Body layout kernel is already attached');
+  bodyLayoutKernels.set(owner, kernel);
+}
+
+export function bodyLayoutKernelOf(services: LayoutServices): BodyLayoutKernel | undefined {
+  const owner = layoutServicesRuntimeOwner(services, false);
+  return owner ? bodyLayoutKernels.get(owner) : undefined;
+}
+
+export function attachLayoutVariantStore(
+  services: LayoutServices,
+  store: LayoutVariantStore,
+): void {
+  if (layoutVariantStores.has(services)) throw new Error('Layout variant store is already attached');
+  layoutVariantStores.set(services, store);
+}
+
+export function layoutVariantStoreOf(services: LayoutServices): LayoutVariantStore | undefined {
+  return layoutVariantStores.get(services);
+}
 
 export function attachPrivateResourceLookup<T>(
   owner: object,
@@ -109,6 +172,23 @@ export interface PageFieldAcquisitionContext {
 
 const fieldAcquisitionContexts = new WeakMap<object, FieldAcquisitionContext>();
 
+export function createLayoutServicesRuntimeView(
+  services: LayoutServices,
+  overrides: Readonly<{ text?: LayoutServices['text'] }> = {},
+): LayoutServices {
+  const view = Object.freeze({ ...services, ...overrides });
+  const kernel = bodyLayoutKernelOf(services);
+  if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
+  if (bodyLayoutKernelOf(view) !== kernel) {
+    throw new Error('Layout service view did not retain its body layout kernel owner');
+  }
+  const lookup = privateResourceLookups.get(services);
+  if (lookup) privateResourceLookups.set(view, lookup);
+  const registry = paintResourceRegistries.get(services);
+  if (registry) paintResourceRegistries.set(view, registry);
+  return view;
+}
+
 /** Create one immutable service identity for a pagination-field iteration. */
 export function createFieldAcquisitionServicesView(
   services: LayoutServices,
@@ -117,7 +197,7 @@ export function createFieldAcquisitionServicesView(
   if (!Number.isInteger(context.totalPages) || context.totalPages < 1) {
     throw new RangeError('Field acquisition totalPages must be a positive integer');
   }
-  const view = Object.freeze({ ...services });
+  const view = createLayoutServicesRuntimeView(services);
   fieldAcquisitionContexts.set(view, Object.freeze({ ...context }));
   return view;
 }

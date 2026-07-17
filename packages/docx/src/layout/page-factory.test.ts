@@ -613,6 +613,58 @@ describe('createLayoutPage', () => {
     });
   });
 
+  it('retains an empty continuous region only for out-of-flow occurrence ownership', () => {
+    const first = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const second = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const firstDomain = bodyFlowDomainId(0, 'region:first', 0);
+    const secondDomain = bodyFlowDomainId(0, 'region:second', 0);
+    const floating = {
+      ...drawing('floating', firstDomain, rect(72, 72, 100, 20)),
+      ordinaryFlow: false,
+    };
+    const follower = drawing('follower', secondDomain, rect(72, 72, 100, 20));
+    const input = {
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:first',
+      section: first,
+      sectionRegions: [
+        {
+          id: 'region:first', sectionOccurrenceId: 'section:first', section: first,
+          writingMode: 'horizontal-tb' as const, blockStartPt: 72, blockEndPt: 72,
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+        },
+        {
+          id: 'region:second', sectionOccurrenceId: 'section:second', section: second,
+          writingMode: 'horizontal-tb' as const, blockStartPt: 72, blockEndPt: 720,
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+        },
+      ],
+      paint: [
+        { layer: 'body' as const, node: floating },
+        { layer: 'body' as const, node: follower },
+      ],
+      readingOrder: [floating, follower],
+      pageNumber: {
+        displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:first',
+      },
+    };
+
+    const page = createLayoutPage(input);
+
+    expect(page.flowDomains.map((domain) => domain.logicalBounds.heightPt)).toEqual([0, 648]);
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
+    expect(() => assertDocumentLayout({
+      pages: [{
+        ...page,
+        layers: { ...page.layers, body: [{ ...floating, ordinaryFlow: true }, follower] },
+      }],
+      diagnostics: [],
+    })).toThrow(LayoutInvariantError);
+  });
+
   it('retains a logical-to-physical transform for vertical section regions', () => {
     const vertical = verticalSection('tbRl', [{ xPt: 72, wPt: 648 }]);
 
@@ -1012,7 +1064,7 @@ describe('createLayoutPage', () => {
     expect(() => assertDocumentLayout(inventedPlacement)).toThrow(/bookmark metadata/);
   });
 
-  it('rejects an ownerless derived bookmark while preserving transitional omission and emptiness', () => {
+  it('rejects an ownerless derived bookmark while preserving canonical emptiness', () => {
     const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
     const domainId = bodyFlowDomainId(0, 'region:body', 0);
     const paragraph = bookmarkParagraph(
@@ -1030,21 +1082,9 @@ describe('createLayoutPage', () => {
       paint: [{ layer: 'body', node: paragraph }], readingOrder: [paragraph],
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
     });
-    const {
-      sectionOccurrenceId,
-      sectionRegions,
-      pageNumber,
-      bookmarkStarts,
-      ...transitionalPage
-    } = page;
-    void sectionOccurrenceId;
-    void sectionRegions;
-    void pageNumber;
-    void bookmarkStarts;
-
     const ownerless: DocumentLayout = {
       pages: [{
-        ...transitionalPage,
+        ...page,
         bookmarkStarts: [{
           name: 'destination', nodeId: paragraph.id, sectionOccurrenceId: '',
         }],
@@ -1059,11 +1099,9 @@ describe('createLayoutPage', () => {
       expect((error as LayoutInvariantError).code).toBe('INVALID_REFERENCE');
     }
 
-    expect(() => assertDocumentLayout({ pages: [transitionalPage], diagnostics: [] }))
-      .not.toThrow();
     expect(() => assertDocumentLayout({
       pages: [{
-        ...transitionalPage,
+        ...page,
         bookmarkStarts: [],
         layers: {
           paintOrder: [], background: [], behindText: [], header: [], body: [],

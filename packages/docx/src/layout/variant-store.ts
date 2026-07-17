@@ -1,10 +1,26 @@
 import { deepFreezeDocumentLayout } from './invariants.js';
 import { layoutOptionsKey, type LayoutOptions } from './options.js';
-import type { DeepReadonly, DocumentLayout, LayoutServices } from './types.js';
+import type { DeepReadonly, DocumentLayout, LayoutPage, LayoutServices } from './types.js';
 
 export type DocumentLayoutBuilder = (
   options: LayoutOptions,
 ) => DocumentLayout | DeepReadonly<DocumentLayout>;
+
+export interface DocumentLayoutSelection {
+  readonly key: string;
+  readonly options: LayoutOptions;
+  readonly layout: DeepReadonly<DocumentLayout>;
+}
+
+export function requireLayoutPage(
+  layout: DeepReadonly<DocumentLayout>,
+  pageIndex: number,
+): DeepReadonly<LayoutPage> {
+  if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= layout.pages.length) {
+    throw new RangeError(`Page index ${pageIndex} out of range (count: ${layout.pages.length})`);
+  }
+  return layout.pages[pageIndex] as DeepReadonly<LayoutPage>;
+}
 
 /**
  * Document-scoped layout cache. The key deliberately excludes paint-only facts
@@ -33,13 +49,36 @@ export class LayoutVariantStore {
   }
 
   layoutFor(options: LayoutOptions): DeepReadonly<DocumentLayout> {
-    const normalized = Object.freeze({ ...options });
+    return this.select(options).layout;
+  }
+
+  select(options: LayoutOptions): DocumentLayoutSelection {
+    const normalized = Object.isFrozen(options)
+      ? options
+      : Object.freeze({ ...options });
     const key = layoutOptionsKey(normalized, this.#services);
-    const cached = this.#variants.get(key);
-    if (cached) return cached;
-    const layout = deepFreezeDocumentLayout(this.#build(normalized) as DocumentLayout);
-    this.#variants.set(key, layout);
-    return layout;
+    let layout = this.#variants.get(key);
+    if (!layout) {
+      layout = deepFreezeDocumentLayout(this.#build(normalized) as DocumentLayout);
+      this.#variants.set(key, layout);
+    }
+    return Object.freeze({ key, options: normalized, layout });
+  }
+
+  selectPage(
+    options: LayoutOptions,
+    pageIndex: number,
+  ): Readonly<{
+    key: string;
+    options: LayoutOptions;
+    layout: DeepReadonly<DocumentLayout>;
+    page: DeepReadonly<LayoutPage>;
+  }> {
+    const selection = this.select(options);
+    return Object.freeze({
+      ...selection,
+      page: requireLayoutPage(selection.layout, pageIndex),
+    });
   }
 
   isDefault(options: LayoutOptions): boolean {

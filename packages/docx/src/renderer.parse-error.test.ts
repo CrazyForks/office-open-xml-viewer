@@ -1,10 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, renderDocumentToCanvas } from './renderer';
+import { createLayoutServices, renderDocumentToCanvas } from './renderer.js';
 import type { DocxDocumentModel, SectionProps } from './types';
-import { createFontResolver } from './layout/font-service.js';
-import { createTextLayoutService } from './layout/text.js';
-import { layoutParseErrorPage } from './layout/error-page.js';
-import { deepFreezeDocumentLayout } from './layout/invariants.js';
 
 /**
  * RB7: a document carrying `parseError` (a degraded `word/document.xml`, or —
@@ -98,21 +94,6 @@ function degradedDoc(parseError: string): DocxDocumentModel {
   };
 }
 
-function retainedErrorLayout(doc: DocxDocumentModel) {
-  const text = createTextLayoutService({
-    fonts: createFontResolver([]),
-    measurer: {
-      fingerprint: 'parse-error-layout-v1',
-      measure: (request) => ({ advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2 }),
-    },
-  });
-  return deepFreezeDocumentLayout(layoutParseErrorPage(
-    doc.parseError as string,
-    { widthPt: doc.section.pageWidth, heightPt: doc.section.pageHeight },
-    text,
-  ));
-}
-
 describe('RB7 renderDocumentToCanvas placeholder', () => {
   it('paints a placeholder carrying the parseError message for a degraded document', async () => {
     const { ctx, calls } = recordingCtx(true);
@@ -122,7 +103,7 @@ describe('RB7 renderDocumentToCanvas placeholder', () => {
       doc,
       canvas,
       0,
-      { width: 816, dpr: 1, retainedLayout: retainedErrorLayout(doc) },
+      { width: 816, dpr: 1 },
     );
 
     const texts = calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
@@ -142,7 +123,7 @@ describe('RB7 renderDocumentToCanvas placeholder', () => {
       doc,
       canvas,
       0,
-      { width: 816, dpr: 1, retainedLayout: retainedErrorLayout(doc) },
+      { width: 816, dpr: 1 },
     );
     const texts = calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
     expect(texts.join(' ')).toContain('zip container');

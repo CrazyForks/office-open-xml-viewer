@@ -143,7 +143,8 @@ export function retainedTextDecorations(input: Readonly<{
     const style = underlineStyle(input.underline.authoredStyle);
     const common = {
       kind: 'underline' as const,
-      authoredStyle: input.underline.authoredStyle,
+      ...(input.underline.authoredStyle === undefined
+        ? {} : { authoredStyle: input.underline.authoredStyle }),
       color: input.underline.color,
       widthPt: strokeWidthPt,
     };

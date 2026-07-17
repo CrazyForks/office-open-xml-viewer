@@ -10,7 +10,7 @@ import type { FloatTableBox } from './float-table-geometry.js';
 import type { FramePr, TblpPr } from './types.js';
 import type { FloatRect } from './float-layout.js';
 
-// #513 regression: the change-page MEASURE pass (computePages) must resolve an
+// #513 regression: the change-page measurement pass must resolve an
 // out-of-flow frame (§17.3.1.11 framePr) / floating table (§17.4.57 tblpPr) with
 // the SAME per-column content band the PAINT pass (renderBodyElements) uses, so
 // their FloatRect x / wrap side agree inside a multi-column (§17.6.4) section.

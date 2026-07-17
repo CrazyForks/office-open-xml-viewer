@@ -1,9 +1,6 @@
 import { beforeAll, describe, it, expect } from 'vitest';
-import {
-  bodyFragmentFor,
-  paginateDocument,
-  renderDocumentToCanvas,
-} from './renderer.js';
+import { layoutDocument } from './renderer.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,
   CellElement,
@@ -79,6 +76,9 @@ function makeRecordingCanvas(): {
     },
     save() { stack.push({ ...transform }); },
     restore() { transform = stack.pop() ?? transform; },
+    setTransform(a: number, _b: number, _c: number, d: number, e: number, f: number) {
+      transform = { scaleX: a, scaleY: d, translateX: e, translateY: f };
+    },
     beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {},
     fillRect(x: number, y: number, w: number, h: number) {
@@ -222,20 +222,15 @@ const SCALE = CSS_WIDTH / PAGE_WIDTH;
 
 async function renderAndRead(t: DocTable) {
   const model = docWithTable(t);
-  const pages = paginateDocument(model);
-  const tableElement = pages.flat().find((element) => element.type === 'table');
-  expect(tableElement).toBeDefined();
-  const placed = bodyFragmentFor(tableElement!);
-  expect(placed?.fragment.kind).toBe('table');
-  if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+  const layout = layoutDocument(model);
+  const table = layout.pages.flatMap((page) => page.layers.body)
+    .find((node) => node.kind === 'table');
+  expect(table).toBeDefined();
+  if (table?.kind !== 'table') {
     throw new Error('expected retained TableLayout/TableFragmentLayout');
   }
   const rec = makeRecordingCanvas();
-  await renderDocumentToCanvas(model, rec.canvas, 0, {
-    dpr: 1,
-    width: CSS_WIDTH,
-    prebuiltPages: pages,
-  });
+  await paintLayoutPage(layout, 0, rec.canvas, { dpr: 1, scale: CSS_WIDTH / PAGE_WIDTH });
   expect(rec.measured()).toBe(0);
   return rec;
 }

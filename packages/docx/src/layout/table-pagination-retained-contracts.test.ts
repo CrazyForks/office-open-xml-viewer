@@ -1,8 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import {
-  bodyFragmentFor,
-  paginateDocument,
-} from '../renderer.js';
+import { layoutDocument } from '../renderer.js';
 import { tableFormatInput } from '../parser-model.js';
 import type {
   BodyElement,
@@ -12,8 +9,7 @@ import type {
   DocTableCell,
   DocTableRow,
   DocxDocumentModel,
-  PaginatedBodyElement,
-  SectionProps,
+    SectionProps,
 } from '../types.js';
 import type { TableFragmentLayout } from './table-pagination.js';
 
@@ -129,12 +125,10 @@ function documentModel(
   } as unknown as DocxDocumentModel;
 }
 
-function retainedTopLevelTables(pages: PaginatedBodyElement[][]): TableFragmentLayout[] {
-  return pages.flatMap((page) => page.flatMap((element) => {
-    if (element.type !== 'table') return [];
-    const retained = bodyFragmentFor(element)?.fragment;
-    return retained?.kind === 'table' && 'flowBounds' in retained
-      ? [retained as TableFragmentLayout]
+function retainedTopLevelTables(layout: ReturnType<typeof layoutDocument>): TableFragmentLayout[] {
+  return layout.pages.flatMap((page) => page.layers.body.flatMap((node) => {
+    return node.kind === 'table'
+      ? [node as TableFragmentLayout]
       : [];
   }));
 }
@@ -159,8 +153,8 @@ describe('retained table pagination contracts', () => {
       background: '112233',
     });
     const source = table([row([sourceCell])], [120]);
-    const pages = paginateDocument(documentModel([source as unknown as BodyElement], 80));
-    const nestedFragments = retainedTopLevelTables(pages).flatMap((fragment) =>
+    const layout = layoutDocument(documentModel([source as unknown as BodyElement], 80));
+    const nestedFragments = retainedTopLevelTables(layout).flatMap((fragment) =>
       fragment.rows.flatMap((fragmentRow) => fragmentRow.cells.flatMap((fragmentCell) =>
         fragmentCell.blocks.flatMap((block) => block.layout.kind === 'table'
           ? [block.layout as TableFragmentLayout]
@@ -192,22 +186,18 @@ describe('retained table pagination contracts', () => {
       section: { ...wideModel.section, pageWidth: 150 },
     } as DocxDocumentModel;
 
-    const [wideElement] = paginateDocument(wideModel)[0] ?? [];
-    if (!wideElement) throw new Error('expected wide table placement');
-    const wide = bodyFragmentFor(wideElement);
+    const wide = layoutDocument(wideModel).pages[0]?.layers.body.find((node) => node.kind === 'table');
+    if (wide?.kind !== 'table') throw new Error('expected wide table placement');
     const wideFingerprint = JSON.stringify(wide);
 
-    const [narrowElement] = paginateDocument(narrowModel)[0] ?? [];
-    if (!narrowElement) throw new Error('expected narrow table placement');
-    const narrow = bodyFragmentFor(narrowElement);
+    const narrow = layoutDocument(narrowModel).pages[0]?.layers.body.find((node) => node.kind === 'table');
+    if (narrow?.kind !== 'table') throw new Error('expected narrow table placement');
 
-    expect(wide?.fragment.kind).toBe('table');
-    expect(narrow?.fragment.kind).toBe('table');
-    expect(wide?.widthPt).toBeCloseTo(180, 6);
-    expect(narrow?.widthPt).toBeCloseTo(130, 6);
-    expect(wide?.xPt).toBeCloseTo(10, 6);
-    expect(narrow?.xPt).toBeCloseTo(10, 6);
-    expect(wide?.fragment).not.toBe(narrow?.fragment);
+    expect(wide.flowBounds.widthPt).toBeCloseTo(180, 6);
+    expect(narrow.flowBounds.widthPt).toBeCloseTo(130, 6);
+    expect(wide.flowBounds.xPt).toBeCloseTo(10, 6);
+    expect(narrow.flowBounds.xPt).toBeCloseTo(10, 6);
+    expect(wide).not.toBe(narrow);
     expect(JSON.stringify(wide)).toBe(wideFingerprint);
     expect(source).not.toHaveProperty('tableColWidthsPt');
     expect(source).not.toHaveProperty('tableRowHeightsPt');
@@ -221,8 +211,8 @@ describe('retained table pagination contracts', () => {
       source as unknown as BodyElement,
     ], 100);
 
-    const [first] = retainedTopLevelTables(paginateDocument(firstModel));
-    const [second] = retainedTopLevelTables(paginateDocument(secondModel));
+    const [first] = retainedTopLevelTables(layoutDocument(firstModel));
+    const [second] = retainedTopLevelTables(layoutDocument(secondModel));
 
     expect(first?.source.path[0]).toBe(0);
     expect(second?.source.path[0]).toBe(1);
@@ -254,58 +244,56 @@ describe('retained table pagination contracts', () => {
       },
     } as SectionProps;
 
-    const pages = paginateDocument(model);
-    const elements = pages.flatMap((page) => page).filter((element) => element.type === 'table');
-    const placements = elements.map((element) => bodyFragmentFor(element));
+    const layout = layoutDocument(model);
+    const placements = layout.pages.flatMap((page) => page.layers.body.flatMap((node) => (
+      node.kind === 'table' ? [{ page, node }] : []
+    )));
 
     expect(placements).toHaveLength(2);
-    expect(placements.map((placed) => placed?.fragment.source.path[0])).toEqual([0, 2]);
-    expect(placements.map((placed) => placed?.columnIndex)).toEqual([0, 1]);
-    expect(placements.map((placed) => placed?.widthPt)).toEqual([120, 60]);
-    expect(placements[0]?.fragment).not.toBe(placements[1]?.fragment);
-    expect(placements[0]?.fragment.source.path).not.toEqual(placements[1]?.fragment.source.path);
+    expect(placements.map(({ node }) => node.source.path[0])).toEqual([0, 2]);
+    expect(placements.map(({ page, node }) => page.sectionRegions
+      .flatMap((region) => region.flowDomainIds)
+      .indexOf(node.flowDomainId))).toEqual([0, 1]);
+    expect(placements.map(({ node }) => node.flowBounds.widthPt)).toEqual([120, 60]);
+    expect(placements[0]?.node).not.toBe(placements[1]?.node);
+    expect(placements[0]?.node.source.path).not.toEqual(placements[1]?.node.source.path);
   });
 
   it('emits distinct retained paragraph envelopes for repeated source occurrences', () => {
     const source = paragraph('repeated paragraph');
-    const pages = paginateDocument(documentModel([
+    const layout = layoutDocument(documentModel([
       source as unknown as BodyElement,
       source as unknown as BodyElement,
     ], 100));
-    const emitted = pages.flatMap((page) => page).filter(
-      (element) => element.type === 'paragraph',
+    const emitted = layout.pages.flatMap((page) => page.layers.body).filter(
+      (node) => node.kind === 'paragraph',
     );
-    const placements = emitted.map((element) => bodyFragmentFor(element));
 
     expect(emitted).toHaveLength(2);
     expect(emitted[0]).not.toBe(emitted[1]);
-    expect(placements.map((placement) => placement?.fragment.source.path[0])).toEqual([0, 1]);
-    expect(placements[0]?.yPt).toBeLessThan(placements[1]?.yPt ?? 0);
-    expect(placements[0]?.fragment).not.toBe(placements[1]?.fragment);
+    expect(emitted.map((node) => node.source.path[0])).toEqual([0, 1]);
+    expect(emitted[0]?.flowBounds.yPt).toBeLessThan(emitted[1]?.flowBounds.yPt ?? 0);
   });
 
   it('keeps an earlier retained paragraph envelope stable across sessions', () => {
     const source = paragraph('independent paragraph session');
     const wideModel = documentModel([source as unknown as BodyElement], 100, 200);
     const narrowModel = documentModel([source as unknown as BodyElement], 100, 150);
-    const firstElement = paginateDocument(wideModel)[0]?.find(
-      (element) => element.type === 'paragraph',
+    const firstElement = layoutDocument(wideModel).pages[0]?.layers.body.find(
+      (node) => node.kind === 'paragraph',
     );
     if (!firstElement) throw new Error('expected the first retained paragraph occurrence');
-    const firstPlacement = bodyFragmentFor(firstElement);
-    const firstFingerprint = JSON.stringify(firstPlacement);
+    const firstFingerprint = JSON.stringify(firstElement);
 
-    const secondElement = paginateDocument(narrowModel)[0]?.find(
-      (element) => element.type === 'paragraph',
+    const secondElement = layoutDocument(narrowModel).pages[0]?.layers.body.find(
+      (node) => node.kind === 'paragraph',
     );
     if (!secondElement) throw new Error('expected the second retained paragraph occurrence');
-    const secondPlacement = bodyFragmentFor(secondElement);
 
     expect(firstElement).not.toBe(secondElement);
-    expect(firstPlacement?.widthPt).toBeCloseTo(180, 6);
-    expect(secondPlacement?.widthPt).toBeCloseTo(130, 6);
-    expect(bodyFragmentFor(firstElement)).toEqual(firstPlacement);
-    expect(JSON.stringify(bodyFragmentFor(firstElement))).toBe(firstFingerprint);
+    expect(firstElement.flowBounds.widthPt).toBeCloseTo(180, 6);
+    expect(secondElement.flowBounds.widthPt).toBeCloseTo(130, 6);
+    expect(JSON.stringify(firstElement)).toBe(firstFingerprint);
   });
 
   it('resolves page-local outer border ink for every auto-height slice', () => {
@@ -329,7 +317,7 @@ describe('retained table pagination contracts', () => {
       .toEqual(['auto', 'auto', 'auto']);
 
     const fragments = retainedTopLevelTables(
-      paginateDocument(documentModel([source as unknown as BodyElement], 50)),
+      layoutDocument(documentModel([source as unknown as BodyElement], 50)),
     );
 
     expect(fragments).toHaveLength(3);
@@ -377,7 +365,7 @@ describe('retained table pagination contracts', () => {
       .toEqual(['auto', 'exact', 'auto', 'exact', 'auto']);
 
     const fragments = retainedTopLevelTables(
-      paginateDocument(documentModel([source as unknown as BodyElement], 52)),
+      layoutDocument(documentModel([source as unknown as BodyElement], 52)),
     );
 
     expect(fragments).toHaveLength(1);
@@ -412,7 +400,7 @@ describe('retained table pagination contracts', () => {
     );
 
     const fragments = retainedTopLevelTables(
-      paginateDocument(documentModel([source as unknown as BodyElement], 70)),
+      layoutDocument(documentModel([source as unknown as BodyElement], 70)),
     );
 
     expect(fragments).toHaveLength(3);
@@ -454,7 +442,7 @@ describe('retained table pagination contracts', () => {
     );
 
     const fragments = retainedTopLevelTables(
-      paginateDocument(documentModel([source as unknown as BodyElement], 80)),
+      layoutDocument(documentModel([source as unknown as BodyElement], 80)),
     );
 
     expect(fragments).toHaveLength(2);
@@ -489,7 +477,7 @@ describe('retained table pagination contracts', () => {
     );
 
     const fragments = retainedTopLevelTables(
-      paginateDocument(documentModel([source as unknown as BodyElement], 80)),
+      layoutDocument(documentModel([source as unknown as BodyElement], 80)),
     );
 
     expect(fragments.length).toBeGreaterThan(1);

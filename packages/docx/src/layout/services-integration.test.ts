@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildSegments, layoutLines, rescaleLayoutLines, type LineLayoutEnvironment } from '../line-layout.js';
-import { createLayoutServices } from '../renderer.js';
+import { createLayoutServices, layoutDocument } from '../renderer.js';
 import type { DocRun, DocxDocumentModel } from '../types.js';
 import type { InternalDocxDocumentModel, InternalFieldRun } from '../parser-model.js';
 import type { TextLayoutService } from './text.js';
@@ -50,6 +50,18 @@ function textRun(text: string, extra: Record<string, unknown> = {}): DocRun {
 }
 
 describe('production layout service integration', () => {
+  it('retains the document kernel when production text services are composed by object spread', () => {
+    const document = model();
+    const base = createLayoutServices(document, { measureContext: measureContext() });
+    const text = Object.freeze({ ...base.text });
+    const composed = Object.freeze({ ...base, text });
+
+    const layout = layoutDocument(document, composed, { currentDateMs: 10 });
+
+    expect(layout.pages).toHaveLength(1);
+    expect(layout.pages[0]?.geometry).toMatchObject({ widthPt: 612, heightPt: 792 });
+  });
+
   it('routes every normal run segmentation and measurement through the injected text service', () => {
     const base = createLayoutServices(model(), { measureContext: measureContext() });
     let calls = 0;

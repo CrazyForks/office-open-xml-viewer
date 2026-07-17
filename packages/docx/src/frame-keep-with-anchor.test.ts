@@ -1,13 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { bodyFragmentFor, computePages } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
+import type { LayoutPage, PaintNode } from './layout/types.js';
 import type {
   BodyElement,
   DocParagraph,
   DocxTextRun,
   FramePr,
   SectionProps,
-  PaginatedBodyElement,
-} from './types';
+  } from './types';
 
 // Unit tests for the keep-with-anchor pagination of a page-overflowing text
 // frame (ECMA-376 §17.3.1.11 `<w:framePr>`). §17.3.1.11 pins only the frame's
@@ -104,30 +104,36 @@ function framePara(fp: FramePr, opts: { text?: string; fontSize?: number } = {})
 }
 
 /** True when a page holds the frame paragraph (identified by its framePr). */
-const hasFrame = (page: PaginatedBodyElement[]): boolean =>
-  page.some((el) => el.type === 'paragraph' && (el as unknown as DocParagraph).framePr != null);
+const hasFrame = (page: readonly PaintNode[]): boolean =>
+  page.some((node) => node.kind === 'paragraph' && !node.ordinaryFlow);
 
 /** Text of a paragraph element (joins its text runs). */
-const textOf = (el: PaginatedBodyElement): string =>
-  el.type === 'paragraph'
-    ? (el as unknown as DocParagraph).runs
-        .filter((r) => r.type === 'text')
-        .map((r) => (r as DocxTextRun).text)
-        .join('')
+const textOf = (node: PaintNode): string =>
+  node.kind === 'paragraph'
+    ? node.lines.flatMap((line) => line.placements)
+        .filter((placement) => placement.kind === 'text')
+        .map((placement) => placement.text).join('')
     : '';
 
 /** True when a page holds the anchor paragraph (matched by its text). */
-const hasAnchorText = (page: PaginatedBodyElement[], text: string): boolean =>
+const hasAnchorText = (page: readonly PaintNode[], text: string): boolean =>
   page.some((el) => textOf(el) === text);
 
 /** The newspaper column an element landed in. */
-const colOf = (el: PaginatedBodyElement): number | undefined => el.colIndex;
+const colOf = (page: LayoutPage, node: PaintNode): number | undefined => {
+  const region = page.sectionRegions.find((candidate) => candidate.flowDomainIds.includes(node.flowDomainId));
+  const index = region?.flowDomainIds.indexOf(node.flowDomainId) ?? -1;
+  return index < 0 ? undefined : index;
+};
 
 /** Find the (first) frame paragraph element on a page. */
-const frameEl = (page: PaginatedBodyElement[]): PaginatedBodyElement | undefined =>
-  page.find((el) => el.type === 'paragraph' && (el as unknown as DocParagraph).framePr != null);
+const frameEl = (page: readonly PaintNode[]): PaintNode | undefined =>
+  page.find((node) => node.kind === 'paragraph' && !node.ordinaryFlow);
 
-describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
+const bodyLayout = (body: readonly BodyElement[], props: SectionProps, ctx: CanvasRenderingContext2D) =>
+  layoutBodyModel(body, props, ctx);
+
+describe('canonical body layout — text-frame keep-with-anchor (§17.3.1.11)', () => {
   // Content band 160×100, bodyTop 20. Frame: vAnchor="text", hRule="exact",
   // h=60 ⇒ frame body box [paraTop, paraTop+60]. With N leading 20pt lines the
   // frame paragraph's in-flow top is at y=20N; the frame overflows the 100pt
@@ -143,7 +149,7 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
       framePara(frame({ vAnchor: 'text', hRule: 'exact', h: 60 }), { text: 'F' }),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = bodyLayout(body, section(), makeCtx()).pages.map((page) => page.layers.body);
     expect(pages.length).toBe(2);
     // The frame does NOT stay on page 1 (would overflow); it moves to page 2…
     expect(hasFrame(pages[0])).toBe(false);
@@ -167,27 +173,25 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
     ];
     const sectionProps = section();
     const ctx = makeCtx();
-    const pages = computePages(body, sectionProps, ctx);
+    const pages = bodyLayout(body, sectionProps, ctx).pages.map((page) => page.layers.body);
 
     expect(pages).toHaveLength(2);
     expect(pages[0].filter((element) => textOf(element).startsWith('F'))).toEqual([]);
     const frameMembers = pages[1].filter((element) => textOf(element).startsWith('F'));
     expect(frameMembers.map(textOf)).toEqual(['F1', 'F2']);
     for (const member of frameMembers) {
-      expect(bodyFragmentFor(member)?.fragment.kind).toBe('paragraph');
+      expect(member.kind).toBe('paragraph');
     }
     for (const element of pages[0]) {
-      const placed = bodyFragmentFor(element);
-      if (placed?.fragment.kind === 'paragraph') {
-        expect(placed.fragment.exclusions.filter((item) => item.id.includes('frame'))).toHaveLength(0);
+      if (element.kind === 'paragraph') {
+        expect(element.exclusions.filter((item) => item.id.includes('frame'))).toHaveLength(0);
       }
     }
     const anchor = pages[1].find((element) => textOf(element) === 'anchor');
     expect(anchor).toBeDefined();
-    const anchorPlacement = bodyFragmentFor(anchor!);
-    expect(anchorPlacement?.fragment.kind).toBe('paragraph');
-    if (anchorPlacement?.fragment.kind !== 'paragraph') throw new Error('expected anchor layout');
-    expect(anchorPlacement.fragment.exclusions.filter((item) => item.id.includes('frame')))
+    expect(anchor?.kind).toBe('paragraph');
+    if (anchor?.kind !== 'paragraph') throw new Error('expected anchor layout');
+    expect(anchor.exclusions.filter((item) => item.id.includes('frame')))
       .toHaveLength(1);
   });
 
@@ -204,21 +208,22 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
       framePara(frame({ vAnchor: 'text', hAnchor: 'text', hRule: 'exact', h: 60 }), { text: 'F' }),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, twoCol, makeCtx());
+    const layout = bodyLayout(body, twoCol, makeCtx());
+    const pages = layout.pages.map((page) => page.layers.body);
     // Still a single page (column 1 absorbed the frame + anchor).
     expect(pages.length).toBe(1);
     const f = frameEl(pages[0]);
     expect(f).toBeDefined();
-    expect(colOf(f as PaginatedBodyElement)).toBe(1); // moved into column 1
+    expect(colOf(layout.pages[0], f!)).toBe(1); // moved into column 1
     // The three leading lines (a/b/c) stayed in column 0.
     const leadCols = pages[0]
       .filter((el) => ['a', 'b', 'c'].includes(textOf(el)))
-      .map(colOf);
+      .map((node) => colOf(layout.pages[0], node));
     expect(leadCols).toEqual([0, 0, 0]);
     // The trailing anchor text follows the frame into column 1.
     const anchor = pages[0].find((el) => textOf(el) === 'anchor');
     expect(anchor).toBeDefined();
-    expect(colOf(anchor as PaginatedBodyElement)).toBe(1);
+    expect(colOf(layout.pages[0], anchor!)).toBe(1);
   });
 
   it('keeps a text-anchored frame in place when it fits (near the top of the page)', () => {
@@ -229,7 +234,7 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
       framePara(frame({ vAnchor: 'text', hRule: 'exact', h: 60 }), { text: 'F' }),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = bodyLayout(body, section(), makeCtx()).pages.map((page) => page.layers.body);
     expect(pages.length).toBe(1);
     expect(hasFrame(pages[0])).toBe(true);
     expect(hasAnchorText(pages[0], 'anchor')).toBe(true);
@@ -246,7 +251,7 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
       framePara(frame({ vAnchor: 'text', hRule: 'exact', h: 150 }), { text: 'F' }),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = bodyLayout(body, section(), makeCtx()).pages.map((page) => page.layers.body);
     // Frame stays on page 1 with its three leading lines (no relocation).
     expect(hasFrame(pages[0])).toBe(true);
     // A frame that adds no flow height leaves the anchor on the same page.
@@ -269,7 +274,7 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
       framePara(frame({ vAnchor: 'page', hRule: 'exact', h: 60, y: 90 }), { text: 'F' }),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = bodyLayout(body, section(), makeCtx()).pages.map((page) => page.layers.body);
     expect(pages.length).toBe(1);
     expect(hasFrame(pages[0])).toBe(true);
     expect(hasAnchorText(pages[0], 'anchor')).toBe(true);
@@ -287,7 +292,7 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
       framePara(frame({ vAnchor: 'margin', hRule: 'exact', h: 60, y: 70 }), { text: 'F' }),
       para({ text: 'anchor' }),
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = bodyLayout(body, section(), makeCtx()).pages.map((page) => page.layers.body);
     expect(pages.length).toBe(1);
     expect(hasFrame(pages[0])).toBe(true);
   });
@@ -303,7 +308,7 @@ describe('computePages — text-frame keep-with-anchor (§17.3.1.11)', () => {
       ),
       para({ text: 'あ'.repeat(8), fontSize: 20 }), // anchor body text
     ];
-    const pages = computePages(body, section(), makeCtx());
+    const pages = bodyLayout(body, section(), makeCtx()).pages.map((page) => page.layers.body);
     expect(pages.length).toBe(1);
     expect(hasFrame(pages[0])).toBe(true);
     // The drop cap registers a wrap float on page 1 (following text wraps around

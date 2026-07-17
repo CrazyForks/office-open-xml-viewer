@@ -1,12 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import {
-  renderDocumentToCanvas,
-  paginateDocument,
-  createLayoutServices,
-  bodyFragmentFor,
-} from './renderer.js';
+import { createLayoutServices, layoutDocument } from './renderer.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
+import type { DocumentLayout } from './layout/types.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
-import type { BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, DocxDocumentModel, SectionProps, PaginatedBodyElement } from './types';
+import type { BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, DocxDocumentModel, SectionProps } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // A5 P4 — retained TABLE-CELL paragraph layout.
@@ -82,6 +79,9 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
     },
     save() { stack.push({ ...transform }); },
     restore() { transform = stack.pop() ?? transform; },
+    setTransform(a: number, _b: number, _c: number, d: number, e: number, f: number) {
+      transform = { scaleX: a, scaleY: d, translateX: e, translateY: f };
+    },
     beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
     strokeRect() {}, clip() {}, rect() {},
@@ -196,15 +196,15 @@ function doc(body: BodyElement[], pageHeight = 200): DocxDocumentModel {
 
 /** Render every page at `width` (paint scale = width / pageWidth), returning the
  *  concatenated paint stream per page + the total paint-time measureText count. */
-async function renderAll(model: DocxDocumentModel, pages: PaginatedBodyElement[][], width: number): Promise<{ perPage: Call[][]; measures: number }> {
+async function renderAll(layout: DocumentLayout, width: number): Promise<{ perPage: Call[][]; measures: number }> {
   const perPage: Call[][] = [];
   let measures = 0;
-  for (let p = 0; p < pages.length; p++) {
+  for (let p = 0; p < layout.pages.length; p++) {
     const rec = makeRecordingCanvas();
-    const services = createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: rec.canvas.getContext('2d'),
+    await paintLayoutPage(layout, p, rec.canvas, {
+      dpr: 1,
+      scale: width / layout.pages[p].geometry.widthPt,
     });
-    await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, width, prebuiltPages: pages, layoutServices: services });
     perPage.push(rec.calls);
     measures += rec.measures();
   }
@@ -212,14 +212,14 @@ async function renderAll(model: DocxDocumentModel, pages: PaginatedBodyElement[]
 }
 
 async function retainedPaint(model: DocxDocumentModel, width = 300): Promise<{
-  pages: PaginatedBodyElement[][]; drawn: number; measures: number; streams: Call[][];
+  layout: DocumentLayout; drawn: number; measures: number; streams: Call[][];
 }> {
-  const pages = paginateDocument(model, createLayoutServices(model, {
+  const layout = layoutDocument(model, createLayoutServices(model, {
     localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-  }));
-  const painted = await renderAll(model, pages, width);
+  }), { currentDateMs: 0 });
+  const painted = await renderAll(layout, width);
   return {
-    pages,
+    layout,
     drawn: painted.perPage.flat().filter((call) => call.op !== 'img').length,
     measures: painted.measures,
     streams: painted.perPage,
@@ -228,17 +228,12 @@ async function retainedPaint(model: DocxDocumentModel, width = 300): Promise<{
 
 function tableMeasurementGeometry() {
   const model = doc([wrapTable(8) as unknown as BodyElement]);
-  const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
-  const tables = pages.flatMap((page) => page.filter((el) => el.type === 'table'));
-  const fragments = tables.map((table) => {
-    const placed = bodyFragmentFor(table);
-    if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
-      throw new Error('expected retained TableLayout/TableFragmentLayout');
-    }
-    return placed.fragment;
-  });
+  const layout = layoutDocument(model, createLayoutServices(model, {
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+  }), { currentDateMs: 0 });
+  const fragments = layout.pages.flatMap((page) => page.layers.body.filter((node) => node.kind === 'table'));
   return {
-    pageCount: pages.length,
+    pageCount: layout.pages.length,
     rowHeightsPt: fragments.flatMap((fragment) => fragment.rows.map((tableRow) => tableRow.heightPt)),
     cellLineCounts: fragments.flatMap((fragment) => fragment.rows.flatMap((tableRow) =>
       tableRow.cells.flatMap((tableCell) => tableCell.blocks.map((block) =>
@@ -271,24 +266,25 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
 
   it('(a) retained cell paragraphs paint without measuring', async () => {
     const r = await retainedPaint(doc([wrapTable(16) as unknown as BodyElement]));
-    expect(r.pages.length).toBeGreaterThan(1); // table split across pages
+    expect(r.layout.pages.length).toBeGreaterThan(1); // table split across pages
     expect(r.drawn).toBeGreaterThan(0); // really painted cell text
     expect(r.measures).toBe(0);
   });
 
   it('(b) retained cell acquisition never writes obsolete parser line stamps', async () => {
     const model = doc([wrapTable(16) as unknown as BodyElement]);
-    const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
-    const before = await renderAll(model, pages, 300);
-    for (const page of pages) for (const el of page) {
-        if ((el as { type?: string }).type !== 'table') continue;
-        const tbl = el as unknown as DocTable;
-        for (const rw of tbl.rows) for (const c of rw.cells) for (const ce of c.content) {
-          expect(ce).not.toHaveProperty('layoutLines');
-          expect(ce).not.toHaveProperty('layoutLinesInputs');
-        }
+    const layout = layoutDocument(model, createLayoutServices(model, {
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    }), { currentDateMs: 0 });
+    const before = await renderAll(layout, 300);
+    for (const element of model.body) {
+      if (element.type !== 'table') continue;
+      for (const rw of element.rows) for (const c of rw.cells) for (const ce of c.content) {
+        expect(ce).not.toHaveProperty('layoutLines');
+        expect(ce).not.toHaveProperty('layoutLinesInputs');
+      }
     }
-    const after = await renderAll(model, pages, 300);
+    const after = await renderAll(layout, 300);
     expect(before.measures).toBe(0);
     expect(after.measures).toBe(0);
     expect(after.perPage).toEqual(before.perPage);
@@ -296,11 +292,11 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
 
   it('(c) wrap partition is zoom-invariant: scale 1 and scale 0.75 break each cell paragraph identically', async () => {
     const model = doc([wrapTable(10) as unknown as BodyElement]);
-    const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
+    const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }), { currentDateMs: 0 });
     // Same paint text at two scales; the fillText SEQUENCE (line partition) must be
     // identical — only the x/y coordinates scale. Compare the per-line text runs.
-    const at1 = await renderAll(model, pages, 300);   // scale 1
-    const at075 = await renderAll(model, pages, 225);  // scale 0.75 (225 = 300*0.75)
+    const at1 = await renderAll(layout, 300);   // scale 1
+    const at075 = await renderAll(layout, 225);  // scale 0.75 (225 = 300*0.75)
     expect(at1.perPage.length).toBe(at075.perPage.length);
     for (let p = 0; p < at1.perPage.length; p++) {
       const text1 = at1.perPage[p].filter((c) => c.op !== 'img').map((c) => c.text);
@@ -337,9 +333,9 @@ describe('table-cell paragraph line reuse — B2 T2', () => {
 
   it('(e) same page painted twice is identical (the retained tree is not mutated)', async () => {
     const model = doc([wrapTable(16) as unknown as BodyElement]);
-    const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
-    const first = await renderAll(model, pages, 300);
-    const second = await renderAll(model, pages, 300);
+    const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }), { currentDateMs: 0 });
+    const first = await renderAll(layout, 300);
+    const second = await renderAll(layout, 300);
     for (let p = 0; p < first.perPage.length; p++) expect(second.perPage[p]).toEqual(first.perPage[p]);
   });
 });

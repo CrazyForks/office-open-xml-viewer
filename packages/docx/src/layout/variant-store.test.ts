@@ -54,4 +54,15 @@ describe('LayoutVariantStore', () => {
     expect(store.defaultLayout).toBe(before);
     expect(store.defaultLayout.diagnostics[0]?.message).toBe('100');
   });
+
+  it('preserves the one normalized options identity at the selection boundary', () => {
+    const options = Object.freeze({ currentDateMs: 100 });
+    const store = new LayoutVariantStore(
+      services('text:a'),
+      options,
+      () => emptyLayout(),
+    );
+
+    expect(store.select(options).options).toBe(options);
+  });
 });

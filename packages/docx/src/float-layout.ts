@@ -20,6 +20,12 @@ export interface FloatRect {
    *  'frame' = <w:framePr> text frame; both also cover anchor images. */
   kind: 'table' | 'shape' | 'frame';
   mode: 'square' | 'topAndBottom';
+  /** Exact retained wrap semantics for canonical anchor acquisition. The
+   * compatibility renderer still uses `mode` for its rectangular line oracle. */
+  authoredWrap?: 'square' | 'tight' | 'through' | 'topAndBottom';
+  anchorOccurrenceId?: string;
+  acquisitionOccurrenceId?: string;
+  wrapPolygon?: readonly Readonly<{ xPt: number; yPt: number }>[];
   /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
   imageKey: string;
   /** Absolute canvas X of the image box (without dist padding). */

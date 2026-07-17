@@ -63,7 +63,7 @@ describe('immutable DOCX page-flow transitions', () => {
     });
 
     const node = drawingNode('body/drawing/0', 48);
-    const transition = placeFlowNode(initial, node);
+    const transition = placeFlowNode(initial, node, 48);
 
     expect(transition.state).toMatchObject({
       cursorBlockPt: 168,
@@ -86,7 +86,7 @@ describe('immutable DOCX page-flow transitions', () => {
   it('rejects a negative logical block advance', () => {
     const initial = createPageFlowState(section('section-0'));
 
-    expect(() => placeFlowNode(initial, drawingNode('body/drawing/0', -1)))
+    expect(() => placeFlowNode(initial, drawingNode('body/drawing/0', 1), -1))
       .toThrow(RangeError);
   });
 
@@ -250,6 +250,7 @@ describe('immutable DOCX page-flow transitions', () => {
     const placed = placeFlowNode(
       createPageFlowState(section('section-0'), { pageIndex: 6 }),
       drawingNode('body/drawing/0', 24),
+      24,
     ).state;
     const freshPage = applyAuthoredBreak(placed, 'page').state;
 
@@ -265,7 +266,7 @@ describe('immutable DOCX page-flow transitions', () => {
       columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
     }));
     const withPriorColumnContent = advanceColumnOrPage(
-      placeFlowNode(initial, drawingNode('body/drawing/0', 24)).state,
+      placeFlowNode(initial, drawingNode('body/drawing/0', 24), 24).state,
       'overflow',
     ).state;
 

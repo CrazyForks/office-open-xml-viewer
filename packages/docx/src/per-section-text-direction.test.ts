@@ -1,14 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import {
-  computePages,
-  paginateDocument,
-  renderDocumentToCanvas,
-  physicalPageSizeForPage,
-  type DocxTextRunInfo,
-} from './renderer.js';
+import { createLayoutServices, layoutDocument, renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
 import type {
   BodyElement, DocParagraph, DocxTextRun, SectionProps, DocxDocumentModel,
-  SectionGeom, PaginatedBodyElement,
+  SectionGeom,
 } from './types';
 
 // ECMA-376 §17.6.20 — text direction is PER-SECTION (issue #1000, #988 batch-3
@@ -48,7 +42,7 @@ function makeCtx(): CanvasRenderingContext2D {
   return ctx as unknown as CanvasRenderingContext2D;
 }
 
-// `paginateDocument` builds its measure ctx from `new OffscreenCanvas(...)`,
+// Canonical layout builds its default measure ctx from `new OffscreenCanvas(...)`,
 // which the node test env lacks — polyfill with the same deterministic stub.
 (globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas = class {
   getContext() { return makeCtx(); }
@@ -107,38 +101,45 @@ function mixedDoc(): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
+function canonicalLayout(doc: DocxDocumentModel) {
+  return layoutDocument(doc, createLayoutServices(doc, { measureContext: makeCtx() }), { currentDateMs: 0 });
+}
+
+const retainedText = (node: import('./layout/types.js').PaintNode): string => node.kind === 'paragraph'
+  ? node.lines.flatMap((line) => line.placements)
+      .filter((placement) => placement.kind === 'text')
+      .map((placement) => placement.text).join('')
+  : '';
+
 describe('per-section text direction (§17.6.20, issue #1000) — paginator stamps', () => {
   it('stamps a vertical mid-section with its SWAPPED logical geometry + direction', () => {
     const doc = mixedDoc();
-    const pages = computePages(doc.body, doc.section, makeCtx());
+    const pages = canonicalLayout(doc).pages;
     // Page 0 = the btLr section. Its stamped geometry is the LOGICAL quarter-turn
     // of the marker's physical geom: logical width = physical height, and
     // logical margin{Left,Top,Right,Bottom} = physical margin{Top,Right,Bottom,Left}
     // (verticalLayoutSection). header/footer distances are preserved.
-    const v1 = pages[0].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    expect(v1.sectionTextDirection).toBe('btLr');
-    expect(v1.sectionGeom).toEqual({
+    expect(pages[0].section.textDirection).toBe('btLr');
+    expect(pages[0].section.geometry).toEqual({
       pageWidth: 792, pageHeight: 612,
       marginLeft: 10, marginTop: 20, marginRight: 30, marginBottom: 40,
       headerDistance: 7, footerDistance: 8,
     });
     // Page 1 = horizontal final section: body-level geometry, direction null.
-    const h1 = pages[1].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    expect(h1.sectionTextDirection).toBeNull();
-    expect(h1.sectionGeom?.pageWidth).toBe(400);
-    expect(h1.sectionGeom?.pageHeight).toBe(500);
-    expect(h1.sectionGeom?.marginLeft).toBe(48);
+    expect(pages[1].section.textDirection).toBe('lrTb');
+    expect(pages[1].section.geometry.pageWidth).toBe(400);
+    expect(pages[1].section.geometry.pageHeight).toBe(500);
+    expect(pages[1].section.geometry.marginLeft).toBe(48);
   });
 
-  it('a geom-less vertical break swaps the BODY geometry (§17.18.77 inheritance)', () => {
+  it('a geom-less continuous vertical section inherits and swaps the following page box', () => {
     const doc = mixedDoc();
-    doc.body[1] = { type: 'sectionBreak', kind: 'nextPage', textDirection: 'tbRl' } as BodyElement;
-    const pages = computePages(doc.body, doc.section, makeCtx());
-    const v1 = pages[0].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    expect(v1.sectionTextDirection).toBe('tbRl');
+    doc.body[1] = { type: 'sectionBreak', kind: 'continuous', textDirection: 'tbRl' } as BodyElement;
+    const pages = canonicalLayout(doc).pages;
+    expect(pages[0].section.textDirection).toBe('tbRl');
     // swap of body 400×500 / margins T12 R24 B36 L48 → logical
     // 500×400 / L12 T24 R36 B48.
-    expect(v1.sectionGeom).toEqual({
+    expect(pages[0].section.geometry).toEqual({
       pageWidth: 500, pageHeight: 400,
       marginLeft: 12, marginTop: 24, marginRight: 36, marginBottom: 48,
       headerDistance: 5, footerDistance: 6,
@@ -157,16 +158,12 @@ describe('per-section text direction (§17.6.20, issue #1000) — paginator stam
       section, body: [para('V1'), para('V2')],
       headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    // paginateDocument applies verticalLayoutDoc (the body-level swap) itself.
-    const pages = paginateDocument(doc);
+    const pages = canonicalLayout(doc).pages;
     for (const page of pages) {
-      for (const el of page) {
-        const p = el as PaginatedBodyElement;
-        expect(p.sectionTextDirection).toBe('tbRl');
-        expect(p.sectionGeom?.pageWidth).toBe(792);
-        expect(p.sectionGeom?.pageHeight).toBe(612);
-        expect(p.sectionGeom?.marginLeft).toBe(10);
-      }
+      expect(page.section.textDirection).toBe('tbRl');
+      expect(page.section.geometry.pageWidth).toBe(792);
+      expect(page.section.geometry.pageHeight).toBe(612);
+      expect(page.section.geometry.marginLeft).toBe(10);
     }
   });
 
@@ -191,8 +188,8 @@ describe('per-section text direction (§17.6.20, issue #1000) — paginator stam
       section: horizontalBodySection(), body,
       headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = computePages(doc.body, doc.section, makeCtx());
-    const counts = pages.map((page) => page.filter((e) => e.type === 'paragraph').length);
+    const pages = canonicalLayout(doc).pages;
+    const counts = pages.map((page) => page.layers.body.filter((node) => node.kind === 'paragraph').length);
     // 8 one-line paras on page 0, the remaining 2 on page 1, B1 on page 2.
     expect(counts).toEqual([8, 2, 1]);
   });
@@ -205,26 +202,26 @@ describe('per-section text direction (§17.6.20, issue #1000) — paginator stam
     const section: SectionProps = { ...horizontalBodySection(), sectionStart: 'continuous' } as SectionProps;
     const body: BodyElement[] = [
       para('V1'),
-      { type: 'sectionBreak', kind: 'nextPage', geom: VERT_PHYS, textDirection: 'btLr' } as BodyElement,
+      { type: 'sectionBreak', kind: 'continuous', textDirection: 'btLr' } as BodyElement,
       para('H1'),
     ];
     const doc = {
       section, body, headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = computePages(doc.body, doc.section, makeCtx());
+    const pages = canonicalLayout(doc).pages;
     expect(pages.length).toBe(2);
 
     // Control: the same continuous boundary WITHOUT a direction change stays on
     // one page (the existing §17.18.77 continuous behavior is untouched).
     const flatBody: BodyElement[] = [
       para('S1'),
-      { type: 'sectionBreak', kind: 'nextPage', geom: VERT_PHYS } as BodyElement,
+      { type: 'sectionBreak', kind: 'continuous' } as BodyElement,
       para('S2'),
     ];
     const flatDoc = {
       section, body: flatBody, headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const flatPages = computePages(flatDoc.body, flatDoc.section, makeCtx());
+    const flatPages = canonicalLayout(flatDoc).pages;
     expect(flatPages.length).toBe(1);
   });
 });
@@ -398,11 +395,11 @@ describe('per-section text direction (§17.6.20, issue #1000) — renderer', () 
 describe('per-section text direction (§17.6.20, issue #1000) — physical page size', () => {
   it('un-swaps each page by ITS OWN stamped direction', () => {
     const doc = mixedDoc();
-    const pages = paginateDocument(doc);
+    const pages = canonicalLayout(doc).pages;
     // Page 0 (vertical): stamped LOGICAL 792×612 → physical 612×792.
-    expect(physicalPageSizeForPage(pages, 0, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+    expect(pages[0].geometry).toMatchObject({ widthPt: 612, heightPt: 792 });
     // Page 1 (horizontal): stamped physical box verbatim.
-    expect(physicalPageSizeForPage(pages, 1, doc.section)).toEqual({ widthPt: 400, heightPt: 500 });
+    expect(pages[1].geometry).toMatchObject({ widthPt: 400, heightPt: 500 });
   });
 
   it('resolves an EMPTY parity page from its page metadata: the blank belongs to the OUTGOING section', () => {
@@ -419,36 +416,37 @@ describe('per-section text direction (§17.6.20, issue #1000) — physical page 
       // is the NEXT marker's kind (§17.6.22): oddPage.
       { type: 'sectionBreak', kind: 'nextPage', geom: VERT_PHYS, textDirection: 'tbRl' } as BodyElement,
       para('H1'),
-      { type: 'sectionBreak', kind: 'oddPage' } as BodyElement,
+      {
+        type: 'sectionBreak', kind: 'oddPage', geom: horizontalBodySection(),
+      } as BodyElement,
       para('H2'),
     ];
     const doc = {
       section: horizontalBodySection(), body,
       headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = paginateDocument(doc);
+    const pages = canonicalLayout(doc).pages;
     // Page 0: V1 (vertical). Page 1: parity blank (the oddPage section pads
     // past the even slot). Page 2: H1. Page 3: H2 (nextPage default into the
     // final section).
     expect(pages.length).toBe(4);
-    expect(pages[1]).toHaveLength(0);
-    expect(physicalPageSizeForPage(pages, 0, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+    expect(pages[1].layers.body).toHaveLength(0);
+    expect(pages[0].geometry).toMatchObject({ widthPt: 612, heightPt: 792 });
     // The blank parity page belongs to the OUTGOING vertical section
     // (§17.18.77): physical 612×792, not the body 400×500.
-    expect(physicalPageSizeForPage(pages, 1, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+    expect(pages[1].geometry).toMatchObject({ widthPt: 612, heightPt: 792 });
     // The incoming oddPage section itself is horizontal at the body box.
-    expect(physicalPageSizeForPage(pages, 2, doc.section)).toEqual({ widthPt: 400, heightPt: 500 });
+    expect(pages[2].geometry).toMatchObject({ widthPt: 400, heightPt: 500 });
   });
 });
 
 describe('per-section text direction (§17.6.20, issue #1000) — vertical BODY + horizontal mid', () => {
   // The reverse mix: the FINAL (body) section is vertical, a NON-final section
   // horizontal. The body-level swap (verticalLayoutDoc) still runs, so the
-  // geom-less horizontal marker must inherit the body's PHYSICAL geometry
-  // (physicalGeomOf un-swaps the already-swapped body frame — the double-swap
-  // trap), and the horizontal page must paint unrotated while the vertical
-  // final page rotates.
-  it('a geom-less horizontal mid-section inherits the PHYSICAL body geometry', () => {
+  // horizontal marker explicitly carries the body's PHYSICAL geometry, so the
+  // coordinate projection must not double-swap it. The horizontal page paints
+  // unrotated while the vertical final page rotates.
+  it('an authored horizontal mid-section keeps its PHYSICAL page geometry', () => {
     const section: SectionProps = {
       ...horizontalBodySection(),
       pageWidth: 612, pageHeight: 792,
@@ -458,33 +456,31 @@ describe('per-section text direction (§17.6.20, issue #1000) — vertical BODY 
     } as SectionProps;
     const body: BodyElement[] = [
       para('H1'),
-      { type: 'sectionBreak', kind: 'nextPage' } as BodyElement, // horizontal, geom-less
+      { type: 'sectionBreak', kind: 'nextPage', geom: VERT_PHYS } as BodyElement,
       para('V1'),
     ];
     const doc = {
       section, body, headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = paginateDocument(doc);
-    const h1 = pages[0].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    const pages = canonicalLayout(doc).pages;
     // The horizontal mid-section's frame is the body's verbatim PHYSICAL box —
     // NOT the swapped logical one, and NOT a double-swap of it.
-    expect(h1.sectionTextDirection).toBeNull();
-    expect(h1.sectionGeom).toEqual({
+    expect(pages[0].section.textDirection).toBe('lrTb');
+    expect(pages[0].section.geometry).toEqual({
       pageWidth: 612, pageHeight: 792,
       marginTop: 10, marginRight: 20, marginBottom: 30, marginLeft: 40,
       headerDistance: 7, footerDistance: 8,
     });
     // The vertical final section keeps the swapped logical frame.
-    const v1 = pages[1].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
-    expect(v1.sectionTextDirection).toBe('tbRl');
-    expect(v1.sectionGeom).toEqual({
+    expect(pages[1].section.textDirection).toBe('tbRl');
+    expect(pages[1].section.geometry).toEqual({
       pageWidth: 792, pageHeight: 612,
       marginLeft: 10, marginTop: 20, marginRight: 30, marginBottom: 40,
       headerDistance: 7, footerDistance: 8,
     });
     // Physical page boxes agree per page.
-    expect(physicalPageSizeForPage(pages, 0, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
-    expect(physicalPageSizeForPage(pages, 1, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+    expect(pages[0].geometry).toMatchObject({ widthPt: 612, heightPt: 792 });
+    expect(pages[1].geometry).toMatchObject({ widthPt: 612, heightPt: 792 });
   });
 
   it('paints the horizontal mid page unrotated and the vertical final page rotated', async () => {
@@ -535,16 +531,16 @@ describe('per-section text direction (§17.6.20, issue #1000) — split slices a
       section: horizontalBodySection(), body,
       headers: EMPTY_HF, footers: EMPTY_HF, fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = computePages(doc.body, doc.section, makeCtx());
+    const pages = canonicalLayout(doc).pages;
     // The paragraph split across ≥ 2 pages inside the vertical section.
     expect(pages.length).toBeGreaterThanOrEqual(3);
     for (let i = 0; i < pages.length - 1; i++) {
-      const slices = pages[i].filter((e) => e.type === 'paragraph') as PaginatedBodyElement[];
+      const slices = pages[i].layers.body.filter((node) => node.kind === 'paragraph');
       expect(slices.length).toBeGreaterThan(0);
       for (const s of slices) {
-        expect(s.sectionTextDirection).toBe('tbRl');
-        expect(s.sectionGeom?.pageWidth).toBe(300);
-        expect(s.sectionGeom?.pageHeight).toBe(200);
+        expect(pages[i].section.textDirection).toBe('tbRl');
+        expect(pages[i].section.geometry.pageWidth).toBe(300);
+        expect(pages[i].section.geometry.pageHeight).toBe(200);
       }
     }
   });
@@ -554,10 +550,11 @@ describe('per-section text direction (§17.6.20, issue #1000) — split slices a
     const layout = layoutDocument(mixedDoc());
     expect(layout.pages.length).toBe(2);
     expect(layout.pages[0].section.textDirection).toBe('btLr');
-    // The vertical page's LayoutPage geometry is the swapped logical frame.
-    expect(layout.pages[0].geometry.pageWidth).toBe(792);
+    // Page geometry remains the physical page box; section regions own the
+    // logical-to-physical writing-mode transform.
+    expect(layout.pages[0].geometry.widthPt).toBe(612);
     expect(layout.pages[1].section.textDirection).toBe('lrTb');
-    expect(layout.pages[1].geometry.pageWidth).toBe(400);
+    expect(layout.pages[1].geometry.widthPt).toBe(400);
   });
 });
 
@@ -590,10 +587,9 @@ describe('per-section text direction (§17.6.20, issue #1000) — HF reserve', (
       headers: EMPTY_HF, footers: { default: footer40, first: null, even: null },
       fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
-    const pages = paginateDocument(doc);
+    const pages = canonicalLayout(doc).pages;
     const textsOn = (i: number) =>
-      (pages[i] ?? []).filter((e) => e.type === 'paragraph')
-        .map((e) => ((e as { runs?: { text?: string }[] }).runs ?? []).map((r) => r.text).join(''));
+      (pages[i]?.layers.body ?? []).filter((node) => node.kind === 'paragraph').map(retainedText);
     expect(textsOn(0)).toEqual(['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8']);
     expect(textsOn(1)).toEqual(['B1']);
   });

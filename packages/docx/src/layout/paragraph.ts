@@ -765,6 +765,8 @@ export interface ParagraphAcquisitionOptions {
   readonly trailingExtentPt?: number;
   /** The measurement starts after a consumed line boundary on another flow slice. */
   readonly continuesFromPrevious?: boolean;
+  /** Exact paragraph occurrence offset corresponding to the continuation boundary. */
+  readonly sourceRangeStart?: number;
   readonly anchorFrames?: Readonly<Pick<
     AnchorReferenceFramesInput,
     'page' | 'margin' | 'column' | 'pageParity'
@@ -900,6 +902,10 @@ function textPlacement(
     text: segment.text,
     ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
     ...(run?.type === 'field' ? { role: 'field-result' as const, dependency: fieldDependency(run) } : {}),
+    ...(run?.type === 'text'
+      && (run.noteRef?.kind === 'footnote' || run.noteRef?.kind === 'endnote')
+      ? { noteReference: { kind: run.noteRef.kind, id: run.noteRef.id } }
+      : {}),
     range: { start: sourceOffset, end: sourceOffset + segment.text.length },
     origin: { xPt, yPt: baselinePt + (segment.position ? -segment.position : 0) },
     bounds: { xPt, yPt: topPt, widthPt: segment.measuredWidth, heightPt },
@@ -1609,6 +1615,43 @@ function planMeasuredLines(
       },
     });
   });
+}
+
+function offsetRange(range: import('./types.js').TextRange, delta: number) {
+  return { start: range.start + delta, end: range.end + delta };
+}
+
+function rebaseMeasuredLineRanges(
+  lines: readonly LineLayout[],
+  sourceRangeStart: number,
+): readonly LineLayout[] {
+  if (!Number.isFinite(sourceRangeStart) || sourceRangeStart < 0) {
+    throw new RangeError('Paragraph continuation source range must be finite and non-negative');
+  }
+  const first = lines[0];
+  if (!first) return lines;
+  const delta = sourceRangeStart - first.range.start;
+  if (delta === 0) return lines;
+  return lines.map((line) => ({
+    ...line,
+    range: offsetRange(line.range, delta),
+    placements: line.placements.map((placement) => {
+      const range = offsetRange(placement.range, delta);
+      if (placement.kind !== 'text') return { ...placement, range };
+      return {
+        ...placement,
+        range,
+        clusters: placement.clusters.map((cluster) => ({
+          ...cluster,
+          range: offsetRange(cluster.range, delta),
+        })),
+        paintOps: placement.paintOps.map((operation) => ({
+          ...operation,
+          range: offsetRange(operation.range, delta),
+        })),
+      };
+    }),
+  }));
 }
 
 /** A mark-only paragraph still owns a real line box and baseline when numbering
@@ -2501,9 +2544,12 @@ export function acquireRetainedFrameGroup(
       xPt: placed.bounds.xPt,
       yPt: placed.bounds.yPt,
     });
-    const fragment = layoutParagraph(fp.hRule === 'exact' && fp.h != null
+    const laidOut = layoutParagraph(fp.hRule === 'exact' && fp.h != null
       ? { ...translated, clipBounds: placed.bounds }
       : translated);
+    // w:framePr box height remains retained geometry, but a positioned frame
+    // contributes no block advance to the ordinary paragraph flow that anchors it.
+    const fragment = Object.freeze({ ...laidOut, advancePt: 0 });
     return Object.freeze({ ...member, fragment });
   }));
   const acquired = Object.freeze({
@@ -2538,6 +2584,9 @@ export function paragraphLayoutFromMeasurement(
     measured, paragraph, paragraphXPt, availableWidthPt, options.source, planningContext,
     occurrences, numberingPlan, options.environment.layoutServices?.text,
   );
+  if (options.sourceRangeStart !== undefined) {
+    lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);
+  }
   if (
     numberingPlan
     && measured.markOnly
@@ -2939,6 +2988,18 @@ export function sliceParagraphLayout(
     .filter((drawing) => drawingIds.has(drawing.id))
     .map((drawing) => drawing.anchorLayer?.verticalOwnership === 'page'
       ? drawing : translateDrawingY(drawing, deltaYPt));
+  const acquiredHostAnchorOccurrenceIds = new Set(acquired.drawings.flatMap((drawing) => {
+    if (drawing.anchorLayer?.verticalOwnership !== 'host') return [];
+    const occurrenceId = drawing.anchorLayer.acquisitionOccurrenceId
+      ?? drawing.anchorLayer.occurrenceId;
+    return occurrenceId === undefined ? [] : [occurrenceId];
+  }));
+  const retainedHostAnchorOccurrenceIds = new Set(drawings.flatMap((drawing) => {
+    if (drawing.anchorLayer?.verticalOwnership !== 'host') return [];
+    const occurrenceId = drawing.anchorLayer.acquisitionOccurrenceId
+      ?? drawing.anchorLayer.occurrenceId;
+    return occurrenceId === undefined ? [] : [occurrenceId];
+  }));
   const resourceKeys = new Set(selected.flatMap((line) => line.placements.flatMap((placement) =>
     placement.kind === 'resource' ? [placement.resourceKey] : [])));
   for (const drawing of drawings) {
@@ -2992,14 +3053,18 @@ export function sliceParagraphLayout(
       : acquired.events.filter((event) => event.offset >= lineRangeStart
         && (event.offset < lineRangeEnd
           || (!continuation.continuesOnNext && event.offset === lineRangeEnd))),
-    exclusions: acquired.exclusions.map((exclusion) => ({
-      ...exclusion,
-      bounds: exclusion.verticalOwnership === 'page'
-        ? exclusion.bounds : translateRectY(exclusion.bounds, deltaYPt),
-      polygon: exclusion.verticalOwnership === 'page'
-        ? exclusion.polygon
-        : exclusion.polygon.map((point) => translatePointY(point, deltaYPt)),
-    })),
+    exclusions: acquired.exclusions
+      .filter((exclusion) => exclusion.anchorOccurrenceId === undefined
+        || !acquiredHostAnchorOccurrenceIds.has(exclusion.anchorOccurrenceId)
+        || retainedHostAnchorOccurrenceIds.has(exclusion.anchorOccurrenceId))
+      .map((exclusion) => ({
+        ...exclusion,
+        bounds: exclusion.verticalOwnership === 'page'
+          ? exclusion.bounds : translateRectY(exclusion.bounds, deltaYPt),
+        polygon: exclusion.verticalOwnership === 'page'
+          ? exclusion.polygon
+          : exclusion.polygon.map((point) => translatePointY(point, deltaYPt)),
+      })),
     ...(continuation.continuesOnNext
       ? { paragraphMark: undefined }
       : acquired.paragraphMark

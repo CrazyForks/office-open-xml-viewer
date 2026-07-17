@@ -9,6 +9,7 @@ import type {
   PaintCanvas2D,
 } from './paint/types.js';
 import { createLayoutServices } from './renderer.js';
+import { createLayoutServicesRuntimeView } from './layout/runtime-state.js';
 import type {
   BodyElement,
   CellElement,
@@ -239,13 +240,13 @@ function retainedTable(model: DocxDocumentModel): Readonly<{
       return base.text.shape(request);
     },
   });
-  const result = layoutDocument(model, Object.freeze({ ...base, text }));
-  const placed = result.pages.flatMap((page) => page.fragments)
-    .find((item) => item.fragment.kind === 'table');
-  if (!placed || placed.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+  const result = layoutDocument(model, createLayoutServicesRuntimeView(base, { text }));
+  const retained = result.pages.flatMap((page) => page.layers.body)
+    .find((node): node is TableLayout => node.kind === 'table');
+  if (!retained) {
     throw new Error('Expected one retained ordinary table');
   }
-  return { layout: placed.fragment, finalAcquisitions, intrinsicProbes };
+  return { layout: retained, finalAcquisitions, intrinsicProbes };
 }
 
 describe('A4 retained table acceptance', () => {

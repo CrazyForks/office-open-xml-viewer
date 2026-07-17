@@ -146,7 +146,7 @@ export function resolveDocumentLayoutSettings(
   document: DocxDocumentModel,
 ): DocumentLayoutSettings {
   // This document-level resolver is the session boundary shared by production
-  // and direct computePages callers. Preparing source/frame adjacency here keeps
+  // and direct layout callers. Preparing source/frame adjacency here keeps
   // the frozen pagination kernel free of migration setup and caller preconditions.
   prepareBodyFrameMetadata(document.body);
   return {

@@ -197,6 +197,11 @@ function contains(outer: LayoutRect, inner: LayoutRect): boolean {
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
 }
 
+function containsBlockExtent(outer: LayoutRect, inner: LayoutRect): boolean {
+  return inner.yPt >= outer.yPt
+    && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
+}
+
 function equalRect(left: LayoutRect, right: LayoutRect): boolean {
   return left.xPt === right.xPt
     && left.yPt === right.yPt
@@ -437,7 +442,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         requireFinite(region.blockEndPt, `${path}.blockEndPt`);
         if (region.blockStartPt < 0
           || region.blockStartPt < priorBlockEndPt
-          || region.blockEndPt <= region.blockStartPt
+          || region.blockEndPt < region.blockStartPt
           || region.blockEndPt > logicalExtent.heightPt) {
           throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has an invalid block interval`);
         }
@@ -471,7 +476,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
           regionByDomain.set(domainId, region);
           const bounds = domain.logicalBounds;
           const sectionColumn = region.section.columns[columnIndex];
-          if (bounds.widthPt <= 0 || bounds.heightPt <= 0
+          if (bounds.widthPt <= 0 || bounds.heightPt < 0
             || bounds.yPt !== region.blockStartPt
             || bounds.yPt + bounds.heightPt !== region.blockEndPt
             || bounds.xPt < 0
@@ -482,7 +487,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
             || bounds.widthPt !== sectionColumn.wPt) {
             throw new LayoutInvariantError(
               'INVALID_GEOMETRY',
-              `${domainId} is not the section column's positive logical region`,
+              `${domainId} is not the section column's non-negative logical region`,
             );
           }
           priorInlineEndPt = bounds.xPt + bounds.widthPt;
@@ -581,6 +586,12 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       if (!domain) {
         throw new LayoutInvariantError('INVALID_REFERENCE', `${node.id} references missing flow domain ${node.flowDomainId}`);
       }
+      if (node.ordinaryFlow && domain.kind === 'body' && domain.logicalBounds.heightPt === 0) {
+        throw new LayoutInvariantError(
+          'FLOW_DOMAIN_INVASION',
+          `${node.id} claims ordinary flow in an empty body domain`,
+        );
+      }
       if (!node.ordinaryFlow) return;
       if (domain.kind === 'body') {
         const region = regionByDomain.get(domain.id);
@@ -589,7 +600,13 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
           throw new LayoutInvariantError('BOTTOM_MARGIN_INVASION', `${node.id} crosses logical block end`);
         }
       }
-      if (!contains(domain.logicalBounds, node.flowBounds)) {
+      // Signed w:tblInd and table justification may intentionally put an
+      // ordinary table outside the inline text band. It still belongs to this
+      // flow domain and must remain contained on the logical block axis.
+      const insideFlowDomain = node.kind === 'table'
+        ? containsBlockExtent(domain.logicalBounds, node.flowBounds)
+        : contains(domain.logicalBounds, node.flowBounds);
+      if (!insideFlowDomain) {
         throw new LayoutInvariantError('FLOW_DOMAIN_INVASION', `${node.id} crosses flow domain ${domain.id}`);
       }
       ordinary.push(node);

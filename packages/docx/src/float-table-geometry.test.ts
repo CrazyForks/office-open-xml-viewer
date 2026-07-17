@@ -270,7 +270,7 @@ describe('floating table geometry (§17.4.57) — page/margin-anchored Office cl
 
   it('vertAnchor="text": an overflowing box is NOT clamped (paginator row-split handles it)', () => {
     // A vertAnchor="text" table rides the flow cursor; its overflow is split
-    // row-by-row by computePages, so the geometry must leave the box at paraTop +
+    // row-by-row by canonical pagination, so the geometry must leave the box at paraTop +
     // tblpY even when that runs past the page — clamping here would corrupt the
     // per-slice band. paraTop 780, tblpY 0, tableH 100 ⇒ y stays 780 (bottom 880).
     const st = makeState(); // pageH 800

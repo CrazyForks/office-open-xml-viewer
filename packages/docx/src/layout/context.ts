@@ -7,6 +7,11 @@ import type {
   SectionGeom,
   SectionProps,
 } from '../types.js';
+import {
+  computeSectionColumns,
+  type SectionLayoutContext,
+} from '../layout-context.js';
+import type { DeepReadonly } from './types.js';
 
 /**
  * Section facts that must change atomically at a page-flow boundary. Keeping the
@@ -79,10 +84,81 @@ export function physicalSectionGeometry(logical: SectionGeom): SectionGeom {
   };
 }
 
+export function isVerticalSectionDirection(textDirection: string): boolean {
+  return textDirection === 'tbRl'
+    || textDirection === 'tbRlV'
+    || textDirection === 'tbLrV'
+    || textDirection === 'btLr';
+}
+
+export interface SectionPageLayoutPolicy {
+  readonly physicalGeometry: Readonly<SectionGeom>;
+  readonly columns: DeepReadonly<ColumnsSpec> | null;
+  readonly textDirection: string;
+  readonly gutterPt: number;
+  readonly rtlGutter: boolean;
+  readonly mirrorMargins: boolean;
+  readonly gutterAtTop: boolean;
+  readonly bookFoldPrinting: boolean;
+  readonly bookFoldRevPrinting: boolean;
+  readonly printTwoOnOne: boolean;
+}
+
+export function effectivePhysicalSectionGeometry(
+  policy: SectionPageLayoutPolicy,
+  pageIndex: number,
+): SectionGeom {
+  if (!Number.isInteger(pageIndex) || pageIndex < 0) {
+    throw new RangeError('Physical page index must be a non-negative integer');
+  }
+  let { marginTop, marginRight, marginBottom, marginLeft } = policy.physicalGeometry;
+  const imposed = policy.bookFoldPrinting
+    || policy.bookFoldRevPrinting
+    || policy.printTwoOnOne;
+  if (!imposed) {
+    if (policy.gutterAtTop && !policy.mirrorMargins) marginTop += policy.gutterPt;
+    else if (policy.rtlGutter) marginRight += policy.gutterPt;
+    else marginLeft += policy.gutterPt;
+  }
+  if (policy.mirrorMargins && pageIndex % 2 === 1) {
+    [marginLeft, marginRight] = [marginRight, marginLeft];
+  }
+  return { ...policy.physicalGeometry, marginTop, marginRight, marginBottom, marginLeft };
+}
+
+export function resolveSectionContextForPage(
+  base: SectionLayoutContext,
+  policy: SectionPageLayoutPolicy,
+  pageIndex: number,
+): SectionLayoutContext {
+  const physical = effectivePhysicalSectionGeometry(policy, pageIndex);
+  const geometry = isVerticalSectionDirection(policy.textDirection)
+    ? logicalSectionGeometry(physical)
+    : physical;
+  return Object.freeze({
+    ...base,
+    geometry: Object.freeze(geometry),
+    columns: Object.freeze(computeSectionColumns({
+      ...geometry,
+      titlePage: false,
+      evenAndOddHeaders: false,
+      columns: policy.columns,
+    } as SectionProps).map((column) => Object.freeze(column))),
+  });
+}
+
 export interface SectionPlacementFacts {
   readonly sectionId: string;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
+  readonly docGridType: string | null;
+  readonly docGridLinePitch: number | null;
+  readonly docGridCharSpace: number | null;
+  readonly gutterPt: number | null;
+  readonly rtlGutter: boolean | null;
+  readonly pageBordersAuthored: boolean;
+  readonly pageBorders: Readonly<import('../types.js').PageBorders> | null;
+  readonly pageGeometry: Readonly<Partial<SectionGeom>> | null;
 }
 
 /**
@@ -112,6 +188,13 @@ export interface BodySectionOccurrence {
   readonly titlePage: boolean;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
+  readonly docGridType: string | null;
+  readonly docGridLinePitch: number | null;
+  readonly docGridCharSpace: number | null;
+  readonly gutterPt: number;
+  readonly rtlGutter: boolean;
+  readonly pageBordersAuthored: boolean;
+  readonly pageBorders: Readonly<import('../types.js').PageBorders> | null;
   readonly placement: SectionPlacementFacts;
 }
 
@@ -127,7 +210,7 @@ export interface BodySectionIndex {
   sectionAtBodyIndex(bodyIndex: number): BodySectionOccurrence;
 }
 
-export function sectionGeometry(section: SectionProps): SectionGeom {
+export function sectionPageBox(section: SectionProps): SectionGeom {
   return {
     pageWidth: section.pageWidth,
     pageHeight: section.pageHeight,
@@ -138,6 +221,40 @@ export function sectionGeometry(section: SectionProps): SectionGeom {
     headerDistance: section.headerDistance,
     footerDistance: section.footerDistance,
   };
+}
+
+export function defaultSectionGeometry(): SectionGeom {
+  return {
+    pageWidth: 612, pageHeight: 792,
+    marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+    headerDistance: 36, footerDistance: 36,
+  };
+}
+
+/** Resolve section-owned facts after parser acquisition, without retaining the
+ * document wrapper across the canonical layout boundary. */
+export function resolveAcquiredSectionLayoutContext(
+  section: SectionProps,
+): SectionLayoutContext {
+  const gridKind = section.docGridType === 'lines'
+    || section.docGridType === 'linesAndChars'
+    || section.docGridType === 'snapToChars'
+    ? section.docGridType
+    : 'none';
+  return Object.freeze({
+    geometry: Object.freeze(sectionPageBox(section)),
+    columns: Object.freeze(computeSectionColumns(section).map((column) => Object.freeze(column))),
+    grid: Object.freeze({
+      kind: gridKind,
+      linePitchPt: section.docGridLinePitch ?? null,
+      charSpacePt: section.docGridCharSpace == null ? null : section.docGridCharSpace / 4096,
+    }),
+    textDirection: section.textDirection ?? 'lrTb',
+    verticalAlignment: section.vAlign ?? 'top',
+    ...(section.lineNumbering === null || section.lineNumbering === undefined
+      ? {}
+      : { lineNumbering: Object.freeze({ ...section.lineNumbering }) }),
+  });
 }
 
 /**

@@ -80,6 +80,25 @@ describe('retained typography geometry', () => {
     });
   });
 
+  it('omits absent optional authored underline style from the canonical retained node', () => {
+    const [underline] = retainedTextDecorations({
+      origin: { xPt: 5, yPt: 10 }, advancePt: 20,
+      base: { ascentPt: 9, descentPt: 4 },
+      color: '#000000',
+      underline: {
+        color: '#112233',
+        probe: { ascentPt: 2, descentPt: 2 },
+      },
+    });
+
+    expect(underline).toEqual({
+      kind: 'underline', color: '#112233', widthPt: 2, style: 'solid',
+      from: { xPt: 5, yPt: 15 }, to: { xPt: 25, yPt: 15 },
+    });
+    expect(underline).not.toHaveProperty('authoredStyle');
+    expect(structuredClone(underline)).toEqual(underline);
+  });
+
   it('centers a shaped tab-leader sequence inside the authored tab interval', () => {
     expect(centeredLeaderGlyphOrigins({
       interval: { xPt: 10, yPt: 4, widthPt: 23, heightPt: 12 },

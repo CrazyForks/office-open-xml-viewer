@@ -26,6 +26,12 @@ function resourceLayout(
         physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
       }],
       section: {} as SectionLayoutContext,
+      sectionOccurrenceId: 'section:0',
+      parityBlank: false,
+      bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      sectionRegions: [],
+      pageBorders: null,
       layers: {
         paintOrder: [{ layer: 'body', nodeId: 'drawing-1' }],
         background: [], behindText: [], header: [], notes: [], front: [], footer: [],

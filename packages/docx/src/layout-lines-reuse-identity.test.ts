@@ -1,22 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import {
-  renderDocumentToCanvas,
-  paginateDocument,
-  createLayoutServices,
-  bodyFragmentFor,
-} from './renderer.js';
+import { createLayoutServices, layoutDocument } from './renderer.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
+import type { DocumentLayout, LayoutPage, PaintNode } from './layout/types.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import { stableFingerprint } from './layout/fingerprint.js';
 import type { TableFragmentLayout } from './layout/table-pagination.js';
-import type { FlowFragment } from './layout-fragments.js';
+import type { FlowFragment } from './layout/flow-fragment.js';
 import type {
   BodyElement,
   DocParagraph,
   DocTable,
   DocxDocumentModel,
   SectionProps,
-  PaginatedBodyElement,
-} from './types';
+  } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // A3 retained paragraph acquisition and paint invariants.
@@ -26,9 +22,8 @@ import type {
 // assert semantic retained geometry and deterministic device mapping; the removed
 // paragraph fallback/toggle paths are deliberately not test oracles.
 //
-// The pages are built with `paginateDocument` (a fresh OffscreenCanvas(1,1)) and
-// handed to `renderDocumentToCanvas` via `prebuiltPages` — the SAME cross-context
-// flow the public `DocxDocument.renderPage` uses. The render width equals the page
+// The retained layout is built once and passed directly to canonical page paint.
+// The render width equals the page
 // width so the paint scale is exactly 1 (fragment rescale is then a no-op → a
 // migrated paragraph paints with zero measureText calls).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,7 +38,7 @@ interface Call {
   scaleY: number;
 }
 
-/** `paginateDocument` builds its measure ctx from `new OffscreenCanvas(1,1)`,
+/** Canonical layout builds its measure ctx from `new OffscreenCanvas(1,1)`,
  *  which the node test env lacks. Polyfill it with the SAME linear metric the
  *  recording paint canvas uses (glyph width = fontPx·0.5) so the paginate ctx and
  *  the paint ctx measure identically — the condition under which Stage 1
@@ -122,6 +117,9 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: Call[]; meas
     },
     save() { transformStack.push({ ...transform }); },
     restore() { transform = transformStack.pop() ?? transform; },
+    setTransform(a: number, _b: number, _c: number, d: number, e: number, f: number) {
+      transform = { scaleX: a, scaleY: d, translateX: e, translateY: f };
+    },
     beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
     strokeRect() {}, clip() {}, rect() {},
@@ -184,24 +182,20 @@ function doc(body: BodyElement[], pageHeight = 60, settings?: Record<string, unk
   } as unknown as DocxDocumentModel;
 }
 
-/** Render every page of `model` at scale 1 (width == pageWidth) via the shared
- *  prebuilt pages, returning the concatenated paint stream per page. */
-async function renderAllPages(model: DocxDocumentModel, pages: PaginatedBodyElement[][]): Promise<{ perPage: Call[][]; measures: number }> {
+/** Render every canonical page at scale 1, returning its paint stream. */
+async function renderAllPages(layout: DocumentLayout): Promise<{ perPage: Call[][]; measures: number }> {
   const perPage: Call[][] = [];
   let measures = 0;
-  for (let p = 0; p < pages.length; p++) {
+  for (let p = 0; p < layout.pages.length; p++) {
     const rec = makeRecordingCanvas();
-    const services = createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: rec.canvas.getContext('2d'),
-    });
-    await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, width: 200, prebuiltPages: pages, layoutServices: services });
+    await paintLayoutPage(layout, p, rec.canvas, { dpr: 1, scale: 1 }, { paint() {} });
     perPage.push(rec.calls);
     measures += rec.measures();
   }
   return { perPage, measures };
 }
 
-function retainedFlowGeometry(fragment: FlowFragment): unknown {
+function retainedFlowGeometry(fragment: FlowFragment | PaintNode): unknown {
   if (fragment.kind === 'paragraph') return fragment;
   if (fragment.kind === 'table') {
     return {
@@ -221,41 +215,33 @@ function retainedFlowGeometry(fragment: FlowFragment): unknown {
   return fragment;
 }
 
-function retainedFingerprints(pages: PaginatedBodyElement[][]): string[] {
-  return pages.flatMap((page) => page.flatMap((element) => {
-    const placed = bodyFragmentFor(element);
-    return placed === undefined
-      ? []
-      : [stableFingerprint('retained-flow', {
-        columnIndex: placed.columnIndex,
-        xPt: placed.xPt,
-        yPt: placed.yPt,
-        widthPt: placed.widthPt,
-        heightPt: placed.heightPt,
-        fragment: retainedFlowGeometry(placed.fragment),
-      })];
-  }));
+function columnIndex(page: LayoutPage, node: PaintNode): number {
+  const region = page.sectionRegions.find((candidate) => candidate.flowDomainIds.includes(node.flowDomainId));
+  return region?.flowDomainIds.indexOf(node.flowDomainId) ?? -1;
+}
+
+function retainedFingerprints(layout: DocumentLayout): string[] {
+  return layout.pages.flatMap((page) => page.layers.body.map((node) =>
+    stableFingerprint('retained-flow', {
+      columnIndex: columnIndex(page, node),
+      bounds: node.flowBounds,
+      advancePt: node.advancePt,
+      fragment: retainedFlowGeometry(node),
+    })));
 }
 
 async function renderRetainedAtScale(
-  model: DocxDocumentModel,
-  pages: PaginatedBodyElement[][],
+  layout: DocumentLayout,
   scale: 1 | 2,
 ): Promise<{ calls: Call[][]; measures: number }> {
   const calls: Call[][] = [];
   let measures = 0;
-  for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+  for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex++) {
     const rec = makeRecordingCanvas();
-    const services = createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-      measureContext: rec.canvas.getContext('2d'),
-    });
-    await renderDocumentToCanvas(model, rec.canvas, pageIndex, {
+    await paintLayoutPage(layout, pageIndex, rec.canvas, {
       dpr: 1,
-      width: model.section.pageWidth * scale,
-      prebuiltPages: pages,
-      layoutServices: services,
-    });
+      scale,
+    }, { paint() {} });
     calls.push(rec.calls);
     measures += rec.measures();
   }
@@ -266,20 +252,20 @@ async function renderRetainedAtScale(
  *  apply the page's device transform; it may neither reshape nor mutate the node. */
 async function assertRetainedScaleInvariant(
   model: DocxDocumentModel,
-): Promise<{ pages: PaginatedBodyElement[][]; fingerprints: string[] }> {
-  const pages = paginateDocument(model, createLayoutServices(model, {
+): Promise<{ layout: DocumentLayout; fingerprints: string[] }> {
+  const layout = layoutDocument(model, createLayoutServices(model, {
     localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-  }));
-  const before = retainedFingerprints(pages);
+  }), { currentDateMs: 0 });
+  const before = retainedFingerprints(layout);
   expect(before.length).toBeGreaterThan(0);
 
-  const at1 = await renderRetainedAtScale(model, pages, 1);
+  const at1 = await renderRetainedAtScale(layout, 1);
   expect(at1.measures).toBe(0);
-  expect(retainedFingerprints(pages)).toEqual(before);
+  expect(retainedFingerprints(layout)).toEqual(before);
 
-  const at2 = await renderRetainedAtScale(model, pages, 2);
+  const at2 = await renderRetainedAtScale(layout, 2);
   expect(at2.measures).toBe(0);
-  expect(retainedFingerprints(pages)).toEqual(before);
+  expect(retainedFingerprints(layout)).toEqual(before);
   expect(at2.calls).toHaveLength(at1.calls.length);
 
   for (let pageIndex = 0; pageIndex < at1.calls.length; pageIndex++) {
@@ -296,7 +282,7 @@ async function assertRetainedScaleInvariant(
       expect(device.scaleY).toBe(point.scaleY * 2);
     }
   }
-  return { pages, fingerprints: before };
+  return { layout, fingerprints: before };
 }
 
 /** Assert production consumes the retained result deterministically. */
@@ -307,17 +293,17 @@ async function assertRetainedPaint(model: DocxDocumentModel): Promise<{
   measures: number;
   streams: Call[][];
 }> {
-  const pages = paginateDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }));
-  const split = pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice));
-  const before = retainedFingerprints(pages);
-  const first = await renderAllPages(model, pages);
-  expect(retainedFingerprints(pages)).toEqual(before);
-  const second = await renderAllPages(model, pages);
+  const layout = layoutDocument(model, createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }), { currentDateMs: 0 });
+  const split = layout.pages.some((page) => page.layers.body.some((node) => node.kind === 'paragraph' && node.continuation?.continuesOnNext));
+  const before = retainedFingerprints(layout);
+  const first = await renderAllPages(layout);
+  expect(retainedFingerprints(layout)).toEqual(before);
+  const second = await renderAllPages(layout);
   expect(second.perPage).toEqual(first.perPage);
-  expect(retainedFingerprints(pages)).toEqual(before);
+  expect(retainedFingerprints(layout)).toEqual(before);
   const drawn = first.perPage.flat().filter((call) => call.op !== 'img').length;
   return {
-    pages: pages.length,
+    pages: layout.pages.length,
     drawn,
     split,
     measures: first.measures + second.measures,
@@ -392,11 +378,11 @@ describe('body retained paragraph acquisition and paint', () => {
       { type: 'pageBreak' } as BodyElement,
       pageField as unknown as BodyElement,
     ]);
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
-    expect(pages).toHaveLength(2);
-    const production = await renderAllPages(model, pages);
+    }), { currentDateMs: 0 });
+    expect(layout.pages).toHaveLength(2);
+    const production = await renderAllPages(layout);
 
     expect(production.measures).toBe(0);
     expect(production.perPage[1].some((call) => call.text === '2')).toBe(true);
@@ -410,18 +396,16 @@ describe('body retained paragraph acquisition and paint', () => {
       fontSize: 10, color: null, fontFamily: 'Times New Roman', background: null,
     });
     const model = doc([split as unknown as BodyElement]);
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
-    const fieldPageIndex = pages.findIndex((elements) => elements.some((element) => {
-      const placed = bodyFragmentFor(element);
-      return placed?.fragment.kind === 'paragraph'
-        && placed.fragment.lines.some((line) => line.placements.some((placement) =>
-          placement.kind === 'text' && placement.dependency === 'page'));
-    }));
+    }), { currentDateMs: 0 });
+    const fieldPageIndex = layout.pages.findIndex((page) => page.layers.body.some((node) =>
+      node.kind === 'paragraph'
+        && node.lines.some((line) => line.placements.some((placement) =>
+          placement.kind === 'text' && placement.dependency === 'page'))));
     expect(fieldPageIndex).toBeGreaterThan(0);
 
-    const production = await renderAllPages(model, pages);
+    const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
     expect(production.perPage[fieldPageIndex].some((call) =>
       call.text === String(fieldPageIndex + 1))).toBe(true);
@@ -440,20 +424,19 @@ describe('body retained paragraph acquisition and paint', () => {
       body.push((pageIndex === 9 ? pageTen : para(`page ${pageIndex + 1}`)) as unknown as BodyElement);
     }
     const model = doc(body);
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
-    expect(pages).toHaveLength(10);
-    const pageTenFragment = pages[9].flatMap((element) => {
-      const placed = bodyFragmentFor(element);
-      return placed?.fragment.kind === 'paragraph' ? [placed.fragment] : [];
-    }).find((fragment) => fragment.lines.some((line) => line.placements.some((placement) =>
+    }), { currentDateMs: 0 });
+    expect(layout.pages).toHaveLength(10);
+    const pageTenFragment = layout.pages[9].layers.body
+      .filter((node) => node.kind === 'paragraph')
+      .find((fragment) => fragment.lines.some((line) => line.placements.some((placement) =>
       placement.kind === 'text' && placement.dependency === 'page')));
     const pagePlacement = pageTenFragment?.lines.flatMap((line) => line.placements)
       .find((placement) => placement.kind === 'text' && placement.dependency === 'page');
     expect(pagePlacement).toMatchObject({ text: '10', advancePt: 10 });
 
-    const production = await renderAllPages(model, pages);
+    const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
     expect(production.perPage[9].some((call) => call.text === '10')).toBe(true);
   });
@@ -474,20 +457,18 @@ describe('body retained paragraph acquisition and paint', () => {
       ...model.section,
       pageNumType: { start: 50, fmt: 'upperRoman' },
     };
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
-    const production = await renderAllPages(model, pages);
+    }), { currentDateMs: 0 });
+    const production = await renderAllPages(layout);
 
     expect(production.measures).toBe(0);
     expect(production.perPage[1].some((call) => call.text === 'LI')).toBe(true);
   });
 
   it('custom kinsoku settings retain the acquired partition across value-equal rules', async () => {
-    // The prebuiltPages production path resolves resolveKinsokuRules(doc.settings)
-    // TWICE — once in paginateDocument, once in renderDocumentToCanvas — building
-    // fresh Set objects per call. The fragment's lines were laid out under the
-    // paginate-time rules; paint consumes the acquired partition directly.
+    // Value-equal kinsoku rules may contain distinct Set instances; retained paint
+    // must consume the acquired partition without treating identity as semantics.
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement], 60,
       { kinsoku: true, noLineBreaksBefore: '、。！' , noLineBreaksAfter: '（「' });
@@ -499,9 +480,10 @@ describe('body retained paragraph acquisition and paint', () => {
   it('zoom maps the same retained point geometry through the device transform', async () => {
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement]); // pageHeight 60 → splits
-    const { pages } = await assertRetainedScaleInvariant(model);
-    expect(pages.length).toBeGreaterThan(1);
-    expect(pages.some((pg) => pg.some((el) => (el as PaginatedBodyElement).lineSlice))).toBe(true);
+    const { layout } = await assertRetainedScaleInvariant(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    expect(layout.pages.some((page) => page.layers.body.some((node) =>
+      node.kind === 'paragraph' && node.continuation?.continuesOnNext))).toBe(true);
   });
 
   it('retains first-line and hanging indent geometry', async () => {
@@ -532,13 +514,12 @@ describe('body retained paragraph acquisition and paint', () => {
       { pos: 130, alignment: 'right', leader: 'dot' },
     ] as unknown as DocParagraph['tabStops'];
     const p = para(Array.from({ length: 16 }, () => tabbed).join(' '), { tabStops });
-    const { pages } = await assertRetainedScaleInvariant(doc([p as unknown as BodyElement]));
-    const tabs = pages.flatMap((page) => page.flatMap((element) => {
-      const fragment = bodyFragmentFor(element)?.fragment;
-      return fragment?.kind === 'paragraph'
-        ? fragment.lines.flatMap((line) => line.placements.filter((placement) => placement.kind === 'tab'))
-        : [];
-    }));
+    const { layout } = await assertRetainedScaleInvariant(doc([p as unknown as BodyElement]));
+    const tabs = layout.pages.flatMap((page) => page.layers.body.flatMap((node) =>
+      node.kind === 'paragraph'
+        ? node.lines.flatMap((line) => line.placements.filter((placement) => placement.kind === 'tab'))
+        : []
+    ));
     expect(tabs.length).toBeGreaterThan(0);
     expect(tabs.some((tab) => tab.leader === 'dot')).toBe(true);
     expect(tabs.every((tab) => tab.advancePt >= 0)).toBe(true);
@@ -552,20 +533,18 @@ describe('body retained paragraph acquisition and paint', () => {
     const text = Array.from({ length: 200 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement]);
     (model.section as SectionProps).columns = columns;
-    const { pages } = await assertRetainedScaleInvariant(model);
-    const placedColumns = new Set(pages.flatMap((page) => page.flatMap((element) => {
-      const placed = bodyFragmentFor(element);
-      return placed === undefined ? [] : [placed.columnIndex];
-    })));
+    const { layout } = await assertRetainedScaleInvariant(model);
+    const placedColumns = new Set(layout.pages.flatMap((page) =>
+      page.layers.body.map((node) => columnIndex(page, node))));
     expect(placedColumns).toEqual(new Set([0, 1]));
   });
 
   it('same page rendered twice is identical (the shared measured line array is never mutated by paint)', async () => {
     const text = Array.from({ length: 120 }, () => 'w').join(' ');
     const model = doc([para(text) as unknown as BodyElement]);
-    const pages = paginateDocument(model);
-    const first = await renderAllPages(model, pages);
-    const second = await renderAllPages(model, pages);
+    const layout = layoutDocument(model, createLayoutServices(model), { currentDateMs: 0 });
+    const first = await renderAllPages(layout);
+    const second = await renderAllPages(layout);
     for (let p = 0; p < first.perPage.length; p++) expect(second.perPage[p]).toEqual(first.perPage[p]);
   });
 
@@ -574,20 +553,20 @@ describe('body retained paragraph acquisition and paint', () => {
     const wideModel = doc([para(text) as unknown as BodyElement], 600); // colW 180
     const narrowModel = doc([para(text) as unknown as BodyElement], 600);
     (narrowModel.section as SectionProps).pageWidth = 120; // colW 100
-    const pagesNarrow = paginateDocument(narrowModel);
-    const pagesWide = paginateDocument(wideModel);
-    const narrow = bodyFragmentFor(pagesNarrow[0][0]);
-    const wide = bodyFragmentFor(pagesWide[0][0]);
-    if (narrow?.fragment.kind !== 'paragraph' || wide?.fragment.kind !== 'paragraph') {
+    const narrowLayout = layoutDocument(narrowModel, createLayoutServices(narrowModel), { currentDateMs: 0 });
+    const wideLayout = layoutDocument(wideModel, createLayoutServices(wideModel), { currentDateMs: 0 });
+    const narrow = narrowLayout.pages[0].layers.body[0];
+    const wide = wideLayout.pages[0].layers.body[0];
+    if (narrow?.kind !== 'paragraph' || wide?.kind !== 'paragraph') {
       throw new Error('expected retained paragraph nodes');
     }
-    expect(narrow.fragment.flowBounds.widthPt).toBe(100);
-    expect(wide.fragment.flowBounds.widthPt).toBe(180);
-    expect(narrow.fragment.lines.length).toBeGreaterThan(wide.fragment.lines.length);
-    expect(narrow.fragment.source.path).toEqual([0]);
-    expect(wide.fragment.source.path).toEqual([0]);
-    expect((await renderAllPages(narrowModel, pagesNarrow)).measures).toBe(0);
-    expect((await renderAllPages(wideModel, pagesWide)).measures).toBe(0);
+    expect(narrow.flowBounds.widthPt).toBe(100);
+    expect(wide.flowBounds.widthPt).toBe(180);
+    expect(narrow.lines.length).toBeGreaterThan(wide.lines.length);
+    expect(narrow.source.path).toEqual([0]);
+    expect(wide.source.path).toEqual([0]);
+    expect((await renderAllPages(narrowLayout)).measures).toBe(0);
+    expect((await renderAllPages(wideLayout)).measures).toBe(0);
   });
 });
 
@@ -632,21 +611,15 @@ describe('body table retained layout paint', () => {
   it('retains page-local continuation fragments and paints them without measuring', async () => {
     const cellPara = para(Array.from({ length: 40 }, () => 'wrap').join(' '));
     const model = doc([tableOf([cellPara])], 60);
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
-    const sliceTables = pages
-      .flatMap((page) => page)
-      .filter((element): element is PaginatedBodyElement & DocTable => element.type === 'table');
+    }), { currentDateMs: 0 });
+    const sliceTables = layout.pages.flatMap((page) =>
+      page.layers.body.filter((node) => node.kind === 'table')) as TableFragmentLayout[];
 
     expect(sliceTables.length).toBeGreaterThan(1);
     const fragments: TableFragmentLayout[] = [];
-    for (const table of sliceTables) {
-      const placed = bodyFragmentFor(table);
-      if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
-        throw new Error('expected retained table continuation geometry');
-      }
-      const fragment = placed.fragment as TableFragmentLayout;
+    for (const fragment of sliceTables) {
       expect(fragment.rows.length).toBeGreaterThan(0);
       expect(fragment.rows.every((row) => row.occurrenceId.length > 0)).toBe(true);
       fragments.push(fragment);
@@ -654,7 +627,7 @@ describe('body table retained layout paint', () => {
     expect(new Set(fragments.flatMap((fragment) =>
       fragment.rows.map((row) => row.occurrenceId))).size).toBeGreaterThan(1);
 
-    const production = await renderAllPages(model, pages);
+    const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
     expect(production.perPage.flat().some((call) => call.text.includes('wrap'))).toBe(true);
   });
@@ -673,14 +646,14 @@ describe('table-cell retained paragraph paint', () => {
       }),
     ], 400);
 
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
-    const placed = bodyFragmentFor(pages[0][0]);
-    if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+    }), { currentDateMs: 0 });
+    const table = layout.pages[0].layers.body[0];
+    if (table?.kind !== 'table') {
       throw new Error('expected retained negative-indent table geometry');
     }
-    expect(placed.fragment.flowBounds.xPt).toBeCloseTo(-30, 6);
+    expect(table.flowBounds.xPt).toBeCloseTo(model.section.marginLeft - 30, 6);
 
     const r = await assertRetainedPaint(model);
     expect(r.drawn).toBeGreaterThan(0);
@@ -697,10 +670,10 @@ describe('table-cell retained paragraph paint', () => {
       }),
     };
     const model = doc([tableOf([cellPara])], 400);
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
-    const production = await renderAllPages(model, pages);
+    }), { currentDateMs: 0 });
+    const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
     const calls = production.perPage.flat();
     const marker = calls.find((call) => call.text === '1.');
@@ -747,15 +720,14 @@ describe('table-cell retained paragraph paint', () => {
     });
     table.rows = [row(para('first')), row(para('second')), row(pageField)];
     const model = doc([table as unknown as BodyElement], 60);
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
+    }), { currentDateMs: 0 });
 
-    const pageFieldFragments = pages.flatMap((elements, pageIndex) =>
-      elements.flatMap((element) => {
-        const placed = bodyFragmentFor(element);
-        if (placed?.fragment.kind === 'table') {
-          return placed.fragment.rows.flatMap((tableRow) =>
+    const pageFieldFragments = layout.pages.flatMap((page, pageIndex) =>
+      page.layers.body.flatMap((node) => {
+        if (node.kind === 'table') {
+          return node.rows.flatMap((tableRow) =>
             tableRow.cells.flatMap((cell) =>
               cell.blocks.flatMap((block) =>
                 block.layout.kind === 'paragraph' && block.layout.lines.some((line) =>
@@ -774,7 +746,7 @@ describe('table-cell retained paragraph paint', () => {
       .find((placement) => placement.kind === 'text' && placement.dependency === 'page');
     expect(retainedPage).toMatchObject({ text: String(pageIndex + 1) });
 
-    const production = await renderAllPages(model, pages);
+    const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
     expect(production.perPage[pageIndex].some((call) =>
       call.text === String(pageIndex + 1))).toBe(true);
@@ -805,19 +777,19 @@ describe('table-cell retained paragraph paint', () => {
       ...model.section,
       pageNumType: { start: 9, fmt: 'upperRoman' },
     };
-    const pages = paginateDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
-    }));
+    }), { currentDateMs: 0 });
 
-    expect(pages).toHaveLength(3);
-    const retainedHeaderPages = pages.map((elements, pageIndex) => {
-      const tableElement = elements.find((element) => element.type === 'table');
-      const placed = tableElement ? bodyFragmentFor(tableElement) : undefined;
-      if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
+    expect(layout.pages).toHaveLength(3);
+    const retainedHeaderPages = layout.pages.map((page, pageIndex) => {
+      const tableNode = page.layers.body.find((node) => node.kind === 'table') as
+        | TableFragmentLayout
+        | undefined;
+      if (tableNode?.kind !== 'table') {
         throw new Error('expected a retained table fragment');
       }
-      const retained = placed.fragment as TableFragmentLayout;
-      const header = retained.rows.find((candidate) => candidate.logicalRowIndex === 0);
+      const header = tableNode.rows.find((candidate) => candidate.logicalRowIndex === 0);
       const field = header?.cells[0]?.blocks[0]?.layout;
       const result = field?.kind === 'paragraph'
         ? field.lines.flatMap((line) => line.placements).find((placement) =>
@@ -836,7 +808,7 @@ describe('table-cell retained paragraph paint', () => {
       { pageIndex: 2, ownership: 'repeated-header', occurrenceId: expect.any(String), text: 'XI' },
     ]);
 
-    const production = await renderAllPages(model, pages);
+    const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
     expect(production.perPage.map((calls, pageIndex) => calls.some((call) =>
       call.text === ['IX', 'X', 'XI'][pageIndex]))).toEqual([true, true, true]);
@@ -879,16 +851,14 @@ describe('re-wrapped retained continuation slices (issue #908)', () => {
       cols: [{ widthPt: 100, spacePt: 32 }, { widthPt: 48, spacePt: 0 }],
     } as SectionProps['columns'];
 
-    const pages = paginateDocument(model);
-    const continuationPage = pages.findIndex((page) => page.some((el) => {
-      const slice = el as PaginatedBodyElement & {
-        lineSlice?: { start: number; end: number; continues?: boolean };
-      };
-      return slice.colIndex === 1 && slice.lineSlice?.continues === true;
-    }));
+    const layout = layoutDocument(model, createLayoutServices(model), { currentDateMs: 0 });
+    const continuationPage = layout.pages.findIndex((page) => page.layers.body.some((node) =>
+      columnIndex(page, node) === 1
+        && node.kind === 'paragraph'
+        && node.continuation?.continuesFromPrevious));
     expect(continuationPage).toBeGreaterThanOrEqual(0);
 
-    const painted = await renderAllPages(model, pages);
+    const painted = await renderAllPages(layout);
     expect(painted.measures).toBe(0);
     const col1Origin = model.section.marginLeft + 100 + 32;
     const lineCalls = painted.perPage[continuationPage]
@@ -942,15 +912,15 @@ describe('re-wrapped retained continuation slices (issue #908)', () => {
       cols: [{ widthPt: 100, spacePt: 32 }, { widthPt: 48, spacePt: 0 }],
     } as SectionProps['columns'];
 
-    const pages = paginateDocument(model);
+    const layout = layoutDocument(model, createLayoutServices(model), { currentDateMs: 0 });
     // Non-vacuity: the swap really fired — a col-1 slice carries the remainder
     // partition marker (if a float had registered, the swap would be scoped out
     // and this test would be exercising nothing).
-    const slices = pages.flat().filter((el) => el.type === 'paragraph') as
-      (PaginatedBodyElement & { lineSlice?: { start: number; end: number; continues?: boolean } })[];
-    expect(slices.some((s) => s.lineSlice?.continues === true)).toBe(true);
+    const slices = layout.pages.flatMap((page) =>
+      page.layers.body.filter((node) => node.kind === 'paragraph'));
+    expect(slices.some((node) => node.continuation?.continuesFromPrevious)).toBe(true);
 
-    const production = await renderAllPages(model, pages);
+    const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
     for (let pg = 0; pg < production.perPage.length; pg++) {
       const anchorDrawsProduction = production.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
@@ -986,12 +956,12 @@ describe('re-wrapped retained continuation slices (issue #908)', () => {
       cols: [{ widthPt: 100, spacePt: 32 }, { widthPt: 48, spacePt: 0 }],
     } as SectionProps['columns'];
 
-    const pages = paginateDocument(model);
-    const slices = pages.flat().filter((el) => el.type === 'paragraph') as
-      (PaginatedBodyElement & { lineSlice?: { start: number; end: number; continues?: boolean } })[];
-    expect(slices.some((s) => s.lineSlice?.continues === true)).toBe(true);
+    const layout = layoutDocument(model, createLayoutServices(model), { currentDateMs: 0 });
+    const slices = layout.pages.flatMap((page) =>
+      page.layers.body.filter((node) => node.kind === 'paragraph'));
+    expect(slices.some((node) => node.continuation?.continuesFromPrevious)).toBe(true);
 
-    const production = await renderAllPages(model, pages);
+    const production = await renderAllPages(layout);
     expect(production.measures).toBe(0);
     for (let pg = 0; pg < production.perPage.length; pg++) {
       const anchorDrawsProduction = production.perPage[pg].filter((c) => c.text === 'ANCHORTEXT').length;
