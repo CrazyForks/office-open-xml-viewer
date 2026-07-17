@@ -24,6 +24,8 @@ export type AuthoredBreak =
   | 'pageBreakBefore'
   | 'lastRenderedPageBreak';
 
+export type PhysicalPageParity = 'odd' | 'even';
+
 export class UnsupportedPageFlowTransitionError extends Error {
   readonly code = 'NEXT_COLUMN_DESTINATION_UNAVAILABLE' as const;
 
@@ -200,9 +202,46 @@ function advanceToPage(
   }]);
 }
 
+function matchesPhysicalPageParity(
+  pageIndex: number,
+  parity: PhysicalPageParity,
+): boolean {
+  const isOddPhysicalPage = pageIndex % 2 === 0;
+  return parity === 'odd' ? isOddPhysicalPage : !isOddPhysicalPage;
+}
+
+function advanceToPageWithParity(
+  state: PageFlowState,
+  section: PageFlowSectionContext,
+  reason: Extract<PageAdvanceReason, 'explicit-break' | 'section-break'>,
+  parity?: PhysicalPageParity,
+): PageFlowTransition {
+  let pageIndex = state.pageIndex + 1;
+  const events: PageFlowEvent[] = [];
+  if (parity !== undefined && !matchesPhysicalPageParity(pageIndex, parity)) {
+    events.push({
+      type: 'next-page',
+      reason: 'parity',
+      pageIndex,
+      sectionOccurrenceId: state.section.sectionOccurrenceId,
+      parityBlank: true,
+    });
+    pageIndex += 1;
+  }
+  events.push({
+    type: 'next-page',
+    reason,
+    pageIndex,
+    sectionOccurrenceId: section.sectionOccurrenceId,
+    parityBlank: false,
+  });
+  return transition(createPageFlowState(section, { pageIndex }), events);
+}
+
 export function applyAuthoredBreak(
   state: PageFlowState,
   authoredBreak: AuthoredBreak,
+  parity?: PhysicalPageParity,
 ): PageFlowTransition {
   if (authoredBreak === 'lastRenderedPageBreak') {
     // lastRenderedPageBreak is a cached result from a previous layout producer,
@@ -222,16 +261,9 @@ export function applyAuthoredBreak(
     // already at the start of an otherwise empty page satisfies that condition.
     return transition(state, []);
   }
-  return advanceToPage(
-    state,
-    state.section,
-    authoredBreak === 'pageBreakBefore' ? 'page-break-before' : 'explicit-break',
-  );
-}
-
-function matchesParity(pageIndex: number, startType: 'oddPage' | 'evenPage'): boolean {
-  const isOddPhysicalPage = pageIndex % 2 === 0;
-  return startType === 'oddPage' ? isOddPhysicalPage : !isOddPhysicalPage;
+  return authoredBreak === 'page'
+    ? advanceToPageWithParity(state, state.section, 'explicit-break', parity)
+    : advanceToPage(state, state.section, 'page-break-before');
 }
 
 export function beginSection(
@@ -298,30 +330,14 @@ export function beginSection(
     ]);
   }
 
-  let pageIndex = state.pageIndex + 1;
-  const events: PageFlowEvent[] = [];
-  if (
-    (startType === 'oddPage' || startType === 'evenPage')
-    && !matchesParity(pageIndex, startType)
-  ) {
-    // §17.18.77: parity padding precedes the incoming section, so the blank page
-    // retains the outgoing section context while the following page owns the new one.
-    events.push({
-      type: 'next-page',
-      reason: 'parity',
-      pageIndex,
-      sectionOccurrenceId: state.section.sectionOccurrenceId,
-      parityBlank: true,
-    });
-    pageIndex += 1;
-  }
-  events.push({
-    type: 'next-page',
-    reason: 'section-break',
-    pageIndex,
-    sectionOccurrenceId: section.sectionOccurrenceId,
-    parityBlank: false,
-  });
-  events.push({ type: 'begin-section', section });
-  return transition(createPageFlowState(section, { pageIndex }), events);
+  const parity = startType === 'oddPage'
+    ? 'odd'
+    : startType === 'evenPage'
+      ? 'even'
+      : undefined;
+  const pageAdvance = advanceToPageWithParity(state, section, 'section-break', parity);
+  return transition(pageAdvance.state, [
+    ...pageAdvance.events,
+    { type: 'begin-section', section },
+  ]);
 }

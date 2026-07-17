@@ -216,6 +216,7 @@ import {
 } from './layout/document-layout-variants.js';
 import { selectedHeaderFooterStory } from './layout/header-footer-reserve.js';
 import { footnoteIdsInRetainedSlice } from './layout/note-reference-ownership.js';
+import { isFirstSectionOwnedPage } from './layout/section-page-identity.js';
 import type {
   BodyAcquisitionLocation,
   BodyLayoutKernel,
@@ -2153,9 +2154,7 @@ async function renderDocumentToCanvasLeased(
   if (!sectionOccurrence) {
     throw new Error(`Unknown section occurrence: ${retainedBodyPage.sectionOccurrenceId}`);
   }
-  const firstPageOfSection = pageIndex === 0
-    || retainedBodyLayout.pages[pageIndex - 1]?.sectionOccurrenceId
-      !== retainedBodyPage.sectionOccurrenceId;
+  const firstPageOfSection = isFirstSectionOwnedPage(retainedBodyLayout.pages, pageIndex);
   const isEvenDisplayedPage = retainedBodyPage.pageNumber.displayNumber % 2 === 0;
   const header = pickHeaderFooter(
     sectionOccurrence.headers,
@@ -2618,11 +2617,8 @@ function docDefaultFontSizePt(doc: DocxDocumentModel): number {
   return 10;
 }
 
-/** ECMA-376 §17.6.10 `@w:display` (§17.18.62) — whether the section's page borders
- *  are shown on the physical page at `pageIndex` (0-based within the document; for
- *  a single-section document this equals the section-relative page index — the
- *  fixture case). "allPages" (default) ⇒ always; "firstPage" ⇒ only page 0;
- *  "notFirstPage" ⇒ every page except page 0. */
+/** ECMA-376 §17.6.10 `@w:display` (§17.18.62) — page borders are evaluated only
+ * on pages owned by the section, including its first such physical page. */
 function pageBorderShownOnPage(pb: PageBorders, firstSectionPage: boolean): boolean {
   switch (pb.display) {
     case 'firstPage':

@@ -32,6 +32,7 @@ export class LayoutVariantStore {
   readonly #variants = new Map<string, DeepReadonly<DocumentLayout>>();
   readonly #defaultOptions: LayoutOptions;
   readonly #defaultKey: string;
+  #activeNonDefaultKey: string | null = null;
 
   constructor(
     services: LayoutServices,
@@ -60,6 +61,12 @@ export class LayoutVariantStore {
     let layout = this.#variants.get(key);
     if (!layout) {
       layout = deepFreezeDocumentLayout(this.#build(normalized) as DocumentLayout);
+      if (key !== this.#defaultKey) {
+        if (this.#activeNonDefaultKey !== null && this.#activeNonDefaultKey !== key) {
+          this.#variants.delete(this.#activeNonDefaultKey);
+        }
+        this.#activeNonDefaultKey = key;
+      }
       this.#variants.set(key, layout);
     }
     return Object.freeze({ key, options: normalized, layout });

@@ -402,6 +402,58 @@ describe('canonical physical-page numbering', () => {
     ]));
   });
 
+  it('retains an authored parity blank in physical order and NUMPAGES structure', () => {
+    const observations: PageFieldObservation[] = [];
+    const numberedOwner = owner('section:authored-parity', {
+      pageNumbering: { start: 50, format: 'decimal' },
+    });
+    const layout = paginate(numberedOwner, [
+      bodyBlock(0),
+      {
+        kind: 'authored-break',
+        source: bodySource(1),
+        break: 'page',
+        parity: 'odd',
+      },
+      bodyBlock(2),
+    ], new Map([[0, 20], [2, 20]]), {
+      hasPaginationFields: true,
+      fieldObservations: observations,
+    });
+    const finalPass = observations.filter(({ totalPages }) => totalPages === layout.pages.length);
+
+    expect(layout.pages.map((page) => ({
+      pageIndex: page.pageIndex,
+      displayNumber: page.pageNumber.displayNumber,
+      owner: page.sectionOccurrenceId,
+      parityBlank: page.parityBlank,
+    }))).toEqual([
+      { pageIndex: 0, displayNumber: 50, owner: 'section:authored-parity', parityBlank: false },
+      { pageIndex: 1, displayNumber: 51, owner: 'section:authored-parity', parityBlank: true },
+      { pageIndex: 2, displayNumber: 52, owner: 'section:authored-parity', parityBlank: false },
+    ]);
+    expect(layout.pages[1]).toMatchObject({
+      sectionRegions: [],
+      layers: {
+        paintSequence: [],
+        background: [],
+        behindText: [],
+        header: [],
+        body: [],
+        notes: [],
+        front: [],
+        footer: [],
+      },
+      readingOrder: [],
+    });
+    expect(layout.pages.map((page) => page.layers.body.map((node) => node.source.path[0])))
+      .toEqual([[0], [], [2]]);
+    expect(finalPass).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceIndex: 0, physicalPageIndex: 0, totalPages: 3 }),
+      expect.objectContaining({ sourceIndex: 2, physicalPageIndex: 2, totalPages: 3 }),
+    ]));
+  });
+
   it('keeps selected page-number metadata immutable across keyed layout variants', () => {
     const heights = new Map([[0, 20]]);
     const services = createServices({ heights });
@@ -429,7 +481,7 @@ describe('canonical physical-page numbering', () => {
     expect(Object.isFrozen(selected.page.pageNumber)).toBe(true);
   });
 
-  it('does not treat a continuous spillover as the first page of that section story', () => {
+  it('separates continuous content numbering from the first owned story page', () => {
     const observations: StoryObservation[] = [];
     const outgoing = owner('section:outgoing', {
       headers: { default: storySource('outgoing-default'), first: null, even: null },
@@ -457,7 +509,7 @@ describe('canonical physical-page numbering', () => {
       `${physicalPageIndex}:${storyInstance}`
     )))).toEqual(new Set([
       '0:outgoing-default',
-      '1:incoming-default',
+      '1:incoming-first',
     ]));
   });
 

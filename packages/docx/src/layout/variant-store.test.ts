@@ -65,4 +65,30 @@ describe('LayoutVariantStore', () => {
 
     expect(store.select(options).options).toBe(options);
   });
+
+  it('retains the default plus exactly one reusable non-default variant', () => {
+    const builds: number[] = [];
+    const store = new LayoutVariantStore(
+      services('text:a'),
+      { currentDateMs: 100 },
+      (options) => {
+        builds.push(options.currentDateMs);
+        return emptyLayout();
+      },
+    );
+
+    const defaultLayout = store.defaultLayout;
+    const firstExplicit = store.layoutFor({ currentDateMs: 101 });
+    expect(store.layoutFor({ currentDateMs: 101 })).toBe(firstExplicit);
+
+    const secondExplicit = store.layoutFor({ currentDateMs: 102 });
+    expect(secondExplicit).not.toBe(firstExplicit);
+    expect(store.defaultLayout).toBe(defaultLayout);
+
+    const rebuiltFirst = store.layoutFor({ currentDateMs: 101 });
+    expect(rebuiltFirst).not.toBe(firstExplicit);
+    expect(rebuiltFirst).not.toBe(secondExplicit);
+    expect(store.layoutFor({ currentDateMs: 101 })).toBe(rebuiltFirst);
+    expect(builds).toEqual([100, 101, 102, 101]);
+  });
 });

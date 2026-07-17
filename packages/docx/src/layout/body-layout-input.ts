@@ -68,7 +68,12 @@ export interface BodySectionLayoutInput {
 export type BodyLayoutSequenceEntryFor<TSection> =
   | Readonly<{ kind: 'body-block'; block: BodyParagraphSourceInput | BodyTableSourceInput }>
   | BodyAdjacentTableGroupInput
-  | Readonly<{ kind: 'authored-break'; source: SourceRef; break: AuthoredBreak }>
+  | Readonly<{
+      kind: 'authored-break';
+      source: SourceRef;
+      break: AuthoredBreak;
+      parity?: 'odd' | 'even';
+    }>
   | Readonly<{ kind: 'begin-section'; source: SourceRef; section: TSection }>
   | Readonly<{ kind: 'consume-source'; source: SourceRef; reason: 'hidden-paragraph' }>;
 

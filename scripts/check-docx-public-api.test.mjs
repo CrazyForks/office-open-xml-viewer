@@ -38,6 +38,13 @@ function run(root, ...args) {
   });
 }
 
+function writeApiClass(root, members) {
+  writeFileSync(
+    path.join(root, 'dist/types/docx-public.d.ts'),
+    `export declare class Api { ${members} }\n`,
+  );
+}
+
 test('writes a deterministic baseline containing every reachable local declaration', () => {
   const { root, base } = fixture();
   const result = run(root, '--base-ref', base, '--write-baseline');
@@ -79,6 +86,141 @@ test('ignores declaration-emitter quote style and redundant type parentheses', (
   const result = run(root, '--base-ref', base);
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test('ignores private class member renames and type changes', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private original: string; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'private renamed: number; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('ignores added private class members when private presence remains', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private existing: string; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'private existing: string; private added(): void; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('ignores removed private class members when private presence remains', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private retained: string; private removed(): void; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'private retained: string; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('ignores static-private member renames, types, and counts while presence remains', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private static original: string; private static removed(): void; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'private static renamed: number; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('rejects removing a private constructor while instance-private state remains', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private constructor(secret: string); private state: string; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'private state: string; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public API declaration baseline differs/i);
+});
+
+test('rejects changing instance-private state to static-private state', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private state: string; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'private static state: string; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public API declaration baseline differs/i);
+});
+
+test('rejects changing TypeScript private state to hard-private state', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private state: string; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, '#private; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public API declaration baseline differs/i);
+});
+
+test('normalizes private members already recorded in the committed baseline', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private original: string; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  const baselinePath = path.join(root, 'packages/docx/api/public-api-baseline.d.ts');
+  const baseline = readFileSync(baselinePath, 'utf8');
+  const legacyBaseline = baseline.replace(
+    'private __privatePresence;',
+    'private original: string;',
+  );
+  assert.notEqual(legacyBaseline, baseline);
+  writeFileSync(baselinePath, legacyBaseline);
+  writeApiClass(root, 'private renamed: number; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('rejects adding the first private class member', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'private added: string; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public API declaration baseline differs/i);
+});
+
+test('rejects removing the last private class member', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'private removed: string; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public API declaration baseline differs/i);
+});
+
+test('rejects protected class member changes', () => {
+  const { root, base } = fixture();
+  writeApiClass(root, 'protected retained: string; visible: boolean;');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeApiClass(root, 'protected renamed: number; visible: boolean;');
+
+  const result = run(root, '--base-ref', base);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public API declaration baseline differs/i);
 });
 
 test('fails when the generated entry declaration is missing', () => {

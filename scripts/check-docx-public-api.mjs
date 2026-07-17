@@ -47,10 +47,81 @@ function normalizeDeclaration(source, fileName) {
     ts.ScriptKind.TS,
   );
   const transformed = ts.transform(parsed, [(context) => {
+    const hasModifier = (member, kind) => ts.getModifiers(member)?.some(
+      (modifier) => modifier.kind === kind,
+    ) ?? false;
+    const normalizeClassMembers = (members) => {
+      let hasInstancePrivate = false;
+      let hasStaticPrivate = false;
+      let hasHardPrivate = false;
+      let hasPrivateConstructor = false;
+      const visibleMembers = members.filter((member) => {
+        if (member.name && ts.isPrivateIdentifier(member.name)) {
+          hasHardPrivate = true;
+          return false;
+        }
+        if (!hasModifier(member, ts.SyntaxKind.PrivateKeyword)) return true;
+        if (ts.isConstructorDeclaration(member)) hasPrivateConstructor = true;
+        else if (hasModifier(member, ts.SyntaxKind.StaticKeyword)) hasStaticPrivate = true;
+        else hasInstancePrivate = true;
+        return false;
+      });
+      if (visibleMembers.length === members.length) return members;
+      if (hasInstancePrivate) {
+        visibleMembers.push(ts.factory.createPropertyDeclaration(
+          [ts.factory.createModifier(ts.SyntaxKind.PrivateKeyword)],
+          '__privatePresence',
+        ));
+      }
+      if (hasStaticPrivate) {
+        visibleMembers.push(ts.factory.createPropertyDeclaration(
+          [
+            ts.factory.createModifier(ts.SyntaxKind.PrivateKeyword),
+            ts.factory.createModifier(ts.SyntaxKind.StaticKeyword),
+          ],
+          '__staticPrivatePresence',
+        ));
+      }
+      if (hasHardPrivate) {
+        visibleMembers.push(ts.factory.createPropertyDeclaration(
+          undefined,
+          ts.factory.createPrivateIdentifier('#private'),
+        ));
+      }
+      if (hasPrivateConstructor) {
+        visibleMembers.push(ts.factory.createConstructorDeclaration(
+          [ts.factory.createModifier(ts.SyntaxKind.PrivateKeyword)],
+          [],
+          undefined,
+        ));
+      }
+      return ts.factory.createNodeArray(visibleMembers);
+    };
     const visit = (node) => {
       if (ts.isParenthesizedTypeNode(node)) return ts.visitNode(node.type, visit);
       if (ts.isStringLiteral(node)) return ts.factory.createStringLiteral(node.text, true);
-      return ts.visitEachChild(node, visit, context);
+      const visited = ts.visitEachChild(node, visit, context);
+      if (ts.isClassDeclaration(visited)) {
+        return ts.factory.updateClassDeclaration(
+          visited,
+          visited.modifiers,
+          visited.name,
+          visited.typeParameters,
+          visited.heritageClauses,
+          normalizeClassMembers(visited.members),
+        );
+      }
+      if (ts.isClassExpression(visited)) {
+        return ts.factory.updateClassExpression(
+          visited,
+          visited.modifiers,
+          visited.name,
+          visited.typeParameters,
+          visited.heritageClauses,
+          normalizeClassMembers(visited.members),
+        );
+      }
+      return visited;
     };
     return (root) => ts.visitNode(root, visit);
   }]);
@@ -123,6 +194,19 @@ function renderBaseline(declarations) {
   return `${header}\n\n${modules.join('\n\n')}\n`;
 }
 
+function normalizeRenderedBaseline(source) {
+  return normalizeText(source)
+    .split(/\n\n(?=\/\/ --- file: )/)
+    .map((section, index) => {
+      if (index === 0) return section;
+      const declarationStart = section.indexOf('\n');
+      const heading = section.slice(0, declarationStart);
+      const fileName = heading.slice('// --- file: '.length, -' ---'.length);
+      return `${heading}\n${normalizeDeclaration(section.slice(declarationStart + 1), fileName)}`;
+    })
+    .join('\n\n');
+}
+
 function resolveMergeBase(root, explicit) {
   for (const candidate of explicit ? [explicit] : ['origin/main', 'main']) {
     try {
@@ -185,7 +269,7 @@ export function checkPublicApi(options) {
   if (mergeBaseBaseline != null && normalizeText(mergeBaseBaseline) !== expected) {
     throw new Error('DOCX public API baseline differs from the merge base and cannot be changed during the layout migration.');
   }
-  if (normalizeText(actual) !== expected) {
+  if (normalizeRenderedBaseline(actual) !== normalizeRenderedBaseline(expected)) {
     throw new Error(
       'DOCX public API declaration baseline differs. Public API changes are not permitted in this migration; rebuild and inspect the reachable declarations.',
     );

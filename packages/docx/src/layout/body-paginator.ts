@@ -57,6 +57,10 @@ import { footnoteIdsInRetainedSlice } from './note-reference-ownership.js';
 import { composeCanonicalSectionFlow } from './section-flow-composition.js';
 import type { BodyFlowAllocation } from './section-flow-composition.js';
 import {
+  isFirstSectionOwnedPage,
+  sectionContentFirstAppearancePageIndices,
+} from './section-page-identity.js';
+import {
   wordActiveColumnBreakIndexes,
   wordFlowNeutralPreBreakAnchorParagraph,
   wordPreBreakHostAnchorExtentPt,
@@ -511,12 +515,9 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
   // to its first appearance there; its next owned page is therefore start + 1.
   // Issue #804 locks the retained-layout and painted-footer observations together
   // in the continuous-section cases in page-number-field-render.test.ts.
-  const firstAppearance = new Map<string, number>();
-  state.pages.forEach((draft) => draft.accumulator.sectionRegions.forEach((region) => {
-    if (!firstAppearance.has(region.sectionOccurrenceId)) {
-      firstAppearance.set(region.sectionOccurrenceId, draft.accumulator.pageIndex);
-    }
-  }));
+  const contentFirstAppearance = sectionContentFirstAppearancePageIndices(
+    state.pages.map((draft) => draft.accumulator),
+  );
   let displayNumber = 0;
   let priorOwner: string | null = null;
   const pages = state.pages.map((draft) => {
@@ -524,7 +525,7 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
     if (owner.sectionOccurrenceId !== priorOwner && owner.pageNumbering.start !== null) {
       displayNumber = owner.pageNumbering.start + (
         draft.accumulator.pageIndex
-          - (firstAppearance.get(owner.sectionOccurrenceId) ?? draft.accumulator.pageIndex)
+          - (contentFirstAppearance.get(owner.sectionOccurrenceId) ?? draft.accumulator.pageIndex)
       );
     } else displayNumber += 1;
     priorOwner = owner.sectionOccurrenceId;
@@ -736,7 +737,10 @@ function paginateBodyPass(
       if (entry.break === 'column' && !activeColumnBreakIndexes.has(entryIndex)) {
         continue;
       }
-      commitTransition(applyAuthoredBreak(state.flow, entry.break), entryIndex + 1);
+      commitTransition(
+        applyAuthoredBreak(state.flow, entry.break, entry.parity),
+        entryIndex + 1,
+      );
       continue;
     }
     if (entry.kind === 'begin-section') {
@@ -1151,15 +1155,7 @@ function headerFooterReserves(
   pass: Readonly<{ layout: DocumentLayout; session: BodyLayoutSession }>,
   owners: ReadonlyMap<string, BodySectionLayoutInput>,
 ): readonly HeaderFooterReserve[] {
-  const firstSectionPage = new Map<string, number>();
-  pass.layout.pages.forEach((page) => {
-    page.sectionRegions.forEach((region) => {
-      if (!firstSectionPage.has(region.sectionOccurrenceId)) {
-        firstSectionPage.set(region.sectionOccurrenceId, page.pageIndex);
-      }
-    });
-  });
-  return Object.freeze(pass.layout.pages.map((page) => {
+  return Object.freeze(pass.layout.pages.map((page, pageIndex) => {
     if (page.parityBlank) return Object.freeze({ top: 0, bottom: 0 });
     // Vertical header/footer stories paint in physical page space; charging their
     // measured overflow to the logical body interval would create a pagination-only reserve.
@@ -1168,7 +1164,6 @@ function headerFooterReserves(
     }
     const owner = owners.get(page.sectionOccurrenceId);
     if (!owner) throw new Error(`Unknown body section ${page.sectionOccurrenceId}`);
-    const firstPageIndex = firstSectionPage.get(owner.sectionOccurrenceId) ?? page.pageIndex;
     const inlineExtentPt = Math.max(
       0,
       page.section.geometry.pageWidth
@@ -1180,7 +1175,7 @@ function headerFooterReserves(
         kind === 'header' ? owner.headers : owner.footers,
         {
           titlePage: owner.titlePage,
-          firstPageOfSection: page.pageIndex === firstPageIndex,
+          firstPageOfSection: isFirstSectionOwnedPage(pass.layout.pages, pageIndex),
           evenAndOddHeaders: owner.evenAndOddHeaders,
           displayPageNumber: page.pageNumber.displayNumber,
         },

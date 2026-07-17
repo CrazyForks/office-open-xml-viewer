@@ -219,6 +219,62 @@ describe('immutable DOCX page-flow transitions', () => {
     }]);
   });
 
+  it.each([
+    ['odd', 1],
+    ['even', 0],
+  ] as const)(
+    'opens the immediate next physical %s page when authored parity already matches',
+    (parity, currentPageIndex) => {
+      const initial = createPageFlowState(section('section-0'), { pageIndex: currentPageIndex });
+
+      const transition = applyAuthoredBreak(initial, 'page', parity);
+
+      expect(transition.state.pageIndex).toBe(currentPageIndex + 1);
+      expect(transition.events).toEqual([{
+        type: 'next-page',
+        reason: 'explicit-break',
+        pageIndex: currentPageIndex + 1,
+        sectionOccurrenceId: 'section-0',
+        parityBlank: false,
+      }]);
+      expect(transition.events).not.toContainEqual(expect.objectContaining({ type: 'begin-section' }));
+    },
+  );
+
+  it.each([
+    ['odd', 0],
+    ['even', 1],
+  ] as const)(
+    'pads a mismatching immediate candidate before authored %s-page content',
+    (parity, currentPageIndex) => {
+      const initial = createPageFlowState(section('section-0'), { pageIndex: currentPageIndex });
+
+      const transition = applyAuthoredBreak(initial, 'page', parity);
+
+      expect(transition.state).toMatchObject({
+        pageIndex: currentPageIndex + 2,
+        section: { sectionOccurrenceId: 'section-0' },
+      });
+      expect(transition.events).toEqual([
+        {
+          type: 'next-page',
+          reason: 'parity',
+          pageIndex: currentPageIndex + 1,
+          sectionOccurrenceId: 'section-0',
+          parityBlank: true,
+        },
+        {
+          type: 'next-page',
+          reason: 'explicit-break',
+          pageIndex: currentPageIndex + 2,
+          sectionOccurrenceId: 'section-0',
+          parityBlank: false,
+        },
+      ]);
+      expect(transition.events).not.toContainEqual(expect.objectContaining({ type: 'begin-section' }));
+    },
+  );
+
   it('records pageBreakBefore as its own authored page-advance reason', () => {
     const initial = createPageFlowState(section('section-0'), {
       pageIndex: 6,

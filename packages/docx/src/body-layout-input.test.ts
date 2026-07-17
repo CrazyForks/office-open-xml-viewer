@@ -113,6 +113,28 @@ describe('canonical body layout input', () => {
     expect(JSON.stringify(input)).not.toContain('__sectionPlacement');
   });
 
+  it('retains parity only on authored page breaks during acquisition', () => {
+    const document = {
+      body: [
+        { type: 'pageBreak', parity: 'odd' },
+        { type: 'pageBreak' },
+        { type: 'columnBreak', parity: 'even' },
+      ] as unknown as BodyElement[],
+      section: finalSection(),
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as DocxDocumentModel;
+
+    expect(bodyLayoutAcquisitionInput(document).sequence).toMatchObject([
+      { kind: 'authored-break', break: 'page', parity: 'odd' },
+      { kind: 'authored-break', break: 'page' },
+      { kind: 'authored-break', break: 'column' },
+    ]);
+    expect(bodyLayoutAcquisitionInput(document).sequence[1]).not.toHaveProperty('parity');
+    expect(bodyLayoutAcquisitionInput(document).sequence[2]).not.toHaveProperty('parity');
+  });
+
   it('consumes a vanished empty paragraph without admitting a body block', () => {
     const hidden = { ...paragraph(''), runs: [], markVanish: true } as BodyElement;
     const document = {

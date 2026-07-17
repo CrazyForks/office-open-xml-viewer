@@ -791,6 +791,9 @@ function bodyLayoutSequenceInput(
         kind: 'authored-break' as const,
         source,
         break: element.type === 'pageBreak' ? 'page' as const : 'column' as const,
+        ...(element.type === 'pageBreak' && element.parity !== undefined
+          ? { parity: element.parity }
+          : {}),
       });
     }
     if (element.type === 'sectionBreak') {

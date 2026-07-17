@@ -402,11 +402,15 @@ export class DocxDocument {
 
   /** Lazily build (and cache) the `bookmarkName → page index` map from either
    *  the worker meta (worker mode) or the paginated pages (main mode). */
-  private _getBookmarkPages(): Map<string, number> {
+  private _getBookmarkPages(): Map<string, number> | null {
     if (this._bookmarkPages) return this._bookmarkPages;
-    this._bookmarkPages = this._meta
-      ? new Map(this._meta.bookmarkPages)
-      : buildBookmarkPageMap(this._getLayout()!);
+    if (this._meta) {
+      this._bookmarkPages = new Map(this._meta.bookmarkPages);
+      return this._bookmarkPages;
+    }
+    const layout = this._getLayout();
+    if (!layout) return null;
+    this._bookmarkPages = buildBookmarkPageMap(layout);
     return this._bookmarkPages;
   }
 
@@ -424,7 +428,7 @@ export class DocxDocument {
    * meta, built from the same paginated pages as `pageSizes`).
    */
   getBookmarkPage(bookmarkName: string): number | undefined {
-    return this._getBookmarkPages().get(bookmarkName);
+    return this._getBookmarkPages()?.get(bookmarkName);
   }
 
   /**

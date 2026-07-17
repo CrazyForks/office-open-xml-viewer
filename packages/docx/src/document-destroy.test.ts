@@ -146,6 +146,7 @@ const validHeader = (): Uint8Array =>
 
 interface DestroyProbe {
   destroy(): void;
+  getBookmarkPage(bookmarkName: string): number | undefined;
 }
 
 describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
@@ -179,6 +180,19 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     const { doc } = makeDocument();
     doc.destroy();
     expect(() => doc.destroy()).not.toThrow();
+  });
+
+  it('returns no bookmark before load or after destroy without poisoning loaded lookup', () => {
+    const { doc } = makeDocument();
+
+    expect(doc.getBookmarkPage('loaded')).toBeUndefined();
+    (doc as unknown as { _meta: { bookmarkPages: [string, number][] } })._meta = {
+      bookmarkPages: [['loaded', 3]],
+    };
+    expect(doc.getBookmarkPage('loaded')).toBe(3);
+
+    doc.destroy();
+    expect(doc.getBookmarkPage('loaded')).toBeUndefined();
   });
 
   // Wiring guard: destroy() must actually release the embedded fonts the document
