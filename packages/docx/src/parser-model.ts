@@ -1362,8 +1362,19 @@ export interface InternalVmlTextPath extends TextPath {
   fontSizePt?: number;
 }
 
+export interface InternalUnsupportedTextBoxBlock {
+  readonly type: 'unsupportedTextBoxBlock';
+  readonly qName: string;
+  readonly sourcePath: readonly number[];
+}
+
+export type InternalTextBoxBlock =
+  | Extract<BodyElement, { type: 'paragraph' | 'table' }>
+  | InternalUnsupportedTextBoxBlock;
+
 export interface InternalShapeRun extends ShapeRun {
   textPath?: InternalVmlTextPath | null;
+  textBoxContent?: InternalTextBoxBlock[];
 }
 
 export interface NormalizedDocumentInput {
@@ -1392,6 +1403,21 @@ export function vmlTextPathAcquisitionInput(
     ...(textPath.xScale !== undefined ? { xScale: textPath.xScale } : {}),
     ...(textPath.fontSizePt !== undefined ? { fontSizePt: textPath.fontSizePt } : {}),
   }, 'DOCX VML text path acquisition input');
+}
+
+/** Snapshot the parser's complete CT_TxbxContent block sequence without
+ * widening the stable public ShapeRun contract. Layout migration consumes this
+ * plain-data boundary; unsupported schema-permitted children stay ordered and
+ * diagnostic instead of disappearing. */
+export function textBoxContentAcquisitionInput(
+  shape: Readonly<ShapeRun>,
+): readonly InternalTextBoxBlock[] | undefined {
+  const content = (shape as Readonly<InternalShapeRun>).textBoxContent;
+  if (content === undefined) return undefined;
+  return snapshotPlainData(
+    content,
+    'DOCX text box content acquisition input',
+  ) as readonly InternalTextBoxBlock[];
 }
 
 /** Project parser-only anchor facts without widening the public run contract.

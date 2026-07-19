@@ -124,7 +124,7 @@ enum CounterKey {
     OrphanNum(u32),
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NumberingMap {
     /// abstractNumId → [level0..level8]
     abstract_nums: HashMap<u32, Vec<LevelDef>>,
