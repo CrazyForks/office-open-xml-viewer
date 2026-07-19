@@ -15,11 +15,8 @@ import type {
 // carries the noteRef run), so the footnote block must be drawn — and the body
 // area reserved — even when the only reference on a page lives in a table.
 //
-// Regression: `drawPageFootnotes` and the pagination reserve pass only scanned
-// TOP-LEVEL paragraphs, so a footnote referenced solely from a table cell had
-// its marker painted (the cell run draws normally) but its content silently
-// dropped (issue #840). Endnotes were unaffected because `drawEndnotes` draws
-// every note unconditionally without scanning the body for references.
+// Regression: note ownership must descend through table cells. A reference
+// nested in a cell was previously dropped from the page's retained notes layer.
 
 const TEST_FONT = 'Times New Roman';
 

@@ -404,6 +404,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         .unwrap_or_else(|| "word/settings.xml".to_string());
     let mut document_settings: Option<crate::types::DocumentSettings> = None;
     let mut page_layout_settings: Option<crate::types::PageLayoutSettingsWire> = None;
+    let mut note_layout_settings: Option<crate::types::NoteLayoutSettingsWire> = None;
     // §17.10.1 even/odd headers is a settings.xml flag (not a sectPr property), so
     // capture it here and stamp it onto the section below.
     let mut even_and_odd_headers = false;
@@ -413,6 +414,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         }
         document_settings = parse_document_settings(&settings_xml);
         page_layout_settings = parse_page_layout_settings(&settings_xml);
+        note_layout_settings = parse_note_layout_settings(&settings_xml);
         even_and_odd_headers = parse_even_and_odd_headers(&settings_xml);
     }
 
@@ -633,6 +635,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         endnotes,
         settings: document_settings,
         page_layout_settings,
+        note_layout_settings,
         // Healthy document: no degradation (RB7). Only `degraded_document` sets this.
         parse_error: None,
     })
@@ -1131,6 +1134,25 @@ fn parse_page_layout_settings(settings_xml: &str) -> Option<crate::types::PageLa
     }
 }
 
+fn parse_note_layout_settings(settings_xml: &str) -> Option<crate::types::NoteLayoutSettingsWire> {
+    let doc = parse_guarded(settings_xml).ok()?;
+    let root = doc.root_element();
+    let position = |properties: &str| {
+        child_w(root, properties)
+            .and_then(|node| child_w(node, "pos"))
+            .and_then(|node| attr_w(node, "val"))
+    };
+    let result = crate::types::NoteLayoutSettingsWire {
+        footnote_position: position("footnotePr"),
+        endnote_position: position("endnotePr"),
+    };
+    if result.footnote_position.is_none() && result.endnote_position.is_none() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
 #[cfg(test)]
 mod page_layout_settings_tests {
     use super::*;
@@ -1167,6 +1189,42 @@ mod page_layout_settings_tests {
                    </w:settings>"#;
 
         assert!(parse_page_layout_settings(xml).is_none());
+    }
+}
+
+#[cfg(test)]
+mod note_layout_settings_tests {
+    use super::*;
+    use ooxml_common::ns::wordprocessingml;
+
+    #[test]
+    fn preserves_document_wide_note_positions_for_layout_diagnostics() {
+        for namespace in [wordprocessingml::TRANSITIONAL, wordprocessingml::STRICT] {
+            let xml = format!(
+                r#"<w:settings xmlns:w="{namespace}">
+                     <w:footnotePr><w:pos w:val="beneathText"/></w:footnotePr>
+                     <w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr>
+                   </w:settings>"#,
+            );
+
+            let settings = parse_note_layout_settings(&xml).expect("authored note settings");
+            assert_eq!(settings.footnote_position.as_deref(), Some("beneathText"));
+            assert_eq!(settings.endnote_position.as_deref(), Some("sectEnd"));
+        }
+    }
+
+    #[test]
+    fn ignores_foreign_or_nested_note_position_elements() {
+        let xml = r#"<w:settings
+                       xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                       xmlns:x="urn:foreign">
+                     <x:footnotePr><x:pos x:val="beneathText"/></x:footnotePr>
+                     <w:compat>
+                       <w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr>
+                     </w:compat>
+                   </w:settings>"#;
+
+        assert!(parse_note_layout_settings(xml).is_none());
     }
 }
 

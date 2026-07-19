@@ -80,6 +80,11 @@ describe('pagination field convergence seam', () => {
       },
     }]);
     expect(paginatedFlowHasPaginationDependentFields(sectionHeader.body)).toBe(false);
+    expect(paginatedFlowHasPaginationDependentFields(
+      sectionHeader.body,
+      [],
+      [[paragraphWithRuns([field('numPages')])]],
+    )).toBe(true);
 
     const footnote = documentWith([paragraphWithRuns([])]);
     footnote.footnotes = [{ id: '1', content: [paragraphWithRuns([field('numPages')])] }];

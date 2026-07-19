@@ -83,7 +83,7 @@ function para(text: string): DocParagraph {
 }
 
 // A footnote reference run (kind 'footnote') appended to a body paragraph, so the
-// page that holds it draws the note block (drawPageFootnotes scans for these).
+// page that holds it retains the note block in the canonical notes layer.
 function paraWithFootnoteRef(text: string, noteId: string): DocParagraph {
   const p = para(text);
   (p.runs as DocParagraph['runs']).push({

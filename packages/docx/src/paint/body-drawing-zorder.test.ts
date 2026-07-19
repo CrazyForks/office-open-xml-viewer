@@ -600,17 +600,16 @@ describe('canonical body drawing z-order', () => {
     expect(operations).toEqual(['text:FIRST', 'text:SECOND', 'drawing:footer']);
   });
 
-  it.each(['textbox', 'note'] as const)('fails loudly for unsupported %s page nodes', (kind) => {
+  it('fails loudly for unsupported textbox page nodes', () => {
+    const kind = 'textbox' as const;
     const unsupported = {
       kind,
       id: `unsupported:${kind}`,
       source: source([99]),
       flowDomainId: 'body', ordinaryFlow: false,
       flowBounds: bounds, inkBounds: bounds, advancePt: 0,
-      ...(kind === 'textbox' ? {
-        paragraphs: [], writingMode: 'horizontal-tb',
-        insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
-      } : {}),
+      paragraphs: [], writingMode: 'horizontal-tb',
+      insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
     } as PaintNode;
     const layout = page([unsupported]);
     const { context } = recordingPaintContext();

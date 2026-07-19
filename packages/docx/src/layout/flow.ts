@@ -9,6 +9,16 @@ import type {
 } from './types.js';
 import { LayoutInvariantError } from './diagnostics.js';
 
+export class FlowCapacityExceededError extends LayoutInvariantError {
+  constructor(
+    readonly containerId: string,
+    readonly layoutId: string,
+  ) {
+    super('INVALID_GEOMETRY', `${layoutId} exceeds the available flow capacity`);
+    this.name = 'FlowCapacityExceededError';
+  }
+}
+
 function unionBounds(bounds: readonly LayoutRect[], fallback: LayoutRect): LayoutRect {
   if (bounds.length === 0) {
     return { xPt: fallback.xPt, yPt: fallback.yPt, widthPt: 0, heightPt: 0 };
@@ -64,12 +74,15 @@ export function layoutFlowBlocks(
         `${result.layout.id} belongs to ${result.layout.flowDomainId}, not ${input.container.id}`,
       );
     }
+    if (Number.isFinite(result.nextCursor.yPt)
+      && result.nextCursor.yPt > containerBottom) {
+      throw new FlowCapacityExceededError(input.container.id, result.layout.id);
+    }
     if (!Number.isFinite(result.nextCursor.xPt)
       || !Number.isFinite(result.nextCursor.yPt)
       || result.nextCursor.xPt < input.container.bounds.xPt
       || result.nextCursor.xPt > containerRight
-      || result.nextCursor.yPt < cursor.yPt
-      || result.nextCursor.yPt > containerBottom) {
+      || result.nextCursor.yPt < cursor.yPt) {
       throw new LayoutInvariantError('INVALID_GEOMETRY', `${result.layout.id} returned an invalid flow cursor`);
     }
     blocks.push(result.layout);

@@ -8,7 +8,7 @@ import type {
 import type { BodyLayoutKernel } from './body-layout-kernel.js';
 import { paginateBody } from './body-paginator.js';
 import { attachBodyLayoutKernel } from './runtime-state.js';
-import type { LayoutServices, ParagraphLayout, SourceRef } from './types.js';
+import type { LayoutServices, ParagraphLayout, SourceRef, StoryLayout } from './types.js';
 
 const emptyFlowRegistrySnapshot = () => ({
   floats: {
@@ -124,6 +124,17 @@ function paragraph(index: number, heightPt: number): ParagraphLayout {
   };
 }
 
+function emptyStoryLayout(source: SourceRef, heightPt: number): StoryLayout {
+  const bounds = { xPt: 0, yPt: 0, widthPt: 180, heightPt };
+  return {
+    story: source.story,
+    flowBounds: bounds,
+    inkBounds: bounds,
+    blocks: [],
+    advancePt: heightPt,
+  };
+}
+
 function paginate(input: Readonly<{
   initialSection: BodySectionLayoutInput;
   sequence: BodyLayoutInput['sequence'];
@@ -143,11 +154,10 @@ function paginate(input: Readonly<{
       };
     },
     measureTable: () => { throw new Error('unused'); },
-    measureStoryExtent: ({ source, pageIndex }) => {
+    layoutStory: ({ source, pageIndex }) => {
       input.measuredStories?.push({ source, pageIndex });
-      return input.storyExtentPt?.(source, pageIndex) ?? 0;
+      return emptyStoryLayout(source, input.storyExtentPt?.(source, pageIndex) ?? 0);
     },
-    measureFootnoteReserve: () => 0,
     measureFollowingBlock: ({ input: following }) => {
       const heightPt = typeof height === 'function' ? height(following.source) : height;
       return { fullExtentPt: heightPt, leadContentExtentPt: heightPt };

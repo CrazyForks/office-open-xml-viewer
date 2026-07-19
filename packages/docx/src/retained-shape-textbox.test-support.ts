@@ -71,7 +71,7 @@ export function acquireAndPaintShapeTextBox(
       pageNumberFormat: state?.pageNumberFormat,
       currentDateMs: state?.currentDateMs,
       noteNumbers: state?.noteNumbers,
-      currentNoteNumber: state?.currentNoteNumber,
+      noteReferenceNumber: state?.noteReferenceNumber,
       verticalCJK: state?.verticalCJK,
       documentHasEastAsianText: state?.docEastAsian
         ?? shape.textBlocks?.some((block) => /[\u3000-\u9fff\uf900-\ufaff]/u.test(block.text))

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { SectionLayoutContext } from '../layout-context.js';
-import type { DocumentLayout } from '../layout/types.js';
+import type {
+  DocumentLayout,
+  NoteLayout,
+  ParagraphLayout,
+} from '../layout/types.js';
 import { createLayoutPage } from '../layout/page-factory.js';
 import { assertDocumentLayout } from '../layout/invariants.js';
 import type { PageLayerId } from '../layout/types.js';
@@ -217,6 +221,84 @@ describe('paintLayoutPage', () => {
     } as unknown as Parameters<typeof paintLayoutPageContent>[1]);
 
     expect(events).toEqual(['separator', 'front', 'body']);
+  });
+
+  it('paints a note separator outside the retained story clip', () => {
+    const events: string[] = [];
+    const ctx = {
+      save() { events.push('save'); },
+      restore() { events.push('restore'); },
+      beginPath() { events.push('begin'); },
+      rect(x: number, y: number, width: number, height: number) {
+        events.push(`rect:${x},${y},${width},${height}`);
+      },
+      clip() { events.push('clip'); },
+      moveTo() {}, lineTo() {},
+      stroke() { events.push('stroke'); },
+      setLineDash() {},
+      strokeStyle: '', lineWidth: 1,
+    } as unknown as CanvasRenderingContext2D;
+    const section: SectionLayoutContext = {
+      geometry: {
+        pageWidth: 100, pageHeight: 200,
+        marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+        headerDistance: 5, footerDistance: 5,
+      },
+      columns: [{ xPt: 10, wPt: 80 }],
+      columnSeparator: false,
+      grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
+      textDirection: 'lrTb', verticalAlignment: 'top',
+    };
+    const flowDomainId = 'page:0:region:region%3A0:column:0';
+    const source = { story: 'footnote' as const, storyInstance: '1', path: [0] };
+    const child: ParagraphLayout = {
+      kind: 'paragraph', id: 'note-child', source, flowDomainId,
+      ordinaryFlow: true,
+      flowBounds: { xPt: 10, yPt: 150, widthPt: 80, heightPt: 10 },
+      inkBounds: { xPt: 10, yPt: 150, widthPt: 80, heightPt: 10 },
+      advancePt: 10, spacing: { beforePt: 0, afterPt: 0 },
+      contextualSpacing: false, lines: [], borders: [], resources: [],
+      drawings: [], textBoxes: [], events: [], exclusions: [],
+    };
+    const note: NoteLayout = {
+      kind: 'note', id: 'note', source: { ...source, path: [] }, flowDomainId,
+      ordinaryFlow: false,
+      flowBounds: { xPt: 10, yPt: 144, widthPt: 80, heightPt: 16 },
+      inkBounds: { xPt: 10, yPt: 144, widthPt: 80, heightPt: 16 },
+      advancePt: 16,
+      separator: [{
+        edge: 'top', from: { xPt: 10, yPt: 147 }, to: { xPt: 30, yPt: 147 },
+        color: '#000000', widthPt: 0.5, authoredStyle: 'single', style: 'solid',
+      }],
+      story: {
+        story: 'footnote',
+        flowBounds: child.flowBounds,
+        inkBounds: child.inkBounds,
+        clipBounds: { xPt: 10, yPt: 150, widthPt: 80, heightPt: 10 },
+        blocks: [child],
+        advancePt: 10,
+      },
+    };
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: { widthPt: 100, heightPt: 200, contentTopPt: 10, contentBottomPt: 190 },
+      sectionOccurrenceId: 'section:0', section,
+      sectionRegions: [{
+        id: 'region:0', sectionOccurrenceId: 'section:0', section,
+        writingMode: 'horizontal-tb', blockStartPt: 10, blockEndPt: 190,
+        columns: [{ inlineStartPt: 10, inlineExtentPt: 80 }],
+      }],
+      paint: [{ layer: 'notes', node: note }],
+      readingOrder: [note],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+    });
+
+    paintLayoutPageContent(page, {
+      ctx, scale: 1, dpr: 1,
+    } as unknown as Parameters<typeof paintLayoutPageContent>[1]);
+
+    expect(events.indexOf('stroke')).toBeLessThan(events.indexOf('rect:10,150,80,10'));
+    expect(events).toContain('clip');
   });
 
   it('paints retained geometry without measuring text', async () => {

@@ -135,9 +135,11 @@ import {
 } from './layout-context.js';
 import { canvasFontString, justifiedPiecePositions } from '@silurus/ooxml-core';
 import type {
+  BlockLayoutAlgorithms,
   BodyFlowRegistryDeltaPt,
   BodyFlowRegistrySnapshotPt,
   DrawingMLCollisionRegistrySnapshotPt,
+  FlowBlockInput,
   LayoutServices,
   FloatRegistryEntryPt,
   FloatRegistrySnapshotPt,
@@ -145,8 +147,10 @@ import type {
   FloatRegistryDeltaPt,
   Matrix2DData,
   DrawingMLCollisionEntryPt,
+  NoteLayout,
   ParagraphLayout,
   SourceRef,
+  StoryLayout,
   TableLayout,
   TableLayoutInput,
 } from './layout/types.js';
@@ -185,10 +189,6 @@ import {
   type DeferredFrontPaintState,
 } from './paint/deferred-front-session.js';
 import {
-  createHeaderFooterStoryPainter,
-  type HeaderFooterStoryPainter,
-} from './paint/header-footer-story.js';
-import {
   mathResourceKey,
   bodyMathOccurrences,
   createImageMetadataService,
@@ -203,6 +203,7 @@ import {
   attachPrivateResourceLookup,
   attachPaintResourceRegistry,
   createFieldAcquisitionServicesView,
+  createLayoutServicesRuntimeView,
   fieldAcquisitionContextOf,
   layoutVariantStoreOf,
   paintResourceRegistryOf,
@@ -210,13 +211,17 @@ import {
   type PageFieldAcquisitionContext,
 } from './layout/runtime-state.js';
 import {
+  attachStoryBlockLayoutAlgorithms,
+  layoutStory as layoutSharedStory,
+} from './layout/stories.js';
+import {
   attachDocumentLayoutVariants,
   selectDocumentLayoutPage,
 } from './layout/document-layout-variants.js';
-import { selectedHeaderFooterStory } from './layout/header-footer-reserve.js';
 import {
   footnoteIdsInRetainedLines,
   footnoteIdsInRetainedSlice,
+  noteReferenceIdsInDocumentOrder,
 } from './layout/note-reference-ownership.js';
 import { isFirstSectionOwnedPage } from './layout/section-page-identity.js';
 import type {
@@ -227,8 +232,11 @@ import type {
   BodyParagraphAcquisitionInput,
   BodyTableAcquisitionInput,
 } from './layout/body-layout-kernel.js';
+import { NoteCapacityExceededError } from './layout/body-layout-kernel.js';
+import { FlowCapacityExceededError } from './layout/flow.js';
 import { createBodyLayoutInput } from './body-layout-input.js';
 import { paginateBody } from './layout/body-paginator.js';
+import { projectBodyOccurrence } from './layout/occurrence-projection.js';
 import {
   calcEffectiveFontPx,
   createTextLayoutService,
@@ -879,12 +887,12 @@ export interface RenderState extends DeferredFrontPaintState {
    *  display the note's 1-based sequential number, not the raw `@w:id`. Keyed by
    *  `"footnote:<id>"` / `"endnote:<id>"`. The in-note `<w:footnoteRef>`
    *  placeholder (empty id) is substituted with the number provided via
-   *  {@link currentNoteNumber} while drawing that note's content. */
+   *  {@link noteReferenceNumber} while laying out that note's content. */
   noteNumbers?: Map<string, number>;
   /** Set while laying out a footnote/endnote's own content, so the leading
    *  `<w:footnoteRef>` placeholder (which carries no id) renders the note's
    *  number. Undefined for body text. */
-  currentNoteNumber?: number;
+  noteReferenceNumber?: number;
   /** ECMA-376 §20.4.3.2/§20.4.3.5: a DrawingML anchor whose `<wp:positionV>`
    *  uses a page-level `relativeFrom` (page / margin / topMargin / bottomMargin
    *  / leftMargin / rightMargin / insideMargin / outsideMargin / column) is
@@ -1770,14 +1778,6 @@ async function renderDocumentToCanvasLeased(
   const retainedBodyLayout = retainedSelection.layout;
   const retainedBodyPage = retainedSelection.page;
   const totalPages = retainedBodyLayout.pages.length;
-  const pageFootnoteIds = Object.freeze([...new Set(
-    retainedBodyPage.layers.body.flatMap((node) => (
-      node.kind === 'paragraph' || node.kind === 'table'
-        ? footnoteIdsInRetainedSlice(node)
-        : []
-    )),
-  )]);
-
   // ECMA-376 §17.6.12 — canonical page construction owns the displayed number
   // and format; paint only consumes the selected immutable page metadata.
   const thisPageNumber = {
@@ -1910,8 +1910,14 @@ async function renderDocumentToCanvasLeased(
   // ECMA-376 §17.11: map each note id to its 1-based display number so the
   // reference markers (and the in-note footnoteRef placeholder) show the
   // sequential number, not the raw @w:id.
-  const footnoteNums = buildNoteNumberMap(doc.footnotes);
-  const endnoteNums = buildNoteNumberMap(doc.endnotes);
+  const footnoteNums = buildNoteNumberMap(
+    doc.footnotes,
+    noteReferenceIdsInDocumentOrder(doc.body, 'footnote'),
+  );
+  const endnoteNums = buildNoteNumberMap(
+    doc.endnotes,
+    noteReferenceIdsInDocumentOrder(doc.body, 'endnote'),
+  );
   const noteNumbers = new Map<string, number>();
   for (const [id, n] of footnoteNums) noteNumbers.set(`footnote:${id}`, n);
   for (const [id, n] of endnoteNums) noteNumbers.set(`endnote:${id}`, n);
@@ -2010,148 +2016,7 @@ async function renderDocumentToCanvasLeased(
         }
       : undefined,
   };
-  const paintHeaderFooterStory: HeaderFooterStoryPainter<RenderState, BodyElement> =
-    createHeaderFooterStoryPainter<RenderState, BodyElement, DocParagraph, DocTable, ParagraphBorders>({
-      preRegisterPageFloats: (storyElements, state) => {
-        state.pageAnchorPrescanned = new Set();
-        preRegisterPageFloats(storyElements, 0, state);
-      },
-      paragraphOf: (element: BodyElement) => element as unknown as DocParagraph,
-      tableOf: (element: BodyElement) => element as unknown as DocTable,
-      hasFrame: (paragraph: DocParagraph) => !!paragraph.framePr,
-      frameAnchorLineHeight: (storyElements, element, state) =>
-        frameAnchorLineHeightPx(
-          storyElements as BodyElement[],
-          element as BodyElement,
-          state,
-        ),
-      paintFrameParagraph: renderFrameParagraph,
-      spaceBefore: (paragraph: DocParagraph) => paragraph.spaceBefore,
-      spaceAfter: (paragraph: DocParagraph) => paragraph.spaceAfter,
-      bordersOf: (paragraph: DocParagraph) => paragraph.borders,
-      contextualSpacing: contextualSpacingAdjust,
-      hasBorder: hasAnyBorderEdge,
-      sharesBorder: parasShareBorderBox,
-      paintParagraph: (paragraph, state, suppressBefore, borderMerge) =>
-        renderParagraph(paragraph, state, suppressBefore, undefined, false, borderMerge),
-      paintTable: renderTable,
-      tableResetsParagraphFlow: tableParticipatesInOrdinaryFlow,
-    });
-
-  // §17.10.1/.6: reservation and paint share the canonical page occurrence,
-  // first-page identity, and displayed-number parity when selecting a story slot.
-
-  const sectionOccurrence = createBodySectionIndex(bodySectionIndexInput(doc)).occurrences.find(
-    (occurrence) => occurrence.sectionOccurrenceId === retainedBodyPage.sectionOccurrenceId,
-  );
-  if (!sectionOccurrence) {
-    throw new Error(`Unknown section occurrence: ${retainedBodyPage.sectionOccurrenceId}`);
-  }
   const firstPageOfSection = isFirstSectionOwnedPage(retainedBodyLayout.pages, pageIndex);
-  const isEvenDisplayedPage = retainedBodyPage.pageNumber.displayNumber % 2 === 0;
-  const header = pickHeaderFooter(
-    sectionOccurrence.headers,
-    firstPageOfSection,
-    isEvenDisplayedPage,
-    sectionOccurrence.titlePage,
-    doc.section.evenAndOddHeaders,
-  );
-  const footer = pickHeaderFooter(
-    sectionOccurrence.footers,
-    firstPageOfSection,
-    isEvenDisplayedPage,
-    sectionOccurrence.titlePage,
-    doc.section.evenAndOddHeaders,
-  );
-  const footerReservePx = vertical ? 0 : Math.max(
-    0,
-    (
-      sec.pageHeight
-      - bodyMarginInsetPt(sec.marginBottom)
-      - retainedBodyPage.geometry.contentBottomPt
-    ) * scale,
-  );
-
-  if (vertical) {
-    // ECMA-376 §17.6.20 + §17.10.1 (issue #988 batch-3 adjudication): a vertical
-    // (tbRl) section's header/footer stay HORIZONTAL at the PHYSICAL top/bottom
-    // margins — Word does NOT rotate them with the body. The body is laid out in
-    // the swapped logical `sec` under the canonical +90° body transform; the
-    // header/footer are drawn back in the physical page frame recovered by
-    // `physicalLayoutSection`, with the ctx transform reset to physical (no +90°)
-    // and a horizontal (`verticalCJK: false`) state.
-    //
-    // The reserves stay 0: the header/footer occupy the physical top/bottom band,
-    // which maps to the LOGICAL flow-start (column top) axis rather than the
-    // logical `y` the horizontal reserve shifts, and Word's fixtures fit them
-    // within their margins. Pushing the vertical body for an OVER-margin
-    // header/footer is a documented follow-up.
-    if (header || footer) {
-      // The header/footer are drawn HORIZONTALLY, so the layout context they use is
-      // horizontal — clear `textDirection` on the physical section (else the derived
-      // SectionLayoutContext would carry the body's `tbRl`, contradicting the
-      // `verticalCJK: false` state below).
-      const physSec: SectionProps = { ...physicalLayoutSection(sec), textDirection: null };
-      const physSectionLayout = resolveSectionLayoutContext(layoutSettings, physSec);
-      const physBaseState: RenderState = {
-        ...baseState,
-        pointToCss: { a: scale, b: 0, c: 0, d: scale, e: 0, f: 0 },
-        contentX: physSec.marginLeft * scale,
-        contentW: (physPageWidth - physSec.marginLeft - physSec.marginRight) * scale,
-        marginLeft: physSec.marginLeft,
-        marginRight: physSec.marginRight,
-        marginTop: bodyMarginInsetPt(physSec.marginTop),
-        marginBottom: bodyMarginInsetPt(physSec.marginBottom),
-        pageWidth: physPageWidth,
-        pageH: physPageHeight * scale,
-        docGrid: toLegacyDocGridContext(physSectionLayout),
-        sectionLayout: physSectionLayout,
-        verticalCJK: false,
-        verticalAllRotated: false,
-        verticalPhys: undefined,
-      };
-      ctx.save();
-      // Header/footer stories remain in the upright physical page frame.
-      ctx.setTransform(effectiveDpr, 0, 0, effectiveDpr, 0, 0);
-      const physicalStories: Array<readonly [HeaderFooter, number]> = [];
-      if (header !== null) {
-        const activeHeader = header as HeaderFooter;
-        physicalStories.push([activeHeader, physSec.headerDistance * scale]);
-      }
-      if (footer !== null) {
-        const activeFooter = footer as HeaderFooter;
-        const footerHeight = measureHeaderFooterHeight(activeFooter, physBaseState);
-        const footerTopY = cssHeight - physSec.footerDistance * scale - footerHeight;
-        physicalStories.push([activeFooter, footerTopY]);
-      }
-      for (const [story, topY] of physicalStories) paintHeaderFooterStory(story, topY, physBaseState);
-      ctx.restore();
-    }
-  } else {
-    // Header: top of page, starting at headerDistance. A header taller than its
-    // top-margin allowance (§17.6.11) overflows the content area downward; the body
-    // was already laid out to clear it, and its
-    // start y is pushed down by the same overflow so no body line sits over the header.
-    if (header !== null) {
-      const activeHeader = header as HeaderFooter;
-      paintHeaderFooterStory(activeHeader, sec.headerDistance * scale, baseState);
-    }
-
-    // Footer: anchored from bottom, rising by its measured height. A footer taller
-    // than its bottom-margin allowance (§17.6.11) overflows the content area; the body
-    // was already laid out to clear it, and the same
-    // overflow raises the footnote block below so notes clear it too.
-    if (footer !== null) {
-      const activeFooter = footer as HeaderFooter;
-      const footerHeight = measureHeaderFooterHeight(activeFooter, baseState);
-      const footerTopY = cssHeight - sec.footerDistance * scale - footerHeight;
-      paintHeaderFooterStory(activeFooter, footerTopY, baseState);
-    }
-  }
-
-  // §17.6.11: canonical pagination already resolved the effective main-story edge.
-  const bodyTopY = retainedBodyPage.geometry.contentTopPt * scale;
-  const bodyState: RenderState = { ...baseState, y: bodyTopY };
 
   // ECMA-376 §17.6.10 — page borders with zOrder="back" are painted UNDER the body
   // flow (behind intersecting text/objects). Drawn here, before the body.
@@ -2192,37 +2057,6 @@ async function renderDocumentToCanvasLeased(
     ctx.restore();
   }
 
-  // Footnotes referenced on this page (ECMA-376 §17.11): drawn at the bottom of
-  // the text column, above a short separator rule. The page area was already
-  // reserved during pagination so the body stops short of them.
-  if (pageFootnoteIds.length > 0 && (doc.footnotes?.length ?? 0) > 0) {
-    ctx.save();
-    try {
-      if (vertical) {
-        ctx.translate(cssWidth, 0);
-        ctx.rotate(Math.PI / 2);
-      }
-      drawPageFootnotes(pageFootnoteIds, doc, baseState, scale, cssHeight, sec, footerReservePx);
-    } finally {
-      ctx.restore();
-    }
-  }
-
-  // Endnotes (§17.11 endnotePr default position = document end) on the last
-  // page, after the body flow. Minimal impl: a heading-less list at doc end.
-  if (pageIndex === totalPages - 1 && (doc.endnotes?.length ?? 0) > 0) {
-    ctx.save();
-    try {
-      if (vertical) {
-        ctx.translate(cssWidth, 0);
-        ctx.rotate(Math.PI / 2);
-      }
-      drawEndnotes(doc, bodyState, scale, cssHeight, sec);
-    } finally {
-      ctx.restore();
-    }
-  }
-
   // ECMA-376 §17.6.10 — page borders with zOrder="front" (the default) are painted
   // OVER intersecting text/objects, so draw them LAST (after the whole page flow).
   if (pageBorders != null) {
@@ -2242,172 +2076,25 @@ async function renderDocumentToCanvasLeased(
   }
 }
 
-/** Measure a note's content block in pt (paragraphs only), using a fresh
- *  pt-scale measure state. Returns the full height and the last paragraph's
- *  trailing spaceAfter (which overflows the bottom margin, like body text). */
-function measureNoteBlockForDraw(
-  note: DocNote,
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  sec: SectionProps,
-  fontFamilyClasses: Record<string, string>,
-  layoutSettings: DocumentLayoutSettings,
-): { total: number; trailingSpaceAfter: number } {
-  const measure = buildMeasureState(ctx, sec, fontFamilyClasses, layoutSettings);
-  const contentWPt = sec.pageWidth - sec.marginLeft - sec.marginRight;
-  return measureFootnoteBlockPt(note, measure, contentWPt);
-}
-
-/** Draw the footnote area for the current page: a separator rule (§17.11.9)
- *  followed by each referenced note's content, numbered. */
-function drawPageFootnotes(
-  ids: readonly string[],
-  doc: DocxDocumentModel,
-  baseState: RenderState,
-  scale: number,
-  cssHeight: number,
-  sec: SectionProps,
-  footerReservePx = 0,
-): void {
-  if (!doc.footnotes || doc.footnotes.length === 0) return;
-  const noteById = indexNotes(doc.footnotes);
-
-  if (ids.length === 0) return;
-
-  // Total block height (pt). The last note's trailing spaceAfter overflows the
-  // bottom margin (like body text), so the block is positioned by its content
-  // height — placing the last footnote line just above the bottom margin.
-  let totalPt = 0;
-  let lastTrailingPt = 0;
-  for (const id of ids) {
-    const note = noteById.get(id);
-    if (!note) continue;
-    const m = measureNoteBlockForDraw(
-      note,
-      baseState.ctx,
-      sec,
-      baseState.fontFamilyClasses,
-      baseState.layoutSettings,
-    );
-    totalPt += m.total;
-    lastTrailingPt = m.trailingSpaceAfter;
-  }
-  const contentPt = Math.max(0, totalPt - lastTrailingPt);
-  const gapPx = FOOTNOTE_SEPARATOR_GAP_PT * scale;
-  // Clear a footer taller than the bottom margin (§17.6.11): the footnote block, like
-  // the body, sits above the footer's overflow (footerReservePx), not just the margin.
-  const blockTopY = cssHeight - bodyMarginInsetPt(sec.marginBottom) * scale - footerReservePx - contentPt * scale;
-
-  // Separator rule: short left-aligned line (Word's default footnote separator,
-  // ~1/3 of the text width), centered in the gap above the notes.
-  const leftX = sec.marginLeft * scale;
-  const ruleY = Math.round(blockTopY - gapPx);
-  const ctx = baseState.ctx;
-  ctx.save();
-  ctx.strokeStyle = baseState.defaultColor;
-  const ruleLw = Math.max(1, Math.round(0.5 * scale));
-  ctx.lineWidth = ruleLw;
-  // Crispness nudge (see crispOffset): a horizontal rule snaps onto the nearest
-  // crisp device row from its own y. The previous hardcoded `+ 0.5` was a
-  // logical-px offset that only happened to be crisp at dpr=1 and blurred at
-  // dpr>1; crispOffset makes it device-correct at any dpr and fractional y.
-  const ruleNudge = crispOffset(ruleY, ruleLw, baseState.dpr);
-  ctx.beginPath();
-  ctx.moveTo(leftX, ruleY + ruleNudge);
-  ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, ruleY + ruleNudge);
-  ctx.stroke();
-  ctx.restore();
-
-  // Draw each note's content, numbered, flowing down from blockTopY.
-  const noteState: RenderState = { ...baseState, y: blockTopY };
-  for (const id of ids) {
-    const note = noteById.get(id);
-    if (!note) continue;
-    noteState.currentNoteNumber = doc.footnotes.findIndex((n) => n.id === id) + 1;
-    const paras = note.content.filter((e) => e.type === 'paragraph') as unknown as DocParagraph[];
-    renderParaList(paras, noteState);
-  }
-}
-
-/** Draw endnotes after the body flow on the final page (§17.11, default
- *  docEnd position). Each note is numbered with its endnote sequence. */
-function drawEndnotes(
-  doc: DocxDocumentModel,
-  bodyState: RenderState,
-  scale: number,
-  cssHeight: number,
-  sec: SectionProps,
-): void {
-  if (!doc.endnotes || doc.endnotes.length === 0) return;
-  // Skip empty endnotes (only the reserved entries were filtered in the parser;
-  // a note with no text contributes nothing).
-  const notes = doc.endnotes.filter((n) =>
-    n.content.some((e) => e.type === 'paragraph' && (e as unknown as DocParagraph).runs.length > 0),
-  );
-  if (notes.length === 0) return;
-
-  // Continue from the body cursor with a small gap; clamp inside the bottom
-  // margin. We do NOT spill endnotes onto a dedicated trailing page yet.
-  const ctx = bodyState.ctx;
-  let y = bodyState.y + FOOTNOTE_SEPARATOR_GAP_PT * 2 * scale;
-  const maxY = cssHeight - bodyMarginInsetPt(sec.marginBottom) * scale;
-  if (y >= maxY) return;
-
-  // Separator rule above the endnotes.
-  const leftX = sec.marginLeft * scale;
-  ctx.save();
-  ctx.strokeStyle = bodyState.defaultColor;
-  const ruleLw = Math.max(1, Math.round(0.5 * scale));
-  ctx.lineWidth = ruleLw;
-  // Crispness nudge (see crispOffset): device-correct replacement for the old
-  // hardcoded logical `+ 0.5`, which only rendered crisp at dpr=1. Snap from the
-  // rule's own y so it stays crisp at any dpr and fractional position.
-  const ruleY = Math.round(y);
-  const ruleNudge = crispOffset(ruleY, ruleLw, bodyState.dpr);
-  ctx.beginPath();
-  ctx.moveTo(leftX, ruleY + ruleNudge);
-  ctx.lineTo(leftX + (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale / 3, ruleY + ruleNudge);
-  ctx.stroke();
-  ctx.restore();
-
-  // §17.6.8 numbers the main document story only — endnote lines are not numbered.
-  const noteState: RenderState = { ...bodyState, y: y + FOOTNOTE_SEPARATOR_GAP_PT * scale };
-  for (const note of notes) {
-    noteState.currentNoteNumber = doc.endnotes.findIndex((n) => n.id === note.id) + 1;
-    const paras = note.content.filter((e) => e.type === 'paragraph') as unknown as DocParagraph[];
-    renderParaList(paras, noteState);
-  }
-}
-
-// ── Footnotes / endnotes ────────────────────────────────────────────────────
-// ECMA-376 §17.11. A `<w:footnoteReference>` in the body (and the
-// `<w:footnoteRef>` placeholder inside the note) is tagged on its run as
-// `noteRef`. The DISPLAYED number is the note's 1-based position in document
-// order (we don't honor numFmt/numStart overrides yet — the samples don't use
-// them; see dev log). The note bodies are drawn at the bottom of the page that
-// holds their first reference, above a short separator rule (§17.11.9).
-// Endnotes (§17.11 endnotePr@pos, default docEnd) are appended after the body
-// flow; we don't lay them on their own trailing page yet.
-
-/** Vertical space (pt) Word allocates for the footnote separator region — the
- *  short rule plus the small leading above the first footnote. Word draws the
- *  separator in its own paragraph (the reserved id=-1 note, default single
- *  spacing) above the notes; one blank line's worth of leading is a faithful
- *  approximation for the common case. */
+/** Retained default separator leading used by the shared note story layout. */
 const FOOTNOTE_SEPARATOR_GAP_PT = 6;
 
 /** ECMA-376 §17.10.1 — an empty header/footer set (no default/first/even). Used
- *  when a per-section `SectionBreak` declares one reference type but not others:
- *  the absent types fall back to this so `pickHeaderFooter` simply finds none and
- *  renders nothing for that page kind. */
+ *  when constructing a measure-only document service. */
 const EMPTY_HEADERS_FOOTERS: HeadersFooters = { default: null, first: null, even: null };
 
-/** Build a map from a note's `@w:id` to its 1-based sequential number, in the
- *  order the notes appear in footnotes.xml / endnotes.xml (ECMA-376 §17.11
- *  default decimal numbering, start=1, no restart). */
-function buildNoteNumberMap(notes: DocNote[] | undefined): Map<string, number> {
+/** Build default sequential numbering from first-reference order. Unreferenced
+ *  note-part entries do not consume a displayed number (§17.18.22/.34). */
+function buildNoteNumberMap(
+  notes: DocNote[] | undefined,
+  referenceIds: readonly string[],
+): Map<string, number> {
   const m = new Map<string, number>();
   if (!notes) return m;
-  notes.forEach((n, i) => m.set(n.id, i + 1));
+  const available = new Set(notes.map((note) => note.id));
+  referenceIds.forEach((id) => {
+    if (available.has(id) && !m.has(id)) m.set(id, m.size + 1);
+  });
   return m;
 }
 
@@ -2419,47 +2106,6 @@ function indexNotes(notes: DocNote[] | undefined): Map<string, DocNote> {
   return m;
 }
 
-/** Measure one footnote's content block (pt). `total` is every paragraph's full
- *  height; `trailingSpaceAfter` is the last paragraph's `spaceAfter`, which —
- *  like a body paragraph's trailing space — may legally overflow the bottom
- *  margin and so is NOT counted when reserving page space. */
-function measureFootnoteBlockPt(
-  note: DocNote,
-  state: RenderState,
-  contentWPt: number,
-): { total: number; trailingSpaceAfter: number } {
-  let total = 0;
-  let trailingSpaceAfter = 0;
-  for (const el of note.content) {
-    if (el.type !== 'paragraph') continue;
-    const para = el as unknown as DocParagraph;
-    total += estimateParagraphHeight(state, para, contentWPt, false);
-    trailingSpaceAfter = para.spaceAfter;
-  }
-  return { total, trailingSpaceAfter };
-}
-
-/** Height (pt) to RESERVE on the page for a footnote: its content minus the
- *  trailing spaceAfter (overflows the bottom margin) plus the separator region. */
-function footnoteReserveHeightPt(
-  note: DocNote,
-  state: RenderState,
-  contentWPt: number,
-  includeSeparator: boolean,
-): number {
-  const { total, trailingSpaceAfter } = measureFootnoteBlockPt(note, state, contentWPt);
-  return Math.max(0, total - trailingSpaceAfter) + (includeSeparator ? FOOTNOTE_SEPARATOR_GAP_PT : 0);
-}
-
-/**
- * Split body into pages, honoring explicit page breaks AND measuring content
- * overflow for automatic pagination. All measurements are done in pt (scale=1).
- *
- * When `footnotes` is provided, the content area of each page shrinks by the
- * measured height of every footnote whose reference first appears on that page
- * (ECMA-376 §17.11): the footnote bodies occupy the bottom of the text column,
- * so the body must stop short of them.
- */
 // Preserve the historical renderer re-export without retaining the removed raw
 // page-element carrier.
 export type { ColumnGeom } from './types';
@@ -2630,8 +2276,9 @@ function buildMeasureState(
         flowDomainId,
         paragraphBorderEdges,
         inheritedAuthority,
+        sourceRef,
       ) => {
-        const source = {
+        const source = sourceRef ?? {
           story: 'body' as const,
           storyInstance: 'body',
           path: [...paragraphPath],
@@ -2967,10 +2614,16 @@ function createConcreteBodyLayoutKernel(
       );
       const footnotesById = indexNotes(doc.footnotes ?? []);
       state.noteNumbers = new Map([
-        ...[...buildNoteNumberMap(doc.footnotes)].map(
+        ...[...buildNoteNumberMap(
+          doc.footnotes,
+          noteReferenceIdsInDocumentOrder(doc.body, 'footnote'),
+        )].map(
           ([id, number]) => [`footnote:${id}`, number] as const,
         ),
-        ...[...buildNoteNumberMap(doc.endnotes)].map(
+        ...[...buildNoteNumberMap(
+          doc.endnotes,
+          noteReferenceIdsInDocumentOrder(doc.body, 'endnote'),
+        )].map(
           ([id, number]) => [`endnote:${id}`, number] as const,
         ),
       ]);
@@ -3176,10 +2829,250 @@ function createConcreteBodyLayoutKernel(
           inheritedAuthority,
         );
       };
+      const endnotesById = indexNotes(doc.endnotes ?? []);
+      const storyLayoutCache = new Map<string, StoryLayout>();
+      const storyRoot = (source: SourceRef): readonly BodyElement[] => {
+        if (source.path.length !== 0) {
+          throw new Error('Story acquisition requires a story-root source');
+        }
+        if (source.story === 'header' || source.story === 'footer') {
+          const story = stories.get(`${source.story}:${source.storyInstance}`);
+          if (!story) throw new Error(`Unknown ${source.story} story source`);
+          return story.body;
+        }
+        if (source.story === 'footnote' || source.story === 'endnote') {
+          const note = (source.story === 'footnote' ? footnotesById : endnotesById)
+            .get(source.storyInstance);
+          if (!note) throw new Error(`Unknown ${source.story} story source`);
+          return note.content;
+        }
+        throw new Error(`Unsupported shared story source: ${source.story}`);
+      };
+      const storyElement = (
+        root: readonly BodyElement[],
+        source: SourceRef,
+      ): Extract<BodyElement, { type: 'paragraph' | 'table' }> => {
+        if (source.path.length === 0 || (source.path.length - 1) % 3 !== 0) {
+          throw new Error('Story block acquisition requires a canonical source path');
+        }
+        let element: BodyElement | CellElement | undefined = root[source.path[0]!];
+        for (let offset = 1; offset < source.path.length; offset += 3) {
+          if (!element || element.type !== 'table') {
+            throw new Error(`Story source leaves table ownership: ${source.path.join('.')}`);
+          }
+          element = element.rows[source.path[offset]!]
+            ?.cells[source.path[offset + 1]!]
+            ?.content[source.path[offset + 2]!];
+        }
+        if (!element || (element.type !== 'paragraph' && element.type !== 'table')) {
+          throw new Error(`Story source does not identify a flow block: ${source.path.join('.')}`);
+        }
+        return element;
+      };
+      const acquireStoryLayout = (
+        request: import('./layout/body-layout-kernel.js').StoryLayoutAcquisitionInput,
+      ): StoryLayout => {
+        const cacheKey = JSON.stringify({
+          source: request.source,
+          pageIndex: request.pageIndex,
+          section: request.section,
+          container: request.container,
+        });
+        const cached = storyLayoutCache.get(cacheKey);
+        if (cached) return cached;
+        const root = storyRoot(request.source);
+        const noteReferenceNumber = request.source.story === 'footnote'
+          || request.source.story === 'endnote'
+          ? state.noteNumbers?.get(
+              `${request.source.story}:${request.source.storyInstance}`,
+            )
+          : undefined;
+        const fieldContext = fieldAcquisitionContextOf(services);
+        const pageFieldContext = fieldContext.resolveDestinationPage?.(request.pageIndex);
+        const storyVertical = isVerticalTextDirection(request.section.textDirection);
+        const candidate: RenderState = {
+          ...state,
+          sectionLayout: request.section as SectionLayoutContext,
+          docGrid: toLegacyDocGridContext(request.section as SectionLayoutContext),
+          pageIndex: request.pageIndex,
+          totalPages: fieldContext.totalPages,
+          displayPageNumber: pageFieldContext?.displayPageNumber ?? request.pageIndex + 1,
+          pageNumberFormat: pageFieldContext?.pageNumberFormat ?? state.pageNumberFormat,
+          pageWidth: request.section.geometry.pageWidth,
+          pageH: request.section.geometry.pageHeight,
+          marginLeft: request.section.geometry.marginLeft,
+          marginRight: request.section.geometry.marginRight,
+          marginTop: bodyMarginInsetPt(request.section.geometry.marginTop),
+          marginBottom: bodyMarginInsetPt(request.section.geometry.marginBottom),
+          contentX: request.container.bounds.xPt,
+          contentW: request.container.bounds.widthPt,
+          y: request.container.bounds.yPt,
+          floats: [],
+          floatParaSeq: 0,
+          retainedTablesBySourceIndex: new Map(),
+          pageAnchorPrescanned: new Set<DocParagraph>(),
+          noteReferenceNumber,
+          verticalCJK: storyVertical,
+          verticalAllRotated: storyVertical
+            && isAllRotatedVerticalTextDirection(request.section.textDirection),
+          ...(storyVertical ? {} : { verticalPhys: undefined }),
+          storyContext: {
+            story: request.source.story,
+            containers: [],
+            lineNumberingEligible: false,
+          },
+        };
+        preRegisterPageFloats(root as BodyElement[], 0, candidate);
+        const storyServices = createLayoutServicesRuntimeView(services);
+        candidate.layoutServices = storyServices;
+        const blockInputs: FlowBlockInput[] = root.flatMap((element, index): FlowBlockInput[] => {
+          const source: SourceRef = {
+            story: request.source.story,
+            storyInstance: request.source.storyInstance,
+            path: [index],
+          };
+          if (element.type === 'paragraph') return [{ kind: 'paragraph', source }];
+          if (element.type !== 'table') {
+            throw new Error(`Unsupported ${request.source.story} story block: ${element.type}`);
+          }
+          const dependencies = candidate.retainedTableAcquisition;
+          if (!dependencies) throw new Error('Story table acquisition requires retained dependencies');
+          const columns = resolveColumnWidths(
+            element,
+            request.container.bounds.widthPt,
+            candidate,
+          );
+          return [acquireRetainedTable(
+            element,
+            columns,
+            request.container.bounds.widthPt,
+            candidate,
+            source,
+            dependencies,
+          ).input];
+        });
+        let previousParagraph: DocParagraph | null = null;
+        const algorithms: BlockLayoutAlgorithms = {
+          layoutParagraph(block, placement) {
+            const paragraph = storyElement(root, block.source);
+            if (paragraph.type !== 'paragraph') throw new Error('Story paragraph source kind mismatch');
+            const sourceIndex = block.source.path[0]!;
+            const previous = sourceIndex > 0 && root[sourceIndex - 1]?.type === 'paragraph'
+              ? root[sourceIndex - 1] as DocParagraph
+              : null;
+            const next = root[sourceIndex + 1]?.type === 'paragraph'
+              ? root[sourceIndex + 1] as DocParagraph
+              : null;
+            const previousAfterPt = previousParagraph?.spaceAfter ?? 0;
+            const spacing = paragraphGapAdjustment(
+              previousParagraph,
+              paragraph,
+              previousAfterPt,
+              paragraph.spaceBefore,
+            );
+            const startYPt = Math.max(
+              placement.container.bounds.yPt,
+              placement.cursor.yPt - spacing.overlap,
+            );
+            candidate.y = startYPt;
+            candidate.contentX = placement.container.bounds.xPt;
+            candidate.contentW = placement.container.bounds.widthPt;
+            const publicRuns = paragraph.runs.filter((run, runIndex) =>
+              publicAnchorBridge(run, block.source, runIndex) !== null);
+            if (publicRuns.length > 0) {
+              registerAnchorFloats(
+                { ...paragraph, runs: publicRuns },
+                candidate,
+                candidate.y,
+              );
+            }
+            const context = resolveStateParagraphLayoutContext(candidate, paragraph);
+            const borderEdges = resolveParagraphBorderEdges(previous, paragraph, next);
+            const result = acquireRegisteredParagraph(
+              candidate,
+              paragraphAcquisitionInput(paragraph, block.source),
+              {
+                id: `${block.source.story}:${block.source.storyInstance}:${block.source.path.join('.')}`,
+                source: block.source,
+                flowDomainId: placement.container.id,
+                ordinaryFlow: true,
+                context,
+                placement: {
+                  startYPt,
+                  paragraphXPt: placement.container.bounds.xPt,
+                  availableWidthPt: placement.container.bounds.widthPt,
+                  maximumYPt: placement.container.bounds.yPt + placement.container.bounds.heightPt,
+                  suppressSpaceBefore: spacing.suppressBefore,
+                },
+                measurer: {
+                  context: candidate.ctx,
+                  fontFamilyClasses: candidate.fontFamilyClasses,
+                },
+                environment: paragraphMeasurementEnvironment(candidate),
+                exclusions: paragraphWrapExclusions(candidate.floats, placement.container.id),
+                anchorCollisions: paragraphAnchorCollisions(candidate.floats),
+                containerShading: candidate.containerShading,
+                paragraphBorderEdges: borderEdges,
+                trailingExtentPt: Math.max(
+                  context.spaceAfterPt,
+                  borderEdges.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders),
+                ),
+                continuesFromPrevious: false,
+                anchorFrames: paragraphAnchorReferenceFrames(candidate),
+              },
+            );
+            previousParagraph = paragraph;
+            const nextCursor = {
+              xPt: placement.cursor.xPt,
+              yPt: startYPt + result.layout.advancePt,
+            };
+            candidate.y = nextCursor.yPt;
+            return { layout: result.layout, nextCursor };
+          },
+          layoutTable(block, placement) {
+            previousParagraph = null;
+            const normalizedInput: TableLayoutInput = {
+              ...block,
+              flowDomainId: placement.container.id,
+            };
+            const result = layoutRetainedTableInput(normalizedInput, placement, storyServices);
+            candidate.y = result.nextCursor.yPt;
+            return result;
+          },
+        };
+        attachStoryBlockLayoutAlgorithms(storyServices, algorithms);
+        const acquired = layoutSharedStory({
+          source: request.source,
+          container: request.container,
+          blocks: Object.freeze(blockInputs),
+        }, storyServices);
+        const retained = Object.freeze({
+          ...acquired,
+          blocks: Object.freeze(acquired.blocks.map((block, index) => {
+            if (block.kind !== 'paragraph' && block.kind !== 'table') {
+              throw new Error(`Shared story emitted unsupported node: ${block.kind}`);
+            }
+            return projectBodyOccurrence(block, {
+              occurrenceId: `${request.container.id}:block:${index}`,
+              destination: {
+                coordinateSpace: 'logical-page-points',
+                flowDomainId: request.container.id,
+                translation: { xPt: 0, yPt: 0 },
+              },
+            });
+          })),
+        });
+        storyLayoutCache.set(cacheKey, retained);
+        return retained;
+      };
       const session: BodyLayoutSession = {
         hasPaginationFields: paginatedFlowHasPaginationDependentFields(
           doc.body,
           doc.footnotes ?? [],
+          [
+            ...[...stories.values()].map((story) => story.body),
+            ...(doc.endnotes ?? []).map((note) => note.content),
+          ],
         ),
         measureParagraph(request: BodyParagraphAcquisitionInput) {
           applyLocation(request.location);
@@ -3850,45 +3743,103 @@ function createConcreteBodyLayoutKernel(
               : {}),
           });
         },
-        measureStoryExtent(request) {
-          if (
-            (request.source.story !== 'header' && request.source.story !== 'footer')
-            || request.source.path.length !== 0
-          ) {
-            throw new Error('Header/footer extent measurement requires a story-root source');
-          }
-          const story = stories.get(`${request.source.story}:${request.source.storyInstance}`);
-          if (!story) throw new Error('Unknown header/footer story source');
-          const geometry = request.section.geometry;
-          applyLocation(Object.freeze({
-            pageIndex: request.pageIndex,
-            columnIndex: 0,
-            flowDomainId: `story:${request.source.story}:${request.pageIndex}`,
-            section: request.section,
-            cursorPt: Object.freeze({ xPt: Math.abs(geometry.marginLeft), yPt: 0 }),
-            availableBounds: Object.freeze({
-              xPt: Math.abs(geometry.marginLeft), yPt: 0,
-              widthPt: request.availableInlineExtentPt,
-              heightPt: geometry.pageHeight,
-            }),
-          }));
-          return measureHeaderFooterHeight(story, state);
-        },
-        measureFootnoteReserve(request) {
+        layoutStory: acquireStoryLayout,
+        layoutNotes(request) {
+          const notes: NoteLayout[] = [];
+          let cursorYPt = request.container.bounds.yPt;
           let first = request.firstOnPage;
-          let reservePt = 0;
           for (const id of request.referenceIds) {
-            const note = footnotesById.get(id);
-            if (!note) continue;
-            reservePt += footnoteReserveHeightPt(
-              note,
-              state,
-              request.availableInlineExtentPt,
-              first,
-            );
+            const sourceNotes = request.kind === 'footnote' ? footnotesById : endnotesById;
+            if (!sourceNotes.has(id)) continue;
+            const source: SourceRef = {
+              story: request.kind,
+              storyInstance: id,
+              path: [],
+            };
+            const separatorHeightPt = first ? FOOTNOTE_SEPARATOR_GAP_PT : 0;
+            const storyContainer = {
+              ...request.container,
+              id: `${request.container.id}:${request.kind}:${id}`,
+              bounds: {
+                ...request.container.bounds,
+                yPt: cursorYPt + separatorHeightPt,
+                heightPt: Math.max(
+                  0,
+                  request.container.bounds.yPt + request.container.bounds.heightPt
+                    - cursorYPt - separatorHeightPt,
+                ),
+              },
+            };
+            let story: StoryLayout;
+            try {
+              story = acquireStoryLayout({
+                source,
+                pageIndex: request.pageIndex,
+                section: request.section,
+                container: storyContainer,
+              });
+            } catch (error) {
+              if (error instanceof FlowCapacityExceededError
+                && error.containerId === storyContainer.id) {
+                throw new NoteCapacityExceededError(
+                  request.kind,
+                  request.pageIndex,
+                  request.container.id,
+                );
+              }
+              throw error;
+            }
+            const separator = first ? Object.freeze([Object.freeze({
+              edge: 'top' as const,
+              from: Object.freeze({
+                xPt: request.container.bounds.xPt,
+                yPt: cursorYPt + separatorHeightPt / 2,
+              }),
+              to: Object.freeze({
+                xPt: request.container.bounds.xPt + request.container.bounds.widthPt / 3,
+                yPt: cursorYPt + separatorHeightPt / 2,
+              }),
+              color: '#000000',
+              widthPt: 0.5,
+              authoredStyle: 'single',
+              style: 'solid' as const,
+            })]) : Object.freeze([]);
+            const advancePt = separatorHeightPt + story.advancePt;
+            const flowBounds = Object.freeze({
+              xPt: request.container.bounds.xPt,
+              yPt: cursorYPt,
+              widthPt: request.container.bounds.widthPt,
+              heightPt: advancePt,
+            });
+            const note: NoteLayout = Object.freeze({
+              kind: 'note',
+              id: `${request.kind}:${id}:page:${request.pageIndex}`,
+              source,
+              flowDomainId: request.container.id,
+              ordinaryFlow: true,
+              flowBounds,
+              inkBounds: Object.freeze({
+                xPt: Math.min(flowBounds.xPt, story.inkBounds.xPt),
+                yPt: Math.min(flowBounds.yPt, story.inkBounds.yPt),
+                widthPt: Math.max(
+                  flowBounds.xPt + flowBounds.widthPt,
+                  story.inkBounds.xPt + story.inkBounds.widthPt,
+                ) - Math.min(flowBounds.xPt, story.inkBounds.xPt),
+                heightPt: Math.max(
+                  flowBounds.yPt + flowBounds.heightPt,
+                  story.inkBounds.yPt + story.inkBounds.heightPt,
+                ) - Math.min(flowBounds.yPt, story.inkBounds.yPt),
+              }),
+              clipBounds: request.container.bounds,
+              advancePt,
+              separator,
+              story,
+            });
+            notes.push(note);
+            cursorYPt += advancePt;
             first = false;
           }
-          return reservePt;
+          return Object.freeze(notes);
         },
         measureFollowingBlock(request) {
           const candidate: RenderState = {
@@ -4244,7 +4195,7 @@ function paragraphMeasurementEnvironment(
     | 'pageNumberFormat'
     | 'currentDateMs'
     | 'noteNumbers'
-    | 'currentNoteNumber'
+    | 'noteReferenceNumber'
     | 'verticalCJK'
     | 'verticalAllRotated'
     | 'docEastAsian'
@@ -4259,7 +4210,7 @@ function paragraphMeasurementEnvironment(
     pageNumberFormat: state.pageNumberFormat,
     currentDateMs: state.currentDateMs,
     noteNumbers: state.noteNumbers,
-    currentNoteNumber: state.currentNoteNumber,
+    noteReferenceNumber: state.noteReferenceNumber,
     // §17.6.20 btLr (#988 re-adjudication): an all-rotated page lays its lines
     // out with the HORIZONTAL semantics (no 縦中横 grouping — the whole layout
     // rotates wholesale), so the environment's vertical flag is the effective
@@ -4667,63 +4618,6 @@ function cellAtGridColumn(
  *     opened box is empty (no duplication). The grid footprint (`colSpan`) is kept
  *     from the continue cell so the row's column math is unchanged.
  *  Runtime-only clone: the parsed rows/cells are never mutated. */
-function pickHeaderFooter(
-  set: HeadersFooters,
-  isFirstPageOfSection: boolean,
-  isEvenPage: boolean,
-  titlePage: boolean,
-  evenAndOdd: boolean,
-): HeaderFooter | null {
-  return selectedHeaderFooterStory(set, {
-    titlePage,
-    firstPageOfSection: isFirstPageOfSection,
-    evenAndOddHeaders: evenAndOdd,
-    displayPageNumber: isEvenPage ? 2 : 1,
-  });
-}
-
-/**
- * ECMA-376 §17.10.1 — resolve the section active at the TOP of `pageIndex` (the
- * section that owns that page's content) and whether `pageIndex` is that section's
- * FIRST page. Canonical pages retain the section occurrence that owns their top.
- *
- * `isFirstPageOfSection` is true when this is page 0 or the active section differs
- * from the previous page's — i.e. a section boundary fell on this page's top. Two
- * distinct sections are compared by retained occurrence identity.
- */
-function measureHeaderFooterHeight(hf: HeaderFooter, base: RenderState): number {
-  const state: RenderState = { ...base, y: 0, dryRun: true, floats: [] };
-  // Series A intentionally migrates only the body story. Header/footer stories
-  // stay on their established paragraph/table acquisition until B1 gives every
-  // story the same retained layout owner; B1 deletes this explicit legacy seam.
-  return createHeaderFooterStoryPainter<RenderState, BodyElement, DocParagraph, DocTable, ParagraphBorders>({
-    preRegisterPageFloats: (storyElements, storyState) => {
-      storyState.pageAnchorPrescanned = new Set();
-      preRegisterPageFloats(storyElements, 0, storyState);
-    },
-    paragraphOf: (element: BodyElement) => element as unknown as DocParagraph,
-    tableOf: (element: BodyElement) => element as unknown as DocTable,
-    hasFrame: (paragraph: DocParagraph) => !!paragraph.framePr,
-    frameAnchorLineHeight: (storyElements, element, storyState) =>
-      frameAnchorLineHeightPx(
-        storyElements as BodyElement[],
-        element as BodyElement,
-        storyState,
-      ),
-    paintFrameParagraph: renderFrameParagraph,
-    spaceBefore: (paragraph: DocParagraph) => paragraph.spaceBefore,
-    spaceAfter: (paragraph: DocParagraph) => paragraph.spaceAfter,
-    bordersOf: (paragraph: DocParagraph) => paragraph.borders,
-    contextualSpacing: contextualSpacingAdjust,
-    hasBorder: hasAnyBorderEdge,
-    sharesBorder: parasShareBorderBox,
-    paintParagraph: (paragraph, storyState, suppressBefore, borderMerge) =>
-      renderParagraph(paragraph, storyState, suppressBefore, undefined, false, borderMerge),
-    paintTable: renderTable,
-    tableResetsParagraphFlow: tableParticipatesInOrdinaryFlow,
-  })(hf, 0, state);
-}
-
 /**
  * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — Word-adjudicated PER-SIDE
  * semantics (issue #1015, fixture sample-57 ground truth; identical in body,

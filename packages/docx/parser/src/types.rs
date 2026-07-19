@@ -81,6 +81,11 @@ pub struct Document {
         skip_serializing_if = "Option::is_none"
     )]
     pub page_layout_settings: Option<PageLayoutSettingsWire>,
+    #[serde(
+        rename = "__noteLayoutSettings",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub note_layout_settings: Option<NoteLayoutSettingsWire>,
     /// RB7 partial degradation: set when `word/document.xml` — the body part —
     /// could not be read or parsed. The document still "opens" (so the viewer
     /// shows a placeholder page instead of throwing an opaque error) with an
@@ -105,6 +110,17 @@ pub struct PageLayoutSettingsWire {
     pub book_fold_rev_printing: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub print_two_on_one: Option<bool>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteLayoutSettingsWire {
+    /// §17.11.21 / §17.18.34 `w:footnotePr/w:pos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_position: Option<String>,
+    /// §17.11.22 / §17.18.22 `w:endnotePr/w:pos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote_position: Option<String>,
 }
 
 /// One embedded font-style slot from `word/fontTable.xml`. `style` is one of

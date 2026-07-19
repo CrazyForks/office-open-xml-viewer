@@ -14,6 +14,7 @@ import {
 import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintParagraphLayout } from './canvas-text.js';
 import { paintTableLayout } from './canvas-table.js';
+import { paintStrokeSegment } from './canvas-border.js';
 import { appendDeferredPaintFrame, canvasPaintFrame } from './deferred-paint-frame.js';
 import type { PaintResourceSession } from './resource-session.js';
 import type {
@@ -76,8 +77,26 @@ function paintNode(node: PaintNode, context: CanvasPaintContext): void {
     case 'table':
       paintTableLayout(node, context, node.resolvedFloatingTables ?? []);
       return;
+    case 'note': {
+      node.separator.forEach((segment) => paintStrokeSegment(segment, context));
+      const paintStory = () => node.story.blocks.forEach((block) => paintNode(block, context));
+      if (!node.story.clipBounds) {
+        paintStory();
+        return;
+      }
+      const clip = node.story.clipBounds;
+      context.ctx.save();
+      try {
+        context.ctx.beginPath();
+        context.ctx.rect(clip.xPt, clip.yPt, clip.widthPt, clip.heightPt);
+        context.ctx.clip();
+        paintStory();
+      } finally {
+        context.ctx.restore();
+      }
+      return;
+    }
     case 'textbox':
-    case 'note':
       throw new Error(`Unsupported page paint node kind: ${node.kind}`);
     default: {
       const exhaustive: never = node;
@@ -195,6 +214,20 @@ export function paintLayoutPageContent(
   const regionByDomain = new Map(page.sectionRegions.flatMap((region) => (
     region.flowDomainIds.map((domainId) => [domainId, region] as const)
   )));
+  const regionById = new Map(page.sectionRegions.map((region) => [region.id, region]));
+  for (const domain of page.flowDomains) {
+    if (domain.kind === 'footnote' || domain.kind === 'endnote') {
+      const storyRegion = domain.sectionRegionId
+        ? regionById.get(domain.sectionRegionId)
+        : page.sectionRegions[0];
+      if (!storyRegion) {
+        throw new Error(
+          `${domain.id} references missing page story region ${domain.sectionRegionId ?? '<default>'}`,
+        );
+      }
+      regionByDomain.set(domain.id, storyRegion);
+    }
+  }
   const entries = page.layers.paintSequence;
   const firstNonLeadingEntry = entries.findIndex((entry) => (
     entry.layer !== 'background' && entry.layer !== 'behindText' && entry.layer !== 'header'

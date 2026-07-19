@@ -255,6 +255,11 @@ function collectRetainedNodeIds(
     });
     return;
   }
+  if (node.kind === 'note') {
+    node.story.blocks.forEach((block) =>
+      collectRetainedNodeIds(block, pageIds, documentIds));
+    return;
+  }
   if (node.kind === 'textbox') {
     node.paragraphs.forEach((paragraph) =>
       collectRetainedNodeIds(paragraph, pageIds, documentIds));
@@ -655,6 +660,30 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         `pages[${pageIndex}].columnSeparators contradict the retained section regions`,
       );
     }
+    const regionById = new Map(page.sectionRegions.map((region) => [region.id, region]));
+    for (const domain of page.flowDomains) {
+      if (domain.kind !== 'footnote' && domain.kind !== 'endnote') continue;
+      const storyRegion = domain.sectionRegionId
+        ? regionById.get(domain.sectionRegionId)
+        : page.sectionRegions[0];
+      if (!storyRegion) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `${domain.id} references missing page story region ${domain.sectionRegionId ?? '<default>'}`,
+        );
+      }
+      const expectedPhysicalBounds = transformRect(
+        storyRegion.coordinateSpace.logicalToPhysical,
+        domain.logicalBounds,
+      );
+      if (!equalRect(expectedPhysicalBounds, domain.physicalBounds)) {
+        throw new LayoutInvariantError(
+          'INVALID_GEOMETRY',
+          `${domain.id} physical bounds do not match the page story transform`,
+        );
+      }
+      regionByDomain.set(domain.id, storyRegion);
+    }
     for (const domain of page.flowDomains) {
       if (!regionByDomain.has(domain.id) && !equalRect(domain.logicalBounds, domain.physicalBounds)) {
         throw new LayoutInvariantError(
@@ -777,9 +806,24 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       for (let other = index + 1; other < ordinary.length; other += 1) {
         const first = ordinary[index];
         const second = ordinary[other];
-        if (first && second
-          && first.flowDomainId === second.flowDomainId
-          && overlaps(first.flowBounds, second.flowBounds)) {
+        if (!first || !second) continue;
+        const firstDomain = domains.get(first.flowDomainId);
+        const secondDomain = domains.get(second.flowDomainId);
+        const sameDomain = first.flowDomainId === second.flowDomainId;
+        const bodyAndNote = (
+          firstDomain?.kind === 'body'
+          && (secondDomain?.kind === 'footnote' || secondDomain?.kind === 'endnote')
+        ) || (
+          secondDomain?.kind === 'body'
+          && (firstDomain?.kind === 'footnote' || firstDomain?.kind === 'endnote')
+        );
+        const distinctNoteStories = firstDomain?.id !== secondDomain?.id
+          && (firstDomain?.kind === 'footnote' || firstDomain?.kind === 'endnote')
+          && (secondDomain?.kind === 'footnote' || secondDomain?.kind === 'endnote');
+        if (
+          (sameDomain || bodyAndNote || distinctNoteStories)
+          && overlaps(first.flowBounds, second.flowBounds)
+        ) {
           throw new LayoutInvariantError('FLOW_OVERLAP', `${first.id} overlaps ${second.id}`);
         }
       }

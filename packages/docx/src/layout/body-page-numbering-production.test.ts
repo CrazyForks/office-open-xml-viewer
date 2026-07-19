@@ -5,11 +5,11 @@ import type {
   BodySectionLayoutInput,
   BodyStoryReferenceSet,
 } from './body-layout-input.js';
-import type { BodyLayoutKernel } from './body-layout-kernel.js';
+import type { SyntheticBodyLayoutKernel } from './body-layout-kernel.test-support.js';
+import { attachSyntheticBodyLayoutKernel } from './body-layout-kernel.test-support.js';
 import { paginateBody } from './body-paginator.js';
 import { LayoutVariantStore } from './variant-store.js';
 import {
-  attachBodyLayoutKernel,
   fieldAcquisitionContextOf,
 } from './runtime-state.js';
 import type {
@@ -153,7 +153,7 @@ function createServices(input: Readonly<{
     images: { fingerprint: 'images' },
     math: { fingerprint: 'math' },
   }) as LayoutServices;
-  const kernel: BodyLayoutKernel = {
+  const kernel: SyntheticBodyLayoutKernel = {
     openBodyLayoutSession: (_sessionInput, iterationServices) => ({
       hasPaginationFields: input.hasPaginationFields ?? false,
       measureParagraph: ({ input: paragraphInput, location }) => {
@@ -194,7 +194,7 @@ function createServices(input: Readonly<{
       commitFlowRegistryDelta: () => undefined,
     }),
   };
-  attachBodyLayoutKernel(services, kernel);
+  attachSyntheticBodyLayoutKernel(services, kernel);
   return services;
 }
 

@@ -7,7 +7,7 @@
   },
   "migrationIdentifierCounts": {
     "packages/docx/src/layout-context.ts#toLegacyDocGridContext": 1,
-    "packages/docx/src/renderer.ts#dryRun": 25,
+    "packages/docx/src/renderer.ts#dryRun": 24,
     "packages/docx/src/renderer.ts#toLegacyDocGridContext": 5
   },
   "nonLayoutDeclarationKeys": [
@@ -273,10 +273,8 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#decodeRaster",
     "packages/docx/src/renderer.ts#FunctionDeclaration#docDefaultFontSizePt",
     "packages/docx/src/renderer.ts#FunctionDeclaration#drawBorderLine",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#drawEndnotes",
     "packages/docx/src/renderer.ts#FunctionDeclaration#drawImageRunBitmap",
     "packages/docx/src/renderer.ts#FunctionDeclaration#drawPageBorders",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#drawPageFootnotes",
     "packages/docx/src/renderer.ts#FunctionDeclaration#drawParaBorders",
     "packages/docx/src/renderer.ts#FunctionDeclaration#drawParagraphLine",
     "packages/docx/src/renderer.ts#FunctionDeclaration#drawTabLeader",
@@ -286,7 +284,6 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#estimateParagraphHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#estimateTableHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#fitShapeImage",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#footnoteReserveHeightPt",
     "packages/docx/src/renderer.ts#FunctionDeclaration#frameAnchorLineHeightPx",
     "packages/docx/src/renderer.ts#FunctionDeclaration#gridForParagraphContext",
     "packages/docx/src/renderer.ts#FunctionDeclaration#hasInlineImage",
@@ -312,9 +309,6 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellElementHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellParagraphHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellParagraphWindow",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#measureFootnoteBlockPt",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#measureHeaderFooterHeight",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#measureNoteBlockForDraw",
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureShapeTextAutoFitHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#neighbourEdges",
     "packages/docx/src/renderer.ts#FunctionDeclaration#neighbourJob",
@@ -331,7 +325,6 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#paragraphMeasurementEnvironment",
     "packages/docx/src/renderer.ts#FunctionDeclaration#physicalAnchorState",
     "packages/docx/src/renderer.ts#FunctionDeclaration#physicalLayoutSection",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#pickHeaderFooter",
     "packages/docx/src/renderer.ts#FunctionDeclaration#preRegisterPageFloats",
     "packages/docx/src/renderer.ts#FunctionDeclaration#preloadImages",
     "packages/docx/src/renderer.ts#FunctionDeclaration#registerAnchorFloats",
@@ -525,7 +518,7 @@
   ],
   "legacyDeclarationHashes": {
     "packages/docx/src/renderer.ts#FunctionDeclaration#calculateRowHeight": "899e2db0661581eaf474fce3293e735adfd523b9135279e396673e6d9547ce9e",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#computeTableLayout": "a9a97f7e6291560ebe8d579a301595b26f8e3410f9ea95e8da09acccc611d2a8",
+    "packages/docx/src/renderer.ts#FunctionDeclaration#computeTableLayout": "62518f0583c7721c965180977e360b5bb354ad396a09571b429dede04a74fdd0",
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellContentHeightPx": "257321eaf2b84f55c851bd44eaf9e4c4ec326e87e874f87d91265464368e26fb"
   },
   "rendererImportEdges": [

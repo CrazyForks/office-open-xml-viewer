@@ -131,6 +131,10 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     bookFoldRevPrinting?: boolean;
     printTwoOnOne?: boolean;
   }>;
+  readonly __noteLayoutSettings?: Readonly<{
+    footnotePosition?: string;
+    endnotePosition?: string;
+  }>;
 }
 
 export interface DocumentPageLayoutSettingsInput {
@@ -152,6 +156,22 @@ export function documentPageLayoutSettingsInput(
     bookFoldRevPrinting: settings?.bookFoldRevPrinting === true,
     printTwoOnOne: settings?.printTwoOnOne === true,
   }, 'DOCX page layout settings input');
+}
+
+export interface DocumentNoteLayoutSettingsInput {
+  readonly footnotePosition: string;
+  readonly endnotePosition: string;
+}
+
+export function documentNoteLayoutSettingsInput(
+  doc: DocxDocumentModel,
+): DocumentNoteLayoutSettingsInput {
+  const settings = (doc as InternalDocxDocumentModel).__noteLayoutSettings;
+  return snapshotPlainData({
+    // §17.11.21/.22 defaults when document-wide w:pos is absent.
+    footnotePosition: settings?.footnotePosition ?? 'pageBottom',
+    endnotePosition: settings?.endnotePosition ?? 'docEnd',
+  }, 'DOCX note layout settings input');
 }
 
 interface InternalSectionPlacementWire {
@@ -1321,6 +1341,8 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
   return snapshotPlainData({
     sectionIndex,
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
+    endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
+    noteLayoutSettings: documentNoteLayoutSettingsInput(doc),
     pageLayoutSettings: documentPageLayoutSettingsInput(doc),
     sequence,
   }, 'DOCX body layout acquisition input') as BodyLayoutAcquisitionInput;
