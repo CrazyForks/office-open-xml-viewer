@@ -7147,26 +7147,35 @@ fn parse_text_box_content(
     let mut field = FieldState::default();
     let mut wire = Vec::with_capacity(nodes.len());
     let mut legacy = Vec::new();
+    // Acquisition of newly supported blocks must not change the still-active
+    // public textBlocks paint route or numbering after the shape. Parse the
+    // complete stream against an isolated story snapshot, while the live map
+    // advances only through the same direct paragraphs the pre-B2 projection
+    // visited. The complete wire still has one coherent internal sequence.
+    let mut content_num_map = num_map.clone();
 
     for (node, source_path) in nodes {
         match (node.tag_name().namespace(), node.tag_name().name()) {
             (namespace, "p") if is_w_ns(namespace) => {
                 // Preserve the stable ShapeRun.textBlocks view exactly as the
-                // pre-B2 parser emitted it. A numbering snapshot prevents this
-                // compatibility projection from advancing the document's live
-                // list counters a second time.
-                let mut legacy_num_map = num_map.clone();
+                // pre-B2 parser emitted it, including numbering across direct
+                // paragraphs while newly acquired tables remain invisible.
                 let paragraph = parse_paragraph_cond_at_depth(
-                    node, style_map, num_map, media_map, chart_map, rel_map, theme, None, None,
-                    &mut field, depth,
-                );
-                if let Some(block) = extract_simple_paragraph_text(
-                    style_map,
-                    &mut legacy_num_map,
                     node,
-                    theme,
+                    style_map,
+                    &mut content_num_map,
                     media_map,
-                ) {
+                    chart_map,
+                    rel_map,
+                    theme,
+                    None,
+                    None,
+                    &mut field,
+                    depth,
+                );
+                if let Some(block) =
+                    extract_simple_paragraph_text(style_map, num_map, node, theme, media_map)
+                {
                     legacy.push(block);
                 }
                 wire.push(TextBoxBlockWire::Body(BodyElement::Paragraph(Box::new(
@@ -7178,7 +7187,7 @@ fn parse_text_box_content(
                     let table = parse_table(
                         node,
                         style_map,
-                        num_map,
+                        &mut content_num_map,
                         media_map,
                         chart_map,
                         rel_map,
@@ -8134,15 +8143,31 @@ fn parse_vml_pict(
     // Body blocks from <v:textbox><w:txbxContent>. VML and WPS share the same
     // CT_TxbxContent parser/wire; textPath still suppresses only the legacy
     // body-text paint projection, not preservation of authored content.
-    let (text_box_content, parsed_legacy_blocks) = shape
+    let text_box_content_node = shape
         .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
-        .map(|content| {
+        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent");
+    let (text_box_content, parsed_legacy_blocks) = match text_box_content_node {
+        Some(content) if text_path.is_some() => {
+            // Before B2, a VML textPath suppressed txbxContent before parsing,
+            // so its paragraphs did not advance document numbering. Preserve
+            // that visible behavior while still acquiring the complete wire.
+            let mut suppressed_num_map = num_map.clone();
             parse_text_box_content_at_depth(
-                content, style_map, num_map, media_map, chart_map, rel_map, theme, depth,
+                content,
+                style_map,
+                &mut suppressed_num_map,
+                media_map,
+                chart_map,
+                rel_map,
+                theme,
+                depth,
             )
-        })
-        .unwrap_or_default();
+        }
+        Some(content) => parse_text_box_content_at_depth(
+            content, style_map, num_map, media_map, chart_map, rel_map, theme, depth,
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
     let text_blocks = if text_path.is_some() {
         Vec::new()
     } else {
@@ -19668,7 +19693,7 @@ mod txbx_block_wire_tests {
     }
 
     #[test]
-    fn complete_and_legacy_projections_advance_live_numbering_only_once() {
+    fn complete_projection_does_not_change_legacy_or_following_numbering() {
         let numbering = r#"
           <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
             <w:abstractNum w:abstractNumId="0">
@@ -19688,7 +19713,18 @@ mod txbx_block_wire_tests {
             <wps:txbx><w:txbxContent>
               <w:p>
                 <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
-                <w:r><w:t>Inside</w:t></w:r>
+                <w:r><w:t>Before table</w:t></w:r>
+              </w:p>
+              <w:tbl>
+                <w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid>
+                <w:tr><w:tc><w:p>
+                  <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                  <w:r><w:t>Inside table</w:t></w:r>
+                </w:p></w:tc></w:tr>
+              </w:tbl>
+              <w:p>
+                <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                <w:r><w:t>After table</w:t></w:r>
               </w:p>
             </w:txbxContent></wps:txbx>
           </wps:wsp>
@@ -19730,20 +19766,109 @@ mod txbx_block_wire_tests {
         let wire = serde_json::to_value(&body.content).expect("wire serializes");
         assert_eq!(wire[0]["numbering"]["text"], "1.");
         assert_eq!(
-            body.legacy_blocks[0]
-                .numbering
-                .as_ref()
-                .map(|numbering| numbering.text.as_str()),
-            Some("1."),
-            "the stable compatibility projection sees the same list item",
+            wire[1]["rows"][0]["cells"][0]["content"][0]["numbering"]["text"],
+            "2.",
+        );
+        assert_eq!(wire[2]["numbering"]["text"], "3.");
+        assert_eq!(
+            body.legacy_blocks
+                .iter()
+                .map(|block| {
+                    block
+                        .numbering
+                        .as_ref()
+                        .map(|numbering| numbering.text.as_str())
+                })
+                .collect::<Vec<_>>(),
+            [Some("1."), Some("2.")],
+            "the stable projection must ignore newly acquired table content exactly as before",
         );
         assert_eq!(
             following
                 .numbering
                 .as_ref()
                 .map(|numbering| numbering.text.as_str()),
-            Some("2."),
-            "the discarded compatibility clone must not consume item 2",
+            Some("3."),
+            "newly acquired but not yet rendered table content must not change following output",
+        );
+    }
+
+    #[test]
+    fn vml_text_path_content_does_not_advance_suppressed_legacy_numbering() {
+        let numbering = r#"
+          <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+              <w:lvl w:ilvl="0">
+                <w:start w:val="1"/>
+                <w:numFmt w:val="decimal"/>
+                <w:lvlText w:val="%1."/>
+              </w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+          </w:numbering>
+        "#;
+        let pict_xml = r##"
+          <w:pict
+            xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml">
+            <v:shape id="wordart" style="width:200pt;height:100pt">
+              <v:path textpathok="t"/>
+              <v:textpath on="t" string="WordArt"/>
+              <v:textbox><w:txbxContent>
+                <w:p>
+                  <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                  <w:r><w:t>Suppressed body</w:t></w:r>
+                </w:p>
+              </w:txbxContent></v:textbox>
+            </v:shape>
+          </w:pict>
+        "##;
+        let following_xml = r#"
+          <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+            <w:r><w:t>Following</w:t></w:r>
+          </w:p>
+        "#;
+        let pict_document = roxmltree::Document::parse(pict_xml).expect("VML fixture");
+        let following_document =
+            roxmltree::Document::parse(following_xml).expect("paragraph fixture");
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let shape = parse_vml_pict(
+            &StyleMap::default(),
+            &mut num_map,
+            pict_document.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        )
+        .expect("VML shape");
+        let mut field = FieldState::default();
+        let following = parse_paragraph(
+            following_document.root_element(),
+            &StyleMap::default(),
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            None,
+            &mut field,
+        );
+
+        assert!(shape.text_path.is_some());
+        assert!(shape.text_blocks.is_empty());
+        let wire = serde_json::to_value(&shape.text_box_content).expect("wire serializes");
+        assert_eq!(wire[0]["numbering"]["text"], "1.");
+        assert_eq!(
+            following
+                .numbering
+                .as_ref()
+                .map(|numbering| numbering.text.as_str()),
+            Some("1."),
+            "suppressed pre-B2 textPath body content must not consume live numbering",
         );
     }
 }
