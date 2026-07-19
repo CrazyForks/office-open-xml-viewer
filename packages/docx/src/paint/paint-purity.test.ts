@@ -8,6 +8,7 @@ import type {
 import { createLayoutPage } from '../layout/page-factory.js';
 import { assertDocumentLayout } from '../layout/invariants.js';
 import type { PageLayerId } from '../layout/types.js';
+import { buildPageLayers } from '../layout/page-graph.js';
 import { paintLayoutPage, paintLayoutPageContent } from './canvas-page.js';
 
 const canonicalPageMeta = (section: SectionLayoutContext) => ({
@@ -358,16 +359,9 @@ describe('paintLayoutPage', () => {
         }],
         section: {} as SectionLayoutContext,
         ...canonicalPageMeta({} as SectionLayoutContext),
-        layers: {
-          paintSequence: [{ layer: 'body', node, coordinateSpace: 'section-logical' }],
-          background: [],
-          behindText: [],
-          header: [],
-          body: [node],
-          notes: [],
-          front: [],
-          footer: [],
-        },
+        layers: buildPageLayers([
+          { layer: 'body', node, coordinateSpace: 'section-logical' },
+        ]),
         readingOrder: ['drawing-1'],
       }],
       diagnostics: [],
@@ -394,6 +388,9 @@ describe('paintLayoutPage', () => {
       flowDomainId: 'body',
       commands: [],
     };
+    const retainedLayers = buildPageLayers([{
+      layer: 'body', node, coordinateSpace: 'section-logical',
+    }]);
     const page = {
       pageIndex: 0,
       geometry: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 200, contentTopPt: 10, contentBottomPt: 190 },
@@ -405,12 +402,8 @@ describe('paintLayoutPage', () => {
       section: {} as SectionLayoutContext,
       ...canonicalPageMeta({} as SectionLayoutContext),
       layers: {
-        paintSequence: [{
-          layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,
-        }],
-        background: [], behindText: [], header: [],
+        ...retainedLayers,
         get body(): never { throw new Error('paint dereferenced the body layer'); },
-        notes: [], front: [], footer: [],
       },
       readingOrder: [node.id],
     };
@@ -468,10 +461,13 @@ describe('paintLayoutPage', () => {
         }],
         section: {} as SectionLayoutContext,
         ...canonicalPageMeta({} as SectionLayoutContext),
-        layers: {
-          paintSequence: [{ layer: 'body', node: table, coordinateSpace: 'section-logical' }],
-          background: [], behindText: [], header: [], body: [table], notes: [], front: [], footer: [],
-        },
+        layers: buildPageLayers([
+          {
+            layer: 'body',
+            node: table as unknown as DocumentLayout['pages'][number]['layers']['body'][number],
+            coordinateSpace: 'section-logical',
+          },
+        ]),
         readingOrder: ['table-0'],
       }],
       diagnostics: [],

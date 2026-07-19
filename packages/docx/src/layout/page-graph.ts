@@ -4,26 +4,17 @@ import type {
   PageLayers,
   PaintNode,
 } from './types.js';
+import {
+  buildPageLayers,
+  PAGE_LAYER_IDS,
+  type PageLayerNode,
+} from './page-layers.js';
 
-export const PAGE_LAYER_IDS = [
-  'background',
-  'behindText',
-  'header',
-  'body',
-  'notes',
-  'front',
-  'footer',
-] as const satisfies readonly PageLayerId[];
-
-type MissingPageLayer = Exclude<PageLayerId, typeof PAGE_LAYER_IDS[number]>;
-const pageLayersAreExhaustive: MissingPageLayer extends never ? true : never = true;
-void pageLayersAreExhaustive;
-
-export type PageLayerNode = Readonly<{
-  layer: PageLayerId;
-  node: PaintNode;
-  coordinateSpace?: 'section-logical' | 'upright-physical';
-}>;
+export {
+  buildPageLayers,
+  PAGE_LAYER_IDS,
+  type PageLayerNode,
+} from './page-layers.js';
 
 export class PageGraphError extends Error {
   constructor(message: string) {
@@ -32,24 +23,7 @@ export class PageGraphError extends Error {
   }
 }
 
-export function createPageLayers(entries: readonly PageLayerNode[]): PageLayers {
-  const nodes = new Map(PAGE_LAYER_IDS.map((layer) => [layer, [] as PaintNode[]]));
-  for (const entry of entries) nodes.get(entry.layer)!.push(entry.node);
-  return Object.freeze({
-    paintSequence: Object.freeze(entries.map(({ layer, node, coordinateSpace }) => Object.freeze({
-      layer,
-      node,
-      coordinateSpace: coordinateSpace ?? 'section-logical',
-    }))),
-    background: Object.freeze(nodes.get('background')!),
-    behindText: Object.freeze(nodes.get('behindText')!),
-    header: Object.freeze(nodes.get('header')!),
-    body: Object.freeze(nodes.get('body')!),
-    notes: Object.freeze(nodes.get('notes')!),
-    front: Object.freeze(nodes.get('front')!),
-    footer: Object.freeze(nodes.get('footer')!),
-  });
-}
+export const createPageLayers = buildPageLayers;
 
 export function replacePageLayerNodes(
   layers: PageLayers,
@@ -60,7 +34,7 @@ export function replacePageLayerNodes(
   if (replacementById.size !== replacements.length || replacements.length !== layers[layer].length) {
     throw new PageGraphError(`Replacement ${layer} layer must preserve unique paint node identities`);
   }
-  const entries = layers.paintSequence.map((entry): PageLayerNode => {
+  const entries = layers.roots.map((entry): PageLayerNode => {
     if (entry.layer !== layer) return entry;
     const node = replacementById.get(entry.node.id);
     if (!node) throw new PageGraphError(`Missing replacement paint node ${entry.node.id}`);
@@ -70,15 +44,13 @@ export function replacePageLayerNodes(
 }
 
 export function pageLayerNodes(page: LayoutPage): readonly PageLayerNode[] {
-  return PAGE_LAYER_IDS.flatMap((layer) => (
-    page.layers[layer].map((node) => ({ layer, node }))
-  ));
+  return page.layers.roots;
 }
 
 export function orderedPagePaintNodes(page: LayoutPage): readonly PaintNode[] {
   let seenBody = false;
   let leftBody = false;
-  for (const entry of page.layers.paintSequence) {
+  for (const entry of page.layers.roots) {
     if (entry.layer === 'body') {
       if (leftBody) {
         throw new PageGraphError(
@@ -91,29 +63,59 @@ export function orderedPagePaintNodes(page: LayoutPage): readonly PaintNode[] {
     }
   }
   const nodes = new Map<string, PageLayerNode>();
-  for (const entry of pageLayerNodes(page)) {
+  for (const entry of page.layers.roots) {
     if (nodes.has(entry.node.id)) throw new PageGraphError(`Duplicate paint node ${entry.node.id}`);
     nodes.set(entry.node.id, entry);
   }
-
-  const painted = new Set<string>();
-  const ordered: PaintNode[] = [];
-  for (const entry of page.layers.paintSequence) {
-    const target = nodes.get(entry.node.id);
-    if (!target) throw new PageGraphError(`Missing paint node ${entry.node.id}`);
-    if (target.layer !== entry.layer) {
-      throw new PageGraphError(`Paint node ${entry.node.id} belongs to ${target.layer}, not ${entry.layer}`);
+  const semanticNodes = new Map<string, PageLayerNode>();
+  for (const layer of PAGE_LAYER_IDS) {
+    for (const node of page.layers[layer]) {
+      if (semanticNodes.has(node.id)) {
+        throw new PageGraphError(`Duplicate semantic page node ${node.id}`);
+      }
+      semanticNodes.set(node.id, { layer, node });
     }
-    if (target.node !== entry.node) {
-      throw new PageGraphError(`Paint node ${entry.node.id} is not the retained ${entry.layer} node`);
-    }
-    if (painted.has(entry.node.id)) throw new PageGraphError(`Duplicate paint reference ${entry.node.id}`);
-    painted.add(entry.node.id);
-    ordered.push(entry.node);
   }
-  if (painted.size !== nodes.size) {
-    const missing = [...nodes.keys()].find((id) => !painted.has(id));
+  if (semanticNodes.size !== nodes.size) {
+    throw new PageGraphError('Semantic page layers do not match retained roots');
+  }
+  for (const [id, root] of nodes) {
+    const semantic = semanticNodes.get(id);
+    if (!semantic || semantic.layer !== root.layer || semantic.node !== root.node) {
+      throw new PageGraphError(`Paint root ${id} is not the retained ${root.layer} node`);
+    }
+  }
+
+  const representedRoots = new Set<string>();
+  const drawingIds = new Set<string>();
+  for (const entry of page.layers.paintOrder) {
+    const root = nodes.get(entry.rootNodeId);
+    if (!root) throw new PageGraphError(`Missing paint root ${entry.rootNodeId}`);
+    if (root.layer !== entry.sourceLayer) {
+      throw new PageGraphError(
+        `Paint root ${entry.rootNodeId} belongs to ${root.layer}, not ${entry.sourceLayer}`,
+      );
+    }
+    representedRoots.add(entry.rootNodeId);
+    if (entry.kind === 'node') {
+      if (entry.node !== root.node || entry.node.id !== entry.rootNodeId) {
+        throw new PageGraphError(
+          `Paint root ${entry.rootNodeId} is not the retained ${entry.sourceLayer} node`,
+        );
+      }
+      continue;
+    }
+    if (!entry.node.anchorLayer) {
+      throw new PageGraphError(`Drawing paint entry ${entry.node.id} is not anchored`);
+    }
+    if (drawingIds.has(entry.node.id)) {
+      throw new PageGraphError(`Duplicate drawing paint reference ${entry.node.id}`);
+    }
+    drawingIds.add(entry.node.id);
+  }
+  if (representedRoots.size !== nodes.size) {
+    const missing = [...nodes.keys()].find((id) => !representedRoots.has(id));
     throw new PageGraphError(`Missing paint-order reference for ${missing ?? '<unknown>'}`);
   }
-  return ordered;
+  return page.layers.roots.map(({ node }) => node);
 }

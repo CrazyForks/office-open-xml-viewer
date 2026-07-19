@@ -3,8 +3,6 @@ import type {
   LayoutRect,
   PaintResourceKind,
   Matrix2DData,
-  DrawingLayout,
-  TextBoxLayout,
 } from '../layout/types.js';
 import type { ResolvedPaintResource } from './resource-session.js';
 import type { TextRunPaintInfo } from './text-run-info.js';
@@ -64,9 +62,6 @@ export interface CanvasPaintResourcePainter {
   ): void;
 }
 
-export type DeferredCanvasPaint = () => void;
-export type DeferredCanvasPaintWrapper = (paint: DeferredCanvasPaint) => DeferredCanvasPaint;
-
 export interface CanvasPaintContext {
   readonly ctx: PaintCanvas2D;
   readonly scale: number;
@@ -83,20 +78,6 @@ export interface CanvasPaintContext {
   readonly onTextRun?: (run: TextRunPaintInfo) => void;
   readonly layoutTranslationPt?: Readonly<{ xPt: number; yPt: number }>;
   readonly textBoxVerticalMode?: 'vert' | 'vert270' | 'eaVert' | 'mongolianVert';
-  /** Internal A6 traversal phase. Discovery walks retained placement and clip
-   * frames without emitting ordinary table or paragraph ink. */
-  readonly bodyDrawingPass?: 'normal' | 'discover-behind';
-  /** Re-enters every Canvas frame owned by the recursive painter at the point
-   * where a drawing was encountered. */
-  readonly deferredPaintWrapper?: DeferredCanvasPaintWrapper;
-  readonly deferBehindDrawing?: (
-    drawing: DrawingLayout,
-    textBoxes: readonly TextBoxLayout[],
-    paint: () => void,
-  ) => boolean;
-  readonly deferFrontDrawing?: (
-    drawing: DrawingLayout,
-    textBoxes: readonly TextBoxLayout[],
-    paint: () => void,
-  ) => boolean;
+  /** The page paint plan owns anchored drawings for this retained root. */
+  readonly omitAnchoredDrawings?: boolean;
 }

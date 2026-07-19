@@ -186,11 +186,6 @@ import {
   unavailablePaintResourceHandle,
 } from './paint/resource-session.js';
 import {
-  enqueueDeferredFrontPaint,
-  withDeferredFrontPaintSession,
-  type DeferredFrontPaintState,
-} from './paint/deferred-front-session.js';
-import {
   mathResourceKey,
   bodyMathOccurrences,
   createImageMetadataService,
@@ -770,7 +765,7 @@ interface RetainedTableRecord {
   readonly anchorYPt: number;
 }
 
-export interface RenderState extends DeferredFrontPaintState {
+export interface RenderState {
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   scale: number;    // px per pt
   /** Device-pixel ratio the canvas was scaled by (`ctx.scale(dpr, dpr)`). Used to
@@ -7205,25 +7200,6 @@ function renderAnchorImages(
     }
     return;
   }
-  // Front floats (behindDoc="0"): defer to the page's top layer so a later inline
-  // image cannot overpaint them (§20.4.2.10). Capture the current column band so
-  // the replayed draw resolves a column-relative anchor against the right widths.
-  const capturedContentX = state.contentX;
-  const capturedContentW = state.contentW;
-  if (enqueueDeferredFrontPaint(state, () => {
-    const sx = state.contentX;
-    const sw = state.contentW;
-    state.contentX = capturedContentX;
-    state.contentW = capturedContentW;
-    try {
-      renderAnchorImages(para, state, paragraphTopPx, 'front', wrapFloatParagraphTopPx);
-    } finally {
-      state.contentX = sx;
-      state.contentW = sw;
-    }
-  })) {
-    return;
-  }
   const frontRuns = para.runs
     .map((run, index) => {
       const shapeZ = run.type === 'shape'
@@ -7825,7 +7801,6 @@ function verticalPhysicalContentState(state: RenderState): RenderState {
     verticalAllRotated: false,
     verticalPhys: undefined,
     floats: [],
-    frontPaintSession: null,
   };
 }
 

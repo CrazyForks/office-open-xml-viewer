@@ -13,7 +13,7 @@ import {
   scaleAffine,
   translationAffine,
 } from './affine.js';
-import { appendDeferredPaintFrame, canvasPaintFrame } from './deferred-paint-frame.js';
+import { canvasPaintFrame } from './deferred-paint-frame.js';
 import { textRunPaintInfo } from './text-run-info.js';
 
 function validateTextSlices(placement: import('../layout/types.js').TextPlacement): void {
@@ -146,9 +146,9 @@ function textBoxesForDrawing(
   });
 }
 
-export function paintParagraphDrawingLayout(
-  node: ParagraphLayout,
+export function paintDrawingWithOwnedTextBoxes(
   drawing: import('../layout/types.js').DrawingLayout,
+  textBoxes: readonly TextBoxLayout[],
   context: CanvasPaintContext,
 ): void {
   const translation = context.layoutTranslationPt;
@@ -162,12 +162,20 @@ export function paintParagraphDrawingLayout(
   }
   try {
     paintDrawingLayout(drawing, context);
-    for (const textBox of textBoxesForDrawing(node, drawing)) {
-      paintTextBoxLayout(textBox, context);
+    for (const textBox of textBoxes) {
+      paintTextBoxLayout(textBox, { ...context, omitAnchoredDrawings: false });
     }
   } finally {
     if (undoX !== 0 || undoY !== 0) context.ctx.restore();
   }
+}
+
+export function paintParagraphDrawingLayout(
+  node: ParagraphLayout,
+  drawing: import('../layout/types.js').DrawingLayout,
+  context: CanvasPaintContext,
+): void {
+  paintDrawingWithOwnedTextBoxes(drawing, textBoxesForDrawing(node, drawing), context);
 }
 
 function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintContext): void {
@@ -179,32 +187,8 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
     .filter((drawing) => drawing.anchorLayer?.behindDoc === true)
     .sort((a, b) => a.anchorLayer!.relativeHeight - b.anchorLayer!.relativeHeight
       || a.anchorLayer!.sourceOrder - b.anchorLayer!.sourceOrder);
-  if (context.bodyDrawingPass === 'discover-behind') {
-    const replayContext: CanvasPaintContext = {
-      ...context,
-      bodyDrawingPass: 'normal',
-      // Behind owners replay atomically at their sorted page z-position. Any
-      // descendant anchors belong to that owned story and paint in local
-      // paragraph order instead of mutating the page discovery queue.
-      deferBehindDrawing: () => false,
-      deferFrontDrawing: () => false,
-    };
-    for (const drawing of behind) {
-      const textBoxes = textBoxesForDrawing(node, drawing);
-      const paint = () => paintParagraphDrawingLayout(node, drawing, replayContext);
-      context.deferBehindDrawing?.(
-        drawing,
-        textBoxes,
-        context.deferredPaintWrapper?.(paint) ?? paint,
-      );
-    }
-    return;
-  }
-  for (const drawing of behind) {
-    const textBoxes = textBoxesForDrawing(node, drawing);
-    const paint = () => paintDrawingWithTextBoxes(drawing);
-    const deferredPaint = context.deferredPaintWrapper?.(paint) ?? paint;
-    if (!context.deferBehindDrawing?.(drawing, textBoxes, deferredPaint)) paint();
+  if (!context.omitAnchoredDrawings) {
+    for (const drawing of behind) paintDrawingWithTextBoxes(drawing);
   }
   for (const retained of node.lineNumbers ?? []) {
     for (const operation of retained.paintOps) {
@@ -376,11 +360,8 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
     .filter((drawing) => drawing.anchorLayer && !drawing.anchorLayer.behindDoc)
     .sort((a, b) => a.anchorLayer!.relativeHeight - b.anchorLayer!.relativeHeight
       || a.anchorLayer!.sourceOrder - b.anchorLayer!.sourceOrder);
-  for (const drawing of front) {
-    const textBoxes = textBoxesForDrawing(node, drawing);
-    const paint = () => paintDrawingWithTextBoxes(drawing);
-    const deferredPaint = context.deferredPaintWrapper?.(paint) ?? paint;
-    if (!context.deferFrontDrawing?.(drawing, textBoxes, deferredPaint)) paint();
+  if (!context.omitAnchoredDrawings) {
+    for (const drawing of front) paintDrawingWithTextBoxes(drawing);
   }
   for (const textBox of node.textBoxes) {
     if (!ownedTextBoxIds.has(textBox.id)) paintTextBoxLayout(textBox, context);
@@ -405,11 +386,7 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
     );
     context.ctx.clip();
   });
-  const clippedContext: CanvasPaintContext = {
-    ...context,
-    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
-  };
-  frame(() => paintParagraphContents(node, clippedContext))();
+  frame(() => paintParagraphContents(node, context))();
 }
 
 /** Paints an acquired text box. All line partitioning, glyph shaping and point
@@ -463,16 +440,15 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
     );
     context.ctx.clip();
   }) : null;
-  const frame = clipFrame
-    ? appendDeferredPaintFrame(transformFrame, clipFrame)
-    : transformFrame;
   const storyContext: CanvasPaintContext = {
     ...context,
     pointToCss,
     ...(node.verticalMode ? { textBoxVerticalMode: node.verticalMode } : {}),
-    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
   };
-  frame(() => paintStory(storyContext))();
+  transformFrame(() => {
+    if (clipFrame) clipFrame(() => paintStory(storyContext))();
+    else paintStory(storyContext);
+  })();
 }
 
 /** Paints an absolute point-space text box into a CSS-pixel canvas viewport. */
@@ -484,7 +460,6 @@ export function paintPlacedTextBoxLayout(
   const placedContext: CanvasPaintContext = {
     ...context,
     pointToCss: context.pointToCss ?? scaleAffine(context.scale),
-    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
   };
   frame(() => paintTextBoxLayout(node, placedContext))();
 }
@@ -509,7 +484,6 @@ export function paintPlacedParagraphLayout(
     ...context,
     pointToCss,
     layoutTranslationPt: { xPt: dxPt, yPt: dyPt },
-    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
   };
   frame(() => paintParagraphLayout(node, placedContext))();
 }

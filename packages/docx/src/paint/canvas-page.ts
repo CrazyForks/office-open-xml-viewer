@@ -2,20 +2,22 @@ import type {
   DocumentLayout,
   LayoutPage,
   LayoutRect,
+  PagePaintDrawingEntry,
+  PagePaintEntry,
+  PagePaintFrame,
   PaintNode,
   PaintResourceKind,
 } from '../layout/types.js';
 import { rasterizeColumnSeparator } from './column-separator-raster.js';
-import {
-  enqueueDeferredFrontPaint,
-  withDeferredFrontPaintSession,
-  type DeferredFrontPaintState,
-} from './deferred-front-session.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
-import { paintParagraphLayout } from './canvas-text.js';
+import {
+  paintDrawingWithOwnedTextBoxes,
+  paintParagraphLayout,
+} from './canvas-text.js';
 import { paintTableLayout } from './canvas-table.js';
 import { paintStrokeSegment } from './canvas-border.js';
-import { appendDeferredPaintFrame, canvasPaintFrame } from './deferred-paint-frame.js';
+import { canvasPaintFrame } from './deferred-paint-frame.js';
+import { composeAffine, scaleAffine } from './affine.js';
 import type { PaintResourceSession } from './resource-session.js';
 import type {
   CanvasPaintContext,
@@ -105,30 +107,6 @@ function paintNode(node: PaintNode, context: CanvasPaintContext): void {
   }
 }
 
-function paintBodyNode(node: PaintNode, context: CanvasPaintContext): void {
-  if (node.kind !== 'drawing') {
-    paintNode(node, context);
-    return;
-  }
-  const paint = () => paintDrawingLayout(node, context);
-  const deferredPaint = context.deferredPaintWrapper?.(paint) ?? paint;
-  if (context.bodyDrawingPass === 'discover-behind') {
-    if (node.anchorLayer?.behindDoc) {
-      context.deferBehindDrawing?.(node, [], deferredPaint);
-    }
-    return;
-  }
-  if (node.anchorLayer?.behindDoc) {
-    if (!context.deferBehindDrawing?.(node, [], deferredPaint)) paint();
-    return;
-  }
-  if (node.anchorLayer) {
-    if (!context.deferFrontDrawing?.(node, [], deferredPaint)) paint();
-    return;
-  }
-  paint();
-}
-
 function applyRegionTransform(
   ctx: PaintCanvas2D,
   matrix: LayoutPage['sectionRegions'][number]['coordinateSpace']['logicalToPhysical'],
@@ -152,8 +130,6 @@ function applyRegionTransform(
   }
 }
 
-type PagePaintEntry = LayoutPage['layers']['paintSequence'][number];
-
 function paintColumnSeparators(page: LayoutPage, context: CanvasPaintContext): void {
   const segments = page.columnSeparators;
   if (segments.length === 0) return;
@@ -176,9 +152,8 @@ function paintInEntryRegion(
   context: CanvasPaintContext,
   regionByDomain: ReadonlyMap<string, LayoutPage['sectionRegions'][number]>,
   paint: (entryContext: CanvasPaintContext) => void,
-  enterFrame = true,
 ): void {
-  const region = regionByDomain.get(entry.node.flowDomainId);
+  const region = regionByDomain.get(entry.flowDomainId);
   const matrix = entry.coordinateSpace === 'upright-physical'
     ? undefined
     : region?.coordinateSpace.logicalToPhysical;
@@ -200,10 +175,75 @@ function paintInEntryRegion(
         f: matrix.f * context.scale,
       },
     } : {}),
-    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
   };
-  if (enterFrame) frame(() => paint(entryContext))();
-  else paint(entryContext);
+  frame(() => paint(entryContext))();
+}
+
+function applyPaintFrame(frame: PagePaintFrame, ctx: PaintCanvas2D): void {
+  if (frame.kind === 'transform') {
+    const transform = (ctx as PaintCanvas2D & {
+      transform?: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    }).transform;
+    if (transform) {
+      transform.call(
+        ctx,
+        frame.transform.a,
+        frame.transform.b,
+        frame.transform.c,
+        frame.transform.d,
+        frame.transform.e,
+        frame.transform.f,
+      );
+    } else if (
+      frame.transform.a === 1
+      && frame.transform.b === 0
+      && frame.transform.c === 0
+      && frame.transform.d === 1
+    ) {
+      ctx.translate(frame.transform.e, frame.transform.f);
+    } else {
+      throw new Error('Canvas context cannot apply the retained page paint transform');
+    }
+    return;
+  }
+  ctx.beginPath();
+  ctx.rect(
+    frame.clip.xPt,
+    frame.clip.yPt,
+    frame.clip.widthPt,
+    frame.clip.heightPt,
+  );
+  ctx.clip();
+}
+
+function paintDrawingEntry(
+  entry: PagePaintDrawingEntry,
+  context: CanvasPaintContext,
+): void {
+  let pointToCss = context.pointToCss ?? scaleAffine(context.scale);
+  for (const frame of entry.frames) {
+    if (frame.kind === 'transform') pointToCss = composeAffine(pointToCss, frame.transform);
+  }
+  const drawingContext: CanvasPaintContext = {
+    ...context,
+    pointToCss,
+    layoutTranslationPt: entry.layoutTranslationPt,
+    omitAnchoredDrawings: false,
+  };
+  let enteredFrames = 0;
+  try {
+    for (const retainedFrame of entry.frames) {
+      context.ctx.save();
+      enteredFrames += 1;
+      applyPaintFrame(retainedFrame, context.ctx);
+    }
+    paintDrawingWithOwnedTextBoxes(entry.node, entry.textBoxes, drawingContext);
+  } finally {
+    while (enteredFrames > 0) {
+      context.ctx.restore();
+      enteredFrames -= 1;
+    }
+  }
 }
 
 /** Paint a completed page into an already initialized point-space surface. */
@@ -228,88 +268,30 @@ export function paintLayoutPageContent(
       regionByDomain.set(domain.id, storyRegion);
     }
   }
-  const entries = page.layers.paintSequence;
+  const entries = page.layers.paintOrder;
   const firstNonLeadingEntry = entries.findIndex((entry) => (
-    entry.layer !== 'background' && entry.layer !== 'behindText' && entry.layer !== 'header'
+    entry.sourceLayer !== 'background'
+      && entry.sourceLayer !== 'behindText'
+      && entry.sourceLayer !== 'header'
   ));
   const decorationIndex = firstNonLeadingEntry === -1 ? entries.length : firstNonLeadingEntry;
   const paintEntries = (retainedEntries: readonly PagePaintEntry[]): void => {
     for (const entry of retainedEntries) {
       paintInEntryRegion(entry, context, regionByDomain, (entryContext) => {
-        paintNode(entry.node, entryContext);
+        if (entry.kind === 'drawing') {
+          paintDrawingEntry(entry, entryContext);
+        } else {
+          paintNode(entry.node, {
+            ...entryContext,
+            omitAnchoredDrawings: entry.omitAnchoredDrawings,
+          });
+        }
       });
     }
   };
   paintEntries(entries.slice(0, decorationIndex));
   paintColumnSeparators(page, context);
-
-  // Retained order after the decoration boundary is authoritative. In
-  // particular, page-front entries may intentionally precede the body run.
-  const remainingEntries = entries.slice(decorationIndex);
-  const firstBodyEntry = remainingEntries.findIndex((entry) => entry.layer === 'body');
-  if (firstBodyEntry === -1) {
-    paintEntries(remainingEntries);
-    return;
-  }
-  let lastBodyEntry = firstBodyEntry;
-  while (remainingEntries[lastBodyEntry + 1]?.layer === 'body') lastBodyEntry += 1;
-  paintEntries(remainingEntries.slice(0, firstBodyEntry));
-  const behind: Array<Readonly<{
-    drawing: import('../layout/types.js').DrawingLayout;
-    paint: () => void;
-    encounterOrder: number;
-  }>> = [];
-  for (const entry of remainingEntries.slice(firstBodyEntry, lastBodyEntry + 1)) {
-    // Discovery walks immutable retained geometry only. Keep the section frame
-    // in deferred replay wrappers, but do not apply it to this ink-free walk;
-    // normal paint is the destination-final logical-to-physical owner.
-    paintInEntryRegion(entry, context, regionByDomain, (entryContext) => {
-      paintBodyNode(entry.node, {
-        ...entryContext,
-        bodyDrawingPass: 'discover-behind',
-        deferBehindDrawing: (drawing, _textBoxes, paint) => {
-          behind.push({ drawing, paint, encounterOrder: behind.length });
-          return true;
-        },
-      });
-    }, false);
-  }
-  behind.sort((a, b) =>
-    a.drawing.anchorLayer!.relativeHeight - b.drawing.anchorLayer!.relativeHeight
-    || a.drawing.anchorLayer!.sourceOrder - b.drawing.anchorLayer!.sourceOrder
-    || a.encounterOrder - b.encounterOrder);
-  const paintedBehind = new Set(behind.map(({ drawing }) => drawing));
-  // wp:anchor z-order is page-relative (ECMA-376 Part 1 §20.4.2.3), so retained
-  // behindDoc owners must paint before the first body entry, not at paragraph entry.
-  for (const deferred of behind) {
-    deferred.paint();
-  }
-
-  const frontState: DeferredFrontPaintState = {};
-  withDeferredFrontPaintSession(frontState, () => {
-    for (const entry of remainingEntries.slice(firstBodyEntry, lastBodyEntry + 1)) {
-      paintInEntryRegion(entry, context, regionByDomain, (entryContext) => {
-        if (entry.layer !== 'body') {
-          paintNode(entry.node, entryContext);
-          return;
-        }
-        paintBodyNode(entry.node, {
-          ...entryContext,
-          bodyDrawingPass: 'normal',
-          deferBehindDrawing: (drawing) => paintedBehind.has(drawing),
-          deferFrontDrawing: (drawing, _textBoxes, paint) => enqueueDeferredFrontPaint(
-            frontState,
-            paint,
-            drawing.anchorLayer ? {
-              relativeHeight: drawing.anchorLayer.relativeHeight,
-              sourceOrder: drawing.anchorLayer.sourceOrder,
-            } : undefined,
-          ),
-        });
-      });
-    }
-  });
-  paintEntries(remainingEntries.slice(lastBodyEntry + 1));
+  paintEntries(entries.slice(decorationIndex));
 }
 
 export async function paintLayoutPage(

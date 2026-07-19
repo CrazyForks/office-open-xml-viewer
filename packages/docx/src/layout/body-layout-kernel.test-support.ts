@@ -114,7 +114,7 @@ export function attachSyntheticBodyLayoutKernel(
       } = synthetic;
       return Object.freeze({
         ...session,
-        layoutStory: synthetic.layoutStory ?? ((request) => emptyStory(
+        layoutStory: synthetic.layoutStory ?? ((request: StoryLayoutAcquisitionInput) => emptyStory(
           request,
           measureStoryExtent?.({
             source: request.source,
@@ -123,7 +123,7 @@ export function attachSyntheticBodyLayoutKernel(
             availableInlineExtentPt: request.container.bounds.widthPt,
           }) ?? 0,
         )),
-        layoutNotes: synthetic.layoutNotes ?? ((request) => syntheticNotes(
+        layoutNotes: synthetic.layoutNotes ?? ((request: NoteLayoutAcquisitionInput) => syntheticNotes(
           request,
           measureFootnoteReserve?.({
             referenceIds: request.referenceIds,

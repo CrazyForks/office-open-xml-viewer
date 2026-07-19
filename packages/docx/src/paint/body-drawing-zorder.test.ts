@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { stableFingerprint } from '../layout/fingerprint.js';
+import { buildPageLayers } from '../layout/page-graph.js';
 import type {
   DrawingLayout,
   LayoutPage,
@@ -195,12 +196,11 @@ function page(
       flowDomainIds: ['body'],
     }],
     pageBorders: null,
-    layers: {
-      paintSequence: body.map((node) => ({
+    layers: buildPageLayers(
+      body.map((node) => ({
         layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,
       })),
-      background: [], behindText: [], header: [], body, notes: [], front: [], footer: [],
-    },
+    ),
     readingOrder: body.map((node) => node.id),
   };
 }
@@ -280,7 +280,7 @@ function recordingPaintContext() {
 }
 
 describe('canonical body drawing z-order', () => {
-  it('keeps the deferred body drawing session between surrounding page layers', () => {
+  it('keeps the materialized body drawing context between surrounding page layers', () => {
     const behind = drawing('behind', 'behind', true, 5, 1);
     const front = drawing('front', 'front', false, 10, 2);
     const header = drawing('header', 'header', false, 0, 0);
@@ -289,15 +289,11 @@ describe('canonical body drawing z-order', () => {
     const base = page([body]);
     const layout: LayoutPage = {
       ...base,
-      layers: {
-        ...base.layers,
-        header: [header], footer: [footer],
-        paintSequence: [
+      layers: buildPageLayers([
           { layer: 'header', node: header, coordinateSpace: 'section-logical' },
           { layer: 'body', node: body, coordinateSpace: 'section-logical' },
           { layer: 'footer', node: footer, coordinateSpace: 'section-logical' },
-        ],
-      },
+      ]),
     };
     const { context, operations } = recordingPaintContext();
 
@@ -340,7 +336,7 @@ describe('canonical body drawing z-order', () => {
     ]);
   });
 
-  it('keeps an owned text box adjacent to its deferred owner and paints both exactly once', () => {
+  it('keeps an owned text box adjacent to its materialized owner and paints both exactly once', () => {
     const owned = textBox('owned', 'OWNED');
     const owner = drawing('owner', 'owner', false, 10, 1, [owned.id]);
     const layout = page([
@@ -405,7 +401,7 @@ describe('canonical body drawing z-order', () => {
     ]);
   });
 
-  it('does not measure or mutate retained layout while deferring drawings', () => {
+  it('does not measure or mutate retained layout while painting ordered drawings', () => {
     const layout = page([
       paragraph('p1', 'BODY', [
         drawing('behind', 'behind', true, 5, 1),
@@ -569,14 +565,10 @@ describe('canonical body drawing z-order', () => {
     const base = page([body]);
     const layout: LayoutPage = {
       ...base,
-      layers: {
-        ...base.layers,
-        front: [front],
-        paintSequence: [
+      layers: buildPageLayers([
           { layer: 'front', node: front, coordinateSpace: 'section-logical' },
           { layer: 'body', node: body, coordinateSpace: 'section-logical' },
-        ],
-      },
+      ]),
     };
     const { context, operations } = recordingPaintContext();
 
@@ -592,15 +584,11 @@ describe('canonical body drawing z-order', () => {
     const base = page([firstBody, secondBody]);
     const layout: LayoutPage = {
       ...base,
-      layers: {
-        ...base.layers,
-        footer: [footer],
-        paintSequence: [
+      layers: buildPageLayers([
           { layer: 'body', node: firstBody, coordinateSpace: 'section-logical' },
           { layer: 'body', node: secondBody, coordinateSpace: 'section-logical' },
           { layer: 'footer', node: footer, coordinateSpace: 'section-logical' },
-        ],
-      },
+      ]),
     };
     const { context, operations } = recordingPaintContext();
 

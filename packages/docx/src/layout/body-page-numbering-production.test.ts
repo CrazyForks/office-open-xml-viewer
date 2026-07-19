@@ -445,7 +445,7 @@ describe('canonical physical-page numbering', () => {
     expect(layout.pages[1]).toMatchObject({
       sectionRegions: [],
       layers: {
-        paintSequence: [],
+        roots: [],
         background: [],
         behindText: [],
         header: [],

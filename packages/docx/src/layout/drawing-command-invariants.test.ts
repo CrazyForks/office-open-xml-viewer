@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DocumentLayout, DrawingLayout } from './types.js';
 import { assertDocumentLayout } from './invariants.js';
+import { buildPageLayers } from './page-graph.js';
 
 function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout {
   const bounds = { xPt: 72, yPt: 72, widthPt: 100, heightPt: 50 };
@@ -52,11 +53,9 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
         flowDomainIds: ['body'], section,
       }],
       pageBorders: null,
-      layers: {
-        paintSequence: [{ layer: 'front', node: drawing, coordinateSpace: 'section-logical' }],
-        background: [], behindText: [], header: [], body: [], notes: [],
-        front: [drawing], footer: [],
-      },
+      layers: buildPageLayers([
+        { layer: 'front', node: drawing, coordinateSpace: 'section-logical' },
+      ]),
       readingOrder: [drawing.id],
     }],
     diagnostics: [],

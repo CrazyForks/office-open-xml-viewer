@@ -33,9 +33,9 @@ describe('parse-error page layout', () => {
     const layers = layout.pages[0]!.layers;
 
     expect(Object.isFrozen(layers)).toBe(true);
-    expect(Object.isFrozen(layers.paintSequence)).toBe(true);
-    expect(Object.isFrozen(layers.paintSequence[0])).toBe(true);
-    expect(layers.paintSequence[0]!.node).toBe(layers.body[0]);
+    expect(Object.isFrozen(layers.roots)).toBe(true);
+    expect(Object.isFrozen(layers.roots[0])).toBe(true);
+    expect(layers.roots[0]!.node).toBe(layers.body[0]);
     expect(textCommands.length).toBeGreaterThan(3);
     expect(textCommands.map((command) => command.kind === 'text' ? command.text : '').join(' '))
       .toContain('word/document.xml:');

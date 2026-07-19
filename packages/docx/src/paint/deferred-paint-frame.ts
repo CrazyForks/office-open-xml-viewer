@@ -1,13 +1,10 @@
-import type {
-  DeferredCanvasPaintWrapper,
-  PaintCanvas2D,
-} from './types.js';
+import type { PaintCanvas2D } from './types.js';
 
-/** Create a replayable Canvas save/apply/restore frame. */
+/** Enter one synchronous Canvas save/apply/restore frame. */
 export function canvasPaintFrame(
   ctx: PaintCanvas2D,
   apply: () => void,
-): DeferredCanvasPaintWrapper {
+): (paint: () => void) => () => void {
   return (paint) => () => {
     ctx.save();
     try {
@@ -17,12 +14,4 @@ export function canvasPaintFrame(
       ctx.restore();
     }
   };
-}
-
-/** Append one child frame to the exact recursive path already retained by its parent. */
-export function appendDeferredPaintFrame(
-  parent: DeferredCanvasPaintWrapper | undefined,
-  child: DeferredCanvasPaintWrapper,
-): DeferredCanvasPaintWrapper {
-  return (paint) => parent ? parent(child(paint)) : child(paint);
 }

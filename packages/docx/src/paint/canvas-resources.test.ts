@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SectionLayoutContext } from '../layout-context.js';
 import { createPaintResourceRegistry } from '../layout/paint-resources.js';
 import type { DocumentLayout, InlineResourceKind, LayoutRect } from '../layout/types.js';
+import { buildPageLayers } from '../layout/page-graph.js';
 import { createPaintResourceSession } from './resource-session.js';
 import {
   createCanvasPaintResourcePainter,
@@ -44,11 +45,9 @@ function resourceLayout(
       columnSeparators: [],
       sectionRegions: [],
       pageBorders: null,
-      layers: {
-        paintSequence: [{ layer: 'body', node: drawing, coordinateSpace: 'section-logical' }],
-        background: [], behindText: [], header: [], notes: [], front: [], footer: [],
-        body: [drawing],
-      },
+      layers: buildPageLayers([
+        { layer: 'body', node: drawing, coordinateSpace: 'section-logical' },
+      ]),
       readingOrder: ['drawing-1'],
     }],
     diagnostics: [],
