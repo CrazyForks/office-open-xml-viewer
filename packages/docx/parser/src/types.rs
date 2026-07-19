@@ -656,6 +656,24 @@ pub enum BodyElement {
     },
 }
 
+/// Parser-only block wire for ECMA-376 CT_TxbxContent
+/// (`w:EG_BlockLevelElts+`). Supported paragraphs/tables reuse the exact body
+/// payloads; unsupported block-level children remain ordered markers so the
+/// retained layout can diagnose rather than silently discard them.
+#[derive(Serialize, Debug, Clone)]
+#[serde(untagged)]
+pub(crate) enum TextBoxBlockWire {
+    Body(BodyElement),
+    Unsupported {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(rename = "qName")]
+        q_name: String,
+        #[serde(rename = "sourcePath")]
+        source_path: Vec<usize>,
+    },
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DocParagraph {
@@ -1465,6 +1483,11 @@ pub struct ShapeRun {
     /// paragraph) isn't supported in shape bodies yet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub text_blocks: Vec<ShapeText>,
+    /// Complete parser-only `w:txbxContent` block stream. This intentionally
+    /// stays off the stable TypeScript ShapeRun declaration; parser-model.ts
+    /// snapshots it into internal acquisition inputs before layout.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) text_box_content: Vec<TextBoxBlockWire>,
     /// ECMA-376 §20.1.4.1.17 `<wps:style><a:fontRef>` — the shape's DEFAULT text
     /// color (hex, no `#`). A text-box run that sets no explicit `<w:color>`
     /// takes this before falling back to the document/theme default (black). The

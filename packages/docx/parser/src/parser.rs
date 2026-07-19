@@ -2862,7 +2862,7 @@ fn parse_paragraph(
     table_style_id: Option<&str>,
     field: &mut FieldState,
 ) -> DocParagraph {
-    parse_paragraph_cond(
+    parse_paragraph_cond_at_depth(
         node,
         style_map,
         num_map,
@@ -2873,6 +2873,7 @@ fn parse_paragraph(
         table_style_id,
         None,
         field,
+        DepthGuard::root(),
     )
 }
 
@@ -2880,7 +2881,7 @@ fn parse_paragraph(
 /// formatting (§17.7.6, threaded from `parse_table`) as a base below the
 /// paragraph/character styles and direct formatting (§17.7.2 ordering).
 #[allow(clippy::too_many_arguments)]
-fn parse_paragraph_cond(
+fn parse_paragraph_cond_at_depth(
     node: roxmltree::Node,
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
@@ -2891,6 +2892,7 @@ fn parse_paragraph_cond(
     table_style_id: Option<&str>,
     cond: Option<&CondFmt>,
     field: &mut FieldState,
+    depth: DepthGuard,
 ) -> DocParagraph {
     // Get style ID from pPr/pStyle. When absent, resolve_para falls back to the
     // paragraph style marked w:default="1" via StyleMap::default_para_style_id.
@@ -3138,7 +3140,7 @@ fn parse_paragraph_cond(
     let mut runs = vec![];
     parse_para_content(
         node, &base_run, style_map, num_map, media_map, chart_map, rel_map, theme, &mut runs, None,
-        field,
+        field, depth,
     );
 
     // ECMA-376 §17.13.6.2 — bookmark destinations that start inside this
@@ -3322,13 +3324,14 @@ fn parse_para_content(
     // field's result spans one paragraph per entry. The caller owns this so the
     // stack survives from one paragraph to the next.
     field: &mut FieldState,
+    depth: DepthGuard,
 ) {
     for child in element_children_flat(node) {
         match child.tag_name().name() {
             "r" => {
                 handle_run_in_para(
-                    child, base_run, style_map, num_map, media_map, chart_map, theme, runs, field,
-                    None, None, revision,
+                    child, base_run, style_map, num_map, media_map, chart_map, rel_map, theme,
+                    runs, field, None, None, revision, depth,
                 );
             }
             "hyperlink" => {
@@ -3357,12 +3360,14 @@ fn parse_para_content(
                         num_map,
                         media_map,
                         chart_map,
+                        rel_map,
                         theme,
                         runs,
                         field,
                         Some(href.clone()),
                         anchor.clone(),
                         revision,
+                        depth,
                     );
                 }
             }
@@ -3409,12 +3414,13 @@ fn parse_para_content(
                     runs,
                     Some(&inner),
                     field,
+                    depth,
                 );
             }
             "smartTag" => {
                 parse_para_content(
                     child, base_run, style_map, num_map, media_map, chart_map, rel_map, theme,
-                    runs, revision, field,
+                    runs, revision, field, depth,
                 );
             }
             "fldSimple" => {
@@ -3489,6 +3495,7 @@ fn handle_run_in_para(
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     field: &mut FieldState,
@@ -3499,6 +3506,7 @@ fn handle_run_in_para(
     // the run is not inside a hyperlink at all).
     link_anchor: Option<String>,
     revision: Option<&RunRevision>,
+    depth: DepthGuard,
 ) {
     // Inspect this run for field control characters or instruction text first.
     let mut fld_char_type: Option<String> = None;
@@ -3613,12 +3621,14 @@ fn handle_run_in_para(
         num_map,
         media_map,
         chart_map,
+        rel_map,
         theme,
         runs,
         link_href,
         link_anchor,
         revision,
         in_toc,
+        depth,
     );
 }
 
@@ -4049,6 +4059,7 @@ fn parse_run_inner(
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     link_href: Option<Option<String>>,
@@ -4059,6 +4070,7 @@ fn parse_run_inner(
     // True when this run is part of a TOC field's result (§17.16.5.69). Used to
     // suppress the Hyperlink character style's blue/underline on TOC entries.
     in_toc: bool,
+    depth: DepthGuard,
 ) {
     // Merge run-level formatting
     let rpr_node = child_w(node, "rPr");
@@ -4638,12 +4650,14 @@ fn parse_run_inner(
                             num_map,
                             media_map,
                             chart_map,
+                            rel_map,
                             theme,
                             runs,
                             link_href.clone(),
                             link_anchor.clone(),
                             revision,
                             in_toc,
+                            depth,
                         );
                     }
                     // Attach ruby to the FIRST text run produced from rubyBase
@@ -4664,8 +4678,9 @@ fn parse_run_inner(
                 }
             }
             "drawing" => {
-                let mut drawing_runs =
-                    parse_inline_drawing(style_map, num_map, child, media_map, chart_map, theme);
+                let mut drawing_runs = parse_inline_drawing(
+                    style_map, num_map, child, media_map, chart_map, rel_map, theme, depth,
+                );
                 attach_anchor_host_metrics(&mut drawing_runs);
                 runs.extend(drawing_runs);
             }
@@ -4761,7 +4776,8 @@ fn parse_run_inner(
                     for inner in selected.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
                             let mut drawing_runs = parse_inline_drawing(
-                                style_map, num_map, inner, media_map, chart_map, theme,
+                                style_map, num_map, inner, media_map, chart_map, rel_map, theme,
+                                depth,
                             );
                             attach_anchor_host_metrics(&mut drawing_runs);
                             runs.extend(drawing_runs);
@@ -4783,9 +4799,9 @@ fn parse_run_inner(
                 // mistaken for an (empty) text-box panel.
                 if let Some(img) = parse_vml_pict_image(child, media_map) {
                     runs.push(DocRun::Image(Box::new(img)));
-                } else if let Some(shp) =
-                    parse_vml_pict(style_map, num_map, child, theme, media_map)
-                {
+                } else if let Some(shp) = parse_vml_pict(
+                    style_map, num_map, child, theme, media_map, chart_map, rel_map, depth,
+                ) {
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
@@ -4809,7 +4825,7 @@ fn parse_run_inner(
                     .find(|n| n.is_element() && n.tag_name().name() == "drawing");
                 if let Some(drawing) = drawing {
                     let mut drawing_runs = parse_inline_drawing(
-                        style_map, num_map, drawing, media_map, chart_map, theme,
+                        style_map, num_map, drawing, media_map, chart_map, rel_map, theme, depth,
                     );
                     attach_anchor_host_metrics(&mut drawing_runs);
                     runs.extend(drawing_runs);
@@ -4997,13 +5013,16 @@ fn docx_understands_drawing_ns(ns: &str) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_inline_drawing(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     node: roxmltree::Node,
     media_map: &HashMap<String, String>,
     chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
+    depth: DepthGuard,
 ) -> Vec<DocRun> {
     // Distinguish inline vs anchor
     let is_anchor = node.descendants().any(|n| n.tag_name().name() == "anchor");
@@ -5305,6 +5324,9 @@ fn parse_inline_drawing(
             wgp,
             theme,
             media_map,
+            chart_map,
+            rel_map,
+            depth,
             pos_x,
             x_from_margin,
             pos_y,
@@ -5343,6 +5365,9 @@ fn parse_inline_drawing(
             wsp,
             theme,
             media_map,
+            chart_map,
+            rel_map,
+            depth,
             pos_x,
             x_from_margin,
             pos_y,
@@ -6476,12 +6501,17 @@ fn parse_wgp_shapes(
     anchor_z_order: u32,
 ) -> Vec<ShapeRun> {
     let group_metadata = anchor_group_metadata_index(wgp);
+    let chart_map = HashMap::new();
+    let rel_map = HashMap::new();
     parse_wgp_shapes_with_metadata(
         style_map,
         num_map,
         wgp,
         theme,
         media_map,
+        &chart_map,
+        &rel_map,
+        DepthGuard::root(),
         anchor_pos_x,
         x_from_margin,
         anchor_pos_y,
@@ -6499,6 +6529,9 @@ fn parse_wgp_shapes_with_metadata(
     wgp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -6546,6 +6579,9 @@ fn parse_wgp_shapes_with_metadata(
         base,
         theme,
         media_map,
+        chart_map,
+        rel_map,
+        depth,
         anchor_pos_x,
         x_from_margin,
         anchor_pos_y,
@@ -6574,6 +6610,9 @@ fn walk_group_children(
     xform: GroupTransform,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -6602,6 +6641,9 @@ fn walk_group_children(
                     child,
                     theme,
                     media_map,
+                    chart_map,
+                    rel_map,
+                    depth,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -6629,6 +6671,9 @@ fn walk_group_children(
                     child_xform,
                     theme,
                     media_map,
+                    chart_map,
+                    rel_map,
+                    depth,
                     anchor_pos_x,
                     x_from_margin,
                     anchor_pos_y,
@@ -6661,6 +6706,9 @@ fn parse_wsp_shape(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
     anchor_pos_x: f64,
     x_from_margin: bool,
     anchor_pos_y: f64,
@@ -6898,16 +6946,19 @@ fn parse_wsp_shape(
 
     // Shape body text: <wps:txbx><w:txbxContent>...</w:txbxContent></wps:txbx>
     // and the bodyPr (insets / vertical anchor).
-    let (
-        text_blocks,
-        text_anchor,
-        text_autofit,
-        text_vert,
-        text_inset_l,
-        text_inset_t,
-        text_inset_r,
-        text_inset_b,
-    ) = parse_shape_text_body(style_map, num_map, wsp, theme, media_map);
+    let ShapeTextBody {
+        legacy_blocks: text_blocks,
+        content: text_box_content,
+        anchor: text_anchor,
+        autofit: text_autofit,
+        vert: text_vert,
+        inset_l: text_inset_l,
+        inset_t: text_inset_t,
+        inset_r: text_inset_r,
+        inset_b: text_inset_b,
+    } = parse_shape_text_body(
+        style_map, num_map, wsp, theme, media_map, chart_map, rel_map, depth,
+    );
 
     let mut shape = ShapeRun {
         width_pt,
@@ -6932,6 +6983,7 @@ fn parse_wsp_shape(
         flip_v,
         wrap_mode: anchor_meta.wrap_mode.clone(),
         text_blocks,
+        text_box_content,
         default_text_color,
         text_anchor,
         text_autofit,
@@ -7017,23 +7069,186 @@ fn parse_preset_adj(prst_geom: roxmltree::Node) -> Vec<Option<f64>> {
     out
 }
 
-/// The `<wps:txbx>`/`<wps:bodyPr>` body parsed off a shape:
-/// `(blocks, anchor, autofit, vert, inset_l, inset_t, inset_r, inset_b)`.
-/// `vert` is the ECMA-376 §20.1.10.83 text-flow direction; the four insets are pt.
-type ShapeTextBody = (
-    Vec<ShapeText>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    f64,
-    f64,
-    f64,
-    f64,
-);
+/// The `<wps:txbx>`/`<wps:bodyPr>` body parsed off a shape. The complete
+/// `content` stream is parser-only; `legacy_blocks` remains the stable public
+/// paragraph projection until that API can be retired independently.
+#[derive(Debug)]
+struct ShapeTextBody {
+    legacy_blocks: Vec<ShapeText>,
+    content: Vec<TextBoxBlockWire>,
+    anchor: Option<String>,
+    autofit: Option<String>,
+    vert: Option<String>,
+    inset_l: f64,
+    inset_t: f64,
+    inset_r: f64,
+    inset_b: f64,
+}
 
-/// Extract text blocks and bodyPr from a wsp shape.
-/// Returns a `ShapeTextBody` =
-/// `(blocks, anchor, autofit, vert, inset_l, inset_t, inset_r, inset_b)`.
+fn text_box_qname(node: roxmltree::Node) -> String {
+    if is_w_ns(node.tag_name().namespace()) {
+        format!("w:{}", node.tag_name().name())
+    } else if let Some(namespace) = node.tag_name().namespace() {
+        format!("{{{namespace}}}{}", node.tag_name().name())
+    } else {
+        node.tag_name().name().to_string()
+    }
+}
+
+/// Flatten block SDTs while retaining an authored element-index path for every
+/// effective child. Other schema-permitted wrappers remain explicit unsupported
+/// markers until their visible-content semantics are implemented.
+fn text_box_block_nodes<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+) -> Vec<(roxmltree::Node<'a, 'input>, Vec<usize>)> {
+    fn collect<'a, 'input>(
+        node: roxmltree::Node<'a, 'input>,
+        parent_path: &[usize],
+        out: &mut Vec<(roxmltree::Node<'a, 'input>, Vec<usize>)>,
+    ) {
+        for (index, child) in node.children().filter(|node| node.is_element()).enumerate() {
+            let mut path = parent_path.to_vec();
+            path.push(index);
+            if is_w_ns(child.tag_name().namespace()) && child.tag_name().name() == "sdt" {
+                if let Some(content) = child_w(child, "sdtContent") {
+                    collect(content, &path, out);
+                } else {
+                    out.push((child, path));
+                }
+            } else {
+                out.push((child, path));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(node, &[], &mut out);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_text_box_content(
+    content: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    depth: DepthGuard,
+) -> (Vec<TextBoxBlockWire>, Vec<ShapeText>) {
+    let nodes = text_box_block_nodes(content);
+    let sequence_nodes: Vec<_> = nodes.iter().map(|(node, _)| (*node, false)).collect();
+    let table_sequences = logical_table_sequence_contexts(
+        &sequence_nodes,
+        style_map,
+        TablePositioningContext::IgnoredStory,
+    );
+    let mut field = FieldState::default();
+    let mut wire = Vec::with_capacity(nodes.len());
+    let mut legacy = Vec::new();
+
+    for (node, source_path) in nodes {
+        match (node.tag_name().namespace(), node.tag_name().name()) {
+            (namespace, "p") if is_w_ns(namespace) => {
+                // Preserve the stable ShapeRun.textBlocks view exactly as the
+                // pre-B2 parser emitted it. A numbering snapshot prevents this
+                // compatibility projection from advancing the document's live
+                // list counters a second time.
+                let mut legacy_num_map = num_map.clone();
+                let paragraph = parse_paragraph_cond_at_depth(
+                    node, style_map, num_map, media_map, chart_map, rel_map, theme, None, None,
+                    &mut field, depth,
+                );
+                if let Some(block) = extract_simple_paragraph_text(
+                    style_map,
+                    &mut legacy_num_map,
+                    node,
+                    theme,
+                    media_map,
+                ) {
+                    legacy.push(block);
+                }
+                wire.push(TextBoxBlockWire::Body(BodyElement::Paragraph(Box::new(
+                    paragraph,
+                ))));
+            }
+            (namespace, "tbl") if is_w_ns(namespace) => {
+                if let Some(table_depth) = depth.descend() {
+                    let table = parse_table(
+                        node,
+                        style_map,
+                        num_map,
+                        media_map,
+                        chart_map,
+                        rel_map,
+                        theme,
+                        table_depth,
+                        TablePositioningContext::IgnoredStory,
+                        table_sequences
+                            .get(&node.id())
+                            .copied()
+                            .unwrap_or_else(|| LogicalTableSequenceContext::standalone(node)),
+                    );
+                    wire.push(TextBoxBlockWire::Body(BodyElement::Table(Box::new(table))));
+                } else {
+                    wire.push(TextBoxBlockWire::Unsupported {
+                        kind: "unsupportedTextBoxBlock".to_string(),
+                        q_name: text_box_qname(node),
+                        source_path,
+                    });
+                }
+            }
+            _ => wire.push(TextBoxBlockWire::Unsupported {
+                kind: "unsupportedTextBoxBlock".to_string(),
+                q_name: text_box_qname(node),
+                source_path,
+            }),
+        }
+    }
+
+    (wire, legacy)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_text_box_content_at_depth(
+    content: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    depth: DepthGuard,
+) -> (Vec<TextBoxBlockWire>, Vec<ShapeText>) {
+    if let Some(content_depth) = depth.descend() {
+        parse_text_box_content(
+            content,
+            style_map,
+            num_map,
+            media_map,
+            chart_map,
+            rel_map,
+            theme,
+            content_depth,
+        )
+    } else {
+        // Keep the authored container observable when the shared recursion
+        // budget is exhausted. Downstream layout can surface one deterministic
+        // diagnostic instead of mistaking a skipped subtree for an empty box.
+        (
+            vec![TextBoxBlockWire::Unsupported {
+                kind: "unsupportedTextBoxBlock".to_string(),
+                q_name: text_box_qname(content),
+                source_path: Vec::new(),
+            }],
+            Vec::new(),
+        )
+    }
+}
+
+/// Extract the complete text-box block wire, stable legacy text projection,
+/// and bodyPr settings from a wsp shape.
 ///
 /// Per ECMA-376 §21.1.2.1.1, lIns/tIns/rIns/bIns are the distance from
 /// the rendered (page-space) bounding-box edge to the text, measured in
@@ -7042,12 +7257,16 @@ type ShapeTextBody = (
 /// live in page space, so the inset is invariant to the group's sx/sy scale.
 /// Defaults follow §21.1.2.1.1: lIns=rIns=91440 EMU (0.1in = 7.2pt),
 /// tIns=bIns=45720 EMU (0.05in = 3.6pt).
+#[allow(clippy::too_many_arguments)]
 fn parse_shape_text_body(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     wsp: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
 ) -> ShapeTextBody {
     let txbx = wsp
         .children()
@@ -7099,22 +7318,29 @@ fn parse_shape_text_body(
         .map(emu_to_pt)
         .unwrap_or(45720.0 / 12700.0);
 
-    let blocks: Vec<ShapeText> = txbx
-        .and_then(|t| {
-            t.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
-        })
+    let text_box_content = txbx.and_then(|t| {
+        t.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+    });
+    let (content, legacy_blocks) = text_box_content
         .map(|content| {
-            children_w_flat(content, "p")
-                .into_iter()
-                .filter_map(|p| {
-                    extract_simple_paragraph_text(style_map, num_map, p, theme, media_map)
-                })
-                .collect()
+            parse_text_box_content_at_depth(
+                content, style_map, num_map, media_map, chart_map, rel_map, theme, depth,
+            )
         })
         .unwrap_or_default();
 
-    (blocks, anchor, autofit, vert, l, t, r, b)
+    ShapeTextBody {
+        legacy_blocks,
+        content,
+        anchor,
+        autofit,
+        vert,
+        inset_l: l,
+        inset_t: t,
+        inset_r: r,
+        inset_b: b,
+    }
 }
 
 /// Reduce a <w:p> inside <w:txbxContent> to a single ShapeText. Pulls
@@ -7736,12 +7962,16 @@ fn omml_operator_takes_spacing(text: &str) -> bool {
 /// an imagedata shape never reaches here — this path only builds fill/stroke/
 /// text-box panels. The OLE-object case (`<w:object>` with a VML preview) is
 /// handled separately; see `parse_object_ole_image`.
+#[allow(clippy::too_many_arguments)]
 fn parse_vml_pict(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     pict: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    depth: DepthGuard,
 ) -> Option<ShapeRun> {
     // v:shape / v:rect / v:roundrect / v:line — any VML shape element with geometry. A
     // shape whose payload is a `<v:imagedata>` is a PICTURE, not a text/fill
@@ -7901,22 +8131,22 @@ fn parse_vml_pict(
     // document text (a watermark), matching wp:anchor behindDoc semantics.
     let behind_doc = vml_css_length_pt(style, "z-index").is_some_and(|z| z < 0.0);
 
-    // Body text from <v:textbox><w:txbxContent> (none for a textpath watermark).
-    let text_blocks: Vec<ShapeText> = if text_path.is_some() {
+    // Body blocks from <v:textbox><w:txbxContent>. VML and WPS share the same
+    // CT_TxbxContent parser/wire; textPath still suppresses only the legacy
+    // body-text paint projection, not preservation of authored content.
+    let (text_box_content, parsed_legacy_blocks) = shape
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+        .map(|content| {
+            parse_text_box_content_at_depth(
+                content, style_map, num_map, media_map, chart_map, rel_map, theme, depth,
+            )
+        })
+        .unwrap_or_default();
+    let text_blocks = if text_path.is_some() {
         Vec::new()
     } else {
-        shape
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
-            .map(|content| {
-                children_w_flat(content, "p")
-                    .into_iter()
-                    .filter_map(|p| {
-                        extract_simple_paragraph_text(style_map, num_map, p, theme, media_map)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        parsed_legacy_blocks
     };
 
     // §19.1.2.19: Word's absolute VML text boxes encode their numeric
@@ -7980,6 +8210,7 @@ fn parse_vml_pict(
         text_path,
         // VML t202 text-box default insets are the OOXML defaults (§21.1.2.1.1).
         text_blocks,
+        text_box_content,
         text_anchor: None,
         text_inset_l: 91440.0 / 12700.0,
         text_inset_t: 45720.0 / 12700.0,
@@ -10030,18 +10261,21 @@ fn parse_table_cell(
     );
     for child in cell_children {
         match child.tag_name().name() {
-            "p" => content.push(CellElement::Paragraph(Box::new(parse_paragraph_cond(
-                child,
-                style_map,
-                num_map,
-                media_map,
-                chart_map,
-                rel_map,
-                theme,
-                table_style_id,
-                cond,
-                &mut field,
-            )))),
+            "p" => content.push(CellElement::Paragraph(Box::new(
+                parse_paragraph_cond_at_depth(
+                    child,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    table_style_id,
+                    cond,
+                    &mut field,
+                    depth,
+                ),
+            ))),
             // A nested table resolves its OWN table style + conditional
             // formatting; the outer cell's `cond` does not propagate into it.
             //
@@ -11203,6 +11437,7 @@ mod tests {
             &mut runs,
             None,
             &mut field,
+            DepthGuard::root(),
         );
         runs
     }
@@ -15399,7 +15634,16 @@ mod anchor_image_relative_from_tests {
         theme: &ThemeColors,
     ) -> Vec<DocRun> {
         let mut num_map = NumberingMap::default();
-        super::parse_inline_drawing(style_map, &mut num_map, node, media_map, chart_map, theme)
+        super::parse_inline_drawing(
+            style_map,
+            &mut num_map,
+            node,
+            media_map,
+            chart_map,
+            &HashMap::new(),
+            theme,
+            DepthGuard::root(),
+        )
     }
 
     // Tiny valid PNG (1x1) so resolve_inline_blip's extent+blip contract holds.
@@ -17950,7 +18194,16 @@ mod txbx_inline_image_tests {
         media_map: &HashMap<String, String>,
     ) -> super::ShapeTextBody {
         let mut num_map = NumberingMap::default();
-        super::parse_shape_text_body(style_map, &mut num_map, wsp, theme, media_map)
+        super::parse_shape_text_body(
+            style_map,
+            &mut num_map,
+            wsp,
+            theme,
+            media_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        )
     }
 
     fn extract_simple_paragraph_text(
@@ -17999,12 +18252,13 @@ mod txbx_inline_image_tests {
         let mut media = HashMap::new();
         media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
 
-        let (blocks, _anchor, _autofit, _vert, _l, _t, _r, _b) = parse_shape_text_body(
+        let body = parse_shape_text_body(
             &StyleMap::default(),
             doc.root_element(),
             &ThemeColors::default(),
             &media,
         );
+        let blocks = body.legacy_blocks;
 
         assert_eq!(blocks.len(), 2, "image paragraph + caption paragraph");
 
@@ -18064,7 +18318,7 @@ mod txbx_inline_image_tests {
                 &ThemeColors::default(),
                 &HashMap::new(),
             )
-            .2
+            .autofit
         };
         assert_eq!(
             autofit_of(wsp(r#"<wps:bodyPr><a:noAutofit/></wps:bodyPr>"#)).as_deref(),
@@ -18101,7 +18355,7 @@ mod txbx_inline_image_tests {
                 &ThemeColors::default(),
                 &HashMap::new(),
             )
-            .3
+            .vert
         };
         assert_eq!(
             vert_of(wsp(r#"<wps:bodyPr vert="eaVert"/>"#)).as_deref(),
@@ -19157,6 +19411,343 @@ mod txbx_inline_image_tests {
     }
 }
 
+// ECMA-376 CT_TxbxContent is w:EG_BlockLevelElts+, not a paragraph-only
+// container. These tests pin the parser-only block wire independently of the
+// stable ShapeRun.textBlocks compatibility projection.
+#[cfg(test)]
+mod txbx_block_wire_tests {
+    use super::*;
+
+    fn parse_wps_text_body(
+        content: &str,
+        media_map: &HashMap<String, String>,
+        rel_map: &HashMap<String, String>,
+        depth: DepthGuard,
+    ) -> ShapeTextBody {
+        let xml = format!(
+            r#"<wps:wsp
+                 xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                 xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                 xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                 xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx>
+               </wps:wsp>"#,
+        );
+        let document = roxmltree::Document::parse(&xml).expect("WPS fixture");
+        let mut num_map = NumberingMap::default();
+        super::parse_shape_text_body(
+            &StyleMap::default(),
+            &mut num_map,
+            document.root_element(),
+            &ThemeColors::default(),
+            media_map,
+            &HashMap::new(),
+            rel_map,
+            depth,
+        )
+    }
+
+    fn block_content() -> &'static str {
+        r#"
+          <w:p><w:r><w:t>Before</w:t></w:r></w:p>
+          <w:tbl>
+            <w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid>
+            <w:tr><w:tc>
+              <w:p><w:r><w:t>Outer cell</w:t></w:r></w:p>
+              <w:tbl>
+                <w:tblGrid><w:gridCol w:w="900"/></w:tblGrid>
+                <w:tr><w:tc><w:p><w:r><w:t>Nested cell</w:t></w:r></w:p></w:tc></w:tr>
+              </w:tbl>
+            </w:tc></w:tr>
+          </w:tbl>
+          <w:altChunk r:id="rIdAlt"/>
+          <w:p><w:r><w:t>After</w:t></w:r></w:p>
+        "#
+    }
+
+    fn assert_complete_wire(shape: &ShapeRun) {
+        assert_eq!(
+            shape
+                .text_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Before", "After"],
+            "the stable paragraph-only compatibility projection remains intact",
+        );
+
+        let json = serde_json::to_value(shape).expect("ShapeRun serializes");
+        let blocks = json["textBoxContent"]
+            .as_array()
+            .expect("parser-only textBoxContent array");
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block["type"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>(),
+            ["paragraph", "table", "unsupportedTextBoxBlock", "paragraph"],
+            "authored block order is preserved",
+        );
+        assert_eq!(blocks[0]["runs"][0]["text"], "Before");
+        assert_eq!(
+            blocks[1]["rows"][0]["cells"][0]["content"][1]["type"], "table",
+            "nested table structure is preserved",
+        );
+        assert_eq!(
+            blocks[1]["rows"][0]["cells"][0]["content"][1]["rows"][0]["cells"][0]["content"][0]
+                ["runs"][0]["text"],
+            "Nested cell",
+        );
+        assert_eq!(blocks[2]["qName"], "w:altChunk");
+        assert_eq!(blocks[2]["sourcePath"], serde_json::json!([2]));
+        assert_eq!(blocks[3]["runs"][0]["text"], "After");
+    }
+
+    #[test]
+    fn wps_txbx_preserves_complete_ordered_block_wire() {
+        let xml = format!(
+            r#"<wps:wsp
+                 xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                 xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                 xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                 <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/></a:xfrm>
+                   <a:prstGeom prst="rect"/></wps:spPr>
+                 <wps:txbx><w:txbxContent>{}</w:txbxContent></wps:txbx>
+               </wps:wsp>"#,
+            block_content(),
+        );
+        let doc = roxmltree::Document::parse(&xml).expect("WPS fixture");
+        let mut num_map = NumberingMap::default();
+        let shape = parse_wsp_shape(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+            0.0,
+            true,
+            0.0,
+            true,
+            &AnchorMeta::default(),
+            None,
+            None,
+            0,
+        )
+        .expect("WPS shape");
+        assert_complete_wire(&shape);
+    }
+
+    #[test]
+    fn vml_txbx_uses_the_same_complete_block_wire() {
+        let xml = format!(
+            r##"<w:pict
+                  xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                  xmlns:v="urn:schemas-microsoft-com:vml">
+                  <v:shape id="tb1" type="#_x0000_t202"
+                      style="position:relative;width:200pt;height:100pt">
+                    <v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox>
+                  </v:shape>
+                </w:pict>"##,
+            block_content(),
+        );
+        let doc = roxmltree::Document::parse(&xml).expect("VML fixture");
+        let mut num_map = NumberingMap::default();
+        let shape = parse_vml_pict(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        )
+        .expect("VML shape");
+        assert_complete_wire(&shape);
+    }
+
+    #[test]
+    fn exhausted_depth_retains_an_explicit_container_marker() {
+        let body = parse_wps_text_body(
+            r#"<w:p><w:r><w:t>Too deep</w:t></w:r></w:p>"#,
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::with_limit(0),
+        );
+
+        assert!(body.legacy_blocks.is_empty());
+        assert_eq!(body.content.len(), 1);
+        let json = serde_json::to_value(&body.content).expect("wire serializes");
+        assert_eq!(json[0]["type"], "unsupportedTextBoxBlock");
+        assert_eq!(json[0]["qName"], "w:txbxContent");
+        assert_eq!(json[0]["sourcePath"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn vml_exhausted_depth_uses_the_same_explicit_container_marker() {
+        let xml = r##"<w:pict
+                  xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                  xmlns:v="urn:schemas-microsoft-com:vml">
+                  <v:shape id="tb1" type="#_x0000_t202"
+                      style="position:relative;width:200pt;height:100pt">
+                    <v:textbox><w:txbxContent>
+                      <w:p><w:r><w:t>Too deep</w:t></w:r></w:p>
+                    </w:txbxContent></v:textbox>
+                  </v:shape>
+                </w:pict>"##;
+        let document = roxmltree::Document::parse(xml).expect("VML fixture");
+        let mut num_map = NumberingMap::default();
+        let shape = parse_vml_pict(
+            &StyleMap::default(),
+            &mut num_map,
+            document.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::with_limit(0),
+        )
+        .expect("VML shape");
+
+        let json = serde_json::to_value(shape).expect("shape serializes");
+        assert_eq!(json["textBoxContent"][0]["type"], "unsupportedTextBoxBlock");
+        assert_eq!(json["textBoxContent"][0]["qName"], "w:txbxContent");
+        assert_eq!(
+            json["textBoxContent"][0]["sourcePath"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn text_box_paragraph_uses_its_part_relationship_and_media_context() {
+        let mut media_map = HashMap::new();
+        media_map.insert(
+            "rIdImage".to_string(),
+            "word/header-media/image1.png".to_string(),
+        );
+        let mut rel_map = HashMap::new();
+        rel_map.insert(
+            "rIdLink".to_string(),
+            "https://example.com/header".to_string(),
+        );
+        let body = parse_wps_text_body(
+            r#"
+              <w:p>
+                <w:hyperlink r:id="rIdLink"><w:r><w:t>Header link</w:t></w:r></w:hyperlink>
+                <w:r><w:drawing><wp:inline>
+                  <wp:extent cx="127000" cy="254000"/>
+                  <a:graphic><a:graphicData>
+                    <a:blip r:embed="rIdImage"/>
+                  </a:graphicData></a:graphic>
+                </wp:inline></w:drawing></w:r>
+              </w:p>
+            "#,
+            &media_map,
+            &rel_map,
+            DepthGuard::root(),
+        );
+
+        let json = serde_json::to_value(&body.content).expect("wire serializes");
+        assert_eq!(json[0]["type"], "paragraph");
+        assert_eq!(json[0]["runs"][0]["text"], "Header link");
+        assert_eq!(
+            json[0]["runs"][0]["hyperlink"],
+            "https://example.com/header"
+        );
+        assert_eq!(json[0]["runs"][1]["type"], "image");
+        assert_eq!(
+            json[0]["runs"][1]["imagePath"],
+            "word/header-media/image1.png"
+        );
+    }
+
+    #[test]
+    fn complete_and_legacy_projections_advance_live_numbering_only_once() {
+        let numbering = r#"
+          <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+              <w:lvl w:ilvl="0">
+                <w:start w:val="1"/>
+                <w:numFmt w:val="decimal"/>
+                <w:lvlText w:val="%1."/>
+              </w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+          </w:numbering>
+        "#;
+        let wsp_xml = r#"
+          <wps:wsp
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <wps:txbx><w:txbxContent>
+              <w:p>
+                <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+                <w:r><w:t>Inside</w:t></w:r>
+              </w:p>
+            </w:txbxContent></wps:txbx>
+          </wps:wsp>
+        "#;
+        let following_xml = r#"
+          <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+            <w:r><w:t>Following</w:t></w:r>
+          </w:p>
+        "#;
+        let wsp_document = roxmltree::Document::parse(wsp_xml).expect("WPS fixture");
+        let following_document =
+            roxmltree::Document::parse(following_xml).expect("paragraph fixture");
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let body = super::parse_shape_text_body(
+            &StyleMap::default(),
+            &mut num_map,
+            wsp_document.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        );
+        let mut field = FieldState::default();
+        let following = parse_paragraph(
+            following_document.root_element(),
+            &StyleMap::default(),
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            None,
+            &mut field,
+        );
+
+        let wire = serde_json::to_value(&body.content).expect("wire serializes");
+        assert_eq!(wire[0]["numbering"]["text"], "1.");
+        assert_eq!(
+            body.legacy_blocks[0]
+                .numbering
+                .as_ref()
+                .map(|numbering| numbering.text.as_str()),
+            Some("1."),
+            "the stable compatibility projection sees the same list item",
+        );
+        assert_eq!(
+            following
+                .numbering
+                .as_ref()
+                .map(|numbering| numbering.text.as_str()),
+            Some("2."),
+            "the discarded compatibility clone must not consume item 2",
+        );
+    }
+}
+
 // ECMA-376 §20.1.9.18 `<a:prstGeom>` — DOCX shapes use the same DrawingML
 // preset geometry catalog as PPTX/XLSX. Adjustment guides must be carried in
 // adj1..adj8 order, with omitted named guides preserved as holes, so core's
@@ -19212,6 +19803,9 @@ mod shape_preset_geometry_tests {
             doc.root_element(),
             theme,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
             0.0,
             true,
             0.0,
@@ -19345,6 +19939,9 @@ mod shape_fontref_color_tests {
             doc.root_element(),
             &theme(),
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
             0.0,
             true,
             0.0,
