@@ -24,7 +24,7 @@ import type {
   SourceRef,
   VmlTextPathAcquisitionInput,
 } from './types.js';
-import type { NormalizedTextBoxParagraphInput } from './textbox-input.js';
+import type { TextBoxAcquisitionInput } from './textbox-input.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
 
 /** The subset of a measured text segment needed to resolve its effective size. */
@@ -149,7 +149,7 @@ export type ParagraphMathRun = Extract<DocRun, { type: 'math' }> & Readonly<{
 
 export type ParagraphShapeRun = Extract<DocRun, { type: 'shape' }> & Readonly<{
   vmlTextPathInput?: VmlTextPathAcquisitionInput;
-  textBoxInput?: readonly NormalizedTextBoxParagraphInput[];
+  textBoxInput?: TextBoxAcquisitionInput;
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 

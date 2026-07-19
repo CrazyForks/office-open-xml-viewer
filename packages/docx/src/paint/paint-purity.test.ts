@@ -277,6 +277,7 @@ describe('paintLayoutPage', () => {
         clipBounds: { xPt: 10, yPt: 150, widthPt: 80, heightPt: 10 },
         blocks: [child],
         advancePt: 10,
+        diagnostics: [],
       },
     };
     const page = createLayoutPage({

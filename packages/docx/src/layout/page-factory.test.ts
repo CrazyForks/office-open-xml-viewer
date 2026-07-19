@@ -151,7 +151,16 @@ function bookmarkTextBox(
   return {
     kind: 'textbox', id, source: source([4]), flowDomainId,
     flowBounds: bounds, inkBounds: bounds, advancePt: 0, ordinaryFlow: false,
-    paragraphs: [paragraph], writingMode: 'horizontal-tb',
+    story: {
+      story: 'textbox',
+      flowBounds: paragraph.flowBounds,
+      inkBounds: paragraph.inkBounds,
+      blocks: [paragraph],
+      advancePt: paragraph.advancePt,
+      diagnostics: [],
+    },
+    transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+    writingMode: 'horizontal-tb',
     insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
   };
 }

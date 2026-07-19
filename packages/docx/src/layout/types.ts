@@ -764,14 +764,25 @@ export interface ResolvedFloatingTablePlacementLayout {
 
 export interface TextBoxLayout extends LayoutNodeBase {
   readonly kind: 'textbox';
-  readonly paragraphs: readonly ParagraphLayout[];
+  readonly story: StoryLayout;
+  /** Acquisition-local story coordinates to the containing page/shape frame. */
+  readonly transform: Matrix2DData;
   readonly writingMode: WritingMode;
   readonly verticalMode?: 'vert' | 'vert270' | 'eaVert' | 'mongolianVert';
   readonly contentBounds?: LayoutRect;
   readonly insets: Readonly<{ topPt: number; rightPt: number; bottomPt: number; leftPt: number }>;
 }
 
-export type StoryBlockInput = FlowBlockInput;
+/** Parser-owned placeholder for schema-permitted CT_TxbxContent members that
+ * are not yet layout-capable. The structural path keeps their authored order
+ * observable without widening the public ShapeRun contract. */
+export interface ParsedUnsupportedTextBoxBlock {
+  readonly type: 'unsupportedTextBoxBlock';
+  readonly qName: string;
+  readonly sourcePath: readonly number[];
+}
+
+export type StoryBlockInput = FlowBlockInput | ParsedUnsupportedTextBoxBlock;
 
 export interface StoryLayoutInput {
   readonly source: SourceRef;
@@ -786,6 +797,7 @@ export interface StoryLayout {
   readonly clipBounds?: LayoutRect;
   readonly blocks: readonly PaintNode[];
   readonly advancePt: number;
+  readonly diagnostics: readonly LayoutDiagnostic[];
 }
 
 export interface NoteLayout extends LayoutNodeBase {
@@ -1167,6 +1179,9 @@ export interface FlowContainer {
   readonly kind: FlowDomainKind;
   /** Acquisition-local logical bounds; never retained physical page bounds. */
   readonly bounds: LayoutRect;
+  /** Text boxes lay out complete overflow before applying bodyPr clipping or
+   * spAutoFit to the outer frame. Other stories remain capacity-bounded. */
+  readonly capacity?: 'bounded' | 'unbounded';
 }
 
 export interface FlowCursor extends PointPt {}

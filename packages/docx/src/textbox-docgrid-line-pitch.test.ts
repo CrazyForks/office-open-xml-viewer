@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { measureShapeTextAutoFitHeight } from './renderer.js';
-import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
+import {
+  acquireAndPaintShapeTextBox,
+  acquireShapeTextBoxForTest,
+} from './retained-shape-textbox.test-support.js';
 import { shapeRenderState } from './line-layout.js';
 import type { RenderState } from './renderer.js';
 import type { ShapeRun, ShapeText } from './types';
@@ -145,13 +147,18 @@ describe('text-box lines snap to the section docGrid line pitch (ECMA-376 §17.6
     expect(firstLineHeight(fillTexts)).toBeCloseTo(NATURAL, 3);
   });
 
-  it('measureShapeTextAutoFitHeight totals the grid-snapped line heights', () => {
+  it('retained spAutoFit acquisition totals the grid-snapped line heights', () => {
     const { ctx } = makeRecordingCanvas();
     const shape = eaTextbox();
+    shape.textAutofit = 'sp';
     const gridState = stateWithGrid(ctx, { type: 'lines', linePitchPt: PITCH });
     const flatState = stateWithGrid(ctx, { type: 'default', linePitchPt: null });
-    const hGrid = measureShapeTextAutoFitHeight(shape, 60, ctx, 1, {}, new Map(), gridState);
-    const hFlat = measureShapeTextAutoFitHeight(shape, 60, ctx, 1, {}, new Map(), flatState);
+    const hGrid = acquireShapeTextBoxForTest(
+      shape, 0, 0, 60, 400, ctx, 1, {}, gridState,
+    )?.flowBounds.heightPt ?? 0;
+    const hFlat = acquireShapeTextBoxForTest(
+      shape, 0, 0, 60, 400, ctx, 1, {}, flatState,
+    )?.flowBounds.heightPt ?? 0;
     // The grid total is a whole number of 18 pt cells; the flat total is the same
     // line count at 10 pt — so the grid path is strictly taller by 8 pt / line.
     const lineCount = Math.round(hFlat / NATURAL);
@@ -181,11 +188,14 @@ describe('text-box lines snap to the section docGrid line pitch (ECMA-376 §17.6
     expect(baseYs[1] - baseYs[0]).toBeCloseTo(PITCH, 3);
   });
 
-  it('measureShapeTextAutoFitHeight totals ruby lines at the measured glyph box (1 cell each)', () => {
+  it('retained spAutoFit acquisition totals ruby lines at the measured glyph box (1 cell each)', () => {
     const { ctx } = makeRecordingCanvas();
     const shape = rubyTextbox();
+    shape.textAutofit = 'sp';
     const gridState = stateWithGrid(ctx, { type: 'lines', linePitchPt: PITCH });
-    const hGrid = measureShapeTextAutoFitHeight(shape, 60, ctx, 1, {}, new Map(), gridState);
+    const hGrid = acquireShapeTextBoxForTest(
+      shape, 0, 0, 60, 400, ctx, 1, {}, gridState,
+    )?.flowBounds.heightPt ?? 0;
     // rubyTextbox lands each of its three runs on its own line (3 × 18 pt runs
     // exactly fill the 60 pt width). Each ruby line is ONE 18 pt cell (its
     // measured 1.0×em glyph box), not the 2 cells the 游明朝 design height

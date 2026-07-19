@@ -5,11 +5,11 @@ import {
 import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
+import { paintTableLayout } from './canvas-table.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import {
   composeAffine,
   mapAffinePoint,
-  quarterTurnAffine,
   scaleAffine,
   translationAffine,
 } from './affine.js';
@@ -415,37 +415,64 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
 /** Paints an acquired text box. All line partitioning, glyph shaping and point
  * geometry are owned by acquisition; this function only traverses paint data. */
 export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintContext): void {
-  if (!node.verticalMode) {
-    for (const paragraph of node.paragraphs) paintParagraphLayout(paragraph, context);
-    return;
-  }
-  const center = translationAffine(
-    node.flowBounds.xPt + node.flowBounds.widthPt / 2,
-    node.flowBounds.yPt + node.flowBounds.heightPt / 2,
-  );
-  const turn = quarterTurnAffine(node.verticalMode === 'vert270' ? -1 : 1);
+  const paintStory = (storyContext: CanvasPaintContext): void => {
+    for (const block of node.story.blocks) {
+      if (block.kind === 'paragraph') {
+        paintParagraphLayout(block, storyContext);
+      } else if (block.kind === 'table') {
+        paintTableLayout(block, storyContext, block.resolvedFloatingTables ?? []);
+      } else {
+        throw new Error(`Text-box story contains unsupported retained node: ${block.kind}`);
+      }
+    }
+  };
   const pointToCss = composeAffine(
     context.pointToCss ?? scaleAffine(context.scale),
-    composeAffine(center, turn),
+    node.transform,
   );
-  const frame = canvasPaintFrame(context.ctx, () => {
-    context.ctx.translate(
-      node.flowBounds.xPt + node.flowBounds.widthPt / 2,
-      node.flowBounds.yPt + node.flowBounds.heightPt / 2,
-    );
-    context.ctx.rotate(node.verticalMode === 'vert270' ? -Math.PI / 2 : Math.PI / 2);
+  const hasTransform = node.transform.a !== 1
+    || node.transform.b !== 0
+    || node.transform.c !== 0
+    || node.transform.d !== 1
+    || node.transform.e !== 0
+    || node.transform.f !== 0;
+  const transformFrame = canvasPaintFrame(context.ctx, () => {
+    if (hasTransform) {
+      if (node.verticalMode) {
+        context.ctx.translate(node.transform.e, node.transform.f);
+        context.ctx.rotate(node.verticalMode === 'vert270' ? -Math.PI / 2 : Math.PI / 2);
+      } else {
+        context.ctx.transform(
+          node.transform.a,
+          node.transform.b,
+          node.transform.c,
+          node.transform.d,
+          node.transform.e,
+          node.transform.f,
+        );
+      }
+    }
   });
-  const verticalContext: CanvasPaintContext = {
+  const clipFrame = node.clipBounds ? canvasPaintFrame(context.ctx, () => {
+    context.ctx.beginPath();
+    context.ctx.rect(
+      node.clipBounds!.xPt,
+      node.clipBounds!.yPt,
+      node.clipBounds!.widthPt,
+      node.clipBounds!.heightPt,
+    );
+    context.ctx.clip();
+  }) : null;
+  const frame = clipFrame
+    ? appendDeferredPaintFrame(transformFrame, clipFrame)
+    : transformFrame;
+  const storyContext: CanvasPaintContext = {
     ...context,
     pointToCss,
-    textBoxVerticalMode: node.verticalMode,
+    ...(node.verticalMode ? { textBoxVerticalMode: node.verticalMode } : {}),
     deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
   };
-  frame(() => {
-    for (const paragraph of node.paragraphs) {
-      paintParagraphLayout(paragraph, verticalContext);
-    }
-  })();
+  frame(() => paintStory(storyContext))();
 }
 
 /** Paints an absolute point-space text box into a CSS-pixel canvas viewport. */

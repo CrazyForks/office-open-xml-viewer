@@ -123,8 +123,11 @@ describe('normalizeTextBoxInput', () => {
     } as unknown as ShapeRun;
     const source = { story: 'textbox' as const, storyInstance: 'parser-shape', path: [2] };
 
-    const inputs = textBoxAcquisitionInput(shape, source);
+    const acquisition = textBoxAcquisitionInput(shape, source);
 
+    expect(acquisition.kind).toBe('compatibility');
+    if (acquisition.kind !== 'compatibility') throw new Error('expected public compatibility input');
+    const inputs = acquisition.paragraphs;
     expect(inputs[0]?.numberingMarkerShapeInput).toMatchObject({
       fontSizePt: 15,
       fonts: { ascii: 'Parser Sans', eastAsia: 'Parser Gothic' },
@@ -146,5 +149,45 @@ describe('normalizeTextBoxInput', () => {
     });
     expect(structuredClone(inputs)).toEqual(inputs);
     expect(Object.isFrozen(inputs[0]?.numberingMarkerShapeInput?.fonts)).toBe(true);
+  });
+
+  it('prefers complete parser content over the lossy public projection', () => {
+    const parserShape = {
+      type: 'shape',
+      textBlocks: [{ text: 'flattened', fontSizePt: 10 }],
+      textBoxContent: [
+        { type: 'paragraph', runs: [{ type: 'text', text: 'rich paragraph' }] },
+        {
+          type: 'table',
+          rows: [{ cells: [{ content: [
+            { type: 'paragraph', runs: [{ type: 'text', text: 'nested cell' }] },
+          ] }] }],
+        },
+        {
+          type: 'unsupportedTextBoxBlock',
+          qName: 'w:altChunk',
+          sourcePath: [2],
+        },
+      ],
+    } as unknown as ShapeRun;
+
+    const acquisition = textBoxAcquisitionInput(parserShape, {
+      story: 'textbox',
+      storyInstance: 'shape:9',
+      path: [],
+    });
+
+    expect(acquisition.kind).toBe('complete');
+    if (acquisition.kind !== 'complete') throw new Error('expected complete parser input');
+    expect(acquisition.blocks.map((block) => block.type)).toEqual([
+      'paragraph', 'table', 'unsupportedTextBoxBlock',
+    ]);
+    expect(acquisition.blocks[0]).toMatchObject({
+      runs: [{ type: 'text', text: 'rich paragraph' }],
+    });
+    expect(acquisition).not.toHaveProperty('paragraphs');
+    expect(Object.isFrozen(acquisition)).toBe(true);
+    expect(Object.isFrozen(acquisition.blocks)).toBe(true);
+    expect(structuredClone(acquisition)).toEqual(acquisition);
   });
 });

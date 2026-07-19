@@ -32,6 +32,7 @@ export interface PaintCanvas2D {
   translate(x: number, y: number): void;
   rotate(angle: number): void;
   scale(x: number, y: number): void;
+  transform(a: number, b: number, c: number, d: number, e: number, f: number): void;
   drawImage(image: CanvasImageSource, ...coordinates: number[]): void;
   save(): void;
   restore(): void;

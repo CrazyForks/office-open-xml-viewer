@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { shapeParagraphGapBefore } from './renderer';
-import type { ShapeText } from './types';
+import {
+  paragraphGapPt,
+  type ParagraphSpacingParticipant,
+} from './layout/paragraph-spacing.js';
 
 /**
  * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — Word-adjudicated PER-SIDE
@@ -21,26 +23,16 @@ import type { ShapeText } from './types';
  * measured parity), so this text-box helper carries the same table as the body
  * and cell paths.
  */
-describe('shapeParagraphGapBefore — §17.3.1.9 contextualSpacing per-side semantics', () => {
-  const block = (over: Partial<ShapeText>): ShapeText =>
-    ({ text: 'x', fontSizePt: 12, alignment: 'left', ...over }) as ShapeText;
-
+describe('paragraphGapPt — §17.3.1.9 contextualSpacing per-side semantics', () => {
   const pair = (
-    prev: Partial<ShapeText>,
-    curr: Partial<ShapeText>,
+    prev: ParagraphSpacingParticipant,
+    curr: ParagraphSpacingParticipant,
     afterPt: number,
     beforePt: number,
-  ): number =>
-    shapeParagraphGapBefore(
-      [block(prev), block(curr)],
-      1,
-      [0, beforePt],
-      [afterPt, 0],
-    );
+  ): number => paragraphGapPt(prev, curr, afterPt, beforePt);
 
   it('reserves only the first block own spaceBefore at i=0 (no previous block)', () => {
-    const blocks = [block({ spaceBefore: 6 }), block({})];
-    expect(shapeParagraphGapBefore(blocks, 0, [6, 4], [0, 0])).toBe(6);
+    expect(paragraphGapPt(null, {}, 0, 6)).toBe(6);
   });
 
   // ── sample-57 adjudication table (after=10 / before=12 unless noted) ──────

@@ -36,7 +36,9 @@ import { stableFingerprint } from './fingerprint.js';
 import { planShapeDrawing } from './shape-drawing-plan.js';
 import {
   normalizeTextBoxInput,
+  type CompleteTextBoxBlockInput,
   type NormalizedTextBoxParagraphInput,
+  type TextBoxAcquisitionInput,
 } from './textbox-input.js';
 import {
   numberingMarkerPhysicalLeft,
@@ -65,6 +67,7 @@ import {
   translatePlacement,
   translatePoint,
   translateRect,
+  translateTableLayout,
   translateTextBox,
 } from './retained-geometry-translation.js';
 export { translateParagraphLayout } from './retained-geometry-translation.js';
@@ -100,6 +103,8 @@ import type {
   ParagraphPlacement,
   PointPt,
   SourceRef,
+  StoryLayout,
+  FlowContainer,
   TextBoxLayout,
   TextPlacement,
   WrapExclusion,
@@ -792,6 +797,7 @@ export interface ParagraphAcquisitionOptions {
     AnchorReferenceFramesInput,
     'page' | 'margin' | 'column' | 'pageParity'
   >>;
+  readonly acquireCompleteStory?: CompleteTextBoxStoryAcquirer;
 }
 
 function runSource(source: SourceRef, runIndex: number): SourceRef {
@@ -2094,6 +2100,7 @@ function acquireAnchorOccurrence(
       measurer: options.measurer,
       environment: options.environment,
       input: outer.run.textBoxInput,
+      acquireCompleteStory: options.acquireCompleteStory,
     });
     if (textBox) {
       acquiredShapeTextBoxes.set(outer.runIndex, textBox);
@@ -2211,6 +2218,7 @@ function acquireAnchorOccurrence(
         measurer: options.measurer,
         environment: options.environment,
         input: run.textBoxInput,
+        acquireCompleteStory: options.acquireCompleteStory,
       });
       if (textBox) {
         textBoxes.push(textBox);
@@ -2268,6 +2276,14 @@ function acquireAnchorOccurrence(
   };
 }
 
+export type CompleteTextBoxStoryAcquirer = (
+  request: Readonly<{
+    source: SourceRef;
+    container: FlowContainer;
+    blocks: readonly CompleteTextBoxBlockInput[];
+  }>,
+) => StoryLayout;
+
 export interface ShapeTextBoxAcquisitionOptions {
   readonly id: string;
   readonly source: SourceRef;
@@ -2275,7 +2291,8 @@ export interface ShapeTextBoxAcquisitionOptions {
   readonly context: ParagraphLayoutContext;
   readonly measurer: TextMeasurer;
   readonly environment: ParagraphMeasurementEnvironment;
-  readonly input?: readonly NormalizedTextBoxParagraphInput[];
+  readonly input?: TextBoxAcquisitionInput;
+  readonly acquireCompleteStory?: CompleteTextBoxStoryAcquirer;
 }
 
 function textBoxParagraphContext(
@@ -2374,6 +2391,89 @@ function orientVerticalTextBoxParagraph(
   return { ...paragraph, lines };
 }
 
+function orientVerticalTextBoxTable(
+  table: import('./types.js').TableLayout,
+  mode: RetainedTextBoxVerticalMode,
+): import('./types.js').TableLayout {
+  const orientChild = (
+    child: ParagraphLayout | import('./types.js').TableLayout,
+    cellBounds: LayoutRect,
+  ): ParagraphLayout | import('./types.js').TableLayout =>
+    child.kind === 'paragraph'
+      ? orientVerticalTextBoxParagraph(
+          child,
+          // A table cell owns its own horizontal line frame. Mongolian column
+          // reflection belongs to the outer text-box story, while its glyphs
+          // use the same upright/sideways rule as eaVert.
+          mode === 'mongolianVert' ? 'eaVert' : mode,
+          cellBounds,
+          { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+        )
+      : orientVerticalTextBoxTable(child, mode);
+  return {
+    ...table,
+    rows: table.rows.map((row) => ({
+      ...row,
+      cells: row.cells.map((cell) => ({
+        ...cell,
+        blocks: cell.blocks.map((block) => ({
+          ...block,
+          layout: orientChild(block.layout, cell.contentBounds),
+        })),
+      })),
+    })),
+    ...(table.floatingTables ? {
+      floatingTables: table.floatingTables.map((placement) => ({
+        ...placement,
+        child: orientVerticalTextBoxTable(placement.child, mode),
+      })),
+    } : {}),
+    ...(table.resolvedFloatingTables ? {
+      resolvedFloatingTables: table.resolvedFloatingTables.map((placement) => ({
+        ...placement,
+        child: orientVerticalTextBoxTable(placement.child, mode),
+      })),
+    } : {}),
+  };
+}
+
+function orientVerticalTextBoxStory(
+  story: StoryLayout,
+  mode: RetainedTextBoxVerticalMode,
+  innerBounds: LayoutRect,
+  insets: Readonly<{ topPt: number; rightPt: number; bottomPt: number; leftPt: number }>,
+): StoryLayout {
+  return {
+    ...story,
+    blocks: story.blocks.map((block) => {
+      if (block.kind === 'paragraph') {
+        return orientVerticalTextBoxParagraph(block, mode, innerBounds, insets);
+      }
+      if (block.kind === 'table') return orientVerticalTextBoxTable(block, mode);
+      throw new Error(`Text-box story contains unsupported retained node: ${block.kind}`);
+    }),
+  };
+}
+
+function translateTextBoxStory(
+  story: StoryLayout,
+  deltaYPt: number,
+): StoryLayout {
+  if (deltaYPt === 0) return story;
+  const delta = { xPt: 0, yPt: deltaYPt };
+  return {
+    ...story,
+    flowBounds: translateRect(story.flowBounds, delta),
+    inkBounds: translateRect(story.inkBounds, delta),
+    ...(story.clipBounds ? { clipBounds: translateRect(story.clipBounds, delta) } : {}),
+    blocks: story.blocks.map((block) => {
+      if (block.kind === 'paragraph') return translateParagraphLayout(block, delta);
+      if (block.kind === 'table') return translateTableLayout(block, delta);
+      throw new Error(`Text-box story contains unsupported retained node: ${block.kind}`);
+    }),
+  };
+}
+
 /** Acquires a DrawingML/WPS text body through the same paragraph measurement
  * and retained layout seam used by ordinary WordprocessingML paragraphs. */
 export function acquireShapeTextBoxLayout(
@@ -2381,8 +2481,25 @@ export function acquireShapeTextBoxLayout(
   rect: LayoutRect,
   options: ShapeTextBoxAcquisitionOptions,
 ): TextBoxLayout | undefined {
-  if (!shape.textBlocks?.length) return undefined;
   const source = options.source;
+  const acquisition: TextBoxAcquisitionInput = options.input ?? {
+    kind: 'compatibility',
+    source: {
+      story: 'textbox',
+      storyInstance: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
+      path: [],
+    },
+    paragraphs: normalizeTextBoxInput(shape, {
+      story: 'textbox',
+      storyInstance: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
+      path: [],
+    }),
+  };
+  const storySource = acquisition.source;
+  const blockCount = acquisition.kind === 'complete'
+    ? acquisition.blocks.length
+    : acquisition.paragraphs.length;
+  if (blockCount === 0) return undefined;
   const verticalMode = retainedTextBoxVerticalMode(shape.textVert);
   const contentBounds: LayoutRect = verticalMode ? {
     xPt: -rect.heightPt / 2,
@@ -2390,15 +2507,35 @@ export function acquireShapeTextBoxLayout(
     widthPt: rect.heightPt,
     heightPt: rect.widthPt,
   } : rect;
-  const normalized = options.input ?? normalizeTextBoxInput(shape, {
-    story: 'textbox',
-    storyInstance: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
-    path: [],
-  });
+  const normalized = acquisition.kind === 'compatibility'
+    ? acquisition.paragraphs
+    : Object.freeze([]);
   const insets = {
     topPt: shape.textInsetT ?? 0, rightPt: shape.textInsetR ?? 0,
     bottomPt: shape.textInsetB ?? 0, leftPt: shape.textInsetL ?? 0,
   };
+  const innerBounds = {
+    xPt: contentBounds.xPt + insets.leftPt,
+    yPt: contentBounds.yPt + insets.topPt,
+    widthPt: Math.max(0, contentBounds.widthPt - insets.leftPt - insets.rightPt),
+    heightPt: Math.max(0, contentBounds.heightPt - insets.topPt - insets.bottomPt),
+  };
+  let completeStory: StoryLayout | undefined;
+  if (acquisition.kind === 'complete') {
+    if (!options.acquireCompleteStory) {
+      throw new Error('Complete text-box content requires the shared story acquisition adapter');
+    }
+    completeStory = options.acquireCompleteStory({
+      source: storySource,
+      container: {
+        id: `${options.id}:story`,
+        kind: 'textbox',
+        bounds: innerBounds,
+        capacity: 'unbounded',
+      },
+      blocks: acquisition.blocks,
+    });
+  }
   let yPt = contentBounds.yPt + insets.topPt;
   let previousInput: NormalizedTextBoxParagraphInput | null = null;
   let paragraphs = normalized.map((input, blockIndex) => {
@@ -2477,16 +2614,12 @@ export function acquireShapeTextBoxLayout(
     });
     yPt += child.advancePt - child.spacing.afterPt;
     previousInput = input;
-    const innerBounds = {
-      xPt: contentBounds.xPt + insets.leftPt,
-      yPt: contentBounds.yPt + insets.topPt,
-      widthPt: Math.max(0, contentBounds.widthPt - insets.leftPt - insets.rightPt),
-      heightPt: Math.max(0, contentBounds.heightPt - insets.topPt - insets.bottomPt),
-    };
     return verticalMode ? orientVerticalTextBoxParagraph(child, verticalMode, innerBounds, insets) : child;
   });
-  const fittedExtentPt = Math.max(0, yPt - contentBounds.yPt + insets.bottomPt);
-  const mayAutofit = shape.textAutofit === 'sp' && normalized.length > 0
+  const fittedExtentPt = completeStory
+    ? Math.max(0, completeStory.advancePt + insets.topPt + insets.bottomPt)
+    : Math.max(0, yPt - contentBounds.yPt + insets.bottomPt);
+  const mayAutofit = shape.textAutofit === 'sp' && blockCount > 0
     && (!verticalMode || normalized.every((input) => input.image === undefined));
   const effectiveRect = mayAutofit && Number.isFinite(fittedExtentPt) && fittedExtentPt > 0
     ? verticalMode
@@ -2503,10 +2636,55 @@ export function acquireShapeTextBoxLayout(
     const deltaYPt = effectiveContentBounds.yPt - contentBounds.yPt;
     paragraphs = paragraphs.map((paragraph) => translateParagraphY(paragraph, deltaYPt));
   }
+  const effectiveInnerBounds = {
+    xPt: effectiveContentBounds.xPt + insets.leftPt,
+    yPt: effectiveContentBounds.yPt + insets.topPt,
+    widthPt: Math.max(
+      0,
+      effectiveContentBounds.widthPt - insets.leftPt - insets.rightPt,
+    ),
+    heightPt: Math.max(
+      0,
+      effectiveContentBounds.heightPt - insets.topPt - insets.bottomPt,
+    ),
+  };
+  const paragraphFlowBounds = unionLayoutRects(paragraphs.map((paragraph) => paragraph.flowBounds))
+    ?? { xPt: effectiveInnerBounds.xPt, yPt: effectiveInnerBounds.yPt, widthPt: 0, heightPt: 0 };
+  const paragraphInkBounds = unionLayoutRects(paragraphs.map((paragraph) => paragraph.inkBounds))
+    ?? { xPt: effectiveInnerBounds.xPt, yPt: effectiveInnerBounds.yPt, widthPt: 0, heightPt: 0 };
+  let story: StoryLayout = completeStory ?? {
+    story: 'textbox',
+    flowBounds: paragraphFlowBounds,
+    inkBounds: paragraphInkBounds,
+    clipBounds: effectiveInnerBounds,
+    blocks: paragraphs,
+    advancePt: Math.max(0, fittedExtentPt - insets.topPt - insets.bottomPt),
+    diagnostics: [],
+  };
+  if (completeStory && verticalMode) {
+    story = orientVerticalTextBoxStory(
+      translateTextBoxStory(
+        story,
+        effectiveContentBounds.yPt - contentBounds.yPt,
+      ),
+      verticalMode,
+      effectiveInnerBounds,
+      insets,
+    );
+  }
   return deepFreezePlainData({
-    kind: 'textbox', id: options.id, source: normalized[0]?.source ?? source,
+    kind: 'textbox', id: options.id, source: normalized[0]?.source ?? storySource,
     flowDomainId: `${options.flowDomainId}:textbox`, flowBounds: effectiveRect, inkBounds: effectiveRect,
-    advancePt: 0, ordinaryFlow: false, paragraphs,
+    ...(shape.textAutofit === 'none' ? { clipBounds: effectiveInnerBounds } : {}),
+    advancePt: 0, ordinaryFlow: false, story,
+    transform: verticalMode ? {
+      a: 0,
+      b: verticalMode === 'vert270' ? -1 : 1,
+      c: verticalMode === 'vert270' ? 1 : -1,
+      d: 0,
+      e: effectiveRect.xPt + effectiveRect.widthPt / 2,
+      f: effectiveRect.yPt + effectiveRect.heightPt / 2,
+    } : { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
     writingMode: shape.textVert === 'vert270' ? 'vertical-lr' : shape.textVert ? 'vertical-rl' : 'horizontal-tb',
     insets,
     contentBounds: effectiveContentBounds,
@@ -3066,6 +3244,7 @@ export function paragraphLayoutFromMeasurement(
         measurer: options.measurer,
         environment: options.environment,
         input: run.textBoxInput,
+        acquireCompleteStory: options.acquireCompleteStory,
       });
       const shapeRect = textBox?.flowBounds ?? authoredShapeRect;
       let drawing = drawingForShape(run, shapeRect, options, runIndex);

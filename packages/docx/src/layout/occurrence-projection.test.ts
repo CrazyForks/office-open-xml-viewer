@@ -116,7 +116,9 @@ function validateProjectedGraph(
       }
       for (const textBox of layout.textBoxes) {
         ownNode(textBox.id, textBox, 'textbox');
-        textBox.paragraphs.forEach(visit);
+        textBox.story.blocks.forEach((block) => {
+          if (block.kind === 'paragraph' || block.kind === 'table') visit(block);
+        });
       }
       for (const exclusion of layout.exclusions) {
         ownNode(exclusion.id, exclusion, 'exclusion');
@@ -558,14 +560,24 @@ describe('projectBodyOccurrence', () => {
     const child = paragraph('textbox-child');
     const textBox = (id: string, paragraphs: readonly ParagraphLayout[]): TextBoxLayout => ({
       kind: 'textbox', id, source: source([0, 1]), flowDomainId: 'textbox', ordinaryFlow: false,
-      flowBounds: rect(5, 6), inkBounds: rect(5, 6), advancePt: 0, paragraphs,
+      flowBounds: rect(5, 6), inkBounds: rect(5, 6), advancePt: 0,
+      story: {
+        story: 'textbox',
+        flowBounds: rect(5, 6),
+        inkBounds: rect(5, 6),
+        blocks: paragraphs,
+        advancePt: paragraphs.reduce((sum, paragraph) => sum + paragraph.advancePt, 0),
+        diagnostics: [],
+      },
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
       writingMode: 'horizontal-tb', insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
     });
     const aliased = { ...paragraph(), textBoxes: [textBox('box-a', [child, child])] };
 
     const projected = projectBodyOccurrence(aliased, options);
 
-    expect(projected.textBoxes[0]!.paragraphs[0]).toBe(projected.textBoxes[0]!.paragraphs[1]);
+    expect(projected.textBoxes[0]!.story.blocks[0])
+      .toBe(projected.textBoxes[0]!.story.blocks[1]);
     const cyclicChildren: ParagraphLayout[] = [];
     const cyclic = { ...paragraph('cyclic'), textBoxes: [textBox('cycle-box', cyclicChildren)] };
     cyclicChildren.push(cyclic);
@@ -649,7 +661,16 @@ describe('projectBodyOccurrence', () => {
     const verticalBox: TextBoxLayout = {
       kind: 'textbox', id: 'vertical-box', source: source([0, 4]), flowDomainId: 'textbox', ordinaryFlow: false,
       flowBounds: rect(8, 9), inkBounds: rect(8, 9), contentBounds: rect(9, 10), advancePt: 0,
-      paragraphs: [localChild], writingMode: 'vertical-rl', verticalMode: 'vert',
+      story: {
+        story: 'textbox',
+        flowBounds: localChild.flowBounds,
+        inkBounds: localChild.inkBounds,
+        blocks: [localChild],
+        advancePt: localChild.advancePt,
+        diagnostics: [],
+      },
+      transform: { a: 0, b: 1, c: -1, d: 0, e: 13, f: 14 },
+      writingMode: 'vertical-rl', verticalMode: 'vert',
       insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
     };
     const retained = {
@@ -684,6 +705,6 @@ describe('projectBodyOccurrence', () => {
       paintOps: [{ origin: { xPt: 20, yPt: 40 } }] });
     expect(projected.textBoxes[0]!.flowDomainId)
       .toBe('body/page-2/occurrence/page%202%2Fheader/textbox/vertical-box');
-    expect(projected.textBoxes[0]!.paragraphs[0]!.flowBounds).toEqual(localChild.flowBounds);
+    expect(projected.textBoxes[0]!.story.blocks[0]!.flowBounds).toEqual(localChild.flowBounds);
   });
 });

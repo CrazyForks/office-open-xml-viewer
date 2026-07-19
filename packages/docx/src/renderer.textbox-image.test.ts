@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createLayoutServices, measureShapeTextAutoFitHeight, preloadImages } from './renderer';
-import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
+import { createLayoutServices, preloadImages } from './renderer';
+import {
+  acquireAndPaintShapeTextBox,
+  acquireShapeTextBoxForTest,
+} from './retained-shape-textbox.test-support.js';
 import type { DocxDocumentModel, ShapeRun, ShapeText, ShapeTextRun } from './types';
 import type { RenderState } from './renderer';
 import { canvasFontString } from '@silurus/ooxml-core';
@@ -240,7 +243,7 @@ describe('textbox inline images — rendering', () => {
     expect(fillTextCalls[0]?.x).toBeCloseTo(17.2, 5);
   });
 
-  it('measureShapeTextAutoFitHeight returns content height plus bodyPr insets', () => {
+  it('retained spAutoFit acquisition returns content height plus bodyPr insets', () => {
     const { ctx } = makeRecordingCtx();
     const shape = {
       type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
@@ -249,9 +252,9 @@ describe('textbox inline images — rendering', () => {
       textAutofit: 'sp',
     } as unknown as ShapeRun;
 
-    const measured = measureShapeTextAutoFitHeight(shape, 200, ctx, 1, {}, new Map());
+    const layout = acquireShapeTextBoxForTest(shape, 0, 0, 200, 400, ctx, 1);
 
-    expect(measured).toBeCloseTo(17, 5);
+    expect(layout?.flowBounds.heightPt).toBeCloseTo(17, 5);
   });
 });
 
@@ -284,7 +287,9 @@ describe('textbox rich text — per-run formatting', () => {
     const shape = richTextbox([{ text: 'route', fontSizePt: 10, fontFamily: 'Roman Face' }]);
 
     fontCalls.length = 0;
-    measureShapeTextAutoFitHeight(shape, 200, ctx, 1, doc.fontFamilyClasses, new Map(), state);
+    acquireShapeTextBoxForTest(
+      shape, 0, 0, 200, 100, ctx, 1, doc.fontFamilyClasses, state,
+    );
     expect(fontCalls.filter((font) => font.includes('Roman Face')))
       .toEqual(expect.arrayContaining([expected]));
     expect(fontCalls.filter((font) => font.includes('Roman Face')).every((font) => font === expected)).toBe(true);

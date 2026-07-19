@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveShapeAutofitBox } from './renderer';
+import { acquireShapeTextBoxForTest } from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 // ECMA-376 §20.1.10.83 (`<wps:bodyPr vert>`) + §21.1.2.1.1 (`<a:spAutoFit/>`) —
@@ -21,9 +21,8 @@ import type { ShapeRun, ShapeText, ShapeTextRun } from './types';
 // the same top-left bbox anchor the horizontal branch keeps (it fixes the TOP
 // edge and moves the BOTTOM).
 
-/** Minimal measuring 2D context: measureShapeTextAutoFitHeight only reads
- *  font/measureText/save/restore (it never paints). Each code point advances by
- *  the current font px; symmetric-ish font box (0.8 / 0.2 em). */
+/** Minimal measuring 2D context for retained acquisition. Each code point
+ * advances by the current font px; symmetric-ish font box (0.8 / 0.2 em). */
 function makeMeasureCtx(): CanvasRenderingContext2D {
   let font = '10px serif';
   const stack: string[] = [];
@@ -74,6 +73,22 @@ function verticalTextbox(
 
 const CJK = '経';
 
+function retainedAutofitBox(
+  shape: ShapeRun,
+  box: { x: number; y: number; w: number; h: number },
+  ctx: CanvasRenderingContext2D,
+): { x: number; y: number; w: number; h: number } {
+  const layout = acquireShapeTextBoxForTest(
+    shape, box.x, box.y, box.w, box.h, ctx, 1,
+  );
+  return layout ? {
+    x: layout.flowBounds.xPt,
+    y: layout.flowBounds.yPt,
+    w: layout.flowBounds.widthPt,
+    h: layout.flowBounds.heightPt,
+  } : box;
+}
+
 describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shrink (#1000)', () => {
   it('GROW: an overflowing eaVert spAutoFit box widens, LEFT edge fixed, RIGHT edge moves', () => {
     const ctx = makeMeasureCtx();
@@ -81,7 +96,7 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
     // column. 60 CJK ⇒ ~6 columns ⇒ required cross width ≫ authored 30.
     const shape = verticalTextbox(CJK.repeat(60), 'eaVert', 'sp');
     const box = { x: 100, y: 50, w: 30, h: 100 };
-    const fit = resolveShapeAutofitBox(shape, box, ctx, 1, {});
+    const fit = retainedAutofitBox(shape, box, ctx);
     expect(fit.w, `grew past authored 30 (fit.w=${fit.w})`).toBeGreaterThan(45);
     expect(fit.x, 'authored LEFT edge fixed').toBe(100);
     expect(fit.y, 'top unchanged').toBe(50);
@@ -95,7 +110,7 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
     // Box physical 200w × 100h. 5 CJK ⇒ 1 column ⇒ required cross width ≪ 200.
     const shape = verticalTextbox(CJK.repeat(5), 'eaVert', 'sp');
     const box = { x: 100, y: 50, w: 200, h: 100 };
-    const fit = resolveShapeAutofitBox(shape, box, ctx, 1, {});
+    const fit = retainedAutofitBox(shape, box, ctx);
     expect(fit.w, `shrank below authored 200 (fit.w=${fit.w})`).toBeLessThan(40);
     expect(fit.w, 'still positive').toBeGreaterThan(0);
     expect(fit.x, 'authored LEFT edge fixed').toBe(100);
@@ -107,7 +122,7 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
     const ctx = makeMeasureCtx();
     const shape = verticalTextbox(CJK.repeat(60), 'eaVert', 'none');
     const box = { x: 100, y: 50, w: 30, h: 100 };
-    const fit = resolveShapeAutofitBox(shape, box, ctx, 1, {});
+    const fit = retainedAutofitBox(shape, box, ctx);
     expect(fit).toEqual(box);
   });
 
@@ -116,7 +131,7 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
     for (const mode of ['vert', 'vert270', 'eaVert', 'mongolianVert']) {
       const shape = verticalTextbox(CJK.repeat(60), mode, 'sp');
       const box = { x: 0, y: 0, w: 30, h: 100 };
-      const fit = resolveShapeAutofitBox(shape, box, ctx, 1, {});
+      const fit = retainedAutofitBox(shape, box, ctx);
       expect(fit.w, `${mode} grew width`).toBeGreaterThan(45);
       expect(fit.h, `${mode} kept height`).toBe(100);
     }
@@ -128,7 +143,7 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
     // height grows well past 20; width stays 200.
     const shape = verticalTextbox(CJK.repeat(60), null, 'sp');
     const box = { x: 100, y: 50, w: 200, h: 20 };
-    const fit = resolveShapeAutofitBox(shape, box, ctx, 1, {});
+    const fit = retainedAutofitBox(shape, box, ctx);
     expect(fit.w, 'width unchanged for a horizontal box').toBe(200);
     expect(fit.h, 'height grew to the line stack').toBeGreaterThan(20);
     expect(fit.x, 'x unchanged').toBe(100);
@@ -144,13 +159,13 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
     const shape = verticalTextbox(CJK.repeat(60), 'eaVert', 'sp');
     (shape as unknown as { textBlocks: ShapeText[] }).textBlocks.push(imgBlock);
     const box = { x: 10, y: 10, w: 30, h: 100 };
-    const fit = resolveShapeAutofitBox(shape, box, ctx, 1, {});
+    const fit = retainedAutofitBox(shape, box, ctx);
     expect(fit).toEqual(box);
   });
 
   it('inset-axis mapping: tIns/bIns add to the CROSS (width) extent (not the column length)', () => {
-    // measureShapeTextAutoFitHeight returns `tIns + contentH + bIns` and is called
-    // with the wrap width = physical HEIGHT, so tIns/bIns land on the physical
+    // Retained acquisition returns `tIns + contentH + bIns` on the fitted axis;
+    // the wrap width is physical HEIGHT, so tIns/bIns land on the physical
     // WIDTH (cross) axis. Two boxes with identical content + identical h differ
     // only by tIns/bIns ⇒ the grown widths differ by exactly 2·tb.
     const ctx = makeMeasureCtx();
@@ -164,8 +179,8 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
       } as unknown as ShapeRun;
     };
     const box = { x: 0, y: 0, w: 30, h: 100 };
-    const w0 = resolveShapeAutofitBox(mk(0), box, ctx, 1, {}).w;
-    const w7 = resolveShapeAutofitBox(mk(7), box, ctx, 1, {}).w;
+    const w0 = retainedAutofitBox(mk(0), box, ctx).w;
+    const w7 = retainedAutofitBox(mk(7), box, ctx).w;
     expect(w7 - w0, 'tIns+bIns=2·7 added to the cross width').toBeCloseTo(14, 5);
   });
 
@@ -184,8 +199,8 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
       } as unknown as ShapeRun;
     };
     const box = { x: 0, y: 0, w: 30, h: 100 };
-    const wNarrowInset = resolveShapeAutofitBox(mk(0), box, ctx, 1, {}).w;
-    const wWideInset = resolveShapeAutofitBox(mk(25), box, ctx, 1, {}).w;
+    const wNarrowInset = retainedAutofitBox(mk(0), box, ctx).w;
+    const wWideInset = retainedAutofitBox(mk(25), box, ctx).w;
     expect(wWideInset, 'shorter columns from bigger lIns/rIns pack into more columns ⇒ wider')
       .toBeGreaterThan(wNarrowInset);
   });
@@ -194,8 +209,8 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
     const ctx = makeMeasureCtx();
     const noText = { type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null, textVert: 'eaVert', textAutofit: 'sp' } as unknown as ShapeRun;
     const box = { x: 1, y: 2, w: 3, h: 4 };
-    expect(resolveShapeAutofitBox(noText, box, ctx, 1, {})).toEqual(box);
+    expect(retainedAutofitBox(noText, box, ctx)).toEqual(box);
     const notSp = verticalTextbox(CJK.repeat(60), 'eaVert', null);
-    expect(resolveShapeAutofitBox(notSp, { ...box }, ctx, 1, {})).toEqual(box);
+    expect(retainedAutofitBox(notSp, { ...box }, ctx)).toEqual(box);
   });
 });

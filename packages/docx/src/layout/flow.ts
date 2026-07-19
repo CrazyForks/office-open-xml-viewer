@@ -44,6 +44,9 @@ export function layoutFlowBlocks(
     throw new LayoutInvariantError('INVALID_GEOMETRY', `${input.container.id} has invalid bounds`);
   }
   const containerBottom = input.container.bounds.yPt + input.container.bounds.heightPt;
+  const capacityBottom = input.container.capacity === 'unbounded'
+    ? Number.MAX_SAFE_INTEGER
+    : containerBottom;
   const containerRight = input.container.bounds.xPt + input.container.bounds.widthPt;
   if (!Number.isFinite(cursor.xPt)
     || !Number.isFinite(cursor.yPt)
@@ -62,7 +65,7 @@ export function layoutFlowBlocks(
         xPt: input.container.bounds.xPt,
         yPt: cursor.yPt,
         widthPt: input.container.bounds.widthPt,
-        heightPt: Math.max(0, containerBottom - cursor.yPt),
+        heightPt: Math.max(0, capacityBottom - cursor.yPt),
       },
     };
     const result = block.kind === 'paragraph'
@@ -74,7 +77,8 @@ export function layoutFlowBlocks(
         `${result.layout.id} belongs to ${result.layout.flowDomainId}, not ${input.container.id}`,
       );
     }
-    if (Number.isFinite(result.nextCursor.yPt)
+    if (input.container.capacity !== 'unbounded'
+      && Number.isFinite(result.nextCursor.yPt)
       && result.nextCursor.yPt > containerBottom) {
       throw new FlowCapacityExceededError(input.container.id, result.layout.id);
     }
@@ -97,7 +101,9 @@ export function layoutFlowBlocks(
     flowDomainId: input.container.id,
     flowBounds: unionBounds(blocks.map((block) => block.flowBounds), input.container.bounds),
     inkBounds: unionBounds(blocks.map((block) => block.inkBounds), input.container.bounds),
-    clipBounds: input.container.bounds,
+    ...(input.container.capacity === 'unbounded'
+      ? {}
+      : { clipBounds: input.container.bounds }),
     advancePt: cursor.yPt - input.cursor.yPt,
     ordinaryFlow: true,
   };

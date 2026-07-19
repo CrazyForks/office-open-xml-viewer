@@ -297,12 +297,29 @@ function translateTextBoxWithContext(
   return {
     ...textBox,
     flowBounds: translateRect(textBox.flowBounds, delta), inkBounds: translateRect(textBox.inkBounds, delta),
-    ...(textBox.clipBounds ? { clipBounds: translateRect(textBox.clipBounds, delta) } : {}),
+    ...(textBox.clipBounds ? { clipBounds: pageRelativeContent
+      ? translateRect(textBox.clipBounds, delta) : textBox.clipBounds } : {}),
     ...(textBox.contentBounds ? { contentBounds: pageRelativeContent
       ? translateRect(textBox.contentBounds, delta) : textBox.contentBounds } : {}),
-    paragraphs: pageRelativeContent
-      ? textBox.paragraphs.map((paragraph) => translateParagraphWithContext(paragraph, delta, context))
-      : textBox.paragraphs,
+    transform: pageRelativeContent ? textBox.transform : {
+      ...textBox.transform,
+      e: textBox.transform.e + delta.xPt,
+      f: textBox.transform.f + delta.yPt,
+    },
+    story: pageRelativeContent ? {
+      ...textBox.story,
+      flowBounds: translateRect(textBox.story.flowBounds, delta),
+      inkBounds: translateRect(textBox.story.inkBounds, delta),
+      ...(textBox.story.clipBounds
+        ? { clipBounds: translateRect(textBox.story.clipBounds, delta) } : {}),
+      blocks: textBox.story.blocks.map((block) => {
+        if (block.kind === 'paragraph') {
+          return translateParagraphWithContext(block, delta, context);
+        }
+        if (block.kind === 'table') return translateTableLayout(block, delta);
+        throw new Error(`Text-box story contains unsupported retained node: ${block.kind}`);
+      }),
+    } : textBox.story,
   };
 }
 

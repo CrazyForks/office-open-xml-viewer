@@ -125,7 +125,15 @@ function textBox(id: string, ownerText: string, nestedDrawings: readonly Drawing
   return {
     kind: 'textbox', id, source: source([90]), flowDomainId: 'body', ordinaryFlow: false,
     flowBounds: bounds, inkBounds: bounds, advancePt: 0,
-    paragraphs: [paragraph(`${id}-paragraph`, ownerText, nestedDrawings)],
+    story: {
+      story: 'textbox',
+      flowBounds: bounds,
+      inkBounds: bounds,
+      blocks: [paragraph(`${id}-paragraph`, ownerText, nestedDrawings)],
+      advancePt: 10,
+      diagnostics: [],
+    },
+    transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
     writingMode: 'horizontal-tb',
     insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
   };
@@ -608,7 +616,16 @@ describe('canonical body drawing z-order', () => {
       source: source([99]),
       flowDomainId: 'body', ordinaryFlow: false,
       flowBounds: bounds, inkBounds: bounds, advancePt: 0,
-      paragraphs: [], writingMode: 'horizontal-tb',
+      story: {
+        story: 'body',
+        flowBounds: bounds,
+        inkBounds: bounds,
+        blocks: [],
+        advancePt: 0,
+        diagnostics: [],
+      },
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      writingMode: 'horizontal-tb',
       insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
     } as PaintNode;
     const layout = page([unsupported]);
