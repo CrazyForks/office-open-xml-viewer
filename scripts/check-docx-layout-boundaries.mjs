@@ -18,7 +18,9 @@ const PARSER_MODEL = `${DOCX_SOURCE}/parser-model.ts`;
 const BODY_LAYOUT_ADAPTER = `${DOCX_SOURCE}/body-layout-input.ts`;
 const PARAGRAPH_ANCHOR_FRAME_ADAPTER = `${DOCX_SOURCE}/paragraph-anchor-frame-adapter.ts`;
 const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
+const TEXT_RUN_PROJECTION_ADAPTER = `${DOCX_SOURCE}/text-run-projection.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
+const LAYOUT_AFFINE = `${LAYOUT_SOURCE}/affine.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
 const LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL = 'normalizeInternalDocumentModel';
 
@@ -56,6 +58,22 @@ const PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS = new Set([
 const WORKER_LAYOUT_RETENTION_DECLARATIONS = new Set([
   'RetainedRenderWorkerDocumentLayout',
   'retainRenderWorkerDocumentLayout',
+]);
+const TEXT_RUN_PROJECTION_ADAPTER_DECLARATIONS = new Set([
+  'SelectedTextRunsForPageOptions',
+  'TextRunsForPageOptions',
+  'projectTextRun',
+  'textRunsForPage',
+  'textRunsForSelectedPage',
+]);
+const LAYOUT_AFFINE_EXPORTS = new Set([
+  'composeAffine',
+  'inverseMapAffinePoint',
+  'inverseMapAffineVector',
+  'mapAffinePoint',
+  'quarterTurnAffine',
+  'scaleAffine',
+  'translationAffine',
 ]);
 const BODY_KERNEL_IMPLEMENTATION_DECLARATIONS = new Set(['createConcreteBodyLayoutKernel']);
 const BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS = new Map([
@@ -313,6 +331,8 @@ function paintBoundaryViolations(root) {
   const graph = dependencyGraph(root);
   const paintRoot = resolve(root, PAINT_SOURCE);
   const layoutTypes = resolve(root, LAYOUT_SOURCE, 'types.ts');
+  const layoutAffine = resolve(root, LAYOUT_AFFINE);
+  const paintAffine = resolve(root, PAINT_SOURCE, 'affine.ts');
   const entries = [...graph.keys()].filter((path) => path.startsWith(`${paintRoot}${sep}`));
   const violations = [];
   const nonLiteral = [];
@@ -352,7 +372,14 @@ function paintBoundaryViolations(root) {
         }
         const chain = [...current.chain, dependency];
         const insidePaint = dependency.startsWith(`${paintRoot}${sep}`);
-        const allowedContract = edge.typeOnly && dependency === layoutTypes;
+        const allowedAffineContract = current.path === paintAffine
+          && dependency === layoutAffine
+          && edge.kind === 'export'
+          && !edge.typeOnly
+          && edge.importedNames?.length === LAYOUT_AFFINE_EXPORTS.size
+          && edge.importedNames.every((name) => LAYOUT_AFFINE_EXPORTS.has(name));
+        const allowedContract = (edge.typeOnly && dependency === layoutTypes)
+          || allowedAffineContract;
         if (!insidePaint && !allowedContract) {
           violations.push(chain.map((path) => posixPath(relative(root, path))));
           continue;
@@ -473,6 +500,108 @@ function assertCoordinateSpaceRuntimeDependencies(root) {
     const dependency = resolveLocalImport(pageFactory, edge.specifier);
     if (!dependency || !runtimeTargets.has(dependency)) {
       fail('COORDINATE_SPACE_RUNTIME_DEPENDENCY', detail);
+    }
+  }
+}
+
+function assertAffineRuntimeDependencies(root) {
+  const affine = resolve(root, LAYOUT_AFFINE);
+  if (!existsSync(affine)) {
+    fail('AFFINE_RUNTIME_DEPENDENCY', `missing ${LAYOUT_AFFINE}`);
+  }
+  for (const edge of moduleEdges(affine)) {
+    const detail = `${LAYOUT_AFFINE} -> ${edge.specifier}`;
+    if (edge.kind !== 'import' || !edge.literal || edge.bare || !edge.typeOnly
+      || edge.specifier !== './types.js') {
+      fail('AFFINE_RUNTIME_DEPENDENCY', detail);
+    }
+  }
+}
+
+function assertTextRunProjectionAdapterBoundary(root) {
+  const adapter = resolve(root, TEXT_RUN_PROJECTION_ADAPTER);
+  if (!existsSync(adapter)) return;
+  const declarationCounts = new Map();
+  const source = sourceFile(adapter);
+  for (const statement of source.statements) {
+    if (ts.isExportDeclaration(statement)) {
+      fail('TEXT_RUN_PROJECTION_DECLARATION', statement.getText(source));
+    }
+    for (const name of declarationNames(statement)) {
+      if (!TEXT_RUN_PROJECTION_ADAPTER_DECLARATIONS.has(name)) {
+        fail('TEXT_RUN_PROJECTION_DECLARATION', name);
+      }
+      declarationCounts.set(name, (declarationCounts.get(name) ?? 0) + 1);
+      const shouldExport = name !== 'projectTextRun';
+      if (hasExportModifier(statement) !== shouldExport) {
+        fail('TEXT_RUN_PROJECTION_DECLARATION', name);
+      }
+    }
+  }
+  for (const name of TEXT_RUN_PROJECTION_ADAPTER_DECLARATIONS) {
+    if (declarationCounts.get(name) !== 1) {
+      fail(
+        'TEXT_RUN_PROJECTION_DECLARATION',
+        `${name} count ${declarationCounts.get(name) ?? 0}`,
+      );
+    }
+  }
+  const expected = new Map([
+    ['@silurus/ooxml-core', [
+      { typeOnly: false, names: ['PT_TO_PX', 'canvasFontString'] },
+    ]],
+    [`${DOCX_SOURCE}/renderer.ts`, [
+      { typeOnly: true, names: ['DocxTextRunInfo'] },
+    ]],
+    [`${LAYOUT_SOURCE}/affine.ts`, [
+      { typeOnly: false, names: ['composeAffine', 'mapAffinePoint', 'scaleAffine'] },
+    ]],
+    [`${LAYOUT_SOURCE}/document-layout-variants.ts`, [
+      { typeOnly: false, names: ['selectDocumentLayoutPage'] },
+    ]],
+    [`${LAYOUT_SOURCE}/text-index.ts`, [
+      { typeOnly: false, names: ['textRunGeometryForPage'] },
+      { typeOnly: true, names: ['TextRunGeometry'] },
+    ]],
+    [`${LAYOUT_SOURCE}/types.ts`, [
+      { typeOnly: true, names: ['DocumentLayout', 'LayoutServices', 'Matrix2DData'] },
+    ]],
+    [`${PAINT_SOURCE}/affine.ts`, [
+      { typeOnly: false, names: ['cssTransformFor'] },
+    ]],
+  ]);
+  const actual = new Map();
+  for (const edge of moduleEdges(adapter)) {
+    if (edge.kind !== 'import' || !edge.literal || edge.bare || edge.aliased
+      || edge.specifier.includes('?') || edge.specifier.includes('#')) {
+      fail('TEXT_RUN_PROJECTION_IMPORT', `${TEXT_RUN_PROJECTION_ADAPTER} -> ${edge.specifier}`);
+    }
+    const key = edge.specifier.startsWith('.')
+      ? (() => {
+          const target = resolveLocalImport(adapter, edge.specifier);
+          return target ? posixPath(relative(root, target)) : null;
+        })()
+      : edge.specifier;
+    if (key === null || !expected.has(key)) {
+      fail('TEXT_RUN_PROJECTION_IMPORT', `${TEXT_RUN_PROJECTION_ADAPTER} -> ${edge.specifier}`);
+    }
+    const entries = actual.get(key) ?? [];
+    entries.push({
+      typeOnly: edge.typeOnly,
+      names: [...(edge.importedNames ?? [])].sort(),
+    });
+    actual.set(key, entries);
+  }
+  const normalize = (entries) => [...entries]
+    .map(({ typeOnly, names }) => `${typeOnly ? 'type' : 'value'}:${[...names].sort().join(',')}`)
+    .sort();
+  for (const [key, expectedEntries] of expected) {
+    const actualEntries = actual.get(key) ?? [];
+    if (JSON.stringify(normalize(actualEntries)) !== JSON.stringify(normalize(expectedEntries))) {
+      fail(
+        'TEXT_RUN_PROJECTION_IMPORT',
+        `${TEXT_RUN_PROJECTION_ADAPTER} -> ${key} expected ${normalize(expectedEntries).join('|')}, received ${normalize(actualEntries).join('|')}`,
+      );
     }
   }
 }
@@ -3081,11 +3210,13 @@ function declarationInventory(root, allowTransitionalAdapter = false) {
           && PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS.has(name);
         const plannedWorkerLayoutRetention = file === WORKER_LAYOUT_RETENTION
           && WORKER_LAYOUT_RETENTION_DECLARATIONS.has(name);
+        const plannedTextRunProjectionAdapter = file === TEXT_RUN_PROJECTION_ADAPTER
+          && TEXT_RUN_PROJECTION_ADAPTER_DECLARATIONS.has(name);
         const plannedBodyKernelImplementation = file === `${DOCX_SOURCE}/renderer.ts`
           && BODY_KERNEL_IMPLEMENTATION_DECLARATIONS.has(name);
         if (!migrationOwner && !plannedRendererAdapter && !plannedBodyLayoutAdapter
           && !transitionalParagraphAnchorAdapter && !plannedWorkerLayoutRetention
-          && !plannedBodyKernelImplementation) {
+          && !plannedTextRunProjectionAdapter && !plannedBodyKernelImplementation) {
           nonLayoutDeclarationKeys.push(key);
         }
         if (LEGACY_SYMBOLS.includes(name)) {
@@ -3421,6 +3552,7 @@ function assertFinalRendererAdapter(root) {
     const rel = posixPath(relative(root, target));
     const allowed = rel.startsWith(`${LAYOUT_SOURCE}/`)
       || rel.startsWith(`${PAINT_SOURCE}/`)
+      || rel === TEXT_RUN_PROJECTION_ADAPTER
       || (edge.typeOnly && rel === `${DOCX_SOURCE}/types.ts`);
     if (!allowed) fail('FINAL_ADAPTER_IMPORT', `${DOCX_SOURCE}/renderer.ts -> ${rel}`);
   }
@@ -3453,6 +3585,8 @@ export function checkDocxLayoutBoundaries(options) {
   assertNoDeletedPageProducerIdentifiers(root);
   assertPaintBoundaries(root);
   assertCapabilityBoundaries(root);
+  assertAffineRuntimeDependencies(root);
+  assertTextRunProjectionAdapterBoundary(root);
   assertCoordinateSpaceRuntimeDependencies(root);
   assertOccurrenceProjectionRuntimeDependencies(root);
   assertBodyPaintConsumesRetainedLayout(root);

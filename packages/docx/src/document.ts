@@ -34,7 +34,7 @@ import type {
 } from './worker-protocol';
 import { normalizeInternalDocumentModel } from './parser-model.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
-import { textRunsForSelectedPage } from './layout/text-index.js';
+import { textRunsForSelectedPage } from './text-run-projection.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the

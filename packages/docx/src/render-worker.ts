@@ -28,7 +28,7 @@ import {
   retainRenderWorkerDocumentLayout,
   type RetainedRenderWorkerDocumentLayout,
 } from './render-worker-layout.js';
-import { textRunsForSelectedPage } from './layout/text-index.js';
+import { textRunsForSelectedPage } from './text-run-projection.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
 // embedded-font read) recycles the instance so the next document renders on

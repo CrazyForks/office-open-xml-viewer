@@ -20,7 +20,7 @@ import { DocxDocument } from './document.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { stableFingerprint } from './layout/fingerprint.js';
 import { buildBookmarkPageMap } from './bookmark-nav.js';
-import { textRunsForSelectedPage } from './layout/text-index.js';
+import { textRunsForSelectedPage } from './text-run-projection.js';
 
 function services(): LayoutServices {
   return Object.freeze({

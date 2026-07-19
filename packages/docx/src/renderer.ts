@@ -392,7 +392,7 @@ import {
   drawUprightBox,
   physicalToLogicalAnchorBox,
 } from './vertical-text.js';
-import { textRunsForPage } from './layout/text-index.js';
+import { textRunsForPage } from './text-run-projection.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',

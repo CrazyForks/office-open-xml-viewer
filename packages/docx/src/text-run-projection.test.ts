@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { CanvasFontRoute } from '@silurus/ooxml-core';
-import { buildPageLayers } from './page-layers.js';
-import { textRunsForPage } from './text-index.js';
+import { buildPageLayers } from './layout/page-layers.js';
+import { textRunGeometryForPage } from './layout/text-index.js';
+import { textRunsForPage } from './text-run-projection.js';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -12,11 +13,12 @@ import type {
   PageLayers,
   ParagraphPlacement,
   ParagraphLayout,
+  ResolvedFloatingTablePlacementLayout,
   SourceRef,
   TableLayout,
   TextBoxLayout,
   TextPlacement,
-} from './types.js';
+} from './layout/types.js';
 
 const fontRoute = Object.freeze({
   familyList: '"Index Sans"',
@@ -234,6 +236,49 @@ function anchoredDrawing(
   });
 }
 
+function resolvedFloatingTable(
+  child: TableLayout,
+  xPt: number,
+  yPt: number,
+): ResolvedFloatingTablePlacementLayout {
+  const bounds = rect(xPt, yPt, child.flowBounds.widthPt, child.flowBounds.heightPt);
+  return Object.freeze({
+    kind: 'resolved-floating-table-placement',
+    occurrenceId: `resolved:${child.id}`,
+    xPt,
+    yPt,
+    bounds,
+    exclusionBounds: bounds,
+    overlap: 'overlap',
+    child,
+    source: Object.freeze({
+      kind: 'floating-table-placement',
+      occurrenceId: `source:${child.id}`,
+      ownership: 'source',
+      physicalPageIndex: 0,
+      displayPageNumber: 1,
+      hostCellId: 'host-cell',
+      sourceBlockIndex: 0,
+      anchorBlockIndex: 0,
+      tableId: child.id,
+      overlap: 'overlap',
+      positioning: Object.freeze({
+        leftFromTextPt: 0,
+        rightFromTextPt: 0,
+        topFromTextPt: 0,
+        bottomFromTextPt: 0,
+        horzAnchor: 'page',
+        horzSpecified: true,
+        vertAnchor: 'page',
+        xPt,
+        yPt,
+      }),
+      anchorBounds: rect(),
+      child,
+    }),
+  });
+}
+
 function note(id: string, text: string): NoteLayout {
   const bounds = rect();
   return Object.freeze({
@@ -415,6 +460,65 @@ describe('textRunsForPage', () => {
       })]);
   });
 
+  it('uses the first section region for an unbound note domain, matching paint', () => {
+    const footnote = note('fallback-note', 'N');
+    const layers = buildPageLayers([
+      { layer: 'notes', node: footnote, coordinateSpace: 'section-logical' },
+    ]);
+    const fallbackPage = page(layers, [footnote.id]);
+    const logicalToPhysical = Object.freeze({
+      a: 0, b: 1, c: -1, d: 0, e: 200, f: 0,
+    });
+    const physicalToLogical = Object.freeze({
+      a: 0, b: -1, c: 1, d: 0, e: 0, f: 200,
+    });
+    const transformedPage: LayoutPage = {
+      ...fallbackPage,
+      flowDomains: fallbackPage.flowDomains.map((domain) => (
+        domain.id === 'footnote:domain'
+          ? { ...domain, sectionRegionId: undefined }
+          : domain
+      )),
+      sectionRegions: fallbackPage.sectionRegions.map((region) => ({
+        ...region,
+        coordinateSpace: {
+          writingMode: 'vertical-rl',
+          logicalToPhysical,
+          physicalToLogical,
+        },
+      })),
+    };
+
+    expect(textRunsForPage(documentLayout(transformedPage), 0, { scale: 1 }))
+      .toEqual([expect.objectContaining({
+        text: 'N',
+        x: 200,
+        y: 0,
+        transform: 'rotate(90deg)',
+      })]);
+  });
+
+  it('rejects a note domain whose retained section region is missing, matching paint', () => {
+    const footnote = note('dangling-note', 'N');
+    const layers = buildPageLayers([
+      { layer: 'notes', node: footnote, coordinateSpace: 'section-logical' },
+    ]);
+    const danglingPage = page(layers, [footnote.id]);
+    const invalidPage: LayoutPage = {
+      ...danglingPage,
+      flowDomains: danglingPage.flowDomains.map((domain) => (
+        domain.id === 'footnote:domain'
+          ? { ...domain, kind: 'endnote', sectionRegionId: 'missing-region' }
+          : domain
+      )),
+    };
+
+    expect(() => textRunsForPage(documentLayout(invalidPage), 0, { scale: 1 }))
+      .toThrow(
+        'footnote:domain references missing page story region missing-region',
+      );
+  });
+
   it('composes nested table-cell placements without paint callbacks', () => {
     const child = paragraph('nested-cell-paragraph', 'body', [
       placement('nested', 2, 3),
@@ -434,6 +538,40 @@ describe('textRunsForPage', () => {
       x: 32,
       y: 57,
     })]);
+  });
+
+  it('projects resolved floating tables from absolute retained page coordinates', () => {
+    const floatingText = paragraph('floating-paragraph', 'body', [
+      placement('FLOAT', 2, 3),
+    ]);
+    const floating = table('floating-table', floatingText);
+    const hostBase = table(
+      'host-table',
+      paragraph('host-paragraph', 'body', []),
+    );
+    const host: TableLayout = Object.freeze({
+      ...hostBase,
+      resolvedFloatingTables: Object.freeze([
+        resolvedFloatingTable(floating, 70, 90),
+      ]),
+    });
+    const outer = table('outer-table', host);
+    const layers = buildPageLayers([
+      { layer: 'body', node: outer, coordinateSpace: 'section-logical' },
+    ]);
+    const layout = documentLayout(page(layers, [outer.id]));
+
+    const geometry = textRunGeometryForPage(layout, 0);
+    const floatingGeometry = geometry.find(({ placement: run }) => run.text === 'FLOAT');
+    expect(floatingGeometry).toMatchObject({
+      pointToPage: { a: 1, b: 0, c: 0, d: 1, e: 85, f: 117 },
+    });
+    expect(textRunsForPage(layout, 0, { scale: 2 }))
+      .toEqual([expect.objectContaining({
+        text: 'FLOAT',
+        x: 174,
+        y: 240,
+      })]);
   });
 
   it('recursively visits anchors inside an owned text-box local stacking context', () => {
@@ -498,7 +636,7 @@ describe('textRunsForPage', () => {
       verticalOwnership: 'host',
     });
     const body = paragraph('body', 'body', [placement('B', 0, 0)], {
-      drawings: [secondDrawing, firstDrawing],
+      drawings: [firstDrawing, secondDrawing],
       textBoxes: [secondBox, firstBox],
     });
     const built = buildPageLayers([
@@ -572,5 +710,50 @@ describe('textRunsForPage', () => {
       w: 20,
       h: 20,
     });
+  });
+
+  it('keeps the single retained drawings-array ordinal when anchor metadata is mixed', () => {
+    const anchoredBox = textBox('anchored-box', 'A');
+    const inlineBox = textBox('inline-box', 'I');
+    const anchored = anchoredDrawing('anchored-drawing', anchoredBox.id, {
+      behindDoc: false,
+      relativeHeight: 1,
+      sourceOrder: 50,
+    });
+    const { anchorLayer: _anchorLayer, ...inlineDrawing } = anchoredDrawing(
+      'inline-drawing',
+      inlineBox.id,
+      {
+        behindDoc: false,
+        relativeHeight: 1,
+        sourceOrder: 0,
+      },
+    );
+    const body = paragraph('body', 'body', [placement('B', 0, 0)], {
+      drawings: [anchored, inlineDrawing],
+      textBoxes: [anchoredBox, inlineBox],
+    });
+    const layers = buildPageLayers([
+      { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+    ]);
+
+    expect(textRunsForPage(
+      documentLayout(page(layers, [body.id])),
+      0,
+      { scale: 1 },
+    ).map((run) => run.text)).toEqual(['B', 'A', 'I']);
+  });
+
+  it.each([0, -1, Number.NaN])('rejects a non-positive display scale %s', (scale) => {
+    const body = paragraph('body', 'body', [placement('B', 0, 0)]);
+    const layers = buildPageLayers([
+      { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+    ]);
+
+    expect(() => textRunsForPage(
+      documentLayout(page(layers, [body.id])),
+      0,
+      { scale },
+    )).toThrow(`Text projection scale must be positive: ${scale}`);
   });
 });

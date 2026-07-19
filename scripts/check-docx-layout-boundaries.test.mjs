@@ -77,6 +77,9 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
     "import { snapshotPlainData } from './plain-data.js';\nexport const project = snapshotPlainData;\n");
   write(root, 'packages/docx/src/layout/types.ts',
     'export interface PointPt { xPt: number; yPt: number }\n');
+  write(root, 'packages/docx/src/layout/affine.ts',
+    "import type { PointPt } from './types.js';\n"
+      + 'export const composeAffine = (point: PointPt) => point;\n');
   write(root, 'packages/docx/src/layout/coordinate-space.ts',
     "import type { PointPt } from './types.js';\nexport const coordinate = (point: PointPt) => point;\n");
   write(root, 'packages/docx/src/layout/page-graph.ts', 'export const PAGE_LAYER_IDS = [];\n');
@@ -331,6 +334,24 @@ test('coordinate-space and page-factory accept only their explicit dependencies'
   }
 });
 
+test('layout affine algebra is a pinned type-only dependency seam', () => {
+  assert.equal(runChecker(initializeCanonicalFixture(), '--final').status, 0);
+  for (const [name, source] of [
+    ['runtime layout', "import { coordinate } from './coordinate-space.js';\nexport const composeAffine = coordinate;\n"],
+    ['paint', "import { cssTransformFor } from '../paint/affine.js';\nexport const composeAffine = cssTransformFor;\n"],
+    ['package', "import value from 'canvas';\nexport const composeAffine = value;\n"],
+    ['dynamic', "export const composeAffine = import('./types.js');\n"],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-affine-${name}-`);
+    write(root, 'packages/docx/src/layout/affine.ts', source);
+    expectDiagnostic(root, 'AFFINE_RUNTIME_DEPENDENCY', name, '--final');
+  }
+
+  const missing = initializeCanonicalFixture('docx-layout-boundary-affine-missing-');
+  rmSync(join(missing, 'packages/docx/src/layout/affine.ts'));
+  expectDiagnostic(missing, 'AFFINE_RUNTIME_DEPENDENCY', 'missing affine seam', '--final');
+});
+
 test('page-factory may retain section decoration geometry through its dedicated layout helper', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-page-decoration-');
   write(root, 'packages/docx/src/layout/column-separators.ts',
@@ -412,6 +433,32 @@ test('paint imports only retained layout contracts and reviewed atomic core pain
     write(root, 'packages/docx/src/paint/helper.ts', source);
     expectDiagnostic(root, 'FORBIDDEN_PAINT_EDGE', name, '--final');
   }
+});
+
+test('paint reaches layout affine algebra only through the exact reviewed facade', () => {
+  const names = [
+    'composeAffine',
+    'inverseMapAffinePoint',
+    'inverseMapAffineVector',
+    'mapAffinePoint',
+    'quarterTurnAffine',
+    'scaleAffine',
+    'translationAffine',
+  ];
+  const allowed = initializeCanonicalFixture('docx-layout-boundary-paint-affine-allowed-');
+  write(allowed, 'packages/docx/src/paint/affine.ts',
+    `export { ${names.join(', ')} } from '../layout/affine.js';\n`);
+  assert.equal(runChecker(allowed, '--final').status, 0);
+
+  const incomplete = initializeCanonicalFixture('docx-layout-boundary-paint-affine-incomplete-');
+  write(incomplete, 'packages/docx/src/paint/affine.ts',
+    `export { ${names.slice(0, -1).join(', ')} } from '../layout/affine.js';\n`);
+  expectDiagnostic(incomplete, 'FORBIDDEN_PAINT_EDGE', 'incomplete affine facade', '--final');
+
+  const direct = initializeCanonicalFixture('docx-layout-boundary-paint-affine-direct-');
+  write(direct, 'packages/docx/src/paint/helper.ts',
+    "import { composeAffine } from '../layout/affine.js';\nvoid composeAffine;\n");
+  expectDiagnostic(direct, 'FORBIDDEN_PAINT_EDGE', 'direct affine edge', '--final');
 });
 
 test('every reviewed atomic core paint binding remains explicitly allowed', () => {
@@ -889,6 +936,50 @@ test('final renderer rejects transitional exports, hidden algorithms, and non-la
     write(root, 'packages/docx/src/renderer.ts', source);
     expectDiagnostic(root, diagnostic, name, '--final');
   }
+});
+
+test('text-run projection has an exact root-adapter declaration surface', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-text-run-adapter-');
+  write(root, 'packages/docx/src/layout/text-index.ts',
+    'export interface TextRunGeometry {}\nexport function textRunGeometryForPage() { return []; }\n');
+  write(root, 'packages/docx/src/paint/affine.ts',
+    'export function cssTransformFor() {}\n');
+  const adapter = `
+import { canvasFontString, PT_TO_PX } from '@silurus/ooxml-core';
+import type { DocxTextRunInfo } from './renderer.js';
+import { composeAffine, mapAffinePoint, scaleAffine } from './layout/affine.js';
+import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
+import { textRunGeometryForPage } from './layout/text-index.js';
+import type { TextRunGeometry } from './layout/text-index.js';
+import type { DocumentLayout, LayoutServices, Matrix2DData } from './layout/types.js';
+import { cssTransformFor } from './paint/affine.js';
+export interface SelectedTextRunsForPageOptions {}
+export interface TextRunsForPageOptions {}
+function projectTextRun() { return [canvasFontString, composeAffine, mapAffinePoint, scaleAffine,
+  textRunGeometryForPage, cssTransformFor] satisfies unknown; }
+export function textRunsForPage(): DocxTextRunInfo[] { return projectTextRun() as DocxTextRunInfo[]; }
+export function textRunsForSelectedPage(
+  _services?: LayoutServices,
+  _layout?: DocumentLayout,
+  _matrix?: Matrix2DData,
+) { return [selectDocumentLayoutPage, PT_TO_PX, {} as TextRunGeometry]; }
+`;
+  write(root, 'packages/docx/src/text-run-projection.ts', adapter);
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/text-run-projection.ts',
+    `${adapter}\nexport const accidentalProjectionPolicy = true;\n`);
+  expectDiagnostic(
+    root,
+    'TEXT_RUN_PROJECTION_DECLARATION',
+    'extra text-run adapter declaration',
+    '--final',
+  );
+
+  write(root, 'packages/docx/src/hidden.ts', 'export const hidden = true;\n');
+  write(root, 'packages/docx/src/text-run-projection.ts',
+    `import { hidden } from './hidden.js';\n${adapter}\nvoid hidden;\n`);
+  expectDiagnostic(root, 'TEXT_RUN_PROJECTION_IMPORT', 'extra text-run adapter import', '--final');
 });
 
 test('final renderer import boundary rejects dynamic, bare, and unresolved imports exactly', () => {
