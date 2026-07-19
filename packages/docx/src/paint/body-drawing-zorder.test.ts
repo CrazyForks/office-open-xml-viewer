@@ -350,6 +350,22 @@ describe('canonical body drawing z-order', () => {
     expect(operations).toEqual(['text:BODY', 'text:LATER', 'drawing:owner', 'text:OWNED']);
   });
 
+  it('keeps anchors in a non-owned text-box story local when page anchors are materialized', () => {
+    const nested = drawing('nested', 'nested', false, 20, 2);
+    const local = textBox('local', 'LOCAL', [nested]);
+    const pageFront = drawing('page-front', 'page-front', false, 10, 1);
+    const layout = page([
+      paragraph('p1', 'BODY', [pageFront], [local]),
+    ]);
+    const { context, operations } = recordingPaintContext();
+
+    paintLayoutPageContent(layout, context);
+
+    expect(operations).toEqual([
+      'text:BODY', 'text:LOCAL', 'drawing:nested', 'drawing:page-front',
+    ]);
+  });
+
   it('paints a behind owner and its owned text box atomically before body ink', () => {
     const owned = textBox('owned', 'OWNED');
     const owner = drawing('owner', 'owner', true, 10, 1, [owned.id]);

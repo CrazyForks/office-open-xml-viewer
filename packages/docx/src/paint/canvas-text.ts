@@ -364,7 +364,12 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
     for (const drawing of front) paintDrawingWithTextBoxes(drawing);
   }
   for (const textBox of node.textBoxes) {
-    if (!ownedTextBoxIds.has(textBox.id)) paintTextBoxLayout(textBox, context);
+    if (!ownedTextBoxIds.has(textBox.id)) {
+      // Page materialization owns only anchors in the retained page root.
+      // A free-standing text-box story is a local stacking context, so its
+      // descendant anchors must not inherit the root's suppression flag.
+      paintTextBoxLayout(textBox, { ...context, omitAnchoredDrawings: false });
+    }
   }
 }
 
