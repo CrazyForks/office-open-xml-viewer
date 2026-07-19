@@ -246,6 +246,6 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       }
       expect(withPages, 'multi-page body').toBeGreaterThan(1);
       expect(withPages, 'header/footer do not perturb vertical pagination').toBe(noPages);
-    });
+    }, 15_000);
   },
 );

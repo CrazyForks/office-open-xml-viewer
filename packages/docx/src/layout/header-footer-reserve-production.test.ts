@@ -132,6 +132,7 @@ function emptyStoryLayout(source: SourceRef, heightPt: number): StoryLayout {
     inkBounds: bounds,
     blocks: [],
     advancePt: heightPt,
+    diagnostics: [],
   };
 }
 

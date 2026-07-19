@@ -90,6 +90,7 @@ import type {
   BodyFlowRegistryDeltaPt,
   DeepReadonly,
   DocumentLayout,
+  LayoutDiagnostic,
   LayoutServices,
   NoteLayout,
   PaintNode,
@@ -97,7 +98,7 @@ import type {
   SourceRef,
   TableLayout,
 } from './types.js';
-import { createPageLayers, type PageLayerNode } from './page-graph.js';
+import { createPageLayers, pageLayerNodes, type PageLayerNode } from './page-graph.js';
 import {
   translateNoteLayout,
   translateStoryLayout,
@@ -127,6 +128,34 @@ interface BodyBalanceTarget {
 }
 
 type BodyBalancePlan = ReadonlyMap<string, BodyBalanceTarget>;
+
+function nestedStoryDiagnostics(
+  node: PaintNode,
+  visited: WeakSet<object>,
+): readonly LayoutDiagnostic[] {
+  if (visited.has(node)) return [];
+  visited.add(node);
+  if (node.kind === 'paragraph') {
+    return node.textBoxes.flatMap((textBox) => nestedStoryDiagnostics(textBox, visited));
+  }
+  if (node.kind === 'table') {
+    return [
+      ...node.rows.flatMap((row) => row.cells.flatMap((cell) =>
+        cell.blocks.flatMap((block) => nestedStoryDiagnostics(block.layout, visited)))),
+      ...(node.floatingTables ?? []).flatMap((placement) =>
+        nestedStoryDiagnostics(placement.child, visited)),
+      ...(node.resolvedFloatingTables ?? []).flatMap((placement) =>
+        nestedStoryDiagnostics(placement.child, visited)),
+    ];
+  }
+  if (node.kind === 'textbox' || node.kind === 'note') {
+    return [
+      ...node.story.diagnostics,
+      ...node.story.blocks.flatMap((block) => nestedStoryDiagnostics(block, visited)),
+    ];
+  }
+  return [];
+}
 
 function assertFreshPageFootnoteAdmission(
   reservePt: number,
@@ -657,7 +686,10 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
     }
     return finalizeLayoutPage(draft.accumulator, pageNumber);
   });
-  const layout: DocumentLayout = { pages, diagnostics: [] };
+  const visited = new WeakSet<object>();
+  const diagnostics = pages.flatMap((page) =>
+    pageLayerNodes(page).flatMap(({ node }) => nestedStoryDiagnostics(node, visited)));
+  const layout: DocumentLayout = { pages, diagnostics };
   assertDocumentLayout(layout);
   return deepFreezeDocumentLayout(layout) as DocumentLayout;
 }

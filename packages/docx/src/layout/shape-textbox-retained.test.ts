@@ -69,7 +69,11 @@ describe('retained shape text-box acquisition', () => {
       },
     });
 
-    expect(layout?.paragraphs[0]?.lines.map((line) => line.range)).toEqual([
+    expect(layout?.story.blocks[0]?.kind).toBe('paragraph');
+    const paragraph = layout?.story.blocks[0];
+    expect(paragraph?.kind === 'paragraph'
+      ? paragraph.lines.map((line) => line.range)
+      : []).toEqual([
       { start: 0, end: 4 }, { start: 4, end: 8 }, { start: 8, end: 10 },
     ]);
     const resources: CanvasPaintResourcePainter = { paint() { throw new Error('unexpected resource'); } };

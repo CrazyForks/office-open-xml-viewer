@@ -261,8 +261,8 @@ function collectRetainedNodeIds(
     return;
   }
   if (node.kind === 'textbox') {
-    node.paragraphs.forEach((paragraph) =>
-      collectRetainedNodeIds(paragraph, pageIds, documentIds));
+    node.story.blocks.forEach((block) =>
+      collectRetainedNodeIds(block, pageIds, documentIds));
   }
 }
 
@@ -325,8 +325,8 @@ function requireRetainedCollisionGeometry(node: PaintNode, path: string): void {
     return;
   }
   if (node.kind === 'textbox') {
-    node.paragraphs.forEach((paragraph, index) =>
-      requireRetainedCollisionGeometry(paragraph, `${path}.paragraphs[${index}]`));
+    node.story.blocks.forEach((block, index) =>
+      requireRetainedCollisionGeometry(block, `${path}.story.blocks[${index}]`));
   }
 }
 

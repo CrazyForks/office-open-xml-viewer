@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { measureShapeTextAutoFitHeight } from './renderer';
-import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
+import {
+  acquireAndPaintShapeTextBox,
+  acquireShapeTextBoxForTest,
+} from './retained-shape-textbox.test-support.js';
 import type { ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 // ECMA-376 §20.1.10.83 ST_TextVerticalType — a DrawingML text-box body direction
@@ -593,7 +595,9 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
         text: '漢', fontSizePt: 10, fontFamily: 'NotInMetrics',
         ...(withRuby ? { ruby: { text: 'かん', fontSizePt: 5 } } : {}),
       }], 'eaVert');
-      return measureShapeTextAutoFitHeight(shape, 200, ctx, 1, {});
+      shape.textAutofit = 'sp';
+      return acquireShapeTextBoxForTest(shape, 0, 0, 200, 200, ctx, 1)
+        ?.flowBounds.widthPt ?? 0;
     };
     expect(measure(true) - measure(false), 'fitted extent grows by retained base/guide ink').toBeCloseTo(9, 5);
   });

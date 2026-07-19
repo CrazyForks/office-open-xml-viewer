@@ -387,7 +387,7 @@ function visitTextBoxBookmarks(
   textBox: TextBoxLayout,
   visit: (paragraph: ParagraphLayout) => void,
 ): void {
-  textBox.paragraphs.forEach((paragraph) => visitBookmarkParagraphs(paragraph, visit));
+  textBox.story.blocks.forEach((block) => visitBookmarkParagraphs(block, visit));
 }
 
 export function derivePageBookmarkStarts(

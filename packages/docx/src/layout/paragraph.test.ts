@@ -284,7 +284,17 @@ describe('layoutParagraph', () => {
       flowBounds: { xPt: 10, yPt: 24, widthPt: 20, heightPt: 10 },
       inkBounds: { xPt: 10, yPt: 24, widthPt: 20, heightPt: 10 },
       contentBounds: { xPt: 10, yPt: 25, widthPt: 20, heightPt: 8 },
-      advancePt: 0, paragraphs: [], writingMode: 'horizontal-tb',
+      advancePt: 0,
+      story: {
+        story: 'textbox' as const,
+        flowBounds: { xPt: 10, yPt: 25, widthPt: 0, heightPt: 0 },
+        inkBounds: { xPt: 10, yPt: 25, widthPt: 0, heightPt: 0 },
+        blocks: [],
+        advancePt: 0,
+        diagnostics: [],
+      },
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      writingMode: 'horizontal-tb',
       insets: { topPt: 1, rightPt: 0, bottomPt: 1, leftPt: 0 },
     } as const;
     const secondLine = {
@@ -477,7 +487,16 @@ describe('layoutParagraph', () => {
       flowDomainId: 'textbox', ordinaryFlow: false,
       flowBounds: { xPt: 0, yPt: 0, widthPt: 5, heightPt: 5 },
       inkBounds: { xPt: 0, yPt: 0, widthPt: 5, heightPt: 5 }, advancePt: 0,
-      paragraphs: [], writingMode: 'horizontal-tb',
+      story: {
+        story: 'textbox' as const,
+        flowBounds: { xPt: 0, yPt: 0, widthPt: 0, heightPt: 0 },
+        inkBounds: { xPt: 0, yPt: 0, widthPt: 0, heightPt: 0 },
+        blocks: [],
+        advancePt: 0,
+        diagnostics: [],
+      },
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      writingMode: 'horizontal-tb',
       insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
     } as const;
     const base = input();

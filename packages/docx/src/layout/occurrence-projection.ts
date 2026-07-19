@@ -69,7 +69,11 @@ function assertAcyclicLayoutGraph(root: ParagraphLayout | TableLayout): void {
     if (completed.has(layout)) return;
     visiting.add(layout);
     if (layout.kind === 'paragraph') {
-      for (const textBox of layout.textBoxes) for (const paragraph of textBox.paragraphs) visit(paragraph);
+      for (const textBox of layout.textBoxes) {
+        for (const block of textBox.story.blocks) {
+          if (block.kind === 'paragraph' || block.kind === 'table') visit(block);
+        }
+      }
     } else {
       for (const row of layout.rows) for (const cell of row.cells) {
         for (const block of cell.blocks) visit(block.layout);
@@ -239,7 +243,14 @@ export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
     const domain = nestedDomain('textbox', textBox.id);
     return {
       ...textBox, id: nodeId(textBox.id), flowDomainId: domain,
-      paragraphs: textBox.paragraphs.map((paragraph) => projectParagraph(paragraph, domain)),
+      story: {
+        ...textBox.story,
+        blocks: textBox.story.blocks.map((block) => {
+          if (block.kind === 'paragraph') return projectParagraph(block, domain);
+          if (block.kind === 'table') return projectTable(block, domain);
+          throw new Error(`Text-box story contains unsupported retained node: ${block.kind}`);
+        }),
+      },
     };
   };
   const projectParagraph = (paragraph: ParagraphLayout, domain: string): ParagraphLayout => {

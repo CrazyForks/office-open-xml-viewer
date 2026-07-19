@@ -129,6 +129,60 @@ describe('layoutStory', () => {
     expect(story.inkBounds).toEqual({ xPt: 10, yPt: 18, widthPt: 84, heightPt: 25 });
     expect(story.clipBounds).toEqual({ xPt: 12, yPt: 18, widthPt: 80, heightPt: 120 });
     expect(story.advancePt).toBe(25);
+    expect(story.diagnostics).toEqual([]);
+  });
+
+  it('keeps unsupported text-box markers diagnostic and delegates supported blocks once', () => {
+    const paragraphInput: ParagraphLayoutInput = {
+      kind: 'paragraph',
+      source: { story: 'textbox', storyInstance: 'shape:2', path: [0] },
+    };
+    const trailingInput: ParagraphLayoutInput = {
+      kind: 'paragraph',
+      source: { story: 'textbox', storyInstance: 'shape:2', path: [2] },
+    };
+    const layoutParagraph = vi.fn<BlockLayoutAlgorithms['layoutParagraph']>(
+      (block, placement) => ({
+        layout: paragraph(block, placement.container.id, placement.cursor.yPt, 10),
+        nextCursor: {
+          xPt: placement.cursor.xPt,
+          yPt: placement.cursor.yPt + 10,
+        },
+      }),
+    );
+    const ownedServices = services();
+    attachStoryBlockLayoutAlgorithms(ownedServices, {
+      layoutParagraph,
+      layoutTable() { throw new Error('not used'); },
+    });
+
+    const story = layoutStory({
+      source: { story: 'textbox', storyInstance: 'shape:2', path: [] },
+      container: {
+        id: 'textbox:shape:2',
+        kind: 'textbox',
+        bounds: { xPt: 4, yPt: 6, widthPt: 80, heightPt: 120 },
+      },
+      blocks: [
+        paragraphInput,
+        {
+          type: 'unsupportedTextBoxBlock',
+          qName: 'w:altChunk',
+          sourcePath: [1],
+        },
+        trailingInput,
+      ],
+    }, ownedServices);
+
+    expect(layoutParagraph).toHaveBeenCalledTimes(2);
+    expect(story.blocks.map((block) => block.source.path)).toEqual([[0], [2]]);
+    expect(story.advancePt).toBe(20);
+    expect(story.diagnostics).toEqual([{
+      code: 'UNSUPPORTED_FEATURE',
+      severity: 'warning',
+      source: { story: 'textbox', storyInstance: 'shape:2', path: [1] },
+      message: 'Unsupported text-box block w:altChunk',
+    }]);
   });
 
   it('retains an empty story at the container origin without inventing ink', () => {

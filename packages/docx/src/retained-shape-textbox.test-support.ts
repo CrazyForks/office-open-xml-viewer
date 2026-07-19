@@ -4,6 +4,7 @@ import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
 import { paintTextBoxLayout } from './paint/canvas-text.js';
 import { createLayoutServices, type DecodedImage, type RenderState } from './renderer.js';
 import { textBoxAcquisitionInput } from './parser-model.js';
+import type { TextBoxLayout } from './layout/types.js';
 import type { DocxDocumentModel, ShapeRun } from './types.js';
 
 function servicesFor(
@@ -24,18 +25,15 @@ function servicesFor(
   } as DocxDocumentModel, { measureContext: ctx });
 }
 
-/** Test-only adapter over the production retained APIs. It intentionally has no
- * production caller: tests use it to acquire once, then exercise measure-free
- * point-geometry paint at an arbitrary viewport scale. */
-export function acquireAndPaintShapeTextBox(
+/** Test-only adapter over the production retained acquisition API. */
+export function acquireShapeTextBoxForTest(
   shape: ShapeRun,
   x: number, y: number, w: number, h: number,
   ctx: CanvasRenderingContext2D,
   scale: number,
   fontFamilyClasses: Record<string, string> = {},
-  images: Map<string, DecodedImage> = new Map(),
   state?: RenderState,
-): void {
+): TextBoxLayout | undefined {
   const services = state?.layoutServices ?? servicesFor(ctx, fontFamilyClasses);
   const grid = state?.docGrid;
   const lineGridActive = grid?.linePitchPt != null && grid.linePitchPt > 0
@@ -57,7 +55,7 @@ export function acquireAndPaintShapeTextBox(
     mathDefJc: state?.mathDefJc,
   };
   const source = { story: 'textbox' as const, storyInstance: 'test-shape', path: [] as number[] };
-  const layout = acquireShapeTextBoxLayout(shape, {
+  return acquireShapeTextBoxLayout(shape, {
     xPt: x / scale, yPt: y / scale, widthPt: w / scale, heightPt: h / scale,
   }, {
     id: 'test-shape-textbox',
@@ -81,6 +79,23 @@ export function acquireAndPaintShapeTextBox(
     },
     input: textBoxAcquisitionInput(shape, source),
   });
+}
+
+/** Test-only adapter over the production retained APIs. It intentionally has no
+ * production caller: tests use it to acquire once, then exercise measure-free
+ * point-geometry paint at an arbitrary viewport scale. */
+export function acquireAndPaintShapeTextBox(
+  shape: ShapeRun,
+  x: number, y: number, w: number, h: number,
+  ctx: CanvasRenderingContext2D,
+  scale: number,
+  fontFamilyClasses: Record<string, string> = {},
+  images: Map<string, DecodedImage> = new Map(),
+  state?: RenderState,
+): void {
+  const layout = acquireShapeTextBoxForTest(
+    shape, x, y, w, h, ctx, scale, fontFamilyClasses, state,
+  );
   if (!layout) return;
   const viewportContext = scale === 1 ? ctx : new Proxy(ctx, {
     get(target, property) {
@@ -115,7 +130,8 @@ export function acquireAndPaintShapeTextBox(
     },
   });
   const imageByResourceKey = new Map<string, DecodedImage>();
-  layout.paragraphs.forEach((paragraph, blockIndex) => {
+  layout.story.blocks.forEach((paragraph, blockIndex) => {
+    if (paragraph.kind !== 'paragraph') return;
     const block = shape.textBlocks?.[blockIndex];
     const image = block?.imagePath ? images.get(block.imagePath) : undefined;
     if (!image) return;

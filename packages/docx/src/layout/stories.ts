@@ -12,10 +12,16 @@ import type {
   LayoutServices,
   NoteLayout,
   StoryLayout,
+  StoryBlockInput,
   StoryLayoutInput,
+  ParsedUnsupportedTextBoxBlock,
 } from './types.js';
 
 const storyBlockAlgorithms = new WeakMap<LayoutServices, BlockLayoutAlgorithms>();
+const isUnsupportedTextBoxBlock = (
+  block: StoryBlockInput,
+): block is ParsedUnsupportedTextBoxBlock =>
+  'type' in block && block.type === 'unsupportedTextBoxBlock';
 
 /**
  * Associate document/session-private paragraph and table acquisition with one
@@ -69,6 +75,7 @@ export function layoutStory(
   services: LayoutServices,
 ): StoryLayout {
   for (const block of input.blocks) {
+    if (isUnsupportedTextBoxBlock(block)) continue;
     if (
       block.source.story !== input.source.story
       || block.source.storyInstance !== input.source.storyInstance
@@ -84,8 +91,15 @@ export function layoutStory(
   if (!algorithms) {
     throw new Error('Story block layout algorithms are not attached to the supplied services');
   }
+  const unsupported = input.blocks.filter(
+    isUnsupportedTextBoxBlock,
+  );
+  const supported = input.blocks.filter(
+    (block): block is Exclude<StoryBlockInput, ParsedUnsupportedTextBoxBlock> =>
+      !isUnsupportedTextBoxBlock(block),
+  );
   const flow = layoutFlowBlocks({
-    blocks: input.blocks,
+    blocks: supported,
     container: input.container,
     cursor: {
       xPt: input.container.bounds.xPt,
@@ -100,5 +114,15 @@ export function layoutStory(
     ...(flow.clipBounds ? { clipBounds: flow.clipBounds } : {}),
     blocks: Object.freeze([...flow.blocks]),
     advancePt: flow.advancePt,
+    diagnostics: Object.freeze(unsupported.map((block) => Object.freeze({
+      code: 'UNSUPPORTED_FEATURE' as const,
+      severity: 'warning' as const,
+      source: Object.freeze({
+        story: input.source.story,
+        storyInstance: input.source.storyInstance,
+        path: Object.freeze([...block.sourcePath]),
+      }),
+      message: `Unsupported text-box block ${block.qName}`,
+    }))),
   });
 }

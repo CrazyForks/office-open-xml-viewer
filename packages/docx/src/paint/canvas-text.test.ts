@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { stableFingerprint } from '../layout/fingerprint.js';
-import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
+import type { ParagraphLayout, TableLayout, TextBoxLayout } from '../layout/types.js';
 import { paintParagraphLayout, paintPlacedParagraphLayout, paintPlacedTextBoxLayout } from './canvas-text.js';
 import { inverseMapAffinePoint, inverseMapAffineVector, mapAffinePoint } from './affine.js';
 import type { CanvasPaintResourcePainter } from './types.js';
@@ -42,6 +42,91 @@ function node(): ParagraphLayout {
 }
 
 describe('paintParagraphLayout', () => {
+  it('paints retained table blocks inside a text-box story', () => {
+    const texts: string[] = [];
+    const ctx = {
+      globalAlpha: 1,
+      fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: 'left',
+      textBaseline: 'alphabetic', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto',
+      save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, transform() {},
+      setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {}, rect() {}, clip() {},
+      moveTo() {}, lineTo() {}, stroke() {}, fill() {},
+      fillText(text: string) { texts.push(text); },
+      drawImage() {},
+    } as unknown as CanvasRenderingContext2D;
+    const paragraph = {
+      ...node(),
+      source: { story: 'textbox' as const, storyInstance: 'shape:table', path: [0, 0, 0, 0] },
+      flowDomainId: 'textbox:table',
+    };
+    const bounds = { xPt: 0, yPt: 0, widthPt: 50, heightPt: 20 };
+    const table: TableLayout = {
+      kind: 'table',
+      id: 'textbox-table',
+      source: { story: 'textbox', storyInstance: 'shape:table', path: [0] },
+      flowDomainId: 'textbox:table',
+      ordinaryFlow: true,
+      flowBounds: bounds,
+      inkBounds: bounds,
+      advancePt: 20,
+      columnWidthsPt: [50],
+      borders: [],
+      rows: [{
+        kind: 'table-row',
+        id: 'textbox-table-row',
+        source: { story: 'textbox', storyInstance: 'shape:table', path: [0, 0] },
+        flowDomainId: 'textbox:table',
+        ordinaryFlow: true,
+        flowBounds: bounds,
+        inkBounds: bounds,
+        advancePt: 20,
+        heightPt: 20,
+        contentHeightPt: 14,
+        cells: [{
+          kind: 'table-cell',
+          id: 'textbox-table-cell',
+          source: { story: 'textbox', storyInstance: 'shape:table', path: [0, 0, 0] },
+          flowDomainId: 'textbox:table',
+          ordinaryFlow: true,
+          flowBounds: bounds,
+          inkBounds: bounds,
+          advancePt: 20,
+          contentBounds: bounds,
+          verticalMerge: 'none',
+          vAlign: 'top',
+          blocks: [{ layout: paragraph, offsetPt: 0, advancePt: paragraph.advancePt }],
+        }],
+      }],
+    };
+    const textBox: TextBoxLayout = {
+      kind: 'textbox',
+      id: 'textbox-with-table',
+      source: { story: 'textbox', storyInstance: 'shape:table', path: [] },
+      flowDomainId: 'textbox:table',
+      ordinaryFlow: false,
+      flowBounds: bounds,
+      inkBounds: bounds,
+      advancePt: 0,
+      story: {
+        story: 'textbox',
+        flowBounds: bounds,
+        inkBounds: bounds,
+        blocks: [table],
+        advancePt: 20,
+        diagnostics: [],
+      },
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      writingMode: 'horizontal-tb',
+      insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+    };
+
+    paintPlacedTextBoxLayout(textBox, {
+      ctx, scale: 1, dpr: 1, resources: noPaintResources,
+    });
+
+    expect(texts).toContain('test');
+  });
+
   it('clips direct and placed paragraph paint to the retained clipBounds', () => {
     const calls: unknown[] = [];
     const ctx = {
@@ -216,7 +301,17 @@ describe('paintParagraphLayout', () => {
       flowDomainId: 'body', ordinaryFlow: false,
       flowBounds: { xPt: 10.2, yPt: 20.3, widthPt: 40.2, heightPt: 20.4 },
       inkBounds: { xPt: 10.2, yPt: 20.3, widthPt: 40.2, heightPt: 20.4 },
-      advancePt: 0, paragraphs: [paragraph], writingMode: 'vertical-rl', verticalMode: 'vert',
+      advancePt: 0,
+      story: {
+        story: 'textbox',
+        flowBounds: paragraph.flowBounds,
+        inkBounds: paragraph.inkBounds,
+        blocks: [paragraph],
+        advancePt: paragraph.advancePt,
+        diagnostics: [],
+      },
+      transform: { a: 0, b: 1, c: -1, d: 0, e: 30.3, f: 30.5 },
+      writingMode: 'vertical-rl', verticalMode: 'vert',
       insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
     } as TextBoxLayout;
 

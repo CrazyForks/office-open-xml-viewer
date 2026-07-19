@@ -487,12 +487,15 @@ describe('paragraph run resource projection', () => {
     expect(placements).toEqual(expect.arrayContaining([
       expect.objectContaining({ role: 'field-result', dependency: 'total-pages', text: '9' }),
     ]));
-    expect(node.textBoxes[0]?.paragraphs[0]?.lines[0]?.placements[0]).toMatchObject({ text: 'box' });
+    const textBoxParagraph = node.textBoxes[0]?.story.blocks[0];
+    expect(textBoxParagraph?.kind).toBe('paragraph');
+    expect(textBoxParagraph?.kind === 'paragraph'
+      ? textBoxParagraph.lines[0]?.placements[0] : undefined).toMatchObject({ text: 'box' });
     expect(node.textBoxes[0]?.insets).toEqual({
       topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0,
     });
     expect(node.textBoxes[0]?.flowBounds).toEqual(node.drawings[0]?.flowBounds);
-    expect(node.textBoxes[0]?.paragraphs[0]?.flowBounds).toMatchObject({
+    expect(textBoxParagraph?.flowBounds).toMatchObject({
       xPt: 4, yPt: 15, widthPt: 30,
     });
     expect(JSON.stringify(node)).not.toContain('imagePath');

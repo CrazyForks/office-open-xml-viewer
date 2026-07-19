@@ -53,6 +53,7 @@ function emptyStory(
     inkBounds: bounds,
     blocks: Object.freeze([]),
     advancePt,
+    diagnostics: Object.freeze([]),
   });
 }
 
@@ -78,6 +79,7 @@ function syntheticNotes(
     inkBounds: bounds,
     blocks: Object.freeze([]),
     advancePt,
+    diagnostics: Object.freeze([]),
   });
   return Object.freeze([Object.freeze({
     kind: 'note',

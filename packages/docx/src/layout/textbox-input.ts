@@ -1,5 +1,10 @@
-import type { NumberingInfo, ShapeRun } from '../types.js';
-import type { NumberingMarkerShapeInput, SourceRef } from './types.js';
+import type { BodyElement, NumberingInfo, ShapeRun } from '../types.js';
+import type {
+  DeepReadonly,
+  NumberingMarkerShapeInput,
+  ParsedUnsupportedTextBoxBlock,
+  SourceRef,
+} from './types.js';
 import { snapshotPlainData } from './plain-data.js';
 
 function compatibilityNumberingMarkerInput(
@@ -64,6 +69,25 @@ export interface NormalizedTextBoxParagraphInput {
   }>;
   readonly runs: readonly NormalizedTextBoxRunInput[];
 }
+
+export type CompleteTextBoxBlockInput =
+  | DeepReadonly<Extract<BodyElement, { type: 'paragraph' | 'table' }>>
+  | ParsedUnsupportedTextBoxBlock;
+
+/** Immutable parser/model seam. Parser-produced shapes retain the complete rich
+ * block sequence; hand-built public shapes retain the deliberately lossy A3
+ * paragraph projection as an explicit compatibility variant. */
+export type TextBoxAcquisitionInput =
+  | Readonly<{
+      kind: 'complete';
+      source: SourceRef;
+      blocks: readonly CompleteTextBoxBlockInput[];
+    }>
+  | Readonly<{
+      kind: 'compatibility';
+      source: SourceRef;
+      paragraphs: readonly NormalizedTextBoxParagraphInput[];
+    }>;
 
 /**
  * Converts the deliberately lossy public `ShapeRun.textBlocks` fallback to the

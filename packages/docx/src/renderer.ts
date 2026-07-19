@@ -1,6 +1,6 @@
 import type {
   DocxDocumentModel, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeFill, TextPath, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeFill, TextPath, ShapeText, FieldRun, HeaderFooter, HeadersFooters, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, PageBorders, PageBorderEdge, DocNote, NumberingInfo, ColumnsSpec, FramePr, TblpPr, DocSettings,
 } from './types';
 import { docxRenderedFontFamilies } from './document-content.js';
@@ -150,10 +150,12 @@ import type {
   NoteLayout,
   ParagraphLayout,
   SourceRef,
+  StoryBlockInput,
   StoryLayout,
   TableLayout,
   TableLayoutInput,
 } from './layout/types.js';
+import type { CompleteTextBoxBlockInput } from './layout/textbox-input.js';
 import type { DocumentLayout as RetainedDocumentLayout } from './layout/types.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import {
@@ -175,7 +177,7 @@ import {
   paintLayoutPage as paintRetainedLayoutPage,
 } from './paint/canvas-page.js';
 import { canonicalCanvasPaintResourceHandlers } from './paint/canonical-resource-handlers.js';
-import { paintPlacedParagraphLayout, paintPlacedTextBoxLayout, paintTextBoxLayout } from './paint/canvas-text.js';
+import { paintPlacedParagraphLayout, paintTextBoxLayout } from './paint/canvas-text.js';
 import { paintDrawingLayout } from './paint/canvas-drawing.js';
 import type { CanvasPaintResourcePainter } from './paint/types.js';
 import { createDocumentPaintResourceRegistry } from './layout/production-paint-resources.js';
@@ -370,6 +372,7 @@ import {
   bodyParagraphBorderEdgesFor,
   paragraphLayoutFromMeasurement,
   sliceParagraphLayout,
+  type CompleteTextBoxStoryAcquirer,
 } from './layout/paragraph.js';
 import {
   ownedParagraphAnchorCollisions,
@@ -849,6 +852,9 @@ export interface RenderState extends DeferredFrontPaintState {
   retainedResourcePainter?: CanvasPaintResourcePainter;
   /** Renderer authorities injected into the pure recursive table acquisition. */
   retainedTableAcquisition?: RetainedTableAcquisitionDependencies<RenderState>;
+  /** Session-local bridge from shape geometry to the shared paragraph/table
+   * story algorithms. Kept renderer-private so retained layouts stay plain. */
+  acquireCompleteTextBoxStory?: CompleteTextBoxStoryAcquirer;
   /** Each body occurrence owns its acquisition and pagination context for this
    * render session. Parser objects may legally occur more than once. */
   retainedTablesBySourceIndex?: Map<number, RetainedTableRecord>;
@@ -2335,6 +2341,7 @@ function buildMeasureState(
             ),
             continuesFromPrevious: false,
             anchorFrames: paragraphAnchorReferenceFrames(cellState),
+            acquireCompleteStory: cellState.acquireCompleteTextBoxStory,
           },
           inheritedAuthority,
         ).layout;
@@ -2578,6 +2585,7 @@ function createConcreteBodyLayoutKernel(
           sourceRangeStart: continuation.sourceRangeStart,
         }),
         anchorFrames: paragraphAnchorReferenceFrames(state),
+        acquireCompleteStory: state.acquireCompleteTextBoxStory,
       },
       continuation.boundary === null ? undefined : {
         boundary: continuation.boundary,
@@ -2849,28 +2857,37 @@ function createConcreteBodyLayoutKernel(
         throw new Error(`Unsupported shared story source: ${source.story}`);
       };
       const storyElement = (
-        root: readonly BodyElement[],
+        root: readonly (BodyElement | CompleteTextBoxBlockInput)[],
         source: SourceRef,
       ): Extract<BodyElement, { type: 'paragraph' | 'table' }> => {
         if (source.path.length === 0 || (source.path.length - 1) % 3 !== 0) {
           throw new Error('Story block acquisition requires a canonical source path');
         }
-        let element: BodyElement | CellElement | undefined = root[source.path[0]!];
+        type TraversableStoryElement = Readonly<{
+          type: string;
+          rows?: readonly Readonly<{
+            cells: readonly Readonly<{
+              content: readonly TraversableStoryElement[];
+            }>[];
+          }>[];
+        }>;
+        let element = root[source.path[0]!] as TraversableStoryElement | undefined;
         for (let offset = 1; offset < source.path.length; offset += 3) {
           if (!element || element.type !== 'table') {
             throw new Error(`Story source leaves table ownership: ${source.path.join('.')}`);
           }
-          element = element.rows[source.path[offset]!]
+          element = element.rows?.[source.path[offset]!]
             ?.cells[source.path[offset + 1]!]
             ?.content[source.path[offset + 2]!];
         }
         if (!element || (element.type !== 'paragraph' && element.type !== 'table')) {
           throw new Error(`Story source does not identify a flow block: ${source.path.join('.')}`);
         }
-        return element;
+        return element as unknown as Extract<BodyElement, { type: 'paragraph' | 'table' }>;
       };
       const acquireStoryLayout = (
         request: import('./layout/body-layout-kernel.js').StoryLayoutAcquisitionInput,
+        explicitRoot?: readonly CompleteTextBoxBlockInput[],
       ): StoryLayout => {
         const cacheKey = JSON.stringify({
           source: request.source,
@@ -2880,7 +2897,7 @@ function createConcreteBodyLayoutKernel(
         });
         const cached = storyLayoutCache.get(cacheKey);
         if (cached) return cached;
-        const root = storyRoot(request.source);
+        const root = explicitRoot ?? storyRoot(request.source);
         const noteReferenceNumber = request.source.story === 'footnote'
           || request.source.story === 'endnote'
           ? state.noteNumbers?.get(
@@ -2899,7 +2916,9 @@ function createConcreteBodyLayoutKernel(
           displayPageNumber: pageFieldContext?.displayPageNumber ?? request.pageIndex + 1,
           pageNumberFormat: pageFieldContext?.pageNumberFormat ?? state.pageNumberFormat,
           pageWidth: request.section.geometry.pageWidth,
-          pageH: request.section.geometry.pageHeight,
+          pageH: request.container.capacity === 'unbounded'
+            ? Number.MAX_SAFE_INTEGER
+            : request.section.geometry.pageHeight,
           marginLeft: request.section.geometry.marginLeft,
           marginRight: request.section.geometry.marginRight,
           marginTop: bodyMarginInsetPt(request.section.geometry.marginTop),
@@ -2922,28 +2941,36 @@ function createConcreteBodyLayoutKernel(
             lineNumberingEligible: false,
           },
         };
-        preRegisterPageFloats(root as BodyElement[], 0, candidate);
+        preRegisterPageFloats(root as readonly BodyElement[], 0, candidate);
         const storyServices = createLayoutServicesRuntimeView(services);
         candidate.layoutServices = storyServices;
-        const blockInputs: FlowBlockInput[] = root.flatMap((element, index): FlowBlockInput[] => {
+        const blockInputs: StoryBlockInput[] = root.flatMap((element, index): StoryBlockInput[] => {
           const source: SourceRef = {
             story: request.source.story,
             storyInstance: request.source.storyInstance,
             path: [index],
           };
+          if (element.type === 'unsupportedTextBoxBlock') {
+            return [{
+              type: 'unsupportedTextBoxBlock',
+              qName: element.qName,
+              sourcePath: element.sourcePath,
+            }];
+          }
           if (element.type === 'paragraph') return [{ kind: 'paragraph', source }];
           if (element.type !== 'table') {
             throw new Error(`Unsupported ${request.source.story} story block: ${element.type}`);
           }
           const dependencies = candidate.retainedTableAcquisition;
           if (!dependencies) throw new Error('Story table acquisition requires retained dependencies');
+          const table = element as unknown as DocTable;
           const columns = resolveColumnWidths(
-            element,
+            table,
             request.container.bounds.widthPt,
             candidate,
           );
           return [acquireRetainedTable(
-            element,
+            table,
             columns,
             request.container.bounds.widthPt,
             candidate,
@@ -3001,7 +3028,7 @@ function createConcreteBodyLayoutKernel(
                   startYPt,
                   paragraphXPt: placement.container.bounds.xPt,
                   availableWidthPt: placement.container.bounds.widthPt,
-                  maximumYPt: placement.container.bounds.yPt + placement.container.bounds.heightPt,
+                  maximumYPt: placement.availableBounds.yPt + placement.availableBounds.heightPt,
                   suppressSpaceBefore: spacing.suppressBefore,
                 },
                 measurer: {
@@ -3019,6 +3046,7 @@ function createConcreteBodyLayoutKernel(
                 ),
                 continuesFromPrevious: false,
                 anchorFrames: paragraphAnchorReferenceFrames(candidate),
+                acquireCompleteStory: candidate.acquireCompleteTextBoxStory,
               },
             );
             previousParagraph = paragraph;
@@ -3065,6 +3093,14 @@ function createConcreteBodyLayoutKernel(
         storyLayoutCache.set(cacheKey, retained);
         return retained;
       };
+      const acquireCompleteTextBoxStory: CompleteTextBoxStoryAcquirer = (request) =>
+        acquireStoryLayout({
+          source: request.source,
+          pageIndex: state.pageIndex,
+          section: state.sectionLayout,
+          container: request.container,
+        }, request.blocks);
+      state.acquireCompleteTextBoxStory = acquireCompleteTextBoxStory;
       const session: BodyLayoutSession = {
         hasPaginationFields: paginatedFlowHasPaginationDependentFields(
           doc.body,
@@ -4651,31 +4687,6 @@ function contextualSpacingAdjust(
   spaceBefore: number,
 ): { suppressBefore: boolean; overlap: number } {
   return paragraphGapAdjustment(prev, curr, prevAfter, spaceBefore);
-}
-
-/**
- * ECMA-376 §17.3.1.33 + §17.3.1.9 — the vertical gap reserved ABOVE text-box
- * paragraph `i`. The first paragraph reserves only its own spaceBefore; between
- * two paragraphs the gap collapses to max(prev.spaceAfter, this.spaceBefore) — NOT
- * their sum — minus any {@link contextualSpacingAdjust} per-side suppression
- * (the identical rule the body path applies). Without the suppression a
- * `<w:contextualSpacing/>` ListParagraph list inside a fixed box kept inheriting
- * the docDefault `after=160` (8 pt) gap, which inflated its line pitch and
- * clipped the trailing line (sample-32). Shared by the render pass and the
- * auto-fit height measurement so the two never disagree.
- */
-export function shapeParagraphGapBefore(
-  blocks: ReadonlyArray<{ contextualSpacing?: boolean; styleId?: string | null }>,
-  i: number,
-  spBefore: readonly number[],
-  spAfter: readonly number[],
-): number {
-  return paragraphGapPt(
-    i <= 0 ? null : blocks[i - 1],
-    blocks[i],
-    i <= 0 ? 0 : spAfter[i - 1],
-    spBefore[i],
-  );
 }
 
 /**
@@ -7524,28 +7535,6 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   if (w < 0 || h < 0) return;
   if (isLineGeom ? w === 0 && h === 0 : w === 0 || h === 0) return;
 
-  if (!isLineGeom) {
-    // §21.1.2.1.1 `<a:spAutoFit/>` — resize the box to its content, keeping the
-    // authored top-left anchor fixed. A HORIZONTAL box grows the physical HEIGHT
-    // (line-stacking axis, top edge fixed); a VERTICAL box (§20.1.10.83, #1000)
-    // grows/shrinks the physical WIDTH (the column-stacking cross axis after the
-    // ±90° rotate-layout, LEFT edge fixed) — Word-verified against the autofit
-    // adjudication fixture. `resolveShapeAutofitBox` picks the axis by `vert`.
-    const fit = resolveShapeAutofitBox(
-      shape,
-      { x, y, w, h },
-      ctx as CanvasRenderingContext2D,
-      scale,
-      state.fontFamilyClasses,
-      state.images,
-      state,
-    );
-    x = fit.x;
-    y = fit.y;
-    w = fit.w;
-    h = fit.h;
-  }
-
   // ECMA-376 Part 4 §19.1.2.23 `<v:textpath>` — a WordArt text watermark. It
   // draws stretched, rotated, semi-transparent text filling the shape box
   // INSTEAD of a fill/stroke panel + body text, then returns.
@@ -7699,345 +7688,6 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   }
   ctx.restore();
 
-  // Body text inside the shape (wps:txbx). Drawn AFTER fill/stroke so text
-  // sits on top of the panel. Rotation is intentionally not applied to body
-  // text — the cover-template usage we care about uses anchor-only text.
-  if (shape.textBlocks && shape.textBlocks.length > 0) {
-    const grid = state.docGrid;
-    const lineGridActive = grid?.linePitchPt != null
-      && grid.linePitchPt > 0
-      && isGridLineRule(grid);
-    const characterGridActive = grid?.charSpacePt != null
-      && (grid.type === 'linesAndChars' || grid.type === 'snapToChars');
-    const textBoxSource = {
-      story: 'textbox' as const, storyInstance: 'legacy-shape', path: [] as number[],
-    };
-    const textBoxLayout = acquireShapeTextBoxLayout(shape, {
-      xPt: x / scale, yPt: y / scale, widthPt: w / scale, heightPt: h / scale,
-    }, {
-      id: 'legacy-shape-textbox',
-      source: textBoxSource,
-      flowDomainId: 'legacy-shape',
-      context: {
-        lineGrid: { active: lineGridActive, pitchPt: lineGridActive ? grid?.linePitchPt ?? null : null },
-        characterGrid: {
-          active: characterGridActive,
-          deltaPt: characterGridActive ? grid.charSpacePt ?? 0 : 0,
-        },
-        physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
-        lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
-        baseRtl: false, isJustified: false, stretchLastLine: false,
-        tabStops: [], hasRuby: false, hasEastAsianText: false,
-        kinsoku: state.kinsoku, defaultTabPt: state.defaultTabPt,
-        mathDefJc: state.mathDefJc,
-      },
-      measurer: { context: ctx, fontFamilyClasses: state.fontFamilyClasses },
-      environment: paragraphMeasurementEnvironment(state),
-      input: textBoxAcquisitionInput(shape, textBoxSource),
-    });
-    if (textBoxLayout) {
-      if (!state.retainedResourcePainter) {
-        throw new Error('Shape text-box paint requires a retained resource painter');
-      }
-      paintPlacedTextBoxLayout(textBoxLayout, {
-        ctx, scale, dpr: state.dpr,
-        defaultTextColor: shape.defaultTextColor
-          ? `#${shape.defaultTextColor}` : state.defaultColor,
-        showTrackChanges: state.showTrackChanges,
-        resources: state.retainedResourcePainter,
-        pointToCss: state.pointToCss,
-        onTextRun: state.onTextRun,
-      });
-    }
-  }
-}
-
-/** Fit an image block to the text-box inner width, preserving aspect from its
- *  natural pt size. If the natural width already fits, draw at natural size ×
- *  scale; otherwise scale down to innerW. Falls back to a square innerW box when
- *  the natural size is unknown (0). Returns px dimensions. */
-function fitShapeImage(
-  widthPt: number,
-  heightPt: number,
-  innerW: number,
-  scale: number,
-): { w: number; h: number } {
-  const natW = (widthPt ?? 0) * scale;
-  const natH = (heightPt ?? 0) * scale;
-  if (natW <= 0 || natH <= 0) {
-    // No intrinsic size surfaced — reserve a square innerW box.
-    return { w: innerW, h: innerW };
-  }
-  if (natW <= innerW) return { w: natW, h: natH };
-  const s = innerW / natW;
-  return { w: innerW, h: natH * s };
-}
-
-function shapeTextHorizontalInsetsPx(shape: ShapeRun, scale: number): { lIns: number; rIns: number } {
-  return {
-    lIns: (shape.textInsetL ?? 0) * scale,
-    rIns: (shape.textInsetR ?? 0) * scale,
-  };
-}
-
-function shapeLineSpacingOf(b: ShapeText): LineSpacing | null {
-  return b.lineSpacingRule
-    ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
-    : null;
-}
-
-/** ECMA-376 §20.1.10.83 ST_TextVerticalType — the IMPLEMENTED vertical text-box
- *  directions (`<wps:bodyPr vert>`), or `null` for horizontal / not-yet-handled
- *  values. `eaVert` keeps East-Asian glyphs upright (per-glyph UAX#50); `vert`
- *  and `vert270` rotate EVERY glyph (their spec meaning), so the whole-box ±90°
- *  rotation already produces them with no per-glyph work. `mongolianVert` shares
- *  `eaVert`'s per-glyph orientation (CJK upright, Latin sideways) but stacks its
- *  columns LEFT→RIGHT instead of right→left (Word-verified, the batch-3
- *  adjudication fixtures / issue #988) — the renderer draws it exactly like
- *  `eaVert` and then reflects each line's cross-position within the box (see
- *  `mongolianLineFlip`). The WordArt stacked variants remain deferred (horizontal). */
-function verticalTextboxMode(
-  vert: string | null | undefined,
-): 'vert' | 'vert270' | 'eaVert' | 'mongolianVert' | null {
-  return vert === 'vert' || vert === 'vert270' || vert === 'eaVert' || vert === 'mongolianVert'
-    ? vert
-    : null;
-}
-
-function verticalRubyLineMetrics(
-  line: LayoutLine,
-  lineSpacing: LineSpacing | null,
-  scale: number,
-  grid?: DocGridCtx,
-): { lineH: number; baselineOffset: number } {
-  const glyphNatural = line.ascent + line.descent;
-  const lineH = lineBoxHeight(
-    lineSpacing,
-    line.ascent,
-    line.descent,
-    scale,
-    grid,
-    true,
-    line.intendedSingle,
-    line.eastAsian ?? false,
-  );
-  return { lineH, baselineOffset: (lineH - glyphNatural) / 2 + line.ascent };
-}
-
-/** Measure a shape text body's fitted height for `<a:spAutoFit/>`.
- *  Returns px, including bodyPr top/bottom insets and paragraph spacing. */
-export function measureShapeTextAutoFitHeight(
-  shape: ShapeRun,
-  w: number,
-  ctx: CanvasRenderingContext2D,
-  scale: number,
-  fontFamilyClasses: Record<string, string> = {},
-  images: Map<string, DecodedImage> = new Map(),
-  state?: RenderState,
-): number {
-  const effState = state ?? shapeRenderState(ctx, scale, fontFamilyClasses, images);
-  const blocks = shape.textBlocks ?? [];
-  const vmode = verticalTextboxMode(shape.textVert);
-  const { lIns, rIns } = shapeTextHorizontalInsetsPx(shape, scale);
-  const tIns = (shape.textInsetT ?? 0) * scale;
-  const bIns = (shape.textInsetB ?? 0) * scale;
-  const innerW = Math.max(0, w - lIns - rIns);
-
-  const indentOf = (b: ShapeText) => {
-    const leftPx = (b.indentLeft ?? 0) * scale;
-    const rightPx = (b.indentRight ?? 0) * scale;
-    const rawFirstPx = (b.indentFirst ?? 0) * scale;
-    const firstPx = b.numbering && rawFirstPx < 0 ? 0 : rawFirstPx;
-    const paraW = Math.max(0, innerW - leftPx - rightPx);
-    const firstLineW = Math.max(0, paraW - firstPx);
-    return { leftPx, firstPx, paraW, firstLineW };
-  };
-
-  const lineHeightFor = (b: ShapeText, line: LayoutLine): number => {
-    if (vmode && line.hasRuby) {
-      return verticalRubyLineMetrics(line, shapeLineSpacingOf(b), scale, effState.docGrid).lineH;
-    }
-    let tallest: LayoutTextSeg | null = null;
-    let tallestEa = false;
-    let floorPx = 0;
-    let lineText = '';
-    for (const seg of line.segments) {
-      if (!('text' in seg)) continue;
-      const ts = seg as LayoutTextSeg;
-      lineText += ts.text;
-      // Script hint: eaOnly design heights (Word FE 1.3 × hhea) apply to East
-      // Asian segments only (issue #1013); Latin segments keep the Canvas box.
-      // Ruby segments keep their MEASURED box too (Word's FE height for a
-      // ruby-bearing line is unmeasured — sample-5 calibration stands).
-      const segEa = EAST_ASIAN_RE.test(ts.text) && !ts.ruby;
-      if (!tallest || ts.fontSize > tallest.fontSize) {
-        tallest = ts;
-        tallestEa = segEa;
-      }
-      const segPx = ts.fontSize * scale;
-      floorPx = Math.max(
-        floorPx,
-        segmentIntendedSingleLinePx(ts, segPx, segEa),
-        segmentEastAsiaFloorSingleLinePx(ts, segPx, segEa),
-      );
-    }
-    const lineEa = EAST_ASIAN_RE.test(lineText);
-    const fontPt = tallest?.fontSize ?? b.fontSizePt;
-    const fontPx = fontPt * scale;
-    const family = tallest?.fontFamily ?? b.fontFamily ?? null;
-    const eaFamily = tallest?.eaFloorFamily ?? b.fontFamily ?? null;
-    // METRIC hint = the tallest segment's own script (a Latin tallest segment
-    // keeps its Canvas box even on a CJK-bearing line); GRID participation
-    // stays line-wide (any EA content on the line makes it cell-rounded).
-    const asciiIntended = tallest
-      ? segmentIntendedSingleLinePx(tallest, fontPx, tallestEa)
-      : intendedSingleLinePx(family, fontPx, tallestEa);
-    const eaIntended = tallest
-      ? segmentEastAsiaFloorSingleLinePx(tallest, fontPx, tallestEa)
-      : intendedSingleLinePx(eaFamily, fontPx, tallestEa);
-    const measureFamily = eaIntended > asciiIntended ? eaFamily : family;
-    const measureRoute = eaIntended > asciiIntended ? tallest?.eaFloorRoute : tallest?.fontRoute;
-    ctx.font = buildFont(
-      tallest?.bold ?? b.bold ?? false,
-      tallest?.italic ?? b.italic ?? false,
-      fontPx,
-      measureFamily,
-      fontFamilyClasses,
-      measureRoute,
-    );
-    const m = ctx.measureText('Mg');
-    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
-    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
-    const c = correctLineMetrics(measureFamily, fontPx, rawAsc, rawDesc, tallestEa);
-    const ls: LineSpacing | null = b.lineSpacingRule
-      ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
-      : null;
-    const eastAsian = lineEa;
-    // Ruby lines reserve real furigana height, so use the measured glyph box,
-    // mirroring the body path.
-    return lineBoxHeight(
-      ls,
-      c.ascent,
-      c.descent,
-      scale,
-      effState.docGrid,
-      line.hasRuby ?? false,
-      floorPx,
-      eastAsian,
-      line.gridCountSingle,
-    );
-  };
-
-  const spBefore = blocks.map((b) => (b.spaceBefore ?? 0) * scale);
-  const spAfter = blocks.map((b) => (b.spaceAfter ?? 0) * scale);
-  const gapBefore = (i: number): number => shapeParagraphGapBefore(blocks, i, spBefore, spAfter);
-
-  ctx.save();
-  try {
-    let contentH = 0;
-    for (let i = 0; i < blocks.length; i++) {
-      const b = blocks[i];
-      const ind = indentOf(b);
-      contentH += gapBefore(i);
-      if (b.imagePath) {
-        contentH += fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, ind.firstLineW, scale).h;
-        continue;
-      }
-      const runs: ShapeTextRun[] =
-        b.runs && b.runs.length > 0
-          ? b.runs
-          : [{
-              text: b.text,
-              fontSizePt: b.fontSizePt,
-              color: b.color,
-              fontFamily: b.fontFamily,
-              bold: b.bold,
-              italic: b.italic,
-            } as ShapeTextRun];
-      const segs = buildSegments(runs.map((run) => shapeRunToDocRun(run, shape.textVert)), effState);
-      const baseRtl = resolveBaseDirection(b.bidi, b.text) === 'rtl';
-      const lines = layoutLines(
-        ctx,
-        segs,
-        ind.paraW,
-        ind.firstPx,
-        scale,
-        b.tabStops ?? [],
-        undefined,
-        fontFamilyClasses,
-        ind.leftPx,
-        effState.kinsoku,
-        0,
-        effState.defaultTabPt,
-        ind.paraW,
-        baseRtl,
-        jcIsFullyJustified(b.alignment),
-        jcStretchesLastLine(b.alignment),
-      );
-      contentH += lines.reduce((sum, line) => sum + lineHeightFor(b, line), 0);
-    }
-    return tIns + contentH + bIns;
-  } finally {
-    ctx.restore();
-  }
-}
-
-/** ECMA-376 §21.1.2.1.1 `<a:spAutoFit/>` — resize a text box's bounding box to
- *  fit its laid-out content, keeping the authored TOP-LEFT anchor (`<a:off>`)
- *  fixed. Returns the box unchanged for a non-spAutoFit box or one with no text.
- *
- *  HORIZONTAL box (`vert` absent): the block-progression (line-stacking) axis is
- *  the physical HEIGHT, so the height grows/shrinks to the line stack — the TOP
- *  edge (`off.y`) stays fixed, the BOTTOM edge moves. (Existing behaviour.)
- *
- *  VERTICAL box (§20.1.10.83 `vert`/`vert270`/`eaVert`/`mongolianVert`, issue
- *  #1000): after the ±90° rotate-layout the block-progression (column-stacking)
- *  axis is the physical WIDTH — the column length (= physical HEIGHT) is the
- *  FIXED wrap dimension (#988B). spAutoFit resizes THAT cross axis to the column
- *  stack: GROW on overflow, SHRINK on underflow, keeping the authored LEFT edge
- *  (`positionH` posOffset / `off.x`) fixed and moving the RIGHT edge — the SAME
- *  top-left bbox anchor the horizontal branch keeps. Word GT (the autofit
- *  adjudication fixture, measured from the Word PDF): an overflowing `eaVert` box
- *  grows +1.37in RIGHTWARD and an underflowing one shrinks −1.45in from the
- *  right, its authored LEFT edge fixed in both; a `noAutofit` twin keeps the
- *  authored extent and clips. The cross extent is measured by the SAME line
- *  engine, but with the wrap width = physical HEIGHT (the swapped column-length
- *  axis): `measureShapeTextAutoFitHeight` maps lIns/rIns onto the wrap axis and
- *  tIns/bIns onto the stack axis exactly as the vertical draw does, so its
- *  returned "height" IS the physical WIDTH the columns require (insets included).
- *
- *  A vertical box carrying an inline-image block keeps its authored extent: an
- *  upright image reserves its cross extent by physical WIDTH, which the
- *  horizontal line measurement cannot size, so growing/shrinking is skipped
- *  (pre-#1000 behaviour) rather than sized from a wrong measurement.
- *
- *  Exported for unit testing the grow/shrink/anchor contract. */
-export function resolveShapeAutofitBox(
-  shape: ShapeRun,
-  box: { x: number; y: number; w: number; h: number },
-  ctx: CanvasRenderingContext2D,
-  scale: number,
-  fontFamilyClasses: Record<string, string> = {},
-  images: Map<string, DecodedImage> = new Map(),
-  state?: RenderState,
-): { x: number; y: number; w: number; h: number } {
-  const { x, y, w, h } = box;
-  if (shape.textAutofit !== 'sp' || !shape.textBlocks || shape.textBlocks.length === 0) {
-    return { x, y, w, h };
-  }
-  const vmode = verticalTextboxMode(shape.textVert);
-  if (vmode === null) {
-    // HORIZONTAL: grow/shrink the physical HEIGHT (line-stacking axis) to the
-    // laid-out content; the TOP edge (y) stays fixed.
-    const fitH = measureShapeTextAutoFitHeight(shape, w, ctx, scale, fontFamilyClasses, images, state);
-    return Number.isFinite(fitH) && fitH > 0 ? { x, y, w, h: fitH } : { x, y, w, h };
-  }
-  // VERTICAL (§20.1.10.83, #1000): resize the physical WIDTH (cross / column-
-  // stacking axis) to the content, LEFT edge (x) fixed. An upright inline image's
-  // cross extent is not line-measurable ⇒ keep the authored extent.
-  if (shape.textBlocks.some((b) => b.imagePath)) return { x, y, w, h };
-  const fitW = measureShapeTextAutoFitHeight(shape, h, ctx, scale, fontFamilyClasses, images, state);
-  return Number.isFinite(fitW) && fitW > 0 ? { x, y, w: fitW, h } : { x, y, w, h };
 }
 
 /**

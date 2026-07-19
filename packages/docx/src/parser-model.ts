@@ -41,7 +41,7 @@ import {
 import { deepFreezePlainData, snapshotPlainData } from './layout/plain-data.js';
 import {
   normalizeTextBoxInput,
-  type NormalizedTextBoxParagraphInput,
+  type TextBoxAcquisitionInput,
 } from './layout/textbox-input.js';
 import { tableCellHorizontalSpacingInsets } from './layout/table-columns.js';
 import {
@@ -1476,8 +1476,19 @@ export function numberingMarkerShapeInput(
 export function textBoxAcquisitionInput(
   shape: Readonly<ShapeRun>,
   source: SourceRef,
-): readonly NormalizedTextBoxParagraphInput[] {
-  return normalizeTextBoxInput(shape, source, numberingMarkerShapeInput);
+): TextBoxAcquisitionInput {
+  const content = textBoxContentAcquisitionInput(shape);
+  return content === undefined
+      ? snapshotPlainData({
+        kind: 'compatibility',
+        source,
+        paragraphs: normalizeTextBoxInput(shape, source, numberingMarkerShapeInput),
+      }, 'DOCX public text box acquisition input')
+    : snapshotPlainData({
+        kind: 'complete',
+        source,
+        blocks: content,
+      }, 'DOCX complete text box acquisition input');
 }
 
 /** Snapshot private paragraph-mark rPr facts at the parser boundary. Retained
@@ -1584,7 +1595,9 @@ export function paragraphAcquisitionInput(
       return Object.freeze({
         ...publicRun,
         ...(vmlTextPathInput === undefined ? {} : { vmlTextPathInput }),
-        ...(textBoxInput.length === 0 ? {} : { textBoxInput }),
+        ...((textBoxInput.kind === 'complete'
+          ? textBoxInput.blocks.length
+          : textBoxInput.paragraphs.length) === 0 ? {} : { textBoxInput }),
         ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
       }) as ParagraphAcquisitionRun;
     }
