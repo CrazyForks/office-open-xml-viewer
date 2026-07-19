@@ -13,6 +13,17 @@ function resourceLayout(
   resourceKind: InlineResourceKind,
   bounds: LayoutRect,
 ): DocumentLayout {
+  const drawing: DocumentLayout['pages'][number]['layers']['body'][number] = {
+    kind: 'drawing',
+    id: 'drawing-1',
+    source: { story: 'body', storyInstance: 'body', path: [0] },
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: bounds.heightPt,
+    ordinaryFlow: true,
+    flowDomainId: 'body',
+    commands: [{ kind: 'resource', resourceKey, resourceKind, rect: bounds }],
+  };
   return {
     pages: [{
       pageIndex: 0,
@@ -26,20 +37,17 @@ function resourceLayout(
         physicalBounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
       }],
       section: {} as SectionLayoutContext,
+      sectionOccurrenceId: 'section:0',
+      parityBlank: false,
+      bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      columnSeparators: [],
+      sectionRegions: [],
+      pageBorders: null,
       layers: {
-        paintOrder: [{ layer: 'body', nodeId: 'drawing-1' }],
+        paintSequence: [{ layer: 'body', node: drawing, coordinateSpace: 'section-logical' }],
         background: [], behindText: [], header: [], notes: [], front: [], footer: [],
-        body: [{
-          kind: 'drawing',
-          id: 'drawing-1',
-          source: { story: 'body', storyInstance: 'body', path: [0] },
-          flowBounds: bounds,
-          inkBounds: bounds,
-          advancePt: bounds.heightPt,
-          ordinaryFlow: true,
-          flowDomainId: 'body',
-          commands: [{ kind: 'resource', resourceKey, resourceKind, rect: bounds }],
-        }],
+        body: [drawing],
       },
       readingOrder: ['drawing-1'],
     }],

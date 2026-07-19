@@ -30,7 +30,12 @@ describe('parse-error page layout', () => {
     const textCommands = layout.pages[0]?.layers.body.flatMap((node) =>
       node.kind === 'drawing' ? node.commands.filter((command) => command.kind === 'text') : [],
     ) ?? [];
+    const layers = layout.pages[0]!.layers;
 
+    expect(Object.isFrozen(layers)).toBe(true);
+    expect(Object.isFrozen(layers.paintSequence)).toBe(true);
+    expect(Object.isFrozen(layers.paintSequence[0])).toBe(true);
+    expect(layers.paintSequence[0]!.node).toBe(layers.body[0]);
     expect(textCommands.length).toBeGreaterThan(3);
     expect(textCommands.map((command) => command.kind === 'text' ? command.text : '').join(' '))
       .toContain('word/document.xml:');

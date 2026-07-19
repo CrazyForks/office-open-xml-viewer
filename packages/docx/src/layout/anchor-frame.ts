@@ -99,6 +99,7 @@ export interface AnchorSizeDiagnostic {
   readonly relativeFrom: string | null;
   readonly referenceFrame: ResolvedAxisDiagnostic['referenceFrame'] | null;
   readonly fraction: number | null;
+  readonly compatibilityFallback?: 'word-zero-relative-size';
 }
 
 export interface AnchorEffectiveEdges {
@@ -377,7 +378,9 @@ function resolveSize(
 ): { resolved?: ResolvedSize; problem?: AnchorFrameIssue } {
   const relative = acquisition.relativeSize[axis];
   const axisName = axis === 'horizontal' ? 'width' : 'height';
-  if (relative === null) {
+  const resolveExtent = (
+    compatibilityRelative: Readonly<{ relativeFrom: string | null; fraction: number }> | null = null,
+  ): { resolved?: ResolvedSize; problem?: AnchorFrameIssue } => {
     const status = axis === 'horizontal'
       ? acquisition.extent.widthStatus
       : acquisition.extent.heightStatus;
@@ -402,32 +405,20 @@ function resolveSize(
         diagnostic: {
           source: 'extent',
           valuePt: value,
-          relativeFrom: null,
+          relativeFrom: compatibilityRelative?.relativeFrom ?? null,
           referenceFrame: null,
-          fraction: null,
+          fraction: compatibilityRelative?.fraction ?? null,
+          ...(compatibilityRelative === null
+            ? {}
+            : { compatibilityFallback: 'word-zero-relative-size' as const }),
         },
       },
     };
+  };
+  if (relative === null) {
+    return resolveExtent();
   }
   const path = `relativeSize.${axis}`;
-  if (relative.relativeFromStatus === 'missing' || relative.relativeFrom === null) {
-    return {
-      problem: issue(
-        'missing-relative-size-reference',
-        `${path}.relativeFrom`,
-        'relative size reference is required',
-      ),
-    };
-  }
-  if (relative.relativeFromStatus !== 'valid') {
-    return {
-      problem: issue(
-        'invalid-relative-size-reference',
-        `${path}.relativeFrom`,
-        'relative size reference is invalid',
-      ),
-    };
-  }
   if (relative.fractionStatus === 'missing' || relative.fraction === null) {
     return {
       problem: issue(
@@ -443,6 +434,41 @@ function resolveSize(
         'invalid-relative-size-fraction',
         `${path}.fraction`,
         'relative size fraction must be finite',
+      ),
+    };
+  }
+  if (relative.fraction < 0) {
+    return {
+      problem: issue(
+        'invalid-relative-size-fraction',
+        `${path}.fraction`,
+        'relative size fraction must be non-negative',
+      ),
+    };
+  }
+  if (relative.fraction === 0) {
+    // [MS-ODRAWXML] notes 125/126: Word 2010 supports only positive pctWidth/
+    // pctHeight values. Retain the authored zero in acquisition, but use wp:extent.
+    return resolveExtent({
+      relativeFrom: relative.relativeFrom,
+      fraction: relative.fraction,
+    });
+  }
+  if (relative.relativeFromStatus === 'missing' || relative.relativeFrom === null) {
+    return {
+      problem: issue(
+        'missing-relative-size-reference',
+        `${path}.relativeFrom`,
+        'relative size reference is required',
+      ),
+    };
+  }
+  if (relative.relativeFromStatus !== 'valid') {
+    return {
+      problem: issue(
+        'invalid-relative-size-reference',
+        `${path}.relativeFrom`,
+        'relative size reference is invalid',
       ),
     };
   }

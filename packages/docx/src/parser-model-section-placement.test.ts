@@ -5,12 +5,30 @@ import {
   sectionPlacementInputFrom,
   sectionPlacementInputFromBody,
 } from './parser-model.js';
-import type { BodyElement, DocxDocumentModel, LineNumbering, SectionProps } from './types.js';
+import type { BodyElement, DocxDocumentModel, LineNumbering, PageBorders, SectionProps } from './types.js';
 
 interface PrivateSectionPlacementWire {
   readonly sectionId: string;
+  readonly sectionBidi: boolean;
   readonly vAlign: string | null;
   readonly lineNumbering: LineNumbering | null;
+  readonly docGridType: string | null;
+  readonly docGridLinePitch: number | null;
+  readonly docGridCharSpace: number | null;
+  readonly gutterPt: number | null;
+  readonly rtlGutter: boolean | null;
+  readonly pageBordersAuthored: boolean;
+  readonly pageBorders: PageBorders | null;
+  readonly pageGeometry: Readonly<{
+    pageWidth: number | null;
+    pageHeight: number | null;
+    marginTop: number | null;
+    marginRight: number | null;
+    marginBottom: number | null;
+    marginLeft: number | null;
+    headerDistance: number | null;
+    footerDistance: number | null;
+  }> | null;
 }
 
 type PrivateSectionBreak = Extract<BodyElement, { type: 'sectionBreak' }> & {
@@ -25,8 +43,24 @@ function sectionBreak(sectionId: string): BodyElement {
     titlePage: false,
     __sectionPlacement: {
       sectionId,
+      sectionBidi: true,
       vAlign: 'center',
       lineNumbering: { countBy: 2, start: 7, distance: 12, restart: 'newSection' },
+      docGridType: 'lines',
+      docGridLinePitch: 18,
+      docGridCharSpace: 2048,
+      gutterPt: 9,
+      rtlGutter: true,
+      pageBordersAuthored: true,
+      pageBorders: {
+        offsetFrom: 'page', display: 'allPages', zOrder: 'front',
+        top: { style: 'single', width: 1, space: 2 },
+      },
+      pageGeometry: {
+        pageWidth: 210, pageHeight: 297,
+        marginTop: 25, marginRight: null, marginBottom: null, marginLeft: null,
+        headerDistance: null, footerDistance: null,
+      },
     },
   } as PrivateSectionBreak;
 }
@@ -61,10 +95,27 @@ describe('parser-private section placement projection', () => {
     expect(workerEnding).toEqual(mainEnding);
     expect(workerEnding).toEqual({
       sectionId: 'section:0',
+      sectionBidi: true,
       vAlign: 'center',
       lineNumbering: { countBy: 2, start: 7, distance: 12, restart: 'newSection' },
+      docGridType: 'lines',
+      docGridLinePitch: 18,
+      docGridCharSpace: 2048,
+      gutterPt: 9,
+      rtlGutter: true,
+      pageBordersAuthored: true,
+      pageBorders: {
+        offsetFrom: 'page', display: 'allPages', zOrder: 'front',
+        top: { style: 'single', width: 1, space: 2 },
+      },
+      pageGeometry: {
+        pageWidth: 210, pageHeight: 297,
+        marginTop: 25, marginRight: null, marginBottom: null, marginLeft: null,
+        headerDistance: null, footerDistance: null,
+      },
     });
     expect(workerFinal).toEqual(mainFinal);
+    expect(workerFinal.sectionBidi).toBe(false);
     expect(workerFinal.sectionId).toBe('section:1');
     expect(Object.isFrozen(workerEnding)).toBe(true);
     expect(Object.isFrozen(workerEnding.lineNumbering)).toBe(true);
@@ -79,12 +130,13 @@ describe('parser-private section placement projection', () => {
     expect(projected.bodyLength).toBe(2);
     expect(projected.occurrences.map((occurrence) => ({
       id: occurrence.sectionOccurrenceId,
+      sectionBidi: occurrence.sectionBidi,
       start: occurrence.startBodyIndex,
       end: occurrence.endBodyIndex,
       final: occurrence.final,
     }))).toEqual([
-      { id: 'section:0', start: 0, end: 0, final: false },
-      { id: 'section:1', start: 1, end: 1, final: true },
+      { id: 'section:0', sectionBidi: true, start: 0, end: 0, final: false },
+      { id: 'section:1', sectionBidi: false, start: 1, end: 1, final: true },
     ]);
     expect(Object.isFrozen(projected)).toBe(true);
     expect(Object.isFrozen(projected.occurrences)).toBe(true);

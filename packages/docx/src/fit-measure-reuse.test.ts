@@ -87,15 +87,14 @@ function doc(body: BodyElement[], pageHeight = 400): DocxDocumentModel {
  *  to prove the reuse produced the SAME layout as a fresh measurement. */
 function projection(model: DocxDocumentModel) {
   return layoutDocument(model).pages.map((page) =>
-    page.fragments.map((placed) => {
-      const f = placed.fragment as ParagraphLayout;
+    page.layers.body.filter((node): node is ParagraphLayout => node.kind === 'paragraph').map((f) => {
       return {
         continuation: f.continuation,
         sourcePath: f.source.path,
         lines: f.lines.length,
         availW: f.flowBounds.widthPt,
         startY: f.flowBounds.yPt,
-        heightPt: placed.heightPt,
+        heightPt: f.advancePt,
         advances: f.lines.map((l) => l.advancePt),
       };
     }),

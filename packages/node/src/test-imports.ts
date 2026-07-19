@@ -67,3 +67,23 @@ export async function importForTests<T>(
 export function loadSkiaForTests(): Promise<typeof import('skia-canvas') | null> {
   return importForTests(() => import('skia-canvas'), 'skia-canvas');
 }
+
+export type DocxRendererModule = typeof import('../../docx/src/renderer.ts');
+export type DocxLayoutServices = ReturnType<DocxRendererModule['createLayoutServices']>;
+
+/** Load the DOCX renderer without erasing its compile-time module contract. */
+export function loadDocxRendererForTests(): Promise<DocxRendererModule | null> {
+  return importForTests(
+    () => import('../../docx/src/renderer.ts'),
+    'packages/docx/src/renderer.ts',
+  );
+}
+
+export type DocxBookmarkNavModule = typeof import('../../docx/src/bookmark-nav.ts');
+
+export function loadDocxBookmarkNavForTests(): Promise<DocxBookmarkNavModule | null> {
+  return importForTests(
+    () => import('../../docx/src/bookmark-nav.ts'),
+    'packages/docx/src/bookmark-nav.ts',
+  );
+}

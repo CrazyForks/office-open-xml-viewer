@@ -29,7 +29,14 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import type { DocxDocumentModel } from '@silurus/ooxml-docx';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+  type DocxLayoutServices,
+  type DocxRendererModule,
+} from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
@@ -44,11 +51,8 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
 const SAMPLE = process.env.DOCX_FIT_SAMPLE;
 const PDF = process.env.DOCX_FIT_PDF;
@@ -56,16 +60,10 @@ const PDF = process.env.DOCX_FIT_PDF;
 interface Run { text: string; x: number; y: number; w: number }
 interface VisLine { y: number; x0: number; x1: number; text: string }
 
-interface RendererMod {
-  paginateDocument: (doc: unknown) => unknown[][];
-  renderDocumentToCanvas: (
-    doc: unknown, canvas: unknown, pageIndex: number, opts: Record<string, unknown>,
-  ) => Promise<void>;
-}
+type DocxLayout = ReturnType<DocxRendererModule['layoutDocument']>;
 
-function parse(path: string): unknown {
-  const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => unknown };
-  return parseDocx(readFileSync(path));
+function parse(path: string): DocxDocumentModel {
+  return docxMod!.parseDocx(readFileSync(path));
 }
 
 /** Recording ctx proxy: forwards everything to the real skia ctx but records
@@ -96,17 +94,26 @@ function recordingCtx(real: CanvasRenderingContext2D, sink: Run[]): CanvasRender
 
 /** Reconstruct our visual lines for one page (single-column doc): bucket runs by
  *  baseline y, sort by x, concatenate. Returns lines top-to-bottom. */
-async function ourPageLines(doc: unknown, pages: unknown[][], page: number, widthPx: number): Promise<VisLine[]> {
+async function ourPageLines(
+  doc: DocxDocumentModel,
+  layoutServices: DocxLayoutServices,
+  page: number,
+  widthPx: number,
+): Promise<VisLine[]> {
   const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
   try {
-    const { renderDocumentToCanvas } = rendererMod as unknown as RendererMod;
+    const { renderDocumentToCanvas } = rendererMod!;
     const runs: Run[] = [];
     const canvas = new Canvas(Math.round(widthPx * 1.5), Math.round(widthPx * 2));
     const realCtx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
     const recCtx = recordingCtx(realCtx, runs);
     (canvas as unknown as { getContext: () => unknown }).getContext = () => recCtx;
     await renderDocumentToCanvas(doc, canvas as unknown as never, page, {
-      width: widthPx, dpr: 1, prebuiltPages: pages, totalPages: pages.length,
+      width: widthPx,
+      dpr: 1,
+      layoutServices,
+      currentDate: 0,
+      defaultCurrentDateMs: 0,
     });
     const byY = new Map<number, Run[]>();
     for (const r of runs) {
@@ -186,8 +193,13 @@ describe.skipIf(!gate)('issue #991 — SEA justified line-fit adjudication', () 
   it('per-page line-break divergence report', async () => {
     const doc = parse(SAMPLE!);
     const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
-    let pages: unknown[][];
-    try { pages = (rendererMod as unknown as RendererMod).paginateDocument(doc); }
+    let layout: DocxLayout;
+    let layoutServices: DocxLayoutServices;
+    try {
+      const renderer = rendererMod!;
+      layoutServices = renderer.createLayoutServices(doc);
+      layout = renderer.layoutDocument(doc, layoutServices, { currentDateMs: 0 });
+    }
     finally { restore.forEach((r) => r()); }
 
     // A4 width in the PDF is 595pt; render at 595px so our coords ≈ pt.
@@ -198,8 +210,8 @@ describe.skipIf(!gate)('issue #991 — SEA justified line-fit adjudication', () 
     const dumpPages = new Set((process.env.DOCX_FIT_DUMP_PAGES ?? '').split(',').map((s) => +s.trim() - 1));
     const dumps: string[] = [];
 
-    for (let p = 0; p < pages.length; p++) {
-      const our = await ourPageLines(doc, pages, p, widthPx);
+    for (let p = 0; p < layout.pages.length; p++) {
+      const our = await ourPageLines(doc, layoutServices, p, widthPx);
       const word = wordPageLines(PDF!, p);
       ourTotal += our.length;
       wordTotal += word.length;
@@ -289,13 +301,18 @@ describe.skipIf(!baseGate || !havePdfinfo)('issue #991 — private fixture line-
     it.skipIf(!pair)(`${name}: per-page visible-line counts match the Word PDF`, async () => {
       const doc = parse(pair!.docx);
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
-      let pages: unknown[][];
-      try { pages = (rendererMod as unknown as RendererMod).paginateDocument(doc); }
+      let layout: DocxLayout;
+      let layoutServices: DocxLayoutServices;
+      try {
+        const renderer = rendererMod!;
+        layoutServices = renderer.createLayoutServices(doc);
+        layout = renderer.layoutDocument(doc, layoutServices, { currentDateMs: 0 });
+      }
       finally { restore.forEach((r) => r()); }
       let ourTotal = 0;
       let wordTotal = 0;
-      for (let p = 0; p < pages.length; p++) {
-        const our = await ourPageLines(doc, pages, p, 595);
+      for (let p = 0; p < layout.pages.length; p++) {
+        const our = await ourPageLines(doc, layoutServices, p, 595);
         const word = wordPageLines(pair!.pdf, p);
         ourTotal += our.length;
         wordTotal += word.length;
@@ -309,14 +326,14 @@ describe.skipIf(!baseGate || !havePdfinfo)('issue #991 — private fixture line-
       const pdfInfo = execFileSync('pdfinfo', [pair!.pdf], { encoding: 'utf8' });
       const pdfPages = Number(/^Pages:\s+(\d+)$/m.exec(pdfInfo)?.[1] ?? '0');
       expect(pdfPages, `${name} pdfinfo page count`).toBeGreaterThan(0);
-      for (let p = pages.length; p < pdfPages; p++) {
+      for (let p = layout.pages.length; p < pdfPages; p++) {
         expect(
           wordPageLines(pair!.pdf, p).length,
           `${name} Word PDF page ${p + 1} exceeds our pagination and must be empty`,
         ).toBe(0);
       }
       // eslint-disable-next-line no-console
-      console.log(`[#991 pin] ${name}: ${ourTotal} lines == Word ${wordTotal} (our ${pages.length} pages, PDF ${pdfPages})`);
+      console.log(`[#991 pin] ${name}: ${ourTotal} lines == Word ${wordTotal} (our ${layout.pages.length} pages, PDF ${pdfPages})`);
       expect(ourTotal).toBe(wordTotal);
     });
   }

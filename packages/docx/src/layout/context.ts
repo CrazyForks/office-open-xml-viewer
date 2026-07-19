@@ -7,6 +7,12 @@ import type {
   SectionGeom,
   SectionProps,
 } from '../types.js';
+import {
+  computeSectionColumns,
+  type SectionLayoutContext,
+  type SectionGridContext,
+} from '../layout-context.js';
+import type { DeepReadonly } from './types.js';
 
 /**
  * Section facts that must change atomically at a page-flow boundary. Keeping the
@@ -18,6 +24,9 @@ export interface PageFlowSectionContext {
   readonly geometry: Readonly<SectionGeom>;
   readonly columns: readonly Readonly<ColumnGeom>[];
   readonly textDirection: string;
+  /** §17.6.1 section direction controls newspaper-column population order. */
+  readonly sectionBidi: boolean;
+  readonly grid: Readonly<SectionGridContext>;
 }
 
 export function createPageFlowSectionContext(input: Readonly<{
@@ -25,6 +34,8 @@ export function createPageFlowSectionContext(input: Readonly<{
   geometry: SectionGeom;
   columns: readonly Readonly<ColumnGeom>[];
   textDirection: string;
+  sectionBidi?: boolean;
+  grid?: Readonly<SectionGridContext>;
 }>): PageFlowSectionContext {
   if (input.sectionOccurrenceId.length === 0) {
     throw new RangeError('Section occurrence id must not be empty');
@@ -37,6 +48,12 @@ export function createPageFlowSectionContext(input: Readonly<{
     geometry: Object.freeze({ ...input.geometry }),
     columns: Object.freeze(input.columns.map((column) => Object.freeze({ ...column }))),
     textDirection: input.textDirection,
+    sectionBidi: input.sectionBidi ?? false,
+    grid: Object.freeze(input.grid ?? {
+      kind: 'none',
+      linePitchPt: null,
+      charSpacePt: null,
+    }),
   });
 }
 
@@ -44,6 +61,10 @@ export function createPageFlowSectionContext(input: Readonly<{
  * from the page edge; the sign controls header/footer overlap separately. */
 export function sectionContentStartBlockPt(section: PageFlowSectionContext): number {
   return sectionBodyInsetPt(section.geometry.marginTop);
+}
+
+export function sectionContentEndBlockPt(section: PageFlowSectionContext): number {
+  return section.geometry.pageHeight - sectionBodyInsetPt(section.geometry.marginBottom);
 }
 
 /** Signed top/bottom margins retain overlap policy; body placement uses distance. */
@@ -79,10 +100,100 @@ export function physicalSectionGeometry(logical: SectionGeom): SectionGeom {
   };
 }
 
+export function isVerticalSectionDirection(textDirection: string): boolean {
+  return textDirection === 'tbRl'
+    || textDirection === 'tbRlV'
+    || textDirection === 'tbLrV'
+    || textDirection === 'btLr';
+}
+
+export interface SectionPageLayoutPolicy {
+  readonly physicalGeometry: Readonly<SectionGeom>;
+  readonly columns: DeepReadonly<ColumnsSpec> | null;
+  readonly textDirection: string;
+  readonly gutterPt: number;
+  readonly rtlGutter: boolean;
+  readonly mirrorMargins: boolean;
+  readonly gutterAtTop: boolean;
+  readonly bookFoldPrinting: boolean;
+  readonly bookFoldRevPrinting: boolean;
+  readonly printTwoOnOne: boolean;
+}
+
+export function effectivePhysicalSectionGeometry(
+  policy: SectionPageLayoutPolicy,
+  pageIndex: number,
+): SectionGeom {
+  if (!Number.isInteger(pageIndex) || pageIndex < 0) {
+    throw new RangeError('Physical page index must be a non-negative integer');
+  }
+  let { pageWidth, pageHeight } = policy.physicalGeometry;
+  let { marginTop, marginRight, marginBottom, marginLeft } = policy.physicalGeometry;
+  const bookFold = policy.bookFoldPrinting || policy.bookFoldRevPrinting;
+  if (bookFold) {
+    pageWidth /= 2;
+    // ECMA-376 §§17.15.1.11/.13 define a half-sheet editing page and automatic
+    // gutter placement. Word places the bisector on the right-margin side
+    // ([MS-OI29500] §§2.1.389/.391), so the authored gutter belongs there.
+    marginRight += policy.gutterPt;
+  } else if (policy.printTwoOnOne) {
+    pageHeight /= 2;
+    // §17.15.1.64 places each editing page on a half-sheet with its top margin
+    // at the bisector; §17.15.1.50 therefore makes that the automatic gutter edge.
+    marginTop += policy.gutterPt;
+  } else {
+    if (policy.gutterAtTop && !policy.mirrorMargins) marginTop += policy.gutterPt;
+    else if (policy.rtlGutter) marginRight += policy.gutterPt;
+    else marginLeft += policy.gutterPt;
+  }
+  if (!bookFold && !policy.printTwoOnOne && policy.mirrorMargins && pageIndex % 2 === 1) {
+    [marginLeft, marginRight] = [marginRight, marginLeft];
+  }
+  return {
+    ...policy.physicalGeometry,
+    pageWidth,
+    pageHeight,
+    marginTop,
+    marginRight,
+    marginBottom,
+    marginLeft,
+  };
+}
+
+export function resolveSectionContextForPage(
+  base: SectionLayoutContext,
+  policy: SectionPageLayoutPolicy,
+  pageIndex: number,
+): SectionLayoutContext {
+  const physical = effectivePhysicalSectionGeometry(policy, pageIndex);
+  const geometry = isVerticalSectionDirection(policy.textDirection)
+    ? logicalSectionGeometry(physical)
+    : physical;
+  return Object.freeze({
+    ...base,
+    geometry: Object.freeze(geometry),
+    columns: Object.freeze(computeSectionColumns({
+      ...geometry,
+      titlePage: false,
+      evenAndOddHeaders: false,
+      columns: policy.columns,
+    } as SectionProps).map((column) => Object.freeze(column))),
+  });
+}
+
 export interface SectionPlacementFacts {
   readonly sectionId: string;
+  readonly sectionBidi: boolean;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
+  readonly docGridType: string | null;
+  readonly docGridLinePitch: number | null;
+  readonly docGridCharSpace: number | null;
+  readonly gutterPt: number | null;
+  readonly rtlGutter: boolean | null;
+  readonly pageBordersAuthored: boolean;
+  readonly pageBorders: Readonly<import('../types.js').PageBorders> | null;
+  readonly pageGeometry: Readonly<Partial<SectionGeom>> | null;
 }
 
 /**
@@ -110,8 +221,16 @@ export interface BodySectionOccurrence {
   readonly headers: HeadersFooters;
   readonly footers: HeadersFooters;
   readonly titlePage: boolean;
+  readonly sectionBidi: boolean;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
+  readonly docGridType: string | null;
+  readonly docGridLinePitch: number | null;
+  readonly docGridCharSpace: number | null;
+  readonly gutterPt: number;
+  readonly rtlGutter: boolean;
+  readonly pageBordersAuthored: boolean;
+  readonly pageBorders: Readonly<import('../types.js').PageBorders> | null;
   readonly placement: SectionPlacementFacts;
 }
 
@@ -127,7 +246,7 @@ export interface BodySectionIndex {
   sectionAtBodyIndex(bodyIndex: number): BodySectionOccurrence;
 }
 
-export function sectionGeometry(section: SectionProps): SectionGeom {
+export function sectionPageBox(section: SectionProps): SectionGeom {
   return {
     pageWidth: section.pageWidth,
     pageHeight: section.pageHeight,
@@ -138,6 +257,43 @@ export function sectionGeometry(section: SectionProps): SectionGeom {
     headerDistance: section.headerDistance,
     footerDistance: section.footerDistance,
   };
+}
+
+export function defaultSectionGeometry(): SectionGeom {
+  return {
+    pageWidth: 612, pageHeight: 792,
+    marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+    headerDistance: 36, footerDistance: 36,
+  };
+}
+
+/** Resolve section-owned facts after parser acquisition, without retaining the
+ * document wrapper across the canonical layout boundary. */
+export function resolveAcquiredSectionLayoutContext(
+  section: SectionProps,
+  sectionBidi = false,
+): SectionLayoutContext {
+  const gridKind = section.docGridType === 'lines'
+    || section.docGridType === 'linesAndChars'
+    || section.docGridType === 'snapToChars'
+    ? section.docGridType
+    : 'none';
+  return Object.freeze({
+    geometry: Object.freeze(sectionPageBox(section)),
+    columns: Object.freeze(computeSectionColumns(section).map((column) => Object.freeze(column))),
+    columnSeparator: section.columns?.sep === true,
+    grid: Object.freeze({
+      kind: gridKind,
+      linePitchPt: section.docGridLinePitch ?? null,
+      charSpacePt: section.docGridCharSpace == null ? null : section.docGridCharSpace / 4096,
+    }),
+    textDirection: section.textDirection ?? 'lrTb',
+    sectionBidi,
+    verticalAlignment: section.vAlign ?? 'top',
+    ...(section.lineNumbering === null || section.lineNumbering === undefined
+      ? {}
+      : { lineNumbering: Object.freeze({ ...section.lineNumbering }) }),
+  });
 }
 
 /**

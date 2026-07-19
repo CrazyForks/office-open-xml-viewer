@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computePages } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -9,7 +9,7 @@ import type {
 } from './types.js';
 
 // Paginator-level pin for ECMA-376 §20.4.3.4 `relativeFrom="column"` anchors:
-// the MEASURE pass (computePages → buildMeasureState) must resolve a body-level
+// the canonical body layout pass must resolve a body-level
 // column anchor against the SAME text-column band as the paint pass.
 //
 // Regression this pins (PR #844 review F1): buildMeasureState seeded
@@ -22,7 +22,7 @@ import type {
 //
 // The MinState unit tests in anchor-column.test.ts cannot catch this: they
 // hand-construct contentX and never exercise the paginator's own state seeding.
-// This test goes through computePages so the real buildMeasureState seed is on
+// This test goes through the production document layout so the real measure-state seed is on
 // the hook.
 //
 // Setup (mirrors page-anchor-prescan.test.ts geometry): 200×200 page, 20pt
@@ -112,32 +112,38 @@ function floatImage(anchorXRelativeFrom: string): DocRun {
   return { type: 'image', ...img } as DocRun;
 }
 
-function pagesFor(anchorXRelativeFrom: string): ReturnType<typeof computePages> {
+function layoutFor(anchorXRelativeFrom: string) {
   const body: BodyElement[] = [
     para([textRun('あ'.repeat(64), 20)]),
     para([floatImage(anchorXRelativeFrom)]),
   ];
-  return computePages(body, section(), makeCtx());
+  return layoutBodyModel(body, section(), makeCtx());
 }
 
-describe('computePages — body-level column anchor measures like the paint pass (§20.4.3.4)', () => {
+describe('canonical body layout — column anchor measurement (§20.4.3.4)', () => {
   it('column-relative float paginates identically to the margin-relative control', () => {
-    const marginPages = pagesFor('margin');
-    const columnPages = pagesFor('column');
-
-    type SlicedEl = { lineSlice?: { start: number; end: number } };
-    const marginFirst = marginPages[0][0] as SlicedEl;
-    const columnFirst = columnPages[0][0] as SlicedEl;
+    const marginLayout = layoutFor('margin');
+    const columnLayout = layoutFor('column');
+    const marginFirst = marginLayout.pages[0]?.layers.body.find((node) => node.source.path[0] === 0);
+    const columnFirst = columnLayout.pages[0]?.layers.body.find((node) => node.source.path[0] === 0);
 
     // Control: margin-anchored float at x∈[180,260] is outside the text band ⇒
     // paragraph A's 8 lines fit page 1 whole — no split.
-    expect(marginFirst.lineSlice).toBeUndefined();
+    expect(marginFirst).toMatchObject({ kind: 'paragraph' });
+    expect(marginFirst?.kind === 'paragraph' ? marginFirst.continuation : undefined).toMatchObject({
+      lineStart: 0,
+      lineEnd: 8,
+      continuesFromPrevious: false,
+      continuesOnNext: false,
+    });
 
     // Pin: at body level the column band == the margin band, so the column
     // variant must behave IDENTICALLY. Under the buggy contentX=0 measure seed
     // the float lands at x∈[160,240], invades the band, and A splits
-    // (lineSlice appears) — a pagination divergence from the paint pass.
-    expect(columnFirst.lineSlice).toBeUndefined();
-    expect(columnPages.length).toBe(marginPages.length);
+    // (a continuation appears) — a pagination divergence from the paint pass.
+    expect(columnFirst).toMatchObject({ kind: 'paragraph' });
+    expect(columnFirst?.kind === 'paragraph' ? columnFirst.continuation : undefined)
+      .toEqual(marginFirst?.kind === 'paragraph' ? marginFirst.continuation : undefined);
+    expect(columnLayout.pages.length).toBe(marginLayout.pages.length);
   });
 });

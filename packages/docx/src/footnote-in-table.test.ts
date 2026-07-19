@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   createLayoutServices,
-  paginateDocument,
+  layoutDocument,
   renderDocumentToCanvas,
 } from './renderer.js';
 import type {
@@ -9,8 +9,8 @@ import type {
   DocTableRow, DocxDocumentModel, SectionProps,
 } from './types';
 
-// ECMA-376 §17.11.10 — a footnote is drawn at the bottom of the page that holds
-// its reference, regardless of WHERE in the document story that reference sits.
+// ECMA-376 §17.11.21 / §17.18.34 — a footnote is drawn at the bottom of the
+// page that holds its reference, regardless of WHERE in the document story it sits.
 // A `<w:footnoteReference>` can appear inside a table cell (the cell paragraph
 // carries the noteRef run), so the footnote block must be drawn — and the body
 // area reserved — even when the only reference on a page lives in a table.
@@ -119,7 +119,7 @@ async function renderPage0(doc: DocxDocumentModel): Promise<Call[]> {
   return calls;
 }
 
-describe('footnote referenced from a table cell (ECMA-376 §17.11.10)', () => {
+describe('footnote referenced from a table cell (ECMA-376 §17.11.21 / §17.18.34)', () => {
   const footnotes: DocNote[] = [
     { id: 'fn1', content: [para([textRun('NOTE')]) as unknown as BodyElement] },
   ];
@@ -236,7 +236,7 @@ describe('footnote referenced from a table cell (ECMA-376 §17.11.10)', () => {
       getContext() { return ctx; }
     };
     try {
-      paginateDocument(model, services);
+      layoutDocument(model, services, { currentDateMs: 0 });
     } finally {
       if (previousOffscreenCanvas === undefined) delete globals.OffscreenCanvas;
       else globals.OffscreenCanvas = previousOffscreenCanvas;
@@ -245,7 +245,7 @@ describe('footnote referenced from a table cell (ECMA-376 §17.11.10)', () => {
     expect(shapedTexts).toContain('X');
   });
 
-  it('uses the final split-table page that owns the footnote reserve', () => {
+  it('uses the split-table page that retains the footnote reference', () => {
     const notePage = para([{
       type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '?',
       bold: false, italic: false, underline: false, strikethrough: false,
@@ -282,15 +282,18 @@ describe('footnote referenced from a table cell (ECMA-376 §17.11.10)', () => {
     globals.OffscreenCanvas = class {
       getContext() { return ctx; }
     };
-    let pages: ReturnType<typeof paginateDocument>;
+    let layout: ReturnType<typeof layoutDocument>;
     try {
-      pages = paginateDocument(model, services);
+      layout = layoutDocument(model, services, { currentDateMs: 0 });
     } finally {
       if (previousOffscreenCanvas === undefined) delete globals.OffscreenCanvas;
       else globals.OffscreenCanvas = previousOffscreenCanvas;
     }
 
-    expect(pages.length).toBeGreaterThan(1);
-    expect(shapedTexts).toContain(String(9 + pages.length));
+    expect(layout.pages.length).toBeGreaterThan(1);
+    // The seed pass shapes physical page 1; the only converged displayed PAGE
+    // value must be row 0's 10, never a later terminal-slice page.
+    expect([...new Set(shapedTexts.filter((text) => /^\d+$/.test(text)))].sort())
+      .toEqual(['1', '10']);
   });
 });

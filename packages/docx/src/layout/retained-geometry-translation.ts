@@ -7,6 +7,22 @@ import type {
 
 export interface LayoutTranslation { readonly xPt: number; readonly yPt: number }
 
+/** Keep occurrence translation a dependency-free leaf: projection may call it,
+ * so importing general geometry helpers here would reopen a runtime cycle seam. */
+function unionTranslatedRects(rects: readonly LayoutRect[]): LayoutRect | null {
+  if (rects.length === 0) return null;
+  const left = Math.min(...rects.map((rect) => rect.xPt));
+  const top = Math.min(...rects.map((rect) => rect.yPt));
+  const right = Math.max(...rects.map((rect) => rect.xPt + rect.widthPt));
+  const bottom = Math.max(...rects.map((rect) => rect.yPt + rect.heightPt));
+  return {
+    xPt: left,
+    yPt: top,
+    widthPt: right - left,
+    heightPt: bottom - top,
+  };
+}
+
 /** Initial tblpPr placement and retained occurrence translation must share this
  * predicate or their resolved frame and later axis ownership diverge. */
 export function floatingTableAxesFollowHostFlow(
@@ -212,15 +228,22 @@ function translateParagraphWithContext(
     drawingTranslations.set(drawing.id, drawingDelta);
     drawing.textBoxIds?.forEach((id) => textBoxTranslations.set(id, drawingDelta));
   }
+  const drawings = paragraph.drawings.map((drawing) => translateDrawingWithContext(
+    drawing, drawingTranslations.get(drawing.id) ?? delta, context,
+  ));
+  const cellContainmentBounds = unionTranslatedRects(
+    drawings
+      .filter((drawing) => drawing.anchorLayer?.cellContainment === true)
+      .map((drawing) => drawing.flowBounds),
+  );
   const translated: ParagraphLayout = {
     ...paragraph,
     flowBounds: translateRect(paragraph.flowBounds, delta), inkBounds: translateRect(paragraph.inkBounds, delta),
     ...(paragraph.clipBounds ? { clipBounds: translateRect(paragraph.clipBounds, delta) } : {}),
     lines: paragraph.lines.map((line) => translateLine(line, delta, drawingTranslations)),
     borders: paragraph.borders.map((border) => translateBorder(border, delta)),
-    drawings: paragraph.drawings.map((drawing) => translateDrawingWithContext(
-      drawing, drawingTranslations.get(drawing.id) ?? delta, context,
-    )),
+    drawings,
+    ...(cellContainmentBounds ? { cellContainmentBounds } : {}),
     textBoxes: paragraph.textBoxes.map((textBox) =>
       translateTextBoxWithContext(textBox, textBoxTranslations.get(textBox.id) ?? delta, context)),
     exclusions: paragraph.exclusions.map((exclusion) => {
@@ -234,6 +257,15 @@ function translateParagraphWithContext(
         polygon: exclusion.polygon.map((point) => translatePoint(point, exclusionDelta)),
       };
     }),
+    ...(paragraph.anchorCollisions ? {
+      anchorCollisions: paragraph.anchorCollisions.map((entry) => ({
+        ...entry,
+        bounds: translateRect(entry.bounds, {
+          xPt: entry.horizontalOwnership === 'page' ? 0 : delta.xPt,
+          yPt: entry.verticalOwnership === 'page' ? 0 : delta.yPt,
+        }),
+      })),
+    } : {}),
     ...(paragraph.anchorFrames ? { anchorFrames: paragraph.anchorFrames.map((frame) =>
       translateAnchorFrame(frame, delta)) } : {}),
     ...(paragraph.paragraphMark ? { paragraphMark: {

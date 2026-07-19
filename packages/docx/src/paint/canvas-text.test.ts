@@ -96,6 +96,26 @@ describe('paintParagraphLayout', () => {
     expect(runs[0]).toMatchObject({ x: 60, y: 80, w: 40, h: 20, fontSize: 20 });
   });
 
+  it('reports text-run geometry through the retained point-to-CSS affine', () => {
+    const runs: unknown[] = [];
+    const ctx = {
+      fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: 'left',
+      textBaseline: 'alphabetic', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto',
+      save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, setLineDash() {},
+      fillRect() {}, strokeRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fillText() {},
+    } as unknown as CanvasRenderingContext2D;
+
+    paintParagraphLayout(node(), {
+      ctx, scale: 2, dpr: 1, resources: noPaintResources,
+      pointToCss: { a: 0, b: 2, c: -2, d: 0, e: 200, f: 5 },
+      onTextRun: (run) => runs.push(run),
+    });
+
+    expect(runs[0]).toMatchObject({
+      x: 180, y: 25, w: 40, h: 20, fontSize: 20, transform: 'rotate(90deg)',
+    });
+  });
+
   it.each([
     { scale: 1, dpr: 1, placement: { xPt: 10.25, yPt: 10.25 }, outer: { xPt: 0, yPt: 0 } },
     { scale: 1.5, dpr: 2, placement: { xPt: 10.2, yPt: 10.3 }, outer: { xPt: .15, yPt: .1 } },

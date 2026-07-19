@@ -1,9 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import {
-  bodyFragmentFor,
-  paginateDocument,
-  renderDocumentToCanvas,
-} from './renderer.js';
+import { layoutDocument } from './renderer.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,
   CellElement,
@@ -11,8 +8,7 @@ import type {
   DocTable,
   DocTableRow,
   DocxDocumentModel,
-  PaginatedBodyElement,
-  SectionProps,
+    SectionProps,
 } from './types';
 
 interface TextCall {
@@ -76,7 +72,7 @@ function makeRecordingCanvas(): {
     save() { translations.push({ ...translation }); },
     restore() { translation = translations.pop() ?? { x: 0, y: 0 }; },
     closePath() {}, fill() {}, fillRect() {}, strokeRect() {},
-    clip() {}, rect() {}, scale() {},
+    clip() {}, rect() {}, scale() {}, setTransform() { translation = { x: 0, y: 0 }; },
     translate(x: number, y: number) {
       translation = { x: translation.x + x, y: translation.y + y };
     },
@@ -184,26 +180,18 @@ function documentWithRow(tableRow: DocTableRow, pageHeight: number): DocxDocumen
 }
 
 async function renderPage(
-  model: DocxDocumentModel,
-  pages: PaginatedBodyElement[][],
+  layout: ReturnType<typeof layoutDocument>,
   pageIndex: number,
 ) {
   const recording = makeRecordingCanvas();
-  await renderDocumentToCanvas(model, recording.canvas, pageIndex, {
-    dpr: 1,
-    width: 160,
-    prebuiltPages: pages,
-  });
+  await paintLayoutPage(layout, pageIndex, recording.canvas, { dpr: 1, scale: 1 });
   return recording;
 }
 
-function firstSliceOnPage(pages: PaginatedBodyElement[][], pageIndex: number) {
-  const table = pages[pageIndex].find((element) => element.type === 'table') as
-    (PaginatedBodyElement & DocTable) | undefined;
-  if (!table) return undefined;
-  const placed = bodyFragmentFor(table);
-  if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) return undefined;
-  const paragraph = placed.fragment.rows[0]?.cells[0]?.blocks[0]?.layout;
+function firstSliceOnPage(layout: ReturnType<typeof layoutDocument>, pageIndex: number) {
+  const table = layout.pages[pageIndex]?.layers.body.find((node) => node.kind === 'table');
+  if (table?.kind !== 'table') return undefined;
+  const paragraph = table.rows[0]?.cells[0]?.blocks[0]?.layout;
   if (paragraph?.kind !== 'paragraph') return undefined;
   const continuation = paragraph.continuation;
   return continuation ? { start: continuation.lineStart, end: continuation.lineEnd } : undefined;
@@ -218,12 +206,12 @@ const splitText =
 describe('table row split fidelity — fragment-owned paint geometry', () => {
   it('paints only the retained continuation [k, n) line window', async () => {
     const model = documentWithRow(row(splitText, 'top'), 60);
-    const pages = paginateDocument(model);
-    expect(pages).toHaveLength(2);
-    expect(firstSliceOnPage(pages, 0)).toEqual({ start: 0, end: 3 });
-    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 3, end: 4 });
+    const layout = layoutDocument(model);
+    expect(layout.pages).toHaveLength(2);
+    expect(firstSliceOnPage(layout, 0)).toEqual({ start: 0, end: 3 });
+    expect(firstSliceOnPage(layout, 1)).toEqual({ start: 3, end: 4 });
 
-    const page2 = await renderPage(model, pages, 1);
+    const page2 = await renderPage(layout, 1);
     const paintedText = page2.texts.map((call) => call.text).join('');
     expect(paintedText).toBe('丁'.repeat(16));
     expect(paintedText).not.toContain('甲');
@@ -232,11 +220,11 @@ describe('table row split fidelity — fragment-owned paint geometry', () => {
 
   it('keeps every centered continuation baseline at or below its row-top rule', async () => {
     const model = documentWithRow(row(splitText, 'center'), 60);
-    const pages = paginateDocument(model);
-    expect(pages).toHaveLength(2);
-    expect(firstSliceOnPage(pages, 1)).toEqual({ start: 3, end: 4 });
+    const layout = layoutDocument(model);
+    expect(layout.pages).toHaveLength(2);
+    expect(firstSliceOnPage(layout, 1)).toEqual({ start: 3, end: 4 });
 
-    const page2 = await renderPage(model, pages, 1);
+    const page2 = await renderPage(layout, 1);
     const topRule = page2.strokes.find(
       (stroke) => Math.abs(stroke.y1 - stroke.y2) < 0.5 && Math.abs(stroke.x2 - stroke.x1) > 100,
     );
@@ -248,11 +236,11 @@ describe('table row split fidelity — fragment-owned paint geometry', () => {
 
   it('keeps an unsplit centered cell deterministic and measurement-free', async () => {
     const model = documentWithRow(row('CENTER', 'center', 60, 'exact'), 80);
-    const pages = paginateDocument(model);
-    expect(pages).toHaveLength(1);
+    const layout = layoutDocument(model);
+    expect(layout.pages).toHaveLength(1);
 
-    const first = await renderPage(model, pages, 0);
-    const second = await renderPage(model, pages, 0);
+    const first = await renderPage(layout, 0);
+    const second = await renderPage(layout, 0);
     expect(second.texts).toEqual(first.texts);
     expect(first.texts.map(({ text, x, y }) => ({ text, x, y }))).toEqual([
       { text: 'CENTER', x: 0, y: 36 },

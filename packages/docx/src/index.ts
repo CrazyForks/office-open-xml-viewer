@@ -30,7 +30,7 @@ export type {
   EmbeddedFontRef,
   SectionProps,
   // Per-section page geometry (reachable via the BodyElement sectionBreak arm's
-  // `geom` and PaginatedBodyElement's `sectionGeom`, ECMA-376 §17.6.13/§17.6.11).
+  // `geom` and canonical section-region geometry, ECMA-376 §17.6.13/§17.6.11).
   SectionGeom,
   // Per-section page-numbering settings (reachable via SectionProps.pageNumType
   // and the BodyElement sectionBreak arm's `pageNumType`, ECMA-376 §17.6.12).

@@ -34,16 +34,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+} from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas, FontLibrary } = (skia ?? {}) as Skia;
 const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)');
-const rendererMod = await importForTests(
-  () => import('./../../docx/src/renderer.ts'),
-  'packages/docx/src/renderer.ts',
-);
+const rendererMod = await loadDocxRendererForTests();
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -71,9 +72,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !havePrereqs)(
       for (const fam of ['Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', 'MS Mincho', 'Noto Serif JP']) {
         FontLibrary.use(fam, [MINCHO]);
       }
-      const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
-      const { renderDocumentToCanvas, paginateDocument, physicalPageSizeForPage } =
-        rendererMod as Any;
+      const { parseDocx } = docxMod!;
+      const { createLayoutServices, layoutDocument, renderDocumentToCanvas } = rendererMod!;
       const doc = parseDocx(readFileSync(SAMPLE));
 
       const rImg = installImageBitmapShim(factory);
@@ -82,10 +82,17 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !havePrereqs)(
         // Word PDF: 2 pages, both physical Letter portrait 612×792 pt — the
         // vertical page's stamped LOGICAL frame (792×612) must un-swap by its
         // OWN direction, the horizontal page by its own.
-        const pages = paginateDocument(doc);
-        expect(pages.length).toBe(2);
-        expect(physicalPageSizeForPage(pages, 0, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
-        expect(physicalPageSizeForPage(pages, 1, doc.section)).toEqual({ widthPt: 612, heightPt: 792 });
+        const layoutServices = createLayoutServices(doc);
+        const layout = layoutDocument(doc, layoutServices, { currentDateMs: 0 });
+        expect(layout.pages.length).toBe(2);
+        expect({
+          widthPt: layout.pages[0].geometry.widthPt,
+          heightPt: layout.pages[0].geometry.heightPt,
+        }).toEqual({ widthPt: 612, heightPt: 792 });
+        expect({
+          widthPt: layout.pages[1].geometry.widthPt,
+          heightPt: layout.pages[1].geometry.heightPt,
+        }).toEqual({ widthPt: 612, heightPt: 792 });
 
         const renderPage = async (pageIndex: number) => {
           const runs: RunInfo[] = [];
@@ -93,7 +100,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !havePrereqs)(
           await renderDocumentToCanvas(doc, canvas as Any, pageIndex, {
             dpr: 1,
             width: 612,
-            prebuiltPages: pages,
+            layoutServices,
+            currentDate: 0,
+            defaultCurrentDateMs: 0,
             onTextRun: (r: RunInfo) => runs.push(r),
           });
           return { runs, canvas };

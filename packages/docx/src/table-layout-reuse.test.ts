@@ -1,10 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import {
-  bodyFragmentFor,
-  createLayoutServices,
-  paginateDocument,
-  renderDocumentToCanvas,
-} from './renderer.js';
+import { createLayoutServices, layoutDocument } from './renderer.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -12,8 +8,7 @@ import type {
   DocTableCell,
   DocTableRow,
   DocxDocumentModel,
-  PaginatedBodyElement,
-  SectionProps,
+    SectionProps,
 } from './types';
 import type { TableFragmentLayout } from './layout/table-pagination.js';
 
@@ -45,7 +40,7 @@ function makeCtx(onMeasure: () => void = () => {}): CanvasRenderingContext2D {
     },
     save() {}, restore() {}, beginPath() {}, closePath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {}, strokeRect() {},
-    rect() {}, clip() {}, scale() {}, translate() {}, rotate() {},
+    rect() {}, clip() {}, scale() {}, translate() {}, rotate() {}, setTransform() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
     drawImage() {}, fillText() {}, strokeText() {},
@@ -121,42 +116,35 @@ function modelWithTable(rowCount: number, repeatedHeader = false): DocxDocumentM
   } as unknown as DocxDocumentModel;
 }
 
-function retainedTables(pages: PaginatedBodyElement[][]) {
-  return pages.flatMap((page) => page
-    .filter((element) => element.type === 'table')
-    .map((element) => {
-      const placed = bodyFragmentFor(element);
-      expect(placed?.fragment.kind).toBe('table');
-      if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
-        throw new Error('expected retained TableLayout/TableFragmentLayout');
-      }
-      return { element, placed, fragment: placed.fragment as TableFragmentLayout };
-    }));
+function retainedTables(layout: ReturnType<typeof layoutDocument>) {
+  return layout.pages.flatMap((page) => page.layers.body.flatMap((node) => (
+    node.kind === 'table' ? [{ node, fragment: node as TableFragmentLayout }] : []
+  )));
 }
 
 describe('retained table layout reuse', () => {
   it('stores shared column geometry and page-local row geometry without legacy stamps', () => {
     const model = modelWithTable(8);
-    const pages = paginateDocument(model, createLayoutServices(model));
-    const tables = retainedTables(pages);
+    const layout = layoutDocument(model, createLayoutServices(model), { currentDateMs: 0 });
+    const tables = retainedTables(layout);
 
     expect(tables.length).toBeGreaterThan(1);
-    for (const { element, placed, fragment } of tables) {
+    for (const { node, fragment } of tables) {
       expect(fragment.columnWidthsPt).toEqual([200, 300]);
       expect(fragment.rows.length).toBeGreaterThan(0);
       expect(fragment.rows.every((tableRow) => tableRow.heightPt > 0)).toBe(true);
-      expect(placed.heightPt).toBeCloseTo(fragment.advancePt, 6);
-      expect(element).not.toHaveProperty('tableColWidthsPt');
-      expect(element).not.toHaveProperty('tableRowHeightsPt');
-      expect(element).not.toHaveProperty('tableLayoutInputs');
+      expect(node.advancePt).toBeCloseTo(fragment.advancePt, 6);
+      expect(node).not.toHaveProperty('tableColWidthsPt');
+      expect(node).not.toHaveProperty('tableRowHeightsPt');
+      expect(node).not.toHaveProperty('tableLayoutInputs');
     }
     expect(tables.every(({ fragment }) => fragment.columnWidthsPt === tables[0]!.fragment.columnWidthsPt)).toBe(true);
   });
 
   it('represents repeated headers and source rows in TableFragmentLayout metadata', () => {
     const model = modelWithTable(8, true);
-    const pages = paginateDocument(model, createLayoutServices(model));
-    const tables = retainedTables(pages);
+    const layout = layoutDocument(model, createLayoutServices(model), { currentDateMs: 0 });
+    const tables = retainedTables(layout);
 
     expect(tables.length).toBeGreaterThan(1);
     const sourceRows = tables.flatMap(({ fragment }) => fragment.rows
@@ -171,21 +159,20 @@ describe('retained table layout reuse', () => {
 
   it('paints the retained table tree at non-unit scale without measuring or mutating geometry', async () => {
     const model = modelWithTable(8, true);
-    const pages = paginateDocument(model, createLayoutServices(model));
-    const tables = retainedTables(pages);
+    const layout = layoutDocument(model, createLayoutServices(model), { currentDateMs: 0 });
+    const tables = retainedTables(layout);
     const fragments = tables.map(({ fragment }) => fragment);
     let measures = 0;
 
-    for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
-      await renderDocumentToCanvas(model, paintCanvas(() => { measures += 1; }), pageIndex, {
+    for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex += 1) {
+      await paintLayoutPage(layout, pageIndex, paintCanvas(() => { measures += 1; }), {
         dpr: 1,
-        width: 750,
-        prebuiltPages: pages,
+        scale: 1.5,
       });
     }
 
     expect(measures).toBe(0);
-    const afterPaint = retainedTables(pages).map(({ fragment }) => fragment);
+    const afterPaint = retainedTables(layout).map(({ fragment }) => fragment);
     expect(afterPaint).toHaveLength(fragments.length);
     for (let index = 0; index < fragments.length; index += 1) {
       expect(afterPaint[index]).toBe(fragments[index]);

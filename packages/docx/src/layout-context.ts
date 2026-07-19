@@ -46,8 +46,11 @@ export interface SectionGridContext {
 export interface SectionLayoutContext {
   readonly geometry: SectionGeom;
   readonly columns: readonly ColumnGeom[];
+  readonly columnSeparator: boolean;
   readonly grid: SectionGridContext;
   readonly textDirection: string;
+  /** Internal retention of §17.6.1 section-level column population direction. */
+  readonly sectionBidi?: boolean;
   readonly verticalAlignment: string;
   readonly lineNumbering?: LineNumbering;
 }
@@ -146,7 +149,7 @@ export function resolveDocumentLayoutSettings(
   document: DocxDocumentModel,
 ): DocumentLayoutSettings {
   // This document-level resolver is the session boundary shared by production
-  // and direct computePages callers. Preparing source/frame adjacency here keeps
+  // and direct layout callers. Preparing source/frame adjacency here keeps
   // the frozen pagination kernel free of migration setup and caller preconditions.
   prepareBodyFrameMetadata(document.body);
   return {
@@ -226,6 +229,7 @@ export function resolveSectionLayoutContext(
       footerDistance: section.footerDistance,
     },
     columns: computeSectionColumns(section),
+    columnSeparator: section.columns?.sep === true,
     grid: {
       kind: normalizeGridKind(section.docGridType),
       linePitchPt: section.docGridLinePitch ?? null,
@@ -233,6 +237,7 @@ export function resolveSectionLayoutContext(
         section.docGridCharSpace == null ? null : section.docGridCharSpace / 4096,
     },
     textDirection: section.textDirection ?? 'lrTb',
+    sectionBidi: false,
     verticalAlignment: section.vAlign ?? 'top',
     lineNumbering: section.lineNumbering ?? undefined,
   };

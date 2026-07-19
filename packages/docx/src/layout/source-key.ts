@@ -1,7 +1,23 @@
 import type { SourceRef } from './types.js';
 
-function sourceKey(source: SourceRef): string {
+export function sourceKey(source: SourceRef): string {
   return `${source.story}:${encodeURIComponent(source.storyInstance)}:${source.path.join('.')}`;
+}
+
+export function bodyOccurrenceKey(
+  source: SourceRef,
+  flowDomainId: string,
+  fragmentStartKey: string,
+): string {
+  if (flowDomainId.length === 0 || fragmentStartKey.length === 0) {
+    throw new RangeError('Body occurrence identity requires a flow domain and fragment start');
+  }
+  return [
+    'body-occurrence',
+    encodeURIComponent(sourceKey(source)),
+    encodeURIComponent(flowDomainId),
+    encodeURIComponent(fragmentStartKey),
+  ].join('/');
 }
 
 export function imageResourceKey(source: SourceRef, partPath: string): string {

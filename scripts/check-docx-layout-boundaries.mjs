@@ -15,6 +15,9 @@ const DOCX_SOURCE = 'packages/docx/src';
 const PAINT_SOURCE = `${DOCX_SOURCE}/paint`;
 const LAYOUT_SOURCE = `${DOCX_SOURCE}/layout`;
 const PARSER_MODEL = `${DOCX_SOURCE}/parser-model.ts`;
+const BODY_LAYOUT_ADAPTER = `${DOCX_SOURCE}/body-layout-input.ts`;
+const PARAGRAPH_ANCHOR_FRAME_ADAPTER = `${DOCX_SOURCE}/paragraph-anchor-frame-adapter.ts`;
+const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
 const LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL = 'normalizeInternalDocumentModel';
@@ -25,8 +28,6 @@ const FINAL_RENDERER_EXPORTS = new Set([
   'clearResolvedLocalFonts',
   'documentHasMath',
   'dropColorReplacedCache',
-  'paginateDocument',
-  'physicalPageSizeForPage',
   'prepareMathRuns',
   'renderDocumentToCanvas',
   'setResolvedLocalFonts',
@@ -34,6 +35,7 @@ const FINAL_RENDERER_EXPORTS = new Set([
 
 const FINAL_RENDERER_DECLARATIONS = new Set([
   ...FINAL_RENDERER_EXPORTS,
+  'createConcreteBodyLayoutKernel',
   'createLayoutServices',
   'normalizeRenderOptions',
 ]);
@@ -44,6 +46,25 @@ const A5_STATE_OWNER_DECLARATIONS = new Set([
   'prepareFittingOuterFragment',
   'reacquirePageBlock',
   'retainedTableRecord',
+]);
+
+const BODY_LAYOUT_ADAPTER_DECLARATIONS = new Set(['createBodyLayoutInput']);
+const PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS = new Set([
+  'ParagraphAnchorReferenceFrameSnapshot',
+  'paragraphAnchorReferenceFrames',
+]);
+const WORKER_LAYOUT_RETENTION_DECLARATIONS = new Set([
+  'RetainedRenderWorkerDocumentLayout',
+  'retainRenderWorkerDocumentLayout',
+]);
+const BODY_KERNEL_IMPLEMENTATION_DECLARATIONS = new Set(['createConcreteBodyLayoutKernel']);
+const BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS = new Map([
+  [PARSER_MODEL, new Map([['bodyLayoutAcquisitionInput', 'value']])],
+  [`${DOCX_SOURCE}/types.ts`, new Map([['DocxDocumentModel', 'type']])],
+  [`${LAYOUT_SOURCE}/body-layout-input.ts`, new Map([
+    ['projectBodyLayoutInput', 'value'],
+    ['BodyLayoutInput', 'type'],
+  ])],
 ]);
 
 const PLANNED_NON_LAYOUT_MODULES = new Set([
@@ -97,6 +118,32 @@ const LEGACY_SYMBOLS = [
   'tableLayoutInputs',
 ];
 
+const DELETED_PAGE_PRODUCER_IDENTIFIERS = new Set([
+  'bodyFragmentFor',
+  'bodyLayoutFallback',
+  'computePages',
+  'paginateDocument',
+  'paginateWithHeaderFooterReserve',
+  'PaginatedBodyElement',
+  'physicalPageSizeForPage',
+  'prebuiltPages',
+  'retainedLayout',
+  'sectionBreakSpacer',
+  'collapsedSpacer',
+  'leadsCollapsedRun',
+  'hiddenCollapsed',
+]);
+
+const DELETED_LEGACY_STAMP_PROPERTIES = new Set([
+  'colIndex',
+  'colGeom',
+  'colTopPt',
+  'sectionHF',
+  'sectionGeom',
+  'sectionPageNumType',
+  'sectionTextDirection',
+]);
+
 const LEGACY_RENDERER_IMPORTS = new Set([
   'layout-context.ts',
   'layout-fragments.ts',
@@ -127,7 +174,7 @@ function assertNoProductionTestSupportImports(root) {
     for (const edge of moduleEdges(path)) {
       if (!edge.literal || !edge.specifier.startsWith('.')) continue;
       const dependency = resolveLocalImport(path, edge.specifier);
-      if (dependency && /\.test-support\.tsx?$/.test(dependency)) {
+      if (dependency && /\.(?:test|test-support)\.tsx?$/.test(dependency)) {
         fail(
           'PRODUCTION_TEST_SUPPORT_IMPORT',
           `${posixPath(relative(root, path))} -> ${posixPath(relative(root, dependency))}`,
@@ -261,7 +308,6 @@ function paintBoundaryViolations(root) {
   const graph = dependencyGraph(root);
   const paintRoot = resolve(root, PAINT_SOURCE);
   const layoutTypes = resolve(root, LAYOUT_SOURCE, 'types.ts');
-  const pageGraph = resolve(root, LAYOUT_SOURCE, 'page-graph.ts');
   const entries = [...graph.keys()].filter((path) => path.startsWith(`${paintRoot}${sep}`));
   const violations = [];
   const nonLiteral = [];
@@ -301,12 +347,12 @@ function paintBoundaryViolations(root) {
         }
         const chain = [...current.chain, dependency];
         const insidePaint = dependency.startsWith(`${paintRoot}${sep}`);
-        const allowedContract = (edge.typeOnly && dependency === layoutTypes) || dependency === pageGraph;
+        const allowedContract = edge.typeOnly && dependency === layoutTypes;
         if (!insidePaint && !allowedContract) {
           violations.push(chain.map((path) => posixPath(relative(root, path))));
           continue;
         }
-        if ((insidePaint || dependency === pageGraph) && !visited.has(dependency)) {
+        if (insidePaint && !visited.has(dependency)) {
           visited.add(dependency);
           stack.push({ path: dependency, chain });
         }
@@ -398,6 +444,9 @@ function assertCoordinateSpaceRuntimeDependencies(root) {
 
   const runtimeTargets = new Set([
     resolve(root, LAYOUT_SOURCE, 'coordinate-space.ts'),
+    // Page finalization owns retained section decoration geometry so paint
+    // cannot reconstruct section bands from layout policy.
+    resolve(root, LAYOUT_SOURCE, 'column-separators.ts'),
     resolve(root, LAYOUT_SOURCE, 'page-graph.ts'),
   ]);
   for (const edge of moduleEdges(pageFactory)) {
@@ -1014,6 +1063,207 @@ function assertLayoutParserModelBoundaries(root) {
   }
 }
 
+function assertBodyLayoutAdapterBoundary(root) {
+  const adapter = resolve(root, BODY_LAYOUT_ADAPTER);
+  if (!existsSync(adapter)) return;
+  const source = sourceFile(adapter);
+  const seenImports = new Map();
+  const declarations = [];
+  for (const statement of source.statements) {
+    if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)) {
+      fail('BODY_LAYOUT_ADAPTER_EXPORT', statement.getText(source));
+    }
+    if (statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
+      fail('BODY_LAYOUT_ADAPTER_EXPORT', statement.getText(source));
+    }
+    if (ts.isImportDeclaration(statement)) {
+      if (!ts.isStringLiteralLike(statement.moduleSpecifier)) {
+        fail('BODY_LAYOUT_ADAPTER_IMPORT', '<dynamic>');
+      }
+      const dependency = resolveLocalImport(adapter, statement.moduleSpecifier.text);
+      const dependencyRelative = dependency ? posixPath(relative(root, dependency)) : null;
+      const reviewedBindings = dependencyRelative
+        ? BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS.get(dependencyRelative)
+        : undefined;
+      const clause = statement.importClause;
+      if (!reviewedBindings || !clause || clause.name || !clause.namedBindings
+        || !ts.isNamedImports(clause.namedBindings)) {
+        fail('BODY_LAYOUT_ADAPTER_IMPORT', statement.getText(source));
+      }
+      if (seenImports.has(dependencyRelative)) {
+        fail('BODY_LAYOUT_ADAPTER_IMPORT', `duplicate:${dependencyRelative}`);
+      }
+      const actualBindings = new Map();
+      for (const element of clause.namedBindings.elements) {
+        const importedName = element.propertyName?.text ?? element.name.text;
+        const kind = clause.isTypeOnly || element.isTypeOnly ? 'type' : 'value';
+        if (element.name.text !== importedName || reviewedBindings.get(importedName) !== kind) {
+          fail('BODY_LAYOUT_ADAPTER_BINDING', `${dependencyRelative}#${importedName}:${kind}`);
+        }
+        actualBindings.set(importedName, kind);
+      }
+      if (actualBindings.size !== reviewedBindings.size
+        || [...reviewedBindings].some(([name, kind]) => actualBindings.get(name) !== kind)) {
+        fail('BODY_LAYOUT_ADAPTER_IMPORT', `incomplete:${dependencyRelative}`);
+      }
+      seenImports.set(dependencyRelative, actualBindings);
+    }
+    for (const name of declarationNames(statement)) {
+      declarations.push(name);
+      if (!BODY_LAYOUT_ADAPTER_DECLARATIONS.has(name)) {
+        fail('BODY_LAYOUT_ADAPTER_DECLARATION', name);
+      }
+    }
+  }
+  if (declarations.length !== 1 || declarations[0] !== 'createBodyLayoutInput') {
+    fail('BODY_LAYOUT_ADAPTER_DECLARATION', declarations.join(','));
+  }
+  if (seenImports.size !== BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS.size
+    || [...BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS.keys()].some((path) => !seenImports.has(path))) {
+    fail('BODY_LAYOUT_ADAPTER_IMPORT', 'exact-import-set-required');
+  }
+  const declaration = source.statements.find(ts.isFunctionDeclaration);
+  const returned = declaration?.body?.statements.length === 1
+    && ts.isReturnStatement(declaration.body.statements[0])
+    ? declaration.body.statements[0].expression
+    : null;
+  const isAcquisitionCall = returned && ts.isCallExpression(returned)
+    && ts.isIdentifier(returned.expression)
+    && returned.expression.text === 'projectBodyLayoutInput'
+    && returned.arguments.length === 1
+    && ts.isCallExpression(returned.arguments[0])
+    && ts.isIdentifier(returned.arguments[0].expression)
+    && returned.arguments[0].expression.text === 'bodyLayoutAcquisitionInput'
+    && returned.arguments[0].arguments.length === 1
+    && ts.isIdentifier(returned.arguments[0].arguments[0])
+    && returned.arguments[0].arguments[0].text === 'document';
+  if (!declaration
+    || declaration.name?.text !== 'createBodyLayoutInput'
+    || declaration.parameters.length !== 1
+    || !ts.isIdentifier(declaration.parameters[0].name)
+    || declaration.parameters[0].name.text !== 'document'
+    || !isAcquisitionCall) {
+    fail('BODY_LAYOUT_ADAPTER_BODY', declaration?.getText(source) ?? '<missing>');
+  }
+}
+
+function assertParagraphAnchorFrameAdapterBoundary(root, allowTransitionalAdapter) {
+  const adapter = resolve(root, PARAGRAPH_ANCHOR_FRAME_ADAPTER);
+  if (!existsSync(adapter)) return;
+  if (!allowTransitionalAdapter) {
+    fail('FINAL_PARAGRAPH_ANCHOR_ADAPTER', PARAGRAPH_ANCHOR_FRAME_ADAPTER);
+  }
+
+  const source = sourceFile(adapter);
+  const imports = source.statements.filter(ts.isImportDeclaration);
+  if (imports.length !== 1) {
+    fail('PARAGRAPH_ANCHOR_ADAPTER_IMPORT', 'exact-import-set-required');
+  }
+  const importStatement = imports[0];
+  const clause = importStatement.importClause;
+  const bindings = clause?.namedBindings;
+  if (!ts.isStringLiteralLike(importStatement.moduleSpecifier)
+    || importStatement.moduleSpecifier.text !== './layout/anchor-frame.js'
+    || !clause?.isTypeOnly
+    || clause.name
+    || !bindings
+    || !ts.isNamedImports(bindings)
+    || bindings.elements.length !== 1
+    || bindings.elements[0]?.name.text !== 'AnchorReferenceFramesInput'
+    || bindings.elements[0]?.propertyName) {
+    fail('PARAGRAPH_ANCHOR_ADAPTER_IMPORT', importStatement.getText(source));
+  }
+
+  const declarations = [];
+  for (const statement of source.statements) {
+    if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)
+      || statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
+      fail('PARAGRAPH_ANCHOR_ADAPTER_EXPORT', statement.getText(source));
+    }
+    for (const name of declarationNames(statement)) {
+      declarations.push(name);
+      if (!PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS.has(name)) {
+        fail('PARAGRAPH_ANCHOR_ADAPTER_DECLARATION', name);
+      }
+    }
+  }
+  const exactDeclarations = [...PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS].sort();
+  if (declarations.length !== exactDeclarations.length
+    || declarations.sort().some((name, index) => name !== exactDeclarations[index])) {
+    fail('PARAGRAPH_ANCHOR_ADAPTER_DECLARATION', declarations.join(','));
+  }
+
+  const runtimeConsumers = [];
+  const sourceRoot = resolve(root, DOCX_SOURCE);
+  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
+    if (path === adapter) continue;
+    for (const edge of moduleEdges(path)) {
+      if (!edge.literal || edge.typeOnly || !edge.specifier.startsWith('.')) continue;
+      if (resolveLocalImport(path, edge.specifier) !== adapter) continue;
+      const consumer = posixPath(relative(root, path));
+      runtimeConsumers.push(consumer);
+      if (consumer !== `${DOCX_SOURCE}/renderer.ts`
+        || edge.kind !== 'import'
+        || edge.aliased
+        || edge.importedNames.length !== 1
+        || edge.importedNames[0] !== 'paragraphAnchorReferenceFrames') {
+        fail('PARAGRAPH_ANCHOR_ADAPTER_CONSUMER', consumer);
+      }
+    }
+  }
+  if (runtimeConsumers.length !== 1
+    || runtimeConsumers[0] !== `${DOCX_SOURCE}/renderer.ts`) {
+    fail('PARAGRAPH_ANCHOR_ADAPTER_CONSUMER', runtimeConsumers.join(','));
+  }
+}
+
+function assertBodyKernelServiceOwner(root) {
+  const renderer = resolve(root, DOCX_SOURCE, 'renderer.ts');
+  if (!existsSync(renderer)) return;
+  const source = sourceFile(renderer);
+  const owner = source.statements.find((statement) => (
+    ts.isFunctionDeclaration(statement) && statement.name?.text === 'createLayoutServices'
+  ));
+  const implementation = source.statements.find((statement) => (
+    ts.isFunctionDeclaration(statement) && statement.name?.text === 'createConcreteBodyLayoutKernel'
+  ));
+  if (!owner?.body || !implementation?.body) {
+    fail('BODY_KERNEL_SERVICE_OWNER', 'missing owner or implementation');
+  }
+  const calls = [];
+  const identifiers = [];
+  const visit = (node) => {
+    if (ts.isIdentifier(node) && node.text === 'createConcreteBodyLayoutKernel') identifiers.push(node);
+    if (ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === 'createConcreteBodyLayoutKernel') calls.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const call = calls[0];
+  const parentCall = call?.parent;
+  const owned = call
+    && parentCall
+    && ts.isCallExpression(parentCall)
+    && ts.isIdentifier(parentCall.expression)
+    && parentCall.expression.text === 'attachBodyLayoutKernel'
+    && parentCall.arguments.length === 2
+    && ts.isIdentifier(parentCall.arguments[0])
+    && parentCall.arguments[0].text === 'services'
+    && parentCall.arguments[1] === call
+    && call.arguments.length === 3
+    && call.arguments.every((argument, index) => (
+      ts.isIdentifier(argument) && argument.text === ['doc', 'ctx', 'localMetrics'][index]
+    ));
+  let insideOwner = false;
+  for (let node = parentCall; node; node = node.parent) {
+    if (node === owner) insideOwner = true;
+  }
+  if (calls.length !== 1 || identifiers.length !== 2 || !owned || !insideOwner) {
+    fail('BODY_KERNEL_SERVICE_OWNER', `calls:${calls.length};identifiers:${identifiers.length}`);
+  }
+}
+
 const MIGRATION_IDENTIFIER = /(?:legacy|(?:use|enable|prefer|require)[a-z0-9]*(?:old|previous|alternate)[a-z0-9]*(?:engine|layout|path|algorithm)|(?:reuse|paint)enabled|requireslegacy|dryrun)/i;
 
 function matchingIdentifierCounts(root, predicate) {
@@ -1032,6 +1282,416 @@ function matchingIdentifierCounts(root, predicate) {
     visit(source);
   }
   return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function assertNoDeletedPageProducerIdentifiers(root) {
+  const matches = {};
+  const sourceRoot = resolve(root, DOCX_SOURCE);
+  const record = (file, name) => {
+    const key = `${file}#${name}`;
+    matches[key] = (matches[key] ?? 0) + 1;
+  };
+  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
+    const source = sourceFile(path);
+    const file = posixPath(relative(root, path));
+    const visit = (node) => {
+      if (ts.isIdentifier(node) && DELETED_PAGE_PRODUCER_IDENTIFIERS.has(node.text)) {
+        record(file, node.text);
+      } else if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node))
+        && DELETED_LEGACY_STAMP_PROPERTIES.has(node.text)) {
+        const parent = node.parent;
+        const isStaticPropertyName = (
+          (ts.isPropertyAccessExpression(parent) && parent.name === node)
+          || (ts.isElementAccessExpression(parent) && parent.argumentExpression === node)
+          || (ts.isPropertyAssignment(parent) && parent.name === node)
+          || (ts.isShorthandPropertyAssignment(parent) && parent.name === node)
+          || (ts.isPropertyDeclaration(parent) && parent.name === node)
+          || (ts.isPropertySignature(parent) && parent.name === node)
+          || (ts.isMethodDeclaration(parent) && parent.name === node)
+          || (ts.isGetAccessorDeclaration(parent) && parent.name === node)
+          || (ts.isSetAccessorDeclaration(parent) && parent.name === node)
+          || (ts.isBindingElement(parent) && (parent.propertyName ?? parent.name) === node)
+        );
+        if (isStaticPropertyName) record(file, node.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  if (Object.keys(matches).length > 0) {
+    fail('FORBIDDEN_PAGE_PRODUCER_IDENTIFIER', stableJson(matches).trim());
+  }
+}
+
+function callsNamed(node, name) {
+  const calls = [];
+  const visit = (current) => {
+    if (ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === name) calls.push(current);
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  return calls;
+}
+
+function unwrapStaticExpression(expression) {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isNonNullExpression(current)
+    || ts.isSatisfiesExpression(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function callOf(expression, name) {
+  const value = expression && unwrapStaticExpression(expression);
+  return value
+    && ts.isCallExpression(value)
+    && ts.isIdentifier(value.expression)
+    && value.expression.text === name
+    ? value
+    : null;
+}
+
+function hasExactInvariantImports(source) {
+  return source.statements.some((statement) => {
+    if (!ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)
+      || statement.moduleSpecifier.text !== './invariants.js'
+      || !statement.importClause
+      || statement.importClause.isTypeOnly
+      || statement.importClause.name
+      || !statement.importClause.namedBindings
+      || !ts.isNamedImports(statement.importClause.namedBindings)) return false;
+    const elements = statement.importClause.namedBindings.elements;
+    return elements.length === 2
+      && elements.every((element) => !element.isTypeOnly && !element.propertyName)
+      && new Set(elements.map((element) => element.name.text)).size === 2
+      && elements.some((element) => element.name.text === 'assertDocumentLayout')
+      && elements.some((element) => element.name.text === 'deepFreezeDocumentLayout');
+  });
+}
+
+function isCanonicalSelectedLayoutFunction(statement, source) {
+  if (!ts.isFunctionDeclaration(statement)
+    || statement.name?.text !== 'selectDocumentLayoutPage'
+    || !hasExportModifier(statement)
+    || !statement.body
+    || statement.parameters.length !== 3
+    || statement.parameters.some((parameter) => !ts.isIdentifier(parameter.name))
+    || statement.body.statements.length !== 3) return false;
+  const [services, input, pageIndex] = statement.parameters.map((parameter) => parameter.name.text);
+  const [storeDeclaration, missingStore, selectedPage] = statement.body.statements;
+  if (!ts.isVariableStatement(storeDeclaration)
+    || (storeDeclaration.declarationList.flags & ts.NodeFlags.Const) === 0
+    || storeDeclaration.declarationList.declarations.length !== 1) return false;
+  const [store] = storeDeclaration.declarationList.declarations;
+  const storeCall = callOf(store.initializer, 'layoutVariantStoreOf');
+  if (!ts.isIdentifier(store.name)
+    || !storeCall
+    || storeCall.arguments.length !== 1
+    || storeCall.arguments[0].getText(source) !== services) return false;
+  const storeName = store.name.text;
+  if (!ts.isIfStatement(missingStore)
+    || missingStore.elseStatement
+    || !ts.isPrefixUnaryExpression(missingStore.expression)
+    || missingStore.expression.operator !== ts.SyntaxKind.ExclamationToken
+    || missingStore.expression.operand.getText(source) !== storeName
+    || !ts.isThrowStatement(missingStore.thenStatement)) return false;
+  if (!ts.isReturnStatement(selectedPage) || !selectedPage.expression) return false;
+  const selection = unwrapStaticExpression(selectedPage.expression);
+  if (!ts.isCallExpression(selection)
+    || !ts.isPropertyAccessExpression(selection.expression)
+    || selection.expression.expression.getText(source) !== storeName
+    || selection.expression.name.text !== 'selectPage'
+    || selection.arguments.length !== 2) return false;
+  const normalized = callOf(selection.arguments[0], 'layoutOptionsForRender');
+  return normalized !== null
+    && normalized.arguments.length === 1
+    && normalized.arguments[0].getText(source) === input
+    && selection.arguments[1].getText(source) === pageIndex;
+}
+
+function objectProperty(object, name) {
+  return object.properties.find((property) => (
+    (ts.isPropertyAssignment(property)
+      || ts.isShorthandPropertyAssignment(property)
+      || ts.isMethodDeclaration(property))
+    && (ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name))
+    && property.name.text === name
+  ));
+}
+
+function isCanonicalWorkerVariantAttachment(call, source) {
+  if (call.arguments.length !== 1) return false;
+  const value = unwrapStaticExpression(call.arguments[0]);
+  if (!ts.isObjectLiteralExpression(value)) return false;
+  const model = objectProperty(value, 'model');
+  const services = objectProperty(value, 'services');
+  const buildLayout = objectProperty(value, 'buildLayout');
+  if (!model || !services || !ts.isPropertyAssignment(buildLayout)) return false;
+  const modelExpression = ts.isShorthandPropertyAssignment(model) ? model.name : model.initializer;
+  const servicesExpression = ts.isShorthandPropertyAssignment(services) ? services.name : services.initializer;
+  const builder = unwrapStaticExpression(buildLayout.initializer);
+  if (!ts.isArrowFunction(builder)
+    || builder.parameters.length !== 1
+    || !ts.isIdentifier(builder.parameters[0].name)) return false;
+  const layoutCall = callOf(builder.body, 'layoutDocument');
+  return layoutCall !== null
+    && layoutCall.arguments.length === 3
+    && layoutCall.arguments[0].getText(source) === modelExpression.getText(source)
+    && layoutCall.arguments[1].getText(source) === servicesExpression.getText(source)
+    && layoutCall.arguments[2].getText(source) === builder.parameters[0].name.text;
+}
+
+function exactObjectPropertyIdentities(object, identities, source) {
+  if (object.properties.length !== identities.size) return false;
+  for (const [name, expected] of identities) {
+    const property = objectProperty(object, name);
+    const value = ts.isShorthandPropertyAssignment(property)
+      ? property.name
+      : ts.isPropertyAssignment(property)
+        ? property.initializer
+        : null;
+    if (value?.getText(source) !== expected) return false;
+  }
+  return true;
+}
+
+function returnedObjectLiteral(body) {
+  const returns = body.statements.filter(ts.isReturnStatement);
+  if (returns.length !== 1 || !returns[0].expression) return null;
+  let expression = unwrapStaticExpression(returns[0].expression);
+  if (ts.isCallExpression(expression)
+    && ts.isPropertyAccessExpression(expression.expression)
+    && expression.expression.expression.getText() === 'Object'
+    && expression.expression.name.text === 'freeze'
+    && expression.arguments.length === 1) {
+    expression = unwrapStaticExpression(expression.arguments[0]);
+  }
+  return ts.isObjectLiteralExpression(expression) ? expression : null;
+}
+
+function workerRenderCallIsCanonical(call, source) {
+  if (call.arguments.length !== 4) return false;
+  const options = unwrapStaticExpression(call.arguments[3]);
+  if (!ts.isObjectLiteralExpression(options)) return false;
+  const services = objectProperty(options, 'layoutServices');
+  const defaultDate = objectProperty(options, 'defaultCurrentDateMs');
+  return ts.isPropertyAssignment(services)
+    && services.initializer.getText(source) === 'doc.layoutServices'
+    && ts.isPropertyAssignment(defaultDate)
+    && defaultDate.initializer.getText(source) === 'doc.defaultCurrentDateMs';
+}
+
+function workerRetentionCallIsCanonical(call, source) {
+  return call.arguments.length === 3
+    && call.arguments[0].getText(source) === 'model'
+    && call.arguments[1].getText(source) === 'layoutServices'
+    && call.arguments[2].getText(source) === 'req.defaultCurrentDateMs';
+}
+
+function workerRetentionSeamIsCanonical(source) {
+  const declarations = source.statements.flatMap(declarationNames).sort();
+  const exactDeclarations = [...WORKER_LAYOUT_RETENTION_DECLARATIONS].sort();
+  if (declarations.length !== exactDeclarations.length
+    || declarations.some((name, index) => name !== exactDeclarations[index])) return false;
+  const retention = source.statements.find((statement) => (
+    ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'retainRenderWorkerDocumentLayout'
+  ));
+  if (!retention?.body
+    || retention.parameters.length !== 3
+    || retention.parameters.some((parameter) => !ts.isIdentifier(parameter.name))
+    || retention.parameters.map((parameter) => parameter.name.getText(source)).join(',')
+      !== 'model,layoutServices,defaultCurrentDateMs') return false;
+  const attachments = callsNamed(retention.body, 'attachDocumentLayoutVariants');
+  if (attachments.length !== 1
+    || callsNamed(retention.body, 'layoutDocument').length !== 1
+    || !isCanonicalWorkerVariantAttachment(attachments[0], source)) return false;
+  const attachment = unwrapStaticExpression(attachments[0].arguments[0]);
+  if (!ts.isObjectLiteralExpression(attachment)) return false;
+  const model = objectProperty(attachment, 'model');
+  const services = objectProperty(attachment, 'services');
+  const defaultDate = objectProperty(attachment, 'defaultCurrentDateMs');
+  const modelExpression = ts.isShorthandPropertyAssignment(model)
+    ? model.name
+    : ts.isPropertyAssignment(model)
+      ? model.initializer
+      : null;
+  const servicesExpression = ts.isShorthandPropertyAssignment(services)
+    ? services.name
+    : ts.isPropertyAssignment(services)
+      ? services.initializer
+      : null;
+  const defaultDateExpression = ts.isShorthandPropertyAssignment(defaultDate)
+    ? defaultDate.name
+    : ts.isPropertyAssignment(defaultDate)
+      ? defaultDate.initializer
+      : null;
+  const returned = returnedObjectLiteral(retention.body);
+  return modelExpression?.getText(source) === 'model'
+    && servicesExpression?.getText(source) === 'layoutServices'
+    && defaultDateExpression?.getText(source) === 'defaultCurrentDateMs'
+    && returned !== null
+    && exactObjectPropertyIdentities(returned, new Map([
+      ['model', 'model'],
+      ['layoutServices', 'layoutServices'],
+      ['layoutVariants', 'variants.store'],
+      ['defaultCurrentDateMs', 'defaultCurrentDateMs'],
+    ]), source);
+}
+
+function variableDeclarationsNamed(node, name) {
+  const declarations = [];
+  const visit = (current) => {
+    if (ts.isVariableDeclaration(current)
+      && ts.isIdentifier(current.name)
+      && current.name.text === name) declarations.push(current);
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  return declarations;
+}
+
+function workerMetadataRouteIsCanonical(source) {
+  const layouts = variableDeclarationsNamed(source, 'layout');
+  const pageSizeLists = variableDeclarationsNamed(source, 'pageSizes');
+  const metadata = variableDeclarationsNamed(source, 'meta');
+  if (layouts.length !== 1
+    || layouts[0].initializer?.getText(source) !== 'doc.layoutVariants.defaultLayout'
+    || pageSizeLists.length !== 1
+    || metadata.length !== 1) return false;
+  const pageSizesInitializer = pageSizeLists[0].initializer
+    && unwrapStaticExpression(pageSizeLists[0].initializer);
+  if (!pageSizesInitializer
+    || !ts.isCallExpression(pageSizesInitializer)
+    || !ts.isPropertyAccessExpression(pageSizesInitializer.expression)
+    || pageSizesInitializer.expression.name.text !== 'map'
+    || pageSizesInitializer.expression.expression.getText(source) !== 'layout.pages') return false;
+  const value = metadata[0].initializer && unwrapStaticExpression(metadata[0].initializer);
+  if (!value || !ts.isObjectLiteralExpression(value)) return false;
+  const pageCount = objectProperty(value, 'pageCount');
+  const pageSizes = objectProperty(value, 'pageSizes');
+  const bookmarks = objectProperty(value, 'bookmarkPages');
+  if (!ts.isPropertyAssignment(pageCount)
+    || pageCount.initializer.getText(source) !== 'layout.pages.length'
+    || (!ts.isShorthandPropertyAssignment(pageSizes)
+      && !(ts.isPropertyAssignment(pageSizes)
+        && pageSizes.initializer.getText(source) === 'pageSizes'))
+    || !ts.isPropertyAssignment(bookmarks)
+    || !ts.isArrayLiteralExpression(bookmarks.initializer)
+    || bookmarks.initializer.elements.length !== 1
+    || !ts.isSpreadElement(bookmarks.initializer.elements[0])) return false;
+  const bookmarkCall = callOf(bookmarks.initializer.elements[0].expression, 'buildBookmarkPageMap');
+  return bookmarkCall?.arguments.length === 1
+    && bookmarkCall.arguments[0].getText(source) === 'layout';
+}
+
+function assertCanonicalCutoverBoundaries(root) {
+  const paginatorPath = resolve(root, LAYOUT_SOURCE, 'body-paginator.ts');
+  if (!existsSync(paginatorPath)) {
+    fail('CANONICAL_LAYOUT_PRODUCER', `${LAYOUT_SOURCE}/body-paginator.ts#paginateBody`);
+  } else {
+    const source = sourceFile(paginatorPath);
+    const exportedValues = source.statements.filter((statement) => (
+      hasExportModifier(statement)
+      && (ts.isFunctionDeclaration(statement)
+        || ts.isVariableStatement(statement)
+        || ts.isClassDeclaration(statement)
+        || ts.isEnumDeclaration(statement))
+    ));
+    const runtimeExportForms = source.statements.filter((statement) => (
+      ts.isExportAssignment(statement)
+      || (ts.isExportDeclaration(statement) && !exportIsTypeOnly(statement))
+    ));
+    const producer = exportedValues.find((statement) => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'paginateBody'
+    ));
+    if (!producer?.body || exportedValues.length !== 1 || runtimeExportForms.length !== 0) {
+      fail('CANONICAL_LAYOUT_PRODUCER', `${LAYOUT_SOURCE}/body-paginator.ts#paginateBody`);
+    }
+    const validation = producer.body.statements.at(-2);
+    const returned = producer.body.statements.at(-1);
+    const validationCall = validation && ts.isExpressionStatement(validation)
+      ? callOf(validation.expression, 'assertDocumentLayout')
+      : null;
+    const frozenCall = returned && ts.isReturnStatement(returned)
+      ? callOf(returned.expression, 'deepFreezeDocumentLayout')
+      : null;
+    if (!hasExactInvariantImports(source)
+      || callsNamed(producer.body, 'assertDocumentLayout').length !== 1
+      || callsNamed(producer.body, 'deepFreezeDocumentLayout').length !== 1
+      || validationCall?.arguments.length !== 1
+      || frozenCall?.arguments.length !== 1
+      || validationCall.arguments[0].getText(source)
+        !== frozenCall.arguments[0].getText(source)) {
+      fail('RETAINED_LAYOUT_IMMUTABILITY', `${LAYOUT_SOURCE}/body-paginator.ts#paginateBody`);
+    }
+  }
+
+  const variantsPath = resolve(root, LAYOUT_SOURCE, 'document-layout-variants.ts');
+  if (!existsSync(variantsPath)) {
+    fail('SELECTED_LAYOUT_VARIANT', `${LAYOUT_SOURCE}/document-layout-variants.ts#selectDocumentLayoutPage`);
+  } else {
+    const source = sourceFile(variantsPath);
+    const selection = source.statements.find((statement) => (
+      ts.isFunctionDeclaration(statement)
+      && statement.name?.text === 'selectDocumentLayoutPage'
+    ));
+    if (!selection || !isCanonicalSelectedLayoutFunction(selection, source)) {
+      fail('SELECTED_LAYOUT_VARIANT', `${LAYOUT_SOURCE}/document-layout-variants.ts#selectDocumentLayoutPage`);
+    }
+  }
+
+  const workerPath = resolve(root, DOCX_SOURCE, 'render-worker.ts');
+  const workerRetentionPath = resolve(root, DOCX_SOURCE, 'render-worker-layout.ts');
+  if (!existsSync(workerPath)) {
+    fail('WORKER_LAYOUT_SELECTION', `${DOCX_SOURCE}/render-worker.ts`);
+  } else if (!existsSync(workerRetentionPath)
+    || !workerRetentionSeamIsCanonical(sourceFile(workerRetentionPath))) {
+    fail('WORKER_LAYOUT_SELECTION', `${DOCX_SOURCE}/render-worker-layout.ts`);
+  } else {
+    const source = sourceFile(workerPath);
+    const topLevelPages = source.statements.some((statement) => (
+      ts.isVariableStatement(statement)
+      && statement.declarationList.declarations.some((declaration) => (
+        ts.isIdentifier(declaration.name) && declaration.name.text === 'pages'
+      ))
+    ));
+    let duplicateSelection = false;
+    const visit = (node) => {
+      if (ts.isIdentifier(node) && node.text === 'selectDocumentLayoutPage') {
+        duplicateSelection = true;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    const variantAttachments = callsNamed(source, 'attachDocumentLayoutVariants');
+    const retentionCalls = callsNamed(source, 'retainRenderWorkerDocumentLayout');
+    const rendererCalls = callsNamed(source, 'renderDocumentToCanvas');
+    if (topLevelPages
+      || duplicateSelection
+      || variantAttachments.length !== 0
+      || callsNamed(source, 'layoutDocument').length !== 0
+      || retentionCalls.length !== 1
+      || !workerRetentionCallIsCanonical(retentionCalls[0], source)
+      || rendererCalls.length !== 2
+      || rendererCalls.some((call) => !workerRenderCallIsCanonical(call, source))
+      || !workerMetadataRouteIsCanonical(source)) {
+      fail('WORKER_LAYOUT_SELECTION', `${DOCX_SOURCE}/render-worker.ts`);
+    }
+
+    const rendererPath = resolve(root, DOCX_SOURCE, 'renderer.ts');
+    if (existsSync(rendererPath)
+      && callsNamed(sourceFile(rendererPath), 'selectDocumentLayoutPage').length !== 1) {
+      fail('SELECTED_LAYOUT_VARIANT', `${DOCX_SOURCE}/renderer.ts#selectDocumentLayoutPage`);
+    }
+  }
 }
 
 function identifierCounts(root) {
@@ -2392,7 +3052,7 @@ function normalizedRenderShapeTextHash(node, source) {
   return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
 }
 
-function declarationInventory(root) {
+function declarationInventory(root, allowTransitionalAdapter = false) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
   const nonLayoutDeclarationKeys = [];
   const legacyDeclarationHashes = {};
@@ -2410,7 +3070,20 @@ function declarationInventory(root) {
         // those named adapters without opening a route for arbitrary helpers.
         const plannedRendererAdapter = file === `${DOCX_SOURCE}/renderer.ts`
           && (FINAL_RENDERER_DECLARATIONS.has(name) || A5_STATE_OWNER_DECLARATIONS.has(name));
-        if (!migrationOwner && !plannedRendererAdapter) nonLayoutDeclarationKeys.push(key);
+        const plannedBodyLayoutAdapter = file === BODY_LAYOUT_ADAPTER
+          && BODY_LAYOUT_ADAPTER_DECLARATIONS.has(name);
+        const transitionalParagraphAnchorAdapter = allowTransitionalAdapter
+          && file === PARAGRAPH_ANCHOR_FRAME_ADAPTER
+          && PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS.has(name);
+        const plannedWorkerLayoutRetention = file === WORKER_LAYOUT_RETENTION
+          && WORKER_LAYOUT_RETENTION_DECLARATIONS.has(name);
+        const plannedBodyKernelImplementation = file === `${DOCX_SOURCE}/renderer.ts`
+          && BODY_KERNEL_IMPLEMENTATION_DECLARATIONS.has(name);
+        if (!migrationOwner && !plannedRendererAdapter && !plannedBodyLayoutAdapter
+          && !transitionalParagraphAnchorAdapter && !plannedWorkerLayoutRetention
+          && !plannedBodyKernelImplementation) {
+          nonLayoutDeclarationKeys.push(key);
+        }
         if (LEGACY_SYMBOLS.includes(name)) {
           legacyDeclarationHashes[key] = name === 'computePages'
             ? normalizedComputePagesHash(statement, source)
@@ -2444,8 +3117,8 @@ function rendererImportEdges(root) {
     .sort();
 }
 
-function currentAllowances(root) {
-  const declarations = declarationInventory(root);
+function currentAllowances(root, allowTransitionalAdapter = false) {
+  const declarations = declarationInventory(root, allowTransitionalAdapter);
   return {
     version: 2,
     legacySymbolCounts: identifierCounts(root),
@@ -2456,17 +3129,59 @@ function currentAllowances(root) {
   };
 }
 
-function readBaseline(path) {
-  const value = JSON.parse(readFileSync(path, 'utf8'));
-  if (value.version !== 2
+function parseBaselineJson(contents, detail) {
+  try {
+    return JSON.parse(contents);
+  } catch {
+    fail('INVALID_BASELINE', detail);
+  }
+}
+
+function assertUniqueJsonObjectKeys(contents, detail) {
+  const source = ts.parseJsonText(detail, contents);
+  const visit = (node) => {
+    if (ts.isObjectLiteralExpression(node)) {
+      const keys = new Set();
+      for (const property of node.properties) {
+        const name = property.name;
+        const key = name && (ts.isStringLiteralLike(name) || ts.isIdentifier(name))
+          ? name.text
+          : null;
+        if (key !== null && keys.has(key)) {
+          fail('INVALID_BASELINE', `${detail}: duplicate key ${key}`);
+        }
+        if (key !== null) keys.add(key);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+}
+
+function assertValidBaseline(value, detail) {
+  if (value === null
+    || typeof value !== 'object'
+    || value.version !== 2
     || typeof value.legacySymbolCounts !== 'object'
+    || value.legacySymbolCounts === null
+    || Array.isArray(value.legacySymbolCounts)
     || typeof value.migrationIdentifierCounts !== 'object'
+    || value.migrationIdentifierCounts === null
+    || Array.isArray(value.migrationIdentifierCounts)
     || !Array.isArray(value.nonLayoutDeclarationKeys)
     || typeof value.legacyDeclarationHashes !== 'object'
+    || value.legacyDeclarationHashes === null
+    || Array.isArray(value.legacyDeclarationHashes)
     || !Array.isArray(value.rendererImportEdges)) {
-    fail('INVALID_BASELINE', path);
+    fail('INVALID_BASELINE', detail);
   }
   return value;
+}
+
+function readBaseline(path) {
+  const contents = readFileSync(path, 'utf8');
+  assertUniqueJsonObjectKeys(contents, path);
+  return assertValidBaseline(parseBaselineJson(contents, path), path);
 }
 
 function git(root, args, allowFailure = false) {
@@ -2479,8 +3194,8 @@ function mergeBaseBaseline(root, baseRef) {
   const mergeBase = git(root, ['merge-base', baseRef, 'HEAD']).stdout.trim();
   const shown = git(root, ['show', `${mergeBase}:${BASELINE_PATH}`], true);
   if (shown.status !== 0) return null;
-  const value = JSON.parse(shown.stdout);
-  if (value.version !== 2) fail('INVALID_BASELINE', `${mergeBase}:${BASELINE_PATH}`);
+  const detail = `${mergeBase}:${BASELINE_PATH}`;
+  const value = assertValidBaseline(parseBaselineJson(shown.stdout, detail), detail);
   // The stored A1 hashes predate the A2-specific normalization. Recompute only
   // the two mechanically constrained declarations from the immutable merge-base
   // source; every other declaration continues to use the committed baseline.
@@ -2687,7 +3402,7 @@ function assertFinalRendererAdapter(root) {
   for (const statement of source.statements) {
     if (ts.isFunctionDeclaration(statement)
       && statement.name
-      && (statement.name.text === 'paginateDocument' || statement.name.text === 'renderDocumentToCanvas')
+      && statement.name.text === 'renderDocumentToCanvas'
       && statement.body
       && !adapterBodyIsAllowed(statement.body, callable)) {
       fail('FINAL_ADAPTER_BODY', statement.name.text);
@@ -2729,13 +3444,19 @@ export function checkDocxLayoutBoundaries(options) {
   const root = resolve(options.root);
   const baselinePath = resolve(root, BASELINE_PATH);
   const baselineExists = existsSync(baselinePath);
+  const allowTransitionalParagraphAnchorAdapter = baselineExists && !options.final;
   assertNoProductionTestSupportImports(root);
+  assertNoDeletedPageProducerIdentifiers(root);
   assertPaintBoundaries(root);
   assertCapabilityBoundaries(root);
   assertCoordinateSpaceRuntimeDependencies(root);
   assertOccurrenceProjectionRuntimeDependencies(root);
   assertBodyPaintConsumesRetainedLayout(root);
   assertLayoutParserModelBoundaries(root);
+  assertBodyLayoutAdapterBoundary(root);
+  assertParagraphAnchorFrameAdapterBoundary(root, allowTransitionalParagraphAnchorAdapter);
+  assertBodyKernelServiceOwner(root);
+  assertCanonicalCutoverBoundaries(root);
 
   if (options.write) {
     const baseBaseline = mergeBaseBaseline(root, options.baseRef);
@@ -2783,7 +3504,7 @@ export function checkDocxLayoutBoundaries(options) {
     );
     assertNoExpansion(headBaseline, baseBaseline);
   }
-  const actual = currentAllowances(root);
+  const actual = currentAllowances(root, allowTransitionalParagraphAnchorAdapter);
   if (baseBaseline) assertNoExpansion(actual, baseBaseline);
   assertExactBaseline(headBaseline, actual);
 }

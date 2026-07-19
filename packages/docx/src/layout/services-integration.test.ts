@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildSegments, layoutLines, rescaleLayoutLines, type LineLayoutEnvironment } from '../line-layout.js';
-import { createLayoutServices } from '../renderer.js';
+import {
+  buildSegments,
+  layoutLines,
+  normalizeFontFamilyUncached,
+  rescaleLayoutLines,
+  type LineLayoutEnvironment,
+} from '../line-layout.js';
+import { createLayoutServices, layoutDocument } from '../renderer.js';
 import type { DocRun, DocxDocumentModel } from '../types.js';
 import type { InternalDocxDocumentModel, InternalFieldRun } from '../parser-model.js';
 import type { TextLayoutService } from './text.js';
@@ -50,6 +56,18 @@ function textRun(text: string, extra: Record<string, unknown> = {}): DocRun {
 }
 
 describe('production layout service integration', () => {
+  it('retains the document kernel when production text services are composed by object spread', () => {
+    const document = model();
+    const base = createLayoutServices(document, { measureContext: measureContext() });
+    const text = Object.freeze({ ...base.text });
+    const composed = Object.freeze({ ...base, text });
+
+    const layout = layoutDocument(document, composed, { currentDateMs: 10 });
+
+    expect(layout.pages).toHaveLength(1);
+    expect(layout.pages[0]?.geometry).toMatchObject({ widthPt: 612, heightPt: 792 });
+  });
+
   it('routes every normal run segmentation and measurement through the injected text service', () => {
     const base = createLayoutServices(model(), { measureContext: measureContext() });
     let calls = 0;
@@ -386,8 +404,51 @@ describe('production layout service integration', () => {
     expect(services.text.shape({
       text: 'x', fontSizePt: 10, fonts: { ascii: 'Roman Face' },
     }).spans[0]?.font.route).toMatchObject({
-      familyList: '"Roman Face", serif', scope: 'native',
+      familyList: expect.stringMatching(/^"Roman Face", .*"Noto Serif".*serif$/),
+      scope: 'native',
     });
+  });
+
+  it('retains the full fallback route and fingerprint for a run-only face absent from fontTable', () => {
+    const family = 'Times New Roman';
+    const document = model({
+      body: [{ type: 'paragraph', runs: [textRun('run-only', { fontFamily: family })] }],
+    } as Partial<DocxDocumentModel>);
+    const alternate = model({
+      body: [{ type: 'paragraph', runs: [textRun('run-only', { fontFamily: 'Arial' })] }],
+    } as Partial<DocxDocumentModel>);
+    const services = createLayoutServices(document, { measureContext: measureContext() });
+    const route = services.text.shape({
+      text: 'x', fontSizePt: 10, fonts: { ascii: family },
+    }).spans[0]?.font.route;
+
+    expect(route).toMatchObject({
+      familyList: normalizeFontFamilyUncached(family, {}, {}),
+      scope: 'native',
+    });
+    expect(services.text.fingerprint).not.toBe(
+      createLayoutServices(alternate, { measureContext: measureContext() }).text.fingerprint,
+    );
+  });
+
+  it('retains the full fallback route and fingerprint for a theme-only face', () => {
+    const family = 'Cambria';
+    const services = createLayoutServices(model({ majorFont: family }), {
+      measureContext: measureContext(),
+    });
+    const route = services.text.shape({
+      text: 'x', fontSizePt: 10, fonts: {}, themeFonts: { ascii: family },
+    }).spans[0]?.font.route;
+
+    expect(route).toMatchObject({
+      familyList: normalizeFontFamilyUncached(family, {}, {}),
+      scope: 'native',
+    });
+    expect(services.text.fingerprint).not.toBe(
+      createLayoutServices(model({ majorFont: 'Arial' }), {
+        measureContext: measureContext(),
+      }).text.fingerprint,
+    );
   });
 
   it('inventories only successfully registered faces and labels Office replacements as substitutions', () => {

@@ -15,6 +15,7 @@ import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { snapshotPlainData } from './plain-data.js';
 import type {
   FloatingTablePositionInput,
+  DrawingMLCollisionEntryPt,
   LayoutServices,
   LayoutNodeId,
   ParagraphLayout,
@@ -23,6 +24,7 @@ import type {
   TableFormatInput,
   TableLayout,
   TableLayoutInput,
+  WrapExclusion,
 } from './types.js';
 
 export interface RetainedTableAcquisitionDependencies<State> {
@@ -36,7 +38,11 @@ export interface RetainedTableAcquisitionDependencies<State> {
     contentWidthPt: number,
     sourcePath: readonly number[],
     flowDomainId: string,
-    paragraphBorderEdges: ParagraphBorderEdges,
+    paragraphBorderEdges?: ParagraphBorderEdges,
+    inheritedAuthority?: Readonly<{
+      exclusions: readonly WrapExclusion[];
+      collisions: readonly DrawingMLCollisionEntryPt[];
+    }>,
   ): ParagraphLayout;
   registerFloatingTable(
     state: State,

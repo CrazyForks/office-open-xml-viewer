@@ -7,7 +7,11 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+} from './test-imports';
 
 // skia-canvas is a devDependency. Absent → skip cleanly (local), while
 // OOXML_REQUIRE_SKIA=1 makes its absence a hard failure for this probe.
@@ -24,12 +28,8 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -175,19 +175,15 @@ function collectRuns(body: Any[], type: string): Any[] {
 }
 
 async function renderPage(doc: Any): Promise<{ data: Uint8ClampedArray; w: number; h: number }> {
-  const { renderDocumentToCanvas } = rendererMod as {
-    renderDocumentToCanvas: (
-      doc: Any,
-      canvas: unknown,
-      pageIndex: number,
-      opts: { dpr: number; width: number },
-    ) => Promise<void>;
-  };
+  const { renderDocumentToCanvas } = rendererMod!;
   const canvas = new Canvas(doc.section.pageWidth, doc.section.pageHeight);
   const restoreImage = installImageBitmapShim(factory);
   const restoreOffscreen = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: doc.section.pageWidth });
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0, {
+      dpr: 1,
+      width: doc.section.pageWidth,
+    });
   } finally {
     restoreOffscreen();
     restoreImage();
@@ -234,7 +230,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       [chart] = collectRuns(doc.body, 'chart');
       const restoreOffscreen = installOffscreenCanvasShim(factory);
       try {
-        layout = (rendererMod as { layoutDocument: (model: Any) => Any }).layoutDocument(doc);
+        layout = rendererMod!.layoutDocument(doc);
       } finally {
         restoreOffscreen();
       }
@@ -266,9 +262,15 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
     const chartBottom = 216;
 
     it('retains one chart command at the exact margin/right paragraph frame', () => {
-      const paragraph = layout.pages[0]?.fragments[0]?.fragment;
-      expect(paragraph?.drawings).toHaveLength(1);
-      expect(paragraph?.drawings[0]).toMatchObject({
+      const paragraph = layout.pages[0]?.layers.body.find((node: Any) =>
+        node.kind === 'paragraph'
+        && node.source.story === 'body'
+        && node.source.storyInstance === 'body'
+        && node.source.path.length === 1
+        && node.source.path[0] === 0);
+      expect(paragraph, 'retained body paragraph at source path [0]').toBeDefined();
+      expect(paragraph.drawings).toHaveLength(1);
+      expect(paragraph.drawings[0]).toMatchObject({
         flowBounds: {
           xPt: chartLeft, yPt: chartTop,
           widthPt: chartRight - chartLeft, heightPt: chartBottom - chartTop,
@@ -285,7 +287,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
           horizontalOwnership: 'page', verticalOwnership: 'host',
         },
       });
-      expect(paragraph?.resources).toContainEqual(expect.objectContaining({
+      expect(paragraph.resources).toContainEqual(expect.objectContaining({
         kind: 'chart', resourceKey: paragraph.drawings[0].commands[0].resourceKey,
       }));
     });

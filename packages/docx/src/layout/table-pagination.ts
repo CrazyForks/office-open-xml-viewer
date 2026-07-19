@@ -64,7 +64,7 @@ export interface TableFragmentLayout extends TableLayout {
   readonly rows: readonly TableRowFragmentLayout[];
   readonly floatingTables: readonly FloatingTablePlacementLayout[];
   readonly resolvedFloatingTables: readonly ResolvedFloatingTablePlacementLayout[];
-  readonly floatingTableCoordinateSpace?: FloatRegistrySnapshotPt['coordinateSpace'];
+  readonly resolvedFloatingTableCoordinateSpace?: FloatRegistrySnapshotPt['coordinateSpace'];
 }
 
 interface TableCellFragmentCursor {
@@ -474,22 +474,17 @@ function finalFrameRow(
     candidate: TableRowLayoutInput,
     resolved: readonly ResolvedFloatingTablePlacementLayout[],
   ) => JSON.stringify({
-    blocks: candidate.cells.flatMap((cell) => cell.blocks.map((block) => ({
+    blocks: candidate.cells.map((cell) => cell.blocks.map((block) => ({
       sourceBlockIndex: block.sourceBlockIndex,
-      advancePt: block.layout.advancePt,
-      lineCount: block.layout.kind === 'paragraph' ? block.layout.lines.length : null,
+      layout: block.layout,
     }))),
-    placements: resolved.map((placement) => ({
-      occurrenceId: placement.occurrenceId,
-      bounds: placement.bounds,
-      exclusionBounds: placement.exclusionBounds,
-      anchorBounds: placement.source.anchorBounds,
-    })),
+    placements: resolved,
   });
 
   let candidate = row;
   let previousKey: string | null = null;
-  for (let iteration = 0; iteration < 4; iteration += 1) {
+  const visitedKeys = new Set<string>();
+  while (true) {
     const resolution = resolveCandidate(candidate);
     if (resolution.resolved.length === 0) {
       return { row, resolved: [], registry, nextParagraphId };
@@ -506,10 +501,13 @@ function finalFrameRow(
         nextParagraphId: resolution.transaction.nextParagraphId,
       };
     }
+    if (visitedKeys.has(key)) {
+      throw new Error('Floating table final-frame reflow did not converge');
+    }
+    visitedKeys.add(key);
     previousKey = key;
     candidate = reacquireCandidate(resolution.resolved);
   }
-  throw new Error('Floating table final-frame reflow did not converge');
 }
 
 function selectedOwnsOccurrence(
@@ -904,7 +902,7 @@ function materializeFragment(
     )),
     resolvedFloatingTables,
     ...(context.floatingTableRegistry ? {
-      floatingTableCoordinateSpace: context.floatingTableRegistry.coordinateSpace,
+      resolvedFloatingTableCoordinateSpace: context.floatingTableRegistry.coordinateSpace,
     } : {}),
   });
 }
@@ -1075,8 +1073,14 @@ export function takeTableFragment(
       source, acquiredRow, rowCursor, availablePt, context,
     );
     let selectedPrepared: ReturnType<typeof finalFrameRow> | null = null;
-    for (let ownershipPass = 0; partial.selected && ownershipPass < 4; ownershipPass += 1) {
+    const visitedOwnershipStates = new Set<string>();
+    while (partial.selected) {
       const transactionInputs = selectedOccurrenceKeys(source, partial.selected);
+      const ownershipState = JSON.stringify([...transactionInputs].sort());
+      if (visitedOwnershipStates.has(ownershipState)) {
+        throw new Error('Floating table selected ownership did not converge');
+      }
+      visitedOwnershipStates.add(ownershipState);
       selectedPrepared = finalFrameRow(
         source,
         acquiredRow,

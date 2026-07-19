@@ -1,6 +1,6 @@
 import { convergeLayout, type LayoutIteration } from './convergence.js';
 import { stableFingerprint } from './fingerprint.js';
-import type { FlowFragment } from '../layout-fragments.js';
+import type { FlowFragment } from './flow-fragment.js';
 import type { TableRowFragmentLayout } from './table-pagination.js';
 import type {
   BodyElement,
@@ -50,7 +50,7 @@ function storyHasPaginationFields(elements: readonly (BodyElement | CellElement)
 }
 
 /**
- * Whether `computePages` has a field feedback edge that requires another pass.
+ * Whether canonical body pagination has a field feedback edge that requires another pass.
  * Body PAGE needs its destination occurrence from the preceding pass. A footnote
  * PAGE likewise feeds its owning page's formatted number into note height and the
  * body reserve. Body and footnote NUMPAGES can feed measured width back into the
@@ -63,30 +63,6 @@ export function paginatedFlowHasPaginationDependentFields(
 ): boolean {
   return storyHasPaginationFields(body)
     || footnotes.some((note) => storyHasPaginationFields(note.content));
-}
-
-/**
- * Retain PAGE run identities from a page-owned story for the next acquisition
- * iteration (ECMA-376 §17.16.5.44). Keeping the traversal beside dependency
- * detection prevents nested-story field ownership from leaking into the renderer.
- */
-export function recordStoryPageFieldOccurrences(
-  elements: readonly (BodyElement | CellElement)[],
-  pageIndex: number,
-  record: (paragraph: object, sourceRunIndex: number, pageIndex: number) => void,
-): void {
-  for (const element of elements) {
-    if (element.type === 'paragraph') {
-      element.runs.forEach((run, sourceRunIndex) => {
-        if (run.type === 'field' && paginationFieldDependency(run) === 'page') {
-          record(element, sourceRunIndex, pageIndex);
-        }
-      });
-    } else if (element.type === 'table') {
-      element.rows.forEach((row) => row.cells.forEach((cell) =>
-        recordStoryPageFieldOccurrences(cell.content, pageIndex, record)));
-    }
-  }
 }
 
 /**

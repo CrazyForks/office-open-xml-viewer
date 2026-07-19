@@ -9,6 +9,7 @@ import type {
   FlowDomain,
   LayoutRect,
   LayoutServices,
+  ParagraphLayout,
   PaintNode,
   SourceRef,
   TableEdgeInputs,
@@ -62,6 +63,32 @@ function drawing(
   };
 }
 
+function paragraphWithCollisions(
+  collisions: ParagraphLayout['anchorCollisions'],
+): ParagraphLayout {
+  const bounds = rect(72, 100, 200, 20);
+  return {
+    kind: 'paragraph',
+    id: 'paragraph-collisions',
+    source: source(0),
+    flowDomainId: 'body',
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: 20,
+    ordinaryFlow: true,
+    spacing: { beforePt: 0, afterPt: 0 },
+    contextualSpacing: false,
+    lines: [],
+    borders: [],
+    resources: [],
+    drawings: [],
+    textBoxes: [],
+    events: [],
+    exclusions: [],
+    anchorCollisions: collisions,
+  };
+}
+
 const bodyDomain: FlowDomain = {
   id: 'body',
   kind: 'body',
@@ -76,6 +103,7 @@ const horizontalSection: SectionLayoutContext = {
     headerDistance: 36, footerDistance: 36,
   },
   columns: [{ xPt: 72, wPt: 468 }],
+  columnSeparator: false,
   grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
   textDirection: 'lrTb',
   verticalAlignment: 'top',
@@ -96,6 +124,7 @@ function regionLayout(): DocumentLayout {
       ...base.pages[0]!,
       section: horizontalSection,
       sectionOccurrenceId: 'section:body',
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
       flowDomains: [{
         id: 'body', kind: 'body',
         logicalBounds: rect(72, 72, 468, 648),
@@ -109,6 +138,7 @@ function regionLayout(): DocumentLayout {
           physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
         },
         blockStartPt: 72, blockEndPt: 720,
+        columnFlowDirection: 'ltr', columnIndexes: [0],
         flowDomainIds: ['body'], section: horizontalSection,
       }],
     }],
@@ -165,6 +195,8 @@ function twoRegionLayout(
               },
           blockStartPt: 300,
           blockEndPt: secondIsVertical ? 540 : 720,
+          columnFlowDirection: 'ltr',
+          columnIndexes: [0],
           flowDomainIds: [secondDomain.id],
           section: secondSection,
         },
@@ -226,9 +258,28 @@ function documentWith(
         contentBottomPt: 720,
       },
       flowDomains: [bodyDomain],
-      section: {} as SectionLayoutContext,
+      section: horizontalSection,
+      sectionOccurrenceId: 'section:0',
+      parityBlank: false,
+      bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      columnSeparators: [],
+      sectionRegions: [{
+        id: 'region:0', sectionOccurrenceId: 'section:0',
+        coordinateSpace: {
+          writingMode: 'horizontal-tb',
+          logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        },
+        blockStartPt: 72, blockEndPt: 720,
+        columnFlowDirection: 'ltr', columnIndexes: [0],
+        flowDomainIds: ['body'], section: horizontalSection,
+      }],
+      pageBorders: null,
       layers: {
-        paintOrder: nodes.map((node) => ({ layer: 'body' as const, nodeId: node.id })),
+        paintSequence: nodes.map((node) => ({
+          layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,
+        })),
         background: [],
         behindText: [],
         header: [],
@@ -244,6 +295,80 @@ function documentWith(
 }
 
 describe('assertDocumentLayout', () => {
+  it('rejects duplicate or invalid retained DrawingML collision geometry', () => {
+    const collision = {
+      occurrenceId: 'same',
+      bounds: rect(10, 20, 30, 40),
+      horizontalOwnership: 'page' as const,
+      verticalOwnership: 'host' as const,
+    };
+
+    expect(() => assertDocumentLayout(documentWith([
+      paragraphWithCollisions([collision, collision]),
+    ]))).toThrow(/anchorCollisions.*duplicated/);
+    expect(() => assertDocumentLayout(documentWith([
+      paragraphWithCollisions([{
+        ...collision,
+        occurrenceId: 'negative',
+        bounds: rect(10, 20, -1, 40),
+      }]),
+    ]))).toThrow(/negative extent/);
+  });
+
+  it('rejects invalid retained table-cell containment geometry', () => {
+    const paragraph = {
+      ...paragraphWithCollisions([]),
+      cellContainmentBounds: rect(10, 20, 30, -1),
+    } as ParagraphLayout;
+
+    expectInvalidGeometry(() => assertDocumentLayout(documentWith([paragraph])));
+  });
+
+  it('requires retained cell-containment bounds and marked drawings to agree', () => {
+    const markedDrawing = {
+      ...drawing('cell-contained-drawing', rect(10, 20, 30, 40), {
+        ordinaryFlow: false,
+      }),
+      anchorLayer: {
+        occurrenceId: 'cell-contained',
+        behindDoc: false,
+        relativeHeight: 0,
+        sourceOrder: 0,
+        horizontalOwnership: 'host' as const,
+        verticalOwnership: 'host' as const,
+        cellContainment: true as const,
+      },
+    };
+    const base = {
+      ...paragraphWithCollisions([]),
+      drawings: [markedDrawing],
+    } as ParagraphLayout;
+
+    expectInvalidGeometry(() => assertDocumentLayout(documentWith([base])));
+    expectInvalidGeometry(() => assertDocumentLayout(documentWith([{
+      ...base,
+      cellContainmentBounds: rect(10, 20, 30, 39),
+    }])));
+    expectInvalidGeometry(() => assertDocumentLayout(documentWith([{
+      ...paragraphWithCollisions([]),
+      cellContainmentBounds: rect(10, 20, 30, 40),
+    } as ParagraphLayout])));
+  });
+
+  it('rejects column separator ink not derived from the retained section regions', () => {
+    const valid = documentWith([]);
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!,
+        columnSeparators: [{
+          start: { xPt: 100, yPt: 72 },
+          end: { xPt: 100, yPt: 720 },
+        }],
+      }],
+    }));
+  });
+
   it('rejects overlapping ordinary flow allocations', () => {
     const layout = documentWith([
       drawing('n1', rect(72, 100, 200, 30)),
@@ -294,9 +419,9 @@ describe('assertDocumentLayout', () => {
         ],
         layers: {
           ...base.pages[0]!.layers,
-          paintOrder: [
-            { layer: 'body', nodeId: body.id },
-            { layer: 'footer', nodeId: footer.id },
+          paintSequence: [
+            { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+            { layer: 'footer', node: footer, coordinateSpace: 'section-logical' },
           ],
           body: [body],
           footer: [footer],
@@ -317,6 +442,7 @@ describe('assertDocumentLayout', () => {
       pages: [{
         ...base.pages[0]!,
         flowDomains: [
+          bodyDomain,
           {
             id: 'cell:1', kind: 'tableCell',
             logicalBounds: rect(90, 90, 100, 40), physicalBounds: rect(90, 90, 100, 40),
@@ -341,7 +467,14 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!,
-        layers: { ...base.pages[0]!.layers, paintOrder: [{ layer: 'body', nodeId: 'unknown' }] },
+        layers: {
+          ...base.pages[0]!.layers,
+          paintSequence: [{
+            layer: 'body',
+            node: drawing('unknown', rect(72, 100, 200, 30)),
+            coordinateSpace: 'section-logical',
+          }],
+        },
       }],
     };
     expect(() => assertDocumentLayout(badPaint)).toThrow(/INVALID_REFERENCE/);
@@ -366,9 +499,9 @@ describe('assertDocumentLayout', () => {
         ...base.pages[0]!,
         layers: {
           ...base.pages[0]!.layers,
-          paintOrder: [
-            { layer: 'body', nodeId: 'n1' },
-            { layer: 'body', nodeId: 'n1' },
+          paintSequence: [
+            { layer: 'body', node: base.pages[0]!.layers.body[0]!, coordinateSpace: 'section-logical' },
+            { layer: 'body', node: base.pages[0]!.layers.body[0]!, coordinateSpace: 'section-logical' },
           ],
         },
       }],
@@ -437,6 +570,8 @@ describe('assertDocumentLayout', () => {
           },
           blockStartPt: 72,
           blockEndPt: 720,
+          columnFlowDirection: 'ltr',
+          columnIndexes: [],
           flowDomainIds: [],
           section: noColumnSection,
         }],
@@ -456,6 +591,7 @@ describe('assertDocumentLayout', () => {
         ...base.pages[0]!,
         section: strictVerticalSection,
         sectionOccurrenceId: 'section:vertical',
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:vertical' },
         flowDomains: [{
           id: 'vertical-body', kind: 'body',
           logicalBounds: rect(72, 72, 648, 468),
@@ -469,6 +605,7 @@ describe('assertDocumentLayout', () => {
             physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
           },
           blockStartPt: 72, blockEndPt: 540,
+          columnFlowDirection: 'ltr', columnIndexes: [0],
           flowDomainIds: ['vertical-body'], section: strictVerticalSection,
         }],
       }],
@@ -486,6 +623,7 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!, section: verticalSection, sectionOccurrenceId: 'section:vertical',
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:vertical' },
         flowDomains: [{
           id: 'vertical-body', kind: 'body',
           logicalBounds: rect(72, 72, 648, 468), physicalBounds: rect(72, 72, 468, 648),
@@ -498,6 +636,7 @@ describe('assertDocumentLayout', () => {
             physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
           },
           blockStartPt: 72, blockEndPt: 540,
+          columnFlowDirection: 'ltr', columnIndexes: [0],
           flowDomainIds: ['vertical-body'], section: verticalSection,
         }],
       }],
@@ -513,6 +652,7 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!, section: verticalSection, sectionOccurrenceId: 'section:vertical',
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:vertical' },
         flowDomains: [{
           id: 'vertical-body', kind: 'body',
           logicalBounds: rect(72, 72, 648, 468), physicalBounds: rect(0, 0, 1, 1),
@@ -525,6 +665,7 @@ describe('assertDocumentLayout', () => {
             physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 612 },
           },
           blockStartPt: 72, blockEndPt: 540,
+          columnFlowDirection: 'ltr', columnIndexes: [0],
           flowDomainIds: ['vertical-body'], section: verticalSection,
         }],
       }],
@@ -533,7 +674,7 @@ describe('assertDocumentLayout', () => {
     expect(() => assertDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
   });
 
-  it('requires equal dual-space bounds on transitional pages without regions', () => {
+  it('requires retained dual-space bounds to match their canonical region transform', () => {
     const base = documentWith([]);
     const unequal: DocumentLayout = {
       ...base,
@@ -560,11 +701,13 @@ describe('assertDocumentLayout', () => {
         physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
       },
       blockStartPt: 72, blockEndPt: 720,
+      columnFlowDirection: 'ltr' as const, columnIndexes: [0],
       flowDomainIds: ['body'], section: horizontalSection,
     };
     const page = {
       ...base.pages[0]!, section: horizontalSection,
       sectionOccurrenceId: 'section:first', sectionRegions: [region],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:first' },
     };
 
     expect(() => assertDocumentLayout({ ...base, pages: [page] })).not.toThrow();
@@ -589,6 +732,19 @@ describe('assertDocumentLayout', () => {
   it('rejects clone data whose region direction or columns contradict its section', () => {
     const valid = regionLayout();
     expect(() => assertDocumentLayout(valid)).not.toThrow();
+    const rtlSection = { ...horizontalSection, sectionBidi: true };
+    expect(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!,
+        section: rtlSection,
+        sectionRegions: [{
+          ...valid.pages[0]!.sectionRegions![0]!,
+          section: rtlSection,
+          columnFlowDirection: 'ltr',
+        }],
+      }],
+    })).toThrow(/column flow direction contradicts/);
     expectInvalidGeometry(() => assertDocumentLayout({
       ...valid,
       pages: [{

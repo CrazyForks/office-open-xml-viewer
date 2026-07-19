@@ -6,6 +6,7 @@ import {
   uprightPhysicalExtent,
   writingModeFromTextDirection,
 } from './coordinate-space.js';
+import { columnSeparatorSegments } from './column-separators.js';
 import { orderedPagePaintNodes, pageLayerNodes, PageGraphError } from './page-graph.js';
 import {
   derivePageBookmarkStarts,
@@ -25,6 +26,7 @@ import type {
   SectionRegionCoordinateSpace,
   WritingMode,
 } from './types.js';
+import { unionLayoutRects } from './rect-union.js';
 
 function assertPlainData(value: unknown, path: string, ancestors = new WeakSet<object>()): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
@@ -197,6 +199,11 @@ function contains(outer: LayoutRect, inner: LayoutRect): boolean {
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
 }
 
+function containsBlockExtent(outer: LayoutRect, inner: LayoutRect): boolean {
+  return inner.yPt >= outer.yPt
+    && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
+}
+
 function equalRect(left: LayoutRect, right: LayoutRect): boolean {
   return left.xPt === right.xPt
     && left.yPt === right.yPt
@@ -251,6 +258,70 @@ function collectRetainedNodeIds(
   if (node.kind === 'textbox') {
     node.paragraphs.forEach((paragraph) =>
       collectRetainedNodeIds(paragraph, pageIds, documentIds));
+  }
+}
+
+function requireRetainedCollisionGeometry(node: PaintNode, path: string): void {
+  if (node.kind === 'paragraph') {
+    const expectedCellContainmentBounds = unionLayoutRects(
+      node.drawings
+        .filter((drawing) => drawing.anchorLayer?.cellContainment === true)
+        .map((drawing) => drawing.flowBounds),
+    );
+    if (node.cellContainmentBounds) {
+      requireRect(node.cellContainmentBounds, `${path}.cellContainmentBounds`);
+    }
+    if (
+      (expectedCellContainmentBounds === null) !== (node.cellContainmentBounds === undefined)
+      || (
+        expectedCellContainmentBounds
+        && node.cellContainmentBounds
+        && !equalRect(expectedCellContainmentBounds, node.cellContainmentBounds)
+      )
+    ) {
+      throw new LayoutInvariantError(
+        'INVALID_GEOMETRY',
+        `${path}.cellContainmentBounds does not match its retained layoutInCell drawings`,
+      );
+    }
+    const occurrenceIds = new Set<string>();
+    (node.anchorCollisions ?? []).forEach((entry, index) => {
+      const entryPath = `${path}.anchorCollisions[${index}]`;
+      if (entry.occurrenceId.length === 0 || occurrenceIds.has(entry.occurrenceId)) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `${entryPath}.occurrenceId is empty or duplicated`,
+        );
+      }
+      occurrenceIds.add(entry.occurrenceId);
+      requireRect(entry.bounds, `${entryPath}.bounds`);
+      if (
+        (entry.horizontalOwnership !== 'page' && entry.horizontalOwnership !== 'host')
+        || (entry.verticalOwnership !== 'page' && entry.verticalOwnership !== 'host')
+      ) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `${entryPath} has invalid axis ownership`,
+        );
+      }
+    });
+    node.textBoxes.forEach((textBox, index) =>
+      requireRetainedCollisionGeometry(textBox, `${path}.textBoxes[${index}]`));
+    return;
+  }
+  if (node.kind === 'table') {
+    node.rows.forEach((row, rowIndex) =>
+      row.cells.forEach((cell, cellIndex) =>
+        cell.blocks.forEach((block, blockIndex) =>
+          requireRetainedCollisionGeometry(
+            block.layout,
+            `${path}.rows[${rowIndex}].cells[${cellIndex}].blocks[${blockIndex}]`,
+          ))));
+    return;
+  }
+  if (node.kind === 'textbox') {
+    node.paragraphs.forEach((paragraph, index) =>
+      requireRetainedCollisionGeometry(paragraph, `${path}.paragraphs[${index}]`));
   }
 }
 
@@ -348,8 +419,9 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
     if (page.parityBlank && (
       page.flowDomains.length > 0
       || (page.sectionRegions?.length ?? 0) > 0
+      || (page.columnSeparators?.length ?? 0) > 0
       || pageLayerNodes(page).length > 0
-      || page.layers.paintOrder.length > 0
+      || page.layers.paintSequence.length > 0
       || page.readingOrder.length > 0
       || (page.bookmarkStarts?.length ?? 0) > 0
     )) {
@@ -375,7 +447,10 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       const regionIds = new Set<string>();
       const occurrenceIds = new Set<string>();
       const bodyOwnership = new Map<string, number>();
-      let priorBlockEndPt = 0;
+      const occupiedPhysicalBodyDomains: Array<Readonly<{
+        regionId: string;
+        bounds: LayoutRect;
+      }>> = [];
       let pageWritingMode: WritingMode | undefined;
       page.sectionRegions.forEach((region, regionIndex) => {
         const path = `pages[${pageIndex}].sectionRegions[${regionIndex}]`;
@@ -435,13 +510,27 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         }
         requireFinite(region.blockStartPt, `${path}.blockStartPt`);
         requireFinite(region.blockEndPt, `${path}.blockEndPt`);
+        if (
+          region.columnFlowDirection !== 'ltr'
+          && region.columnFlowDirection !== 'rtl'
+        ) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path} has an invalid column flow direction`,
+          );
+        }
+        const sectionColumnFlowDirection = region.section.sectionBidi === true ? 'rtl' : 'ltr';
+        if (region.columnFlowDirection !== sectionColumnFlowDirection) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${path} column flow direction contradicts its section bidi`,
+          );
+        }
         if (region.blockStartPt < 0
-          || region.blockStartPt < priorBlockEndPt
-          || region.blockEndPt <= region.blockStartPt
+          || region.blockEndPt < region.blockStartPt
           || region.blockEndPt > logicalExtent.heightPt) {
           throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has an invalid block interval`);
         }
-        priorBlockEndPt = region.blockEndPt;
         const expectedCoordinateSpace = createSectionRegionCoordinateSpace(
           region.coordinateSpace.writingMode,
           page.geometry,
@@ -455,11 +544,20 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         )) {
           throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has an invalid coordinate transform`);
         }
-        if (region.flowDomainIds.length !== region.section.columns.length) {
+        const columnIndexes = region.columnIndexes;
+        if (
+          region.flowDomainIds.length !== columnIndexes.length
+          || columnIndexes.some((columnIndex, index) => (
+            !Number.isInteger(columnIndex)
+            || columnIndex < 0
+            || columnIndex >= region.section.columns.length
+            || (index > 0 && columnIndex <= columnIndexes[index - 1]!)
+          ))
+        ) {
           throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} columns contradict its section`);
         }
         let priorInlineEndPt = 0;
-        region.flowDomainIds.forEach((domainId, columnIndex) => {
+        region.flowDomainIds.forEach((domainId, columnPosition) => {
           const domain = domains.get(domainId);
           if (!domain) {
             throw new LayoutInvariantError('INVALID_REFERENCE', `${path} references missing flow domain ${domainId}`);
@@ -470,8 +568,8 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
           bodyOwnership.set(domainId, (bodyOwnership.get(domainId) ?? 0) + 1);
           regionByDomain.set(domainId, region);
           const bounds = domain.logicalBounds;
-          const sectionColumn = region.section.columns[columnIndex];
-          if (bounds.widthPt <= 0 || bounds.heightPt <= 0
+          const sectionColumn = region.section.columns[columnIndexes[columnPosition]!];
+          if (bounds.widthPt <= 0 || bounds.heightPt < 0
             || bounds.yPt !== region.blockStartPt
             || bounds.yPt + bounds.heightPt !== region.blockEndPt
             || bounds.xPt < 0
@@ -482,7 +580,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
             || bounds.widthPt !== sectionColumn.wPt) {
             throw new LayoutInvariantError(
               'INVALID_GEOMETRY',
-              `${domainId} is not the section column's positive logical region`,
+              `${domainId} is not the section column's non-negative logical region`,
             );
           }
           priorInlineEndPt = bounds.xPt + bounds.widthPt;
@@ -502,6 +600,18 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
               `${domainId} physical bounds leave the upright physical page`,
             );
           }
+          if (occupiedPhysicalBodyDomains.some((prior) => (
+            prior.regionId !== region.id && overlaps(prior.bounds, domain.physicalBounds)
+          ))) {
+            throw new LayoutInvariantError(
+              'INVALID_GEOMETRY',
+              `${domainId} overlaps a body flow domain owned by another section region`,
+            );
+          }
+          occupiedPhysicalBodyDomains.push({
+            regionId: region.id,
+            bounds: domain.physicalBounds,
+          });
         });
       });
       page.flowDomains.filter((domain) => domain.kind === 'body').forEach((domain) => {
@@ -528,6 +638,22 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
           );
         }
       }
+    }
+    const expectedColumnSeparators = columnSeparatorSegments(page.sectionRegions ?? []);
+    if (!Array.isArray(page.columnSeparators)
+      || page.columnSeparators.length !== expectedColumnSeparators.length
+      || page.columnSeparators.some((segment, index) => {
+        const expected = expectedColumnSeparators[index];
+        return expected === undefined
+          || segment.start.xPt !== expected.start.xPt
+          || segment.start.yPt !== expected.start.yPt
+          || segment.end.xPt !== expected.end.xPt
+          || segment.end.yPt !== expected.end.yPt;
+      })) {
+      throw new LayoutInvariantError(
+        'INVALID_GEOMETRY',
+        `pages[${pageIndex}].columnSeparators contradict the retained section regions`,
+      );
     }
     for (const domain of page.flowDomains) {
       if (!regionByDomain.has(domain.id) && !equalRect(domain.logicalBounds, domain.physicalBounds)) {
@@ -572,6 +698,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       const path = `pages[${pageIndex}].nodes[${nodeIndex}]`;
       nodes.set(node.id, node);
       collectRetainedNodeIds(node, retainedNodeIds, documentRetainedNodeIds);
+      requireRetainedCollisionGeometry(node, path);
       requireRect(node.flowBounds, `${path}.flowBounds`);
       requireRect(node.inkBounds, `${path}.inkBounds`);
       if (node.clipBounds) requireRect(node.clipBounds, `${path}.clipBounds`);
@@ -581,6 +708,12 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       if (!domain) {
         throw new LayoutInvariantError('INVALID_REFERENCE', `${node.id} references missing flow domain ${node.flowDomainId}`);
       }
+      if (node.ordinaryFlow && domain.kind === 'body' && domain.logicalBounds.heightPt === 0) {
+        throw new LayoutInvariantError(
+          'FLOW_DOMAIN_INVASION',
+          `${node.id} claims ordinary flow in an empty body domain`,
+        );
+      }
       if (!node.ordinaryFlow) return;
       if (domain.kind === 'body') {
         const region = regionByDomain.get(domain.id);
@@ -589,7 +722,13 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
           throw new LayoutInvariantError('BOTTOM_MARGIN_INVASION', `${node.id} crosses logical block end`);
         }
       }
-      if (!contains(domain.logicalBounds, node.flowBounds)) {
+      // Signed w:tblInd and table justification may intentionally put an
+      // ordinary table outside the inline text band. It still belongs to this
+      // flow domain and must remain contained on the logical block axis.
+      const insideFlowDomain = node.kind === 'table'
+        ? containsBlockExtent(domain.logicalBounds, node.flowBounds)
+        : contains(domain.logicalBounds, node.flowBounds);
+      if (!insideFlowDomain) {
         throw new LayoutInvariantError('FLOW_DOMAIN_INVASION', `${node.id} crosses flow domain ${domain.id}`);
       }
       ordinary.push(node);

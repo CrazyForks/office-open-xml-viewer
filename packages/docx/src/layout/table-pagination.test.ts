@@ -21,12 +21,16 @@ const noBorders: TableEdgeInputs = {
   top: null, right: null, bottom: null, left: null, insideH: null, insideV: null,
 };
 
-function paragraph(id: string, lineHeights: readonly number[]): ParagraphLayout {
+function paragraph(
+  id: string,
+  lineHeights: readonly number[],
+  lineXPt = 0,
+): ParagraphLayout {
   let yPt = 0;
   const lines = lineHeights.map((heightPt, index) => {
     const line = {
       range: { start: index, end: index + 1 },
-      bounds: { xPt: 0, yPt, widthPt: 20, heightPt },
+      bounds: { xPt: lineXPt, yPt, widthPt: 20, heightPt },
       baselinePt: yPt + heightPt * 0.8,
       advancePt: heightPt,
       placements: [],
@@ -402,8 +406,8 @@ describe('retained table pagination', () => {
       {
         coordinateSpace: snapshot.coordinateSpace,
         flowDomainId: snapshot.flowDomainId,
+        entries: snapshot.entries,
         nextParagraphId: snapshot.nextParagraphId,
-        occurrenceIds: [occurrenceId],
       },
     )).not.toThrow();
   });
@@ -477,8 +481,8 @@ describe('retained table pagination', () => {
       {
         coordinateSpace: snapshot.coordinateSpace,
         flowDomainId: snapshot.flowDomainId,
+        entries: snapshot.entries,
         nextParagraphId: snapshot.nextParagraphId,
-        occurrenceIds: [baseOccurrenceId],
       },
     )).not.toThrow();
   });
@@ -511,6 +515,7 @@ describe('retained table pagination', () => {
     expect(beforeAnchor.floatingTableRegistryDelta).toEqual({
       coordinateSpace: 'logical-page-points',
       flowDomainId: source.input.flowDomainId,
+      baseEntries: [],
       baseNextParagraphId: 0,
       nextParagraphId: 0,
       entries: [],
@@ -523,9 +528,13 @@ describe('retained table pagination', () => {
     ]);
     expect(atAnchor.floatingTablePlacements).toHaveLength(1);
     expect(atAnchor.floatingTablePlacements?.[0]?.source.anchorBounds.yPt).toBe(20);
-    expect(structuredClone(atAnchor.floatingTableRegistryDelta)).toEqual(
-      atAnchor.floatingTableRegistryDelta,
-    );
+    const clonedDelta = structuredClone(atAnchor.floatingTableRegistryDelta!);
+    expect(() => validateFloatingTableRegistryDelta(clonedDelta, {
+      coordinateSpace: atAnchor.floatingTableRegistryDelta!.coordinateSpace,
+      flowDomainId: atAnchor.floatingTableRegistryDelta!.flowDomainId,
+      entries: atAnchor.floatingTableRegistryDelta!.baseEntries,
+      nextParagraphId: atAnchor.floatingTableRegistryDelta!.baseNextParagraphId,
+    })).toThrow('base/domain mismatch');
     expect(atAnchor.floatingTableRegistryDelta).toMatchObject({
       coordinateSpace: 'logical-page-points',
       flowDomainId: source.input.flowDomainId,
@@ -593,7 +602,7 @@ describe('retained table pagination', () => {
     ]);
   });
 
-  it('rejects final-frame reflow that does not converge within four passes', () => {
+  it('converges final-frame reflow without an arbitrary pass limit', () => {
     const nested = acquisition([row(0, 10)]);
     const retained = withNestedFloatingTable(acquisition([row(0, 20)]), nested);
     const source = Object.freeze({
@@ -608,7 +617,7 @@ describe('retained table pagination', () => {
     });
     let pass = 0;
 
-    expect(() => take(source, 100, startTableFragmentCursor(), {
+    const result = take(source, 100, startTableFragmentCursor(), {
       floatingTableFrames: {
         page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 100 },
         margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 80 },
@@ -620,10 +629,52 @@ describe('retained table pagination', () => {
       },
       reacquirePageDependentBlock: () => {
         pass += 1;
-        return paragraph(`unstable-${pass}`, Array.from({ length: pass + 1 }, () => 10));
+        const settledLineCount = Math.min(pass + 1, 6);
+        return paragraph(
+          `settling-${settledLineCount}`,
+          Array.from({ length: settledLineCount }, () => 10),
+        );
       },
+    });
+
+    expect(pass).toBe(6);
+    expect(result.fragment?.rows[0]?.cells[0]?.blocks[0]?.layout).toMatchObject({
+      lines: { length: 6 },
+    });
+  });
+
+  it('rejects a deterministic final-frame cycle when retained line state changes', () => {
+    const nested = acquisition([row(0, 10)]);
+    const retained = withNestedFloatingTable(acquisition([row(0, 20)]), nested);
+    const source = Object.freeze({
+      ...retained,
+      floatingTables: Object.freeze(retained.floatingTables.map((placement) => Object.freeze({
+        ...placement,
+        positioning: Object.freeze({
+          ...placement.positioning,
+          horzAnchor: 'page', vertAnchor: 'text', xPt: 10, yPt: 0,
+        }),
+      }))),
+    });
+    const cycle = [
+      paragraph('cycle-a', [20], 1),
+      paragraph('cycle-b', [20], 2),
+    ] as const;
+    let pass = 0;
+
+    expect(() => take(source, 100, startTableFragmentCursor(), {
+      floatingTableFrames: {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 100 },
+        margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 80 },
+        column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 80 },
+      },
+      floatingTableRegistry: {
+        coordinateSpace: 'logical-page-points', flowDomainId: 'logical-page:0',
+        entries: Object.freeze([]), nextParagraphId: 0,
+      },
+      reacquirePageDependentBlock: () => cycle[pass++ % cycle.length]!,
     })).toThrow('Floating table final-frame reflow did not converge');
-    expect(pass).toBe(4);
+    expect(pass).toBe(3);
   });
 
   it('resolves an owned float independently of an earlier unowned occurrence', () => {

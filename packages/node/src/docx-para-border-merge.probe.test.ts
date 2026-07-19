@@ -33,11 +33,12 @@ import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts'
 import type { NodeCanvasFactory } from './render.ts';
 import type {
   DocxDocumentModel,
-  DocParagraph,
   BodyElement,
+  DocRun,
+  DocxTextRun,
   ParaBorderEdge,
 } from '@silurus/ooxml-docx';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import { importForTests, loadDocxRendererForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
@@ -48,11 +49,7 @@ const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
 const SAMPLE = resolve(ROOT, 'packages/docx/public/demo/sample-1.docx');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-const rendererMod = await importForTests(
-  () => import(RENDERER_PATH),
-  'packages/docx/src/renderer.ts',
-);
+const rendererMod = await loadDocxRendererForTests();
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>
@@ -67,6 +64,24 @@ function lum(r: number, g: number, b: number): number {
 }
 
 const SINGLE = (): ParaBorderEdge => ({ style: 'single', color: '000000', width: 1, space: 0 });
+
+function textRun(text: string, fontFamily: string): DocRun {
+  const run: DocxTextRun = {
+    text,
+    fontSize: 11,
+    bold: false,
+    italic: false,
+    underline: false,
+    strikethrough: false,
+    color: null,
+    fontFamily,
+    isLink: false,
+    background: null,
+    vertAlign: null,
+    hyperlink: null,
+  };
+  return { type: 'text', ...run };
+}
 
 /** One code-block line carrying ONLY a black bottom border (like sample-13's
  *  code-style paragraphs). A run of single-character text keeps the line box
@@ -83,9 +98,9 @@ function codeLine(text: string): BodyElement {
     lineSpacing: null,
     numbering: null,
     tabStops: [],
-    runs: [{ type: 'text', text, fontSize: 11, bold: false, italic: false, color: null, fontFamily: 'Courier New' }],
+    runs: [textRun(text, 'Courier New')],
     borders: { top: null, bottom: SINGLE(), left: null, right: null, between: null },
-  } as unknown as DocParagraph as unknown as BodyElement;
+  };
 }
 
 function caption(text: string): BodyElement {
@@ -100,10 +115,10 @@ function caption(text: string): BodyElement {
     lineSpacing: null,
     numbering: null,
     tabStops: [],
-    runs: [{ type: 'text', text, fontSize: 11, bold: false, italic: false, color: null, fontFamily: 'Times New Roman' }],
+    runs: [textRun(text, 'Times New Roman')],
     // Caption box differs from the code lines: it has BOTH top and bottom.
     borders: { top: SINGLE(), bottom: SINGLE(), left: null, right: null, between: null },
-  } as unknown as DocParagraph as unknown as BodyElement;
+  };
 }
 
 function plain(text: string): BodyElement {
@@ -118,9 +133,9 @@ function plain(text: string): BodyElement {
     lineSpacing: null,
     numbering: null,
     tabStops: [],
-    runs: text ? [{ type: 'text', text, fontSize: 11, bold: false, italic: false, color: null, fontFamily: 'Times New Roman' }] : [],
+    runs: text ? [textRun(text, 'Times New Roman')] : [],
     borders: null,
-  } as unknown as DocParagraph as unknown as BodyElement;
+  };
 }
 
 function buildDoc(body: BodyElement[]): DocxDocumentModel {
@@ -138,21 +153,17 @@ function buildDoc(body: BodyElement[]): DocxDocumentModel {
 }
 
 async function render(doc: DocxDocumentModel, widthPx: number): Promise<{ data: Uint8ClampedArray; w: number; h: number }> {
-  const { renderDocumentToCanvas } = rendererMod as {
-    renderDocumentToCanvas: (
-      doc: DocxDocumentModel,
-      canvas: unknown,
-      pageIndex: number,
-      opts: { dpr: number; width: number },
-    ) => Promise<void>;
-  };
+  const { renderDocumentToCanvas } = rendererMod!;
   const scale = widthPx / doc.section.pageWidth;
   const heightPx = Math.round(doc.section.pageHeight * scale);
   const canvas = new Canvas(widthPx, heightPx);
   const restoreImg = installImageBitmapShim(factory);
   const restoreOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1, width: widthPx });
+    await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, 0, {
+      dpr: 1,
+      width: widthPx,
+    });
   } finally {
     restoreOff();
     restoreImg();
@@ -238,9 +249,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
         lineSpacing: null,
         numbering: null,
         tabStops: [],
-        runs: [{ type: 'text', text: 'boxed', fontSize: 11, bold: false, italic: false, color: null, fontFamily: 'Times New Roman' }],
+        runs: [textRun('boxed', 'Times New Roman')],
         borders: { top: SINGLE(), bottom: SINGLE(), left: SINGLE(), right: SINGLE(), between: null },
-      } as unknown as DocParagraph as unknown as BodyElement;
+      };
       const doc = buildDoc([plain('above'), boxed, plain('below')]);
       const { data, w, h } = await render(doc, 600);
       const rules = findHorizontalRules(data, w, h);

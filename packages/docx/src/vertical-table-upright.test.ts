@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
-  bodyFragmentFor,
-  computePages,
+  createLayoutServices,
+  layoutDocument,
   renderDocumentToCanvas,
-  __test_verticalLayoutSection,
   type DocxTextRunInfo,
 } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type {
   DocxDocumentModel,
   DocTable,
@@ -16,6 +16,8 @@ import type {
   BodyElement,
 } from './types';
 import type { TableFragmentLayout } from './layout/table-pagination.js';
+import type { DocumentLayout, LayoutPage, PaintNode } from './layout/types.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 
 // ECMA-376 §17.6.20 + §17.4.80/§17.18.37 — issue #988 batch-3 adjudication ④:
 // a table CELL inside a vertical (tbRl) section renders like a normal
@@ -194,6 +196,27 @@ function verticalTableDoc(): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
+function documentLayout(doc: DocxDocumentModel): DocumentLayout {
+  const measure = makeRecordingCanvas();
+  return layoutDocument(doc, createLayoutServices(doc, {
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    measureContext: measure.canvas.getContext('2d'),
+  }), { currentDateMs: 0 });
+}
+
+function documentServices(doc: DocxDocumentModel): ReturnType<typeof createLayoutServices> {
+  const measure = makeRecordingCanvas();
+  return createLayoutServices(doc, {
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    measureContext: measure.canvas.getContext('2d'),
+  });
+}
+
+function bodyColumn(page: LayoutPage, node: PaintNode): number {
+  const region = page.sectionRegions.find((candidate) => candidate.flowDomainIds.includes(node.flowDomainId));
+  return region?.flowDomainIds.indexOf(node.flowDomainId) ?? -1;
+}
+
 function floatingTable(text: string, widthPt = 50, mixedAxis = false): BodyElement {
   const table = fixedTable(text, 20);
   table.colWidths = [widthPt];
@@ -329,70 +352,50 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
       { type: 'paragraph', ...bodyParagraph('zz') },
       { type: 'table', ...fixedTable(CELL_TEXT_1, 140) },
     ] as unknown as BodyElement[];
-    const logicalSec = __test_verticalLayoutSection(PHYS);
-    const pages = computePages(body, logicalSec, ctx, { 'Times New Roman': 'roman' });
-    expect(pages.length).toBe(1);
-    expect(pages[0].length).toBe(2);
+    const layout = layoutBodyModel(body, PHYS, ctx, { 'Times New Roman': 'roman' });
+    expect(layout.pages.length).toBe(1);
+    expect(layout.pages[0].layers.body.length).toBe(2);
   });
 
   it('retains upright physical geometry while the placement owns the vertical flow footprint', async () => {
     const doc = verticalTableDoc();
-    const measure = makeRecordingCanvas();
-    const logicalSec = __test_verticalLayoutSection(PHYS);
-    const pages = computePages(
-      doc.body,
-      logicalSec,
-      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
-      doc.fontFamilyClasses,
-    );
-    const tables = pages[0].filter((element) => element.type === 'table');
+    const layout = documentLayout(doc);
+    const tables = layout.pages[0].layers.body.filter((node) => node.kind === 'table');
     expect(tables).toHaveLength(2);
 
-    const exact = bodyFragmentFor(tables[0]);
-    const auto = bodyFragmentFor(tables[1]);
-    if (
-      exact?.fragment.kind !== 'table' || !('flowBounds' in exact.fragment) ||
-      auto?.fragment.kind !== 'table' || !('flowBounds' in auto.fragment)
-    ) {
+    const [exact, auto] = tables;
+    if (exact?.kind !== 'table' || auto?.kind !== 'table') {
       throw new Error('expected retained upright table layouts');
     }
 
     // §17.6.20: the upright table's rows remain in physical coordinates, so
     // the exact row owns an 80 pt physical row stack. The surrounding vertical
     // story advances by the table's 50 pt physical width instead.
-    expect(exact.fragment.advancePt).toBeCloseTo(80, 6);
-    expect(auto.fragment.advancePt).toBeGreaterThan(80);
-    expect(exact.heightPt).toBeCloseTo(TABLE_W, 6);
-    expect(auto.heightPt).toBeCloseTo(TABLE_W, 6);
+    expect(exact.advancePt).toBeCloseTo(80, 6);
+    expect(auto.advancePt).toBeGreaterThan(80);
+    expect(exact.flowBounds.heightPt).toBeCloseTo(TABLE_W, 6);
+    expect(auto.flowBounds.heightPt).toBeCloseTo(TABLE_W, 6);
 
     const paint = makeRecordingCanvas();
     await renderDocumentToCanvas(doc, paint.canvas, 0, {
       dpr: 1,
       width: PHYS.pageWidth,
-      prebuiltPages: pages,
+      layoutServices: documentServices(doc),
     });
     expect(paint.measureCalls()).toBe(0);
   });
 
   it('retains one physical nested-float box for upright wrap, pagination, and paint', async () => {
     const doc = verticalNestedFloatingTableDoc();
-    const measure = makeRecordingCanvas();
-    const pages = computePages(
-      doc.body,
-      __test_verticalLayoutSection(PHYS),
-      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
-      doc.fontFamilyClasses,
-    );
-    const table = pages[0]!.find((element) => element.type === 'table');
-    const retained = table ? bodyFragmentFor(table) : undefined;
-    if (retained?.fragment.kind !== 'table'
-      || !('resolvedFloatingTables' in retained.fragment)) {
+    const layout = documentLayout(doc);
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
+    if (table?.kind !== 'table' || !('resolvedFloatingTables' in table)) {
       throw new Error('expected an upright retained table fragment with nested floats');
     }
-    const fragment = retained.fragment as TableFragmentLayout;
+    const fragment = table as TableFragmentLayout;
     const nested = fragment.resolvedFloatingTables[0];
 
-    expect(pages).toHaveLength(1);
+    expect(layout.pages).toHaveLength(1);
     expect(nested).toMatchObject({
       bounds: { xPt: 120, yPt: 20, widthPt: 50, heightPt: 20 },
       exclusionBounds: { xPt: 120, yPt: 20, widthPt: 50, heightPt: 20 },
@@ -410,7 +413,7 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     await renderDocumentToCanvas(doc, paint.canvas, 0, {
       dpr: 1,
       width: PHYS.pageWidth,
-      prebuiltPages: pages,
+      layoutServices: documentServices(doc),
       onTextRun: (run) => runs.push(run),
     });
     expect(paint.measureCalls()).toBe(0);
@@ -422,20 +425,12 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
 
   it('finalizes an upright nested float only after relocating to its destination page', async () => {
     const doc = verticalNestedFloatingTableDoc(true);
-    const measure = makeRecordingCanvas();
-    const pages = computePages(
-      doc.body,
-      __test_verticalLayoutSection(PHYS),
-      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
-      doc.fontFamilyClasses,
-    );
-    const target = pages[1]?.find((element) => element.type === 'table');
-    const retained = target ? bodyFragmentFor(target) : undefined;
-    if (retained?.fragment.kind !== 'table'
-      || !('resolvedFloatingTables' in retained.fragment)) {
+    const layout = documentLayout(doc);
+    const target = layout.pages[1]?.layers.body.find((node) => node.kind === 'table');
+    if (target?.kind !== 'table' || !('resolvedFloatingTables' in target)) {
       throw new Error('expected relocated upright retained nested float');
     }
-    const fragment = retained.fragment as TableFragmentLayout;
+    const fragment = target as TableFragmentLayout;
     const nested = fragment.resolvedFloatingTables[0]!;
     const anchorBlock = fragment.rows[0]?.cells[0]?.blocks.find(
       (block) => block.layout.kind === 'paragraph',
@@ -447,8 +442,8 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
       heightPt: nested.exclusionBounds.heightPt,
     };
 
-    expect(pages).toHaveLength(2);
-    expect(fragment.floatingTableCoordinateSpace).toBe('upright-physical-page-points');
+    expect(layout.pages).toHaveLength(2);
+    expect(fragment.resolvedFloatingTableCoordinateSpace).toBe('upright-physical-page-points');
     expect(nested.source.physicalPageIndex).toBe(1);
     expect(anchorBlock?.layout.kind === 'paragraph'
       ? anchorBlock.layout.exclusions
@@ -459,7 +454,7 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     await renderDocumentToCanvas(doc, paint.canvas, 1, {
       dpr: 1,
       width: PHYS.pageWidth,
-      prebuiltPages: pages,
+      layoutServices: documentServices(doc),
       onTextRun: (run) => runs.push(run),
     });
     expect(paint.measureCalls()).toBe(0);
@@ -471,23 +466,15 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
 
   it('resolves two upright nested floats in source order and paints each before the parent border', async () => {
     const doc = verticalNestedFloatingTableDoc(false, true);
-    const measure = makeRecordingCanvas();
-    const pages = computePages(
-      doc.body,
-      __test_verticalLayoutSection(PHYS),
-      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
-      doc.fontFamilyClasses,
-    );
-    const table = pages[0]!.find((element) => element.type === 'table');
-    const retained = table ? bodyFragmentFor(table) : undefined;
-    if (retained?.fragment.kind !== 'table'
-      || !('resolvedFloatingTables' in retained.fragment)) {
+    const layout = documentLayout(doc);
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
+    if (table?.kind !== 'table' || !('resolvedFloatingTables' in table)) {
       throw new Error('expected two retained upright nested floats');
     }
-    const fragment = retained.fragment as TableFragmentLayout;
+    const fragment = table as TableFragmentLayout;
     const [first, second] = fragment.resolvedFloatingTables;
 
-    expect(fragment.floatingTableCoordinateSpace).toBe('upright-physical-page-points');
+    expect(fragment.resolvedFloatingTableCoordinateSpace).toBe('upright-physical-page-points');
     expect(fragment.resolvedFloatingTables).toHaveLength(2);
     expect(first?.bounds).toEqual({ xPt: 120, yPt: 20, widthPt: 60, heightPt: 20 });
     expect(second?.bounds).toEqual({ xPt: 120, yPt: 40, widthPt: 60, heightPt: 20 });
@@ -496,7 +483,7 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     await renderDocumentToCanvas(doc, paint.canvas, 0, {
       dpr: 1,
       width: PHYS.pageWidth,
-      prebuiltPages: pages,
+      layoutServices: documentServices(doc),
       onTextRun: (run) => paint.paintEvents.push({ kind: 'text', text: run.text }),
     });
     expect(paint.measureCalls()).toBe(0);
@@ -516,20 +503,12 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
 
   it('composes the upright cell-column X axis with the physical page Y axis', () => {
     const doc = verticalNestedFloatingTableDoc(false, false, true);
-    const measure = makeRecordingCanvas();
-    const pages = computePages(
-      doc.body,
-      __test_verticalLayoutSection(PHYS),
-      measure.canvas.getContext('2d') as CanvasRenderingContext2D,
-      doc.fontFamilyClasses,
-    );
-    const table = pages[0]!.find((element) => element.type === 'table');
-    const retained = table ? bodyFragmentFor(table) : undefined;
-    if (retained?.fragment.kind !== 'table'
-      || !('resolvedFloatingTables' in retained.fragment)) {
+    const layout = documentLayout(doc);
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
+    if (table?.kind !== 'table' || !('resolvedFloatingTables' in table)) {
       throw new Error('expected a mixed-axis upright nested float');
     }
-    const [placement] = (retained.fragment as TableFragmentLayout).resolvedFloatingTables;
+    const [placement] = (table as TableFragmentLayout).resolvedFloatingTables;
 
     if (!placement?.source.columnBounds) throw new Error('expected the retained cell column');
     // Horizontal text placement composes the retained physical cell-column X
@@ -556,15 +535,16 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
       { type: 'table', ...narrow },
     ] as unknown as BodyElement[];
     const measure = makeRecordingCanvas();
-    const pages = computePages(
+    const layout = layoutBodyModel(
       body,
-      __test_verticalLayoutSection(physical),
+      physical,
       measure.canvas.getContext('2d') as CanvasRenderingContext2D,
       { 'Times New Roman': 'roman' },
     );
-    const tables = pages[0].filter((element) => element.type === 'table');
+    const page = layout.pages[0];
+    const tables = page.layers.body.filter((node) => node.kind === 'table');
     expect(tables).toHaveLength(2);
-    expect(bodyFragmentFor(tables[0])?.columnIndex).toBe(0);
-    expect(bodyFragmentFor(tables[1])?.columnIndex).toBe(1);
+    expect(bodyColumn(page, tables[0])).toBe(0);
+    expect(bodyColumn(page, tables[1])).toBe(1);
   });
 });

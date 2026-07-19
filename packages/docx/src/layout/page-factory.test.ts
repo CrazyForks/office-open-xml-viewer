@@ -52,6 +52,7 @@ function section(
       footerDistance: 36,
     },
     columns,
+    columnSeparator: false,
     grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
     textDirection,
     verticalAlignment: 'top',
@@ -102,6 +103,7 @@ function bookmarkParagraph(
     inkBounds: bounds,
     advancePt: bounds.heightPt,
     ordinaryFlow: true,
+    bookmarkStarts: [bookmark],
     spacing: { beforePt: 0, afterPt: 0 },
     contextualSpacing: false,
     lines: [{
@@ -129,7 +131,6 @@ function bookmarkParagraph(
         fontStyle: 'normal',
         direction: 'ltr',
         decorations: [],
-        bookmark,
       }],
     }],
     borders: [],
@@ -438,6 +439,7 @@ describe('createLayoutPage', () => {
     const mismatches: SectionLayoutContext[] = [
       { ...first, geometry: { ...first.geometry, marginLeft: 73 } },
       { ...first, columns: [{ xPt: 73, wPt: 468 }] },
+      { ...first, columnSeparator: true },
       { ...first, textDirection: 'lrTbV' },
       { ...first, grid: { ...first.grid, kind: 'lines' } },
       { ...first, verticalAlignment: 'center' },
@@ -613,6 +615,236 @@ describe('createLayoutPage', () => {
     });
   });
 
+  it('retains overlapping block bands when section regions own disjoint authored columns', () => {
+    const columns = [
+      { xPt: 72, wPt: 142 },
+      { xPt: 235, wPt: 142 },
+      { xPt: 398, wPt: 142 },
+    ];
+    const outgoing = section('lrTb', columns);
+    const incoming = section('lrTb', columns);
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:outgoing',
+      section: outgoing,
+      sectionRegions: [
+        {
+          id: 'region:outgoing',
+          sectionOccurrenceId: 'section:outgoing',
+          section: outgoing,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 240,
+          blockEndPt: 720,
+          columnIndexes: [0],
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 142 }],
+        },
+        {
+          id: 'region:incoming',
+          sectionOccurrenceId: 'section:incoming',
+          section: incoming,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 240,
+          blockEndPt: 720,
+          columnIndexes: [1, 2],
+          columns: [
+            { inlineStartPt: 235, inlineExtentPt: 142 },
+            { inlineStartPt: 398, inlineExtentPt: 142 },
+          ],
+        },
+      ],
+      paint: [],
+      readingOrder: [],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:outgoing',
+      },
+    });
+
+    expect(page.sectionRegions.map((region) => region.columnIndexes)).toEqual([
+      [0],
+      [1, 2],
+    ]);
+    expect(page.flowDomains.map((domain) => domain.id)).toEqual([
+      bodyFlowDomainId(0, 'region:outgoing', 0),
+      bodyFlowDomainId(0, 'region:incoming', 1),
+      bodyFlowDomainId(0, 'region:incoming', 2),
+    ]);
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
+
+    expect(() => createLayoutPage({
+      ...page,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionRegions: [
+        {
+          id: 'region:outgoing',
+          sectionOccurrenceId: 'section:outgoing',
+          section: outgoing,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 240,
+          blockEndPt: 720,
+          columnIndexes: [0],
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 142 }],
+        },
+        {
+          id: 'region:incoming',
+          sectionOccurrenceId: 'section:incoming',
+          section: incoming,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 240,
+          blockEndPt: 720,
+          columnIndexes: [0],
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 142 }],
+        },
+      ],
+      paint: [],
+      readingOrder: [],
+    })).toThrow(RangeError);
+  });
+
+  it('requires retained column population direction to agree with sectPr bidi', () => {
+    const rtlSection = {
+      ...section('lrTb', [
+        { xPt: 72, wPt: 224 },
+        { xPt: 316, wPt: 224 },
+      ]),
+      sectionBidi: true,
+    };
+
+    expect(() => createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:rtl',
+      section: rtlSection,
+      sectionRegions: [{
+        id: 'region:rtl',
+        sectionOccurrenceId: 'section:rtl',
+        section: rtlSection,
+        writingMode: 'horizontal-tb',
+        blockStartPt: 72,
+        blockEndPt: 720,
+        columnFlowDirection: 'ltr',
+        columns: [
+          { inlineStartPt: 72, inlineExtentPt: 224 },
+          { inlineStartPt: 316, inlineExtentPt: 224 },
+        ],
+      }],
+      paint: [],
+      readingOrder: [],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:rtl',
+      },
+    })).toThrow(/column flow direction/i);
+  });
+
+  it('retains section column separator geometry on the completed page', () => {
+    const separated = {
+      ...section('lrTb', [
+        { xPt: 72, wPt: 220 },
+        { xPt: 320, wPt: 220 },
+      ]),
+      columnSeparator: true,
+    };
+
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612,
+        heightPt: 792,
+        contentTopPt: 72,
+        contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:separated',
+      section: separated,
+      sectionRegions: [{
+        id: 'region:separated',
+        sectionOccurrenceId: 'section:separated',
+        section: separated,
+        writingMode: 'horizontal-tb',
+        blockStartPt: 72,
+        blockEndPt: 330,
+        columns: [
+          { inlineStartPt: 72, inlineExtentPt: 220 },
+          { inlineStartPt: 320, inlineExtentPt: 220 },
+        ],
+      }],
+      paint: [],
+      readingOrder: [],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:separated',
+      },
+    });
+
+    expect(page.columnSeparators).toEqual([{
+      start: { xPt: 306, yPt: 72 },
+      end: { xPt: 306, yPt: 330 },
+    }]);
+    expect(Object.isFrozen(page.columnSeparators)).toBe(true);
+  });
+
+  it('retains an empty continuous region only for out-of-flow occurrence ownership', () => {
+    const first = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const second = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const firstDomain = bodyFlowDomainId(0, 'region:first', 0);
+    const secondDomain = bodyFlowDomainId(0, 'region:second', 0);
+    const floating = {
+      ...drawing('floating', firstDomain, rect(72, 72, 100, 20)),
+      ordinaryFlow: false,
+    };
+    const follower = drawing('follower', secondDomain, rect(72, 72, 100, 20));
+    const input = {
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:first',
+      section: first,
+      sectionRegions: [
+        {
+          id: 'region:first', sectionOccurrenceId: 'section:first', section: first,
+          writingMode: 'horizontal-tb' as const, blockStartPt: 72, blockEndPt: 72,
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+        },
+        {
+          id: 'region:second', sectionOccurrenceId: 'section:second', section: second,
+          writingMode: 'horizontal-tb' as const, blockStartPt: 72, blockEndPt: 720,
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+        },
+      ],
+      paint: [
+        { layer: 'body' as const, node: floating },
+        { layer: 'body' as const, node: follower },
+      ],
+      readingOrder: [floating, follower],
+      pageNumber: {
+        displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:first',
+      },
+    };
+
+    const page = createLayoutPage(input);
+
+    expect(page.flowDomains.map((domain) => domain.logicalBounds.heightPt)).toEqual([0, 648]);
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
+    expect(() => assertDocumentLayout({
+      pages: [{
+        ...page,
+        layers: { ...page.layers, body: [{ ...floating, ordinaryFlow: true }, follower] },
+      }],
+      diagnostics: [],
+    })).toThrow(LayoutInvariantError);
+  });
+
   it('retains a logical-to-physical transform for vertical section regions', () => {
     const vertical = verticalSection('tbRl', [{ xPt: 72, wPt: 648 }]);
 
@@ -744,9 +976,9 @@ describe('createLayoutPage', () => {
 
     expect(page.layers.behindText).toEqual([behind]);
     expect(page.layers.body).toEqual([paragraph]);
-    expect(page.layers.paintOrder).toEqual([
-      { layer: 'behindText', nodeId: 'drawing-1' },
-      { layer: 'body', nodeId: 'paragraph-3' },
+    expect(page.layers.paintSequence).toEqual([
+      { layer: 'behindText', node: behind, coordinateSpace: 'section-logical' },
+      { layer: 'body', node: paragraph, coordinateSpace: 'section-logical' },
     ]);
     expect(page.readingOrder).toEqual(['paragraph-3']);
     expect(page.bookmarkStarts).toEqual([{
@@ -1012,7 +1244,7 @@ describe('createLayoutPage', () => {
     expect(() => assertDocumentLayout(inventedPlacement)).toThrow(/bookmark metadata/);
   });
 
-  it('rejects an ownerless derived bookmark while preserving transitional omission and emptiness', () => {
+  it('rejects an ownerless derived bookmark while preserving canonical emptiness', () => {
     const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
     const domainId = bodyFlowDomainId(0, 'region:body', 0);
     const paragraph = bookmarkParagraph(
@@ -1030,21 +1262,9 @@ describe('createLayoutPage', () => {
       paint: [{ layer: 'body', node: paragraph }], readingOrder: [paragraph],
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
     });
-    const {
-      sectionOccurrenceId,
-      sectionRegions,
-      pageNumber,
-      bookmarkStarts,
-      ...transitionalPage
-    } = page;
-    void sectionOccurrenceId;
-    void sectionRegions;
-    void pageNumber;
-    void bookmarkStarts;
-
     const ownerless: DocumentLayout = {
       pages: [{
-        ...transitionalPage,
+        ...page,
         bookmarkStarts: [{
           name: 'destination', nodeId: paragraph.id, sectionOccurrenceId: '',
         }],
@@ -1059,14 +1279,12 @@ describe('createLayoutPage', () => {
       expect((error as LayoutInvariantError).code).toBe('INVALID_REFERENCE');
     }
 
-    expect(() => assertDocumentLayout({ pages: [transitionalPage], diagnostics: [] }))
-      .not.toThrow();
     expect(() => assertDocumentLayout({
       pages: [{
-        ...transitionalPage,
+        ...page,
         bookmarkStarts: [],
         layers: {
-          paintOrder: [], background: [], behindText: [], header: [], body: [],
+          paintSequence: [], background: [], behindText: [], header: [], body: [],
           notes: [], front: [], footer: [],
         },
         readingOrder: [],
@@ -1131,7 +1349,7 @@ describe('createParityBlankLayoutPage', () => {
     expect(page.sectionOccurrenceId).toBe('section:outgoing');
     expect(page.sectionRegions).toEqual([]);
     expect(page.flowDomains).toEqual([]);
-    expect(page.layers.paintOrder).toEqual([]);
+    expect(page.layers.paintSequence).toEqual([]);
     expect(page.readingOrder).toEqual([]);
     expect(page.bookmarkStarts).toEqual([]);
     expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();

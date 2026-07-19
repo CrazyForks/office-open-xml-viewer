@@ -29,7 +29,11 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+} from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
@@ -44,39 +48,26 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
 
 const samplePath = (n: number) => resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
 const have = (n: number) => existsSync(samplePath(n));
 
 interface Run { text: string; x: number; y: number; w: number; h: number; fontSize: number }
 
-interface RendererMod {
-  parseDocxAvailable?: boolean;
-  paginateDocument: (doc: unknown) => unknown[][];
-  renderDocumentToCanvas: (
-    doc: unknown,
-    canvas: unknown,
-    pageIndex: number,
-    opts: Record<string, unknown>,
-  ) => Promise<void>;
+function parse(n: number) {
+  return docxMod!.parseDocx(readFileSync(samplePath(n)));
 }
 
-function parse(n: number): unknown {
-  const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => unknown };
-  return parseDocx(readFileSync(samplePath(n)));
-}
-
-/** Page count via the pure paginator (needs the OffscreenCanvas shim). */
+/** Page count via retained layout (needs the OffscreenCanvas shim). */
 function pageCount(n: number, width = 595): number {
   const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
   try {
-    const { paginateDocument } = rendererMod as unknown as RendererMod;
-    return paginateDocument(parse(n)).length;
+    const { createLayoutServices, layoutDocument } = rendererMod!;
+    const doc = parse(n);
+    const layoutServices = createLayoutServices(doc);
+    return layoutDocument(doc, layoutServices, { currentDateMs: 0 }).pages.length;
   } finally {
     restore.forEach((r) => r());
   }
@@ -119,9 +110,9 @@ function recordingCtx(real: CanvasRenderingContext2D, sink: Run[]): CanvasRender
 async function pageLines(n: number, page: number, width = 595): Promise<string[]> {
   const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
   try {
-    const { paginateDocument, renderDocumentToCanvas } = rendererMod as unknown as RendererMod;
+    const { createLayoutServices, renderDocumentToCanvas } = rendererMod!;
     const doc = parse(n);
-    const pages = paginateDocument(doc);
+    const layoutServices = createLayoutServices(doc);
     const runs: Run[] = [];
     const canvas = new Canvas(Math.round(width * 1.5), Math.round(width * 2));
     const realCtx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
@@ -132,8 +123,9 @@ async function pageLines(n: number, page: number, width = 595): Promise<string[]
     await renderDocumentToCanvas(doc, canvas as unknown as never, page, {
       width,
       dpr: 1,
-      prebuiltPages: pages,
-      totalPages: pages.length,
+      layoutServices,
+      currentDate: 0,
+      defaultCurrentDateMs: 0,
     });
     // Column-aware line reconstruction: bucket by baseline y, then within a row
     // split into separate visual lines wherever x jumps by more than ~15% of the

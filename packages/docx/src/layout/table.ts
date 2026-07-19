@@ -4,6 +4,7 @@ import { paragraphGapPt } from './paragraph-spacing.js';
 import { snapshotPlainData } from './plain-data.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { firstAuthoredTableBorder } from './table-border-layer.js';
+import { unionLayoutRects } from './rect-union.js';
 import type {
   BlockLayoutResult,
   FlowBlockPlacement,
@@ -28,6 +29,8 @@ interface CellFlowGeometry {
   readonly flowHeightPt: number;
   readonly inkTopPt: number;
   readonly inkHeightPt: number;
+  readonly cellContainmentTopPt: number | null;
+  readonly cellContainmentBottomPt: number | null;
 }
 
 interface CellOwner {
@@ -68,6 +71,8 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
   let previousAfterPt = 0;
   let firstInkTopPt: number | undefined;
   let lastInkBottomPt = 0;
+  let cellContainmentTopPt: number | null = null;
+  let cellContainmentBottomPt: number | null = null;
 
   for (const block of blocks) {
     const layout = block.layout;
@@ -83,9 +88,26 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
       if (!block.structuralTrailing) {
         cursorPt = offsetPt + advancePt;
         firstInkTopPt ??= offsetPt;
-        lastInkBottomPt = cursorPt;
+        lastInkBottomPt = Math.max(lastInkBottomPt, cursorPt);
         previousParagraph = layout;
         previousAfterPt = afterPt;
+      }
+      if (layout.cellContainmentBounds) {
+        const containmentTopPt = offsetPt
+          + layout.cellContainmentBounds.yPt
+          - layout.flowBounds.yPt;
+        const containmentBottomPt = containmentTopPt
+          + layout.cellContainmentBounds.heightPt;
+        firstInkTopPt = firstInkTopPt === undefined
+          ? containmentTopPt
+          : Math.min(firstInkTopPt, containmentTopPt);
+        lastInkBottomPt = Math.max(lastInkBottomPt, containmentBottomPt);
+        cellContainmentTopPt = cellContainmentTopPt === null
+          ? containmentTopPt
+          : Math.min(cellContainmentTopPt, containmentTopPt);
+        cellContainmentBottomPt = cellContainmentBottomPt === null
+          ? containmentBottomPt
+          : Math.max(cellContainmentBottomPt, containmentBottomPt);
       }
       continue;
     }
@@ -107,7 +129,19 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
     flowHeightPt,
     inkTopPt,
     inkHeightPt: Math.max(0, lastInkBottomPt - inkTopPt),
+    cellContainmentTopPt,
+    cellContainmentBottomPt,
   };
+}
+
+function cellContentRequiredHeightPt(flow: CellFlowGeometry): number {
+  const containmentTopPt = flow.cellContainmentTopPt ?? 0;
+  const containmentBottomPt = flow.cellContainmentBottomPt ?? 0;
+  // ECMA-376 §20.4.2.3 layoutInCell contains the object frame even though the
+  // object remains out of ordinary paragraph flow. General child ink is not a
+  // row-sizing input; only this explicitly retained containment interval is.
+  return Math.max(flow.flowHeightPt, containmentBottomPt)
+    - Math.min(0, containmentTopPt);
 }
 
 /**
@@ -118,7 +152,7 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
 export function measureTableCellBlockFlowHeightPt(
   blocks: readonly TableCellBlockInput[],
 ): number {
-  return resolveCellFlow(blocks).flowHeightPt;
+  return cellContentRequiredHeightPt(resolveCellFlow(blocks));
 }
 
 interface RowSpacingInsets {
@@ -157,7 +191,7 @@ function cellRequiredHeight(
 ): number {
   return spacing.topPt
     + input.margins.topPt
-    + flow.flowHeightPt
+    + cellContentRequiredHeightPt(flow)
     + input.margins.bottomPt
     + spacing.bottomPt;
 }
@@ -891,15 +925,6 @@ function unionInkBounds(flowBounds: LayoutRect, borders: readonly ResolvedBorder
   return { xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top };
 }
 
-function unionRects(rects: readonly LayoutRect[], fallback: LayoutRect): LayoutRect {
-  if (rects.length === 0) return fallback;
-  const left = Math.min(...rects.map((rect) => rect.xPt));
-  const top = Math.min(...rects.map((rect) => rect.yPt));
-  const right = Math.max(...rects.map((rect) => rect.xPt + rect.widthPt));
-  const bottom = Math.max(...rects.map((rect) => rect.yPt + rect.heightPt));
-  return { xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top };
-}
-
 function intersectRects(left: LayoutRect, right: LayoutRect): LayoutRect | null {
   const xPt = Math.max(left.xPt, right.xPt);
   const yPt = Math.max(left.yPt, right.yPt);
@@ -1017,7 +1042,7 @@ export function layoutTable(
         ? cell.margins.topPt + (availableContentHeightPt - flow.inkHeightPt) / 2 - flow.inkTopPt
         : cell.vAlign === 'bottom'
           ? cellHeightPt - cell.margins.bottomPt - flow.inkHeightPt - flow.inkTopPt
-          : cell.margins.topPt;
+          : cell.margins.topPt - Math.min(0, flow.inkTopPt);
       const contentBounds = {
         xPt: cellXPt + cell.margins.leftPt,
         yPt: cellTopPt + inkOffsetPt,
@@ -1052,7 +1077,7 @@ export function layoutTable(
         .map((block) => placedChildInkBounds(block, contentBounds.xPt, cellFlowBounds.yPt))
         .map((bounds) => clipBounds ? intersectRects(bounds, clipBounds) : bounds)
         .filter((bounds): bounds is LayoutRect => bounds !== null);
-      const cellInkBounds = unionRects([cellFlowBounds, ...childInk], cellFlowBounds);
+      const cellInkBounds = unionLayoutRects([cellFlowBounds, ...childInk]) ?? cellFlowBounds;
       return {
         kind: 'table-cell',
         id: cell.id,
@@ -1071,7 +1096,8 @@ export function layoutTable(
       };
     });
     const rowBounds = { xPt: rowOriginXPt, yPt: rowTopPt, widthPt, heightPt: rowHeightPt };
-    const rowInkBounds = unionRects([rowBounds, ...cells.map((cell) => cell.inkBounds)], rowBounds);
+    const rowInkBounds = unionLayoutRects([rowBounds, ...cells.map((cell) => cell.inkBounds)])
+      ?? rowBounds;
     return {
       kind: 'table-row',
       id: row.id,
@@ -1097,7 +1123,8 @@ export function layoutTable(
     widthPt: Math.max(0, flowRightPt - flowLeftPt),
     heightPt,
   };
-  const childInkBounds = unionRects([flowBounds, ...rows.map((row) => row.inkBounds)], flowBounds);
+  const childInkBounds = unionLayoutRects([flowBounds, ...rows.map((row) => row.inkBounds)])
+    ?? flowBounds;
   const layout: TableLayout = {
     kind: 'table',
     id: input.id,

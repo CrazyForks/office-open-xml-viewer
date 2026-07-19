@@ -95,6 +95,7 @@ export interface FlowOwnership {
   readonly clipBounds?: LayoutRect;
   readonly advancePt: number;
   readonly ordinaryFlow: boolean;
+  readonly sectionFlowOwnership?: 'host-flow' | 'page';
 }
 
 interface LayoutNodeBase extends FlowOwnership {
@@ -175,6 +176,8 @@ export interface DrawingLayout extends LayoutNodeBase {
     sourceOrder: number;
     horizontalOwnership: 'page' | 'host';
     verticalOwnership: 'page' | 'host';
+    /** @internal This occurrence contributes to its owning table-cell extent. */
+    cellContainment?: true;
   }>;
   readonly textBoxIds?: readonly LayoutNodeId[];
 }
@@ -310,6 +313,7 @@ export interface TextPlacement {
   readonly sourceRunIndex?: number;
   readonly role?: 'content' | 'numbering-marker' | 'field-result';
   readonly dependency?: 'page' | 'total-pages' | 'date' | 'time' | 'document';
+  readonly noteReference?: Readonly<{ kind: 'footnote' | 'endnote'; id: string }>;
   readonly range: TextRange;
   readonly origin: PointPt;
   readonly bounds: LayoutRect;
@@ -369,7 +373,6 @@ export interface TextPlacement {
   )[];
   readonly decorations: readonly TextDecorationLayout[];
   readonly hyperlink?: string;
-  readonly bookmark?: string;
 }
 
 export interface TabPlacement {
@@ -494,10 +497,21 @@ export type FillPaint = Readonly<{ color: string }>;
 export interface WrapExclusion {
   readonly id: string;
   readonly wrap: 'square' | 'tight' | 'through' | 'topAndBottom';
+  readonly wrapSide?: 'bothSides' | 'left' | 'right' | 'largest';
   readonly bounds: LayoutRect;
   readonly polygon: readonly PointPt[];
   readonly anchorOccurrenceId?: string;
   readonly verticalOwnership?: 'page' | 'host';
+}
+
+/** @internal Occurrence-keyed DrawingML object bounds for §20.4.2.3.
+ * Kept separate from text-wrap exclusions because wrapNone objects still
+ * participate in object-to-object collision avoidance. */
+export interface DrawingMLCollisionEntryPt {
+  readonly occurrenceId: string;
+  readonly bounds: LayoutRect;
+  readonly horizontalOwnership: 'page' | 'host';
+  readonly verticalOwnership: 'page' | 'host';
 }
 
 export interface ParagraphFlowEvent {
@@ -550,6 +564,12 @@ export interface ParagraphSpacingLayout {
 export interface ParagraphLayout extends LayoutNodeBase {
   readonly kind: 'paragraph';
   readonly styleId?: string | null;
+  /**
+   * ECMA-376 §17.13.6.2 bookmark starts owned by this retained paragraph
+   * fragment. The parser currently preserves paragraph ownership rather than
+   * an inline character offset, so only the first page slice carries them.
+   */
+  readonly bookmarkStarts?: readonly string[];
   readonly spacing: ParagraphSpacingLayout;
   readonly contextualSpacing: boolean;
   readonly lines: readonly LineLayout[];
@@ -560,6 +580,10 @@ export interface ParagraphLayout extends LayoutNodeBase {
   readonly textBoxes: readonly TextBoxLayout[];
   readonly events: readonly ParagraphFlowEvent[];
   readonly exclusions: readonly WrapExclusion[];
+  /** @internal Union of layoutInCell drawing frames owned by this fragment. */
+  readonly cellContainmentBounds?: LayoutRect;
+  /** @internal */
+  readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
   readonly anchorFrames?: readonly AnchorFrameResult[];
   readonly paragraphMark?: ParagraphMarkLayout;
   readonly lineNumbers?: readonly LineNumberLayout[];
@@ -604,6 +628,11 @@ export interface TableLayout extends LayoutNodeBase {
   readonly columnWidthsPt: readonly number[];
   readonly rows: readonly TableRowLayout[];
   readonly borders: readonly ResolvedBorderSegment[];
+  readonly floatingTables?: readonly FloatingTablePlacementLayout[];
+  readonly resolvedFloatingTables?: readonly ResolvedFloatingTablePlacementLayout[];
+  /** Point space already owned by `resolvedFloatingTables`; occurrence projection
+   * must not translate those final frames a second time. */
+  readonly resolvedFloatingTableCoordinateSpace?: FloatRegistryCoordinateSpace;
 }
 
 /**
@@ -644,6 +673,22 @@ export interface FloatRegistryEntryPt {
   readonly paragraphId: number;
   readonly bounds: LayoutRect;
   readonly exclusionBounds: LayoutRect;
+  /** DrawingML collision-axis ownership; present for parser-owned shapes. */
+  readonly horizontalOwnership?: 'page' | 'host';
+  readonly verticalOwnership?: 'page' | 'host';
+  /** Stable retained-graph identity for exclusions owned by an accepted occurrence. */
+  readonly exclusionId?: string;
+  /** Parser-authored DrawingML wrap facts. Ordinary tables/frames omit these
+   * and retain their established square exclusion semantics. */
+  readonly wrap?: WrapExclusion['wrap'];
+  readonly wrapSide?: string | null;
+  readonly wrapDistances?: Readonly<{
+    topPt: number;
+    rightPt: number;
+    bottomPt: number;
+    leftPt: number;
+  }>;
+  readonly wrapPolygon?: readonly PointPt[];
 }
 
 export type FloatRegistryCoordinateSpace = Exclude<
@@ -658,12 +703,48 @@ export interface FloatRegistrySnapshotPt {
   readonly nextParagraphId: number;
 }
 
+/** @internal Transaction-local delta. Cloned deltas intentionally lose lineage
+ * and therefore cannot be committed. */
 export interface FloatRegistryDeltaPt {
   readonly coordinateSpace: FloatRegistryCoordinateSpace;
   readonly flowDomainId: string;
+  /** Exact immutable snapshot lineage; registry deltas never cross a clone boundary. */
+  readonly baseEntries: FloatRegistrySnapshotPt['entries'];
   readonly baseNextParagraphId: number;
   readonly nextParagraphId: number;
   readonly entries: readonly FloatRegistryEntryPt[];
+}
+
+/** Accepted DrawingML object bounds in source-acceptance order.
+ * Unlike the text float registry, this registry is never populated by page
+ * prescan because §20.4.2.3 collision authority begins at source acceptance. */
+export interface DrawingMLCollisionRegistrySnapshotPt {
+  readonly coordinateSpace: FloatRegistryCoordinateSpace;
+  readonly flowDomainId: string;
+  readonly entries: readonly DrawingMLCollisionEntryPt[];
+}
+
+/** @internal Transaction-local delta. Cloned deltas intentionally lose lineage
+ * and therefore cannot be committed. */
+export interface DrawingMLCollisionRegistryDeltaPt {
+  readonly coordinateSpace: FloatRegistryCoordinateSpace;
+  readonly flowDomainId: string;
+  /** Exact immutable snapshot lineage; registry deltas never cross a clone boundary. */
+  readonly baseEntries: DrawingMLCollisionRegistrySnapshotPt['entries'];
+  readonly baseEntryCount: number;
+  readonly entries: readonly DrawingMLCollisionEntryPt[];
+}
+
+/** Page-local registries committed together after one body candidate is accepted.
+ * The shared occurrence ID is a join key, not duplicate geometry authority. */
+export interface BodyFlowRegistrySnapshotPt {
+  readonly floats: FloatRegistrySnapshotPt;
+  readonly drawingCollisions: DrawingMLCollisionRegistrySnapshotPt;
+}
+
+export interface BodyFlowRegistryDeltaPt {
+  readonly floats?: FloatRegistryDeltaPt;
+  readonly drawingCollisions?: DrawingMLCollisionRegistryDeltaPt;
 }
 
 /** Paint-ready result of resolving a page-local floating-table occurrence. */
@@ -703,13 +784,16 @@ export type PageLayerId =
   | 'front'
   | 'footer';
 
-export interface PagePaintEntry {
+export interface PagePaintSequenceEntry {
   readonly layer: PageLayerId;
-  readonly nodeId: LayoutNodeId;
+  readonly node: PaintNode;
+  readonly coordinateSpace: 'section-logical' | 'upright-physical';
 }
 
 export interface PageLayers {
-  readonly paintOrder: readonly PagePaintEntry[];
+  /** Completed layout-owned sequence. Paint consumes it without graph lookup,
+   * ordering, or validation. */
+  readonly paintSequence: readonly PagePaintSequenceEntry[];
   readonly background: readonly PaintNode[];
   readonly behindText: readonly PaintNode[];
   readonly header: readonly PaintNode[];
@@ -720,7 +804,8 @@ export interface PageLayers {
 }
 
 /** One section-owned body-flow region on a physical page. A continuous section
- * may add another region below existing content without creating a new page. */
+ * may add another region below existing content without creating a new page;
+ * an occurrence owning only out-of-flow content has an empty region. */
 export interface PageSectionRegion {
   readonly id: string;
   readonly sectionOccurrenceId: string;
@@ -729,6 +814,9 @@ export interface PageSectionRegion {
   readonly coordinateSpace: SectionRegionCoordinateSpace;
   readonly blockStartPt: number;
   readonly blockEndPt: number;
+  readonly columnFlowDirection: 'ltr' | 'rtl';
+  /** Authored §17.6.4 column indexes owned by this physical region. */
+  readonly columnIndexes: readonly number[];
   readonly flowDomainIds: readonly string[];
   readonly section: DeepReadonly<SectionLayoutContext>;
 }
@@ -745,19 +833,26 @@ export interface PageNumberMetadata {
   readonly sectionOccurrenceId: string;
 }
 
+/** Physical page-space ink fixed during layout for ECMA-376 §17.6.4
+ * `w:cols/@w:sep`. Paint may snap the retained endpoints to device pixels,
+ * but it must not recover section-band geometry. */
+export interface ColumnSeparatorLayout {
+  readonly start: PointPt;
+  readonly end: PointPt;
+}
+
 export interface LayoutPage {
   readonly pageIndex: number;
   readonly geometry: PageGeometry;
   readonly flowDomains: readonly FlowDomain[];
   readonly section: DeepReadonly<SectionLayoutContext>;
-  /** Transitional optionals keep pre-A6 producers compiling while the canonical
-   * page factory becomes the sole producer; A6 removes that migration latitude. */
-  readonly sectionOccurrenceId?: string;
-  readonly parityBlank?: boolean;
-  readonly bookmarkStarts?: readonly PageBookmarkStart[];
-  readonly pageNumber?: PageNumberMetadata;
-  /** Transitional until A6's canonical page producer is the only producer. */
-  readonly sectionRegions?: readonly PageSectionRegion[];
+  readonly sectionOccurrenceId: string;
+  readonly parityBlank: boolean;
+  readonly bookmarkStarts: readonly PageBookmarkStart[];
+  readonly pageNumber: PageNumberMetadata;
+  readonly sectionRegions: readonly PageSectionRegion[];
+  readonly columnSeparators: readonly ColumnSeparatorLayout[];
+  readonly pageBorders: DeepReadonly<import('../types.js').PageBorders> | null;
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
 }
@@ -785,6 +880,7 @@ export interface DocumentLayout {
 
 export type CompatibilityEvidence =
   | Readonly<{ kind: 'microsoft-note'; reference: string }>
+  | Readonly<{ kind: 'regression-test'; reference: string }>
   | Readonly<{
       kind: 'office-observation';
       syntheticFixtureId: string;
@@ -833,6 +929,7 @@ export interface AcquiredParagraphLayoutInput {
   readonly flowDomainId: string;
   readonly ordinaryFlow: boolean;
   readonly styleId?: string | null;
+  readonly bookmarkStarts?: readonly string[];
   readonly flowBounds: LayoutRect;
   readonly inkBounds: LayoutRect;
   readonly clipBounds?: LayoutRect;
@@ -846,6 +943,10 @@ export interface AcquiredParagraphLayoutInput {
   readonly textBoxes: readonly TextBoxLayout[];
   readonly events: readonly ParagraphFlowEvent[];
   readonly exclusions: readonly WrapExclusion[];
+  /** @internal Union of layoutInCell drawing frames owned by this fragment. */
+  readonly cellContainmentBounds?: LayoutRect;
+  /** @internal */
+  readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
   readonly anchorFrames?: readonly AnchorFrameResult[];
   readonly paragraphMark?: ParagraphMarkLayout;
   readonly continuation?: Readonly<{

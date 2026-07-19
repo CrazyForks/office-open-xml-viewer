@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { bodyFragmentFor, computePages } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
+import type { DocumentLayout } from './layout/types.js';
 import type {
   BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell,
-  DocxTextRun, SectionProps, TblpPr, PaginatedBodyElement,
-} from './types';
+  DocxTextRun, SectionProps, TblpPr, } from './types';
 
 // ECMA-376 §17.4.57 — a FLOATING table (`<w:tblpPr>`) is positioned absolutely
 // (out of flow) and is NOT confined to the text column: Word keeps its declared
@@ -98,59 +98,55 @@ function table(
   return { type: 'table', ...t } as unknown as BodyElement;
 }
 
-const isTable = (e: PaginatedBodyElement): boolean => e.type === 'table';
-const resolvedWidth = (pages: PaginatedBodyElement[][]): number => {
-  const el = pages.flat().find(isTable);
-  expect(el).toBeDefined();
-  const placed = bodyFragmentFor(el as PaginatedBodyElement);
-  expect(placed?.fragment.kind).toBe('table');
-  expect(placed?.fragment.kind === 'table' && 'flowBounds' in placed.fragment).toBe(true);
-  return placed!.fragment.kind === 'table'
-    ? placed!.fragment.columnWidthsPt.reduce((sum, widthPt) => sum + widthPt, 0)
+const resolvedWidth = (layout: DocumentLayout): number => {
+  const table = layout.pages.flatMap((page) => page.layers.body).find((node) => node.kind === 'table');
+  expect(table).toBeDefined();
+  return table?.kind === 'table'
+    ? table.columnWidthsPt.reduce((sum, widthPt) => sum + widthPt, 0)
     : 0;
 };
 
 describe('floating-table width cap (§17.4.57) — page width, not the column band', () => {
   it('keeps a FIXED-layout floating table at its full tblGrid width past the column band', () => {
     // Grid 520 > band 450, < page 600 ⇒ stays 520 (was scaled to 450).
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([200, 120, 200], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(520, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(520, 1);
   });
 
   it('keeps an AUTOFIT floating table with a preferred tblW at its full grid width', () => {
     // Autofit + tblW=dxa (grid trusted): grid 520 > band 450 ⇒ stays 520.
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([200, 120, 200], { widthPt: 520, float: true })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(520, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(520, 1);
   });
 
   it('clamps a floating table wider than the PAGE to the page width', () => {
     // Grid 700 > page 600 ⇒ scaled to 600 (the float cannot exceed the paper).
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([300, 100, 300], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(600, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(600, 1);
   });
 
   it('still scales a NON-floating fixed table down to the column band (block-table cap unchanged)', () => {
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([200, 120, 200], { layout: 'fixed' })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(450, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(450, 1);
   });
 
   it('leaves a floating table narrower than the band untouched (cap never bites)', () => {
-    const pages = computePages(
+    const layout = layoutBodyModel(
       [table([100, 100], { layout: 'fixed', float: true })],
       section(), makeCtx(),
     );
-    expect(resolvedWidth(pages)).toBeCloseTo(200, 1);
+    expect(resolvedWidth(layout)).toBeCloseTo(200, 1);
   });
 });

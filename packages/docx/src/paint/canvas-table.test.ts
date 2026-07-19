@@ -376,7 +376,7 @@ describe('paintTableLayout', () => {
       exclusionBounds: { xPt: 200, yPt: 300, widthPt: 80, heightPt: 16 },
       overlap: 'never', child, source,
     }] satisfies readonly ResolvedFloatingTablePlacementLayout[];
-    const { paintPlacedTableLayout } = await import('./canvas-table.js');
+    const { paintPlacedTableLayout, paintTableLayout } = await import('./canvas-table.js');
 
     paintPlacedTableLayout(
       parentWithoutNestedFlow,
@@ -391,5 +391,11 @@ describe('paintTableLayout', () => {
     expect(paintedText).toEqual(['child']);
     expect(runs).toEqual([{ x: 202, y: 302 }]);
     expect(paintOrder.at(-1)).toBe('stroke:#445566');
+
+    paintedText.length = 0;
+    paintTableLayout({ ...parentWithoutNestedFlow, resolvedFloatingTables: floating }, {
+      ctx, scale: 1, dpr: 1, resources,
+    }, []);
+    expect(paintedText).toEqual([]);
   });
 });

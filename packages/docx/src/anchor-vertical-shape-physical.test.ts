@@ -2,10 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   __test_resolveAnchorBox,
   __test_resolveShapeBox,
-  __test_verticalLayoutSection,
-  computePages,
   type RenderState,
 } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { BodyElement, DocParagraph, ImageRun, SectionProps, ShapeRun } from './types.js';
 
 // ECMA-376 §17.6.20 (tbRl) + §20.4.3.x — issue #988 batch-3 adjudication ②:
@@ -186,7 +185,7 @@ function makeMeasureCtx(): CanvasRenderingContext2D {
   return ctx as unknown as CanvasRenderingContext2D;
 }
 
-describe('computePages — vertical wrapped-shape band uses the physical projection (#988 ②, F1)', () => {
+describe('canonical body layout — vertical wrapped-shape physical projection (#988 ②, F1)', () => {
   it('a topAndBottom shape displaces the flow by its LOGICAL projection (physical width)', () => {
     // Physical portrait 200×300, margins T20 R30 B40 L24 ⇒ logical flow starts
     // at y=30 and ends at 30+146=176 (insets 30/24 on the 200 pt flow axis).
@@ -225,15 +224,15 @@ describe('computePages — vertical wrapped-shape band uses the physical project
       { type: 'paragraph', ...testParagraph('qq') },
       { type: 'paragraph', ...testParagraph('ww') },
     ] as unknown as BodyElement[];
-    const pages = computePages(
-      body, __test_verticalLayoutSection(phys), makeMeasureCtx(),
+    const layout = layoutBodyModel(
+      body, phys, makeMeasureCtx(),
       { 'Times New Roman': 'roman' },
     );
     // With the PHYSICAL projection the band ends at logical y=160: the two
     // following one-line (~11.5 pt) paragraphs are pushed to ~160–171.5 and
     // ~171.5–183 — the second crosses the 176 flow bottom onto page 2. With
     // the raw logical band ([40, 60]) they sit at ~60–83 and fit page 1.
-    expect(pages.length).toBe(2);
+    expect(layout.pages.length).toBe(2);
   });
 });
 

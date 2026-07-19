@@ -7,6 +7,7 @@ import {
   resolveAnchorFrame,
   type AnchorFrameInput,
 } from './anchor-frame.js';
+import { createFloatWrapOracle } from '../paragraph-measure.js';
 
 const missingEdges = (): AnchorEdgesInput => ({
   topPt: null,
@@ -228,7 +229,7 @@ describe('retained anchor frame geometry', () => {
     });
   });
 
-  it('preserves exact zero percent positioning and relative sizing', () => {
+  it('preserves exact zero percent positioning', () => {
     const result = resolved(resolveAnchorFrame(input(anchor({
       horizontal: {
         relativeFrom: 'margin',
@@ -240,6 +241,22 @@ describe('retained anchor frame geometry', () => {
         relativeFromStatus: 'valid',
         choice: { kind: 'percent', fraction: 0 },
       },
+    }))));
+
+    expect(result.geometry.objectFrame).toEqual({
+      xPt: 60,
+      yPt: 20,
+      widthPt: 20,
+      heightPt: 10,
+    });
+    expect(result.axes.horizontal).toMatchObject({
+      choiceKind: 'percent',
+      choiceValue: 0,
+    });
+  });
+
+  it('uses wp:extent when Word does not support an exact-zero relative size', () => {
+    const result = resolved(resolveAnchorFrame(input(anchor({
       relativeSize: {
         horizontal: {
           relativeFrom: 'page',
@@ -251,21 +268,35 @@ describe('retained anchor frame geometry', () => {
       },
     }))));
 
-    expect(result.geometry.objectFrame).toEqual({
-      xPt: 60,
-      yPt: 20,
-      widthPt: 0,
-      heightPt: 10,
-    });
-    expect(result.geometry.size.horizontal).toMatchObject({
-      source: 'relative',
+    expect(result.geometry.objectFrame.widthPt).toBe(20);
+    expect(result.geometry.size.horizontal).toEqual({
+      source: 'extent',
+      valuePt: 20,
+      relativeFrom: 'page',
+      referenceFrame: null,
       fraction: 0,
-      valuePt: 0,
+      compatibilityFallback: 'word-zero-relative-size',
     });
-    expect(result.axes.horizontal).toMatchObject({
-      choiceKind: 'percent',
-      choiceValue: 0,
-    });
+  });
+
+  it('rejects a negative relative size instead of treating it as an extent fallback', () => {
+    const result = resolveAnchorFrame(input(anchor({
+      relativeSize: {
+        horizontal: {
+          relativeFrom: 'page',
+          relativeFromStatus: 'valid',
+          fraction: -0.1,
+          fractionStatus: 'valid',
+        },
+        vertical: null,
+      },
+    })));
+
+    expect(result.status).toBe('unsupported');
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      code: 'invalid-relative-size-fraction',
+      path: 'relativeSize.horizontal.fraction',
+    }));
   });
 
   it('uses simple positioning only when explicitly enabled', () => {
@@ -406,6 +437,55 @@ describe('retained anchor frame geometry', () => {
       widthPt: 241.1,
       heightPt: 112,
     });
+  });
+
+  it('hands a zero-signed-area bow-tie to the compiled line oracle without late rejection', () => {
+    const result = resolved(resolveAnchorFrame(input(anchor({
+      extent: {
+        widthPt: 100,
+        heightPt: 100,
+        widthStatus: 'valid',
+        heightStatus: 'valid',
+      },
+      wrap: {
+        kind: 'through',
+        authoredKinds: ['wrapThrough'],
+        side: 'bothSides',
+        distances: missingEdges(),
+        effectExtent: null,
+        polygon: {
+          edited: false,
+          coordinateSpace: { width: 21600, height: 21600 },
+          points: [
+            { x: 0, y: 0, rawX: '0', rawY: '0' },
+            { x: 21600, y: 21600, rawX: '21600', rawY: '21600' },
+            { x: 0, y: 21600, rawX: '0', rawY: '21600' },
+            { x: 21600, y: 0, rawX: '21600', rawY: '0' },
+          ],
+          invalidPointCount: 0,
+        },
+      },
+    }))));
+    const bounds = result.geometry.wrapBounds!;
+    const polygon = result.geometry.wrap.polygon!.points;
+    const oracle = createFloatWrapOracle([{
+      kind: 'shape', mode: 'square', authoredWrap: 'through', wrapPolygon: polygon,
+      imageKey: 'bow-tie', imageX: 10, imageY: 20, imageW: 100, imageH: 100,
+      xLeft: bounds.xPt, xRight: bounds.xPt + bounds.widthPt,
+      yTop: bounds.yPt, yBottom: bounds.yPt + bounds.heightPt,
+      side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
+      paraId: 0, drawn: false,
+    }]);
+
+    expect(oracle.lineWindow({
+      topYPt: 40,
+      minimumStartWidthPt: 1,
+      probeHeightPt: 10,
+      paragraphXPt: 0,
+      maximumWidthPt: 120,
+      columnXPt: 0,
+      columnWidthPt: 120,
+    })).toMatchObject({ topYPt: 40 });
   });
 
   it('does not degrade an invalid tight polygon to square wrapping', () => {

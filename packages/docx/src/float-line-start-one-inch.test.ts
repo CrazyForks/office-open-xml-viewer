@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
+  prepareFloatWrap,
   resolveLineFloatWindow,
+  computePreparedLineFloatWindow,
+  skipPastTopAndBottom,
   wordMinLineStartPx,
   WORD_MIN_LINE_START_PT,
   LINE_START_GAP_EPS_PT,
+  normalizeWrapSide,
   type FloatRect,
 } from './float-layout.js';
 import {
@@ -67,6 +71,29 @@ function leftBand(floatRightPx: number, floatBottomPx: number): FloatRect {
   } as FloatRect;
 }
 
+function polygonFloat(
+  authoredWrap: 'tight' | 'through',
+  points: readonly Readonly<{ xPt: number; yPt: number }>[],
+  overrides: Partial<FloatRect> = {},
+): FloatRect {
+  const xs = points.map((point) => point.xPt);
+  const ys = points.map((point) => point.yPt);
+  const xLeft = Math.min(...xs);
+  const xRight = Math.max(...xs);
+  const yTop = Math.min(...ys);
+  const yBottom = Math.max(...ys);
+  return {
+    ...leftBand(xRight, yBottom),
+    imageKey: authoredWrap,
+    authoredWrap,
+    wrapPolygon: points,
+    xLeft, xRight, yTop, yBottom,
+    imageX: xLeft, imageY: yTop,
+    imageW: xRight - xLeft, imageH: yBottom - yTop,
+    ...overrides,
+  };
+}
+
 /** Query resolveLineFloatWindow with a given free-gap width (px) at a given
  *  scale, passing EXACTLY what the docx renderer passes for a line-start probe
  *  (`wordMinLineStartPx(scale)`). Returns whether the line was placed BESIDE the
@@ -83,17 +110,266 @@ function placeLine(gapPx: number, scale: number): { beside: boolean; topY: numbe
   return { beside, topY: win.topY, xOffset: win.xOffset };
 }
 
+const resolveWithReference = resolveLineFloatWindow as unknown as (
+  topY: number,
+  requiredWidth: number,
+  probeH: number,
+  paraX: number,
+  maxWidth: number,
+  floats: FloatRect[],
+  columnXLeftPt?: number,
+  columnXRightPt?: number,
+  reference?: Readonly<{
+    xLeftPt: number;
+    xRightPt: number;
+    readingDirection: 'ltr' | 'rtl';
+  }>,
+) => { topY: number; xOffset: number; maxWidth: number };
+
 describe('resolveLineFloatWindow — Word 1-inch line-start gate (issue #676)', () => {
-  it('the grounded constant is exactly 1 inch (72pt) with a half-twip tolerance', () => {
+  const fullBand = (id: string, mode: FloatRect['mode'], yTop: number, yBottom: number): FloatRect => ({
+    ...leftBand(100, yBottom),
+    imageKey: id, mode, yTop, yBottom,
+  });
+  it('normalizes unknown legacy wrap sides to bothSides', () => {
+    expect(normalizeWrapSide('left')).toBe('left');
+    expect(normalizeWrapSide('legacy-unknown')).toBe('bothSides');
+    expect(normalizeWrapSide(null)).toBe('bothSides');
+  });
+
+  it('projects a triangular tight polygon at the current line Y', () => {
+    const triangle = polygonFloat('tight', [
+      { xPt: 20, yPt: 0 }, { xPt: 80, yPt: 0 }, { xPt: 50, yPt: 100 },
+    ]);
+
+    expect(resolveLineFloatWindow(0, 1, 10, 0, 100, [triangle]))
+      .toEqual({ topY: 0, xOffset: 0, maxWidth: 20 });
+    expect(resolveLineFloatWindow(80, 1, 10, 0, 100, [triangle]))
+      .toEqual({ topY: 80, xOffset: 0, maxWidth: 44 });
+  });
+
+  it('advances to the earliest contour root instead of the polygon bottom', () => {
+    const triangle = polygonFloat('tight', [
+      { xPt: 20, yPt: 0 }, { xPt: 80, yPt: 0 }, { xPt: 50, yPt: 100 },
+    ]);
+
+    const result = resolveLineFloatWindow(0, 40, 1, 0, 100, [triangle]);
+
+    expect(result.topY).toBeCloseTo(200 / 3, 10);
+    expect(result.maxWidth).toBeCloseTo(40, 10);
+  });
+
+  it('keeps a concave polygon interior gap for through but not tight', () => {
+    const concave = [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 0 },
+      { xPt: 90, yPt: 80 }, { xPt: 80, yPt: 80 },
+      { xPt: 80, yPt: 20 }, { xPt: 20, yPt: 20 },
+      { xPt: 20, yPt: 80 }, { xPt: 10, yPt: 80 },
+    ];
+
+    expect(resolveLineFloatWindow(30, 1, 10, 0, 100, [polygonFloat('tight', concave)]))
+      .toEqual({ topY: 30, xOffset: 0, maxWidth: 10 });
+    expect(resolveLineFloatWindow(30, 1, 10, 0, 100, [polygonFloat('through', concave)]))
+      .toEqual({ topY: 30, xOffset: 20, maxWidth: 60 });
+  });
+
+  it('keeps a through-notch opening whose area begins at the line top', () => {
+    const notch = [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 0 },
+      { xPt: 90, yPt: 100 }, { xPt: 70, yPt: 100 },
+      { xPt: 70, yPt: 40 }, { xPt: 30, yPt: 40 },
+      { xPt: 30, yPt: 100 }, { xPt: 10, yPt: 100 },
+    ];
+
+    expect(resolveLineFloatWindow(40, 1, 10, 0, 100, [polygonFloat('through', notch)]))
+      .toEqual({ topY: 40, xOffset: 30, maxWidth: 40 });
+  });
+
+  it('does not apply square compatibility to a polygon gap the square does not constrain', () => {
+    const notch = polygonFloat('through', [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 0 },
+      { xPt: 90, yPt: 100 }, { xPt: 70, yPt: 100 },
+      { xPt: 70, yPt: 40 }, { xPt: 30, yPt: 40 },
+      { xPt: 30, yPt: 100 }, { xPt: 10, yPt: 100 },
+    ]);
+    const containedSquare = {
+      ...leftBand(20, 100),
+      imageKey: 'contained-square',
+      xLeft: 15,
+      imageX: 15,
+      imageW: 5,
+    };
+
+    expect(computePreparedLineFloatWindow(
+      50, 1, 10, 0, 100,
+      prepareFloatWrap([notch, containedSquare]),
+      0, 100,
+      { xLeftPt: 0, xRightPt: 100, readingDirection: 'ltr' },
+      72,
+    )).toEqual({ topY: 50, xOffset: 30, maxWidth: 40 });
+  });
+
+  it('applies square compatibility when the square constrains the selected polygon gap', () => {
+    const notch = polygonFloat('through', [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 0 },
+      { xPt: 90, yPt: 100 }, { xPt: 70, yPt: 100 },
+      { xPt: 70, yPt: 40 }, { xPt: 30, yPt: 40 },
+      { xPt: 30, yPt: 100 }, { xPt: 10, yPt: 100 },
+    ]);
+    const gapBoundingSquare = {
+      ...leftBand(35, 100),
+      imageKey: 'gap-bounding-square',
+      xLeft: 25,
+      imageX: 25,
+      imageW: 10,
+    };
+
+    expect(computePreparedLineFloatWindow(
+      50, 1, 10, 0, 100,
+      prepareFloatWrap([notch, gapBoundingSquare]),
+      0, 100,
+      { xLeftPt: 0, xRightPt: 100, readingDirection: 'ltr' },
+      72,
+    )).toEqual({ topY: 100, xOffset: 0, maxWidth: 100 });
+  });
+
+  it('advances to the exact root where an eligible through gap becomes geometrically widest', () => {
+    const opening = polygonFloat('through', [
+      { xPt: 130, yPt: 0 }, { xPt: 200, yPt: 0 },
+      { xPt: 200, yPt: 100 }, { xPt: 195, yPt: 100 },
+      { xPt: 160, yPt: 20 }, { xPt: 140, yPt: 20 },
+      { xPt: 140, yPt: 100 }, { xPt: 130, yPt: 100 },
+    ]);
+    const square = { ...leftBand(80, 100), imageKey: 'square-boundary' };
+
+    const result = computePreparedLineFloatWindow(
+      50, 1, 0.5, 0, 200,
+      prepareFloatWrap([square, opening]),
+      0, 200,
+      { xLeftPt: 0, xRightPt: 200, readingDirection: 'ltr' },
+      72,
+    );
+
+    expect(result.topY).toBeCloseTo(620 / 7, 10);
+    expect(result).toMatchObject({ xOffset: 140, maxWidth: 50 });
+  });
+
+  it('supports an inferred-closure bow-tie whose signed shoelace area is zero', () => {
+    const bowTie = polygonFloat('through', [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 100 },
+      { xPt: 10, yPt: 100 }, { xPt: 90, yPt: 0 },
+    ]);
+
+    expect(resolveLineFloatWindow(20, 1, 10, 0, 100, [bowTie]))
+      .toEqual({ topY: 20, xOffset: 0, maxWidth: 26 });
+  });
+
+  it('applies wrap distances to polygon line-band and horizontal projection', () => {
+    const padded = polygonFloat('tight', [
+      { xPt: 20, yPt: 20 }, { xPt: 40, yPt: 20 }, { xPt: 30, yPt: 40 },
+    ], { xLeft: 15, xRight: 47, yTop: 10, yBottom: 46 });
+
+    expect(resolveLineFloatWindow(45, 1, 1, 0, 100, [padded]))
+      .toEqual({ topY: 45, xOffset: 37.5, maxWidth: 62.5 });
+  });
+
+  it('applies authored left, right, and largest sides after polygon projection', () => {
+    const triangle = [
+      { xPt: 20, yPt: 0 }, { xPt: 80, yPt: 0 }, { xPt: 50, yPt: 100 },
+    ];
+    const resolve = (side: FloatRect['side']) => resolveLineFloatWindow(
+      80, 1, 10, 0, 100, [polygonFloat('tight', triangle, { side })],
+    );
+
+    expect(resolve('left')).toEqual({ topY: 80, xOffset: 0, maxWidth: 44 });
+    expect(resolve('right')).toEqual({ topY: 80, xOffset: 56, maxWidth: 44 });
+    expect(resolve('largest')).toEqual({ topY: 80, xOffset: 0, maxWidth: 44 });
+  });
+
+  it('selects a polygon largest side from its maximum extent for every line band', () => {
+    const asymmetric = prepareFloatWrap([polygonFloat('tight', [
+      { xPt: 60, yPt: 0 }, { xPt: 70, yPt: 0 },
+      { xPt: 20, yPt: 100 }, { xPt: 10, yPt: 100 },
+    ], { side: 'largest' })]);
+    const resolve = (topY: number) => computePreparedLineFloatWindow(
+      topY, 1, 10, 0, 100, asymmetric,
+      0, 100,
+      { xLeftPt: 0, xRightPt: 100, readingDirection: 'ltr' },
+    );
+
+    // §20.4.3.7 selects the object's right side from its full [10, 70]
+    // horizontal extent. Its top contour locally lies on the opposite half of
+    // the page, but that line-band projection cannot reverse the selected side.
+    expect(resolve(0)).toEqual({ topY: 0, xOffset: 70, maxWidth: 30 });
+    expect(resolve(90)).toEqual({ topY: 90, xOffset: 25, maxWidth: 75 });
+  });
+
+  it('resolves a centered largest object by the first intersecting line direction', () => {
+    const centered = { ...leftBand(60, 100), xLeft: 40, imageX: 40, imageW: 20, side: 'largest' };
+
+    expect(resolveWithReference(0, 1, 10, 0, 100, [centered], 0, 100, {
+      xLeftPt: 0, xRightPt: 100, readingDirection: 'ltr',
+    })).toEqual({ topY: 0, xOffset: 0, maxWidth: 40 });
+    expect(resolveWithReference(0, 1, 10, 0, 100, [centered], 0, 100, {
+      xLeftPt: 0, xRightPt: 100, readingDirection: 'rtl',
+    })).toEqual({ topY: 0, xOffset: 60, maxWidth: 40 });
+  });
+
+  it('intersects the independently selected sides of multiple largest objects', () => {
+    const left = { ...leftBand(40, 100), xLeft: 20, imageX: 20, imageW: 20, side: 'largest', imageKey: 'left' };
+    const right = { ...leftBand(80, 100), xLeft: 60, imageX: 60, imageW: 20, side: 'largest', imageKey: 'right' };
+
+    expect(resolveWithReference(0, 1, 10, 0, 100, [left, right], 0, 100, {
+      xLeftPt: 0, xRightPt: 100, readingDirection: 'ltr',
+    })).toEqual({ topY: 0, xOffset: 40, maxWidth: 20 });
+  });
+
+  it('rejects tight and through floats without a finite nonzero polygon', () => {
+    const missing = { ...leftBand(80, 20), authoredWrap: 'tight' as const };
+    const nonfinite = polygonFloat('through', [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 0 }, { xPt: 50, yPt: 20 },
+    ], { wrapPolygon: [{ xPt: Number.NaN, yPt: 0 }, { xPt: 90, yPt: 0 }, { xPt: 50, yPt: 20 }] });
+
+    expect(() => resolveLineFloatWindow(0, 1, 10, 0, 100, [missing]))
+      .toThrow(/invalid tight wrapPolygon/i);
+    expect(() => resolveLineFloatWindow(0, 1, 10, 0, 100, [nonfinite]))
+      .toThrow(/invalid through wrapPolygon/i);
+  });
+
+  it('crosses more than sixteen chained topAndBottom bottoms', () => {
+    const floats = Array.from({ length: 20 }, (_, index) =>
+      fullBand(`top-${index}`, 'topAndBottom', index, index + 1));
+
+    expect(skipPastTopAndBottom(0, floats, 0, 100)).toBe(20);
+    expect(resolveLineFloatWindow(0, 1, 0.5, 0, 100, floats).topY).toBe(20);
+  });
+
+  it('crosses more than sixty-four chained square bottoms', () => {
+    const floats = Array.from({ length: 70 }, (_, index) =>
+      fullBand(`square-${index}`, 'square', index, index + 1));
+
+    expect(resolveLineFloatWindow(0, 1, 0.5, 0, 100, floats).topY).toBe(70);
+  });
+
+  it('rechecks topAndBottom after a square push', () => {
+    const floats = [
+      fullBand('square', 'square', 0, 10),
+      fullBand('top', 'topAndBottom', 10, 20),
+    ];
+
+    expect(resolveLineFloatWindow(0, 1, 0.5, 0, 100, floats).topY).toBe(20);
+  });
+
+  it('the grounded constant is exactly 1 inch (72pt) with a one-twip tolerance', () => {
     expect(WORD_MIN_LINE_START_PT).toBe(72);
-    expect(LINE_START_GAP_EPS_PT).toBe(0.05); // half a twip (1 twip = 1/20 pt)
+    expect(LINE_START_GAP_EPS_PT).toBe(0.05); // one twip (1/20 pt)
     expect(wordMinLineStartPx(1)).toBeCloseTo(71.95, 10);
     expect(wordMinLineStartPx(2)).toBeCloseTo(143.9, 10);
   });
 
   it('(a) a 71.9pt gap flows the line BELOW the band (clear of the tolerance band)', () => {
     // 71.9 < 71.95 effective threshold → below. 71.9pt is the largest "below"
-    // probe that stays outside the half-twip tolerance (a genuinely sub-inch gap).
+    // probe that stays outside the one-twip tolerance (a genuinely sub-inch gap).
     const r = placeLine(71.9, 1);
     expect(r.beside).toBe(false);
     expect(r.topY).toBe(50); // pushed to the band bottom
@@ -315,5 +591,53 @@ describe('layoutLines — 1-inch line-start rule end to end (issue #676)', () =>
     const lines = layoutLines(makeLinearCtx(), [textSeg('AFTER', 10)], colW, 0, scale, [], wrapCtx(bandFor(200)), {}, 0);
     expect(firstLinePlacement(lines)).toBe('beside');
     expect((lines[0].segments[0] as LayoutTextSeg).text).toBe('AFTER');
+  });
+
+  it('remeasures a tall line against its actual polygon band', () => {
+    const inverted = polygonFloat('tight', [
+      { xPt: 50, yPt: 0 }, { xPt: 100, yPt: 100 }, { xPt: 0, yPt: 100 },
+    ]);
+
+    const lines = layoutLines(
+      makeLinearCtx(), [textSeg('X', 60)], 100, 0, 1, [], wrapCtx([inverted]), {}, 0,
+    );
+
+    expect(lines[0].ascent + lines[0].descent).toBe(60);
+    expect(lines[0].availWidth).toBe(20);
+  });
+
+  it('diagnoses an exact non-adjacent line-window cycle without a pass cap', () => {
+    let calls = 0;
+    const cycling: WrapLayoutCtx = {
+      ...wrapCtx([]),
+      lineWindow: (input) => {
+        calls += 1;
+        return {
+          topYPt: input.topYPt,
+          xOffsetPt: 0,
+          maximumWidthPt: calls % 2 === 1 ? 50 : 100,
+        };
+      },
+    };
+
+    expect(() => layoutLines(
+      makeLinearCtx(), [textSeg('AAAAA '), textSeg('BBBBB')], 100, 0, 1, [], cycling, {}, 0,
+    )).toThrow(/measure\/resolve cycle did not converge/i);
+  });
+
+  it('uses a spec-permitted through opening without the square-only one-inch policy', () => {
+    const notch = polygonFloat('through', [
+      { xPt: 10, yPt: 0 }, { xPt: 90, yPt: 0 },
+      { xPt: 90, yPt: 100 }, { xPt: 70, yPt: 100 },
+      { xPt: 70, yPt: 40 }, { xPt: 30, yPt: 40 },
+      { xPt: 30, yPt: 100 }, { xPt: 10, yPt: 100 },
+    ]);
+    const context = { ...wrapCtx([notch]), startPageY: 40 };
+
+    const lines = layoutLines(
+      makeLinearCtx(), [textSeg('word', 10)], 100, 0, 1, [], context, {}, 0,
+    );
+
+    expect(lines[0]).toMatchObject({ topY: 40, xOffset: 30, availWidth: 40 });
   });
 });

@@ -8,6 +8,7 @@ import {
 import { acquireRetainedFrameGroup } from './paragraph.js';
 import { paragraphAcquisitionInput } from '../parser-model.js';
 import { resolveNumberingMarkerGeometry } from './numbering-marker.js';
+import type { AnchorAcquisitionInput, AnchorEdgesInput } from './anchor-input.js';
 import type { TextLayoutService } from './text.js';
 import type { BodyElement, DocParagraph, FramePr } from '../types.js';
 
@@ -29,6 +30,135 @@ function paragraph(framePr?: FramePr): DocParagraph {
       isLink: false, background: null, vertAlign: null, hyperlink: null,
     }],
     defaultFontSize: 10, defaultFontFamily: 'serif',
+  } as unknown as DocParagraph;
+}
+
+const missingAnchorEdges = (): AnchorEdgesInput => ({
+  topPt: null, topStatus: 'missing',
+  rightPt: null, rightStatus: 'missing',
+  bottomPt: null, bottomStatus: 'missing',
+  leftPt: null, leftStatus: 'missing',
+});
+
+function framedParagraphWithTopAndBottomAnchor(): DocParagraph {
+  const occurrenceId = 'frame-top-and-bottom';
+  const acquisition: AnchorAcquisitionInput = {
+    occurrenceId,
+    simplePosition: {
+      enabled: false, status: 'valid',
+      xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid',
+    },
+    horizontal: {
+      relativeFrom: 'column', relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: -10 },
+    },
+    vertical: {
+      relativeFrom: 'paragraph', relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: 0 },
+    },
+    extent: {
+      widthPt: 40, heightPt: 20,
+      widthStatus: 'valid', heightStatus: 'valid',
+    },
+    parentEffectExtent: missingAnchorEdges(),
+    anchorDistances: missingAnchorEdges(),
+    relativeSize: { horizontal: null, vertical: null },
+    wrap: {
+      kind: 'topAndBottom', authoredKinds: ['wrapTopAndBottom'], side: null,
+      distances: missingAnchorEdges(), effectExtent: null, polygon: null,
+    },
+    behavior: {
+      behindDoc: false, behindDocStatus: 'valid',
+      relativeHeight: 1, relativeHeightStatus: 'valid',
+      locked: false, lockedStatus: 'valid',
+      allowOverlap: true, allowOverlapStatus: 'valid',
+      layoutInCell: true, layoutInCellStatus: 'valid',
+    },
+    group: null,
+  };
+  const text = (value: string) => ({
+    type: 'text', text: value, bold: false, italic: false, underline: false,
+    strikethrough: false, fontSize: 10, color: null, fontFamily: 'serif',
+    isLink: false, background: null, vertAlign: null, hyperlink: null,
+  });
+  return {
+    ...paragraph(frame({ w: 40 })),
+    runs: [
+      text('A'.repeat(9)),
+      {
+        type: 'anchorHost', fontSize: 10,
+        __anchorOccurrenceId: occurrenceId,
+      },
+      {
+        type: 'image',
+        imagePath: 'word/media/frame-anchor.png',
+        mimeType: 'image/png',
+        widthPt: 40, heightPt: 20,
+        anchor: true,
+        __anchorAcquisition: acquisition,
+      },
+      text('B'.repeat(8)),
+    ],
+  } as unknown as DocParagraph;
+}
+
+function framedParagraphWithFollowingSquareAnchor(): DocParagraph {
+  const occurrenceId = 'frame-following-square';
+  const acquisition: AnchorAcquisitionInput = {
+    occurrenceId,
+    simplePosition: {
+      enabled: false, status: 'valid',
+      xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid',
+    },
+    horizontal: {
+      relativeFrom: 'column', relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: 70 },
+    },
+    vertical: {
+      relativeFrom: 'paragraph', relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: 0 },
+    },
+    extent: {
+      widthPt: 80, heightPt: 60,
+      widthStatus: 'valid', heightStatus: 'valid',
+    },
+    parentEffectExtent: missingAnchorEdges(),
+    anchorDistances: missingAnchorEdges(),
+    relativeSize: { horizontal: null, vertical: null },
+    wrap: {
+      kind: 'square', authoredKinds: ['wrapSquare'], side: 'bothSides',
+      distances: missingAnchorEdges(), effectExtent: null, polygon: null,
+    },
+    behavior: {
+      behindDoc: false, behindDocStatus: 'valid',
+      relativeHeight: 1, relativeHeightStatus: 'valid',
+      locked: false, lockedStatus: 'valid',
+      allowOverlap: true, allowOverlapStatus: 'valid',
+      layoutInCell: true, layoutInCellStatus: 'valid',
+    },
+    group: null,
+  };
+  return {
+    ...paragraph(frame({ w: 160 })),
+    runs: [
+      {
+        type: 'anchorHost', fontSize: 10,
+        __anchorOccurrenceId: occurrenceId,
+      },
+      {
+        type: 'image',
+        imagePath: 'word/media/frame-following.png',
+        mimeType: 'image/png',
+        widthPt: 80, heightPt: 60,
+        anchor: true,
+        __anchorAcquisition: acquisition,
+      },
+      {
+        type: 'text', text: 'A', bold: false, italic: false, underline: false,
+        strikethrough: false, fontSize: 10, color: null, fontFamily: 'serif',
+        isLink: false, background: null, vertAlign: null, hyperlink: null,
+      },
+    ],
   } as unknown as DocParagraph;
 }
 
@@ -348,6 +478,58 @@ describe('retained text-frame grouping', () => {
       .flatMap((line) => line.placements)
       .find((item) => item.kind === 'text' && item.role === 'numbering-marker');
     expect(placement?.bounds).toMatchObject({ xPt: -30, widthPt: 60 });
+  });
+
+  it('reflows a parser-owned frame anchor before retaining its exclusion', () => {
+    const framed = framedParagraphWithTopAndBottomAnchor();
+    const group = collectBodyFrameGroups([framed as unknown as BodyElement]).get(framed)!;
+    const acquired = acquireRetainedFrameGroup(group, frameOptions(group, [framed]));
+    const retained = acquired.members[0]!.fragment;
+    const lineTexts = retained.lines.map((line) => line.placements
+      .filter((placement) => placement.kind === 'text')
+      .map((placement) => placement.text)
+      .join(''));
+    const exclusion = retained.exclusions.find((candidate) =>
+      candidate.anchorOccurrenceId?.endsWith('frame-top-and-bottom'));
+
+    expect(lineTexts).toEqual(['AAAAAAAA', 'A', 'BBBBBBBB']);
+    expect(retained.lines[0]!.bounds.yPt).toBe(retained.flowBounds.yPt + 20);
+    expect(exclusion?.bounds.yPt).toBe(retained.flowBounds.yPt);
+  });
+
+  it('carries a retained host exclusion into the next member of the frame group', () => {
+    const anchored = framedParagraphWithFollowingSquareAnchor();
+    const following = {
+      ...paragraph(frame({ w: 160 })),
+      runs: [{
+        type: 'text', text: 'B'.repeat(40), bold: false, italic: false,
+        underline: false, strikethrough: false, fontSize: 10, color: null,
+        fontFamily: 'serif', isLink: false, background: null,
+        vertAlign: null, hyperlink: null,
+      }],
+    } as unknown as DocParagraph;
+    const group = collectBodyFrameGroups([
+      anchored as unknown as BodyElement,
+      following as unknown as BodyElement,
+    ]).get(anchored)!;
+    const acquired = acquireRetainedFrameGroup(
+      group,
+      frameOptions(group, [anchored, following]),
+    );
+    const followingLines = acquired.members[1]!.fragment.lines.map((line) =>
+      line.placements.filter((placement) => placement.kind === 'text')
+        .map((placement) => placement.text).join(''));
+
+    expect(acquired.members[0]!.fragment.exclusions).toHaveLength(1);
+    expect(acquired.members[1]!.fragment.exclusions.map((candidate) =>
+      candidate.anchorOccurrenceId)).toEqual([
+      acquired.members[0]!.fragment.exclusions[0]!.anchorOccurrenceId,
+    ]);
+    expect(followingLines).toEqual([
+      'B'.repeat(16),
+      'B'.repeat(16),
+      'B'.repeat(8),
+    ]);
   });
 
   it('retains a picture bullet when an auto-width frame has no body runs', () => {

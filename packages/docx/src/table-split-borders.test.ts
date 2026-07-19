@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { bodyFragmentFor, renderDocumentToCanvas, paginateDocument } from './renderer.js';
+import { layoutDocument } from './renderer.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,
   CellElement,
@@ -7,8 +8,7 @@ import type {
   DocTable,
   DocTableRow,
   DocxDocumentModel,
-  PaginatedBodyElement,
-  SectionProps,
+    SectionProps,
   BorderSpec,
 } from './types';
 import type { TableFragmentLayout } from './layout/table-pagination.js';
@@ -62,7 +62,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; strokes: StrokeSeg[
     stroke() {
       if (pending) strokes.push({ ...pending, width: lineWidth, color: strokeStyle });
     },
-    fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    fill() {}, fillRect() {}, strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {}, setTransform() {},
     setLineDash() {}, drawImage() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
     bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
     fillText() {}, strokeText() {},
@@ -138,23 +138,19 @@ const shortRow = (text: string): DocTableRow => ({
   rowHeight: 20, rowHeightRule: 'exact', isHeader: false,
 } as unknown as DocTableRow);
 
-async function renderPage(model: DocxDocumentModel, pages: PaginatedBodyElement[][], pageIndex: number): Promise<StrokeSeg[]> {
+async function renderPage(layout: ReturnType<typeof layoutDocument>, pageIndex: number): Promise<StrokeSeg[]> {
   const { canvas, strokes } = makeRecordingCanvas();
-  await renderDocumentToCanvas(model, canvas, pageIndex, { dpr: 1, width: 160, prebuiltPages: pages });
+  await paintLayoutPage(layout, pageIndex, canvas, { dpr: 1, scale: 1 });
   return strokes;
 }
 
 const horizontals = (strokes: StrokeSeg[]) =>
   strokes.filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && Math.abs(s.x2 - s.x1) > 10);
 
-function retainedTableOnPage(pages: PaginatedBodyElement[][], pageIndex: number) {
-  const envelope = pages[pageIndex].find((element) => element.type === 'table');
-  if (!envelope) throw new Error('expected a table envelope');
-  const placed = bodyFragmentFor(envelope);
-  if (placed?.fragment.kind !== 'table' || !('flowBounds' in placed.fragment)) {
-    throw new Error('expected retained table geometry');
-  }
-  return placed.fragment as TableFragmentLayout;
+function retainedTableOnPage(layout: ReturnType<typeof layoutDocument>, pageIndex: number) {
+  const table = layout.pages[pageIndex]?.layers.body.find((node) => node.kind === 'table');
+  if (table?.kind !== 'table') throw new Error('expected retained table geometry');
+  return table as TableFragmentLayout;
 }
 
 describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', () => {
@@ -163,15 +159,15 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     // footprint. Two 20pt lines fit with the two half-rules; a third would make
     // the complete slice overflow.
     const model = splitDoc([wrappingRow()], 60);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const firstFragment = retainedTableOnPage(pages, 0);
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const firstFragment = retainedTableOnPage(layout, 0);
     expect(firstFragment.rows[0]?.cells[0]?.blocks[0]?.layout).toMatchObject({
       continuation: { lineStart: 0, continuesOnNext: true },
     });
 
-    const p1 = await renderPage(model, pages, 0);
-    const p2 = await renderPage(model, pages, 1);
+    const p1 = await renderPage(layout, 0);
+    const p2 = await renderPage(layout, 1);
 
     const p1H = horizontals(p1);
     // Top frame at y=0 present…
@@ -196,10 +192,10 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     const row = wrappingRow();
     (row.cells[0].borders as { bottom: BorderSpec | null }).bottom = null;
     const model = splitDoc([row], 60);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const p1H = horizontals(await renderPage(model, pages, 0));
-    const firstFragment = retainedTableOnPage(pages, 0);
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const p1H = horizontals(await renderPage(layout, 0));
+    const firstFragment = retainedTableOnPage(layout, 0);
     const expectedCutY = firstFragment.flowBounds.yPt + firstFragment.flowBounds.heightPt + 0.5;
     expect(p1H.filter((s) => Math.abs(s.y1 - expectedCutY) <= 0.1)).toHaveLength(1);
   });
@@ -209,9 +205,9 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     (row.cells[0] as { borders: unknown }).borders = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null };
     const model = splitDoc([row], 60);
     (model.body[0] as unknown as DocTable).borders = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null } as DocTable['borders'];
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const p1H = horizontals(await renderPage(model, pages, 0));
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const p1H = horizontals(await renderPage(layout, 0));
     expect(p1H.filter((s) => Math.abs(s.y1 - 60) <= 1)).toHaveLength(0);
   });
 
@@ -221,12 +217,12 @@ describe('mid-row page-cut border semantics (§17.4.66 conflict at the cut)', ()
     // row-boundary edges draw today) must not change. Pin: a horizontal rule IS
     // drawn at the page-1 bottom (y=40) — the row's own boundary edge.
     const model = splitDoc([shortRow('a'), shortRow('b'), shortRow('c')], 40);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const firstFragment = retainedTableOnPage(pages, 0);
+    const layout = layoutDocument(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const firstFragment = retainedTableOnPage(layout, 0);
     expect(firstFragment.rows.every((row) => row.fragmentIndex === 0)).toBe(true);
 
-    const p1 = await renderPage(model, pages, 0);
+    const p1 = await renderPage(layout, 0);
     const p1H = horizontals(p1);
     expect(p1H.filter((s) => Math.abs(s.y1 - 40) <= 1).length).toBeGreaterThan(0);
   });

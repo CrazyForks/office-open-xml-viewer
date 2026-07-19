@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices, layoutDocument, renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement,
   DocParagraph,
   DocxDocumentModel,
   DocxTextRun,
+  HeaderFooter,
   LineNumbering,
   PageBorders,
   SectionProps,
@@ -135,6 +136,44 @@ function docOf(body: BodyElement[], sec: SectionProps): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
+function header(...lines: string[]): HeaderFooter {
+  return { body: lines.map((line) => para(line)) };
+}
+
+function continuousTitlePageDoc(display: PageBorders['display']): DocxDocumentModel {
+  const pageBorders: PageBorders = {
+    offsetFrom: 'page', display, zOrder: 'front',
+    top: { style: 'single', color: 'ff0000', width: 1, space: 24 },
+  };
+  const finalSection = section({
+    sectionStart: 'continuous',
+    titlePage: true,
+    pageBorders,
+  });
+  return {
+    section: finalSection,
+    body: [
+      para('OUTGOING'),
+      {
+        type: 'sectionBreak', kind: 'nextPage', geom: section(),
+        headers: { default: null, first: null, even: null },
+        footers: { default: null, first: null, even: null },
+        titlePage: false,
+      } as BodyElement,
+      para('INCOMING_SHARED'),
+      { type: 'pageBreak' } as BodyElement,
+      para('INCOMING_NEXT'),
+    ],
+    headers: {
+      default: header('HEADER_DEFAULT'),
+      first: header('HEADER_FIRST_1', 'HEADER_FIRST_2', 'HEADER_FIRST_3'),
+      even: null,
+    },
+    footers: { default: null, first: null, even: null },
+    fontFamilyClasses: { [TEST_FONT]: 'roman' },
+  } as unknown as DocxDocumentModel;
+}
+
 async function render(doc: DocxDocumentModel, pageIndex = 0) {
   const rec = makeRecordingCanvas();
   await renderDocumentToCanvas(doc, rec.canvas, pageIndex, {
@@ -202,6 +241,34 @@ describe('§17.6.10 pgBorders — page border rectangle', () => {
     const { segments } = await render(docOf([para('body')], section()));
     // A plain paragraph draws no long axis-aligned rules at a border inset.
     expect(hasHoriz(segments, 24)).toBe(false);
+  });
+
+  it('uses the first section-owned page for title-page reserve, paint, and borders', async () => {
+    const firstPageBorderDoc = continuousTitlePageDoc('firstPage');
+    const measureCanvas = makeRecordingCanvas().canvas;
+    const services = createLayoutServices(firstPageBorderDoc, {
+      measureContext: measureCanvas.getContext('2d'),
+    });
+    const layout = layoutDocument(firstPageBorderDoc, services, { currentDateMs: 0 });
+
+    expect(layout.pages[0]?.sectionRegions).toHaveLength(2);
+    const incoming = layout.pages[0]?.sectionRegions[1]?.sectionOccurrenceId;
+    expect(layout.pages.map((page) => page.sectionOccurrenceId)).toEqual([
+      layout.pages[0]?.sectionOccurrenceId,
+      incoming,
+    ]);
+    // The shared page is owned by the outgoing section, so the incoming
+    // section's first owned page reserves its taller first-page header.
+    expect(layout.pages[1]?.geometry.contentTopPt).toBe(30);
+
+    const firstPagePaint = await render(firstPageBorderDoc, 1);
+    const firstPageTexts = firstPagePaint.fillTextCalls.map(({ text }) => text);
+    expect(firstPageTexts).toContain('HEADER_FIRST_1');
+    expect(firstPageTexts).not.toContain('HEADER_DEFAULT');
+    expect(hasHoriz(firstPagePaint.segments, 24)).toBe(true);
+
+    const notFirstPagePaint = await render(continuousTitlePageDoc('notFirstPage'), 1);
+    expect(hasHoriz(notFirstPagePaint.segments, 24)).toBe(false);
   });
 });
 

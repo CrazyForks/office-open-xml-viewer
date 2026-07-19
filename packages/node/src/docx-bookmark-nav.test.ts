@@ -7,7 +7,12 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxBookmarkNavForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+} from './test-imports';
 
 // IX-nav END-TO-END: prove the docx internal-anchor navigation resolves against
 // the REAL parser + REAL paginator + REAL bookmark-map builder on a real fixture
@@ -29,16 +34,9 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
-const BOOKMARK_NAV_PATH = resolve(ROOT, 'packages/docx/src/bookmark-nav.ts');
-
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
-const navMod = skia
-  ? await importForTests(() => import(BOOKMARK_NAV_PATH), 'packages/docx/src/bookmark-nav.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
+const navMod = skia ? await loadDocxBookmarkNavForTests() : null;
 
 const samplePath = (n: number) => resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
 const haveSample11 = existsSync(samplePath(11));
@@ -50,15 +48,12 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !navMod || !haveSample11)(
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
         const { parseDocx } = docxMod!;
-        const { paginateDocument } = rendererMod as {
-          paginateDocument: (doc: unknown) => unknown[][];
-        };
-        const { buildBookmarkPageMap } = navMod as {
-          buildBookmarkPageMap: (pages: unknown[][]) => Map<string, number>;
-        };
+        const { createLayoutServices, layoutDocument } = rendererMod!;
+        const { buildBookmarkPageMap } = navMod!;
         const doc = parseDocx(readFileSync(samplePath(11)));
-        const pages = paginateDocument(doc);
-        return buildBookmarkPageMap(pages);
+        const layoutServices = createLayoutServices(doc);
+        const layout = layoutDocument(doc, layoutServices, { currentDateMs: 0 });
+        return buildBookmarkPageMap(layout);
       } finally {
         restore.forEach((r) => r());
       }

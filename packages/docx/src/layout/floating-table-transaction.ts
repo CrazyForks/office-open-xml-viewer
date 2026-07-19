@@ -1,4 +1,4 @@
-import { resolveFloatOverlap } from '../float-layout.js';
+import { resolveFloatOverlap } from './float-wrap.js';
 import { floatingTableAxesFollowHostFlow } from './retained-geometry-translation.js';
 import type {
   FloatRegistryEntryPt,
@@ -149,6 +149,7 @@ export function floatingTableRegistryDelta(
   return Object.freeze({
     coordinateSpace: snapshot.coordinateSpace,
     flowDomainId: snapshot.flowDomainId,
+    baseEntries: snapshot.entries,
     baseNextParagraphId: snapshot.nextParagraphId,
     nextParagraphId,
     entries: Object.freeze([...entries]),
@@ -160,16 +161,17 @@ export function validateFloatingTableRegistryDelta(
   current: Readonly<{
     coordinateSpace: FloatRegistrySnapshotPt['coordinateSpace'];
     flowDomainId: string;
+    entries: FloatRegistrySnapshotPt['entries'];
     nextParagraphId: number;
-    occurrenceIds: readonly string[];
   }>,
 ): void {
   if (current.coordinateSpace !== delta.coordinateSpace
     || current.flowDomainId !== delta.flowDomainId
+    || current.entries !== delta.baseEntries
     || current.nextParagraphId !== delta.baseNextParagraphId) {
     throw new Error('Floating table registry delta base/domain mismatch');
   }
-  const existingIds = new Set(current.occurrenceIds);
+  const existingIds = new Set(current.entries.map((entry) => entry.occurrenceId));
   if (delta.entries.some((entry) => existingIds.has(entry.occurrenceId))) {
     throw new Error('Floating table registry delta was already committed');
   }
@@ -227,7 +229,9 @@ export function resolveFloatingTablePlacementInTransaction(
     positioning.leftFromTextPt, positioning.rightFromTextPt,
     positioning.topFromTextPt, positioning.bottomFromTextPt,
     transaction.nextParagraphId, placement.overlap !== 'never', 'table',
-    endX(frames.page), registry.map(registryBlocker),
+    endX(frames.page), registry
+      .filter((entry) => entry.kind !== 'shape' || entry.wrap !== undefined)
+      .map(registryBlocker),
   );
   const finalPlacement = resolvedPlacement(placement, position.x, position.y);
   const entry = Object.freeze({

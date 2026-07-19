@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { bodyFragmentFor, computePages, renderDocumentToCanvas } from './renderer.js';
+import {
+  createLayoutServices,
+  layoutDocument,
+  renderDocumentToCanvas,
+} from './renderer.js';
 import type {
   DocxDocumentModel,
   DocTable,
@@ -126,24 +130,18 @@ describe('§17.4.50 tblInd — table indent from the leading margin', () => {
   it('retains the signed leading-edge origin for both visual directions', () => {
     const retained = (doc: DocxDocumentModel) => {
       const recording = makeRecordingCanvas();
-      const pages = computePages(
-        doc.body,
-        doc.section,
-        recording.canvas.getContext('2d') as CanvasRenderingContext2D,
-        doc.fontFamilyClasses,
-      );
-      return bodyFragmentFor(pages[0][0]);
+      const services = createLayoutServices(doc, {
+        measureContext: recording.canvas.getContext('2d') as CanvasRenderingContext2D,
+      });
+      return layoutDocument(doc, services, { currentDateMs: 0 }).pages[0]?.layers.body[0];
     };
     const ltr = retained(tableDoc(160, -10, false));
     const rtl = retained(tableDoc(160, -10, true));
-    if (
-      ltr?.fragment.kind !== 'table' || !('flowBounds' in ltr.fragment) ||
-      rtl?.fragment.kind !== 'table' || !('flowBounds' in rtl.fragment)
-    ) {
+    if (ltr?.kind !== 'table' || rtl?.kind !== 'table') {
       throw new Error('expected retained table geometry');
     }
-    expect(ltr.fragment.flowBounds.xPt).toBeCloseTo(-10, 6);
-    expect(rtl.fragment.flowBounds.xPt).toBeCloseTo(10, 6);
+    expect(ltr.flowBounds.xPt).toBeCloseTo(10, 6);
+    expect(rtl.flowBounds.xPt).toBeCloseTo(30, 6);
   });
 
   it('LTR: negative tblInd pulls the LEFT origin outward past the left margin', async () => {

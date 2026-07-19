@@ -28,16 +28,13 @@ import { describe, it, expect } from 'vitest';
 import { crc32 } from 'node:zlib';
 import { installImageBitmapShim, installOffscreenCanvasShim } from './render.ts';
 import type { NodeCanvasFactory } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import { importForTests, loadDocxRendererForTests, loadSkiaForTests } from './test-imports';
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
 const { Canvas } = (skia ?? {}) as Skia;
 const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)');
-const rendererMod = await importForTests(
-  () => import('./../../docx/src/renderer.ts'),
-  'packages/docx/src/renderer.ts',
-);
+const rendererMod = await loadDocxRendererForTests();
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -135,7 +132,7 @@ async function renderDoc(
   bytes: Uint8Array,
 ): Promise<{ runs: Run[]; pixels: Uint8ClampedArray; w: number; h: number }> {
   const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
-  const { renderDocumentToCanvas } = rendererMod as Any;
+  const { renderDocumentToCanvas } = rendererMod!;
   const doc = parseDocx(bytes);
   // Single-section docs: `doc.section` is the sectPr's verbatim PHYSICAL page
   // box (the vertical swap happens inside renderDocumentToCanvas).
@@ -145,7 +142,7 @@ async function renderDoc(
   const rImg = installImageBitmapShim(factory);
   const rOff = installOffscreenCanvasShim(factory);
   try {
-    await renderDocumentToCanvas(doc, canvas, 0, {
+    await renderDocumentToCanvas(doc, canvas as Any, 0, {
       dpr: 1,
       width: physWidthPt,
       onTextRun: (r: Any) =>

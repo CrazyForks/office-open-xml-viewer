@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,10 +7,14 @@ import {
   installOffscreenCanvasShim,
   type NodeCanvasFactory,
 } from './render.ts';
-import { importForTests, loadSkiaForTests } from './test-imports';
+import {
+  importForTests,
+  loadDocxRendererForTests,
+  loadSkiaForTests,
+} from './test-imports';
 
 /**
- * IX2 findText END-TO-END on the real (committed) demo docx: parse → paginate →
+ * IX2 findText END-TO-END on the real (committed) demo docx: parse → retain →
  * render each page capturing the real `onTextRun` runs → DocxFindController →
  * find a known word → assert its `{ page }` location + reconstructed text, then
  * feed the real match slices to buildDocxHighlightLayer with a REAL skia
@@ -32,14 +36,11 @@ const factory: NodeCanvasFactory = {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const RENDERER_PATH = resolve(ROOT, 'packages/docx/src/renderer.ts');
 const FIND_PATH = resolve(ROOT, 'packages/docx/src/find.ts');
 const HIGHLIGHT_PATH = resolve(ROOT, 'packages/docx/src/find-highlight-layer.ts');
 
 const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)') : null;
-const rendererMod = skia
-  ? await importForTests(() => import(RENDERER_PATH), 'packages/docx/src/renderer.ts')
-  : null;
+const rendererMod = skia ? await loadDocxRendererForTests() : null;
 const findMod = skia ? await importForTests(() => import(FIND_PATH), 'packages/docx/src/find.ts') : null;
 const highlightMod = skia
   ? await importForTests(() => import(HIGHLIGHT_PATH), 'packages/docx/src/find-highlight-layer.ts')
@@ -91,43 +92,55 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       fontSize: number;
     };
 
-    // Render every page and collect its runs, exactly as DocxViewer does.
-    async function collectAllPages(): Promise<{ pages: Run[][]; controller: unknown }> {
+    // Render every page and collect its runs, exactly as DocxViewer does. Keep
+    // the immutable recording for both assertions: rebuilding the complete
+    // retained document twice made these behavior-identical tests contend with
+    // the rest of the full-suite workers. Preparing the real DOCX in beforeAll
+    // also keeps suite setup out of Vitest's shorter per-test timeout.
+    async function collectAllPages(): Promise<Run[][]> {
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
-        const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => unknown };
-        const { paginateDocument, renderDocumentToCanvas } = rendererMod as {
-          paginateDocument: (doc: unknown) => unknown[][];
-          renderDocumentToCanvas: (
-            doc: unknown,
-            canvas: unknown,
-            pageIndex: number,
-            opts: Record<string, unknown>,
-          ) => Promise<void>;
-        };
+        const { parseDocx } = docxMod!;
+        const { createLayoutServices, layoutDocument, renderDocumentToCanvas } = rendererMod!;
         const doc = parseDocx(readFileSync(DEMO));
-        const pages = paginateDocument(doc);
+        const layoutServices = createLayoutServices(doc);
+        // layoutDocument consumes the normalized internal epoch value, while
+        // renderDocumentToCanvas accepts the public Date|number override plus
+        // the load-time default used to key its retained-layout variant store.
+        // Pin all three views of the same instant so this probe is deterministic.
+        const layout = layoutDocument(doc, layoutServices, { currentDateMs: 0 });
         const perPage: Run[][] = [];
-        for (let p = 0; p < pages.length; p++) {
+        for (let p = 0; p < layout.pages.length; p++) {
           const canvas = new Canvas(800, 1000);
           const runs: Run[] = [];
-          await renderDocumentToCanvas(doc, canvas, p, {
+          await renderDocumentToCanvas(doc, canvas as unknown as OffscreenCanvas, p, {
             width: 800,
             dpr: 1,
-            prebuiltPages: pages,
-            totalPages: pages.length,
+            layoutServices,
+            currentDate: 0,
+            defaultCurrentDateMs: 0,
             onTextRun: (r: Run) => runs.push(r),
           });
           perPage.push(runs);
         }
-        return { pages: perPage, controller: null };
+        return perPage;
       } finally {
         restore.forEach((r) => r());
       }
     }
 
+    let collectedPages: Run[][] | null = null;
+    beforeAll(async () => {
+      collectedPages = await collectAllPages();
+    }, 30_000);
+
+    function pages(): Run[][] {
+      if (!collectedPages) throw new Error('DOCX run fixture was not prepared');
+      return collectedPages;
+    }
+
     it('finds a known word and reports its page + original-case text', async () => {
-      const { pages } = await collectAllPages();
+      const recordedPages = pages();
       const { DocxFindController } = findMod as {
         DocxFindController: new (
           count: () => number,
@@ -139,8 +152,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
         };
       };
       const controller = new DocxFindController(
-        () => pages.length,
-        (p) => Promise.resolve(pages[p] ?? []),
+        () => recordedPages.length,
+        (p) => Promise.resolve(recordedPages[p] ?? []),
       );
 
       // "Cathedral" appears in the demo's feature headline.
@@ -149,7 +162,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       // Case-insensitive match, but the reported text is the document's case.
       expect(matches[0].text.toLowerCase()).toBe('cathedral');
       expect(matches[0].location.page).toBeGreaterThanOrEqual(0);
-      expect(matches[0].location.page).toBeLessThan(pages.length);
+      expect(matches[0].location.page).toBeLessThan(recordedPages.length);
 
       // Activate the first match; its page must carry a highlight marked active.
       controller.next();
@@ -158,7 +171,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
     });
 
     it('places the highlight box on the drawn glyph run (real skia measure)', async () => {
-      const { pages } = await collectAllPages();
+      const recordedPages = pages();
       const { DocxFindController } = findMod as {
         DocxFindController: new (
           count: () => number,
@@ -180,12 +193,12 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
         ) => void;
       };
       const controller = new DocxFindController(
-        () => pages.length,
-        (p) => Promise.resolve(pages[p] ?? []),
+        () => recordedPages.length,
+        (p) => Promise.resolve(recordedPages[p] ?? []),
       );
       const matches = await controller.find('cathedral');
       const page = matches[0].location.page;
-      const runs = pages[page];
+      const runs = recordedPages[page];
       const highlights = controller.pageHighlights(page);
 
       // Real skia measurer, primed per font (same as the viewer's _measureForFont).

@@ -2,12 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   __test_isPageLevelAnchorY,
   __test_preRegisterPageFloats,
-  computePages,
+  createLayoutServices,
+  layoutDocument,
   type RenderState,
 } from './renderer.js';
+import type { AnchorAcquisitionInput, AnchorEdgesInput } from './layout/anchor-input.js';
+import type { ParagraphLayout } from './layout/types.js';
 import type {
   BodyElement,
   DocParagraph,
+  DocxDocumentModel,
   DocxTextRun,
   ImageRun,
   SectionProps,
@@ -95,6 +99,123 @@ function paraWith(runs: DocRun[], opts: { fontSize?: number } = {}): BodyElement
   return { type: 'paragraph', ...p } as BodyElement;
 }
 
+const missingAnchorEdges = (): AnchorEdgesInput => ({
+  topPt: null, topStatus: 'missing',
+  rightPt: null, rightStatus: 'missing',
+  bottomPt: null, bottomStatus: 'missing',
+  leftPt: null, leftStatus: 'missing',
+});
+
+function parserAnchor(
+  occurrenceId: string,
+  overrides: Readonly<{
+    xPt?: number;
+    yPt?: number;
+    widthPt?: number;
+    heightPt?: number;
+    verticalRelativeFrom?: 'margin' | 'paragraph';
+    wrap?: 'square' | 'topAndBottom' | 'none';
+    allowOverlap?: boolean;
+  }> = {},
+): AnchorAcquisitionInput {
+  const wrap = overrides.wrap ?? 'square';
+  return {
+    occurrenceId,
+    simplePosition: {
+      enabled: false, status: 'valid',
+      xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid',
+    },
+    horizontal: {
+      relativeFrom: 'margin', relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: overrides.xPt ?? 80 },
+    },
+    vertical: {
+      relativeFrom: overrides.verticalRelativeFrom ?? 'margin',
+      relativeFromStatus: 'valid',
+      choice: { kind: 'offset', valuePt: overrides.yPt ?? 0 },
+    },
+    extent: {
+      widthPt: overrides.widthPt ?? 80,
+      heightPt: overrides.heightPt ?? 60,
+      widthStatus: 'valid', heightStatus: 'valid',
+    },
+    parentEffectExtent: missingAnchorEdges(),
+    anchorDistances: missingAnchorEdges(),
+    relativeSize: { horizontal: null, vertical: null },
+    wrap: {
+      kind: wrap,
+      authoredKinds: [wrap === 'square'
+        ? 'wrapSquare'
+        : wrap === 'topAndBottom' ? 'wrapTopAndBottom' : 'wrapNone'],
+      side: wrap === 'square' ? 'bothSides' : null,
+      distances: missingAnchorEdges(), effectExtent: null, polygon: null,
+    },
+    behavior: {
+      behindDoc: false, behindDocStatus: 'valid',
+      relativeHeight: 1, relativeHeightStatus: 'valid',
+      locked: false, lockedStatus: 'valid',
+      allowOverlap: overrides.allowOverlap ?? true, allowOverlapStatus: 'valid',
+      layoutInCell: true, layoutInCellStatus: 'valid',
+    },
+    group: null,
+  };
+}
+
+function parserAnchoredImage(acquisition: AnchorAcquisitionInput): DocRun[] {
+  return [
+    {
+      type: 'anchorHost', fontSize: 20,
+      __anchorOccurrenceId: acquisition.occurrenceId,
+    } as unknown as DocRun,
+    {
+      type: 'image', imagePath: 'word/media/canonical.png', mimeType: 'image/png',
+      widthPt: acquisition.extent.widthPt ?? 1,
+      heightPt: acquisition.extent.heightPt ?? 1,
+      anchor: true,
+      __anchorAcquisition: acquisition,
+    } as unknown as DocRun,
+  ];
+}
+
+function canonicalModel(body: BodyElement[]): DocxDocumentModel {
+  return {
+    section: section({ sectionStart: 'nextPage', columns: null }),
+    body,
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    footnotes: [], endnotes: [], fontFamilyClasses: {},
+  } as unknown as DocxDocumentModel;
+}
+
+function canonicalLayout(body: BodyElement[]) {
+  const model = canonicalModel(body);
+  return layoutDocument(
+    model,
+    createLayoutServices(model, { measureContext: makeCtx() }),
+    { currentDateMs: 0 },
+  );
+}
+
+function sourceParagraphs(
+  layout: ReturnType<typeof canonicalLayout>,
+  bodyIndex: number,
+): ParagraphLayout[] {
+  return layout.pages.flatMap((page) => page.layers.body.filter(
+    (node): node is ParagraphLayout => node.kind === 'paragraph'
+      && node.source.story === 'body'
+      && node.source.storyInstance === 'body'
+      && node.source.path[0] === bodyIndex,
+  ));
+}
+
+function retainedText(paragraphs: readonly ParagraphLayout[]): string {
+  return paragraphs.flatMap((paragraph) => paragraph.lines)
+    .flatMap((line) => line.placements)
+    .filter((placement) => placement.kind === 'text')
+    .map((placement) => placement.text)
+    .join('');
+}
+
 // Minimal page-level square-anchored image float (positionV relativeFrom=margin
 // + align=top, square wrap). 100×40 pt, pinned at the right edge of the top
 // margin so anything on the page from y∈[20,60], x∈[120,220] wraps around it.
@@ -126,6 +247,21 @@ function pageImageRun(opts: {
     anchorYRelativeFrom: opts.anchorYRelativeFrom ?? 'margin',
   };
   return { type: 'image', ...img } as DocRun;
+}
+
+function pageChartRun(opts: {
+  anchorXPt?: number;
+  anchorYPt?: number;
+  widthPt?: number;
+  heightPt?: number;
+} = {}): DocRun {
+  return {
+    type: 'chart', chart: {}, anchor: true,
+    widthPt: opts.widthPt ?? 40, heightPt: opts.heightPt ?? 40,
+    anchorXPt: opts.anchorXPt ?? 0, anchorYPt: opts.anchorYPt ?? 0,
+    anchorXRelativeFrom: 'margin', anchorYRelativeFrom: 'margin',
+    wrapMode: 'square', wrapSide: 'bothSides',
+  } as unknown as DocRun;
 }
 
 // Minimal page-level wrap shape (positionV relativeFrom=page + topAndBottom).
@@ -179,85 +315,351 @@ describe('preRegisterPageFloats — isPageLevelAnchorY classifier (§20.4.3.5)',
   });
 });
 
-describe('preRegisterPageFloats — earlier paragraph sees the float band (§20.4.3.2/§20.4.3.5)', () => {
-  // Page-content geometry: contentH = 200 - 40 = 160, contentW = 200 - 40 = 160.
-  // A page-anchored topAndBottom shape carried by paragraph B is pinned at
-  // y∈[20,50] (anchorYPt=20 + heightPt=30, anchorYRelativeFrom='page' ⇒ Y is
-  // page-absolute; a full-width topAndBottom band stamps the full content
-  // width). Paragraph A's first body line WITHOUT pre-scan starts at the
-  // marginTop (no float band registered yet), so its text fits in column-top
-  // space. WITH pre-scan, paragraph A is laid out AFTER the float band is
-  // already in the float set ⇒ its lines flow BELOW y=50 (under the band),
-  // displacing the rest of the body downward.
-  //
-  // Asserts the displacement by comparing the paginated layout against a
-  // sibling test with a paragraph-LOCAL anchor (relativeFrom='paragraph'),
-  // which is NOT pre-registered, so paragraph A keeps the full content top.
+describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
+  it('preserves page-owned wrapping for a hand-built public image anchor', () => {
+    const layout = canonicalLayout([
+      para({ text: 'あ'.repeat(40), fontSize: 20 }),
+      paraWith([pageImageRun({
+        widthPt: 80,
+        heightPt: 60,
+        anchorXPt: 80,
+        anchorYPt: 0,
+        anchorXRelativeFrom: 'margin',
+        anchorYRelativeFrom: 'margin',
+        anchorYFromPara: false,
+        wrapMode: 'square',
+      })]),
+    ]);
+    const earlier = sourceParagraphs(layout, 0);
 
-  it('a page-level anchor on a LATER paragraph wraps earlier paragraphs (more pages)', () => {
-    // Geometry: contentW=160, contentH=160. 20pt font → 8 chars/line normal.
-    // Paragraph B carries a page-level SQUARE float anchored at x=80 (right
-    // half of content band) y=0 in the top margin, width 80, height 60. Its
-    // exclusion rect (without dist padding) is x∈[100,180], y∈[20,80] (the
-    // anchorXFromMargin/anchorYRelativeFrom='margin' resolve to marginLeft+80
-    // = 100, marginTop+0 = 20). For lines whose top is in [20,80]
-    // (3 lines: y=20→40, 40→60, 60→80), the wrap window narrows to
-    // [20,100] = 80pt = 4 chars/line. Below the float, lines use the full
-    // 160pt = 8 chars/line.
-    //
-    // 64 chars of text in paragraph A — exactly 8 lines × 20pt = 160pt
-    //   pre-scan OFF (paragraph-local Y): A flows full-width ⇒ 8 lines fit
-    //                exactly on page 1; B's anchor-only mark also fits
-    //                (spaceAfter overflow allowed) ⇒ ONE page.
-    //   pre-scan ON: lines 1-3 (y∈[20,80]) wrap into x∈[20,100] = 80pt =
-    //                4 chars/line ⇒ 12 chars consumed in those 3 lines.
-    //                Remaining 52 chars below the float at 8 chars/line ⇒
-    //                ceil(52/8) = 7 lines. Total 10 lines × 20 = 200pt > 160pt
-    //                ⇒ paragraph A alone spills onto a second page.
-    const bodyPage = [
-      para({ text: 'あ'.repeat(64), fontSize: 20 }),
-      paraWith([
-        pageImageRun({
-          widthPt: 80, heightPt: 60,
-          anchorXPt: 80, anchorYPt: 0,
-          anchorXRelativeFrom: 'margin', anchorYRelativeFrom: 'margin',
-          anchorXFromMargin: true, anchorYFromPara: false,
-          wrapMode: 'square', wrapSide: 'bothSides',
-        }),
-      ]),
-    ];
-    const pagesWithPageAnchor = computePages(bodyPage, section(), makeCtx());
-
-    // Paragraph-LOCAL Y anchor (relativeFrom='paragraph'). Pre-scan must
-    // SKIP this float — A flows without it.
-    const bodyLocal = [
-      para({ text: 'あ'.repeat(64), fontSize: 20 }),
-      paraWith([
-        pageImageRun({
-          widthPt: 80, heightPt: 60,
-          anchorXPt: 80, anchorYPt: 0,
-          anchorXRelativeFrom: 'margin', anchorYRelativeFrom: 'paragraph',
-          anchorXFromMargin: true, anchorYFromPara: true,
-          wrapMode: 'square', wrapSide: 'bothSides',
-        }),
-      ]),
-    ];
-    const pagesWithLocalAnchor = computePages(bodyLocal, section(), makeCtx());
-
-    // Signal: under the pre-scan, paragraph A is SPLIT (its 64 chars no
-    // longer fit on one page because the pre-registered float narrows the
-    // wrap window) — page 1 carries a `lineSlice` for A. Under the
-    // paragraph-local anchor, A is NOT split (8 lines × 20pt = 160pt fits
-    // page 1 exactly) — its element is emitted whole, no `lineSlice`.
-    const firstElOf = (pages: ReturnType<typeof computePages>) => pages[0][0] as { lineSlice?: { start: number; end: number } };
-    const pageFirst = firstElOf(pagesWithPageAnchor);
-    const localFirst = firstElOf(pagesWithLocalAnchor);
-    // Page-level case: paragraph A is split (lineSlice present) because the
-    // pre-registered float forced more lines than the page can hold.
-    expect(pageFirst.lineSlice).toBeDefined();
-    // Paragraph-local case: A is NOT pre-narrowed, fits whole on page 1.
-    expect(localFirst.lineSlice).toBeUndefined();
+    expect(earlier[0]!.exclusions).toEqual([
+      expect.objectContaining({
+        wrap: 'square',
+        anchorOccurrenceId: expect.stringContaining(
+          encodeURIComponent('public-anchor:body:body:1:0'),
+        ),
+      }),
+    ]);
   });
+
+  it('prescans public image, chart, and shape occurrences without collapsing identity', () => {
+    const layout = canonicalLayout([
+      para({ text: 'あ'.repeat(8), fontSize: 20 }),
+      paraWith([
+        pageImageRun({ widthPt: 40, heightPt: 40, anchorXPt: 0, anchorYPt: 0 }),
+        pageChartRun({ widthPt: 40, heightPt: 40, anchorXPt: 50, anchorYPt: 0 }),
+        pageShapeRun({ widthPt: 40, heightPt: 40, anchorYPt: 0 }),
+      ]),
+    ]);
+    const occurrenceIds = sourceParagraphs(layout, 0)[0]!.exclusions
+      .map((exclusion) => exclusion.anchorOccurrenceId ?? '');
+
+    expect(occurrenceIds).toHaveLength(3);
+    expect(occurrenceIds).toEqual(expect.arrayContaining([
+      expect.stringContaining(encodeURIComponent('public-anchor:body:body:1:0')),
+      expect.stringContaining(encodeURIComponent('public-anchor:body:body:1:1')),
+      expect.stringContaining(encodeURIComponent('public-shape:body:body:1:2')),
+    ]));
+  });
+
+  it('acquires a later page-owned occurrence from parser facts before paragraph zero', () => {
+    const text = 'あ'.repeat(40);
+    const pageOwned = parserAnchor('page-owned');
+    const paragraphLocal = parserAnchor('paragraph-local', {
+      verticalRelativeFrom: 'paragraph',
+    });
+    const pageLayout = canonicalLayout([
+      para({ text, fontSize: 20 }),
+      paraWith(parserAnchoredImage(pageOwned)),
+    ]);
+    const localLayout = canonicalLayout([
+      para({ text, fontSize: 20 }),
+      paraWith(parserAnchoredImage(paragraphLocal)),
+    ]);
+    const pageParagraphs = sourceParagraphs(pageLayout, 0);
+    const localParagraphs = sourceParagraphs(localLayout, 0);
+
+    expect(pageParagraphs.flatMap((paragraph) => paragraph.lines).length)
+      .toBeGreaterThan(localParagraphs.flatMap((paragraph) => paragraph.lines).length);
+    expect(retainedText(pageParagraphs)).toBe(text);
+    expect(retainedText(localParagraphs)).toBe(text);
+    expect(pageParagraphs[0]!.exclusions).toHaveLength(1);
+    expect(pageParagraphs[0]!.exclusions[0]!.wrap).toBe('square');
+    expect(localParagraphs[0]!.exclusions).toHaveLength(0);
+  });
+
+  it('keeps two occurrences in one paragraph distinct and preserves authored wrap kinds', () => {
+    const square = parserAnchor('square', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 40, wrap: 'square',
+    });
+    const topAndBottom = parserAnchor('top-bottom', {
+      xPt: 0, yPt: 80, widthPt: 160, heightPt: 20, wrap: 'topAndBottom',
+    });
+    const layout = canonicalLayout([
+      para({ text: 'あ'.repeat(24), fontSize: 20 }),
+      paraWith([
+        ...parserAnchoredImage(square),
+        ...parserAnchoredImage(topAndBottom),
+      ]),
+    ]);
+    const first = sourceParagraphs(layout, 0)[0]!;
+    const canonical = first.exclusions;
+
+    expect(canonical.map((exclusion) => ({
+      wrap: exclusion.wrap,
+    }))).toEqual([
+      { wrap: 'square' },
+      { wrap: 'topAndBottom' },
+    ]);
+    expect(new Set(canonical.map((exclusion) => exclusion.anchorOccurrenceId)).size).toBe(2);
+  });
+
+  it('does not let a future prescanned text float displace an earlier object', () => {
+    const earlier = parserAnchor('earlier-object', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 60,
+      verticalRelativeFrom: 'paragraph', wrap: 'none', allowOverlap: false,
+    });
+    const future = parserAnchor('future-wrapped-object', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 60,
+      wrap: 'square',
+    });
+    const text = 'あ'.repeat(32);
+    const baseline = canonicalLayout([
+      paraWith([...parserAnchoredImage(earlier), textRun(text, 20)]),
+    ]);
+    const withFuture = canonicalLayout([
+      paraWith([...parserAnchoredImage(earlier), textRun(text, 20)]),
+      paraWith(parserAnchoredImage(future)),
+    ]);
+    const baselineEarlier = sourceParagraphs(baseline, 0)[0]!;
+    const prescannedEarlier = sourceParagraphs(withFuture, 0)[0]!;
+
+    expect(prescannedEarlier.drawings[0]?.flowBounds)
+      .toEqual(baselineEarlier.drawings[0]?.flowBounds);
+    expect(prescannedEarlier.lines.length).toBeGreaterThan(baselineEarlier.lines.length);
+    expect(prescannedEarlier.exclusions).toEqual([
+      expect.objectContaining({
+        anchorOccurrenceId: expect.stringContaining('future-wrapped-object'),
+      }),
+    ]);
+  });
+
+  it('starts page-owned object collision authority only after source acceptance', () => {
+    const future = parserAnchor('accepted-page-object', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 100,
+      wrap: 'square',
+    });
+    const later = parserAnchor('later-object', {
+      xPt: 80, yPt: 0, widthPt: 80, heightPt: 20,
+      verticalRelativeFrom: 'paragraph', wrap: 'none', allowOverlap: false,
+    });
+    const layout = canonicalLayout([
+      para({ text: '前', fontSize: 20 }),
+      paraWith(parserAnchoredImage(future)),
+      paraWith(parserAnchoredImage(later)),
+    ]);
+    const blocker = sourceParagraphs(layout, 1)
+      .flatMap((paragraph) => paragraph.drawings)
+      .find((drawing) => drawing.anchorLayer?.occurrenceId.endsWith('accepted-page-object'));
+    const moving = sourceParagraphs(layout, 2)
+      .flatMap((paragraph) => paragraph.drawings)
+      .find((drawing) => drawing.anchorLayer?.occurrenceId.endsWith('later-object'));
+
+    expect(blocker).toBeDefined();
+    expect(moving).toBeDefined();
+    expect(moving!.flowBounds.yPt).toBe(
+      blocker!.flowBounds.yPt + blocker!.flowBounds.heightPt,
+    );
+  });
+});
+
+describe('canonical paragraph-owned anchor registry (§20.4.2.3/.20 + §20.4.3.5)', () => {
+  it('clears accepted object collisions at a physical page transition', () => {
+    const firstPage = parserAnchor('first-page-wrap-none', {
+      xPt: 0, yPt: 0, widthPt: 80, heightPt: 60,
+      verticalRelativeFrom: 'paragraph', wrap: 'none',
+    });
+    const secondPage = parserAnchor('second-page-moving', {
+      xPt: 0, yPt: 0, widthPt: 80, heightPt: 40,
+      verticalRelativeFrom: 'paragraph', wrap: 'none', allowOverlap: false,
+    });
+    const baseline = canonicalLayout([
+      paraWith(parserAnchoredImage(secondPage)),
+    ]);
+    const paginated = canonicalLayout([
+      paraWith(parserAnchoredImage(firstPage)),
+      { type: 'pageBreak' } as BodyElement,
+      paraWith(parserAnchoredImage(secondPage)),
+    ]);
+    const baselineBounds = sourceParagraphs(baseline, 0)[0]!.drawings[0]!.flowBounds;
+    const secondPageBounds = sourceParagraphs(paginated, 2)[0]!.drawings[0]!.flowBounds;
+
+    expect(secondPageBounds.xPt).toBe(baselineBounds.xPt);
+    expect(secondPageBounds.yPt).toBe(baselineBounds.yPt);
+  });
+
+  it('paginates parser-owned square-anchor text from the final reflowed line boundaries', () => {
+    const occurrenceId = 'same-paragraph-square-pagination';
+    const square = parserAnchor(occurrenceId, {
+      xPt: 100, yPt: 0, widthPt: 40, heightPt: 60,
+      verticalRelativeFrom: 'paragraph', wrap: 'square',
+    });
+    const none = parserAnchor(occurrenceId, {
+      xPt: 100, yPt: 0, widthPt: 40, heightPt: 60,
+      verticalRelativeFrom: 'paragraph', wrap: 'none',
+    });
+    const text = 'あ'.repeat(80);
+    const acquire = (anchor: AnchorAcquisitionInput) => canonicalLayout([
+      paraWith([...parserAnchoredImage(anchor), textRun(text, 20)]),
+    ]);
+
+    const wrappedLayout = acquire(square);
+    const noneLayout = acquire(none);
+    const wrapped = sourceParagraphs(wrappedLayout, 0);
+    const unwrapped = sourceParagraphs(noneLayout, 0);
+
+    expect(wrapped.flatMap((paragraph) => paragraph.lines).length)
+      .toBeGreaterThan(unwrapped.flatMap((paragraph) => paragraph.lines).length);
+    expect(retainedText(wrapped)).toBe(text);
+    expect(wrapped.flatMap((paragraph) => paragraph.drawings)).toHaveLength(1);
+    expect(wrapped.flatMap((paragraph) => paragraph.exclusions)).toHaveLength(1);
+    expect(wrapped.every((paragraph, index) => index === 0
+      ? paragraph.continuation?.continuesFromPrevious !== true
+      : paragraph.continuation?.continuesFromPrevious === true)).toBe(true);
+    expect(wrapped.length).toBeGreaterThan(1);
+  });
+
+  it('commits a parser-owned topAndBottom exclusion for following paragraphs', () => {
+    const paragraphOwned = parserAnchor('paragraph-owned-top-bottom', {
+      xPt: 0,
+      yPt: 0,
+      widthPt: 160,
+      heightPt: 60,
+      verticalRelativeFrom: 'paragraph',
+      wrap: 'topAndBottom',
+    });
+    const layout = canonicalLayout([
+      paraWith(parserAnchoredImage(paragraphOwned)),
+      para({ text: 'あ'.repeat(48), fontSize: 20 }),
+    ]);
+    const following = sourceParagraphs(layout, 1);
+
+    expect(layout.pages).toHaveLength(2);
+    expect(following).toHaveLength(2);
+    expect(following[0]!.exclusions).toEqual([
+      expect.objectContaining({
+        wrap: 'topAndBottom',
+        anchorOccurrenceId: expect.stringContaining(
+          encodeURIComponent('anchor:body:body:0:paragraph-owned-top-bottom'),
+        ),
+      }),
+    ]);
+  });
+
+  it('commits a parser-owned anchor only when its continuation is accepted', () => {
+    const occurrenceId = 'later-continuation-top-bottom';
+    const paragraphOwned = parserAnchor(occurrenceId, {
+      xPt: 0,
+      yPt: 0,
+      widthPt: 160,
+      heightPt: 60,
+      verticalRelativeFrom: 'paragraph',
+      wrap: 'topAndBottom',
+    });
+    const layout = canonicalLayout([
+      paraWith([
+        textRun('あ'.repeat(80), 20),
+        ...parserAnchoredImage(paragraphOwned),
+      ]),
+      para({ text: 'い'.repeat(48), fontSize: 20 }),
+    ]);
+    const anchored = sourceParagraphs(layout, 0);
+    const following = sourceParagraphs(layout, 1);
+    const ownsOccurrence = (paragraph: ParagraphLayout) => paragraph.drawings.some((drawing) =>
+      drawing.anchorLayer?.acquisitionOccurrenceId?.endsWith(occurrenceId));
+    const carriesOccurrenceExclusion = (paragraph: ParagraphLayout) => paragraph.exclusions.some(
+      (exclusion) => exclusion.anchorOccurrenceId?.endsWith(occurrenceId),
+    );
+
+    expect(anchored).toHaveLength(2);
+    expect(ownsOccurrence(anchored[0]!)).toBe(false);
+    expect(carriesOccurrenceExclusion(anchored[0]!)).toBe(false);
+    expect(ownsOccurrence(anchored[1]!)).toBe(true);
+    expect(carriesOccurrenceExclusion(anchored[1]!)).toBe(true);
+    expect(following).toHaveLength(2);
+    expect(layout.pages).toHaveLength(3);
+  });
+
+  it('measures an anchored keepNext successor through the same reflow acquisition', () => {
+    const paragraphOwned = parserAnchor('keep-next-successor-square', {
+      xPt: 0,
+      yPt: 0,
+      widthPt: 160,
+      heightPt: 60,
+      verticalRelativeFrom: 'paragraph',
+      wrap: 'topAndBottom',
+    });
+    const kept = {
+      ...para({ text: 'keep', fontSize: 20 }),
+      keepNext: true,
+    } as BodyElement;
+    const anchoredSuccessor = {
+      ...paraWith([
+        ...parserAnchoredImage(paragraphOwned),
+        textRun('後'.repeat(8), 20),
+      ]),
+      keepNext: true,
+    } as BodyElement;
+    const layout = canonicalLayout([
+      para({ text: '前'.repeat(40), fontSize: 20 }),
+      kept,
+      anchoredSuccessor,
+      para({ text: '終', fontSize: 20 }),
+    ]);
+    const sourcePages = (bodyIndex: number) => layout.pages.flatMap((page, pageIndex) =>
+      page.layers.body.some((node) => node.kind === 'paragraph'
+        && node.source.story === 'body'
+        && node.source.path[0] === bodyIndex)
+        ? [pageIndex]
+        : []);
+
+    expect(sourcePages(1)).toEqual([1]);
+    expect(sourcePages(2)).toEqual([1]);
+    expect(sourcePages(3)).toEqual([1]);
+  });
+
+  it('includes anchor displacement in the terminal successor lead extent', () => {
+    const paragraphOwned = parserAnchor('keep-next-terminal-top-bottom', {
+      xPt: 0,
+      yPt: 0,
+      widthPt: 160,
+      heightPt: 60,
+      verticalRelativeFrom: 'paragraph',
+      wrap: 'topAndBottom',
+    });
+    const kept = {
+      ...para({ text: 'keep', fontSize: 20 }),
+      keepNext: true,
+    } as BodyElement;
+    const layout = canonicalLayout([
+      para({ text: '前'.repeat(40), fontSize: 20 }),
+      kept,
+      paraWith([
+        ...parserAnchoredImage(paragraphOwned),
+        textRun('後'.repeat(8), 20),
+      ]),
+    ]);
+    const sourcePages = (bodyIndex: number) => layout.pages.flatMap((page, pageIndex) =>
+      page.layers.body.some((node) => node.kind === 'paragraph'
+        && node.source.story === 'body'
+        && node.source.path[0] === bodyIndex)
+        ? [pageIndex]
+        : []);
+
+    expect(sourcePages(1)).toEqual([1]);
+    expect(sourcePages(2)).toEqual([1]);
+  });
+
 });
 
 describe('preRegisterPageFloats — paragraph-local Y is NOT pre-registered', () => {

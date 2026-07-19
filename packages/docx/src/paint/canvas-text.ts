@@ -8,10 +8,12 @@ import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import {
   composeAffine,
+  mapAffinePoint,
   quarterTurnAffine,
   scaleAffine,
   translationAffine,
 } from './affine.js';
+import { appendDeferredPaintFrame, canvasPaintFrame } from './deferred-paint-frame.js';
 import { textRunPaintInfo } from './text-run-info.js';
 
 function validateTextSlices(placement: import('../layout/types.js').TextPlacement): void {
@@ -74,6 +76,19 @@ function textColor(
   return resolvedTextColor(placement.color, context);
 }
 
+function cssTransformFor(matrix: import('../layout/types.js').Matrix2DData): string | undefined {
+  const inlineScale = Math.hypot(matrix.a, matrix.b);
+  const blockScale = Math.hypot(matrix.c, matrix.d);
+  const a = matrix.a / inlineScale;
+  const b = matrix.b / inlineScale;
+  const c = matrix.c / blockScale;
+  const d = matrix.d / blockScale;
+  if (a === 1 && b === 0 && c === 0 && d === 1) return undefined;
+  if (a === 0 && b === 1 && c === -1 && d === 0) return 'rotate(90deg)';
+  if (a === 0 && b === -1 && c === 1 && d === 0) return 'rotate(-90deg)';
+  return `matrix(${a}, ${b}, ${c}, ${d}, 0, 0)`;
+}
+
 function paintRetainedGlyph(
   operation: import('../layout/types.js').RetainedGlyphPaintOperation,
   context: CanvasPaintContext,
@@ -120,51 +135,77 @@ function paintRetainedMarkPath(
   }
 }
 
-/** Paints only retained point geometry. Text acquisition and measurement are not
- * available through this contract, so zoom cannot alter line partitioning. */
-export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaintContext): void {
-  const { ctx } = context;
-  if (node.clipBounds) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(
-      node.clipBounds.xPt,
-      node.clipBounds.yPt,
-      node.clipBounds.widthPt,
-      node.clipBounds.heightPt,
-    );
-    ctx.clip();
+function textBoxesForDrawing(
+  node: ParagraphLayout,
+  drawing: import('../layout/types.js').DrawingLayout,
+): readonly TextBoxLayout[] {
+  const textBoxesById = new Map(node.textBoxes.map((textBox) => [textBox.id, textBox]));
+  return (drawing.textBoxIds ?? []).flatMap((id) => {
+    const textBox = textBoxesById.get(id);
+    return textBox ? [textBox] : [];
+  });
+}
+
+export function paintParagraphDrawingLayout(
+  node: ParagraphLayout,
+  drawing: import('../layout/types.js').DrawingLayout,
+  context: CanvasPaintContext,
+): void {
+  const translation = context.layoutTranslationPt;
+  const undoX = drawing.anchorLayer?.horizontalOwnership === 'page'
+    ? -(translation?.xPt ?? 0) : 0;
+  const undoY = drawing.anchorLayer?.verticalOwnership === 'page'
+    ? -(translation?.yPt ?? 0) : 0;
+  if (undoX !== 0 || undoY !== 0) {
+    context.ctx.save();
+    context.ctx.translate(undoX, undoY);
   }
   try {
-  const textBoxesById = new Map(node.textBoxes.map((textBox) => [textBox.id, textBox]));
+    paintDrawingLayout(drawing, context);
+    for (const textBox of textBoxesForDrawing(node, drawing)) {
+      paintTextBoxLayout(textBox, context);
+    }
+  } finally {
+    if (undoX !== 0 || undoY !== 0) context.ctx.restore();
+  }
+}
+
+function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintContext): void {
+  const { ctx } = context;
   const ownedTextBoxIds = new Set(node.drawings.flatMap((drawing) => drawing.textBoxIds ?? []));
-  const textBoxesFor = (drawing: import('../layout/types.js').DrawingLayout) =>
-    (drawing.textBoxIds ?? []).flatMap((id) => {
-      const textBox = textBoxesById.get(id);
-      return textBox ? [textBox] : [];
-    });
-  const paintDrawingWithTextBoxes = (drawing: import('../layout/types.js').DrawingLayout): void => {
-    const translation = context.layoutTranslationPt;
-    const undoX = drawing.anchorLayer?.horizontalOwnership === 'page'
-      ? -(translation?.xPt ?? 0) : 0;
-    const undoY = drawing.anchorLayer?.verticalOwnership === 'page'
-      ? -(translation?.yPt ?? 0) : 0;
-    if (undoX !== 0 || undoY !== 0) {
-      context.ctx.save();
-      context.ctx.translate(undoX, undoY);
-    }
-    try {
-      paintDrawingLayout(drawing, context);
-      for (const textBox of textBoxesFor(drawing)) paintTextBoxLayout(textBox, context);
-    } finally {
-      if (undoX !== 0 || undoY !== 0) context.ctx.restore();
-    }
-  };
+  const paintDrawingWithTextBoxes = (drawing: import('../layout/types.js').DrawingLayout): void =>
+    paintParagraphDrawingLayout(node, drawing, context);
   const behind = node.drawings
     .filter((drawing) => drawing.anchorLayer?.behindDoc === true)
     .sort((a, b) => a.anchorLayer!.relativeHeight - b.anchorLayer!.relativeHeight
       || a.anchorLayer!.sourceOrder - b.anchorLayer!.sourceOrder);
-  for (const drawing of behind) paintDrawingWithTextBoxes(drawing);
+  if (context.bodyDrawingPass === 'discover-behind') {
+    const replayContext: CanvasPaintContext = {
+      ...context,
+      bodyDrawingPass: 'normal',
+      // Behind owners replay atomically at their sorted page z-position. Any
+      // descendant anchors belong to that owned story and paint in local
+      // paragraph order instead of mutating the page discovery queue.
+      deferBehindDrawing: () => false,
+      deferFrontDrawing: () => false,
+    };
+    for (const drawing of behind) {
+      const textBoxes = textBoxesForDrawing(node, drawing);
+      const paint = () => paintParagraphDrawingLayout(node, drawing, replayContext);
+      context.deferBehindDrawing?.(
+        drawing,
+        textBoxes,
+        context.deferredPaintWrapper?.(paint) ?? paint,
+      );
+    }
+    return;
+  }
+  for (const drawing of behind) {
+    const textBoxes = textBoxesForDrawing(node, drawing);
+    const paint = () => paintDrawingWithTextBoxes(drawing);
+    const deferredPaint = context.deferredPaintWrapper?.(paint) ?? paint;
+    if (!context.deferBehindDrawing?.(drawing, textBoxes, deferredPaint)) paint();
+  }
   for (const retained of node.lineNumbers ?? []) {
     for (const operation of retained.paintOps) {
       ctx.fillStyle = operation.color;
@@ -296,27 +337,27 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
       }
       for (const path of placement.emphasis?.paths ?? []) paintRetainedMarkPath(path, context);
       if (context.onTextRun) {
-        const transform = context.textRunTransform ?? {
-          translateXPt: 0,
-          translateYPt: 0,
-          scale: 1,
-        };
-        const scale = transform.scale;
+        const pointToCss = context.pointToCss ?? scaleAffine(context.scale);
+        const origin = mapAffinePoint(pointToCss, placement.bounds);
+        const inlineScale = Math.hypot(pointToCss.a, pointToCss.b);
+        const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
+        const transform = cssTransformFor(pointToCss);
         const letterSpacingPt = placement.paintOps[0]?.letterSpacingPt ?? 0;
         context.onTextRun(textRunPaintInfo({
           text: placement.text,
-          x: (transform.translateXPt + placement.bounds.xPt) * scale,
-          y: (transform.translateYPt + placement.bounds.yPt) * scale,
-          w: placement.bounds.widthPt * scale,
-          h: placement.bounds.heightPt * scale,
-          fontSize: placement.fontSizePt * scale,
+          x: origin.xPt,
+          y: origin.yPt,
+          w: placement.bounds.widthPt * inlineScale,
+          h: placement.bounds.heightPt * blockScale,
+          fontSize: placement.fontSizePt * blockScale,
           font: canvasFontString(
             placement.fontRoute,
-            placement.fontSizePt * scale,
+            placement.fontSizePt * blockScale,
             placement.fontWeight,
             placement.fontStyle,
           ),
-          ...(letterSpacingPt !== 0 ? { letterSpacingPx: letterSpacingPt * scale } : {}),
+          ...(letterSpacingPt !== 0 ? { letterSpacingPx: letterSpacingPt * inlineScale } : {}),
+          ...(transform ? { transform } : {}),
           ...(placement.hyperlink ? {
             hyperlink: { kind: 'external' as const, url: placement.hyperlink },
           } : {}),
@@ -336,16 +377,39 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
     .sort((a, b) => a.anchorLayer!.relativeHeight - b.anchorLayer!.relativeHeight
       || a.anchorLayer!.sourceOrder - b.anchorLayer!.sourceOrder);
   for (const drawing of front) {
-    if (!context.deferFrontDrawing?.(drawing, textBoxesFor(drawing))) {
-      paintDrawingWithTextBoxes(drawing);
-    }
+    const textBoxes = textBoxesForDrawing(node, drawing);
+    const paint = () => paintDrawingWithTextBoxes(drawing);
+    const deferredPaint = context.deferredPaintWrapper?.(paint) ?? paint;
+    if (!context.deferFrontDrawing?.(drawing, textBoxes, deferredPaint)) paint();
   }
   for (const textBox of node.textBoxes) {
     if (!ownedTextBoxIds.has(textBox.id)) paintTextBoxLayout(textBox, context);
   }
-  } finally {
-    if (node.clipBounds) ctx.restore();
+}
+
+/** Paints only retained point geometry. Text acquisition and measurement are not
+ * available through this contract, so zoom cannot alter line partitioning. */
+export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaintContext): void {
+  if (!node.clipBounds) {
+    paintParagraphContents(node, context);
+    return;
   }
+  const clipBounds = node.clipBounds;
+  const frame = canvasPaintFrame(context.ctx, () => {
+    context.ctx.beginPath();
+    context.ctx.rect(
+      clipBounds.xPt,
+      clipBounds.yPt,
+      clipBounds.widthPt,
+      clipBounds.heightPt,
+    );
+    context.ctx.clip();
+  });
+  const clippedContext: CanvasPaintContext = {
+    ...context,
+    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
+  };
+  frame(() => paintParagraphContents(node, clippedContext))();
 }
 
 /** Paints an acquired text box. All line partitioning, glyph shaping and point
@@ -355,32 +419,33 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
     for (const paragraph of node.paragraphs) paintParagraphLayout(paragraph, context);
     return;
   }
-  context.ctx.save();
-  try {
-    const center = translationAffine(
-      node.flowBounds.xPt + node.flowBounds.widthPt / 2,
-      node.flowBounds.yPt + node.flowBounds.heightPt / 2,
-    );
-    const turn = quarterTurnAffine(node.verticalMode === 'vert270' ? -1 : 1);
-    const pointToCss = composeAffine(
-      context.pointToCss ?? scaleAffine(context.scale),
-      composeAffine(center, turn),
-    );
+  const center = translationAffine(
+    node.flowBounds.xPt + node.flowBounds.widthPt / 2,
+    node.flowBounds.yPt + node.flowBounds.heightPt / 2,
+  );
+  const turn = quarterTurnAffine(node.verticalMode === 'vert270' ? -1 : 1);
+  const pointToCss = composeAffine(
+    context.pointToCss ?? scaleAffine(context.scale),
+    composeAffine(center, turn),
+  );
+  const frame = canvasPaintFrame(context.ctx, () => {
     context.ctx.translate(
       node.flowBounds.xPt + node.flowBounds.widthPt / 2,
       node.flowBounds.yPt + node.flowBounds.heightPt / 2,
     );
     context.ctx.rotate(node.verticalMode === 'vert270' ? -Math.PI / 2 : Math.PI / 2);
+  });
+  const verticalContext: CanvasPaintContext = {
+    ...context,
+    pointToCss,
+    textBoxVerticalMode: node.verticalMode,
+    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
+  };
+  frame(() => {
     for (const paragraph of node.paragraphs) {
-      paintParagraphLayout(paragraph, {
-        ...context,
-        pointToCss,
-        textBoxVerticalMode: node.verticalMode,
-      });
+      paintParagraphLayout(paragraph, verticalContext);
     }
-  } finally {
-    context.ctx.restore();
-  }
+  })();
 }
 
 /** Paints an absolute point-space text box into a CSS-pixel canvas viewport. */
@@ -388,16 +453,13 @@ export function paintPlacedTextBoxLayout(
   node: TextBoxLayout,
   context: CanvasPaintContext,
 ): void {
-  context.ctx.save();
-  try {
-    context.ctx.scale(context.scale, context.scale);
-    paintTextBoxLayout(node, {
-      ...context,
-      pointToCss: context.pointToCss ?? scaleAffine(context.scale),
-    });
-  } finally {
-    context.ctx.restore();
-  }
+  const frame = canvasPaintFrame(context.ctx, () => context.ctx.scale(context.scale, context.scale));
+  const placedContext: CanvasPaintContext = {
+    ...context,
+    pointToCss: context.pointToCss ?? scaleAffine(context.scale),
+    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
+  };
+  frame(() => paintTextBoxLayout(node, placedContext))();
 }
 
 /** Paint a retained paragraph at a page placement using one point-to-CSS transform. */
@@ -412,21 +474,15 @@ export function paintPlacedParagraphLayout(
     context.pointToCss ?? scaleAffine(context.scale),
     translationAffine(dxPt, dyPt),
   );
-  context.ctx.save();
-  try {
+  const frame = canvasPaintFrame(context.ctx, () => {
     context.ctx.translate(dxPt * context.scale, dyPt * context.scale);
     context.ctx.scale(context.scale, context.scale);
-    paintParagraphLayout(node, {
-      ...context,
-      pointToCss,
-      textRunTransform: {
-        translateXPt: dxPt,
-        translateYPt: dyPt,
-        scale: context.scale,
-      },
-      layoutTranslationPt: { xPt: dxPt, yPt: dyPt },
-    });
-  } finally {
-    context.ctx.restore();
-  }
+  });
+  const placedContext: CanvasPaintContext = {
+    ...context,
+    pointToCss,
+    layoutTranslationPt: { xPt: dxPt, yPt: dyPt },
+    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
+  };
+  frame(() => paintParagraphLayout(node, placedContext))();
 }

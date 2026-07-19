@@ -7,7 +7,8 @@ import {
   writingModeFromTextDirection,
   type PhysicalPageExtent,
 } from './coordinate-space.js';
-import { PAGE_LAYER_IDS, type PageLayerNode } from './page-graph.js';
+import { columnSeparatorSegments } from './column-separators.js';
+import { createPageLayers, type PageLayerNode } from './page-graph.js';
 import type { BodyOccurrenceDestination } from './occurrence-projection.js';
 import type {
   DeepReadonly,
@@ -15,7 +16,6 @@ import type {
   LayoutPage,
   LayoutRect,
   PageBookmarkStart,
-  PageLayers,
   PageNumberMetadata,
   PageSectionRegion,
   PaintNode,
@@ -40,9 +40,13 @@ export interface PageSectionRegionInput {
   readonly id: string;
   readonly sectionOccurrenceId: string;
   readonly section: DeepReadonly<SectionLayoutContext>;
+  readonly pageBorders?: DeepReadonly<import('../types.js').PageBorders> | null;
   readonly writingMode: WritingMode;
   readonly blockStartPt: number;
   readonly blockEndPt: number;
+  readonly columnFlowDirection?: 'ltr' | 'rtl';
+  /** Defaults to every authored section column for ordinary full-width regions. */
+  readonly columnIndexes?: readonly number[];
   readonly columns: readonly LogicalColumnInput[];
 }
 
@@ -51,6 +55,7 @@ export interface LayoutPageAccumulatorInput {
   readonly physicalPage: PhysicalPageInput;
   readonly sectionOccurrenceId: string;
   readonly section: DeepReadonly<SectionLayoutContext>;
+  readonly pageBorders?: DeepReadonly<import('../types.js').PageBorders> | null;
 }
 
 export interface LayoutPageAccumulator extends LayoutPageAccumulatorInput {
@@ -72,6 +77,7 @@ export interface ParityBlankLayoutPageInput {
   readonly sectionOccurrenceId: string;
   readonly section: DeepReadonly<SectionLayoutContext>;
   readonly pageNumber: PageNumberMetadata;
+  readonly pageBorders?: DeepReadonly<import('../types.js').PageBorders> | null;
 }
 
 export function bodyFlowDomainId(
@@ -154,7 +160,9 @@ export function sectionLayoutContextsEqual(
     && left.geometry.headerDistance === right.geometry.headerDistance
     && left.geometry.footerDistance === right.geometry.footerDistance
     && equalColumns(left.columns, right.columns)
+    && left.columnSeparator === right.columnSeparator
     && left.textDirection === right.textDirection
+    && (left.sectionBidi === true) === (right.sectionBidi === true)
     && left.grid.kind === right.grid.kind
     && left.grid.linePitchPt === right.grid.linePitchPt
     && left.grid.charSpacePt === right.grid.charSpacePt
@@ -167,9 +175,24 @@ function requireRegionSectionAgreement(input: PageSectionRegionInput): void {
   if (writingMode !== input.writingMode) {
     throw new RangeError('Section region writing mode must agree with its section text direction');
   }
-  if (input.columns.length !== input.section.columns.length
+  const sectionColumnFlowDirection = input.section.sectionBidi === true ? 'rtl' : 'ltr';
+  if (
+    input.columnFlowDirection !== undefined
+    && input.columnFlowDirection !== sectionColumnFlowDirection
+  ) {
+    throw new RangeError('Section region column flow direction must agree with sectPr bidi');
+  }
+  const columnIndexes = input.columnIndexes
+    ?? input.section.columns.map((_, index) => index);
+  if (input.columns.length !== columnIndexes.length
+    || columnIndexes.some((columnIndex, index) => (
+      !Number.isInteger(columnIndex)
+      || columnIndex < 0
+      || columnIndex >= input.section.columns.length
+      || (index > 0 && columnIndex <= columnIndexes[index - 1]!)
+    ))
     || input.columns.some((column, index) => {
-      const sectionColumn = input.section.columns[index];
+      const sectionColumn = input.section.columns[columnIndexes[index]!];
       return sectionColumn === undefined
         || column.inlineStartPt !== sectionColumn.xPt
         || column.inlineExtentPt !== sectionColumn.wPt;
@@ -206,8 +229,8 @@ function buildRegions(
   const sectionByDomain = new Map<string, string>();
   const regionIds = new Set<string>();
   const occurrenceIds = new Set<string>();
-  let priorBlockEndPt = 0;
   let pageWritingMode: WritingMode | undefined;
+  const occupiedPhysicalDomains: LayoutRect[] = [];
 
   for (const input of inputs) {
     requireIdentity(input.id, 'Section region id');
@@ -228,21 +251,25 @@ function buildRegions(
     }, input.writingMode);
     if (expectedPhysicalExtent.widthPt !== physicalPage.widthPt
       || expectedPhysicalExtent.heightPt !== physicalPage.heightPt) {
-      throw new RangeError('Section regions on one physical page must use the same page box');
+      throw new RangeError(
+        `Section regions on one physical page must use the same page box: expected ${expectedPhysicalExtent.widthPt}x${expectedPhysicalExtent.heightPt}, got ${physicalPage.widthPt}x${physicalPage.heightPt}`,
+      );
     }
     const logicalExtent = logicalPageExtent(physicalPage, input.writingMode);
     const logicalInlineExtent = logicalExtent.widthPt;
     const logicalBlockExtent = logicalExtent.heightPt;
     if (!Number.isFinite(input.blockStartPt) || !Number.isFinite(input.blockEndPt)
-      || input.blockStartPt < 0 || input.blockEndPt <= input.blockStartPt
-      || input.blockEndPt > logicalBlockExtent || input.blockStartPt < priorBlockEndPt) {
-      throw new RangeError('Section regions must be ordered, disjoint, and inside the logical page');
+      || input.blockStartPt < 0 || input.blockEndPt < input.blockStartPt
+      || input.blockEndPt > logicalBlockExtent) {
+      throw new RangeError('Section regions must be inside the logical page');
     }
-    priorBlockEndPt = input.blockEndPt;
     if (input.columns.length === 0) throw new RangeError('Section region must contain a column');
+    const columnIndexes = input.columnIndexes
+      ?? input.section.columns.map((_, index) => index);
     let priorInlineEndPt = 0;
     const coordinateSpace = createSectionRegionCoordinateSpace(input.writingMode, physicalPage);
-    const flowDomainIds = input.columns.map((column, columnIndex) => {
+    const flowDomainIds = input.columns.map((column, columnPosition) => {
+      const authoredColumnIndex = columnIndexes[columnPosition]!;
       if (!Number.isFinite(column.inlineStartPt) || !Number.isFinite(column.inlineExtentPt)
         || column.inlineStartPt < 0 || column.inlineExtentPt <= 0
         || column.inlineStartPt + column.inlineExtentPt > logicalInlineExtent
@@ -250,7 +277,7 @@ function buildRegions(
         throw new RangeError('Columns must be ordered, disjoint, and inside the logical page');
       }
       priorInlineEndPt = column.inlineStartPt + column.inlineExtentPt;
-      const id = bodyFlowDomainId(pageIndex, input.id, columnIndex);
+      const id = bodyFlowDomainId(pageIndex, input.id, authoredColumnIndex);
       if (sectionByDomain.has(id)) throw new RangeError(`Duplicate flow domain ${id}`);
       const logicalBounds = {
         xPt: column.inlineStartPt,
@@ -258,11 +285,21 @@ function buildRegions(
         widthPt: column.inlineExtentPt,
         heightPt: input.blockEndPt - input.blockStartPt,
       };
+      const physicalBounds = transformRect(coordinateSpace.logicalToPhysical, logicalBounds);
+      if (occupiedPhysicalDomains.some((prior) => (
+        physicalBounds.xPt < prior.xPt + prior.widthPt
+        && prior.xPt < physicalBounds.xPt + physicalBounds.widthPt
+        && physicalBounds.yPt < prior.yPt + prior.heightPt
+        && prior.yPt < physicalBounds.yPt + physicalBounds.heightPt
+      ))) {
+        throw new RangeError('Section flow domains on one page must be physically disjoint');
+      }
+      occupiedPhysicalDomains.push(physicalBounds);
       domains.push({
         id,
         kind: 'body',
         logicalBounds,
-        physicalBounds: transformRect(coordinateSpace.logicalToPhysical, logicalBounds),
+        physicalBounds,
       });
       sectionByDomain.set(id, input.sectionOccurrenceId);
       return id;
@@ -273,6 +310,9 @@ function buildRegions(
       coordinateSpace,
       blockStartPt: input.blockStartPt,
       blockEndPt: input.blockEndPt,
+      columnFlowDirection: input.columnFlowDirection
+        ?? (input.section.sectionBidi === true ? 'rtl' : 'ltr'),
+      columnIndexes: Object.freeze([...columnIndexes]),
       flowDomainIds,
       section: input.section,
     });
@@ -290,12 +330,18 @@ export function bodyOccurrenceDestinationFor(
 ): BodyOccurrenceDestination {
   requirePageIndex(pageIndex);
   requireIdentity(region.id, 'Section region id');
-  if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= region.columns.length) {
+  if (!Number.isInteger(columnIndex) || columnIndex < 0) {
     throw new RangeError('Column index must identify a section region column');
   }
   if (!Number.isFinite(blockStartPt)) throw new RangeError('Block start must be finite');
   requireRect(retainedFlowBounds, 'Retained flow bounds');
-  const column = region.columns[columnIndex]!;
+  const columnIndexes = region.columnIndexes
+    ?? region.section.columns.map((_, index) => index);
+  const columnPosition = columnIndexes.indexOf(columnIndex);
+  if (columnPosition < 0 || columnPosition >= region.columns.length) {
+    throw new RangeError('Column index must identify a section region column');
+  }
+  const column = region.columns[columnPosition]!;
   if (!Number.isFinite(column.inlineStartPt)) throw new RangeError('Column inline start must be finite');
   return {
     coordinateSpace: 'logical-page-points',
@@ -304,21 +350,6 @@ export function bodyOccurrenceDestinationFor(
       xPt: column.inlineStartPt - retainedFlowBounds.xPt,
       yPt: blockStartPt - retainedFlowBounds.yPt,
     },
-  };
-}
-
-function buildLayers(entries: readonly PageLayerNode[]): PageLayers {
-  const nodes = new Map(PAGE_LAYER_IDS.map((layer) => [layer, [] as PaintNode[]]));
-  for (const entry of entries) nodes.get(entry.layer)!.push(entry.node);
-  return {
-    paintOrder: entries.map(({ layer, node }) => ({ layer, nodeId: node.id })),
-    background: nodes.get('background')!,
-    behindText: nodes.get('behindText')!,
-    header: nodes.get('header')!,
-    body: nodes.get('body')!,
-    notes: nodes.get('notes')!,
-    front: nodes.get('front')!,
-    footer: nodes.get('footer')!,
   };
 }
 
@@ -370,18 +401,14 @@ export function derivePageBookmarkStarts(
     const sectionOccurrenceId = sectionByDomain.get(node.flowDomainId)
       ?? defaultSectionOccurrenceId;
     visitBookmarkParagraphs(node, (paragraph) => {
-      for (const line of paragraph.lines) {
-        for (const placement of line.placements) {
-          if (placement.kind !== 'text' || !placement.bookmark || seen.has(placement.bookmark)) {
-            continue;
-          }
-          seen.add(placement.bookmark);
-          starts.push({
-            name: placement.bookmark,
-            nodeId: paragraph.id,
-            sectionOccurrenceId,
-          });
-        }
+      for (const bookmark of paragraph.bookmarkStarts ?? []) {
+        if (!bookmark || seen.has(bookmark)) continue;
+        seen.add(bookmark);
+        starts.push({
+          name: bookmark,
+          nodeId: paragraph.id,
+          sectionOccurrenceId,
+        });
       }
     });
   }
@@ -417,7 +444,9 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
     ),
     pageNumber: input.pageNumber,
     sectionRegions: regions,
-    layers: buildLayers(input.paint),
+    columnSeparators: columnSeparatorSegments(regions),
+    pageBorders: firstRegion?.pageBorders ?? input.pageBorders ?? null,
+    layers: createPageLayers(input.paint),
     readingOrder: input.readingOrder.map((node) => node.id),
   };
 }
@@ -482,7 +511,9 @@ export function createParityBlankLayoutPage(
     bookmarkStarts: [],
     pageNumber: input.pageNumber,
     sectionRegions: [],
-    layers: buildLayers([]),
+    columnSeparators: [],
+    pageBorders: input.pageBorders ?? null,
+    layers: createPageLayers([]),
     readingOrder: [],
   };
 }

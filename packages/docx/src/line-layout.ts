@@ -53,9 +53,16 @@ import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
 import {
   type FloatRect,
-  resolveLineFloatWindow,
+  MIN_LINE_GAP,
+  prepareFloatWrap,
+  computePreparedLineFloatWindow,
   wordMinLineStartPx,
+  type PreparedFloatWrap,
 } from './float-layout.js';
+import {
+  cloneSegmentsForLinePass,
+  convergeLineWrap,
+} from './layout/line-wrap-convergence.js';
 import { verticalRunInkExtraPx } from './vertical-text.js';
 import type { LayoutServices, NumberingMarkerShapeInput } from './layout/types.js';
 import type {
@@ -484,6 +491,8 @@ export interface WrapLayoutCtx {
   lineWindow?: (input: {
     topYPt: number;
     minimumStartWidthPt: number;
+    /** Word compatibility threshold applied only when a square object is active. */
+    squareMinimumStartWidthPt?: number;
     probeHeightPt: number;
     paragraphXPt: number;
     maximumWidthPt: number;
@@ -497,6 +506,11 @@ export interface WrapLayoutCtx {
     xOffsetPt: number;
     maximumWidthPt: number;
   };
+  /** Page/reference band used by ST_WrapText `largest` (§20.4.3.7). */
+  referenceXPt?: number;
+  referenceWidthPt?: number;
+  /** Reading order of the first line intersecting a centered `largest` object. */
+  readingDirection?: 'ltr' | 'rtl';
   /** Per-line box-height resolver (line natural ascent+descent → total px box height).
    *  `gridCountSinglePx` (the line's design grid-count height) keeps the
    *  float-wrap advance consistent with the final render's docGrid cell count. */
@@ -541,13 +555,6 @@ export interface LineLayoutEnvironment {
   readonly verticalCJK?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
   readonly layoutServices?: LayoutServices;
-  /** Iteration-local PAGE context keyed by the field run occurrence. */
-  readonly resolvePageFieldContext?: (
-    sourceRunIndex: number,
-  ) => Readonly<Pick<
-    LineLayoutEnvironment,
-    'pageIndex' | 'displayPageNumber' | 'pageNumberFormat'
-  >> | undefined;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
@@ -2103,9 +2110,8 @@ export function layoutBidiTabStops(
 
 /** Value equivalence of two resolved kinsoku rule sets, with a reference fast
  *  path. The reuse gate cannot rely on `===` alone: `resolveKinsokuRules` builds
- *  a FRESH object (fresh Sets) on every call, and the prebuiltPages production
- *  path (DocxDocument.renderPage) resolves it independently in paginateDocument
- *  and in renderDocumentToCanvas — same `doc.settings`, different references.
+ *  a FRESH object (fresh Sets) on every call, and canonical layout variants
+ *  resolve it independently — same `doc.settings`, different references.
  *  Both derive from the same immutable settings so they are value-equal there;
  *  this check is pure defense so a genuinely different rule set (which would
  *  change CJK retract decisions in layoutLines) can never reuse stale lines. */
@@ -2606,6 +2612,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         if (label.length > 0) {
           pushTextPiece(label, t, t.vertAlign ?? 'super', runIndex, 0);
         }
+        for (let index = emittedStart; index < segs.length; index += 1) {
+          segs[index].sourceRunIndex = runIndex;
+        }
         continue;
       }
       // Split on tab chars so tab alignment can be resolved during layout.
@@ -2673,13 +2682,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // page/column breaks handled at the document level (splitPages)
     } else if (run.type === 'field') {
       const f = run as unknown as FieldRun & { type: 'field' };
-      // PAGE is defined by the physical page containing this field occurrence,
-      // which can differ between runs of one paragraph after line splitting.
-      const pageContext = environment.resolvePageFieldContext?.(runIndex);
-      const text = resolveFieldText(
-        f,
-        pageContext === undefined ? environment : { ...environment, ...pageContext },
-      );
+      const text = resolveFieldText(f, environment);
       if (text) pushTextPiece(text, f, f.vertAlign, runIndex);
     } else if (run.type === 'math') {
       // The parser resolves the paragraph font size; fall back to a nearby run only
@@ -2847,6 +2850,26 @@ export function layoutLines(
   maxWidth: number,
   firstIndent: number,
   scale: number,
+  tabStops?: TabStop[],
+  wrapCtx?: WrapLayoutCtx,
+  fontFamilyClasses?: Record<string, string>,
+  tabOriginPx?: number,
+  kinsoku?: KinsokuRules,
+  gridDeltaPx?: number,
+  defaultTabPt?: number,
+  marginRightPx?: number,
+  baseRtl?: boolean,
+  isJustified?: boolean,
+  stretchLastLine?: boolean,
+  startBoundary?: LineBoundary,
+  widthPolicy?: 'bounded' | 'intrinsic',
+): LayoutLine[];
+export function layoutLines(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  segs: LayoutSeg[],
+  maxWidth: number,
+  firstIndent: number,
+  scale: number,
   tabStops: TabStop[] = [],
   wrapCtx?: WrapLayoutCtx,
   fontFamilyClasses: Record<string, string> = {},
@@ -2886,7 +2909,59 @@ export function layoutLines(
   stretchLastLine = false,
   startBoundary?: LineBoundary,
   widthPolicy: 'bounded' | 'intrinsic' = 'bounded',
+  passContext?: Readonly<{
+    probeHeights: readonly number[] | null;
+    preparedFloatWrap?: PreparedFloatWrap;
+  }>,
 ): LayoutLine[] {
+  if (passContext === undefined) {
+    // Keep the pass inside the existing declaration: extracting this root
+    // implementation would widen the frozen migration boundary, while moving
+    // it under layout/ would reverse that layer's dependency direction. The
+    // public overload deliberately hides this pass-only context from .d.ts.
+    const runPass = (
+      probeHeights: readonly number[] | null,
+      preparedFloatWrap?: PreparedFloatWrap,
+    ): LayoutLine[] => (layoutLines as unknown as (
+      ...args: unknown[]
+    ) => LayoutLine[])(
+      ctx,
+      cloneSegmentsForLinePass(segs),
+      maxWidth,
+      firstIndent,
+      scale,
+      tabStops,
+      wrapCtx,
+      fontFamilyClasses,
+      tabOriginPx,
+      kinsoku,
+      gridDeltaPx,
+      defaultTabPt,
+      marginRightPx,
+      baseRtl,
+      isJustified,
+      stretchLastLine,
+      startBoundary,
+      widthPolicy,
+      { probeHeights, preparedFloatWrap },
+    );
+    if (!wrapCtx || widthPolicy === 'intrinsic') return runPass(null);
+    const preparedFloatWrap = wrapCtx.lineWindow
+      ? undefined
+      : prepareFloatWrap(wrapCtx.floats);
+    return convergeLineWrap(
+      (probeHeights) => runPass(probeHeights, preparedFloatWrap),
+      (line) => wrapCtx.lineBoxH(
+        line.ascent,
+        line.descent,
+        line.hasRuby,
+        line.intendedSingle,
+        line.eastAsian,
+        line.gridCountSingle,
+      ),
+    );
+  }
+  const { probeHeights, preparedFloatWrap } = passContext;
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
@@ -2917,8 +2992,8 @@ export function layoutLines(
   let lineXOffset = 0;
   let currentLineTopY = wrapCtx?.startPageY ?? 0;
 
-  // Minimum clear side-space (px) a CONTENT line needs before it may START beside
-  // a float rather than flow below the band. Word's measured rule is 1 inch
+  // Square-only compatibility side-space (px) a CONTENT line needs before it may
+  // START beside a square object rather than flow below its band. Word's measured rule is 1 inch
   // (wordMinLineStartPx(scale) — the 1-inch requirement less a one-twip rounding
   // tolerance), INDEPENDENT of a content line's text — the same threshold for a
   // short-token line and a long-word line (a first word that overruns the ≥1-inch
@@ -2939,7 +3014,8 @@ export function layoutLines(
   // gap and drops it below only for a full-width band. #676 over-generalized 1
   // inch onto marks and pushed following content to the next page. Inline
   // content (including a content paragraph's trailing-break final line) keeps
-  // the 1-inch rule.
+  // the square-only 1-inch rule. Tight/through are governed by their polygon
+  // openings (§20.4.2.18/.19), for which there is no corresponding evidence.
   const minLineStartWidth = (): number => wordMinLineStartPx(scale);
   const isParagraphMarkOnlyFlow = segs.length > 0 && segs.every((segment) =>
     ('text' in segment && segment.metricOnly === true)
@@ -2948,23 +3024,30 @@ export function layoutLines(
 
   // Compute wrap constraints for a new line about to start. Mutates
   // lineXOffset/lineMaxWidth/currentLineTopY. `minWidth` is the smallest clear
-  // side-space the upcoming line must have to START here (minLineStartWidth() —
-  // Word's 1-inch rule, §676); a free gap narrower than this is treated as
-  // unusable and the line is sent below the intervening float(s), which is how
-  // Word flows a line that cannot start beside a floating object (there is no
-  // ECMA-376 §x.x.x for this trigger — see resolveLineFloatWindow / issue #676).
+  // square side-space the upcoming line must have to START here. Polygon wraps
+  // receive MIN_LINE_GAP separately so the compatibility policy cannot erase a
+  // through opening explicitly permitted by §20.4.2.18.
   const startLine = (minWidth: number = 0): void => {
     lineBiasBudget = 0;
     lineXOffset = 0;
     lineMaxWidth = maxWidth;
     if (!wrapCtx) return;
-    // Small fixed probe height for float intersection (matches the historical
-    // wrap behaviour for the topAndBottom skip and horizontal-gap scan).
-    const probeH = 10 * scale;
+    const probeH = probeHeights?.[lines.length];
+    // The first pass measures this line without a float window. A later pass
+    // resolves it only once that exact line index has an observed line-box
+    // height; newly-created lines are likewise measured before they are probed.
+    if (probeH === undefined) return;
+    const reference = {
+      xLeftPt: wrapCtx.referenceXPt ?? wrapCtx.paraX,
+      xRightPt: (wrapCtx.referenceXPt ?? wrapCtx.paraX)
+        + (wrapCtx.referenceWidthPt ?? maxWidth),
+      readingDirection: wrapCtx.readingDirection ?? (baseRtl ? 'rtl' : 'ltr'),
+    } as const;
     if (wrapCtx.lineWindow) {
       const win = wrapCtx.lineWindow({
         topYPt: currentLineTopY,
-        minimumStartWidthPt: minWidth,
+        minimumStartWidthPt: MIN_LINE_GAP,
+        squareMinimumStartWidthPt: minWidth,
         probeHeightPt: probeH,
         paragraphXPt: wrapCtx.paraX,
         maximumWidthPt: maxWidth,
@@ -2975,9 +3058,17 @@ export function layoutLines(
       lineXOffset = win.xOffsetPt;
       lineMaxWidth = win.maximumWidthPt;
     } else {
-      const win = resolveLineFloatWindow(
-        currentLineTopY, minWidth, probeH, wrapCtx.paraX, maxWidth, wrapCtx.floats,
-        wrapCtx.columnXPt, wrapCtx.columnXPt + wrapCtx.columnWidthPt,
+      const win = computePreparedLineFloatWindow(
+        currentLineTopY,
+        MIN_LINE_GAP,
+        probeH,
+        wrapCtx.paraX,
+        maxWidth,
+        preparedFloatWrap ?? prepareFloatWrap(wrapCtx.floats),
+        wrapCtx.columnXPt,
+        wrapCtx.columnXPt + wrapCtx.columnWidthPt,
+        reference,
+        minWidth,
       );
       currentLineTopY = win.topY;
       lineXOffset = win.xOffset;

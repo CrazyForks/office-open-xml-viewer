@@ -12,6 +12,7 @@ import type {
   SectionProps,
 } from '../types.js';
 import { stableFingerprint } from './fingerprint.js';
+import { createLayoutServicesRuntimeView } from './runtime-state.js';
 import type { TextLayoutService, TextShapeRequest } from './text.js';
 import type {
   FlowBlockPlacement,
@@ -22,6 +23,7 @@ import type {
   TableLayoutInput,
   TableRowLayout,
 } from './types.js';
+import { measureTableCellBlockFlowHeightPt } from './table.js';
 
 function measuringContext(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -132,7 +134,7 @@ function countingServices(model: DocxDocumentModel): {
       return base.text.shape(request);
     },
   });
-  return { services: Object.freeze({ ...base, text }), finalAcquisitions: counts };
+  return { services: createLayoutServicesRuntimeView(base, { text }), finalAcquisitions: counts };
 }
 
 function retainedParagraph(
@@ -265,11 +267,8 @@ describe('retained table layout', () => {
     const services = createLayoutServices(model, { measureContext: measuringContext() });
 
     const result = layoutDocument(model, services);
-    const placed = result.pages.flatMap((page) => page.fragments)
-      .find((item) => item.fragment.kind === 'table');
-    const retained = placed?.fragment.kind === 'table' && 'flowBounds' in placed.fragment
-      ? placed.fragment
-      : undefined;
+    const retained = result.pages.flatMap((page) => page.layers.body)
+      .find((node): node is TableLayout => node.kind === 'table');
 
     expect(retained).toBeDefined();
     expect(retained?.rows[0]?.advancePt).toBe(12);
@@ -494,6 +493,106 @@ describe('retained table layout', () => {
       .toEqual({ xPt: 4, yPt: 18, widthPt: 46, heightPt: 12 });
     expect(layout.inkBounds)
       .toEqual({ xPt: 4, yPt: 18, widthPt: 46, heightPt: 12 });
+  });
+
+  it('uses only the retained layoutInCell extent to grow an automatic row', async () => {
+    const child = {
+      ...retainedParagraph('cell-anchor', [0, 0, 0], 10),
+      inkBounds: { xPt: -20, yPt: -20, widthPt: 200, heightPt: 200 },
+      cellContainmentBounds: { xPt: 0, yPt: 0, widthPt: 30, heightPt: 80 },
+    } as ParagraphLayout;
+    const input = tableInput([{
+      id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: null, heightRule: 'auto',
+      cells: [cellInput('cell-0', 0, [child])],
+    }], [40]);
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+
+    expect(measureTableCellBlockFlowHeightPt([{ layout: child, sourceBlockIndex: 0 }]))
+      .toBe(80);
+    expect(layout.rows[0]!.advancePt).toBe(80);
+    expect(layout.rows[0]!.cells[0]!.flowBounds.heightPt).toBe(80);
+  });
+
+  it('includes retained layoutInCell geometry in bottom cell alignment', async () => {
+    const child = {
+      ...retainedParagraph('bottom-cell-anchor', [0, 0, 0], 10),
+      cellContainmentBounds: { xPt: 0, yPt: 0, widthPt: 30, heightPt: 80 },
+    } as ParagraphLayout;
+    const input = tableInput([{
+      id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: null, heightRule: 'auto',
+      cells: [cellInput('cell-0', 0, [child], { vAlign: 'bottom' })],
+    }], [40]);
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+    const cell = layout.rows[0]!.cells[0]!;
+    const block = cell.blocks[0]!;
+    const placedContainmentBottomPt = cell.flowBounds.yPt
+      + block.offsetPt
+      + child.cellContainmentBounds!.yPt
+      + child.cellContainmentBounds!.heightPt
+      - child.flowBounds.yPt;
+
+    expect(placedContainmentBottomPt).toBeLessThanOrEqual(
+      cell.flowBounds.yPt + cell.flowBounds.heightPt,
+    );
+  });
+
+  it('grows and offsets a top-aligned cell for negative layoutInCell geometry', async () => {
+    const child = {
+      ...retainedParagraph('negative-top-cell-anchor', [0, 0, 0], 10),
+      cellContainmentBounds: { xPt: 0, yPt: -20, widthPt: 30, heightPt: 60 },
+    } as ParagraphLayout;
+    const input = tableInput([{
+      id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: null, heightRule: 'auto',
+      cells: [cellInput('cell-0', 0, [child], { vAlign: 'top' })],
+    }], [40]);
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+    const cell = layout.rows[0]!.cells[0]!;
+    const block = cell.blocks[0]!;
+    const placedContainmentTopPt = cell.flowBounds.yPt
+      + block.offsetPt
+      + child.cellContainmentBounds!.yPt
+      - child.flowBounds.yPt;
+    const placedContainmentBottomPt = placedContainmentTopPt
+      + child.cellContainmentBounds!.heightPt;
+
+    expect(cell.flowBounds.heightPt).toBe(60);
+    expect(placedContainmentTopPt).toBeGreaterThanOrEqual(cell.flowBounds.yPt);
+    expect(placedContainmentBottomPt).toBeLessThanOrEqual(
+      cell.flowBounds.yPt + cell.flowBounds.heightPt,
+    );
+  });
+
+  it('clips retained layoutInCell overflow instead of growing an exact row', async () => {
+    const child = {
+      ...retainedParagraph('exact-cell-anchor', [0, 0, 0], 10),
+      cellContainmentBounds: { xPt: 0, yPt: 0, widthPt: 30, heightPt: 80 },
+    } as ParagraphLayout;
+    const input = tableInput([{
+      id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: 20, heightRule: 'exact',
+      cells: [cellInput('cell-0', 0, [child])],
+    }], [40]);
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+    const cell = layout.rows[0]!.cells[0]!;
+
+    expect(layout.rows[0]!.advancePt).toBe(20);
+    expect(cell.flowBounds.heightPt).toBe(20);
+    expect(cell.clipBounds).toEqual({ xPt: 10, yPt: 20, widthPt: 100, heightPt: 20 });
   });
 
   it('retains no shared segment when a Word nil border suppresses its opponent', async () => {

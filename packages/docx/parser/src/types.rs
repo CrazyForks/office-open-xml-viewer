@@ -76,6 +76,11 @@ pub struct Document {
     /// (the renderer then uses spec defaults: kinsoku ON).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<DocumentSettings>,
+    #[serde(
+        rename = "__pageLayoutSettings",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_layout_settings: Option<PageLayoutSettingsWire>,
     /// RB7 partial degradation: set when `word/document.xml` — the body part —
     /// could not be read or parsed. The document still "opens" (so the viewer
     /// shows a placeholder page instead of throwing an opaque error) with an
@@ -85,6 +90,21 @@ pub struct Document {
     /// renderer paints a visible error placeholder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_error: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PageLayoutSettingsWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_margins: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gutter_at_top: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book_fold_printing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book_fold_rev_printing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub print_two_on_one: Option<bool>,
 }
 
 /// One embedded font-style slot from `word/fontTable.xml`. `style` is one of
@@ -427,6 +447,8 @@ pub struct SectionProps {
     /// `None` ⇒ "top" (the default; body flows from the top margin unchanged).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub v_align: Option<String>,
+    #[serde(rename = "__sectionPlacement", skip_serializing_if = "Option::is_none")]
+    pub section_placement: Option<Box<SectionPlacementWire>>,
 }
 
 /// ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration.
@@ -466,10 +488,50 @@ pub struct ColSpec {
 #[serde(rename_all = "camelCase")]
 pub struct SectionPlacementWire {
     pub section_id: String,
+    /// §17.6.1 `<w:bidi>` controls section-level presentation, including
+    /// newspaper-column population order, without changing paragraph bidi.
+    pub section_bidi: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub v_align: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_numbering: Option<LineNumbering>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_line_pitch: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_char_space: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gutter_pt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtl_gutter: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_borders_authored: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_borders: Option<PageBorders>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_geometry: Option<Box<SectionPageGeometryWire>>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPageGeometryWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_height: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_top: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_right: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_bottom: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_left: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_distance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footer_distance: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone)]

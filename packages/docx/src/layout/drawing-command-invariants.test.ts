@@ -4,6 +4,13 @@ import { assertDocumentLayout } from './invariants.js';
 
 function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout {
   const bounds = { xPt: 72, yPt: 72, widthPt: 100, heightPt: 50 };
+  const section: DocumentLayout['pages'][number]['section'] = {
+    geometry: { pageWidth: 612, pageHeight: 792, marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72, headerDistance: 36, footerDistance: 36 },
+    columns: [{ xPt: 72, wPt: 468 }],
+    columnSeparator: false,
+    grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
+    textDirection: 'lrTb', verticalAlignment: 'top',
+  };
   const drawing: DrawingLayout = {
     kind: 'drawing',
     id: 'shape-1',
@@ -27,9 +34,26 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
         logicalBounds: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
         physicalBounds: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
       }],
-      section: {} as DocumentLayout['pages'][number]['section'],
+      section,
+      sectionOccurrenceId: 'section:0',
+      parityBlank: false,
+      bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      columnSeparators: [],
+      sectionRegions: [{
+        id: 'region:0', sectionOccurrenceId: 'section:0',
+        coordinateSpace: {
+          writingMode: 'horizontal-tb',
+          logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          physicalToLogical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        },
+        blockStartPt: 72, blockEndPt: 720,
+        columnFlowDirection: 'ltr', columnIndexes: [0],
+        flowDomainIds: ['body'], section,
+      }],
+      pageBorders: null,
       layers: {
-        paintOrder: [{ layer: 'front', nodeId: drawing.id }],
+        paintSequence: [{ layer: 'front', node: drawing, coordinateSpace: 'section-logical' }],
         background: [], behindText: [], header: [], body: [], notes: [],
         front: [drawing], footer: [],
       },

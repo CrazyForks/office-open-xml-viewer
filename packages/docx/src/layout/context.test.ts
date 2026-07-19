@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { bodySectionIndexInput } from '../parser-model.js';
 import {
   createBodySectionIndex,
+  effectivePhysicalSectionGeometry,
   logicalSectionGeometry,
-  physicalSectionGeometry,
+  sectionPageBox,
   sectionBodyInsetPt,
-  sectionGeometry,
+  physicalSectionGeometry,
   type BodySectionOccurrence,
 } from './context.js';
 import type {
@@ -63,7 +64,7 @@ function marker(input: Readonly<{
   sectionId: string;
   kind: string;
   columns?: ColumnsSpec | null;
-  geom?: SectionGeom;
+  geom?: Partial<SectionGeom>;
   textDirection?: string | null;
   pageNumType?: PageNumType | null;
   headers?: HeadersFooters;
@@ -76,7 +77,7 @@ function marker(input: Readonly<{
     type: 'sectionBreak',
     kind: input.kind,
     columns: input.columns ?? null,
-    geom: input.geom,
+    geom: input.geom as SectionGeom | undefined,
     textDirection: input.textDirection ?? null,
     pageNumType: input.pageNumType ?? null,
     headers: input.headers,
@@ -228,11 +229,11 @@ describe('pre-indexed body section ownership', () => {
     });
   });
 
-  it('uses the final physical page geometry when a non-final sectPr inherits its page box', () => {
+  it('inherits omitted page geometry backward only for a continuous section', () => {
     const finalGeometry = geometry({ pageWidth: 700, marginLeft: 54 });
     const doc = document([
       paragraph('inherited'),
-      marker({ sectionId: 'section:0', kind: 'nextPage' }),
+      marker({ sectionId: 'section:0', kind: 'continuous' }),
       paragraph('final'),
     ], finalGeometry);
 
@@ -242,6 +243,35 @@ describe('pre-indexed body section ownership', () => {
     expect(index.occurrences[0]?.headers).toEqual(EMPTY_HF);
     expect(index.occurrences[0]?.footers).toEqual(EMPTY_HF);
     expect(index.occurrences[0]?.titlePage).toBe(false);
+  });
+
+  it('inherits the following page box for omitted non-continuous geometry', () => {
+    const doc = document([
+      paragraph('defaulted'),
+      marker({ sectionId: 'section:0', kind: 'nextPage' }),
+      paragraph('final'),
+    ], geometry({ pageWidth: 700, marginLeft: 54 }));
+
+    expect(createBodySectionIndex(bodySectionIndexInput(doc)).occurrences[0]?.geometry)
+      .toEqual(geometry({ pageWidth: 700, marginLeft: 54 }));
+  });
+
+  it('preserves authored fields and inherits omitted fields for a non-continuous section', () => {
+    const doc = document([
+      paragraph('partially authored'),
+      marker({
+        sectionId: 'section:0',
+        kind: 'nextPage',
+        geom: { pageWidth: 660, marginTop: -24 },
+      }),
+      paragraph('final'),
+    ], geometry({ pageWidth: 700, marginTop: 48, marginLeft: 54 }));
+
+    expect(createBodySectionIndex(bodySectionIndexInput(doc)).occurrences[0]?.geometry).toEqual({
+      pageWidth: 660, pageHeight: 792,
+      marginTop: -24, marginRight: 72, marginBottom: 72, marginLeft: 54,
+      headerDistance: 36, footerDistance: 36,
+    });
   });
 
   it('serves lookups from the built index without rescanning a subsequently changed body', () => {
@@ -262,6 +292,58 @@ describe('pre-indexed body section ownership', () => {
 });
 
 describe('section geometry coordinate boundary', () => {
+  const pagePolicy = (
+    overrides: Partial<Parameters<typeof effectivePhysicalSectionGeometry>[0]> = {},
+  ): Parameters<typeof effectivePhysicalSectionGeometry>[0] => ({
+    physicalGeometry: geometry({ pageWidth: 792, pageHeight: 612 }),
+    columns: null,
+    textDirection: 'lrTb',
+    gutterPt: 18,
+    rtlGutter: false,
+    mirrorMargins: false,
+    gutterAtTop: false,
+    bookFoldPrinting: false,
+    bookFoldRevPrinting: false,
+    printTwoOnOne: false,
+    ...overrides,
+  });
+
+  it.each([
+    ['book fold', { bookFoldPrinting: true }, {
+      pageWidth: 396, pageHeight: 612, marginRight: 90, marginTop: 72,
+    }],
+    ['reverse book fold', { bookFoldRevPrinting: true }, {
+      pageWidth: 396, pageHeight: 612, marginRight: 90, marginTop: 72,
+    }],
+    ['two-on-one', { printTwoOnOne: true }, {
+      pageWidth: 792, pageHeight: 306, marginRight: 72, marginTop: 90,
+    }],
+  ] as const)(
+    'applies the authored gutter to the automatic %s imposition edge',
+    (_label, settings, expected) => {
+      expect(effectivePhysicalSectionGeometry(pagePolicy(settings), 0))
+        .toMatchObject(expected);
+    },
+  );
+
+  it.each([
+    ['left edge', {}, 0, { marginTop: 72, marginRight: 72, marginLeft: 90 }],
+    ['right edge', { rtlGutter: true }, 0, { marginTop: 72, marginRight: 90, marginLeft: 72 }],
+    ['top edge', { gutterAtTop: true }, 0, { marginTop: 90, marginRight: 72, marginLeft: 72 }],
+    ['first mirrored edge', { mirrorMargins: true }, 0, {
+      marginTop: 72, marginRight: 72, marginLeft: 90,
+    }],
+    ['second mirrored edge', { mirrorMargins: true }, 1, {
+      marginTop: 72, marginRight: 90, marginLeft: 72,
+    }],
+  ] as const)(
+    'places the authored gutter on the %s',
+    (_label, settings, pageIndex, expected) => {
+      expect(effectivePhysicalSectionGeometry(pagePolicy(settings), pageIndex))
+        .toMatchObject(expected);
+    },
+  );
+
   it('round-trips a physical page box through the vertical logical frame', () => {
     const physical = geometry({
       pageWidth: 612,
@@ -278,7 +360,7 @@ describe('section geometry coordinate boundary', () => {
   it('projects only page-box facts and preserves signed-margin body distance', () => {
     const props = document([], { marginTop: -36, marginBottom: -54 }).section;
 
-    expect(sectionGeometry(props)).toEqual(geometry({ marginTop: -36, marginBottom: -54 }));
+    expect(sectionPageBox(props)).toEqual(geometry({ marginTop: -36, marginBottom: -54 }));
     expect(sectionBodyInsetPt(props.marginTop)).toBe(36);
     expect(sectionBodyInsetPt(props.marginBottom)).toBe(54);
   });

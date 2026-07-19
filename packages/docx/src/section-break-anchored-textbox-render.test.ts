@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { computePages, renderDocumentToCanvas } from './renderer.js';
+import { renderDocumentToCanvas } from './renderer.js';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -119,19 +120,25 @@ describe('anchored text box on a section-mark paragraph', () => {
     const body: BodyElement[] = [
       ...Array.from({ length: 4 }, () => ({ type: 'paragraph', ...para() }) as BodyElement),
       sectionMarkParagraph,
-      { type: 'sectionBreak', kind: 'nextPage', columns: null } as BodyElement,
+      {
+        type: 'sectionBreak', kind: 'nextPage', columns: null,
+        geom: {
+          pageWidth: 200, pageHeight: 140,
+          marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+          headerDistance: 0, footerDistance: 0,
+        },
+      } as BodyElement,
       { type: 'paragraph', ...para() } as BodyElement,
     ];
     const { canvas, fillTexts } = makeRecordingCanvas();
     const model = documentModel(body);
     const context = canvas.getContext('2d') as CanvasRenderingContext2D;
-    const pages = computePages(body, model.section, context, model.fontFamilyClasses);
+    const layout = layoutBodyModel(body, model.section, context, model.fontFamilyClasses);
 
-    expect(pages).toHaveLength(3);
+    expect(layout.pages).toHaveLength(3);
     await renderDocumentToCanvas(model, canvas, 1, {
       dpr: 1,
       width: 200,
-      prebuiltPages: pages,
     });
 
     expect(fillTexts.map((event) => event.text).join('')).toContain('Divider title');
@@ -145,7 +152,6 @@ describe('anchored text box on a section-mark paragraph', () => {
       await renderDocumentToCanvas(model, other.canvas, otherPage, {
         dpr: 1,
         width: 200,
-        prebuiltPages: pages,
       });
       expect(other.fillTexts.map((event) => event.text).join('')).not.toContain('Divider title');
     }

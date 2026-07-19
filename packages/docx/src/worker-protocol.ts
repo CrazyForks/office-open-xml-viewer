@@ -10,8 +10,8 @@ export interface DocumentMeta {
   footnotes: DocNote[];
   endnotes: DocNote[];
   /** ECMA-376 §17.6.13 / §17.6.11 — per-page page size (pt), one entry per page,
-   *  index-aligned with `pageCount`. Built worker-side from the paginated pages'
-   *  `sectionGeom` so the main thread can lay out (e.g. a scroll viewer's spacer)
+   *  index-aligned with `pageCount`. Built worker-side from canonical page geometry
+   *  so the main thread can lay out (e.g. a scroll viewer's spacer)
    *  without the full model. Genuinely per-page for a mixed-geometry document. */
   pageSizes: { widthPt: number; heightPt: number }[];
   /** ECMA-376 §17.13.6.2 — `bookmarkName → 0-based page index` for internal

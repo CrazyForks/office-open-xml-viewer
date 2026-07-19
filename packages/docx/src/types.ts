@@ -232,9 +232,8 @@ export interface LineNumbering {
  *  geometry: page size + margins + header/footer distances (pt). Mirrors the Rust
  *  `SectionGeom`. Carried on a {@link BodyElement} `sectionBreak` arm (`geom`) so a
  *  mid-body section keeps its own page size; the FINAL section's geometry lives on
- *  {@link DocxDocumentModel.section}. Also stamped per {@link PaginatedBodyElement}
- *  (`sectionGeom`) by the paginator so the renderer sizes each page from its own
- *  section. `orient` is omitted — Word swaps w/h for landscape, so verbatim w/h
+ *  {@link DocxDocumentModel.section}. Canonical layout retains the resolved page
+ *  box on each physical page. `orient` is omitted — Word swaps w/h for landscape, so verbatim w/h
  *  already give the correct dims.
  *
  *  ⚠ Spread over the body-level {@link SectionProps} in `renderDocumentToCanvas`
@@ -406,106 +405,6 @@ export type BodyElement =
       textDirection?: string | null;
     };
 
-/** A BodyElement annotated with a line range to render. Set when the
- *  paginator splits a paragraph that doesn't fit on a single page —
- *  `lineSlice` constrains which laid-out line indices the renderer paints,
- *  and the renderer adjusts the starting Y so the slice's first line begins
- *  at the page's content top. `colIndex` records which newspaper column (0-based)
- *  the element was placed in (ECMA-376 §17.6.4); absent / 0 for single-column
- *  sections. */
-export type PaginatedBodyElement = BodyElement & {
-  lineSlice?: {
-    start: number;
-    end: number;
-    /** §17.6.4 remainder re-wrap: indices refer to the slice's OWN re-measured
-     *  partition, and `continues` marks that this partition is a paragraph
-     *  continuation even though `start === 0`. */
-    continues?: boolean;
-  };
-  /** An empty paragraph that carries a section break (an inkless paragraph
-   *  immediately followed by a `sectionBreak` element) has its spacing-BEFORE
-   *  suppressed — Word/LibreOffice render it flush below the preceding paragraph.
-   *  Stamped by the paginator because the paint pass receives per-page element
-   *  lists with the `sectionBreak` marker already consumed, so it cannot re-detect
-   *  the adjacency itself. Runtime-only — never emitted by the parser. See
-   *  `isSectionBreakSpacerAt` in renderer.ts. */
-  sectionBreakSpacer?: boolean;
-  /** A section-break spacer (see `sectionBreakSpacer`) that ALSO carries no
-   *  space-before of its own: Word renders no paragraph-mark line box for it at
-   *  a CONTINUOUS section break — the section mark collapses to zero height
-   *  rather than occupying a blank line. (A spacer WITH a space-before keeps its
-   *  line box; the before manifests as the blank line.) Stamped by the paginator
-   *  and skipped by both the fill and paint passes so they stay in lockstep. See
-   *  `isCollapsedContinuousSpacer` in renderer.ts. Runtime-only. */
-  collapsedSpacer?: boolean;
-  /** An inkless paragraph that immediately precedes a `collapsedSpacer`: it begins
-   *  the section-break empty run, which Word renders flush below the preceding
-   *  content, so the PREVIOUS paragraph's space-after is also dropped. Stamped by the
-   *  paginator (which sees the full body) and read by the paint pass, because the
-   *  collapsed spacer it looks ahead to can land on the next page's element list — so
-   *  paint cannot re-derive the adjacency from its per-page slice. Runtime-only. See
-   *  `leadsCollapsedRun` in renderer.ts. */
-  leadsCollapsedRun?: boolean;
-  /** ECMA-376 §17.3.1.29 + §17.3.2.41 — a fully-hidden paragraph (inkless AND its
-   *  mark is vanished) that the paginator collapsed to zero height. Stamped so the
-   *  paint pass skips it in lockstep, exactly like `collapsedSpacer`. Runtime-only.
-   *  See `isFullyHiddenParagraph` in renderer.ts. */
-  hiddenCollapsed?: boolean;
-  colIndex?: number;
-  /** ECMA-376 §17.6.4 — the column geometry of the SECTION this element belongs
-   *  to (per-section newspaper columns). Stamped by the paginator so the renderer
-   *  resolves `colIndex` against the right section's columns even when two
-   *  sections share a page (a "continuous" section break). Absent ⇒ the renderer
-   *  uses the page-level `columns` it was given (single-section / header / footer
-   *  paths), so single-section documents are unaffected. Runtime-only — never
-   *  emitted by the parser. */
-  colGeom?: ColumnGeom[];
-  /** ECMA-376 §17.6.4 — page-absolute Y (pt) of the TOP of the multi-column
-   *  region this element belongs to on its page. For a section started by a
-   *  "continuous" section break (§17.18.79) the columns begin partway down the
-   *  page (below the preceding single-column content), not at the page content
-   *  top; the paginator computes that origin once (front-loaded layout) and
-   *  stamps it so the renderer resets a column's vertical cursor to the REGION
-   *  top — never the page top. Also carries the region's bottom (max column
-   *  depth) onto the FIRST element of the following section so it clears all
-   *  columns. Absent ⇒ the renderer uses the page content top (single-column /
-   *  page-spanning section). Runtime-only — never emitted by the parser. */
-  colTopPt?: number;
-  /** ECMA-376 §17.10.1 — the resolved header/footer set + `<w:titlePg>` flag of
-   *  the SECTION this element belongs to. Stamped by the paginator (from the
-   *  upcoming `SectionBreak` marker, or the body-level section for the final
-   *  section) so the renderer picks the active section's header/footer per page —
-   *  mirroring how `colGeom` resolves per-section columns. Absent ⇒ the renderer
-   *  falls back to the body-level `doc.headers`/`doc.footers`/`section.titlePage`.
-   *  Runtime-only — never emitted by the parser. */
-  sectionHF?: { headers: HeadersFooters; footers: HeadersFooters; titlePage: boolean };
-  /** ECMA-376 §17.6.13 / §17.6.11 — the page geometry (size + margins) of the
-   *  SECTION this element belongs to. Stamped by the paginator (from the upcoming
-   *  `SectionBreak`'s `geom`, or the body-level section for the final section) so the
-   *  renderer sizes each page from its own section — mirroring how `sectionHF`
-   *  resolves per-section headers/footers and `colGeom` per-section columns. Absent ⇒
-   *  the renderer uses the body-level `doc.section` geometry (single-section docs are
-   *  unaffected). Runtime-only — never emitted by the parser. */
-  sectionGeom?: SectionGeom;
-  /** ECMA-376 §17.6.12 `<w:pgNumType>` — the page-numbering settings (start / fmt)
-   *  of the SECTION this element belongs to. Stamped by the paginator (from the
-   *  upcoming `SectionBreak`'s `pageNumType`, or the body-level section) so
-   *  `computePageNumbering` resolves each physical page's DISPLAYED number and
-   *  format. `null` ⇒ the section has no `<w:pgNumType>` (numbering continues;
-   *  decimal). Runtime-only — never emitted by the parser. */
-  sectionPageNumType?: PageNumType | null;
-  /** ECMA-376 §17.6.20 — the flow direction of the SECTION this element belongs
-   *  to (same enum as {@link SectionProps.textDirection}; `null` ⇒ horizontal).
-   *  Stamped by the paginator (from the upcoming `SectionBreak`'s
-   *  `textDirection`, or the body-level section) IN LOCKSTEP with `sectionGeom`:
-   *  when this is a vertical value the stamped `sectionGeom` is that section's
-   *  SWAPPED LOGICAL geometry (see `verticalLayoutSection`), and the renderer
-   *  rotates the page +90° at paint (issue #1000 per-section mixing). Kept as a
-   *  SIBLING of `sectionGeom` — `SectionGeom` stays pure page-box geometry
-   *  mirroring the Rust struct. Absent (undefined) ⇒ legacy pages fall back to
-   *  the body-level `doc.section.textDirection`. Runtime-only. */
-  sectionTextDirection?: string | null;
-};
 
 export interface DocParagraph {
   /**
@@ -1602,7 +1501,17 @@ export type WorkerResponse =
   | { type: 'parsed'; id: number; documentJson: ArrayBuffer }
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'markdownRendered'; id: number; markdown: string }
-  | { type: 'error'; id: number; message: string };
+  | {
+      type: 'error';
+      id: number;
+      message: string;
+      errorName?: string;
+      code?: string;
+      reason?: string;
+      outgoingColumnIndex?: number;
+      outgoingColumnCount?: number;
+      incomingColumnCount?: number;
+    };
 
 // ===== Public API types =====
 

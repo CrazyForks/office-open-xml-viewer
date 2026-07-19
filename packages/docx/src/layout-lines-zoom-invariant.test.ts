@@ -1,9 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import {
-  renderDocumentToCanvas,
-  paginateDocument,
-  bodyFragmentFor,
-} from './renderer.js';
+import { createLayoutServices, layoutDocument, renderDocumentToCanvas } from './renderer.js';
+import type { DocumentLayout, LayoutServices } from './layout/types.js';
 import { layoutLines, type LayoutSeg } from './line-layout.js';
 import { stableFingerprint } from './layout/fingerprint.js';
 import type {
@@ -15,8 +12,7 @@ import type {
   DocTableRow,
   DocxDocumentModel,
   SectionProps,
-  PaginatedBodyElement,
-} from './types';
+  } from './types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 4-1 B2 Stage 2 — ZOOM-INVARIANT line breaking.
@@ -234,14 +230,24 @@ function linePartition(draws: Draw[]): string[] {
 
 /** Render every page of `model` at `width` (⇒ paint scale = width/pageWidth) and
  *  return the concatenated per-line text partition across all pages. */
-async function partitionAtWidth(model: DocxDocumentModel, pages: PaginatedBodyElement[][], width: number): Promise<string[]> {
+async function partitionAtWidth(
+  model: DocxDocumentModel,
+  layout: DocumentLayout,
+  services: LayoutServices,
+  width: number,
+): Promise<string[]> {
   const all: string[] = [];
-  for (let p = 0; p < pages.length; p++) {
+  for (let p = 0; p < layout.pages.length; p++) {
     const rec = makeRecordingCanvas();
-    await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, width, prebuiltPages: pages });
+    await renderDocumentToCanvas(model, rec.canvas, p, { dpr: 1, width, layoutServices: services });
     all.push(...linePartition(rec.draws));
   }
   return all;
+}
+
+function canonical(model: DocxDocumentModel) {
+  const services = createLayoutServices(model);
+  return { services, layout: layoutDocument(model, services, { currentDateMs: 0 }) };
 }
 
 describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
@@ -251,11 +257,11 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     // differently, but the scale-1 stamp reuse pins the partition.
     const text = Array.from({ length: 160 }, (_, i) => `w${i % 10}`).join(' ');
     const model = doc([para(text) as unknown as BodyElement]);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1); // actually split
+    const { layout, services } = canonical(model);
+    expect(layout.pages.length).toBeGreaterThan(1); // actually split
 
-    const at1 = await partitionAtWidth(model, pages, 200);       // scale 1.0
-    const at075 = await partitionAtWidth(model, pages, 150);      // scale 0.75
+    const at1 = await partitionAtWidth(model, layout, services, 200);       // scale 1.0
+    const at075 = await partitionAtWidth(model, layout, services, 150);      // scale 0.75
     expect(at075).toEqual(at1);
     // Non-vacuous: the paragraph really wrapped to multiple lines.
     expect(at1.length).toBeGreaterThan(3);
@@ -264,10 +270,10 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
   it('CJK per-glyph wrap: same partition at scale 1 and scale 0.5', async () => {
     const text = 'あ'.repeat(240);
     const model = doc([para(text) as unknown as BodyElement]);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
-    const at1 = await partitionAtWidth(model, pages, 200);   // scale 1.0
-    const at05 = await partitionAtWidth(model, pages, 100);  // scale 0.5
+    const { layout, services } = canonical(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+    const at1 = await partitionAtWidth(model, layout, services, 200);   // scale 1.0
+    const at05 = await partitionAtWidth(model, layout, services, 100);  // scale 0.5
     expect(at05).toEqual(at1);
   });
 
@@ -284,18 +290,18 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
       },
     });
     const model = doc([p as unknown as BodyElement]);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
+    const { layout, services } = canonical(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
 
     const paintScale = 0.5;
     const runBoxes: { x: number; w: number; font: string; fontSize: number }[] = [];
     const glyphDraws: Draw[] = [];
-    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+    for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex++) {
       const rec = makeRecordingCanvas();
       await renderDocumentToCanvas(model, rec.canvas, pageIndex, {
         dpr: 1,
         width: model.section.pageWidth * paintScale,
-        prebuiltPages: pages,
+        layoutServices: services,
         onTextRun: ({ x, w, font, fontSize }) => runBoxes.push({ x, w, font, fontSize }),
       });
       glyphDraws.push(...rec.draws);
@@ -318,18 +324,18 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     const model = doc([
       oneCellTable(para('あ'.repeat(240), { alignment: 'justify' })),
     ], 600);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(0);
+    const { layout, services } = canonical(model);
+    expect(layout.pages.length).toBeGreaterThan(0);
 
     const paintScale = 0.5;
     const glyphDraws: Draw[] = [];
     const runRights: number[] = [];
-    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+    for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex++) {
       const rec = makeRecordingCanvas();
       await renderDocumentToCanvas(model, rec.canvas, pageIndex, {
         dpr: 1,
         width: model.section.pageWidth * paintScale,
-        prebuiltPages: pages,
+        layoutServices: services,
         onTextRun: ({ x, w }) => runRights.push(x + w),
       });
       glyphDraws.push(...rec.draws);
@@ -364,25 +370,26 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     }],
   ])('paints retained %s geometry only through the device transform', async (_name, makeParagraph) => {
     const model = doc([makeParagraph() as unknown as BodyElement], 600);
-    const pages = paginateDocument(model);
-    const fingerprint = stableFingerprint('retained-zoom', bodyFragmentFor(pages[0][0]));
+    const { layout, services } = canonical(model);
+    const retained = layout.pages[0].layers.body[0];
+    const fingerprint = stableFingerprint('retained-zoom', retained);
 
     const point = makeRecordingCanvas();
     await renderDocumentToCanvas(model, point.canvas, 0, {
       dpr: 1,
       width: model.section.pageWidth,
-      prebuiltPages: pages,
+      layoutServices: services,
     });
     const device = makeRecordingCanvas();
     await renderDocumentToCanvas(model, device.canvas, 0, {
       dpr: 1,
       width: model.section.pageWidth * 0.5,
-      prebuiltPages: pages,
+      layoutServices: services,
     });
 
     expect(point.measures()).toBe(0);
     expect(device.measures()).toBe(0);
-    expect(stableFingerprint('retained-zoom', bodyFragmentFor(pages[0][0]))).toBe(fingerprint);
+    expect(stableFingerprint('retained-zoom', retained)).toBe(fingerprint);
     const pointBody = point.draws.find((draw) => draw.text === 'body');
     const deviceBody = device.draws.find((draw) => draw.text === 'body');
     expect(pointBody).toBeDefined();
@@ -434,15 +441,15 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
       widthPt: 50, heightPt: 40, anchor: true, anchorXPt: 30, anchorYPt: 20,
     } as unknown as DocParagraph['runs'][number]);
     const model = doc([p as unknown as BodyElement]);
-    const pages = paginateDocument(model);
-    expect(pages.length).toBeGreaterThan(1);
+    const { layout, services } = canonical(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
 
     const collect = async (width: number): Promise<{ partition: string[]; firstX: number[] }> => {
       const partition: string[] = [];
       const firstX: number[] = [];
-      for (let pg = 0; pg < pages.length; pg++) {
+      for (let pg = 0; pg < layout.pages.length; pg++) {
         const rec = makeRecordingCanvas();
-        await renderDocumentToCanvas(model, rec.canvas, pg, { dpr: 1, width, prebuiltPages: pages });
+        await renderDocumentToCanvas(model, rec.canvas, pg, { dpr: 1, width, layoutServices: services });
         const byLine = new Map<number, Draw[]>();
         for (const d of rec.draws) {
           const key = Math.round(d.y * 100) / 100;

@@ -63,6 +63,9 @@ export interface CanvasPaintResourcePainter {
   ): void;
 }
 
+export type DeferredCanvasPaint = () => void;
+export type DeferredCanvasPaintWrapper = (paint: DeferredCanvasPaint) => DeferredCanvasPaint;
+
 export interface CanvasPaintContext {
   readonly ctx: PaintCanvas2D;
   readonly scale: number;
@@ -77,15 +80,22 @@ export interface CanvasPaintContext {
    */
   readonly pointToCss?: Matrix2DData;
   readonly onTextRun?: (run: TextRunPaintInfo) => void;
-  readonly textRunTransform?: Readonly<{
-    translateXPt: number;
-    translateYPt: number;
-    scale: number;
-  }>;
   readonly layoutTranslationPt?: Readonly<{ xPt: number; yPt: number }>;
   readonly textBoxVerticalMode?: 'vert' | 'vert270' | 'eaVert' | 'mongolianVert';
+  /** Internal A6 traversal phase. Discovery walks retained placement and clip
+   * frames without emitting ordinary table or paragraph ink. */
+  readonly bodyDrawingPass?: 'normal' | 'discover-behind';
+  /** Re-enters every Canvas frame owned by the recursive painter at the point
+   * where a drawing was encountered. */
+  readonly deferredPaintWrapper?: DeferredCanvasPaintWrapper;
+  readonly deferBehindDrawing?: (
+    drawing: DrawingLayout,
+    textBoxes: readonly TextBoxLayout[],
+    paint: () => void,
+  ) => boolean;
   readonly deferFrontDrawing?: (
     drawing: DrawingLayout,
     textBoxes: readonly TextBoxLayout[],
+    paint: () => void,
   ) => boolean;
 }
