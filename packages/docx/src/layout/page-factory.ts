@@ -401,18 +401,14 @@ export function derivePageBookmarkStarts(
     const sectionOccurrenceId = sectionByDomain.get(node.flowDomainId)
       ?? defaultSectionOccurrenceId;
     visitBookmarkParagraphs(node, (paragraph) => {
-      for (const line of paragraph.lines) {
-        for (const placement of line.placements) {
-          if (placement.kind !== 'text' || !placement.bookmark || seen.has(placement.bookmark)) {
-            continue;
-          }
-          seen.add(placement.bookmark);
-          starts.push({
-            name: placement.bookmark,
-            nodeId: paragraph.id,
-            sectionOccurrenceId,
-          });
-        }
+      for (const bookmark of paragraph.bookmarkStarts ?? []) {
+        if (!bookmark || seen.has(bookmark)) continue;
+        seen.add(bookmark);
+        starts.push({
+          name: bookmark,
+          nodeId: paragraph.id,
+          sectionOccurrenceId,
+        });
       }
     });
   }

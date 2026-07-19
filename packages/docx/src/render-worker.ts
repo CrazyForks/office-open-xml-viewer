@@ -215,6 +215,30 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       return;
     }
   } catch (err) {
-    post({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
+    const error = err instanceof Error ? err : new Error(String(err));
+    const details = error as Error & {
+      code?: string;
+      reason?: string;
+      outgoingColumnIndex?: number;
+      outgoingColumnCount?: number;
+      incomingColumnCount?: number;
+    };
+    post({
+      type: 'error',
+      id,
+      message: error.message,
+      errorName: error.name,
+      ...(details.code !== undefined ? { code: details.code } : {}),
+      ...(details.reason !== undefined ? { reason: details.reason } : {}),
+      ...(details.outgoingColumnIndex !== undefined
+        ? { outgoingColumnIndex: details.outgoingColumnIndex }
+        : {}),
+      ...(details.outgoingColumnCount !== undefined
+        ? { outgoingColumnCount: details.outgoingColumnCount }
+        : {}),
+      ...(details.incomingColumnCount !== undefined
+        ? { incomingColumnCount: details.incomingColumnCount }
+        : {}),
+    });
   }
 };

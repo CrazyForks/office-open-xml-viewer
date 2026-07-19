@@ -3137,6 +3137,27 @@ function parseBaselineJson(contents, detail) {
   }
 }
 
+function assertUniqueJsonObjectKeys(contents, detail) {
+  const source = ts.parseJsonText(detail, contents);
+  const visit = (node) => {
+    if (ts.isObjectLiteralExpression(node)) {
+      const keys = new Set();
+      for (const property of node.properties) {
+        const name = property.name;
+        const key = name && (ts.isStringLiteralLike(name) || ts.isIdentifier(name))
+          ? name.text
+          : null;
+        if (key !== null && keys.has(key)) {
+          fail('INVALID_BASELINE', `${detail}: duplicate key ${key}`);
+        }
+        if (key !== null) keys.add(key);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+}
+
 function assertValidBaseline(value, detail) {
   if (value === null
     || typeof value !== 'object'
@@ -3158,7 +3179,9 @@ function assertValidBaseline(value, detail) {
 }
 
 function readBaseline(path) {
-  return assertValidBaseline(parseBaselineJson(readFileSync(path, 'utf8'), path), path);
+  const contents = readFileSync(path, 'utf8');
+  assertUniqueJsonObjectKeys(contents, path);
+  return assertValidBaseline(parseBaselineJson(contents, path), path);
 }
 
 function git(root, args, allowFailure = false) {

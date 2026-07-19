@@ -33,8 +33,7 @@ describe('buildBookmarkPageMap', () => {
   });
 
   it('resolves a name repeated across pages to the FIRST (earliest) page', () => {
-    // A paragraph split across a page break carries its bookmark on both slices;
-    // the destination is where the paragraph begins.
+    // Malformed/duplicated document names still resolve in document order.
     const pages = layout([['dup'], ['dup']]);
     expect(buildBookmarkPageMap(pages).get('dup')).toBe(0);
   });

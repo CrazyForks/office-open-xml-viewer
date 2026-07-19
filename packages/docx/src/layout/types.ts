@@ -373,7 +373,6 @@ export interface TextPlacement {
   )[];
   readonly decorations: readonly TextDecorationLayout[];
   readonly hyperlink?: string;
-  readonly bookmark?: string;
 }
 
 export interface TabPlacement {
@@ -565,6 +564,12 @@ export interface ParagraphSpacingLayout {
 export interface ParagraphLayout extends LayoutNodeBase {
   readonly kind: 'paragraph';
   readonly styleId?: string | null;
+  /**
+   * ECMA-376 §17.13.6.2 bookmark starts owned by this retained paragraph
+   * fragment. The parser currently preserves paragraph ownership rather than
+   * an inline character offset, so only the first page slice carries them.
+   */
+  readonly bookmarkStarts?: readonly string[];
   readonly spacing: ParagraphSpacingLayout;
   readonly contextualSpacing: boolean;
   readonly lines: readonly LineLayout[];
@@ -875,6 +880,7 @@ export interface DocumentLayout {
 
 export type CompatibilityEvidence =
   | Readonly<{ kind: 'microsoft-note'; reference: string }>
+  | Readonly<{ kind: 'regression-test'; reference: string }>
   | Readonly<{
       kind: 'office-observation';
       syntheticFixtureId: string;
@@ -923,6 +929,7 @@ export interface AcquiredParagraphLayoutInput {
   readonly flowDomainId: string;
   readonly ordinaryFlow: boolean;
   readonly styleId?: string | null;
+  readonly bookmarkStarts?: readonly string[];
   readonly flowBounds: LayoutRect;
   readonly inkBounds: LayoutRect;
   readonly clipBounds?: LayoutRect;

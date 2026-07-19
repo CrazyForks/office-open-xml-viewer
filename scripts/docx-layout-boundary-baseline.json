@@ -298,7 +298,6 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#isInklessParagraph",
     "packages/docx/src/renderer.ts#FunctionDeclaration#isPageLevelAnchorY",
     "packages/docx/src/renderer.ts#FunctionDeclaration#isPageLevelWrapFloat",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#isSectionBreakSpacerAt",
     "packages/docx/src/renderer.ts#FunctionDeclaration#isVerticalSection",
     "packages/docx/src/renderer.ts#FunctionDeclaration#isVerticalTextDirection",
     "packages/docx/src/renderer.ts#FunctionDeclaration#kashidaLevelOf",
@@ -527,7 +526,6 @@
   "legacyDeclarationHashes": {
     "packages/docx/src/renderer.ts#FunctionDeclaration#calculateRowHeight": "899e2db0661581eaf474fce3293e735adfd523b9135279e396673e6d9547ce9e",
     "packages/docx/src/renderer.ts#FunctionDeclaration#computeTableLayout": "a9a97f7e6291560ebe8d579a301595b26f8e3410f9ea95e8da09acccc611d2a8",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellContentHeightPx": "257321eaf2b84f55c851bd44eaf9e4c4ec326e87e874f87d91265464368e26fb",
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellContentHeightPx": "257321eaf2b84f55c851bd44eaf9e4c4ec326e87e874f87d91265464368e26fb"
   },
   "rendererImportEdges": [

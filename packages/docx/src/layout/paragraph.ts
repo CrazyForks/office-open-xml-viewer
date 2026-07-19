@@ -734,6 +734,9 @@ export function layoutParagraph(input: AcquiredParagraphLayoutInput): ParagraphL
     flowDomainId: input.flowDomainId,
     ordinaryFlow: input.ordinaryFlow,
     ...(input.styleId !== undefined ? { styleId: input.styleId } : {}),
+    ...(input.bookmarkStarts?.length
+      ? { bookmarkStarts: input.bookmarkStarts }
+      : {}),
     flowBounds: { ...input.flowBounds, heightPt: advancePt },
     inkBounds: input.inkBounds,
     ...(input.clipBounds ? { clipBounds: input.clipBounds } : {}),
@@ -3107,6 +3110,9 @@ export function paragraphLayoutFromMeasurement(
     kind: 'paragraph', id: options.id, source: options.source,
     flowDomainId: options.flowDomainId, ordinaryFlow: options.ordinaryFlow,
     ...(paragraph.styleId !== undefined ? { styleId: paragraph.styleId } : {}),
+    ...(!options.continuesFromPrevious && paragraph.bookmarks?.length
+      ? { bookmarkStarts: paragraph.bookmarks }
+      : {}),
     flowBounds: {
       xPt: options.placement.paragraphXPt, yPt: options.placement.startYPt,
       widthPt: options.placement.availableWidthPt,
@@ -3304,9 +3310,16 @@ export function sliceParagraphLayout(
     stableFingerprint('source-occurrence', drawing.source)));
   const lineRangeStart = first?.range.start;
   const lineRangeEnd = last?.range.end;
+  const {
+    bookmarkStarts: acquiredBookmarkStarts,
+    ...acquiredWithoutBookmarkStarts
+  } = acquired;
   return layoutParagraph({
-    ...acquired,
+    ...acquiredWithoutBookmarkStarts,
     kind: 'paragraph', id,
+    ...(!continuation.continuesFromPrevious && acquiredBookmarkStarts?.length
+      ? { bookmarkStarts: acquiredBookmarkStarts }
+      : {}),
     lines: rebasedLines,
     flowBounds: {
       ...acquired.flowBounds,

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,8 +92,12 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       fontSize: number;
     };
 
-    // Render every page and collect its runs, exactly as DocxViewer does.
-    async function collectAllPages(): Promise<{ pages: Run[][]; controller: unknown }> {
+    // Render every page and collect its runs, exactly as DocxViewer does. Keep
+    // the immutable recording for both assertions: rebuilding the complete
+    // retained document twice made these behavior-identical tests contend with
+    // the rest of the full-suite workers. Preparing the real DOCX in beforeAll
+    // also keeps suite setup out of Vitest's shorter per-test timeout.
+    async function collectAllPages(): Promise<Run[][]> {
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
         const { parseDocx } = docxMod!;
@@ -119,14 +123,24 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
           });
           perPage.push(runs);
         }
-        return { pages: perPage, controller: null };
+        return perPage;
       } finally {
         restore.forEach((r) => r());
       }
     }
 
+    let collectedPages: Run[][] | null = null;
+    beforeAll(async () => {
+      collectedPages = await collectAllPages();
+    }, 30_000);
+
+    function pages(): Run[][] {
+      if (!collectedPages) throw new Error('DOCX run fixture was not prepared');
+      return collectedPages;
+    }
+
     it('finds a known word and reports its page + original-case text', async () => {
-      const { pages } = await collectAllPages();
+      const recordedPages = pages();
       const { DocxFindController } = findMod as {
         DocxFindController: new (
           count: () => number,
@@ -138,8 +152,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
         };
       };
       const controller = new DocxFindController(
-        () => pages.length,
-        (p) => Promise.resolve(pages[p] ?? []),
+        () => recordedPages.length,
+        (p) => Promise.resolve(recordedPages[p] ?? []),
       );
 
       // "Cathedral" appears in the demo's feature headline.
@@ -148,7 +162,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       // Case-insensitive match, but the reported text is the document's case.
       expect(matches[0].text.toLowerCase()).toBe('cathedral');
       expect(matches[0].location.page).toBeGreaterThanOrEqual(0);
-      expect(matches[0].location.page).toBeLessThan(pages.length);
+      expect(matches[0].location.page).toBeLessThan(recordedPages.length);
 
       // Activate the first match; its page must carry a highlight marked active.
       controller.next();
@@ -157,7 +171,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
     });
 
     it('places the highlight box on the drawn glyph run (real skia measure)', async () => {
-      const { pages } = await collectAllPages();
+      const recordedPages = pages();
       const { DocxFindController } = findMod as {
         DocxFindController: new (
           count: () => number,
@@ -179,12 +193,12 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
         ) => void;
       };
       const controller = new DocxFindController(
-        () => pages.length,
-        (p) => Promise.resolve(pages[p] ?? []),
+        () => recordedPages.length,
+        (p) => Promise.resolve(recordedPages[p] ?? []),
       );
       const matches = await controller.find('cathedral');
       const page = matches[0].location.page;
-      const runs = pages[page];
+      const runs = recordedPages[page];
       const highlights = controller.pageHighlights(page);
 
       // Real skia measurer, primed per font (same as the viewer's _measureForFont).

@@ -15,7 +15,7 @@ import {
   type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
-import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, createLayoutServices, layoutDocument, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, createLayoutServices, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
@@ -26,7 +26,6 @@ import {
   layoutVariantStoreOf,
 } from './layout/runtime-state.js';
 import type { DeepReadonly, DocumentLayout } from './layout/types.js';
-import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
 import type {
   DocumentMeta,
   RenderWorkerRequest,
@@ -34,6 +33,7 @@ import type {
   WireRenderPageOptions,
 } from './worker-protocol';
 import { normalizeInternalDocumentModel } from './parser-model.js';
+import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
@@ -108,7 +108,23 @@ export class DocxDocument {
     attachDocumentLayoutRuntime(this, defaultCurrentDateMs);
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
       correlate: (res) => res.id,
-      toError: (res) => (res.type === 'error' ? res.message : undefined),
+      toError: (res) => {
+        if (res.type !== 'error') return undefined;
+        return Object.assign(new Error(res.message), {
+          name: res.errorName ?? 'Error',
+          ...(res.code !== undefined ? { code: res.code } : {}),
+          ...(res.reason !== undefined ? { reason: res.reason } : {}),
+          ...(res.outgoingColumnIndex !== undefined
+            ? { outgoingColumnIndex: res.outgoingColumnIndex }
+            : {}),
+          ...(res.outgoingColumnCount !== undefined
+            ? { outgoingColumnCount: res.outgoingColumnCount }
+            : {}),
+          ...(res.incomingColumnCount !== undefined
+            ? { incomingColumnCount: res.incomingColumnCount }
+            : {}),
+        });
+      },
     });
     // Default: the parser WASM emitted next to this bundle, resolved relative to
     // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
@@ -145,65 +161,72 @@ export class DocxDocument {
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
     const doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
-    if (opts.math && mode === 'worker') {
-      console.warn(
-        "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+    try {
+      if (opts.math && mode === 'worker') {
+        console.warn(
+          "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+        );
+      }
+      // In worker mode the worker preloads fonts before paginating (pagination
+      // measures text), so the flag is forwarded; in main mode fonts are loaded
+      // here after parse, before the lazy first pagination.
+      await doc._parse(
+        buffer,
+        opts.maxZipEntryBytes,
+        mode === 'worker' ? !!opts.useGoogleFonts : false,
+        opts.workerTimeoutMs,
       );
+      if (mode === 'main' && opts.useGoogleFonts && doc._document) {
+        doc._googleFontFaces = await preloadGoogleFonts(
+          docxFontPreloadNames(doc._document),
+          DOCX_GOOGLE_FONTS,
+        );
+      }
+      // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
+      // the worker's zip-entry extraction) before the lazy first pagination, so
+      // text measures/draws with the authored typeface. Worker mode does this
+      // inside the worker (before it paginates); here it runs on the main thread.
+      if (mode === 'main' && doc._document?.embeddedFonts?.length) {
+        doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
+      }
+      let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
+      if (mode === 'main' && doc._document) {
+        localMetrics = await loadDocxLocalFontMetrics(doc._document);
+        doc._localMetricFontFaces = localMetrics.faces;
+      }
+      // Equations are converted + rasterized before pagination (which reads their
+      // extents synchronously). Requires the opt-in `math` engine; without it,
+      // equations are skipped (and the engine asset is never bundled). Math is
+      // main-mode only (the engine needs a DOM, absent in workers).
+      let preparedMath;
+      if (mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
+        preparedMath = await prepareMathRuns(doc._document, opts.math);
+      }
+      if (mode === 'main' && doc._document) {
+        const runtime = documentLayoutRuntimeOf(doc);
+        runtime.services = createLayoutServices(doc._document, {
+          localMetrics: localMetrics?.metrics,
+          useGoogleFonts: !!opts.useGoogleFonts,
+          embeddedFaces: doc._embeddedFontFaces,
+          googleFaces: doc._googleFontFaces,
+          mathResources: preparedMath?.records,
+          mathDrawables: preparedMath?.drawables,
+        });
+        const services = runtime.services;
+        const retained = retainRenderWorkerDocumentLayout(
+          doc._document,
+          services,
+          runtime.defaultCurrentDateMs,
+        );
+        // Worker mode must build this layout to return parsedMeta. Main mode does
+        // the same work here so layout failures reject load() in both modes.
+        retained.layoutVariants.defaultLayout;
+      }
+      return doc;
+    } catch (error) {
+      doc.destroy();
+      throw error;
     }
-    // In worker mode the worker preloads fonts before paginating (pagination
-    // measures text), so the flag is forwarded; in main mode fonts are loaded
-    // here after parse, before the lazy first pagination.
-    await doc._parse(
-      buffer,
-      opts.maxZipEntryBytes,
-      mode === 'worker' ? !!opts.useGoogleFonts : false,
-      opts.workerTimeoutMs,
-    );
-    if (mode === 'main' && opts.useGoogleFonts && doc._document) {
-      doc._googleFontFaces = await preloadGoogleFonts(
-        docxFontPreloadNames(doc._document),
-        DOCX_GOOGLE_FONTS,
-      );
-    }
-    // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
-    // the worker's zip-entry extraction) before the lazy first pagination, so
-    // text measures/draws with the authored typeface. Worker mode does this
-    // inside the worker (before it paginates); here it runs on the main thread.
-    if (mode === 'main' && doc._document?.embeddedFonts?.length) {
-      doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
-    }
-    let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
-    if (mode === 'main' && doc._document) {
-      localMetrics = await loadDocxLocalFontMetrics(doc._document);
-      doc._localMetricFontFaces = localMetrics.faces;
-    }
-    // Equations are converted + rasterized before pagination (which reads their
-    // extents synchronously). Requires the opt-in `math` engine; without it,
-    // equations are skipped (and the engine asset is never bundled). Math is
-    // main-mode only (the engine needs a DOM, absent in workers).
-    let preparedMath;
-    if (mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
-      preparedMath = await prepareMathRuns(doc._document, opts.math);
-    }
-    if (mode === 'main' && doc._document) {
-      const runtime = documentLayoutRuntimeOf(doc);
-      runtime.services = createLayoutServices(doc._document, {
-        localMetrics: localMetrics?.metrics,
-        useGoogleFonts: !!opts.useGoogleFonts,
-        embeddedFaces: doc._embeddedFontFaces,
-        googleFaces: doc._googleFontFaces,
-        mathResources: preparedMath?.records,
-        mathDrawables: preparedMath?.drawables,
-      });
-      const services = runtime.services;
-      attachDocumentLayoutVariants({
-        model: doc._document,
-        services,
-        defaultCurrentDateMs: runtime.defaultCurrentDateMs,
-        buildLayout: (options) => layoutDocument(doc._document!, services, options),
-      });
-    }
-    return doc;
   }
 
   private async _parse(

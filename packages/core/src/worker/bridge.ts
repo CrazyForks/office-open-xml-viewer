@@ -47,10 +47,10 @@ export interface WorkerBridgeOptions<TRes> {
    */
   readonly correlate: (response: TRes) => number | undefined;
   /**
-   * Extract an error message from a response, or `undefined` when the response
-   * is a success. When defined, the matching request rejects with `Error(msg)`.
+   * Extract an error message or reconstructed Error from a response, or
+   * `undefined` when the response is a success.
    */
-  readonly toError?: (response: TRes) => string | undefined;
+  readonly toError?: (response: TRes) => string | Error | undefined;
   /** Called for every message that does not correlate to a pending request. */
   readonly onUnsolicited?: (response: TRes) => void;
   /**
@@ -119,7 +119,7 @@ export class WorkerBridge<TRes = unknown> {
     this._pending.delete(id);
     cb.cleanup();
     const err = this._opts.toError?.(res);
-    if (err !== undefined) cb.reject(new Error(err));
+    if (err !== undefined) cb.reject(err instanceof Error ? err : new Error(err));
     else cb.resolve(res);
   };
 

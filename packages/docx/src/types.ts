@@ -1501,7 +1501,17 @@ export type WorkerResponse =
   | { type: 'parsed'; id: number; documentJson: ArrayBuffer }
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'markdownRendered'; id: number; markdown: string }
-  | { type: 'error'; id: number; message: string };
+  | {
+      type: 'error';
+      id: number;
+      message: string;
+      errorName?: string;
+      code?: string;
+      reason?: string;
+      outgoingColumnIndex?: number;
+      outgoingColumnCount?: number;
+      incomingColumnCount?: number;
+    };
 
 // ===== Public API types =====
 

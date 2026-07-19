@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createPageFlowSectionContext,
+  sectionContentStartBlockPt,
   type PageFlowSectionContext,
 } from './context.js';
 import {
@@ -775,7 +776,7 @@ describe('immutable DOCX page-flow transitions', () => {
     });
   });
 
-  it('rejects nextColumn when the outgoing column has no same-page successor', () => {
+  it('advances nextColumn to the next page when the outgoing column has no same-page successor', () => {
     const outgoing = section('section-0', {
       columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
     });
@@ -789,18 +790,56 @@ describe('immutable DOCX page-flow transitions', () => {
       deepestColumnBlockPt: 400,
     });
 
-    expect(() => beginSection(initial, incoming, 'nextColumn'))
-      .toThrowError(UnsupportedPageFlowTransitionError);
-    try {
-      beginSection(initial, incoming, 'nextColumn');
-    } catch (error) {
-      expect(error).toMatchObject({
-        code: 'NEXT_COLUMN_DESTINATION_UNAVAILABLE',
-        outgoingColumnIndex: 1,
-        outgoingColumnCount: 2,
-        incomingColumnCount: 2,
-      });
-    }
+    const result = beginSection(initial, incoming, 'nextColumn');
+
+    expect(result.state).toMatchObject({
+      pageIndex: 3,
+      columnIndex: 0,
+      pageHasContent: false,
+      section: incoming,
+    });
+    expect(result.events).toEqual([
+      {
+        type: 'next-page',
+        reason: 'section-break',
+        pageIndex: 3,
+        sectionOccurrenceId: 'section-1',
+        parityBlank: false,
+      },
+      { type: 'begin-section', section: incoming },
+    ]);
+  });
+
+  it('advances a single-column nextColumn to the incoming page geometry', () => {
+    const outgoing = section('section-0');
+    const incoming = section('section-1', {
+      pageWidth: 792,
+      pageHeight: 612,
+      marginTop: 54,
+      marginBottom: 54,
+      textDirection: 'tbRl',
+      grid: { kind: 'lines', linePitchPt: 14, charSpacePt: null },
+    });
+    const initial = createPageFlowState(outgoing, {
+      pageIndex: 0,
+      cursorBlockPt: 360,
+      deepestColumnBlockPt: 400,
+    });
+
+    const result = beginSection(initial, incoming, 'nextColumn');
+
+    expect(result.state).toMatchObject({
+      pageIndex: 1,
+      columnIndex: 0,
+      section: incoming,
+    });
+    expect(result.state.pageContentStartBlockPt).toBe(
+      sectionContentStartBlockPt(incoming),
+    );
+    expect(result.events.map(({ type }) => type)).toEqual([
+      'next-page',
+      'begin-section',
+    ]);
   });
 
   it('rejects nextColumn when the incoming section lacks the same-page successor index', () => {

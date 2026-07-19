@@ -365,7 +365,7 @@ describe('render worker canonical layout parity', () => {
     expect([mainBuilds, workerBuilds]).toEqual([2, 1]);
   });
 
-  it('keeps worker request and response protocol shapes unchanged', () => {
+  it('pins worker request and response protocol shapes including structured failures', () => {
     const parse = {
       type: 'parse', id: 1, data: new ArrayBuffer(0), useGoogleFonts: false,
       defaultCurrentDateMs: 10,
@@ -386,6 +386,15 @@ describe('render worker canonical layout parity', () => {
     const runsCollected = {
       type: 'runsCollected', id: 3, runs: [],
     } satisfies RenderWorkerResponse;
+    const error = {
+      type: 'error', id: 4, message: 'unsupported transition',
+      errorName: 'UnsupportedPageFlowTransitionError',
+      code: 'NEXT_COLUMN_DESTINATION_UNAVAILABLE',
+      reason: 'physical-column',
+      outgoingColumnIndex: 0,
+      outgoingColumnCount: 3,
+      incomingColumnCount: 1,
+    } satisfies RenderWorkerResponse;
 
     expect(Object.keys(parse).sort()).toEqual([
       'data', 'defaultCurrentDateMs', 'id', 'type', 'useGoogleFonts',
@@ -395,5 +404,16 @@ describe('render worker canonical layout parity', () => {
     expect(Object.keys(parsed).sort()).toEqual(['id', 'meta', 'type']);
     expect(Object.keys(pageRendered).sort()).toEqual(['bitmap', 'id', 'runs', 'type']);
     expect(Object.keys(runsCollected).sort()).toEqual(['id', 'runs', 'type']);
+    expect(Object.keys(error).sort()).toEqual([
+      'code',
+      'errorName',
+      'id',
+      'incomingColumnCount',
+      'message',
+      'outgoingColumnCount',
+      'outgoingColumnIndex',
+      'reason',
+      'type',
+    ]);
   });
 });

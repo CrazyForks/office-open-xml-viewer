@@ -24,7 +24,8 @@ export function writingModeFromTextDirection(textDirection: string): WritingMode
     case 'tbRlV':
       return 'vertical-rl';
     case 'btLr':
-      // Compatibility rule `word-section-btlr-tbrl-page-frame`; glyph orientation is paint-owned.
+      // Compatibility rule `word-section-btlr-tbrl-page-frame`; the evidence
+      // resolves to the table-driven coordinate-space regression test.
       return 'vertical-rl';
     case 'lr':
     case 'lrV':

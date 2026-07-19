@@ -103,6 +103,7 @@ function bookmarkParagraph(
     inkBounds: bounds,
     advancePt: bounds.heightPt,
     ordinaryFlow: true,
+    bookmarkStarts: [bookmark],
     spacing: { beforePt: 0, afterPt: 0 },
     contextualSpacing: false,
     lines: [{
@@ -130,7 +131,6 @@ function bookmarkParagraph(
         fontStyle: 'normal',
         direction: 'ltr',
         decorations: [],
-        bookmark,
       }],
     }],
     borders: [],

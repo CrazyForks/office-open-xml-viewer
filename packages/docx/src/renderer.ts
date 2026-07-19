@@ -105,7 +105,6 @@ import {
   registerTableFloat,
   floatTableWrapSide,
   resolveFloatingTableBoxPt,
-  resolveFloatingTablePlacement,
 } from './float-table-geometry.js';
 import {
   xContainer,
@@ -147,7 +146,6 @@ import type {
   Matrix2DData,
   DrawingMLCollisionEntryPt,
   ParagraphLayout,
-  ResolvedFloatingTablePlacementLayout,
   SourceRef,
   TableLayout,
   TableLayoutInput,
@@ -174,7 +172,6 @@ import {
 } from './paint/canvas-page.js';
 import { canonicalCanvasPaintResourceHandlers } from './paint/canonical-resource-handlers.js';
 import { paintPlacedParagraphLayout, paintPlacedTextBoxLayout, paintTextBoxLayout } from './paint/canvas-text.js';
-import { paintPlacedTableLayout } from './paint/canvas-table.js';
 import { paintDrawingLayout } from './paint/canvas-drawing.js';
 import type { CanvasPaintResourcePainter } from './paint/types.js';
 import { createDocumentPaintResourceRegistry } from './layout/production-paint-resources.js';
@@ -842,13 +839,6 @@ export interface RenderState extends DeferredFrontPaintState {
   layoutServices?: LayoutServices;
   /** Per-render opaque retained resource session adapter. */
   retainedResourcePainter?: CanvasPaintResourcePainter;
-  /** Renderer-owned retained table adapter, threaded through nested cell states. */
-  retainedTablePainter?: (fragment: TableLayout, state: RenderState) => void;
-  retainedNestedTableResolver?: (
-    fragment: TableLayout,
-    placement: Readonly<{ xPt: number; yPt: number }>,
-    state: RenderState,
-  ) => readonly ResolvedFloatingTablePlacementLayout[];
   /** Renderer authorities injected into the pure recursive table acquisition. */
   retainedTableAcquisition?: RetainedTableAcquisitionDependencies<RenderState>;
   /** Each body occurrence owns its acquisition and pagination context for this
@@ -1978,111 +1968,6 @@ async function renderDocumentToCanvasLeased(
     resolvedLocalFonts,
     layoutServices,
     retainedResourcePainter,
-    retainedNestedTableResolver: (fragment, placement, state) => {
-      if (!fragment.floatingTables) return Object.freeze([]);
-      const tableFragment = fragment;
-      if (tableFragment.resolvedFloatingTableCoordinateSpace === 'upright-physical-page-points') {
-        throw new Error('Upright physical table fragments require the upright paint boundary');
-      }
-      const retained = tableFragment.resolvedFloatingTables ?? [];
-      const retainedIds = new Set(retained.map((item) => item.occurrenceId));
-      const occurrences = (tableFragment.floatingTables ?? []).filter(
-        (occurrence) => !retainedIds.has(occurrence.occurrenceId),
-      );
-      const pageWidthPt = state.pageWidth;
-      const pageHeightPt = state.pageH / state.scale;
-      const marginLeftPt = state.marginLeft;
-      const marginRightPt = state.marginRight;
-      const marginTopPt = state.marginTop;
-      const marginBottomPt = state.marginBottom;
-      const dxPt = placement.xPt - fragment.flowBounds.xPt;
-      const dyPt = placement.yPt - fragment.flowBounds.yPt;
-      return Object.freeze([...retained, ...occurrences.map((occurrence) => (
-        resolveFloatingTablePlacement(occurrence, {
-          page: { xPt: 0, yPt: 0, widthPt: pageWidthPt, heightPt: pageHeightPt },
-          margin: {
-            xPt: marginLeftPt,
-            yPt: marginTopPt,
-            widthPt: Math.max(0, pageWidthPt - marginLeftPt - marginRightPt),
-            heightPt: Math.max(0, pageHeightPt - marginTopPt - marginBottomPt),
-          },
-          text: {
-            xPt: occurrence.anchorBounds.xPt + dxPt,
-            yPt: occurrence.anchorBounds.yPt + dyPt,
-            widthPt: occurrence.anchorBounds.widthPt,
-            heightPt: occurrence.anchorBounds.heightPt,
-          },
-        })
-      ))]);
-    },
-    retainedTablePainter: (fragment, state) => {
-      const resources = state.retainedResourcePainter;
-      if (!resources) throw new Error('Retained table paint requires a resource painter');
-      if (state.verticalPhys) {
-        const cssWidthPx = state.verticalPhys.cssWidthPx;
-        const tableWidthPt = fragment.columnWidthsPt.reduce((sum, width) => sum + width, 0);
-        const physicalLeftPt = (cssWidthPx - state.y) / state.scale - tableWidthPt;
-        const physicalTopPt = state.contentX / state.scale;
-        const tableFragment = fragment.resolvedFloatingTables ? fragment : null;
-        if ((tableFragment?.floatingTables?.length ?? 0) > 0) {
-          throw new Error('Upright nested floats must resolve before retained paint');
-        }
-        if ((tableFragment?.resolvedFloatingTables?.length ?? 0) > 0
-          && tableFragment?.resolvedFloatingTableCoordinateSpace !== 'upright-physical-page-points') {
-          throw new Error('Upright nested float coordinate-space mismatch');
-        }
-        const floatingTables = tableFragment?.resolvedFloatingTables ?? [];
-        const { ctx } = state;
-        ctx.save();
-        try {
-          // The page owns the +90° vertical-flow transform. An upright table
-          // re-enters the physical page frame while retaining its horizontal
-          // cell layout; only this renderer boundary performs the inverse turn.
-          ctx.rotate(-Math.PI / 2);
-          ctx.translate(-cssWidthPx, 0);
-          paintPlacedTableLayout(fragment, {
-            // TableLayout already resolves `jc`, signed `tblInd`, and
-            // `bidiVisual` into flowBounds.xPt. Apply that shared origin once at
-            // placement; the renderer must not reproduce the alignment rules.
-            xPt: physicalLeftPt + fragment.flowBounds.xPt,
-            yPt: physicalTopPt + fragment.flowBounds.yPt,
-          }, {
-            ctx,
-            scale: state.scale,
-            dpr: state.dpr,
-            defaultTextColor: state.defaultColor,
-            showTrackChanges: state.showTrackChanges,
-            resources,
-            pointToCss: { a: state.scale, b: 0, c: 0, d: state.scale, e: 0, f: 0 },
-            onTextRun: state.onTextRun,
-          }, floatingTables);
-        } finally {
-          ctx.restore();
-        }
-        state.y += tableWidthPt * state.scale;
-        return;
-      }
-      const placement = {
-        xPt: state.contentX / state.scale + fragment.flowBounds.xPt,
-        yPt: state.y / state.scale + fragment.flowBounds.yPt,
-      };
-      const floatingTables = state.retainedNestedTableResolver?.(
-        fragment,
-        placement,
-        state,
-      ) ?? [];
-      paintPlacedTableLayout(fragment, placement, {
-        ctx: state.ctx,
-        scale: state.scale,
-        dpr: state.dpr,
-        defaultTextColor: state.defaultColor,
-        showTrackChanges: state.showTrackChanges,
-        resources,
-        pointToCss: state.pointToCss,
-        onTextRun: state.onTextRun,
-      }, floatingTables);
-      state.y += fragment.advancePt * state.scale;
-    },
     kinsoku,
     // §17.15.1.25 — automatic tab interval, resolved once and threaded like
     // `kinsoku` so the measure and draw passes agree.
@@ -4951,47 +4836,6 @@ function isAnchorOnlyParagraph(p: DocParagraph): boolean {
 
 function hasInlineImage(p: DocParagraph): boolean {
   return (p.runs ?? []).some((r) => r.type === 'image' && !(r as unknown as ImageRun).anchor);
-}
-
-/**
- * Whether `body[i]` is an empty paragraph that carries a SECTION BREAK — an
- * inkless paragraph immediately followed by a `sectionBreak` element. (The parser
- * emits a sectPr-bearing paragraph as a `Paragraph` followed by a `SectionBreak`,
- * so the spacer paragraph and its break are adjacent siblings.)
- *
- * This adjacency is the structural test; the CALLER additionally gates on the
- * break being CONTINUOUS (isContinuousSectionSpacer) — that is the measured
- * trigger. When it holds, the spacer's spacing-BEFORE is suppressed: it sits
- * flush below the preceding paragraph (a section transition, not normal flow).
- *
- * NOTE — this matches Microsoft WORD's observed layout, NOT a spec rule. ECMA-376
- * §17.3.1.33 would apply the `before` normally (a consumer takes
- * `max(prev.after, this.before)`), and no clause — nor any [MS-DOC] /
- * [MS-OI29500] note — suppresses it for a section-break or empty paragraph
- * (verified independently). The model is reconstructed from Word's OWN output:
- *   - sample-13 has two empty `mSectionBreak` paragraphs (each `w:before="440"`,
- *     22pt) before a continuous 2-column break. Measuring the Word PDF
- *     (pdftotext -bbox), Word keeps BOTH empty line boxes but renders them flush
- *     — i.e. it drops exactly ONE 22pt `before` — so "1. INTRODUCTION" sits at
- *     64.4pt below "Keywords" instead of our pre-fix 87.3pt.
- *   - Ablation against Word's output pinned the trigger: removing the section
- *     break removes the suppression; putting text in the spacer removes it;
- *     changing the spacer's style does NOT (same-style is irrelevant); 1-col vs
- *     2-col does NOT (column count is irrelevant). So: an EMPTY paragraph at a
- *     CONTINUOUS section boundary, with only its own `before` dropped.
- * So we drop ONLY the spacer's own `before` and keep both line boxes — Word's
- * decomposition. (LibreOffice independently suppresses here too — corroborating
- * that this is real, undocumented Word-compat behaviour, tdf#166503 — but via a
- * DIFFERENT mechanism that collapses a whole paragraph (~33.5pt); we deliberately
- * do NOT follow its amount, only Word's measured −22pt.) Revisit and cite if a
- * primary source ever surfaces.
- */
-function isSectionBreakSpacerAt(body: ArrayLike<{ type?: string }>, i: number): boolean {
-  const el = body[i] as { type?: string } | undefined;
-  if (!el || el.type !== 'paragraph') return false;
-  const next = body[i + 1] as { type?: string } | undefined;
-  if (next?.type !== 'sectionBreak') return false;
-  return isInklessParagraph(el as unknown as DocParagraph);
 }
 
 /**

@@ -188,7 +188,7 @@ describe('layoutParagraph', () => {
   });
 
   it('charges spacing once and rebases only continuation line geometry', () => {
-    const acquired = input();
+    const acquired = input({ bookmarkStarts: ['destination'] });
     const whole = layoutParagraph(acquired);
     const first = sliceParagraphLayout(whole, {
       lineStart: 0, lineEnd: 1, continuesFromPrevious: false, continuesOnNext: true,
@@ -203,6 +203,8 @@ describe('layoutParagraph', () => {
     expect(first.lines[0]).toBe(whole.lines[0]);
     expect(second.lines[0]).not.toBe(whole.lines[1]);
     expect(second.lines[0]?.bounds.yPt).toBe(whole.flowBounds.yPt);
+    expect(first.bookmarkStarts).toEqual(['destination']);
+    expect(second.bookmarkStarts).toBeUndefined();
     expect(Object.isFrozen(whole)).toBe(true);
     expect(Object.isFrozen(whole.lines)).toBe(true);
   });

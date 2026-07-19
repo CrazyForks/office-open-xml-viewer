@@ -1,42 +1,70 @@
-import type { BodyLayoutInput } from './body-layout-input.js';
+import type {
+  BodyLayoutInput,
+  BodyParagraphSourceInput,
+} from './body-layout-input.js';
 import { defineCompatibilityRule } from './compatibility.js';
 import type { ParagraphLayout } from './types.js';
 
 export const WORD_TERMINAL_COLUMN_BREAK = defineCompatibilityRule({
   id: 'word-terminal-column-break',
   evidence: {
-    kind: 'office-observation',
-    syntheticFixtureId: 'pagination-terminal-column-break',
-    application: 'Microsoft Word',
-    version: 'not recorded',
-    platform: 'not recorded',
+    kind: 'regression-test',
+    reference: 'packages/docx/src/pagination.test.ts#ignores a terminal last-column break before a hard page boundary',
   },
-  description: 'Word does not materialize a column transition when no body flow content occurs before the next forced page or non-continuous section boundary.',
+  description: 'The established pagination regression contract does not materialize a column transition when no body flow content occurs before the next forced page or non-continuous section boundary.',
 });
 
 export const WORD_PRE_BREAK_ANCHOR_PARAGRAPH = defineCompatibilityRule({
   id: 'word-pre-break-anchor-paragraph',
   evidence: {
-    kind: 'office-observation',
-    syntheticFixtureId: 'pagination-pre-break-anchor-paragraph',
-    application: 'Microsoft Word',
-    version: 'not recorded',
-    platform: 'not recorded',
+    kind: 'regression-test',
+    reference: 'packages/docx/src/pagination.test.ts#does not push an anchor-only pre-break paragraph to a new page just for its empty mark',
   },
-  description: 'Word keeps an anchor-only paragraph immediately before an authored page break in the pre-break flow region without charging its otherwise visible paragraph mark.',
+  description: 'The established pagination regression contract keeps an anchor-only paragraph immediately before an authored page break in the pre-break flow region without charging its otherwise visible paragraph mark.',
 });
 
 export const WORD_PRE_BREAK_INLINE_DRAWING_GROUP = defineCompatibilityRule({
   id: 'word-pre-break-inline-drawing-group',
   evidence: {
-    kind: 'office-observation',
-    syntheticFixtureId: 'pagination-pre-break-inline-drawing-group',
-    application: 'Microsoft Word',
-    version: 'not recorded',
-    platform: 'not recorded',
+    kind: 'regression-test',
+    reference: 'packages/docx/src/pagination.test.ts#moves a preceding image with its pre-break callout when the pair only fits fresh',
   },
-  description: 'Word relocates a preceding inline DrawingML resource with an immediately following host-owned anchor paragraph before an authored page break when the pair fits only in a fresh flow region.',
+  description: 'The established pagination regression contract relocates a preceding inline DrawingML resource with an immediately following host-owned anchor paragraph before an authored page break when the pair fits only in a fresh flow region.',
 });
+
+export const WORD_CONTINUOUS_SECTION_MARK_SPACING = defineCompatibilityRule({
+  id: 'word-continuous-section-mark-spacing',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/body-layout-input.test.ts#projects mutually exclusive collapsed-mark and drop-previous-after roles',
+  },
+  description: 'The retained body input projects the established continuous-section empty-mark spacing behavior into one mutually exclusive role before pagination.',
+});
+
+/** Compatibility projection governed by {@link WORD_CONTINUOUS_SECTION_MARK_SPACING}. */
+export function wordContinuousSectionRole(
+  sequence: BodyLayoutInput['sequence'],
+  index: number,
+): BodyParagraphSourceInput['continuousSectionRole'] {
+  const entry = sequence[index];
+  if (entry?.kind !== 'body-block' || entry.block.kind !== 'paragraph') return undefined;
+  const next = sequence[index + 1];
+  const afterNext = sequence[index + 2];
+  const suppressBefore = entry.block.inkless === true
+    && next?.kind === 'begin-section'
+    && next.section.startType === 'continuous';
+  if (suppressBefore && entry.block.spaceBeforePt === 0) return 'collapse-mark';
+  if (suppressBefore) return 'suppress-before';
+  return entry.block.inkless === true
+    && next?.kind === 'body-block'
+    && next.block.kind === 'paragraph'
+    && next.block.inkless === true
+    && next.block.spaceBeforePt === 0
+    && afterNext?.kind === 'begin-section'
+    && afterNext.section.startType === 'continuous'
+    ? 'drop-previous-after'
+    : undefined;
+}
 
 function paragraphHasOnlyDrawingAnchors(layout: ParagraphLayout): boolean {
   return layout.drawings.length > 0 && layout.lines.every((line) =>

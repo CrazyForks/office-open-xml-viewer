@@ -163,10 +163,10 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
     expect(pages[2].section.geometry.pageHeight).toBe(200);
   });
 
-  // §17.6.22 gives following-section inheritance only to continuous breaks.
-  // A next-page section with omitted pgSz/pgMar therefore uses the ECMA defaults;
-  // the document-level sectPr still owns the final section's authored page box.
-  it('uses defaults for omitted non-continuous geometry without changing the final section', () => {
+  // pgSz/pgMar are optional children with no normative Letter/one-inch default.
+  // Preserve the document page box for omitted fields without changing the
+  // final section's authored occurrence.
+  it('inherits omitted non-continuous geometry without changing the final section', () => {
     const geom1: SectionGeom = {
       pageWidth: 300, pageHeight: 400,
       marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
@@ -181,7 +181,7 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
       para('S1'),
       { type: 'sectionBreak', kind: 'nextPage', geom: geom1 } as BodyElement,
       para('S2'),
-      // No `geom`: this non-continuous section uses the page-box defaults.
+      // No `geom`: this section retains the following document page box.
       { type: 'sectionBreak', kind: 'nextPage' } as BodyElement,
       para('S3'),
     ];
@@ -195,15 +195,51 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
     // S1: section ending at break1 ⇒ break1's geom.
     expect(pages[0].section.geometry.pageWidth).toBe(300);
     expect(pages[0].section.geometry.pageHeight).toBe(400);
-    // S2: section ending at break2, which has NO geom ⇒ ECMA defaults.
-    expect(pages[1].section.geometry.pageWidth).toBe(612);
-    expect(pages[1].section.geometry.pageHeight).toBe(792);
+    // S2: section ending at break2, which has NO geom ⇒ following page box.
+    expect(pages[1].section.geometry.pageWidth).toBe(140);
+    expect(pages[1].section.geometry.pageHeight).toBe(200);
     // S3: final section ⇒ body-level geometry.
     expect(pages[2].section.geometry.pageWidth).toBe(140);
     expect(pages[2].section.geometry.pageHeight).toBe(200);
   });
 
-  it('does not inherit omitted non-continuous geometry across an incoming continuous boundary', () => {
+  it('does not chain an omitted non-continuous page box through an authored intermediate section', () => {
+    const intermediate: SectionGeom = {
+      pageWidth: 300, pageHeight: 400,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 0, footerDistance: 0,
+    };
+    const bodySection: SectionProps = {
+      pageWidth: 140, pageHeight: 200,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps;
+    const doc = {
+      section: bodySection,
+      body: [
+        para('DOCUMENT_FALLBACK'),
+        { type: 'sectionBreak', kind: 'nextPage' } as BodyElement,
+        para('AUTHORED_INTERMEDIATE'),
+        { type: 'sectionBreak', kind: 'nextPage', geom: intermediate } as BodyElement,
+        para('FINAL'),
+      ],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+
+    const pages = canonicalLayout(doc).pages;
+    expect(pages.map(({ section }) => ({
+      width: section.geometry.pageWidth,
+      height: section.geometry.pageHeight,
+    }))).toEqual([
+      { width: 140, height: 200 },
+      { width: 300, height: 400 },
+      { width: 140, height: 200 },
+    ]);
+  });
+
+  it('inherits omitted non-continuous geometry across an incoming continuous boundary', () => {
     const bodySection: SectionProps = {
       pageWidth: 140, pageHeight: 200,
       marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
@@ -213,7 +249,7 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
     const doc = {
       section: bodySection,
       body: [
-        para('DEFAULTED'),
+        para('INHERITED'),
         { type: 'sectionBreak', kind: 'nextPage' } as BodyElement,
         para('CONTINUOUS'),
       ],
@@ -223,8 +259,11 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
     } as unknown as DocxDocumentModel;
 
     const pages = canonicalLayout(doc).pages;
-    expect(pages[0].section.geometry).toMatchObject({ pageWidth: 612, pageHeight: 792 });
-    expect(pages[1].section.geometry).toMatchObject({ pageWidth: 140, pageHeight: 200 });
+    expect(pages[0].section.geometry).toMatchObject({ pageWidth: 140, pageHeight: 200 });
+    expect(pages).toHaveLength(1);
+    expect(pages[0].sectionRegions).toHaveLength(2);
+    expect(pages[0].sectionRegions[1]?.section.geometry)
+      .toMatchObject({ pageWidth: 140, pageHeight: 200 });
   });
 
   it('single-section document stamps the body-level geometry on every element', () => {

@@ -52,7 +52,6 @@ import {
   multiplyExactLengthKeys,
 } from './layout/exact-length.js';
 import {
-  defaultSectionGeometry,
   sectionPageBox,
   type BodySectionIndexInput,
   type BodySectionOccurrence,
@@ -1258,17 +1257,20 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
   });
 
   const occurrences = new Array<BodySectionOccurrence>(pending.length);
+  const documentGeometry = sectionPageBox(doc.section);
   let followingGeometry: import('./types.js').SectionGeom | null = null;
   let followingGutterPt: number | null = null;
   for (let index = pending.length - 1; index >= 0; index -= 1) {
     const occurrence = pending[index]!;
-    // §17.6.22: only a continuous section inherits omitted page-level facts
-    // from the following sectPr. Other section starts resolve omissions from
-    // the ECMA defaults instead of silently adopting the next page box.
+    // pgSz/pgMar are optional children and ECMA-376 does not define a Letter /
+    // one-inch default for an omitted page box. Preserve the renderer's
+    // established document-level fallback for non-continuous sections. Per
+    // §17.18.77, a continuous section instead inherits omitted page-level facts
+    // from the following section. Authored fields remain occurrence-local.
     const fallback: import('./types.js').SectionGeom =
       occurrence.startType === 'continuous' && followingGeometry !== null
         ? followingGeometry
-        : defaultSectionGeometry();
+        : documentGeometry;
     const authored = occurrence.authoredGeometry;
     const geometry: import('./types.js').SectionGeom = {
       pageWidth: authored.pageWidth ?? fallback.pageWidth,

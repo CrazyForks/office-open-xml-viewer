@@ -245,21 +245,18 @@ describe('pre-indexed body section ownership', () => {
     expect(index.occurrences[0]?.titlePage).toBe(false);
   });
 
-  it('uses section defaults for omitted non-continuous page geometry', () => {
+  it('inherits the following page box for omitted non-continuous geometry', () => {
     const doc = document([
       paragraph('defaulted'),
       marker({ sectionId: 'section:0', kind: 'nextPage' }),
       paragraph('final'),
     ], geometry({ pageWidth: 700, marginLeft: 54 }));
 
-    expect(createBodySectionIndex(bodySectionIndexInput(doc)).occurrences[0]?.geometry).toEqual({
-      pageWidth: 612, pageHeight: 792,
-      marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
-      headerDistance: 36, footerDistance: 36,
-    });
+    expect(createBodySectionIndex(bodySectionIndexInput(doc)).occurrences[0]?.geometry)
+      .toEqual(geometry({ pageWidth: 700, marginLeft: 54 }));
   });
 
-  it('preserves authored fields and defaults omitted fields for a non-continuous section', () => {
+  it('preserves authored fields and inherits omitted fields for a non-continuous section', () => {
     const doc = document([
       paragraph('partially authored'),
       marker({
@@ -272,7 +269,7 @@ describe('pre-indexed body section ownership', () => {
 
     expect(createBodySectionIndex(bodySectionIndexInput(doc)).occurrences[0]?.geometry).toEqual({
       pageWidth: 660, pageHeight: 792,
-      marginTop: -24, marginRight: 72, marginBottom: 72, marginLeft: 72,
+      marginTop: -24, marginRight: 72, marginBottom: 72, marginLeft: 54,
       headerDistance: 36, footerDistance: 36,
     });
   });
@@ -325,6 +322,24 @@ describe('section geometry coordinate boundary', () => {
     'applies the authored gutter to the automatic %s imposition edge',
     (_label, settings, expected) => {
       expect(effectivePhysicalSectionGeometry(pagePolicy(settings), 0))
+        .toMatchObject(expected);
+    },
+  );
+
+  it.each([
+    ['left edge', {}, 0, { marginTop: 72, marginRight: 72, marginLeft: 90 }],
+    ['right edge', { rtlGutter: true }, 0, { marginTop: 72, marginRight: 90, marginLeft: 72 }],
+    ['top edge', { gutterAtTop: true }, 0, { marginTop: 90, marginRight: 72, marginLeft: 72 }],
+    ['first mirrored edge', { mirrorMargins: true }, 0, {
+      marginTop: 72, marginRight: 72, marginLeft: 90,
+    }],
+    ['second mirrored edge', { mirrorMargins: true }, 1, {
+      marginTop: 72, marginRight: 90, marginLeft: 72,
+    }],
+  ] as const)(
+    'places the authored gutter on the %s',
+    (_label, settings, pageIndex, expected) => {
+      expect(effectivePhysicalSectionGeometry(pagePolicy(settings), pageIndex))
         .toMatchObject(expected);
     },
   );

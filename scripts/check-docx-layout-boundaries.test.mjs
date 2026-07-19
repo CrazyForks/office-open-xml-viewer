@@ -1118,6 +1118,17 @@ test('reports malformed current baseline JSON as INVALID_BASELINE', () => {
   expectDiagnostic(root, 'INVALID_BASELINE', 'malformed current baseline', '--base-ref', 'main');
 });
 
+test('reports duplicate keys in the current baseline as INVALID_BASELINE', () => {
+  const root = initializeTransitionalRepository();
+  const path = join(root, 'scripts/docx-layout-boundary-baseline.json');
+  const baseline = readFileSync(path, 'utf8');
+  write(root, 'scripts/docx-layout-boundary-baseline.json', baseline.replace(
+    '"version": 2,',
+    '"version": 2,\n  "version": 2,',
+  ));
+  expectDiagnostic(root, 'INVALID_BASELINE', 'duplicate current baseline', '--base-ref', 'main');
+});
+
 test('reports invalid merge-base baseline structure exactly', () => {
   const root = initializeTransitionalRepository();
   git(root, 'switch', 'main');

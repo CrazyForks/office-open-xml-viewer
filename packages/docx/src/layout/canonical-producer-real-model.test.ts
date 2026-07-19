@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { buildBookmarkPageMap } from '../bookmark-nav.js';
 import { createLayoutServices, layoutDocument } from '../renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from '../types.js';
 
@@ -137,6 +138,25 @@ function fragmentLineAdvancesPt(fragment: Extract<ReturnType<typeof layoutDocume
 }
 
 describe('canonical producer with a real document model', () => {
+  it('retains parser-model bookmark starts through production pagination', () => {
+    const anchored = ordinaryParagraph('destination');
+    anchored.bookmarks = ['destination', 'alias'];
+    const model = sectionBoundaryModel(
+      anchored as unknown as BodyElement,
+      'nextPage',
+    );
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+    expect(layout.pages[0]?.bookmarkStarts.map(({ name }) => name))
+      .toEqual(['destination', 'alias']);
+    expect([...buildBookmarkPageMap(layout)]).toEqual([
+      ['destination', 0],
+      ['alias', 0],
+    ]);
+  });
+
   it('composes compatible continuous sections as disjoint regions on one physical page', () => {
     const model = sectionBoundaryModel(ordinaryBodyParagraph('before'), 'continuous');
     const services = createLayoutServices(model, { measureContext: measureContext() });
@@ -194,6 +214,53 @@ describe('canonical producer with a real document model', () => {
       kind: 'paragraph', ordinaryFlow: true,
       flowDomainId: layout.pages[1]!.sectionRegions[0]!.flowDomainIds[0],
     });
+  });
+
+  it('advances a single-column nextColumn section to its own next-page geometry', () => {
+    const outgoing = {
+      pageWidth: 200, pageHeight: 100,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5,
+    };
+    const incoming = {
+      pageWidth: 300, pageHeight: 160,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 8, footerDistance: 8, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextColumn', columns: null,
+    } as SectionProps;
+    const endingSection = {
+      type: 'sectionBreak',
+      kind: 'nextPage',
+      geom: outgoing,
+      columns: null,
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      titlePage: false,
+    } as unknown as BodyElement;
+    const model = {
+      section: incoming,
+      body: [
+        ordinaryBodyParagraph('before'),
+        endingSection,
+        ordinaryBodyParagraph('after'),
+      ],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+    expect(layout.pages).toHaveLength(2);
+    expect(layout.pages.map((page) => ({
+      widthPt: page.geometry.widthPt,
+      heightPt: page.geometry.heightPt,
+    }))).toEqual([
+      { widthPt: 200, heightPt: 100 },
+      { widthPt: 300, heightPt: 160 },
+    ]);
+    expect(layout.pages.map((page) => page.sectionRegions.length)).toEqual([1, 1]);
   });
 
   it('retains page-owned wrap authority across a same-page nextColumn section cutover', () => {

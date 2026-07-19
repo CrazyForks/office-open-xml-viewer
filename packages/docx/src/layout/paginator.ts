@@ -9,6 +9,7 @@ import {
   uprightPhysicalExtent,
   writingModeFromTextDirection,
 } from './coordinate-space.js';
+import { defineCompatibilityRule } from './compatibility.js';
 import type { PaintNode } from './types.js';
 
 export type PageAdvanceReason =
@@ -33,6 +34,15 @@ export type AuthoredBreak =
 
 export type PhysicalPageParity = 'odd' | 'even';
 
+export const ESTABLISHED_NEXT_COLUMN_PAGE_ADVANCE = defineCompatibilityRule({
+  id: 'established-next-column-page-advance',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/paginator.test.ts#advances nextColumn to the next page when the outgoing column has no same-page successor',
+  },
+  description: 'When §17.18.77 has no following column on the current page, continue in the incoming section on the following page, preserving the established pre-cutover non-continuous section behavior instead of rejecting the document.',
+});
+
 export class UnsupportedPageFlowTransitionError extends Error {
   readonly code = 'NEXT_COLUMN_DESTINATION_UNAVAILABLE' as const;
 
@@ -45,9 +55,8 @@ export class UnsupportedPageFlowTransitionError extends Error {
       | 'writing-mode'
       | 'block-band'
       | 'grid'
-      | 'no-successor'
       | 'physical-overlap'
-      | 'physical-column' = 'no-successor',
+      | 'physical-column',
   ) {
     super(
       'nextColumn requires a following column on the current page, '
@@ -124,6 +133,12 @@ function columnPopulationOrder(
   columnSubset: readonly number[],
 ): readonly number[] {
   return section.sectionBidi ? [...columnSubset].reverse() : [...columnSubset];
+}
+
+function followingColumnIndex(state: PageFlowState): number | undefined {
+  const populationOrder = columnPopulationOrder(state.section, state.columnSubset);
+  const currentOrdinal = populationOrder.indexOf(state.columnIndex);
+  return populationOrder[currentOrdinal + 1];
 }
 
 export function createPageFlowState(
@@ -240,9 +255,7 @@ export function advanceColumnOrPage(
     state.deepestColumnBlockPt,
     state.cursorBlockPt,
   );
-  const populationOrder = columnPopulationOrder(state.section, state.columnSubset);
-  const currentOrdinal = populationOrder.indexOf(state.columnIndex);
-  const nextColumnIndex = populationOrder[currentOrdinal + 1];
+  const nextColumnIndex = followingColumnIndex(state);
   if (nextColumnIndex !== undefined) {
     return transition(Object.freeze({
       ...state,
@@ -344,7 +357,9 @@ function resolveNextColumnDestination(
   const outgoingPopulation = columnPopulationOrder(state.section, state.columnSubset);
   const currentOrdinal = outgoingPopulation.indexOf(state.columnIndex);
   const successorIndex = outgoingPopulation[currentOrdinal + 1];
-  if (successorIndex === undefined) reject('no-successor');
+  if (successorIndex === undefined) {
+    throw new Error('nextColumn destination resolution requires a same-page successor');
+  }
   const coordinateSpace = createSectionRegionCoordinateSpace(
     outgoingWritingMode,
     outgoingPage,
@@ -518,6 +533,18 @@ export function beginSection(
   }
 
   if (startType === 'nextColumn') {
+    if (followingColumnIndex(state) === undefined) {
+      // §17.18.77 defines nextColumn as the following column on the page. Once
+      // the active region has no such column (including a one-column section),
+      // the next flow destination is the incoming section's first column on the
+      // following page. Compatibility contract:
+      // ESTABLISHED_NEXT_COLUMN_PAGE_ADVANCE.
+      const nextPage = advanceToPage(state, section, 'section-break');
+      return transition(nextPage.state, [
+        ...nextPage.events,
+        { type: 'begin-section', section },
+      ]);
+    }
     const destination = resolveNextColumnDestination(state, section, options);
     return transition(Object.freeze({
       ...state,

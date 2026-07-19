@@ -9,6 +9,7 @@ import {
 import type { SectionStartType, AuthoredBreak } from './paginator.js';
 import { snapshotPlainData } from './plain-data.js';
 import type { DeepReadonly, SourceRef } from './types.js';
+import { wordContinuousSectionRole } from './body-pagination-compatibility.js';
 
 export interface BodyParagraphSourceInput {
   readonly kind: 'paragraph';
@@ -209,26 +210,7 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
   });
   const sequence: BodyLayoutSequenceEntry[] = resolved.map((entry, index) => {
     if (entry.kind !== 'body-block' || entry.block.kind !== 'paragraph') return entry;
-    const next = resolved[index + 1];
-    const afterNext = resolved[index + 2];
-    const suppressBefore = entry.block.inkless === true
-      && next?.kind === 'begin-section'
-      && next.section.startType === 'continuous';
-    const collapseMark = suppressBefore && entry.block.spaceBeforePt === 0;
-    const dropPreviousAfter = entry.block.inkless === true
-      && next?.kind === 'body-block'
-      && next.block.kind === 'paragraph'
-      && next.block.inkless === true
-      && next.block.spaceBeforePt === 0
-      && afterNext?.kind === 'begin-section'
-      && afterNext.section.startType === 'continuous';
-    const continuousSectionRole = collapseMark
-      ? 'collapse-mark' as const
-      : suppressBefore
-        ? 'suppress-before' as const
-        : dropPreviousAfter
-          ? 'drop-previous-after' as const
-          : undefined;
+    const continuousSectionRole = wordContinuousSectionRole(resolved, index);
     if (continuousSectionRole === undefined) return entry;
     return Object.freeze({
       ...entry,
