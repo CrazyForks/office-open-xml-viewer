@@ -817,16 +817,63 @@ export type PageLayerId =
   | 'front'
   | 'footer';
 
-export interface PagePaintSequenceEntry {
+export interface PageLayerRoot {
   readonly layer: PageLayerId;
   readonly node: PaintNode;
   readonly coordinateSpace: 'section-logical' | 'upright-physical';
 }
 
+export type PagePaintFrame =
+  | Readonly<{
+      kind: 'transform';
+      transform: Matrix2DData;
+    }>
+  | Readonly<{
+      kind: 'clip';
+      clip: LayoutRect;
+    }>;
+
+interface PagePaintEntryBase {
+  /** Final semantic stacking layer. */
+  readonly layer: PageLayerId;
+  /** Story/root layer from which this paint operation was materialized. */
+  readonly sourceLayer: PageLayerId;
+  /** Top-level retained root represented by this operation. */
+  readonly rootNodeId: LayoutNodeId;
+  readonly coordinateSpace: 'section-logical' | 'upright-physical';
+  /** Flow domain whose section-region transform owns this operation. */
+  readonly flowDomainId: string;
+}
+
+export interface PagePaintNodeEntry extends PagePaintEntryBase {
+  readonly kind: 'node';
+  readonly node: PaintNode;
+  /** Anchored drawings owned by this root are represented by drawing entries. */
+  readonly omitAnchoredDrawings: boolean;
+}
+
+export interface PagePaintDrawingEntry extends PagePaintEntryBase {
+  readonly kind: 'drawing';
+  readonly layer: 'behindText' | 'front';
+  readonly node: DrawingLayout;
+  /** Diagnostic/ownership identity; paint does not traverse the owner graph. */
+  readonly ownerNodeId?: LayoutNodeId;
+  readonly textBoxes: readonly TextBoxLayout[];
+  /** Plain-data Canvas frames from the root to the anchor encounter. */
+  readonly frames: readonly PagePaintFrame[];
+  /** Cumulative host placement used to undo page-owned anchor axes exactly once. */
+  readonly layoutTranslationPt: PointPt;
+}
+
+export type PagePaintEntry = PagePaintNodeEntry | PagePaintDrawingEntry;
+
 export interface PageLayers {
-  /** Completed layout-owned sequence. Paint consumes it without graph lookup,
-   * ordering, or validation. */
-  readonly paintSequence: readonly PagePaintSequenceEntry[];
+  /** Top-level retained story roots in composition order. This is graph and
+   * reading-order authority, not paint-order authority. */
+  readonly roots: readonly PageLayerRoot[];
+  /** Completed layout-owned order. Paint consumes it without graph discovery,
+   * sorting, callback collection, or callback re-entry. */
+  readonly paintOrder: readonly PagePaintEntry[];
   readonly background: readonly PaintNode[];
   readonly behindText: readonly PaintNode[];
   readonly header: readonly PaintNode[];

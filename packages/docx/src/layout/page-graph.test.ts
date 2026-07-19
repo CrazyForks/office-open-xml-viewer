@@ -18,22 +18,8 @@ function drawing(id: string): DrawingLayout {
 }
 
 function page(entries: readonly Readonly<{ layer: PageLayerId; node: DrawingLayout }>[]): LayoutPage {
-  const byLayer = (layer: PageLayerId) => entries
-    .filter((entry) => entry.layer === layer)
-    .map((entry) => entry.node);
   return {
-    layers: {
-      paintSequence: entries.map((entry) => ({
-        ...entry, coordinateSpace: 'section-logical' as const,
-      })),
-      background: byLayer('background'),
-      behindText: byLayer('behindText'),
-      header: byLayer('header'),
-      body: byLayer('body'),
-      notes: byLayer('notes'),
-      front: byLayer('front'),
-      footer: byLayer('footer'),
-    },
+    layers: createPageLayers(entries),
   } as unknown as LayoutPage;
 }
 
@@ -42,13 +28,13 @@ describe('orderedPagePaintNodes body run', () => {
     const body = drawing('body');
     const layers = createPageLayers([{ layer: 'body', node: body }]);
 
-    expect(layers.paintSequence).toEqual([
+    expect(layers.roots).toEqual([
       { layer: 'body', node: body, coordinateSpace: 'section-logical' },
     ]);
-    expect(layers.paintSequence[0]!.node).toBe(layers.body[0]);
+    expect(layers.roots[0]!.node).toBe(layers.body[0]);
     expect(Object.isFrozen(layers)).toBe(true);
-    expect(Object.isFrozen(layers.paintSequence)).toBe(true);
-    expect(Object.isFrozen(layers.paintSequence[0])).toBe(true);
+    expect(Object.isFrozen(layers.roots)).toBe(true);
+    expect(Object.isFrozen(layers.roots[0])).toBe(true);
   });
 
   it('preserves arbitrary non-body order around one body run', () => {
@@ -81,9 +67,9 @@ describe('orderedPagePaintNodes body run', () => {
       ...layout,
       layers: {
         ...layout.layers,
-        paintSequence: [{
-          layer: 'body' as const, node: stale, coordinateSpace: 'section-logical' as const,
-        }],
+        paintOrder: layout.layers.paintOrder.map((entry) => (
+          entry.kind === 'node' ? { ...entry, node: stale } : entry
+        )),
       },
     };
 

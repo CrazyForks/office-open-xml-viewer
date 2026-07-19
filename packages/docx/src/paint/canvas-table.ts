@@ -6,7 +6,7 @@ import type {
 import { composeAffine, scaleAffine, translationAffine } from './affine.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import { paintParagraphLayout } from './canvas-text.js';
-import { appendDeferredPaintFrame, canvasPaintFrame } from './deferred-paint-frame.js';
+import { canvasPaintFrame } from './deferred-paint-frame.js';
 import type { CanvasPaintContext } from './types.js';
 
 function paintPlacedChild(
@@ -32,7 +32,6 @@ function paintPlacedChild(
       xPt: parentLayoutTranslation.xPt + dxPt,
       yPt: parentLayoutTranslation.yPt + dyPt,
     },
-    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
   };
   frame(() => {
     if (layout.kind === 'paragraph') paintParagraphLayout(layout, childContext);
@@ -50,7 +49,7 @@ function paintTableContents(
       const ownsContinuationPaint = 'visualMergeOwnership' in cell
         && cell.visualMergeOwnership === 'continuation';
       if (cell.verticalMerge === 'continue' && !ownsContinuationPaint) continue;
-      if (cell.background && context.bodyDrawingPass !== 'discover-behind') {
+      if (cell.background) {
         context.ctx.fillStyle = cell.background.color;
         context.ctx.fillRect(
           cell.flowBounds.xPt,
@@ -88,17 +87,11 @@ function paintTableContents(
         );
         context.ctx.clip();
       });
-      const cellContext: CanvasPaintContext = {
-        ...context,
-        deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
-      };
-      frame(() => paintBlocks(cellContext))();
+      frame(() => paintBlocks(context))();
     }
   }
   paintResolvedFloatingTablePlacements(floatingTables, context);
-  if (context.bodyDrawingPass !== 'discover-behind') {
-    for (const border of node.borders) paintStrokeSegment(border, context);
-  }
+  for (const border of node.borders) paintStrokeSegment(border, context);
 }
 
 /** Paint stored table geometry. No inheritance, sizing, shaping, or conflict resolution occurs here. */
@@ -123,11 +116,7 @@ export function paintTableLayout(
     );
     context.ctx.clip();
   });
-  const clippedContext: CanvasPaintContext = {
-    ...context,
-    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
-  };
-  frame(() => paintTableContents(node, clippedContext, placements))();
+  frame(() => paintTableContents(node, context, placements))();
 }
 
 /** Paint only point-space placements already resolved by the layout adapter. */
@@ -165,7 +154,6 @@ export function paintPlacedTableLayout(
     ...context,
     pointToCss,
     layoutTranslationPt: { xPt: dxPt, yPt: dyPt },
-    deferredPaintWrapper: appendDeferredPaintFrame(context.deferredPaintWrapper, frame),
   };
   frame(() => paintTableLayout(node, placedContext, floatingTables))();
 }

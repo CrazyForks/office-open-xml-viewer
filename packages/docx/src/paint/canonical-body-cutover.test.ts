@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { paintLayoutPageContent } from './canvas-page.js';
 import type { CanvasPaintContext } from './types.js';
 import type { LayoutPage } from '../layout/types.js';
+import { buildPageLayers } from '../layout/page-graph.js';
 
 describe('retained canonical body paint', () => {
   it('does not initialize the surface or measure while painting an empty retained body', () => {
@@ -24,7 +25,7 @@ describe('retained canonical body paint', () => {
       columnSeparators: [],
       sectionRegions: [],
       pageBorders: null,
-      layers: { paintSequence: [], background: [], behindText: [], header: [], body: [], notes: [], front: [], footer: [] },
+      layers: buildPageLayers([]),
       readingOrder: [],
     } satisfies LayoutPage;
 

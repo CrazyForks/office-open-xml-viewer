@@ -5,11 +5,9 @@ import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps, ShapeR
 // ECMA-376 Part 1 §20.4.2.3 and §20.4.2.15 — a wp:anchor with behindDoc="0"
 // and wrapNone floats IN FRONT of the
 // inline text/image flow. Since the flow is painted in document order, a
-// front-anchored shape in an EARLY paragraph must NOT be overpainted by a LATER
-// paragraph's content (sample-13: the "Journal homepage" text box, anchored to
-// the first paragraph, was hidden behind the inline masthead banner that
-// follows it). The renderer defers front floats to a per-page top layer; this
-// test pins that ordering by recording the sequence of fillText calls.
+// front-anchored shape in an early paragraph must not be overpainted by a later
+// paragraph's content. The immutable page paint plan places front anchors after
+// body ink; this synthetic test records that ordering without private samples.
 
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; texts: string[] } {
   let font = '10px serif';
@@ -140,8 +138,8 @@ describe('front float z-order (§20.4.2.3, §20.4.2.15)', () => {
     const shapeIdx = texts.indexOf('SHAPE_FRONT');
     expect(bodyIdx).toBeGreaterThanOrEqual(0);
     expect(shapeIdx).toBeGreaterThanOrEqual(0);
-    // The front shape, anchored to the FIRST paragraph, must be painted AFTER the
-    // later body text so it lands on top (deferred to the page's front layer).
+    // The front shape, anchored to the first paragraph, must be painted after
+    // the later body text so it lands on top in the retained front layer.
     expect(shapeIdx).toBeGreaterThan(bodyIdx);
   });
 

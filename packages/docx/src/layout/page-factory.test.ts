@@ -13,6 +13,7 @@ import {
 } from './page-factory.js';
 import { assertDocumentLayout } from './invariants.js';
 import { LayoutInvariantError } from './diagnostics.js';
+import { createPageLayers } from './page-graph.js';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -848,7 +849,10 @@ describe('createLayoutPage', () => {
     expect(() => assertDocumentLayout({
       pages: [{
         ...page,
-        layers: { ...page.layers, body: [{ ...floating, ordinaryFlow: true }, follower] },
+        layers: createPageLayers([
+          { layer: 'body', node: { ...floating, ordinaryFlow: true } },
+          { layer: 'body', node: follower },
+        ]),
       }],
       diagnostics: [],
     })).toThrow(LayoutInvariantError);
@@ -985,7 +989,7 @@ describe('createLayoutPage', () => {
 
     expect(page.layers.behindText).toEqual([behind]);
     expect(page.layers.body).toEqual([paragraph]);
-    expect(page.layers.paintSequence).toEqual([
+    expect(page.layers.roots).toEqual([
       { layer: 'behindText', node: behind, coordinateSpace: 'section-logical' },
       { layer: 'body', node: paragraph, coordinateSpace: 'section-logical' },
     ]);
@@ -1292,10 +1296,7 @@ describe('createLayoutPage', () => {
       pages: [{
         ...page,
         bookmarkStarts: [],
-        layers: {
-          paintSequence: [], background: [], behindText: [], header: [], body: [],
-          notes: [], front: [], footer: [],
-        },
+        layers: createPageLayers([]),
         readingOrder: [],
       }],
       diagnostics: [],
@@ -1358,7 +1359,7 @@ describe('createParityBlankLayoutPage', () => {
     expect(page.sectionOccurrenceId).toBe('section:outgoing');
     expect(page.sectionRegions).toEqual([]);
     expect(page.flowDomains).toEqual([]);
-    expect(page.layers.paintSequence).toEqual([]);
+    expect(page.layers.roots).toEqual([]);
     expect(page.readingOrder).toEqual([]);
     expect(page.bookmarkStarts).toEqual([]);
     expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();

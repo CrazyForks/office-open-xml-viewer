@@ -1660,7 +1660,7 @@ function composePageStories(
         }),
       })] : []),
     ];
-    const existing = page.layers.paintSequence.map((entry): PageLayerNode => entry);
+    const existing = page.layers.roots.map((entry): PageLayerNode => entry);
     const firstNonLeading = existing.findIndex((entry) =>
       entry.layer !== 'background' && entry.layer !== 'behindText');
     const headerIndex = firstNonLeading < 0 ? existing.length : firstNonLeading;
@@ -1810,7 +1810,7 @@ function composeDocumentEndnotes(
           ))
         : endnoteLogicalBounds,
     });
-    const entries: PageLayerNode[] = page.layers.paintSequence.map((entry) => entry);
+    const entries: PageLayerNode[] = page.layers.roots.map((entry) => entry);
     let insertionIndex = -1;
     for (let index = 0; index < entries.length; index += 1) {
       if (entries[index]!.layer === 'body') insertionIndex = index;

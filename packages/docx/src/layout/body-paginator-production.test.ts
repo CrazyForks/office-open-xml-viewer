@@ -2108,7 +2108,7 @@ describe('canonical body producer', () => {
     expect(body[0]!.advancePt).toBe(30);
     expect(body[0]!.flowBounds).toMatchObject({ xPt: 40, yPt: 25, heightPt: 20 });
     expect(body[1]!.flowBounds.yPt).toBe(30);
-    expect(layout.pages[0]!.layers.paintSequence[0]).toMatchObject({ coordinateSpace: 'upright-physical' });
+    expect(layout.pages[0]!.layers.roots[0]).toMatchObject({ coordinateSpace: 'upright-physical' });
   });
 
   it('assigns deterministic distinct occurrence ids to one table continued across two columns', () => {
@@ -2234,10 +2234,10 @@ describe('canonical body producer', () => {
 
     expect(retained.advancePt).toBe(30);
     expect(retained.flowBounds.yPt).toBe(55);
-    expect(layout.pages[0]!.layers.paintSequence[0]).toEqual({
+    expect(layout.pages[0]!.layers.roots[0]).toEqual({
       layer: 'body', node: retained, coordinateSpace: 'upright-physical',
     });
-    expect(layout.pages[0]!.layers.paintSequence[0]!.node).toBe(retained);
+    expect(layout.pages[0]!.layers.roots[0]!.node).toBe(retained);
   });
 
   it('moves a feasible keepNext chain together before accepting any chain member', () => {

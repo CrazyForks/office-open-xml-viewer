@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SectionLayoutContext } from '../layout-context.js';
 import { deepFreezeDocumentLayout, layoutFingerprint } from './invariants.js';
 import type { DocumentLayout } from './types.js';
+import { buildPageLayers } from './page-graph.js';
 
 describe('DocumentLayout data boundary', () => {
   it('is deeply immutable and structured-clone safe without platform objects', () => {
@@ -67,16 +68,9 @@ describe('DocumentLayout data boundary', () => {
         columnSeparators: [],
         sectionRegions: [],
         pageBorders: null,
-        layers: {
-          paintSequence: [{ layer: 'front', node: drawing, coordinateSpace: 'section-logical' }],
-          background: [],
-          behindText: [],
-          header: [],
-          body: [],
-          notes: [],
-          front: [drawing],
-          footer: [],
-        },
+        layers: buildPageLayers([
+          { layer: 'front', node: drawing, coordinateSpace: 'section-logical' },
+        ]),
         readingOrder: ['drawing-1'],
       }],
       diagnostics: [{
@@ -96,7 +90,7 @@ describe('DocumentLayout data boundary', () => {
     expect(Object.isFrozen(frozen.pages)).toBe(true);
     expect(Object.isFrozen(frozen.pages[0]?.layers.front[0]?.source.path)).toBe(true);
     expect(Object.getPrototypeOf(clonedNode.transform)).toBe(Object.prototype);
-    expect(cloned.pages[0]?.layers.paintSequence[0]?.node).toBe(clonedNode);
+    expect(cloned.pages[0]?.layers.roots[0]?.node).toBe(clonedNode);
     expect(layoutFingerprint(cloned)).toBe(layoutFingerprint(frozen));
     expect(() => (frozen as unknown as { pages: unknown[] }).pages.push({})).toThrow();
   });

@@ -109,6 +109,11 @@ const LEGACY_SYMBOLS = [
   'renderHeaderFooter',
   'measureFootnoteHeight',
   'deferFront',
+  'deferFrontDrawing',
+  'deferBehindDrawing',
+  'deferredFrontPaint',
+  'deferredPaintWrapper',
+  'bodyDrawingPass',
   'sectionBreakSpacer',
   'collapsedSpacer',
   'leadsCollapsedRun',
@@ -535,7 +540,6 @@ function assertBodyPaintConsumesRetainedLayout(root) {
       'paintPlacedTextBoxLayout',
       'paintTextBoxLayout',
     ])],
-    ['./paint/deferred-front-session.js', new Set(['enqueueDeferredFrontPaint'])],
     ['./vertical-text.js', new Set(['verticalTextLayerPlacement'])],
   ]);
 

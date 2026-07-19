@@ -426,7 +426,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
       || (page.sectionRegions?.length ?? 0) > 0
       || (page.columnSeparators?.length ?? 0) > 0
       || pageLayerNodes(page).length > 0
-      || page.layers.paintSequence.length > 0
+      || page.layers.roots.length > 0
       || page.readingOrder.length > 0
       || (page.bookmarkStarts?.length ?? 0) > 0
     )) {

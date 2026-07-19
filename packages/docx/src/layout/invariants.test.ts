@@ -17,6 +17,7 @@ import type {
 } from './types.js';
 import type { SectionLayoutContext } from '../layout-context.js';
 import { createCanvasFontRoute } from '@silurus/ooxml-core';
+import { buildPageLayers } from './page-graph.js';
 
 const source = (index: number): SourceRef => ({
   story: 'body',
@@ -276,18 +277,11 @@ function documentWith(
         flowDomainIds: ['body'], section: horizontalSection,
       }],
       pageBorders: null,
-      layers: {
-        paintSequence: nodes.map((node) => ({
+      layers: buildPageLayers(
+        nodes.map((node) => ({
           layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,
         })),
-        background: [],
-        behindText: [],
-        header: [],
-        body: nodes,
-        notes: [],
-        front: [],
-        footer: [],
-      },
+      ),
       readingOrder: nodes.map((node) => node.id),
     }],
     diagnostics,
@@ -396,15 +390,10 @@ describe('assertDocumentLayout', () => {
             physicalBounds: rect(72, 110, 468, 80),
           },
         ],
-        layers: {
-          ...base.pages[0]!.layers,
-          paintSequence: [
+        layers: buildPageLayers([
             { layer: 'body', node: body, coordinateSpace: 'section-logical' },
             { layer: 'notes', node: note, coordinateSpace: 'section-logical' },
-          ],
-          body: [body],
-          notes: [note],
-        },
+        ]),
         readingOrder: [body.id, note.id],
       }],
     };
@@ -451,15 +440,10 @@ describe('assertDocumentLayout', () => {
             logicalBounds: rect(72, 730, 468, 40), physicalBounds: rect(72, 730, 468, 40),
           },
         ],
-        layers: {
-          ...base.pages[0]!.layers,
-          paintSequence: [
+        layers: buildPageLayers([
             { layer: 'body', node: body, coordinateSpace: 'section-logical' },
             { layer: 'footer', node: footer, coordinateSpace: 'section-logical' },
-          ],
-          body: [body],
-          footer: [footer],
-        },
+        ]),
         readingOrder: [body.id, footer.id],
       }],
     };
@@ -501,14 +485,11 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!,
-        layers: {
-          ...base.pages[0]!.layers,
-          paintSequence: [{
+        layers: buildPageLayers([{
             layer: 'body',
             node: drawing('unknown', rect(72, 100, 200, 30)),
             coordinateSpace: 'section-logical',
-          }],
-        },
+        }]),
       }],
     };
     expect(() => assertDocumentLayout(badPaint)).toThrow(/INVALID_REFERENCE/);
@@ -531,13 +512,10 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!,
-        layers: {
-          ...base.pages[0]!.layers,
-          paintSequence: [
+        layers: buildPageLayers([
             { layer: 'body', node: base.pages[0]!.layers.body[0]!, coordinateSpace: 'section-logical' },
             { layer: 'body', node: base.pages[0]!.layers.body[0]!, coordinateSpace: 'section-logical' },
-          ],
-        },
+        ]),
       }],
     };
     expect(() => assertDocumentLayout(duplicatePaint)).toThrow(/INVALID_REFERENCE/);
