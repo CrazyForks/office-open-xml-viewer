@@ -84,11 +84,22 @@ export interface BodyLayoutInput {
   readonly source: SourceRef;
   readonly initialSection: BodySectionLayoutInput;
   readonly sequence: readonly BodyLayoutSequenceEntry[];
+  /** §17.11 document-end note stories, in authored numbering order. */
+  readonly endnoteIds?: readonly string[];
+  readonly noteLayoutSettings?: Readonly<{
+    footnotePosition: string;
+    endnotePosition: string;
+  }>;
 }
 
 export interface BodyLayoutAcquisitionInput {
   readonly sectionIndex: BodySectionIndexInput;
   readonly evenAndOddHeaders: boolean;
+  readonly endnoteIds?: readonly string[];
+  readonly noteLayoutSettings: Readonly<{
+    footnotePosition: string;
+    endnotePosition: string;
+  }>;
   readonly pageLayoutSettings: Readonly<{
     mirrorMargins: boolean;
     gutterAtTop: boolean;
@@ -224,5 +235,7 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
     source: { story: 'body', storyInstance: 'body', path: [] },
     initialSection,
     sequence,
+    endnoteIds: acquired.endnoteIds ?? [],
+    noteLayoutSettings: acquired.noteLayoutSettings,
   }, 'DOCX body layout input') as BodyLayoutInput;
 }

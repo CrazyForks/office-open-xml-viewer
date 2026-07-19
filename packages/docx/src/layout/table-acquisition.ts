@@ -24,6 +24,7 @@ import type {
   TableFormatInput,
   TableLayout,
   TableLayoutInput,
+  SourceRef,
   WrapExclusion,
 } from './types.js';
 
@@ -43,6 +44,7 @@ export interface RetainedTableAcquisitionDependencies<State> {
       exclusions: readonly WrapExclusion[];
       collisions: readonly DrawingMLCollisionEntryPt[];
     }>,
+    source?: SourceRef,
   ): ParagraphLayout;
   registerFloatingTable(
     state: State,
@@ -144,12 +146,23 @@ export function acquireRetainedTable<State>(
   columnWidthsPt: readonly number[],
   contentWidthPt: number,
   outerState: State,
-  sourcePath: readonly number[],
+  source: SourceRef | readonly number[],
   dependencies: RetainedTableAcquisitionDependencies<State>,
 ): RetainedTableAcquisition {
+  const sourceRoot: SourceRef = Array.isArray(source)
+    ? { story: 'body', storyInstance: 'body', path: source }
+    : source as SourceRef;
+  const sourcePath = sourceRoot.path;
+  const sourceAt = (path: readonly number[]): SourceRef => ({
+    story: sourceRoot.story,
+    storyInstance: sourceRoot.storyInstance,
+    path,
+  });
   const services = dependencies.layoutServices(outerState);
   if (!services) throw new Error('Retained table acquisition requires layout services');
-  const flowDomainId = `table:${sourcePath.join('.')}`;
+  const flowDomainId = sourceRoot.story === 'body' && sourceRoot.storyInstance === 'body'
+    ? `table:${sourcePath.join('.')}`
+    : `${sourceRoot.story}:${sourceRoot.storyInstance}:table:${sourcePath.join('.')}`;
   const format = dependencies.tableFormat(table);
   const bidiVisual = table.bidiVisual === true;
   const firstRowException = format.firstRowException;
@@ -216,6 +229,8 @@ export function acquireRetainedTable<State>(
               paragraphPath,
               `${flowDomainId}:cell:${rowIndex}.${cellIndex}`,
               paragraphBorderEdges,
+              undefined,
+              sourceAt(paragraphPath),
             ),
             acquireNestedTable: (cellState, nestedTable, nestedContentWidthPt, nestedPath) => {
               const nestedColumns = dependencies.resolveColumns(
@@ -228,7 +243,7 @@ export function acquireRetainedTable<State>(
                 nestedColumns,
                 nestedContentWidthPt,
                 cellState,
-                nestedPath,
+                sourceAt(nestedPath),
                 dependencies,
               );
               nestedById[nested.layout.id] = nested;
@@ -262,7 +277,7 @@ export function acquireRetainedTable<State>(
           });
       return {
         id: cellId,
-        source: { story: 'body' as const, storyInstance: 'body', path: cellPath },
+        source: sourceAt(cellPath),
         columnStart: currentColumnStart,
         columnSpan,
         verticalMerge: cell.vMerge === true
@@ -305,7 +320,7 @@ export function acquireRetainedTable<State>(
     const heightRule = rowFormat?.height?.rule ?? 'auto';
     return {
       id: `${flowDomainId}:row:${rowIndex}`,
-      source: { story: 'body' as const, storyInstance: 'body', path: [...sourcePath, rowIndex] },
+      source: sourceAt([...sourcePath, rowIndex]),
       logicalRowIndex: rowIndex,
       cantSplit: rowFormat?.cantSplit ?? row.cantSplit === true,
       heightPt: rowFormat?.height?.valuePt ?? null,
@@ -323,7 +338,7 @@ export function acquireRetainedTable<State>(
   const input = snapshotPlainData<TableLayoutInput>({
     kind: 'table',
     id: flowDomainId,
-    source: { story: 'body', storyInstance: 'body', path: [...sourcePath] },
+    source: sourceAt([...sourcePath]),
     flowDomainId,
     ordinaryFlow: format.ordinaryFlow,
     alignment: physicalAlignment(table.jc, bidiVisual),

@@ -1,17 +1,68 @@
+import type { BodyElement, CellElement } from '../types.js';
 import type { LineLayout, ParagraphLayout, TableLayout } from './types.js';
 
-export function footnoteIdsInRetainedLines(lines: readonly LineLayout[]): readonly string[] {
+/** Collect first reference order from the main document story. */
+export function noteReferenceIdsInDocumentOrder(
+  elements: readonly (BodyElement | CellElement)[],
+  kind: 'footnote' | 'endnote',
+): readonly string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const element of elements) {
+    if (element.type === 'paragraph') {
+      for (const run of element.runs) {
+        if (run.type !== 'text'
+          || run.noteRef?.kind !== kind
+          || run.noteRef.id.length === 0
+          || seen.has(run.noteRef.id)) continue;
+        seen.add(run.noteRef.id);
+        ids.push(run.noteRef.id);
+      }
+    } else if (element.type === 'table') {
+      for (const row of element.rows) for (const cell of row.cells) {
+        for (const id of noteReferenceIdsInDocumentOrder(cell.content, kind)) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+    }
+  }
+  return Object.freeze(ids);
+}
+
+function noteIdsInRetainedLines(
+  lines: readonly LineLayout[],
+  kind: 'footnote' | 'endnote',
+): readonly string[] {
   return Object.freeze([...new Set(lines.flatMap((line) => line.placements.flatMap((placement) => (
-    placement.kind === 'text' && placement.noteReference?.kind === 'footnote'
+    placement.kind === 'text' && placement.noteReference?.kind === kind
       ? [placement.noteReference.id]
       : []
   ))))]);
 }
 
-function tableFootnoteIds(table: TableLayout): readonly string[] {
+function tableNoteIds(
+  table: TableLayout,
+  kind: 'footnote' | 'endnote',
+): readonly string[] {
   return table.rows.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.flatMap(
-    (block) => footnoteIdsInRetainedSlice(block.layout),
+    (block) => noteIdsInRetainedSlice(block.layout, kind),
   )));
+}
+
+function noteIdsInRetainedSlice(
+  slice: ParagraphLayout | TableLayout,
+  kind: 'footnote' | 'endnote',
+): readonly string[] {
+  const ids = slice.kind === 'paragraph'
+    ? noteIdsInRetainedLines(slice.lines, kind)
+    : tableNoteIds(slice, kind);
+  return Object.freeze([...new Set(ids)]);
+}
+
+export function footnoteIdsInRetainedLines(lines: readonly LineLayout[]): readonly string[] {
+  return noteIdsInRetainedLines(lines, 'footnote');
 }
 
 /** §17.11.21 / §17.18.34 assign the note to the physical page that paints its
@@ -19,8 +70,12 @@ function tableFootnoteIds(table: TableLayout): readonly string[] {
 export function footnoteIdsInRetainedSlice(
   slice: ParagraphLayout | TableLayout,
 ): readonly string[] {
-  const ids = slice.kind === 'paragraph'
-    ? footnoteIdsInRetainedLines(slice.lines)
-    : tableFootnoteIds(slice);
-  return Object.freeze([...new Set(ids)]);
+  return noteIdsInRetainedSlice(slice, 'footnote');
+}
+
+/** §17.18.22: unreferenced endnotes are not displayed. */
+export function endnoteIdsInRetainedSlice(
+  slice: ParagraphLayout | TableLayout,
+): readonly string[] {
+  return noteIdsInRetainedSlice(slice, 'endnote');
 }

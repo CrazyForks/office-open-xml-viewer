@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { layoutFlowBlocks } from './flow.js';
+import { FlowCapacityExceededError, layoutFlowBlocks } from './flow.js';
 import { assertDocumentLayout, layoutFingerprint } from './invariants.js';
 import { LayoutInvariantError } from './diagnostics.js';
 import type {
@@ -374,6 +374,40 @@ describe('assertDocumentLayout', () => {
       drawing('n1', rect(72, 100, 200, 30)),
       drawing('n2', rect(72, 120, 200, 30)),
     ]);
+
+    expect(() => assertDocumentLayout(layout)).toThrow(/FLOW_OVERLAP/);
+  });
+
+  it('rejects overlap between body flow and a retained note domain', () => {
+    const body = drawing('body-1', rect(72, 100, 200, 30));
+    const note = drawing('note-1', rect(72, 120, 200, 30), {
+      flowDomainId: 'notes:page:0',
+    });
+    const base = documentWith([body]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        flowDomains: [
+          bodyDomain,
+          {
+            id: 'notes:page:0', kind: 'footnote',
+            logicalBounds: rect(72, 110, 468, 80),
+            physicalBounds: rect(72, 110, 468, 80),
+          },
+        ],
+        layers: {
+          ...base.pages[0]!.layers,
+          paintSequence: [
+            { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+            { layer: 'notes', node: note, coordinateSpace: 'section-logical' },
+          ],
+          body: [body],
+          notes: [note],
+        },
+        readingOrder: [body.id, note.id],
+      }],
+    };
 
     expect(() => assertDocumentLayout(layout)).toThrow(/FLOW_OVERLAP/);
   });
@@ -1046,5 +1080,30 @@ describe('layoutFlowBlocks', () => {
       ...base,
       cursor: { xPt: 111, yPt: 20 },
     }, services, unused)).toThrow(/INVALID_GEOMETRY/);
+  });
+
+  it('distinguishes exhausted flow capacity from a malformed cursor', () => {
+    const layoutParagraph: BlockLayoutAlgorithms['layoutParagraph'] = (input, placement) => ({
+      layout: {
+        ...drawing('overflow', rect(10, placement.cursor.yPt, 100, 12)),
+        kind: 'paragraph',
+        source: input.source,
+        spacing: { beforePt: 0, afterPt: 0 },
+        contextualSpacing: false,
+        lines: [], borders: [], resources: [], drawings: [], textBoxes: [], events: [], exclusions: [],
+      },
+      nextCursor: { xPt: 10, yPt: 31 },
+    });
+    const services = serviceStubs();
+
+    expect(() => layoutFlowBlocks({
+      source: source(0),
+      container: { id: 'body', kind: 'body', bounds: rect(10, 20, 100, 10) },
+      cursor: { xPt: 10, yPt: 20 },
+      blocks: [{ kind: 'paragraph', source: source(1) }],
+    }, services, {
+      layoutParagraph,
+      layoutTable() { throw new Error('not used'); },
+    })).toThrow(FlowCapacityExceededError);
   });
 });

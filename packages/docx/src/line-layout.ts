@@ -551,7 +551,7 @@ export interface LineLayoutEnvironment {
   readonly pageNumberFormat?: NumberFormat;
   readonly currentDateMs?: number;
   readonly noteNumbers?: ReadonlyMap<string, number>;
-  readonly currentNoteNumber?: number;
+  readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
   readonly layoutServices?: LayoutServices;
@@ -2134,7 +2134,7 @@ export function kinsokuRulesEquivalent(a: KinsokuRules, b: KinsokuRules): boolea
  *      `environment.pageIndex + 1` / `environment.totalPages`, and the measure environment is
  *      frozen at pageIndex 0 / totalPages 1 (buildMeasureState);
  *    - `noteRef` text runs: the label resolves via `environment.noteNumbers` /
- *      `environment.currentNoteNumber`, which only the paint environment carries
+ *      `environment.noteReferenceNumber`, which only a note-story environment carries
  *      (renderDocumentToCanvas builds the map; the measure state never does).
  *  Such a paragraph must NOT stamp its measured lines: the stamped segments
  *  would carry the measure-time text (a stale page number / note label) and the
@@ -2605,7 +2605,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         t.noteRef
           ? (t.noteRef.id
               ? environment.noteNumbers?.get(`${t.noteRef.kind}:${t.noteRef.id}`)
-              : environment.currentNoteNumber)
+              : environment.noteReferenceNumber)
           : undefined;
       if (t.noteRef) {
         const label = noteText != null ? String(noteText) : (t.text || '');

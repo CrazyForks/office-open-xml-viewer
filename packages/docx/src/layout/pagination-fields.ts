@@ -60,9 +60,11 @@ function storyHasPaginationFields(elements: readonly (BodyElement | CellElement)
 export function paginatedFlowHasPaginationDependentFields(
   body: readonly BodyElement[],
   footnotes: readonly DocNote[] = [],
+  additionalStories: readonly (readonly (BodyElement | CellElement)[])[] = [],
 ): boolean {
   return storyHasPaginationFields(body)
-    || footnotes.some((note) => storyHasPaginationFields(note.content));
+    || footnotes.some((note) => storyHasPaginationFields(note.content))
+    || additionalStories.some((story) => storyHasPaginationFields(story));
 }
 
 /**

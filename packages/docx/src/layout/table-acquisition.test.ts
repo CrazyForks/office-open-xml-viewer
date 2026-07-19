@@ -67,7 +67,7 @@ describe('retained table acquisition', () => {
       [100],
       100,
       { yPt: 0 },
-      [0],
+      { story: 'header', storyInstance: 'first', path: [0] },
       {
         layoutServices: () => ({}) as LayoutServices,
         tableFormat: (source) => formats.get(source)!,
@@ -80,6 +80,12 @@ describe('retained table acquisition', () => {
     );
 
     expect(acquisition.input.columnWidthsPt).toEqual([100]);
+    expect(acquisition.input.source).toEqual({
+      story: 'header', storyInstance: 'first', path: [0],
+    });
+    expect(acquisition.input.rows[0]?.cells[0]?.source).toEqual({
+      story: 'header', storyInstance: 'first', path: [0, 0, 0],
+    });
     expect(acquisition.layout.columnWidthsPt).toEqual([100]);
     expect(acquisition.input.rows[0]).toMatchObject({
       logicalRowIndex: 0,
@@ -91,6 +97,9 @@ describe('retained table acquisition', () => {
     });
     expect(Object.keys(acquisition.nestedById)).toHaveLength(1);
     const nestedAcquisition = Object.values(acquisition.nestedById)[0];
+    expect(nestedAcquisition?.input.source).toEqual({
+      story: 'header', storyInstance: 'first', path: [0, 0, 0, 0],
+    });
     expect(nestedAcquisition?.input.rows).toEqual([]);
     expect(nestedAcquisition?.layout.rows).toEqual([]);
     expect(Object.isFrozen(acquisition.input)).toBe(true);

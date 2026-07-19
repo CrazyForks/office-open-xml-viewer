@@ -43,6 +43,25 @@ function ordinaryBodyParagraph(text: string): BodyElement {
   return ordinaryParagraph(text) as unknown as BodyElement;
 }
 
+function endnoteReferenceParagraph(id: string): BodyElement {
+  const result = paragraph();
+  const run = result.runs[0];
+  if (run?.type === 'text') {
+    run.noteRef = { kind: 'endnote', id };
+  }
+  return result as unknown as BodyElement;
+}
+
+function noteMarkerParagraph(kind: 'footnote' | 'endnote'): DocParagraph {
+  const result = ordinaryParagraph('');
+  const run = result.runs[0];
+  if (run?.type === 'text') {
+    run.noteRef = { kind, id: '' };
+    run.vertAlign = 'super';
+  }
+  return result;
+}
+
 function pageOwnedWrappingParagraph(): BodyElement {
   const result = ordinaryParagraph('');
   result.runs = [{
@@ -138,6 +157,113 @@ function fragmentLineAdvancesPt(fragment: Extract<ReturnType<typeof layoutDocume
 }
 
 describe('canonical producer with a real document model', () => {
+  it('lays out document-end notes through the retained story engine', () => {
+    const section = {
+      pageWidth: 200, pageHeight: 100,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const model = {
+      section,
+      body: [endnoteReferenceParagraph('2')],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [],
+      endnotes: [
+        { id: '1', content: [ordinaryParagraph('unreferenced')] },
+        { id: '2', content: [noteMarkerParagraph('endnote')] },
+      ],
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+    const page = layout.pages[0]!;
+    const endnote = page.layers.notes.find((node) => node.source.story === 'endnote');
+
+    expect(layout.diagnostics).toEqual([]);
+    expect(endnote).toMatchObject({
+      kind: 'note',
+      source: { story: 'endnote', storyInstance: '2' },
+      flowDomainId: 'endnotes:page:0',
+    });
+    expect(endnote!.flowBounds.yPt).toBeGreaterThanOrEqual(
+      page.layers.body[0]!.flowBounds.yPt + page.layers.body[0]!.flowBounds.heightPt,
+    );
+    expect(page.readingOrder).toEqual([page.layers.body[0]!.id, endnote!.id]);
+    if (endnote?.kind !== 'note') throw new Error('Expected retained endnote');
+    const storyParagraph = endnote.story.blocks[0];
+    expect(storyParagraph?.kind).toBe('paragraph');
+    if (storyParagraph?.kind !== 'paragraph') throw new Error('Expected retained endnote paragraph');
+    expect(storyParagraph.lines.flatMap((line) => line.placements)
+      .find((placement) => placement.kind === 'text' && placement.noteReference))
+      .toMatchObject({ kind: 'text', text: '1' });
+  });
+
+  it('reports concrete document-end note overflow without hiding other layout failures', () => {
+    const section = {
+      pageWidth: 80, pageHeight: 50,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const model = {
+      section,
+      body: [endnoteReferenceParagraph('1')],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [],
+      endnotes: [{ id: '1', content: [ordinaryParagraph('endnote '.repeat(80))] }],
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+    expect(layout.pages.flatMap((page) => page.layers.notes)).toEqual([]);
+    expect(layout.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'UNSUPPORTED_FEATURE',
+        severity: 'error',
+        source: expect.objectContaining({ story: 'endnote', storyInstance: '1' }),
+        message: expect.stringContaining('do not fit the retained terminal flow region'),
+      }),
+    ]);
+  });
+
+  it('surfaces unsupported authored note positions instead of silently treating them as defaults', () => {
+    const section = {
+      pageWidth: 200, pageHeight: 140,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const model = {
+      section,
+      body: [paragraph() as unknown as BodyElement, endnoteReferenceParagraph('1')],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [{ id: '7', content: [ordinaryParagraph('footnote')] }],
+      endnotes: [{ id: '1', content: [ordinaryParagraph('endnote')] }],
+      fontFamilyClasses: {},
+      __noteLayoutSettings: {
+        footnotePosition: 'beneathText',
+        endnotePosition: 'sectEnd',
+      },
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+    expect(layout.pages.flatMap((page) => page.layers.notes).map((note) => note.source.story))
+      .toEqual(['endnote', 'footnote']);
+    expect(layout.diagnostics.map((diagnostic) => diagnostic.message)).toEqual([
+      expect.stringContaining('Unsupported footnote position "beneathText"'),
+      expect.stringContaining('Unsupported endnote position "sectEnd"'),
+    ]);
+  });
+
   it('retains parser-model bookmark starts through production pagination', () => {
     const anchored = ordinaryParagraph('destination');
     anchored.bookmarks = ['destination', 'alias'];

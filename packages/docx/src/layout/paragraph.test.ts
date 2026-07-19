@@ -851,6 +851,191 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     },
   } as unknown as CanvasRenderingContext2D;
 
+  it('resolves a public VML text shape against its authored margin alignment', () => {
+    const watermark = {
+      ...paragraph,
+      runs: [{
+        type: 'shape',
+        widthPt: 40,
+        heightPt: 20,
+        anchorXPt: 0,
+        anchorYPt: 0,
+        anchorXFromMargin: true,
+        anchorYFromPara: false,
+        anchorXAlign: 'center',
+        anchorYAlign: 'center',
+        anchorXRelativeFrom: 'margin',
+        anchorYRelativeFrom: 'margin',
+        behindDoc: true,
+        zOrder: 0,
+        subpaths: [],
+        presetGeometry: 'rect',
+        fill: { fillType: 'solid', color: 'c0c0c0' },
+        stroke: null,
+        rotation: 315,
+        fillOpacity: 0.5,
+        vmlTextPathInput: {
+          string: 'DRAFT',
+          textPathOk: true,
+          on: true,
+          fitShape: true,
+          fitPath: false,
+          trim: false,
+          xScale: false,
+          fontSizePt: 1,
+        },
+      }],
+    } as unknown as DocParagraph;
+    const host = {
+      text: '',
+      metricOnly: true,
+      sourceRunIndex: 0,
+      measuredWidth: 0,
+      fontSize: 10,
+      fontFamily: 'Test Sans',
+      fontRoute,
+    } as unknown as LayoutTextSeg;
+    const textService = {
+      shape: () => ({
+        advancePt: 5,
+        ascentPt: 0.8,
+        descentPt: 0.2,
+        spans: [{
+          text: 'DRAFT',
+          start: 0,
+          end: 5,
+          script: 'ascii',
+          breakBefore: true,
+          advancePt: 5,
+          ascentPt: 0.8,
+          descentPt: 0.2,
+          font: {
+            family: 'Test Sans',
+            route: fontRoute,
+            weight: 400,
+            style: 'normal',
+            diagnostics: [],
+          },
+          fontRoute,
+        }],
+        diagnostics: [],
+        graphemeBoundaries: [0, 1, 2, 3, 4, 5],
+      }),
+    };
+
+    const node = projectMeasuredSegment(
+      watermark,
+      host,
+      acquisitionContext,
+      { text: textService },
+      {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+        margin: { xPt: 20, yPt: 30, widthPt: 160, heightPt: 240 },
+        column: { xPt: 20, yPt: 30, widthPt: 80, heightPt: 240 },
+        pageParity: 'odd',
+      },
+    );
+
+    expect(node.drawings[0]).toMatchObject({
+      flowBounds: { xPt: 80, yPt: 140, widthPt: 40, heightPt: 20 },
+      inkBounds: { xPt: 80, yPt: 140, widthPt: 40, heightPt: 20 },
+      anchorLayer: {
+        behindDoc: true,
+        horizontalOwnership: 'page',
+        verticalOwnership: 'page',
+      },
+      commands: [{
+        kind: 'watermark-text',
+        rect: { xPt: 80, yPt: 140, widthPt: 40, heightPt: 20 },
+        text: 'DRAFT',
+        fitShape: true,
+      }],
+    });
+  });
+
+  it('resolves public anchor margin strips and mirrors inside alignment by page parity', () => {
+    const host = {
+      text: '',
+      metricOnly: true,
+      sourceRunIndex: 0,
+      measuredWidth: 0,
+      fontSize: 10,
+      fontFamily: 'Test Sans',
+      fontRoute,
+    } as unknown as LayoutTextSeg;
+    const acquire = (
+      pageParity: 'odd' | 'even',
+      overrides: Record<string, unknown>,
+    ) => {
+      const anchored = {
+        ...paragraph,
+        runs: [{
+          type: 'shape',
+          widthPt: 10,
+          heightPt: 10,
+          anchorXPt: 0,
+          anchorYPt: 0,
+          anchorXFromMargin: false,
+          anchorYFromPara: false,
+          zOrder: 0,
+          subpaths: [],
+          presetGeometry: 'rect',
+          fill: null,
+          stroke: null,
+          ...overrides,
+        }],
+      } as unknown as DocParagraph;
+      return projectMeasuredSegment(
+        anchored,
+        host,
+        acquisitionContext,
+        undefined,
+        {
+          page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+          margin: { xPt: 20, yPt: 30, widthPt: 160, heightPt: 240 },
+          column: { xPt: 20, yPt: 30, widthPt: 80, heightPt: 240 },
+          pageParity,
+        },
+      ).drawings[0]!.flowBounds;
+    };
+
+    expect(acquire('odd', {
+      anchorXRelativeFrom: 'margin',
+      anchorXAlign: 'inside',
+      anchorYRelativeFrom: 'page',
+    }).xPt).toBe(20);
+    expect(acquire('even', {
+      anchorXRelativeFrom: 'margin',
+      anchorXAlign: 'inside',
+      anchorYRelativeFrom: 'page',
+    }).xPt).toBe(170);
+    expect(acquire('odd', {
+      anchorXRelativeFrom: 'insideMargin',
+      anchorXAlign: 'center',
+      anchorYRelativeFrom: 'page',
+    }).xPt).toBe(5);
+    expect(acquire('even', {
+      anchorXRelativeFrom: 'insideMargin',
+      anchorXAlign: 'center',
+      anchorYRelativeFrom: 'page',
+    }).xPt).toBe(185);
+    expect(acquire('odd', {
+      anchorXRelativeFrom: 'page',
+      anchorYRelativeFrom: 'topMargin',
+      anchorYAlign: 'bottom',
+    }).yPt).toBe(20);
+    expect(acquire('odd', {
+      anchorXRelativeFrom: 'page',
+      anchorYRelativeFrom: 'bottomMargin',
+      anchorYAlign: 'top',
+    }).yPt).toBe(270);
+    expect(acquire('odd', {
+      anchorXRelativeFrom: 'page',
+      anchorYRelativeFrom: 'line',
+      anchorYPt: 3,
+    }).yPt).toBe(13);
+  });
+
   it('acquires ordinary CJK as complete service-shaped grapheme clusters', () => {
     const cjkParagraph = {
       ...paragraph,

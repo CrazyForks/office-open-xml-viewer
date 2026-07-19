@@ -71,6 +71,29 @@ describe('canonical body layout input', () => {
       section: { sectionOccurrenceId: expect.any(String), startType: 'nextPage' },
     });
     expect(boundary && 'section' in boundary && 'context' in boundary.section).toBe(false);
+    expect(acquired.noteLayoutSettings).toEqual({
+      footnotePosition: 'pageBottom',
+      endnotePosition: 'docEnd',
+    });
+  });
+
+  it('projects parser-private authored note placement facts', () => {
+    const document = {
+      body: [paragraph('body')],
+      section: finalSection(),
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+      __noteLayoutSettings: {
+        footnotePosition: 'beneathText',
+        endnotePosition: 'sectEnd',
+      },
+    } as unknown as DocxDocumentModel;
+
+    expect(createBodyLayoutInput(document).noteLayoutSettings).toEqual({
+      footnotePosition: 'beneathText',
+      endnotePosition: 'sectEnd',
+    });
   });
 
   it('projects section ownership and authored transitions without parser handles', () => {

@@ -13,8 +13,24 @@ import type {
   ParagraphLayout,
   PointPt,
   SourceRef,
+  StoryLayout,
+  FlowContainer,
+  NoteLayout,
   TableLayout,
 } from './types.js';
+
+export class NoteCapacityExceededError extends Error {
+  readonly code = 'NOTE_CAPACITY_EXCEEDED' as const;
+
+  constructor(
+    readonly kind: 'footnote' | 'endnote',
+    readonly pageIndex: number,
+    readonly containerId: string,
+  ) {
+    super(`${kind} story exceeds ${containerId} on page ${pageIndex}`);
+    this.name = 'NoteCapacityExceededError';
+  }
+}
 
 /** Page-local acquisition coordinates supplied by the immutable paginator.
  * This value cannot open a page or choose a transition. */
@@ -97,16 +113,19 @@ export interface AcquiredTableBlock {
   }>;
 }
 
-export interface StoryExtentMeasurementInput {
+export interface StoryLayoutAcquisitionInput {
   readonly source: SourceRef;
   readonly pageIndex: number;
   readonly section: DeepReadonly<SectionLayoutContext>;
-  readonly availableInlineExtentPt: number;
+  readonly container: FlowContainer;
 }
 
-export interface FootnoteReserveMeasurementInput {
+export interface NoteLayoutAcquisitionInput {
+  readonly kind: 'footnote' | 'endnote';
   readonly referenceIds: readonly string[];
-  readonly availableInlineExtentPt: number;
+  readonly pageIndex: number;
+  readonly section: DeepReadonly<SectionLayoutContext>;
+  readonly container: FlowContainer;
   readonly firstOnPage: boolean;
 }
 
@@ -146,8 +165,10 @@ export interface BodyLayoutSession {
   readonly hasPaginationFields: boolean;
   measureParagraph(request: BodyParagraphAcquisitionInput): AcquiredParagraphBlock;
   measureTable(request: BodyTableAcquisitionInput): AcquiredTableBlock;
-  measureStoryExtent(request: StoryExtentMeasurementInput): number;
-  measureFootnoteReserve(request: FootnoteReserveMeasurementInput): number;
+  /** B1 story acquisition. Optional only for synthetic body-only kernels. */
+  layoutStory?(request: StoryLayoutAcquisitionInput): StoryLayout;
+  /** B1 note acquisition. Optional only for synthetic body-only kernels. */
+  layoutNotes?(request: NoteLayoutAcquisitionInput): readonly NoteLayout[];
   measureFollowingBlock(request: FollowingBodyBlockMeasurementInput): FollowingBodyBlockMeasurement;
   prescanPageAnchors?(request: PageAnchorPrescanInput): BodyFlowRegistryDeltaPt | null;
   measureLineNumberGlyph(text: string): LineNumberGlyphMetrics;

@@ -58,6 +58,8 @@ export type FlowDomainKind =
 export interface FlowDomain {
   readonly id: string;
   readonly kind: FlowDomainKind;
+  /** Section-region coordinate owner for page-level stories. */
+  readonly sectionRegionId?: string;
   /** logical-page-points; same space as retained node flowBounds/inkBounds. */
   readonly logicalBounds: LayoutRect;
   /** upright-physical-page-points. */
@@ -769,8 +771,27 @@ export interface TextBoxLayout extends LayoutNodeBase {
   readonly insets: Readonly<{ topPt: number; rightPt: number; bottomPt: number; leftPt: number }>;
 }
 
+export type StoryBlockInput = FlowBlockInput;
+
+export interface StoryLayoutInput {
+  readonly source: SourceRef;
+  readonly container: FlowContainer;
+  readonly blocks: readonly StoryBlockInput[];
+}
+
+export interface StoryLayout {
+  readonly story: SourceRef['story'];
+  readonly flowBounds: LayoutRect;
+  readonly inkBounds: LayoutRect;
+  readonly clipBounds?: LayoutRect;
+  readonly blocks: readonly PaintNode[];
+  readonly advancePt: number;
+}
+
 export interface NoteLayout extends LayoutNodeBase {
   readonly kind: 'note';
+  readonly separator: readonly BorderSegment[];
+  readonly story: StoryLayout;
 }
 
 export type PaintNode = ParagraphLayout | TableLayout | DrawingLayout | TextBoxLayout | NoteLayout;

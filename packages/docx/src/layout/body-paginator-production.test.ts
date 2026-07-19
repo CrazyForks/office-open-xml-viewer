@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { SectionLayoutContext } from '../layout-context.js';
+import { physicalSectionGeometry } from './context.js';
 import type { BodyLayoutInput } from './body-layout-input.js';
-import type { BodyLayoutKernel } from './body-layout-kernel.js';
-import { attachBodyLayoutKernel } from './runtime-state.js';
+import type { SyntheticBodyLayoutKernel } from './body-layout-kernel.test-support.js';
+import { attachSyntheticBodyLayoutKernel as attachBodyLayoutKernel } from './body-layout-kernel.test-support.js';
+import { NoteCapacityExceededError } from './body-layout-kernel.js';
 import { paginateBody } from './body-paginator.js';
 import type { LayoutServices, ParagraphLayout, SourceRef, TableLayout } from './types.js';
 
@@ -50,6 +52,7 @@ const paragraphWithFootnote = (
   src: SourceRef,
   heightPt: number,
   noteId: string,
+  kind: 'footnote' | 'endnote' = 'footnote',
 ): ParagraphLayout => {
   const bounds = { xPt: 0, yPt: 0, widthPt: 180, heightPt };
   return {
@@ -59,10 +62,31 @@ const paragraphWithFootnote = (
       placements: [{
         kind: 'text', range: { start: 0, end: 1 }, origin: { xPt: 0, yPt: heightPt },
         bounds: { ...bounds, widthPt: 1 }, advancePt: 1, decorations: [],
-        noteReference: { kind: 'footnote', id: noteId },
+        noteReference: { kind, id: noteId },
       }],
     }],
   } as unknown as ParagraphLayout;
+};
+
+const paragraphWithEndnotes = (
+  id: string,
+  src: SourceRef,
+  heightPt: number,
+  noteIds: readonly string[],
+): ParagraphLayout => {
+  const retained = paragraphWithFootnote(id, src, heightPt, noteIds[0]!, 'endnote');
+  const line = retained.lines[0]!;
+  const placement = line.placements[0]!;
+  return {
+    ...retained,
+    lines: [{
+      ...line,
+      placements: noteIds.map((noteId) => ({
+        ...placement,
+        noteReference: { kind: 'endnote' as const, id: noteId },
+      })),
+    }],
+  };
 };
 
 const table = (id: string, src: SourceRef, heightPt: number): TableLayout => ({
@@ -130,7 +154,7 @@ describe('canonical body producer', () => {
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
     }) as LayoutServices;
     const layouts = [paragraph('p0', source(0), 60), paragraph('p1', source(1), 60)];
-    const kernel: BodyLayoutKernel = {
+    const kernel: SyntheticBodyLayoutKernel = {
       openBodyLayoutSession: () => ({
         hasPaginationFields: false,
         measureParagraph: ({ input }) => ({
@@ -181,6 +205,210 @@ describe('canonical body producer', () => {
       .toEqual([[0], [1]]);
     expect(layout.pages.map((page) => page.readingOrder.length)).toEqual([1, 1]);
     expect(Object.isFrozen(layout)).toBe(true);
+  });
+
+  it('retains endnotes after terminal body flow in authored order', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => ({
+          layout: paragraphWithEndnotes('body', input.source, 20, ['end-1', 'end-2']),
+          blockExtentPt: 20,
+          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+        }),
+        measureTable: () => { throw new Error('unused'); },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: ({ referenceIds }) => referenceIds.length * 10,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input: BodyLayoutInput = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [{
+        kind: 'body-block',
+        block: {
+          kind: 'paragraph', source: source(0), pageBreakBefore: false,
+          keepLines: false, keepNext: false, widowControl: true,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        },
+      }],
+      endnoteIds: ['end-1', 'end-2'],
+    };
+
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+    const page = layout.pages[0]!;
+    const note = page.layers.notes[0]!;
+
+    expect(layout.diagnostics).toEqual([]);
+    expect(note).toMatchObject({
+      kind: 'note',
+      source: { story: 'endnote', storyInstance: 'end-1' },
+      flowDomainId: 'endnotes:page:0',
+      flowBounds: { yPt: 30, heightPt: 20 },
+    });
+    expect(page.flowDomains.find((domain) => domain.kind === 'endnote')?.sectionRegionId)
+      .toBe(page.sectionRegions[0]!.id);
+    expect(page.readingOrder).toEqual([page.layers.body[0]!.id, note.id]);
+  });
+
+  it('reports a retained endnote story that cannot fit the terminal flow region', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => ({
+          layout: paragraphWithFootnote('body', input.source, 20, 'end-1', 'endnote'),
+          blockExtentPt: 20,
+          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+        }),
+        measureTable: () => { throw new Error('unused'); },
+        layoutNotes: () => {
+          throw new NoteCapacityExceededError('endnote', 0, 'endnotes:page:0');
+        },
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+
+    const layout = paginateBody({
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [{
+        kind: 'body-block',
+        block: {
+          kind: 'paragraph', source: source(0), pageBreakBefore: false,
+          keepLines: false, keepNext: false, widowControl: true,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        },
+      }],
+      endnoteIds: ['end-1'],
+    }, services, { currentDateMs: 0 });
+
+    expect(layout.pages[0]!.layers.notes).toEqual([]);
+    expect(layout.diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'UNSUPPORTED_FEATURE',
+        severity: 'error',
+        source: expect.objectContaining({ story: 'endnote', storyInstance: 'end-1' }),
+        message: expect.stringContaining('do not fit the retained terminal flow region'),
+      }),
+    ]);
+  });
+
+  it.each([
+    new Error('endnote implementation bug'),
+    new NoteCapacityExceededError('endnote', 1, 'endnotes:page:1'),
+  ])('does not misreport an unrelated failure as the terminal endnote capacity limit', (failure) => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => ({
+          layout: paragraphWithFootnote('body', input.source, 20, 'end-1', 'endnote'),
+          blockExtentPt: 20,
+          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+        }),
+        measureTable: () => { throw new Error('unused'); },
+        layoutNotes: () => { throw failure; },
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+
+    expect(() => paginateBody({
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [{
+        kind: 'body-block',
+        block: {
+          kind: 'paragraph', source: source(0), pageBreakBefore: false,
+          keepLines: false, keepNext: false, widowControl: true,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        },
+      }],
+      endnoteIds: ['end-1'],
+    }, services, { currentDateMs: 0 })).toThrow(failure.message);
+  });
+
+  it('places vertical footnotes against the logical block edge and retains physical bounds', () => {
+    const verticalSection: SectionLayoutContext = {
+      ...section,
+      textDirection: 'tbRl',
+    };
+    const owner = {
+      ...bodyOwner(),
+      context: verticalSection,
+      pageLayout: {
+        ...bodyOwner().pageLayout,
+        physicalGeometry: physicalSectionGeometry(verticalSection.geometry),
+        textDirection: 'tbRl' as const,
+      },
+    };
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => ({
+          layout: paragraphWithFootnote('vertical-body', input.source, 20, 'vertical-note'),
+          blockExtentPt: 20,
+          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+        }),
+        measureTable: () => { throw new Error('unused'); },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: ({ referenceIds }) => referenceIds.length > 0 ? 10 : 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input: BodyLayoutInput = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: owner,
+      sequence: [{
+        kind: 'body-block',
+        block: {
+          kind: 'paragraph', source: source(0), pageBreakBefore: false,
+          keepLines: false, keepNext: false, widowControl: true,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        },
+      }],
+    };
+
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+    const page = layout.pages[0]!;
+    const note = page.layers.notes[0]!;
+    const domain = page.flowDomains.find((candidate) => candidate.kind === 'footnote')!;
+
+    expect(note.flowBounds).toMatchObject({ yPt: 80, heightPt: 10 });
+    expect(domain.logicalBounds).toEqual({ xPt: 10, yPt: 80, widthPt: 180, heightPt: 10 });
+    expect(domain.physicalBounds).toEqual({ xPt: 10, yPt: 10, widthPt: 10, heightPt: 180 });
+    expect(domain.sectionRegionId).toBe(page.sectionRegions[0]!.id);
   });
 
   it('retains nextColumn section ownership as disjoint same-page column regions', () => {
@@ -631,7 +859,6 @@ describe('canonical body producer', () => {
     expect(layout.pages).toHaveLength(2);
     expect(admissions).toEqual([
       { pageIndex: 0, referenceIds: ['fn-first'] },
-      { pageIndex: 1, referenceIds: [] },
     ]);
   });
 

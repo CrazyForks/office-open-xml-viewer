@@ -123,7 +123,8 @@ function watermarkDocx(): Uint8Array {
     'z-index:-251657216;mso-position-horizontal:center;mso-position-horizontal-relative:margin;' +
     'mso-position-vertical:center;mso-position-vertical-relative:margin" fillcolor="silver" stroked="f">' +
     '<v:fill opacity=".5"/>' +
-    '<v:textpath style="font-family:&quot;Calibri&quot;;font-size:1pt" string="DRAFT"/>' +
+    '<v:path textpathok="t"/>' +
+    '<v:textpath on="t" fitshape="t" style="font-family:&quot;Calibri&quot;;font-size:1pt" string="DRAFT"/>' +
     '</v:shape></w:pict></w:r></w:p></w:hdr>';
   return storedZip({
     '[Content_Types].xml': contentTypes,
@@ -176,6 +177,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)('VML text watermark render (Â
     // (text). Neutral (near-grey) classification avoids counting anti-aliased
     // edges.
     let greyWatermark = 0;
+    let greyBelowCenter = 0;
     let darkText = 0;
     const greyLums: number[] = [];
     const x0 = 120, x1 = w - 120, y0 = 120, y1 = h - 120;
@@ -190,6 +192,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)('VML text watermark render (Â
           darkText++;
         } else if (L >= 200 && L < 248) {
           greyWatermark++;
+          if (y >= h / 2) greyBelowCenter++;
           greyLums.push(L);
         }
       }
@@ -197,6 +200,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)('VML text watermark render (Â
 
     // (a) the watermark is drawn â€” a meaningful count of grey pixels.
     expect(greyWatermark, 'watermark grey ink present in the page interior').toBeGreaterThan(500);
+    expect(greyBelowCenter, 'margin-centred watermark crosses the page centre').toBeGreaterThan(500);
 
     // (c) it is SEMI-TRANSPARENT: silver(192) over white(255) at Î±â‰ˆ0.5 â†’ â‰ˆ224.
     //     Median grey must sit in the blended band, well above opaque silver(192)
