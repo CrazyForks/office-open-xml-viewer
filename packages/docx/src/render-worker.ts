@@ -17,7 +17,7 @@ import {
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types';
-import { renderDocumentToCanvas, createLayoutServices, dropColorReplacedCache, type DocxTextRunInfo } from './renderer';
+import { renderDocumentToCanvas, createLayoutServices, dropColorReplacedCache } from './renderer';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
@@ -28,6 +28,7 @@ import {
   retainRenderWorkerDocumentLayout,
   type RetainedRenderWorkerDocumentLayout,
 } from './render-worker-layout.js';
+import { textRunsForSelectedPage } from './layout/text-index.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
 // embedded-font read) recycles the instance so the next document renders on
@@ -160,15 +161,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
     if (req.type === 'renderPage') {
       if (!doc) throw new Error('Document not loaded');
       const canvas = new OffscreenCanvas(1, 1); // renderer resizes it
-      // IX6 — collect the run geometry the same render emits so the main thread
-      // can build its selection / find overlay without a second render. The
-      // callback runs worker-side; only the resulting plain array crosses back.
-      const runs: DocxTextRunInfo[] = [];
       await renderDocumentToCanvas(doc.model, canvas, req.pageIndex, {
         ...req.opts,
         fetchImage: getImage,
-        onTextRun: (r) => runs.push(r),
         layoutServices: doc.layoutServices,
+        defaultCurrentDateMs: doc.defaultCurrentDateMs,
+      });
+      const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
+        ...req.opts,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       const bitmap = canvas.transferToImageBitmap();
@@ -176,18 +176,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       return;
     }
     if (req.type === 'collectRuns') {
-      // IX6 — render a page purely to harvest its text-run geometry (find scans
-      // every page). The bitmap is discarded worker-side; only `runs` crosses
-      // the wire. Same renderer / prebuilt pagination as `renderPage`, so the
-      // geometry is identical to what a `renderPage` of the same page would draw.
       if (!doc) throw new Error('Document not loaded');
-      const canvas = new OffscreenCanvas(1, 1);
-      const runs: DocxTextRunInfo[] = [];
-      await renderDocumentToCanvas(doc.model, canvas, req.pageIndex, {
+      const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,
-        fetchImage: getImage,
-        onTextRun: (r) => runs.push(r),
-        layoutServices: doc.layoutServices,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       post({ type: 'runsCollected', id, runs });

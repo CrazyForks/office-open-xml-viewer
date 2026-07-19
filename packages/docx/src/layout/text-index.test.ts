@@ -1,0 +1,576 @@
+import { describe, expect, it } from 'vitest';
+import type { CanvasFontRoute } from '@silurus/ooxml-core';
+import { buildPageLayers } from './page-layers.js';
+import { textRunsForPage } from './text-index.js';
+import type {
+  DocumentLayout,
+  DrawingLayout,
+  LayoutPage,
+  LayoutRect,
+  Matrix2DData,
+  NoteLayout,
+  PageLayers,
+  ParagraphPlacement,
+  ParagraphLayout,
+  SourceRef,
+  TableLayout,
+  TextBoxLayout,
+  TextPlacement,
+} from './types.js';
+
+const fontRoute = Object.freeze({
+  familyList: '"Index Sans"',
+  scope: 'native',
+  fingerprint: 'text-index-test',
+}) satisfies CanvasFontRoute;
+
+const identity = Object.freeze({
+  a: 1, b: 0, c: 0, d: 1, e: 0, f: 0,
+}) satisfies Matrix2DData;
+
+function rect(xPt = 0, yPt = 0, widthPt = 100, heightPt = 20): LayoutRect {
+  return Object.freeze({ xPt, yPt, widthPt, heightPt });
+}
+
+function source(story: SourceRef['story'], path: readonly number[]): SourceRef {
+  return Object.freeze({
+    story,
+    storyInstance: `${story}:test`,
+    path: Object.freeze([...path]),
+  });
+}
+
+function placement(
+  text: string,
+  xPt: number,
+  yPt: number,
+  options: Readonly<{
+    rangeStart?: number;
+    direction?: 'ltr' | 'rtl';
+    hyperlink?: TextPlacement['hyperlink'];
+    letterSpacingPt?: number;
+    tateChuYoko?: boolean;
+  }> = {},
+): TextPlacement {
+  const rangeStart = options.rangeStart ?? 0;
+  const range = Object.freeze({ start: rangeStart, end: rangeStart + text.length });
+  const direction = options.direction ?? 'ltr';
+  return Object.freeze({
+    kind: 'text',
+    text,
+    range,
+    origin: Object.freeze({ xPt, yPt: yPt + 8 }),
+    bounds: rect(xPt, yPt, text.length * 5, 10),
+    advancePt: text.length * 5,
+    clusters: Object.freeze([Object.freeze({
+      range,
+      offset: Object.freeze({ xPt: 0, yPt: 0 }),
+      advancePt: text.length * 5,
+    })]),
+    paintOps: Object.freeze([Object.freeze({
+      text,
+      range,
+      offset: Object.freeze({ xPt: 0, yPt: 0 }),
+      letterSpacingPt: options.letterSpacingPt ?? 0,
+      scaleX: 1,
+      direction,
+      kerning: 'auto',
+      writingMode: 'horizontal-tb',
+    })]),
+    color: Object.freeze({ kind: 'explicit', color: '#000000' }),
+    fontRoute,
+    fontSizePt: 10,
+    fontWeight: 400,
+    fontStyle: 'normal',
+    direction,
+    decorations: Object.freeze([]),
+    ...(options.hyperlink ? { hyperlink: options.hyperlink } : {}),
+    ...(options.tateChuYoko ? { tateChuYoko: true } : {}),
+  });
+}
+
+function paragraph(
+  id: string,
+  story: SourceRef['story'],
+  placements: readonly ParagraphPlacement[],
+  options: Readonly<{
+    drawings?: readonly DrawingLayout[];
+    textBoxes?: readonly TextBoxLayout[];
+    flowDomainId?: string;
+  }> = {},
+): ParagraphLayout {
+  const bounds = rect();
+  return Object.freeze({
+    kind: 'paragraph',
+    id,
+    source: source(story, [0]),
+    flowDomainId: options.flowDomainId ?? `${story}:domain`,
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: 20,
+    ordinaryFlow: story === 'body',
+    spacing: Object.freeze({ beforePt: 0, afterPt: 0 }),
+    contextualSpacing: false,
+    lines: Object.freeze([Object.freeze({
+      range: Object.freeze({ start: 0, end: placements.length }),
+      bounds,
+      baselinePt: 8,
+      advancePt: 20,
+      placements: Object.freeze([...placements]),
+    })]),
+    borders: Object.freeze([]),
+    resources: Object.freeze([]),
+    drawings: Object.freeze([...(options.drawings ?? [])]),
+    textBoxes: Object.freeze([...(options.textBoxes ?? [])]),
+    events: Object.freeze([]),
+    exclusions: Object.freeze([]),
+  });
+}
+
+function table(id: string, child: ParagraphLayout | TableLayout): TableLayout {
+  const bounds = rect();
+  return Object.freeze({
+    kind: 'table',
+    id,
+    source: source('body', [1]),
+    flowDomainId: 'body:domain',
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: 40,
+    ordinaryFlow: true,
+    columnWidthsPt: Object.freeze([100]),
+    rows: Object.freeze([Object.freeze({
+      kind: 'table-row',
+      id: `${id}:row`,
+      source: source('body', [1, 0]),
+      flowDomainId: 'body:domain',
+      flowBounds: rect(10, 20, 100, 40),
+      inkBounds: bounds,
+      advancePt: 40,
+      ordinaryFlow: true,
+      heightPt: 40,
+      contentHeightPt: 40,
+      cells: Object.freeze([Object.freeze({
+        kind: 'table-cell',
+        id: `${id}:cell`,
+        source: source('body', [1, 0, 0]),
+        flowDomainId: 'body:domain',
+        flowBounds: rect(10, 20, 100, 40),
+        inkBounds: bounds,
+        advancePt: 40,
+        ordinaryFlow: true,
+        contentBounds: rect(15, 20, 90, 40),
+        verticalMerge: 'none',
+        vAlign: 'top',
+        blocks: Object.freeze([Object.freeze({
+          layout: child,
+          offsetPt: 7,
+          advancePt: child.advancePt,
+        })]),
+      })]),
+    })]),
+    borders: Object.freeze([]),
+  });
+}
+
+function textBox(id: string, text: string): TextBoxLayout {
+  const bounds = rect();
+  const child = paragraph(`${id}:paragraph`, 'textbox', [placement(text, 1, 2)], {
+    flowDomainId: `${id}:domain`,
+  });
+  return Object.freeze({
+    kind: 'textbox',
+    id,
+    source: source('textbox', [0]),
+    flowDomainId: `${id}:domain`,
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: 20,
+    ordinaryFlow: false,
+    story: Object.freeze({
+      story: 'textbox',
+      flowBounds: bounds,
+      inkBounds: bounds,
+      blocks: Object.freeze([child]),
+      advancePt: 20,
+      diagnostics: Object.freeze([]),
+    }),
+    transform: Object.freeze({ a: 1, b: 0, c: 0, d: 1, e: 5, f: 6 }),
+    writingMode: 'horizontal-tb',
+    insets: Object.freeze({ topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 }),
+  });
+}
+
+function anchoredDrawing(
+  id: string,
+  textBoxId: string,
+  options: Readonly<{
+    behindDoc: boolean;
+    relativeHeight: number;
+    sourceOrder: number;
+    horizontalOwnership?: 'page' | 'host';
+    verticalOwnership?: 'page' | 'host';
+  }>,
+): DrawingLayout {
+  return Object.freeze({
+    kind: 'drawing',
+    id,
+    source: source('body', [options.sourceOrder]),
+    flowDomainId: 'body:domain',
+    flowBounds: rect(),
+    inkBounds: rect(),
+    advancePt: 0,
+    ordinaryFlow: false,
+    commands: Object.freeze([]),
+    anchorLayer: Object.freeze({
+      occurrenceId: `anchor:${id}`,
+      behindDoc: options.behindDoc,
+      relativeHeight: options.relativeHeight,
+      sourceOrder: options.sourceOrder,
+      horizontalOwnership: options.horizontalOwnership ?? 'host',
+      verticalOwnership: options.verticalOwnership ?? 'host',
+    }),
+    textBoxIds: Object.freeze([textBoxId]),
+  });
+}
+
+function note(id: string, text: string): NoteLayout {
+  const bounds = rect();
+  return Object.freeze({
+    kind: 'note',
+    id,
+    source: source('footnote', [0]),
+    flowDomainId: 'footnote:domain',
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: 20,
+    ordinaryFlow: false,
+    separator: Object.freeze([]),
+    story: Object.freeze({
+      story: 'footnote',
+      flowBounds: bounds,
+      inkBounds: bounds,
+      blocks: Object.freeze([
+        paragraph(`${id}:paragraph`, 'footnote', [placement(text, 0, 0)], {
+          flowDomainId: 'footnote:domain',
+        }),
+      ]),
+      advancePt: 20,
+      diagnostics: Object.freeze([]),
+    }),
+  });
+}
+
+function page(layers: PageLayers, readingOrder: readonly string[]): LayoutPage {
+  const geometry = Object.freeze({
+    ...rect(0, 0, 200, 300),
+    contentTopPt: 20,
+    contentBottomPt: 280,
+  });
+  return {
+    pageIndex: 0,
+    geometry,
+    flowDomains: [
+      {
+        id: 'header:domain', kind: 'header',
+        logicalBounds: geometry, physicalBounds: geometry,
+      },
+      {
+        id: 'body:domain', kind: 'body',
+        sectionRegionId: 'region',
+        logicalBounds: geometry, physicalBounds: geometry,
+      },
+      {
+        id: 'footnote:domain', kind: 'footnote',
+        sectionRegionId: 'region',
+        logicalBounds: geometry, physicalBounds: geometry,
+      },
+      {
+        id: 'footer:domain', kind: 'footer',
+        logicalBounds: geometry, physicalBounds: geometry,
+      },
+    ],
+    section: {} as LayoutPage['section'],
+    sectionOccurrenceId: 'section',
+    parityBlank: false,
+    bookmarkStarts: [],
+    pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section' },
+    sectionRegions: [{
+      id: 'region',
+      sectionOccurrenceId: 'section',
+      coordinateSpace: {
+        writingMode: 'horizontal-tb',
+        logicalToPhysical: identity,
+        physicalToLogical: identity,
+      },
+      blockStartPt: 0,
+      blockEndPt: 300,
+      columnFlowDirection: 'ltr',
+      columnIndexes: [0],
+      flowDomainIds: ['body:domain'],
+      section: {} as LayoutPage['section'],
+    }],
+    columnSeparators: [],
+    pageBorders: null,
+    layers,
+    readingOrder,
+  };
+}
+
+function documentLayout(layoutPage: LayoutPage): DocumentLayout {
+  return Object.freeze({
+    pages: Object.freeze([layoutPage]),
+    diagnostics: Object.freeze([]),
+  });
+}
+
+describe('textRunsForPage', () => {
+  it('projects retained visual placements in semantic story order without reshaping', () => {
+    const header = paragraph('header', 'header', [placement('H', 1, 1)], {
+      flowDomainId: 'header:domain',
+    });
+    const body = paragraph('body', 'body', [
+      placement('RTL', 20, 10, {
+        rangeStart: 3,
+        direction: 'rtl',
+        hyperlink: { kind: 'internal', ref: 'destination' },
+        letterSpacingPt: 0.5,
+      }),
+      Object.freeze({
+        kind: 'tab',
+        range: Object.freeze({ start: 2, end: 3 }),
+        bounds: rect(15, 10, 5, 10),
+        advancePt: 5,
+        leader: 'none',
+      }),
+      placement('fi', 5, 10, { rangeStart: 0 }),
+    ]);
+    const footnote = note('note', 'N');
+    const footer = paragraph('footer', 'footer', [placement('F', 2, 250)], {
+      flowDomainId: 'footer:domain',
+    });
+    const layers = buildPageLayers([
+      { layer: 'header', node: header, coordinateSpace: 'section-logical' },
+      { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+      { layer: 'notes', node: footnote, coordinateSpace: 'section-logical' },
+      { layer: 'footer', node: footer, coordinateSpace: 'section-logical' },
+    ]);
+
+    const runs = textRunsForPage(
+      documentLayout(page(layers, [header.id, body.id, footnote.id, footer.id])),
+      0,
+      { scale: 2 },
+    );
+
+    expect(runs.map((run) => run.text)).toEqual(['H', 'RTL', 'fi', 'N', 'F']);
+    expect(runs[1]).toMatchObject({
+      x: 40,
+      y: 20,
+      w: 30,
+      h: 20,
+      fontSize: 20,
+      letterSpacingPx: 1,
+      hyperlink: { kind: 'internal', ref: 'destination' },
+    });
+    expect(runs[2]?.font).toBe('normal 400 20px "Index Sans"');
+  });
+
+  it('projects table-cell and vertical page transforms into physical CSS geometry', () => {
+    const child = paragraph('cell-paragraph', 'body', [
+      placement('V', 2, 3, { tateChuYoko: true }),
+    ]);
+    const root = table('table', child);
+    const layers = buildPageLayers([
+      { layer: 'body', node: root, coordinateSpace: 'section-logical' },
+    ]);
+    const verticalPage = page(layers, [root.id]);
+    const logicalToPhysical = Object.freeze({
+      a: 0, b: 1, c: -1, d: 0, e: 200, f: 0,
+    });
+    const physicalToLogical = Object.freeze({
+      a: 0, b: -1, c: 1, d: 0, e: 0, f: 200,
+    });
+    const transformedPage: LayoutPage = {
+      ...verticalPage,
+      sectionRegions: verticalPage.sectionRegions.map((region) => ({
+        ...region,
+        coordinateSpace: {
+          writingMode: 'vertical-rl',
+          logicalToPhysical,
+          physicalToLogical,
+        },
+      })),
+    };
+
+    expect(textRunsForPage(documentLayout(transformedPage), 0, { scale: 2 }))
+      .toEqual([expect.objectContaining({
+        text: 'V',
+        x: 340,
+        y: 34,
+        w: 10,
+        h: 20,
+        fontSize: 20,
+        transform: 'rotate(90deg)',
+        eastAsianVert: true,
+      })]);
+  });
+
+  it('composes nested table-cell placements without paint callbacks', () => {
+    const child = paragraph('nested-cell-paragraph', 'body', [
+      placement('nested', 2, 3),
+    ]);
+    const nested = table('nested-table', child);
+    const outer = table('outer-table', nested);
+    const layers = buildPageLayers([
+      { layer: 'body', node: outer, coordinateSpace: 'section-logical' },
+    ]);
+
+    expect(textRunsForPage(
+      documentLayout(page(layers, [outer.id])),
+      0,
+      { scale: 1 },
+    )).toEqual([expect.objectContaining({
+      text: 'nested',
+      x: 32,
+      y: 57,
+    })]);
+  });
+
+  it('recursively visits anchors inside an owned text-box local stacking context', () => {
+    const innerBox = textBox('inner-box', 'I');
+    const innerDrawing = anchoredDrawing('inner-drawing', innerBox.id, {
+      behindDoc: true,
+      relativeHeight: 10,
+      sourceOrder: 0,
+    });
+    const outerParagraph = paragraph('outer-box:paragraph', 'textbox', [
+      placement('O', 1, 2),
+    ], {
+      flowDomainId: 'outer-box:domain',
+      drawings: [innerDrawing],
+      textBoxes: [innerBox],
+    });
+    const outerBoxBase = textBox('outer-box', 'unused');
+    const outerBox: TextBoxLayout = Object.freeze({
+      ...outerBoxBase,
+      story: Object.freeze({
+        ...outerBoxBase.story,
+        blocks: Object.freeze([outerParagraph]),
+      }),
+    });
+    const outerDrawing = anchoredDrawing('outer-drawing', outerBox.id, {
+      behindDoc: false,
+      relativeHeight: 20,
+      sourceOrder: 0,
+    });
+    const body = paragraph('body', 'body', [placement('B', 0, 0)], {
+      drawings: [outerDrawing],
+      textBoxes: [outerBox],
+    });
+    const layers = buildPageLayers([
+      { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+    ]);
+
+    const runs = textRunsForPage(
+      documentLayout(page(layers, [body.id])),
+      0,
+      { scale: 1 },
+    );
+    expect(runs.map((run) => run.text)).toEqual(['B', 'O', 'I']);
+    expect(runs[2]).toMatchObject({ x: 11, y: 14 });
+  });
+
+  it('keeps anchored text-box sequence stable under z-order edits and uses retained frames for geometry', () => {
+    const firstBox = textBox('first-box', 'T1');
+    const secondBox = textBox('second-box', 'T2');
+    const firstDrawing = anchoredDrawing('first-drawing', firstBox.id, {
+      behindDoc: true,
+      relativeHeight: 1,
+      sourceOrder: 0,
+      horizontalOwnership: 'page',
+      verticalOwnership: 'host',
+    });
+    const secondDrawing = anchoredDrawing('second-drawing', secondBox.id, {
+      behindDoc: false,
+      relativeHeight: 500,
+      sourceOrder: 1,
+      horizontalOwnership: 'page',
+      verticalOwnership: 'host',
+    });
+    const body = paragraph('body', 'body', [placement('B', 0, 0)], {
+      drawings: [secondDrawing, firstDrawing],
+      textBoxes: [secondBox, firstBox],
+    });
+    const built = buildPageLayers([
+      { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+    ]);
+    const layers: PageLayers = Object.freeze({
+      ...built,
+      paintOrder: Object.freeze(built.paintOrder.map((entry) => (
+        entry.kind === 'drawing' ? Object.freeze({
+          ...entry,
+          frames: Object.freeze([Object.freeze({
+            kind: 'transform' as const,
+            transform: Object.freeze({ a: 1, b: 0, c: 0, d: 1, e: 30, f: 40 }),
+          })]),
+          layoutTranslationPt: Object.freeze({ xPt: 30, yPt: 40 }),
+        }) : entry
+      ))),
+    });
+
+    const original = textRunsForPage(
+      documentLayout(page(layers, [body.id])),
+      0,
+      { scale: 2 },
+    );
+
+    const raisedFirstDrawing = anchoredDrawing('first-drawing', firstBox.id, {
+      behindDoc: false,
+      relativeHeight: 999,
+      sourceOrder: 0,
+      horizontalOwnership: 'page',
+      verticalOwnership: 'host',
+    });
+    const raisedSecondDrawing = anchoredDrawing('second-drawing', secondBox.id, {
+      behindDoc: true,
+      relativeHeight: 0,
+      sourceOrder: 1,
+      horizontalOwnership: 'page',
+      verticalOwnership: 'host',
+    });
+    const raisedBody = paragraph('body', 'body', [placement('B', 0, 0)], {
+      drawings: [raisedFirstDrawing, raisedSecondDrawing],
+      textBoxes: [firstBox, secondBox],
+    });
+    const raisedBuilt = buildPageLayers([
+      { layer: 'body', node: raisedBody, coordinateSpace: 'section-logical' },
+    ]);
+    const raisedLayers: PageLayers = Object.freeze({
+      ...raisedBuilt,
+      paintOrder: Object.freeze(raisedBuilt.paintOrder.map((entry) => (
+        entry.kind === 'drawing' ? Object.freeze({
+          ...entry,
+          frames: Object.freeze([Object.freeze({
+            kind: 'transform' as const,
+            transform: Object.freeze({ a: 1, b: 0, c: 0, d: 1, e: 30, f: 40 }),
+          })]),
+          layoutTranslationPt: Object.freeze({ xPt: 30, yPt: 40 }),
+        }) : entry
+      ))),
+    });
+    const raised = textRunsForPage(
+      documentLayout(page(raisedLayers, [raisedBody.id])),
+      0,
+      { scale: 2 },
+    );
+
+    expect(original.map((run) => run.text)).toEqual(['B', 'T1', 'T2']);
+    expect(raised).toEqual(original);
+    expect(original[1]).toMatchObject({
+      x: 12,
+      y: 96,
+      w: 20,
+      h: 20,
+    });
+  });
+});

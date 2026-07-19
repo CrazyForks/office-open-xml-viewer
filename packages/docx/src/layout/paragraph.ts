@@ -1035,7 +1035,7 @@ function textPlacement(
         : segment.fontSize >= segment.kerning ? 'normal' : 'none',
       writingMode: segment.verticalRun ? 'vertical-rl' : 'horizontal-tb',
     }],
-    ...(segment.hyperlink?.kind === 'external' ? { hyperlink: segment.hyperlink.url } : {}),
+    ...(segment.hyperlink ? { hyperlink: segment.hyperlink } : {}),
   };
 }
 

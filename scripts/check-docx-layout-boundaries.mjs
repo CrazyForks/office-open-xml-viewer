@@ -1684,7 +1684,7 @@ function assertCanonicalCutoverBoundaries(root) {
       || callsNamed(source, 'layoutDocument').length !== 0
       || retentionCalls.length !== 1
       || !workerRetentionCallIsCanonical(retentionCalls[0], source)
-      || rendererCalls.length !== 2
+      || rendererCalls.length !== 1
       || rendererCalls.some((call) => !workerRenderCallIsCanonical(call, source))
       || !workerMetadataRouteIsCanonical(source)) {
       fail('WORKER_LAYOUT_SELECTION', `${DOCX_SOURCE}/render-worker.ts`);

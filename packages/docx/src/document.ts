@@ -34,6 +34,7 @@ import type {
 } from './worker-protocol';
 import { normalizeInternalDocumentModel } from './parser-model.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
+import { textRunsForSelectedPage } from './layout/text-index.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
@@ -540,12 +541,11 @@ export class DocxDocument {
   }
 
   /**
-   * IX6 — collect a page's text-run geometry (`DocxTextRunInfo[]`) without
-   * painting a visible canvas. Works in BOTH modes: worker mode renders the page
-   * off-thread and ships only the runs (no bitmap transfer); main mode renders
-   * to a throwaway offscreen canvas. Used by the find controller to scan every
-   * page for matches. The geometry is identical to a `renderPage` of the same
-   * page at the same width/dpr.
+   * Collect a page's text-run geometry (`DocxTextRunInfo[]`) directly from the
+   * retained layout. Works in BOTH modes without painting or constructing a
+   * Canvas; worker mode ships only the projected plain-data runs. Used by the
+   * find controller to scan every page. Geometry uses the same selected layout
+   * variant and width scale as `renderPage`; DPR does not change CSS pixels.
    */
   async collectPageRuns(
     pageIndex: number,
@@ -559,12 +559,13 @@ export class DocxDocument {
       );
       return (res as Extract<RenderWorkerResponse, { type: 'runsCollected' }>).runs;
     }
-    const runs: DocxTextRunInfo[] = [];
-    const off =
-      typeof OffscreenCanvas !== 'undefined'
-        ? new OffscreenCanvas(1, 1)
-        : (globalThis.document?.createElement('canvas') as HTMLCanvasElement);
-    await this.renderPage(off, pageIndex, { ...wireOpts, onTextRun: (r) => runs.push(r) });
-    return runs;
+    const runtime = documentLayoutRuntimeOf(this);
+    const services = runtime.services;
+    if (!services) throw new Error('Document layout services are not initialized');
+    return textRunsForSelectedPage(services, pageIndex, {
+      currentDate: wireOpts.currentDate,
+      defaultCurrentDateMs: runtime.defaultCurrentDateMs,
+      width: wireOpts.width,
+    });
   }
 }

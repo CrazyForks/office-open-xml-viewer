@@ -138,11 +138,7 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + '    layoutServices: doc.layoutServices,\n'
       + '    defaultCurrentDateMs: doc.defaultCurrentDateMs });\n'
       + '}\n'
-      + 'export function collectWorkerRuns(doc, canvas, pageIndex, options) {\n'
-      + '  return renderDocumentToCanvas(doc.model, canvas, pageIndex, { ...options,\n'
-      + '    layoutServices: doc.layoutServices,\n'
-      + '    defaultCurrentDateMs: doc.defaultCurrentDateMs });\n'
-      + '}\n');
+      + 'export function collectWorkerRuns() { return []; }\n');
   write(root, 'packages/docx/src/renderer.ts', canonicalRenderer);
   return root;
 }
@@ -1296,6 +1292,21 @@ test('worker selection validates call ownership rather than only call counts', (
       + 'export function renderWorkerPage() { return renderDocumentToCanvas(); }\n'
       + 'export function collectWorkerRuns() { return renderDocumentToCanvas(); }\n');
   expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', 'wrong worker call ownership', '--final');
+});
+
+test('worker run collection cannot add a second dry-render call', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-worker-dry-collect-');
+  const workerPath = join(root, 'packages/docx/src/render-worker.ts');
+  const source = readFileSync(workerPath, 'utf8');
+  write(root, 'packages/docx/src/render-worker.ts', source.replace(
+    'export function collectWorkerRuns() { return []; }',
+    'export function collectWorkerRuns(doc, canvas, pageIndex, options) {\n'
+      + '  return renderDocumentToCanvas(doc.model, canvas, pageIndex, { ...options,\n'
+      + '    layoutServices: doc.layoutServices,\n'
+      + '    defaultCurrentDateMs: doc.defaultCurrentDateMs });\n'
+      + '}',
+  ));
+  expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', 'dry run collection', '--final');
 });
 
 test('worker render calls require the exact retained worker layout authority', () => {

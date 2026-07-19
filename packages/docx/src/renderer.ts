@@ -5,7 +5,6 @@ import type {
 } from './types';
 import { docxRenderedFontFamilies } from './document-content.js';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
-import { textRunPaintInfo } from './paint/text-run-info.js';
 import {
   buildCustomPath,
   buildShapePath,
@@ -392,8 +391,8 @@ import {
   drawTateChuYokoRun,
   drawUprightBox,
   physicalToLogicalAnchorBox,
-  verticalTextLayerPlacement,
 } from './vertical-text.js';
+import { textRunsForPage } from './layout/text-index.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -874,8 +873,6 @@ export interface RenderState {
    *  Threaded from `doc.settings.mathDefJc` like `kinsoku`; consumed by the
    *  per-line alignment step for single display-math lines. */
   mathDefJc?: string;
-  /** Callback for building a transparent text selection overlay. */
-  onTextRun?: (run: DocxTextRunInfo) => void;
   /** When false, runs tagged with a `revision` render without the
    *  track-changes overlay (no author colour, no underline/strikethrough). */
   showTrackChanges: boolean;
@@ -1984,7 +1981,6 @@ async function renderDocumentToCanvasLeased(
     balanceSingleByteDoubleByteWidth:
       layoutSettings.compat.balanceSingleByteDoubleByteWidth,
     mathDefJc: layoutSettings.mathDefJc,
-    onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
     // §17.16.4.1 — the instant DATE/TIME fields format against (default real time).
     currentDateMs: layoutOptions.currentDateMs,
@@ -2052,7 +2048,6 @@ async function renderDocumentToCanvasLeased(
       resources: retainedResourcePainter,
       defaultTextColor: baseState.defaultColor,
       showTrackChanges: baseState.showTrackChanges,
-      ...(opts.onTextRun ? { onTextRun: opts.onTextRun } : {}),
     });
   } finally {
     ctx.restore();
@@ -2073,6 +2068,11 @@ async function renderDocumentToCanvasLeased(
       } finally {
         ctx.restore();
       }
+    }
+  }
+  if (opts.onTextRun) {
+    for (const run of textRunsForPage(retainedBodyLayout, pageIndex, { scale })) {
+      opts.onTextRun(run);
     }
   }
 }
@@ -6912,46 +6912,6 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
             }
           }
           ctx.restore();
-        }
-
-        if (state.onTextRun && s.text) {
-          // ECMA-376 §17.6.20 (tbRl) — `x`/`state.y` are LOGICAL flow coords; on a
-          // vertical page the overlay DOM lives on the physical (rotated) canvas,
-          // so project the logical top-left to physical and hand the span the +90°
-          // rotation. `verticalTextLayerPlacement` returns null on horizontal pages
-          // (the span stays at the logical `x`/`y`, byte-identical to before).
-          const place = verticalTextLayerPlacement(
-            x, state.y, state.verticalPhys?.cssWidthPx ?? 0, !!state.verticalCJK,
-          );
-          // Reuse the paint path's single pitch authority so selection and find
-          // overlays reproduce §17.3.2.14 fitText or docGrid + §17.3.2.35 spacing.
-          // Upright-vertical / 縦中横 runs retain their existing payload and
-          // geometry; an all-rotated (btLr) run drew through the horizontal
-          // branch WITH the pitch, so its overlay reports it like horizontal.
-          const letterSpacingPx = !verticalUpright && !s.tateChuYoko
-            ? segLetterSpacingPx(s, drawGridDeltaPx, scale)
-            : 0;
-          state.onTextRun(textRunPaintInfo({
-            text: s.text,
-            x: place ? place.left : x,
-            y: place ? place.top : state.y,
-            w: spanW,
-            h: lineH,
-            fontSize: effSizePx,
-            font: ctx.font,
-            ...(letterSpacingPx !== 0 ? { letterSpacingPx } : {}),
-            transform: place?.transform,
-            // IX1 — hand the resolved hyperlink target to the overlay so a link
-            // run becomes clickable. Undefined for non-link runs (no payload
-            // change). Does not touch any drawing above.
-            hyperlink: s.hyperlink,
-            // §17.3.2.10 縦中横 — flag a tate-chu-yoko run so the overlays clamp
-            // their extent to the drawn one-em cell (`w`) instead of the run's
-            // natural glyph width (#836). Only set on a vertical page, where the
-            // 縦中横 draw path (above) actually fires; `undefined` otherwise so a
-            // non-縦中横 run's payload is byte-identical.
-            eastAsianVert: verticalUpright && s.tateChuYoko ? true : undefined,
-          }));
         }
 
         // Underline / strike share the glyph colour, so an inverse-video run

@@ -157,9 +157,8 @@ describe('paintParagraphLayout', () => {
     expect(calls).toContain('clip');
   });
 
-  it('owns placement scale and reports transformed text-run geometry', () => {
+  it('owns placement scale', () => {
     const transforms: unknown[] = [];
-    const runs: unknown[] = [];
     const ctx = {
       fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: 'left',
       textBaseline: 'alphabetic', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto',
@@ -172,33 +171,11 @@ describe('paintParagraphLayout', () => {
 
     paintPlacedParagraphLayout(node(), { xPt: 30, yPt: 40 }, {
       ctx, scale: 2, dpr: 1, resources: noPaintResources,
-      onTextRun: (run) => runs.push(run),
     });
 
     expect(transforms).toEqual([
       'save', ['translate', 40, 60], ['scale', 2, 2], 'restore',
     ]);
-    expect(runs[0]).toMatchObject({ x: 60, y: 80, w: 40, h: 20, fontSize: 20 });
-  });
-
-  it('reports text-run geometry through the retained point-to-CSS affine', () => {
-    const runs: unknown[] = [];
-    const ctx = {
-      fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: 'left',
-      textBaseline: 'alphabetic', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto',
-      save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, setLineDash() {},
-      fillRect() {}, strokeRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fillText() {},
-    } as unknown as CanvasRenderingContext2D;
-
-    paintParagraphLayout(node(), {
-      ctx, scale: 2, dpr: 1, resources: noPaintResources,
-      pointToCss: { a: 0, b: 2, c: -2, d: 0, e: 200, f: 5 },
-      onTextRun: (run) => runs.push(run),
-    });
-
-    expect(runs[0]).toMatchObject({
-      x: 180, y: 25, w: 40, h: 20, fontSize: 20, transform: 'rotate(90deg)',
-    });
   });
 
   it.each([

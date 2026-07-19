@@ -492,7 +492,6 @@
     "packages/docx/src/vertical-text.ts#FunctionDeclaration#verticalRotateInkGeometry",
     "packages/docx/src/vertical-text.ts#FunctionDeclaration#verticalRunInkExtraPx",
     "packages/docx/src/vertical-text.ts#FunctionDeclaration#verticalRunInkExtraPxWithCapability",
-    "packages/docx/src/vertical-text.ts#FunctionDeclaration#verticalTextLayerPlacement",
     "packages/docx/src/vertical-text.ts#InterfaceDeclaration#Box",
     "packages/docx/src/vertical-text.ts#InterfaceDeclaration#RoutedVerticalGlyphCell",
     "packages/docx/src/vertical-text.ts#TypeAliasDeclaration#Ctx2D",

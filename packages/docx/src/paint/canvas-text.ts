@@ -9,12 +9,10 @@ import { paintTableLayout } from './canvas-table.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import {
   composeAffine,
-  mapAffinePoint,
   scaleAffine,
   translationAffine,
 } from './affine.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
-import { textRunPaintInfo } from './text-run-info.js';
 
 function validateTextSlices(placement: import('../layout/types.js').TextPlacement): void {
   if (placement.text.length !== placement.range.end - placement.range.start) {
@@ -74,19 +72,6 @@ function textColor(
   context: CanvasPaintContext,
 ): string {
   return resolvedTextColor(placement.color, context);
-}
-
-function cssTransformFor(matrix: import('../layout/types.js').Matrix2DData): string | undefined {
-  const inlineScale = Math.hypot(matrix.a, matrix.b);
-  const blockScale = Math.hypot(matrix.c, matrix.d);
-  const a = matrix.a / inlineScale;
-  const b = matrix.b / inlineScale;
-  const c = matrix.c / blockScale;
-  const d = matrix.d / blockScale;
-  if (a === 1 && b === 0 && c === 0 && d === 1) return undefined;
-  if (a === 0 && b === 1 && c === -1 && d === 0) return 'rotate(90deg)';
-  if (a === 0 && b === -1 && c === 1 && d === 0) return 'rotate(-90deg)';
-  return `matrix(${a}, ${b}, ${c}, ${d}, 0, 0)`;
 }
 
 function paintRetainedGlyph(
@@ -320,34 +305,6 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
         paintRetainedGlyph(operation, context);
       }
       for (const path of placement.emphasis?.paths ?? []) paintRetainedMarkPath(path, context);
-      if (context.onTextRun) {
-        const pointToCss = context.pointToCss ?? scaleAffine(context.scale);
-        const origin = mapAffinePoint(pointToCss, placement.bounds);
-        const inlineScale = Math.hypot(pointToCss.a, pointToCss.b);
-        const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
-        const transform = cssTransformFor(pointToCss);
-        const letterSpacingPt = placement.paintOps[0]?.letterSpacingPt ?? 0;
-        context.onTextRun(textRunPaintInfo({
-          text: placement.text,
-          x: origin.xPt,
-          y: origin.yPt,
-          w: placement.bounds.widthPt * inlineScale,
-          h: placement.bounds.heightPt * blockScale,
-          fontSize: placement.fontSizePt * blockScale,
-          font: canvasFontString(
-            placement.fontRoute,
-            placement.fontSizePt * blockScale,
-            placement.fontWeight,
-            placement.fontStyle,
-          ),
-          ...(letterSpacingPt !== 0 ? { letterSpacingPx: letterSpacingPt * inlineScale } : {}),
-          ...(transform ? { transform } : {}),
-          ...(placement.hyperlink ? {
-            hyperlink: { kind: 'external' as const, url: placement.hyperlink },
-          } : {}),
-          ...(placement.tateChuYoko ? { eastAsianVert: true } : {}),
-        }));
-      }
       for (const decoration of placement.decorations) paintStrokeSegment(decoration, context);
       for (const border of placement.runBorderFragments ?? []) paintStrokeSegment(border, context);
     }
