@@ -2410,7 +2410,7 @@ function orientVerticalTextBoxTable(
           { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
         )
       : orientVerticalTextBoxTable(child, mode);
-  return {
+  const oriented: import('./types.js').TableLayout = {
     ...table,
     rows: table.rows.map((row) => ({
       ...row,
@@ -2422,18 +2422,34 @@ function orientVerticalTextBoxTable(
         })),
       })),
     })),
-    ...(table.floatingTables ? {
-      floatingTables: table.floatingTables.map((placement) => ({
-        ...placement,
-        child: orientVerticalTextBoxTable(placement.child, mode),
-      })),
-    } : {}),
-    ...(table.resolvedFloatingTables ? {
-      resolvedFloatingTables: table.resolvedFloatingTables.map((placement) => ({
-        ...placement,
-        child: orientVerticalTextBoxTable(placement.child, mode),
-      })),
-    } : {}),
+  };
+  const sourceMemo = new Map<
+    import('./types.js').FloatingTablePlacementLayout,
+    import('./types.js').FloatingTablePlacementLayout
+  >();
+  const orientSource = (
+    placement: import('./types.js').FloatingTablePlacementLayout,
+  ): import('./types.js').FloatingTablePlacementLayout => {
+    const prior = sourceMemo.get(placement);
+    if (prior) return prior;
+    const result = {
+      ...placement,
+      child: orientVerticalTextBoxTable(placement.child, mode),
+    };
+    sourceMemo.set(placement, result);
+    return result;
+  };
+  const floatingTables = table.floatingTables?.map(orientSource);
+  const resolvedFloatingTables = table.resolvedFloatingTables?.map(
+    (placement) => {
+      const source = orientSource(placement.source);
+      return { ...placement, source, child: source.child };
+    },
+  );
+  return {
+    ...oriented,
+    ...(floatingTables ? { floatingTables } : {}),
+    ...(resolvedFloatingTables ? { resolvedFloatingTables } : {}),
   };
 }
 
@@ -2468,9 +2484,59 @@ function translateTextBoxStory(
     ...(story.clipBounds ? { clipBounds: translateRect(story.clipBounds, delta) } : {}),
     blocks: story.blocks.map((block) => {
       if (block.kind === 'paragraph') return translateParagraphLayout(block, delta);
-      if (block.kind === 'table') return translateTableLayout(block, delta);
+      if (block.kind === 'table') return translateVerticalTextBoxTable(block, delta);
       throw new Error(`Text-box story contains unsupported retained node: ${block.kind}`);
     }),
+  };
+}
+
+function translateVerticalTextBoxTable(
+  table: import('./types.js').TableLayout,
+  delta: Readonly<{ xPt: number; yPt: number }>,
+): import('./types.js').TableLayout {
+  // The generic occurrence translator deliberately preserves page-owned
+  // resolved floats. This delta instead belongs to the vertical text-box's
+  // local story frame, so every floating-table frame moves with that story.
+  const translated = translateTableLayout(table, delta);
+  const sourceMemo = new Map<
+    import('./types.js').FloatingTablePlacementLayout,
+    import('./types.js').FloatingTablePlacementLayout
+  >();
+  const translateSource = (
+    source: import('./types.js').FloatingTablePlacementLayout,
+  ): import('./types.js').FloatingTablePlacementLayout => {
+    const prior = sourceMemo.get(source);
+    if (prior) return prior;
+    const result = {
+      ...source,
+      anchorBounds: translateRect(source.anchorBounds, delta),
+      ...(source.columnBounds
+        ? { columnBounds: translateRect(source.columnBounds, delta) }
+        : {}),
+      child: translateVerticalTextBoxTable(source.child, delta),
+    };
+    sourceMemo.set(source, result);
+    return result;
+  };
+  const floatingTables = table.floatingTables?.map(translateSource);
+  const resolvedFloatingTables = table.resolvedFloatingTables?.map(
+    (placement) => {
+      const source = translateSource(placement.source);
+      return {
+        ...placement,
+        xPt: placement.xPt + delta.xPt,
+        yPt: placement.yPt + delta.yPt,
+        bounds: translateRect(placement.bounds, delta),
+        exclusionBounds: translateRect(placement.exclusionBounds, delta),
+        source,
+        child: source.child,
+      };
+    },
+  );
+  return {
+    ...translated,
+    ...(floatingTables ? { floatingTables } : {}),
+    ...(resolvedFloatingTables ? { resolvedFloatingTables } : {}),
   };
 }
 

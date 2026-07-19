@@ -11,7 +11,9 @@ import { createLayoutServices, layoutDocument } from '../renderer.js';
 import { acquireShapeTextBoxLayout } from './paragraph.js';
 import type { CompleteTextBoxBlockInput } from './textbox-input.js';
 import type {
+  FloatingTablePlacementLayout,
   ParagraphLayout,
+  ResolvedFloatingTablePlacementLayout,
   StoryLayout,
   TableLayout,
 } from './types.js';
@@ -166,6 +168,113 @@ describe('rich text-box story acquisition', () => {
       transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
     });
     expect(layout).not.toHaveProperty('paragraphs');
+  });
+
+  it('keeps vertical spAutoFit floating-table geometry in the shifted local story frame', () => {
+    const rect = (xPt: number, yPt: number, widthPt = 10, heightPt = 10) => ({
+      xPt, yPt, widthPt, heightPt,
+    });
+    const floatingChild: TableLayout = {
+      ...table(),
+      id: 'textbox-floating-child',
+      flowBounds: rect(2, 5),
+      inkBounds: rect(2, 5),
+    };
+    const sourcePlacement = {
+      kind: 'floating-table-placement',
+      occurrenceId: 'textbox-float',
+      ownership: 'source',
+      physicalPageIndex: 0,
+      displayPageNumber: 1,
+      hostCellId: 'textbox-host-cell',
+      sourceBlockIndex: 0,
+      anchorBlockIndex: 0,
+      tableId: floatingChild.id,
+      overlap: 'overlap',
+      positioning: {},
+      anchorBounds: rect(2, 5),
+      child: floatingChild,
+    } as unknown as FloatingTablePlacementLayout;
+    const resolvedPlacement: ResolvedFloatingTablePlacementLayout = {
+      kind: 'resolved-floating-table-placement',
+      occurrenceId: sourcePlacement.occurrenceId,
+      xPt: 2,
+      yPt: 5,
+      bounds: rect(2, 5),
+      exclusionBounds: rect(1, 4, 12, 12),
+      overlap: 'overlap',
+      child: floatingChild,
+      source: sourcePlacement,
+    };
+    const hostTable: TableLayout = {
+      ...table(),
+      id: 'textbox-floating-host',
+      flowBounds: rect(0, -20, 80, 60),
+      inkBounds: rect(0, -20, 80, 60),
+      advancePt: 60,
+      floatingTables: [sourcePlacement],
+      resolvedFloatingTables: [resolvedPlacement],
+    };
+    const retainedStory: StoryLayout = {
+      story: 'textbox',
+      flowBounds: hostTable.flowBounds,
+      inkBounds: hostTable.inkBounds,
+      blocks: [hostTable],
+      advancePt: 60,
+      diagnostics: [],
+    };
+    const shape = {
+      type: 'shape',
+      textVert: 'eaVert',
+      textAutofit: 'sp',
+      textInsetL: 0,
+      textInsetT: 0,
+      textInsetR: 0,
+      textInsetB: 0,
+    } as unknown as ShapeRun;
+    const layout = acquireShapeTextBoxLayout(
+      shape,
+      { xPt: 0, yPt: 0, widthPt: 40, heightPt: 80 },
+      {
+        id: 'shape:vertical-float',
+        source: { story: 'textbox', storyInstance: 'shape:vertical-float', path: [] },
+        flowDomainId: 'shape-owner',
+        context: paragraphContext,
+        measurer: { context: canvas(), fontFamilyClasses: {} },
+        environment: {
+          pageIndex: 0,
+          totalPages: 1,
+          documentHasEastAsianText: false,
+        },
+        input: {
+          kind: 'complete',
+          source: { story: 'textbox', storyInstance: 'shape:vertical-float', path: [] },
+          blocks: [{
+            type: 'table',
+            colWidths: [],
+            rows: [],
+          }] as unknown as readonly CompleteTextBoxBlockInput[],
+        },
+        acquireCompleteStory: () => retainedStory,
+      },
+    );
+
+    expect(layout?.flowBounds.widthPt).toBe(60);
+    const shiftedHost = layout?.story.blocks[0];
+    expect(shiftedHost?.kind).toBe('table');
+    if (shiftedHost?.kind !== 'table') throw new Error('expected shifted table');
+    const shiftedSource = shiftedHost.floatingTables?.[0];
+    const shiftedResolved = shiftedHost.resolvedFloatingTables?.[0];
+    expect(shiftedSource?.anchorBounds.yPt).toBe(-5);
+    expect(shiftedResolved).toMatchObject({
+      xPt: 2,
+      yPt: -5,
+      bounds: { yPt: -5 },
+      exclusionBounds: { yPt: -6 },
+      child: { flowBounds: { yPt: -5 } },
+    });
+    expect(shiftedResolved?.source).toBe(shiftedSource);
+    expect(shiftedResolved?.child).toBe(shiftedSource?.child);
   });
 
   it('uses the production shared story algorithms for paragraph/table order', () => {
