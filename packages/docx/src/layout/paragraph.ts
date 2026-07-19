@@ -1707,13 +1707,122 @@ function numberingMarkerHostLine(
   });
 }
 
+type PublicAnchorPositionRun = Extract<
+  ParagraphAcquisitionInput['runs'][number],
+  { type: 'shape' | 'image' | 'chart' }
+>;
+
+function resolvedPublicAnchorLayoutRect(
+  run: PublicAnchorPositionRun,
+  options: ParagraphAcquisitionOptions,
+): LayoutRect | null {
+  const frames = options.anchorFrames;
+  const horizontalReference = run.anchorXRelativeFrom
+    ?? (run.anchorXFromMargin ? 'margin' : 'page');
+  const verticalReference = run.anchorYRelativeFrom
+    ?? (run.anchorYFromPara ? 'paragraph' : 'page');
+  const page = frames?.page;
+  const margin = frames?.margin;
+  const leftMarginFrame = page && margin ? {
+    xPt: page.xPt,
+    yPt: page.yPt,
+    widthPt: Math.max(0, margin.xPt - page.xPt),
+    heightPt: page.heightPt,
+  } : null;
+  const rightMarginFrame = page && margin ? {
+    xPt: margin.xPt + margin.widthPt,
+    yPt: page.yPt,
+    widthPt: Math.max(
+      0,
+      page.xPt + page.widthPt - margin.xPt - margin.widthPt,
+    ),
+    heightPt: page.heightPt,
+  } : null;
+  const topMarginFrame = page && margin ? {
+    xPt: page.xPt,
+    yPt: page.yPt,
+    widthPt: page.widthPt,
+    heightPt: Math.max(0, margin.yPt - page.yPt),
+  } : null;
+  const bottomMarginFrame = page && margin ? {
+    xPt: page.xPt,
+    yPt: margin.yPt + margin.heightPt,
+    widthPt: page.widthPt,
+    heightPt: Math.max(
+      0,
+      page.yPt + page.heightPt - margin.yPt - margin.heightPt,
+    ),
+  } : null;
+  const evenPage = frames?.pageParity === 'even';
+  const insideMarginFrame = evenPage ? rightMarginFrame : leftMarginFrame;
+  const outsideMarginFrame = evenPage ? leftMarginFrame : rightMarginFrame;
+  const horizontalFrame = horizontalReference === 'page' ? page
+    : horizontalReference === 'column' || horizontalReference === 'character' ? frames?.column
+      : horizontalReference === 'leftMargin' ? leftMarginFrame
+        : horizontalReference === 'rightMargin' ? rightMarginFrame
+          : horizontalReference === 'insideMargin' ? insideMarginFrame
+            : horizontalReference === 'outsideMargin' ? outsideMarginFrame
+              : margin;
+  const verticalFrame = verticalReference === 'paragraph' ? {
+    xPt: options.placement.paragraphXPt,
+    yPt: options.placement.startYPt,
+    widthPt: options.placement.availableWidthPt,
+    heightPt: 0,
+  } : verticalReference === 'line' || verticalReference === 'character' ? {
+    xPt: options.placement.paragraphXPt,
+    yPt: options.placement.startYPt,
+    widthPt: options.placement.availableWidthPt,
+    heightPt: 0,
+  } : verticalReference === 'page' ? page
+    : verticalReference === 'column' ? frames?.column
+      : verticalReference === 'topMargin' ? topMarginFrame
+        : verticalReference === 'bottomMargin' ? bottomMarginFrame
+          : verticalReference === 'insideMargin'
+            ? (evenPage ? bottomMarginFrame : topMarginFrame)
+            : verticalReference === 'outsideMargin'
+              ? (evenPage ? topMarginFrame : bottomMarginFrame)
+              : margin;
+  if (!horizontalFrame || !verticalFrame) return null;
+  const widthPt = run.widthPt;
+  const heightPt = run.heightPt;
+  const offsetXPt = run.anchorXPt ?? 0;
+  const offsetYPt = run.anchorYPt ?? 0;
+  const pctPosH = run.type === 'shape' ? run.pctPosH : null;
+  const pctPosV = run.type === 'shape' ? run.pctPosV : null;
+  // pctPos and posOffset are an OOXML choice. Public hand-built values can
+  // nevertheless carry both; preserve the established compatibility rule by
+  // applying the explicit offset after the percentage.
+  const xPt = pctPosH != null
+    ? horizontalFrame.xPt + horizontalFrame.widthPt * pctPosH + offsetXPt
+    : run.anchorXAlign === 'center'
+      ? horizontalFrame.xPt + (horizontalFrame.widthPt - widthPt) / 2
+      : run.anchorXAlign === 'right'
+        || (run.anchorXAlign === 'outside' && !evenPage)
+        || (run.anchorXAlign === 'inside' && evenPage)
+        ? horizontalFrame.xPt + horizontalFrame.widthPt - widthPt
+        : horizontalFrame.xPt + offsetXPt;
+  const yPt = pctPosV != null
+    ? verticalFrame.yPt + verticalFrame.heightPt * pctPosV + offsetYPt
+    : run.anchorYAlign === 'center'
+      ? verticalFrame.yPt + (verticalFrame.heightPt - heightPt) / 2
+      : run.anchorYAlign === 'bottom'
+        || (run.anchorYAlign === 'outside' && !evenPage)
+        || (run.anchorYAlign === 'inside' && evenPage)
+        ? verticalFrame.yPt + verticalFrame.heightPt - heightPt
+        : verticalFrame.yPt + offsetYPt;
+  return { xPt, yPt, widthPt, heightPt };
+}
+
 function resolvedShapeLayoutRect(
-  shape: ShapeRun,
+  shape: Extract<ParagraphAcquisitionInput['runs'][number], { type: 'shape' }>,
   options: ParagraphAcquisitionOptions,
 ): LayoutRect {
-  const xPt = shape.anchorXPt + (shape.anchorXFromMargin ? options.placement.paragraphXPt : 0);
-  const yPt = shape.anchorYPt + (shape.anchorYFromPara ? options.placement.startYPt : 0);
-  return { xPt, yPt, widthPt: shape.widthPt, heightPt: shape.heightPt };
+  return resolvedPublicAnchorLayoutRect(shape, options) ?? {
+    xPt: shape.anchorXPt + (shape.anchorXFromMargin ? options.placement.paragraphXPt : 0),
+    yPt: shape.anchorYPt + (shape.anchorYFromPara ? options.placement.startYPt : 0),
+    widthPt: shape.widthPt,
+    heightPt: shape.heightPt,
+  };
 }
 
 function drawingForShape(
@@ -1755,36 +1864,9 @@ function publicAnchoredResourceDrawing(
   runIndex: number,
 ): DrawingLayout | null {
   if (!run.anchor || run.anchorAcquisitionInput) return null;
-  const frames = options.anchorFrames;
-  const horizontalReference = run.anchorXRelativeFrom ?? (run.anchorXFromMargin ? 'margin' : 'page');
+  const rect = resolvedPublicAnchorLayoutRect(run, options);
+  if (!rect) return null;
   const verticalReference = run.anchorYRelativeFrom ?? (run.anchorYFromPara ? 'paragraph' : 'page');
-  const horizontalFrame = horizontalReference === 'margin' ? frames?.margin
-    : horizontalReference === 'column' ? frames?.column
-      : horizontalReference === 'page' ? frames?.page : null;
-  const verticalFrame = verticalReference === 'paragraph' ? {
-    xPt: options.placement.paragraphXPt,
-    yPt: options.placement.startYPt,
-    widthPt: options.placement.availableWidthPt,
-    heightPt: 0,
-  } : verticalReference === 'margin' ? frames?.margin
-    : verticalReference === 'column' ? frames?.column
-      : verticalReference === 'page' ? frames?.page : null;
-  if (!horizontalFrame || !verticalFrame) return null;
-  const widthPt = run.widthPt;
-  const heightPt = run.heightPt;
-  const alignX = run.anchorXAlign;
-  const alignY = run.anchorYAlign;
-  const xPt = alignX === 'right'
-    ? horizontalFrame.xPt + horizontalFrame.widthPt - widthPt
-    : alignX === 'center'
-      ? horizontalFrame.xPt + (horizontalFrame.widthPt - widthPt) / 2
-      : horizontalFrame.xPt + (run.anchorXPt ?? 0);
-  const yPt = alignY === 'bottom'
-    ? verticalFrame.yPt + verticalFrame.heightPt - heightPt
-    : alignY === 'center'
-      ? verticalFrame.yPt + (verticalFrame.heightPt - heightPt) / 2
-      : verticalFrame.yPt + (run.anchorYPt ?? 0);
-  const rect = { xPt, yPt, widthPt, heightPt };
   const source = runSource(options.source, runIndex);
   return {
     kind: 'drawing', id: `${options.id}:public-anchor-drawing:${runIndex}`, source,
