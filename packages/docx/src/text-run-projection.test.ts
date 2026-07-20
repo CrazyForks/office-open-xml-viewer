@@ -356,7 +356,7 @@ function page(layers: PageLayers, readingOrder: readonly string[]): LayoutPage {
       section: {} as LayoutPage['section'],
     }],
     columnSeparators: [],
-    pageBorders: null,
+    pageBorder: null,
     layers,
     readingOrder,
   };

@@ -67,7 +67,7 @@ describe('DocumentLayout data boundary', () => {
         pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
         columnSeparators: [],
         sectionRegions: [],
-        pageBorders: null,
+        pageBorder: null,
         layers: buildPageLayers([
           { layer: 'front', node: drawing, coordinateSpace: 'section-logical' },
         ]),

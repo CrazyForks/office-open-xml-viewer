@@ -16,8 +16,10 @@ import {
 } from './canvas-text.js';
 import { paintTableLayout } from './canvas-table.js';
 import { paintStrokeSegment } from './canvas-border.js';
+import { applyCanvasTransform } from './canvas-transform.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
 import { composeAffine, scaleAffine } from './affine.js';
+import { paintPageBorderLayout } from './page-border.js';
 import type { PaintResourceSession } from './resource-session.js';
 import type {
   CanvasPaintContext,
@@ -107,29 +109,6 @@ function paintNode(node: PaintNode, context: CanvasPaintContext): void {
   }
 }
 
-function applyRegionTransform(
-  ctx: PaintCanvas2D,
-  matrix: LayoutPage['sectionRegions'][number]['coordinateSpace']['logicalToPhysical'],
-): void {
-  const transform = (ctx as PaintCanvas2D & {
-    transform?: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
-  }).transform;
-  if (transform) {
-    transform.call(ctx, matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
-    return;
-  }
-  ctx.translate(matrix.e, matrix.f);
-  if (matrix.a === 0 && matrix.b === 1 && matrix.c === -1 && matrix.d === 0) {
-    ctx.rotate(Math.PI / 2);
-  } else if (matrix.a === 0 && matrix.b === -1 && matrix.c === 1 && matrix.d === 0) {
-    ctx.rotate(-Math.PI / 2);
-  } else if (matrix.b === 0 && matrix.c === 0) {
-    ctx.scale(matrix.a, matrix.d);
-  } else {
-    throw new Error('Canvas context cannot apply the retained section transform');
-  }
-}
-
 function paintColumnSeparators(page: LayoutPage, context: CanvasPaintContext): void {
   const segments = page.columnSeparators;
   if (segments.length === 0) return;
@@ -161,7 +140,7 @@ function paintInEntryRegion(
     if (matrix && (
       matrix.a !== 1 || matrix.b !== 0 || matrix.c !== 0
       || matrix.d !== 1 || matrix.e !== 0 || matrix.f !== 0
-    )) applyRegionTransform(context.ctx, matrix);
+    )) applyCanvasTransform(context.ctx, matrix);
   });
   const entryContext: CanvasPaintContext = {
     ...context,
@@ -289,9 +268,15 @@ export function paintLayoutPageContent(
       });
     }
   };
+  if (page.pageBorder?.zOrder === 'back') {
+    paintPageBorderLayout(page.pageBorder, context);
+  }
   paintEntries(entries.slice(0, decorationIndex));
   paintColumnSeparators(page, context);
   paintEntries(entries.slice(decorationIndex));
+  if (page.pageBorder?.zOrder !== 'back' && page.pageBorder) {
+    paintPageBorderLayout(page.pageBorder, context);
+  }
 }
 
 export async function paintLayoutPage(

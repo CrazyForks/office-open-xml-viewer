@@ -192,7 +192,7 @@ export function layoutParseErrorPage(
       }],
       section,
       sectionOccurrenceId: 'parse-error-section',
-      pageBorders: null,
+      pageBorder: null,
       parityBlank: false,
       bookmarkStarts: [],
       pageNumber: {

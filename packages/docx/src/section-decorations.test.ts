@@ -21,8 +21,8 @@ const TEST_FONT = 'Synthetic Untabled Serif';
 interface FillTextCall { text: string; x: number; y: number; font: string; align: string; }
 interface Seg { x1: number; y1: number; x2: number; y2: number; }
 
-// A crisp-snapped border stroke may be nudged by up to ~0.5 px perpendicular to
-// its direction (see strokeCrispSegment / crispOffset). Match a horizontal rule
+// A crisp-snapped retained stroke may be nudged by up to ~0.5 px perpendicular
+// to its direction. Match a horizontal rule
 // whose y is within 1 px of the target, and likewise a vertical rule's x.
 function hasHoriz(segs: Seg[], y: number): boolean {
   return segs.some((s) => Math.abs(s.y1 - s.y2) < 0.5 && Math.abs(s.y1 - y) <= 1);

@@ -928,6 +928,16 @@ export interface PageNumberMetadata {
   readonly sectionOccurrenceId: string;
 }
 
+/** Paint-ready §17.6.10 page-border geometry in its owning section's logical
+ * point space. Visibility, reference-box geometry, and line treatment are
+ * resolved during document layout; Canvas paint applies only the retained page
+ * transform and front/back ordering. */
+export interface PageBorderLayout {
+  readonly zOrder: 'front' | 'back';
+  readonly logicalToPhysical: Matrix2DData;
+  readonly segments: readonly BorderSegment[];
+}
+
 /** Physical page-space ink fixed during layout for ECMA-376 §17.6.4
  * `w:cols/@w:sep`. Paint may snap the retained endpoints to device pixels,
  * but it must not recover section-band geometry. */
@@ -947,7 +957,7 @@ export interface LayoutPage {
   readonly pageNumber: PageNumberMetadata;
   readonly sectionRegions: readonly PageSectionRegion[];
   readonly columnSeparators: readonly ColumnSeparatorLayout[];
-  readonly pageBorders: DeepReadonly<import('../types.js').PageBorders> | null;
+  readonly pageBorder: PageBorderLayout | null;
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
 }

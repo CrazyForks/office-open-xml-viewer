@@ -669,6 +669,7 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
   let priorOwner: string | null = null;
   const pages = state.pages.map((draft) => {
     const owner = owners.get(draft.accumulator.sectionOccurrenceId)!;
+    const firstSectionOwnedPage = owner.sectionOccurrenceId !== priorOwner;
     if (owner.sectionOccurrenceId !== priorOwner && owner.pageNumbering.start !== null) {
       displayNumber = wordContinuousSectionRestartDisplayNumber(
         owner.pageNumbering.start,
@@ -690,10 +691,11 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
         sectionOccurrenceId: draft.accumulator.sectionOccurrenceId,
         section: draft.accumulator.section,
         pageBorders: draft.accumulator.pageBorders,
+        firstSectionOwnedPage,
         pageNumber,
       });
     }
-    return finalizeLayoutPage(draft.accumulator, pageNumber);
+    return finalizeLayoutPage(draft.accumulator, pageNumber, firstSectionOwnedPage);
   });
   const visited = new WeakSet<object>();
   const diagnostics = pages.flatMap((page) =>

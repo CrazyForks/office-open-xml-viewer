@@ -9,6 +9,7 @@ import type {
   FlowDomain,
   LayoutRect,
   LayoutServices,
+  PageBorderLayout,
   ParagraphLayout,
   PaintNode,
   SourceRef,
@@ -276,7 +277,7 @@ function documentWith(
         columnFlowDirection: 'ltr', columnIndexes: [0],
         flowDomainIds: ['body'], section: horizontalSection,
       }],
-      pageBorders: null,
+      pageBorder: null,
       layers: buildPageLayers(
         nodes.map((node) => ({
           layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,
@@ -739,6 +740,53 @@ describe('assertDocumentLayout', () => {
         }],
       }],
     })).toThrow(/invalid coordinate transform/);
+  });
+
+  it('rejects page-border transforms and segments that contradict retained page geometry', () => {
+    const base = documentWith([]);
+    const pageBorder = {
+      zOrder: 'front',
+      logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      segments: [{
+        edge: 'top',
+        from: { xPt: 12, yPt: 12 },
+        to: { xPt: 600, yPt: 12 },
+        color: '#000000',
+        widthPt: 1,
+        authoredStyle: 'single',
+        style: 'solid',
+        dashPatternPt: [],
+      }],
+    } satisfies PageBorderLayout;
+    const valid = {
+      ...base,
+      pages: [{ ...base.pages[0]!, pageBorder }],
+    };
+
+    expect(() => assertDocumentLayout(valid)).not.toThrow();
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!,
+        pageBorder: {
+          ...pageBorder,
+          logicalToPhysical: { ...pageBorder.logicalToPhysical, e: 1 },
+        },
+      }],
+    }));
+    expectInvalidGeometry(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...valid.pages[0]!,
+        pageBorder: {
+          ...pageBorder,
+          segments: [{
+            ...pageBorder.segments[0]!,
+            to: { xPt: 600, yPt: 13 },
+          }],
+        },
+      }],
+    }));
   });
 
   it('rejects clone data whose region direction or columns contradict its section', () => {

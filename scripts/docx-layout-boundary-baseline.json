@@ -5,8 +5,8 @@
   },
   "migrationIdentifierCounts": {
     "packages/docx/src/layout-context.ts#toLegacyDocGridContext": 1,
-    "packages/docx/src/renderer.ts#dryRun": 6,
-    "packages/docx/src/renderer.ts#toLegacyDocGridContext": 5
+    "packages/docx/src/renderer.ts#dryRun": 5,
+    "packages/docx/src/renderer.ts#toLegacyDocGridContext": 4
   },
   "nonLayoutDeclarationKeys": [
     "packages/docx/src/anchor-geometry.ts#FunctionDeclaration#resolveAnchorX",
@@ -246,7 +246,6 @@
     "packages/docx/src/render-worker.ts#variable#localMetricFontFaces",
     "packages/docx/src/render-worker.ts#variable#post",
     "packages/docx/src/renderer.ts#FunctionDeclaration#applyColorReplacement",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#borderDashPattern",
     "packages/docx/src/renderer.ts#FunctionDeclaration#bottomBorderExtentPt",
     "packages/docx/src/renderer.ts#FunctionDeclaration#buildMeasureState",
     "packages/docx/src/renderer.ts#FunctionDeclaration#buildNoteNumberMap",
@@ -259,9 +258,7 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#contextualSpacingAdjust",
     "packages/docx/src/renderer.ts#FunctionDeclaration#decodeRaster",
     "packages/docx/src/renderer.ts#FunctionDeclaration#docDefaultFontSizePt",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#drawBorderLine",
     "packages/docx/src/renderer.ts#FunctionDeclaration#drawImageRunBitmap",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#drawPageBorders",
     "packages/docx/src/renderer.ts#FunctionDeclaration#effCellMargins",
     "packages/docx/src/renderer.ts#FunctionDeclaration#estimateTableHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#frameAnchorLineHeightPx",
@@ -278,7 +275,6 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellContentHeightPx",
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellElementHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#measureCellParagraphWindow",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#pageBorderShownOnPage",
     "packages/docx/src/renderer.ts#FunctionDeclaration#paintedParagraphHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#paraGrid",
     "packages/docx/src/renderer.ts#FunctionDeclaration#paragraphMeasurementEnvironment",
@@ -299,7 +295,6 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#resolveStateParagraphLayoutContext",
     "packages/docx/src/renderer.ts#FunctionDeclaration#segmentEnvironmentOf",
     "packages/docx/src/renderer.ts#FunctionDeclaration#snapParaLineToGrid",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#strokeCrispSegment",
     "packages/docx/src/renderer.ts#FunctionDeclaration#sumCellContentHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#svgToImage",
     "packages/docx/src/renderer.ts#FunctionDeclaration#trimTrailingStructuralMarker",

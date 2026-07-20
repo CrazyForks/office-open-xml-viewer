@@ -248,6 +248,48 @@ function equalMatrix(
     && left.d === right.d && left.e === right.e && left.f === right.f;
 }
 
+function requirePageBorder(page: LayoutPage, path: string): void {
+  const pageBorder = page.pageBorder;
+  if (pageBorder === null) return;
+  if (pageBorder.zOrder !== 'front' && pageBorder.zOrder !== 'back') {
+    throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.zOrder is invalid`);
+  }
+  requireMatrix(pageBorder.logicalToPhysical, `${path}.logicalToPhysical`);
+  const expectedTransform = createSectionRegionCoordinateSpace(
+    writingModeFromTextDirection(page.section.textDirection),
+    page.geometry,
+  ).logicalToPhysical;
+  if (!equalMatrix(pageBorder.logicalToPhysical, expectedTransform)) {
+    throw new LayoutInvariantError(
+      'INVALID_GEOMETRY',
+      `${path}.logicalToPhysical contradicts the page-start section`,
+    );
+  }
+  if (!Array.isArray(pageBorder.segments) || pageBorder.segments.length === 0) {
+    throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}.segments is empty`);
+  }
+  pageBorder.segments.forEach((segment, index) => {
+    const segmentPath = `${path}.segments[${index}]`;
+    requirePoint(segment.from, `${segmentPath}.from`);
+    requirePoint(segment.to, `${segmentPath}.to`);
+    requireFinite(segment.widthPt, `${segmentPath}.widthPt`);
+    if (
+      (
+        segment.from.xPt !== segment.to.xPt
+        && segment.from.yPt !== segment.to.yPt
+      )
+    ) {
+      throw new LayoutInvariantError(
+        'INVALID_GEOMETRY',
+        `${segmentPath} is not an axis-aligned page edge`,
+      );
+    }
+    if (!/^#[0-9a-fA-F]{6}$/.test(segment.color)) {
+      throw new LayoutInvariantError('INVALID_REFERENCE', `${segmentPath}.color is invalid`);
+    }
+  });
+}
+
 function retainUniqueNodeId(
   id: string,
   pageIds: Set<string>,
@@ -455,6 +497,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         `pages[${pageIndex}] has invalid effective page edges`,
       );
     }
+    requirePageBorder(page, `pages[${pageIndex}].pageBorder`);
 
     const domains = new Map<string, FlowDomain>();
     page.flowDomains.forEach((domain, domainIndex) => {

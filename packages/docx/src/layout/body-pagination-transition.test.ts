@@ -48,9 +48,13 @@ const draft = (pageIndex: number) => createCanonicalPageDraft({
 });
 
 describe('immutable canonical page transitions', () => {
-  it.each(['allPages', 'firstPage', 'notFirstPage'] as const)(
-    'retains parser-owned %s page borders through region draft finalization',
-    (display) => {
+  it.each([
+    ['allPages', true],
+    ['firstPage', true],
+    ['notFirstPage', false],
+  ] as const)(
+    'materializes parser-owned %s page borders for the first section-owned page',
+    (display, visible) => {
       const pageBorders: PageBorders = {
         offsetFrom: 'page', display, zOrder: 'front',
         top: { style: 'single', width: 1, space: 12 },
@@ -73,11 +77,53 @@ describe('immutable canonical page transitions', () => {
 
       const page = finalizeLayoutPage(pageDraft.accumulator, {
         displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0',
-      });
+      }, true);
 
-      expect(page.pageBorders).toEqual(pageBorders);
+      expect(page.pageBorder !== null).toBe(visible);
+      if (visible) {
+        expect(page.pageBorder).toMatchObject({
+          zOrder: 'front',
+          segments: [{
+            edge: 'top',
+            from: { xPt: 0, yPt: 12 },
+            to: { xPt: 200, yPt: 12 },
+            widthPt: 1,
+          }],
+        });
+      }
     },
   );
+
+  it('requires document finalization to supply page-border section ownership', () => {
+    const pageDraft = createCanonicalPageDraft({
+      kind: 'content',
+      pageIndex: 4,
+      physicalPage: {
+        widthPt: 200, heightPt: 100, contentTopPt: 10, contentBottomPt: 90,
+      },
+      sectionOccurrenceId: 'section:later',
+      section,
+      region: {
+        id: 'region:later',
+        sectionOccurrenceId: 'section:later',
+        section,
+        pageBorders: {
+          offsetFrom: 'page',
+          display: 'firstPage',
+          zOrder: 'front',
+          top: { style: 'single', width: 1, space: 12 },
+        },
+        writingMode: 'horizontal-tb',
+        blockStartPt: 10,
+        blockEndPt: 90,
+        columns: [{ inlineStartPt: 10, inlineExtentPt: 180 }],
+      },
+    });
+
+    expect(() => finalizeLayoutPage(pageDraft.accumulator, {
+      displayNumber: 5, format: 'decimal', sectionOccurrenceId: 'section:later',
+    })).toThrow(/section-owned page identity/);
+  });
 
   it('opens a new draft without mutating the prior state or page', () => {
     const flowSection = createPageFlowSectionContext({

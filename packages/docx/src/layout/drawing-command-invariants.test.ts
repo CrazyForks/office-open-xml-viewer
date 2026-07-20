@@ -52,7 +52,7 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
         columnFlowDirection: 'ltr', columnIndexes: [0],
         flowDomainIds: ['body'], section,
       }],
-      pageBorders: null,
+      pageBorder: null,
       layers: buildPageLayers([
         { layer: 'front', node: drawing, coordinateSpace: 'section-logical' },
       ]),

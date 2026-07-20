@@ -44,7 +44,7 @@ function resourceLayout(
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
       columnSeparators: [],
       sectionRegions: [],
-      pageBorders: null,
+      pageBorder: null,
       layers: buildPageLayers([
         { layer: 'body', node: drawing, coordinateSpace: 'section-logical' },
       ]),
