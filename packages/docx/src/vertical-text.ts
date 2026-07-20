@@ -52,7 +52,7 @@
 // font-dependent stage-1 heuristics; paragraph-relative vertical anchors are a
 // follow-up. `btLr` shares the +90° page FRAME but bypasses this module's
 // upright/substitute glyph handling entirely (issue #988 re-adjudication: every
-// glyph rides the page rotation — see RenderState.verticalAllRotated).
+// glyph rides the page rotation — see BodyAcquisitionState.verticalAllRotated).
 
 import { wordPreservesVerticalTuCorner } from './layout/script-compatibility.js';
 import {

@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas, type RenderState } from './renderer.js';
-import { splitTextForLayout, layoutLines, buildSegments, type LayoutTextSeg } from './line-layout.js';
+import { renderDocumentToCanvas } from './renderer.js';
+import {
+  splitTextForLayout,
+  layoutLines,
+  buildSegments,
+  type LayoutTextSeg,
+  type LineLayoutEnvironment,
+} from './line-layout.js';
 import type { DocParagraph, DocxDocumentModel, SectionProps, DocRun } from './types.js';
 
 // ECMA-376 §17.3.3 run-content elements that were previously dropped by the
@@ -207,7 +213,7 @@ describe('noBreakHyphen (§17.3.3.18) and softHyphen (§17.3.3.29)', () => {
   // WHOLE LINE and would otherwise be indistinguishable from an incorrect
   // hyphen-triggered split. Assert the token moves to the next line WHOLE.
   it('a merged noBreakHyphen token wraps to the next line whole, never splitting at the hyphen', () => {
-    const segs = buildSegments([textRun('lead 999-99')], {} as RenderState);
+    const segs = buildSegments([textRun('lead 999-99')], {} as LineLayoutEnvironment);
     const { canvas } = makeRecordingCanvas();
     const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
     // Line width 100px. "lead " (5 glyphs * 10px = 50px) leaves 50px

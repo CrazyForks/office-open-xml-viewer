@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { __test_resolveAnchorBox, type RenderState } from './renderer.js';
+import { __test_resolveAnchorBox } from './renderer.js';
+import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import type { ImageRun } from './types.js';
 
 // Pin the wiring of `<wp:positionH/V>@relativeFrom` (ECMA-376 §20.4.3.2 /
@@ -10,7 +11,7 @@ import type { ImageRun } from './types.js';
 // top content margin instead of the page top (Y=0, inside the top margin).
 //
 // resolveAnchorBox reads only { scale, marginLeft/Right/Top/Bottom, pageH,
-// pageWidth } from RenderState; cast a minimal stand-in like anchor-align.test.
+// pageWidth } from the anchor capability; cast a minimal stand-in like anchor-align.test.
 const state = {
   scale: 1,
   marginLeft: 96,
@@ -19,7 +20,7 @@ const state = {
   marginBottom: 72,
   pageH: 800,
   pageWidth: 612,
-} as unknown as RenderState;
+} as unknown as AnchorFloatRegistrationState;
 
 const baseImg: ImageRun = {
   imagePath: 'word/media/image1.png',

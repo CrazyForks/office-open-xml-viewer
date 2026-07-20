@@ -17,7 +17,7 @@ import { resolveAnchorX, xContainer } from './anchor-geometry.js';
 // column, the closest available base — see anchor-geometry.ts).
 //
 // xContainer reads { scale, pageWidth, marginLeft, marginRight, contentX,
-// contentW } of RenderState; a minimal stand-in is cast like the other geometry
+// contentW } of BodyAcquisitionState; a minimal stand-in is cast like the other geometry
 // tests. contentX/contentW are ALREADY scaled (px), unlike marginLeft etc.
 interface MinState {
   scale: number;

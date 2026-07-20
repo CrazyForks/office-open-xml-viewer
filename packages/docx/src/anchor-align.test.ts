@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { resolveAnchorX, resolveAnchorY } from './anchor-geometry.js';
 
 // resolveAnchorY reads only { scale, marginTop, marginBottom, pageH } of
-// RenderState (via yContainer); cast a minimal stand-in like the other geometry
+// BodyAcquisitionState (via yContainer); cast a minimal stand-in like the other geometry
 // tests. scale=1 so px == pt. pageH=800, top/bottom margins=72 ⇒ the "margin"
 // container band is [72, 728], the "page" band is [0, 800].
 interface MinState {

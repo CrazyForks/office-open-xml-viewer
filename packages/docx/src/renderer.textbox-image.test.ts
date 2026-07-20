@@ -3,9 +3,9 @@ import { createLayoutServices, preloadImages } from './renderer';
 import {
   acquireAndPaintShapeTextBox,
   acquireShapeTextBoxForTest,
+  type ShapeAcquisitionTestState,
 } from './retained-shape-textbox.test-support.js';
 import type { DocxDocumentModel, ShapeRun, ShapeText, ShapeTextRun } from './types';
-import type { RenderState } from './renderer';
 import { canvasFontString } from '@silurus/ooxml-core';
 
 /**
@@ -283,7 +283,7 @@ describe('textbox rich text — per-run formatting', () => {
       totalPages: 1,
       layoutServices: services,
       resolvedLocalFonts: services.text.localMetrics,
-    } as unknown as RenderState;
+    } satisfies ShapeAcquisitionTestState;
     const shape = richTextbox([{ text: 'route', fontSizePt: 10, fontFamily: 'Roman Face' }]);
 
     fontCalls.length = 0;

@@ -2,18 +2,16 @@
 // §17.4.56 `<w:tblOverlap>`).
 //
 // Pure placement math: given a `<w:tblpPr>` and the section geometry on
-// `RenderState`, resolve the table box (canvas px), decide which side body text
+// `FloatRegistrationState`, resolve the table box (canvas px), decide which side body text
 // wraps on, and push the wrap-exclusion FloatRect onto `state.floats`. The
 // anchor / alignment semantics line up 1:1 with a `<w:framePr>` text frame, so
 // this module reuses frame-geometry's frameXContainer / frameYContainer /
 // resolveAlignedPosH / resolveAlignedPosV and the shared pushFloatRect builder.
 // Extracted from renderer.ts so the placement logic can be unit-reasoned in
 // isolation (see float-table-geometry.test.ts / measure-column-geometry.test.ts).
-// Only `RenderState` is imported as a type (erased at runtime), so there is no
-// import cycle with renderer.ts.
 
 import type { TblpPr } from './types.js';
-import type { RenderState } from './renderer.js';
+import type { FloatRegistrationState } from './layout/acquisition-context.js';
 import {
   FLOAT_OVERLAP_EPS,
   FLOAT_PAGE_RIGHT_SLACK,
@@ -57,7 +55,7 @@ export interface FloatTableBox {
  */
 export function computeFloatTableBox(
   tp: TblpPr,
-  state: RenderState,
+  state: FloatRegistrationState,
   paraTop: number,
   tableW: number,
   tableH: number,
@@ -158,7 +156,7 @@ export function computeFloatTableBox(
 export function registerTableFloat(
   box: FloatTableBox,
   tp: TblpPr,
-  state: RenderState,
+  state: FloatRegistrationState,
   side: string,
   allowOverlap: boolean,
   /** The box was already resolved against the pre-descendant registry. */
@@ -205,6 +203,6 @@ export function registerTableFloat(
  *
  * Exported for unit tests only — not package API.
  */
-export function floatTableWrapSide(_box: FloatTableBox, _state: RenderState): string {
+export function floatTableWrapSide(_box: FloatTableBox, _state: FloatRegistrationState): string {
   return 'bothSides';
 }

@@ -11,7 +11,7 @@ import type {
 } from './types.js';
 
 // State type taken from resolveColumnWidths' signature so the test does not
-// depend on RenderState being exported (mirrors table-row-height.test).
+// depend on the acquisition-state type being re-exported (mirrors table-row-height.test).
 type ColState = Parameters<typeof resolveColumnWidths>[2];
 
 // ECMA-376 §17.4.48 (`<w:tblGrid>`) supplies the INITIAL shared grid;

@@ -19,6 +19,7 @@ const BODY_LAYOUT_ADAPTER = `${DOCX_SOURCE}/body-layout-input.ts`;
 const PARAGRAPH_ANCHOR_FRAME_ADAPTER = `${DOCX_SOURCE}/paragraph-anchor-frame-adapter.ts`;
 const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
 const TEXT_RUN_PROJECTION_ADAPTER = `${DOCX_SOURCE}/text-run-projection.ts`;
+const ACQUISITION_CONTEXT = `${LAYOUT_SOURCE}/acquisition-context.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
 const LAYOUT_AFFINE = `${LAYOUT_SOURCE}/affine.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
@@ -127,6 +128,7 @@ const LEGACY_SYMBOLS = [
   'buildTableCellBlocks',
   'renderHeaderFooter',
   'measureFootnoteHeight',
+  'RenderState',
   'deferFront',
   'deferFrontDrawing',
   'deferBehindDrawing',
@@ -177,6 +179,32 @@ const LEGACY_RENDERER_IMPORTS = new Set([
   'table-geometry.ts',
 ]);
 
+const ACQUISITION_CONTEXT_DECLARATIONS = new Set([
+  'AnchorFloatRegistrationState',
+  'AnchorGeometryContext',
+  'BodyAcquisitionState',
+  'BodyMeasurementContext',
+  'FloatRegistrationState',
+  'PhysicalAnchorFrame',
+  'RetainedTableRecord',
+]);
+
+const ACQUISITION_CONTEXT_CONSUMERS = [
+  `${DOCX_SOURCE}/anchor-geometry.ts`,
+  `${DOCX_SOURCE}/float-table-geometry.ts`,
+  `${DOCX_SOURCE}/frame-geometry.ts`,
+  `${DOCX_SOURCE}/line-layout.ts`,
+  `${DOCX_SOURCE}/paragraph-measure.ts`,
+];
+
+const ACQUISITION_PAINT_PROPERTIES = new Set([
+  'defaultColor',
+  'dpr',
+  'dryRun',
+  'images',
+  'showTrackChanges',
+]);
+
 function fail(code, detail) {
   throw new Error(`${code}: ${detail}`);
 }
@@ -202,6 +230,45 @@ function assertNoProductionTestSupportImports(root) {
         fail(
           'PRODUCTION_TEST_SUPPORT_IMPORT',
           `${posixPath(relative(root, path))} -> ${posixPath(relative(root, dependency))}`,
+        );
+      }
+    }
+  }
+}
+
+function assertAcquisitionContextBoundary(root) {
+  const contextPath = resolve(root, ACQUISITION_CONTEXT);
+  if (!existsSync(contextPath)) return;
+  const source = sourceFile(contextPath);
+  const declarations = new Set(source.statements.flatMap(declarationNames));
+  for (const name of ACQUISITION_CONTEXT_DECLARATIONS) {
+    if (!declarations.has(name)) {
+      fail('ACQUISITION_CONTEXT_SURFACE', `${ACQUISITION_CONTEXT} missing ${name}`);
+    }
+  }
+  for (const statement of source.statements) {
+    if (!ts.isInterfaceDeclaration(statement)) continue;
+    for (const member of statement.members) {
+      if (!ts.isPropertySignature(member) || !member.name) continue;
+      const name = ts.isIdentifier(member.name) || ts.isStringLiteralLike(member.name)
+        ? member.name.text
+        : null;
+      if (name && ACQUISITION_PAINT_PROPERTIES.has(name)) {
+        fail('ACQUISITION_PAINT_CAPABILITY', `${ACQUISITION_CONTEXT}#${name}`);
+      }
+    }
+  }
+  const inspected = [ACQUISITION_CONTEXT, ...ACQUISITION_CONTEXT_CONSUMERS];
+  for (const file of inspected) {
+    const path = resolve(root, file);
+    if (!existsSync(path)) continue;
+    for (const edge of moduleEdges(path)) {
+      if (!edge.literal || !edge.specifier.startsWith('.')) continue;
+      const dependency = resolveLocalImport(path, edge.specifier);
+      if (dependency && posixPath(relative(root, dependency)) === `${DOCX_SOURCE}/renderer.ts`) {
+        fail(
+          'ACQUISITION_RENDERER_DEPENDENCY',
+          `${file} -> ${DOCX_SOURCE}/renderer.ts`,
         );
       }
     }
@@ -1990,6 +2057,16 @@ function normalizedNodeHash(node, source) {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
+function normalizedMeasureCellContentHeightHash(node, source) {
+  // C3c changes only the cursor's ownership/type name. Keep the legacy body
+  // byte-pinned until C3d physically moves the measurement chain.
+  const normalized = node.getText(source)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\bBodyAcquisitionState\b/g, 'RenderState');
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
 function normalizedSyntaxHash(node, source) {
   const shape = (current) => {
     const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
@@ -3338,6 +3415,8 @@ function declarationInventory(root, allowTransitionalAdapter = false) {
               ? normalizedIsFragmentPaintableTableHash(statement, source)
             : name === 'renderShapeText'
               ? normalizedRenderShapeTextHash(statement, source)
+            : name === 'measureCellContentHeightPx'
+              ? normalizedMeasureCellContentHeightHash(statement, source)
             : normalizedNodeHash(statement, source);
         }
       }
@@ -3692,6 +3771,7 @@ export function checkDocxLayoutBoundaries(options) {
   const baselineExists = existsSync(baselinePath);
   const allowTransitionalParagraphAnchorAdapter = baselineExists && !options.final;
   assertNoProductionTestSupportImports(root);
+  assertAcquisitionContextBoundary(root);
   assertFloatPlacementAuthority(root);
   assertNoDeletedPageProducerIdentifiers(root);
   assertPaintBoundaries(root);

@@ -4,8 +4,8 @@ import {
   __test_preRegisterPageFloats,
   createLayoutServices,
   layoutDocument,
-  type RenderState,
 } from './renderer.js';
+import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import type { AnchorAcquisitionInput, AnchorEdgesInput } from './layout/anchor-input.js';
 import type { ParagraphLayout } from './layout/types.js';
 import type {
@@ -672,8 +672,8 @@ describe('preRegisterPageFloats — paragraph-local Y is NOT pre-registered', ()
         pageShapeRun({ widthPt: 100, heightPt: 30, anchorYRelativeFrom: 'paragraph', anchorYFromPara: true, wrapMode: 'topAndBottom' }),
       ]),
     ];
-    // Minimal RenderState stub matching what registerImageFloat/registerShapeFloat
-    // touch: scale, marginLeft/Top, pageH, contentX/W, dryRun (no images), floats.
+    // Minimal acquisition-state stub matching what registerImageFloat/registerShapeFloat
+    // touch: scale, marginLeft/Top, pageH, contentX/W, and floats.
     const state = {
       scale: 1,
       marginLeft: 20, marginRight: 20, marginTop: 20, marginBottom: 20,
@@ -681,9 +681,8 @@ describe('preRegisterPageFloats — paragraph-local Y is NOT pre-registered', ()
       contentX: 20, contentW: 160,
       floats: [],
       floatParaSeq: 0,
-      dryRun: true,
       pageAnchorPrescanned: new Set(),
-    } as unknown as RenderState;
+    } as unknown as AnchorFloatRegistrationState;
     __test_preRegisterPageFloats(body, 0, state);
     expect(state.floats.length).toBe(0);
     expect(state.pageAnchorPrescanned?.size ?? 0).toBe(0);
@@ -704,10 +703,8 @@ describe('preRegisterPageFloats — paragraph-local Y is NOT pre-registered', ()
       contentX: 20, contentW: 160,
       floats: [],
       floatParaSeq: 0,
-      images: new Map(),
-      dryRun: true,
       pageAnchorPrescanned: new Set(),
-    } as unknown as RenderState;
+    } as unknown as AnchorFloatRegistrationState;
     __test_preRegisterPageFloats(body, 0, state);
     expect(state.floats.length).toBe(1);
     expect(state.pageAnchorPrescanned?.size).toBe(1);
@@ -727,10 +724,8 @@ describe('preRegisterPageFloats — idempotent on repeated pre-scan', () => {
       contentX: 20, contentW: 160,
       floats: [],
       floatParaSeq: 0,
-      images: new Map(),
-      dryRun: true,
       pageAnchorPrescanned: new Set(),
-    } as unknown as RenderState;
+    } as unknown as AnchorFloatRegistrationState;
     __test_preRegisterPageFloats(body, 0, state);
     const after1 = state.floats.length;
     expect(after1).toBe(1);
@@ -754,10 +749,8 @@ describe('preRegisterPageFloats — idempotent on repeated pre-scan', () => {
       contentX: 20, contentW: 160,
       floats: [],
       floatParaSeq: 0,
-      images: new Map(),
-      dryRun: true,
       pageAnchorPrescanned: new Set(),
-    } as unknown as RenderState;
+    } as unknown as AnchorFloatRegistrationState;
     __test_preRegisterPageFloats(body, 0, state);
     expect(state.floats.length).toBe(1);
     expect(state.pageAnchorPrescanned?.size).toBe(1);

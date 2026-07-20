@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   __test_resolveAnchorBox,
   __test_resolveShapeBox,
-  type RenderState,
 } from './renderer.js';
+import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { BodyElement, DocParagraph, ImageRun, SectionProps, ShapeRun } from './types.js';
 
@@ -31,7 +31,7 @@ const PHYS_W = 612;
 const PHYS_H = 792;
 const MARGIN = 72;
 
-// Vertical RenderState: LOGICAL (swapped) geometry + `verticalPhys`. The
+// Vertical anchor capability: LOGICAL (swapped) geometry + `verticalPhys`. The
 // logical frame of a portrait Letter tbRl page: logical width = physical
 // height, margins rotated one quarter-turn (verticalLayoutSection). contentX
 // is the current column band start in LOGICAL x — its physical image is the
@@ -57,7 +57,7 @@ const verticalState = {
     marginBottom: MARGIN,
     cssWidthPx: PHYS_W,
   },
-} as unknown as RenderState;
+} as unknown as AnchorFloatRegistrationState;
 
 const SHAPE_W = 100.8;
 const SHAPE_H = 86.4;

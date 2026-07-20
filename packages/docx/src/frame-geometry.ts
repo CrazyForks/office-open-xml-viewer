@@ -1,7 +1,7 @@
 // Text-frame / drop-cap placement geometry (ECMA-376 §17.3.1.11 `<w:framePr>`).
 //
 // Pure placement math: given a `<w:framePr>` and the section geometry on
-// `RenderState`, resolve the frame box (canvas px) and the wrap-exclusion
+// `AnchorGeometryContext`, resolve the frame box (canvas px) and the wrap-exclusion
 // FloatRect it pushes onto `state.floats`. Extracted from renderer.ts so the
 // resolve logic can be unit-reasoned in isolation (see frame-geometry.test.ts /
 // measure-column-geometry.test.ts).
@@ -10,11 +10,13 @@
 // (float-table-geometry.ts), which reuses frameXContainer / frameYContainer /
 // resolveAlignedPosH / resolveAlignedPosV (the anchor/alignment semantics line
 // up 1:1 between a text frame and a floating table) and pushFloatRect (the
-// single source of exclusion-rect construction). Only `RenderState` is imported
-// as a type (erased at runtime), so there is no import cycle with renderer.ts.
+// single source of exclusion-rect construction).
 
 import type { FramePr } from './types.js';
-import type { RenderState } from './renderer.js';
+import type {
+  AnchorGeometryContext,
+  FloatRegistrationState,
+} from './layout/acquisition-context.js';
 import type { FloatRect } from './float-layout.js';
 import {
   FLOAT_OVERLAP_EPS,
@@ -25,7 +27,6 @@ import {
   resolveFloatPlacement,
   type FloatPlacementParticipant,
 } from './layout/floats.js';
-import type { FrameGeometryState } from './layout/types.js';
 
 /** Resolved geometry (canvas px) of a `<w:framePr>` text frame. Exported for
  *  unit tests only (the table-driven frame-geometry assertions) — not part of
@@ -59,7 +60,10 @@ export interface FrameBox {
  *   - "page"   → the physical page edges (0..pageWidth).
  * All values in canvas px.
  */
-export function frameXContainer(hAnchor: string, state: FrameGeometryState): { left: number; right: number } {
+export function frameXContainer(
+  hAnchor: string,
+  state: AnchorGeometryContext,
+): { left: number; right: number } {
   const sc = state.scale;
   switch (hAnchor) {
     case 'margin':
@@ -97,7 +101,7 @@ export function frameYContainer(
   vAnchor: string,
   paraTop: number,
   contentH: number,
-  state: FrameGeometryState,
+  state: AnchorGeometryContext,
 ): { start: number; end: number } {
   const sc = state.scale;
   switch (vAnchor) {
@@ -214,7 +218,7 @@ export function clampAbsBoxIntoContainer(
  */
 export function computeFrameBox(
   fp: FramePr,
-  state: FrameGeometryState,
+  state: AnchorGeometryContext,
   paraTop: number,
   contentW: number,
   contentH: number,
@@ -335,9 +339,10 @@ export interface PushFloatOpts {
  * yTop = y − dt, yBottom = y + h + db` exclusion-rect construction shared by
  * registerFrameFloat / registerTableFloat / registerImageFloat /
  * registerShapeFloat (the `dist*` fields carry dl/dr/dt/db verbatim for
- * re-seating). The returned ref lets the image path flip `drawn` after painting.
+ * re-seating). The returned ref exposes the exact registered transport record
+ * to acquisition callers that need its overlap-resolved position.
  */
-export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
+export function pushFloatRect(state: FloatRegistrationState, o: PushFloatOpts): FloatRect {
   if (o.kind === 'table' && o.tableOverlap === undefined) {
     throw new Error('Floating-table transport omitted tblOverlap');
   }
@@ -417,7 +422,7 @@ export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
  *
  * Exported for unit tests only (frame-geometry table) — not package API.
  */
-export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderState): void {
+export function registerFrameFloat(box: FrameBox, fp: FramePr, state: FloatRegistrationState): void {
   if (box.registerExclusion === false) return;
   if (fp.wrap === 'none') return;
   if (box.w <= 0 || box.h <= 0) return;
