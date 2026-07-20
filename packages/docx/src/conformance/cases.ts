@@ -45,6 +45,10 @@ export interface ConformanceCase {
 
 const AXIS_NAMES = Object.keys(CONFORMANCE_AXES) as ConformanceAxisName[];
 
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function isValidAxes(axes: ConformanceAxisValues): boolean {
   if (axes.object === 'floating') {
     if (axes.anchorReference === 'none') return false;
@@ -170,7 +174,7 @@ export function generatePairwiseAxes(): readonly {
   readonly seed: boolean;
 }[] {
   const candidates = cartesianRows().sort((left, right) =>
-    rowKey(left).localeCompare(rowKey(right)));
+    compareCodeUnits(rowKey(left), rowKey(right)));
   const required = new Set(candidates.flatMap(pairsOf));
   const selected: Array<{ axes: ConformanceAxisValues; seed: boolean }> = [];
   const selectedKeys = new Set<string>();
@@ -219,19 +223,31 @@ export function generatePairwiseAxes(): readonly {
   return selected;
 }
 
+type AxisAbbreviations = {
+  readonly [K in ConformanceAxisName]: Readonly<Record<ConformanceAxisValues[K], string>>;
+};
+
+const AXIS_ABBREVIATIONS: AxisAbbreviations = {
+  story: { body: 'body', header: 'hdr', footer: 'ftr' },
+  container: { paragraph: 'p', table: 'tbl', nestedTable: 'ntbl' },
+  paragraph: { single: 'one', wrapped: 'wrap' },
+  object: { none: 'noobj', inline: 'inl', floating: 'float' },
+  direction: { ltr: 'ltr', rtl: 'rtl' },
+  spacing: { auto: 'auto', exact: 'exact' },
+  styleSource: { direct: 'direct', paragraphStyle: 'pstyle', documentDefault: 'docdef' },
+  fontSource: { direct: 'font', theme: 'theme', documentDefault: 'fontdef' },
+  anchorReference: { none: 'noref', margin: 'margin', page: 'page', paragraph: 'para' },
+};
+
+function axisAbbreviation<K extends ConformanceAxisName>(
+  axis: K,
+  value: ConformanceAxisValues[K],
+): string {
+  return AXIS_ABBREVIATIONS[axis][value];
+}
+
 function slug(axes: ConformanceAxisValues): string {
-  const abbreviation = {
-    story: { body: 'body', header: 'hdr', footer: 'ftr' },
-    container: { paragraph: 'p', table: 'tbl', nestedTable: 'ntbl' },
-    paragraph: { single: 'one', wrapped: 'wrap' },
-    object: { none: 'noobj', inline: 'inl', floating: 'float' },
-    direction: { ltr: 'ltr', rtl: 'rtl' },
-    spacing: { auto: 'auto', exact: 'exact' },
-    styleSource: { direct: 'direct', paragraphStyle: 'pstyle', documentDefault: 'docdef' },
-    fontSource: { direct: 'font', theme: 'theme', documentDefault: 'fontdef' },
-    anchorReference: { none: 'noref', margin: 'margin', page: 'page', paragraph: 'para' },
-  } as const;
-  return AXIS_NAMES.map((axis) => abbreviation[axis][axes[axis] as never]).join('-');
+  return AXIS_NAMES.map((axis) => axisAbbreviation(axis, axes[axis])).join('-');
 }
 
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = generatePairwiseAxes()

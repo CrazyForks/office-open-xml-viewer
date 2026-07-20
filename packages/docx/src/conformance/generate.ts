@@ -161,13 +161,13 @@ function table(cellContent: string, inner: boolean): string {
   return `<w:tbl>
     <w:tblPr>
       <w:tblW w:w="${width}" w:type="dxa"/>
-      <w:tblLayout w:type="fixed"/>
       <w:tblBorders>
         <w:top w:val="single" w:sz="8" w:space="0" w:color="000000"/>
         <w:left w:val="single" w:sz="8" w:space="0" w:color="000000"/>
         <w:bottom w:val="single" w:sz="8" w:space="0" w:color="000000"/>
         <w:right w:val="single" w:sz="8" w:space="0" w:color="000000"/>
       </w:tblBorders>
+      <w:tblLayout w:type="fixed"/>
     </w:tblPr>
     <w:tblGrid><w:gridCol w:w="${width}"/></w:tblGrid>
     <w:tr><w:tc>
@@ -312,7 +312,8 @@ export function generateConformanceParts(
   if (testCase.axes.object !== 'none') {
     parts.set('word/media/pixel.png', ONE_PIXEL_PNG);
   }
-  return new Map([...parts].sort(([left], [right]) => left.localeCompare(right)));
+  return new Map([...parts].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0));
 }
 
 function crc32(bytes: Uint8Array): number {
@@ -361,7 +362,8 @@ export function storeZip(parts: ReadonlyMap<string, Uint8Array>): Uint8Array {
   const centralChunks: Uint8Array[] = [];
   let offset = 0;
 
-  for (const [name, data] of [...parts].sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [name, data] of [...parts].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0)) {
     const encodedName = encoder.encode(name);
     const checksum = crc32(data);
     const local = concat([

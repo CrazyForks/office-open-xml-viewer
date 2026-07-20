@@ -55,7 +55,7 @@
             normalizeNumber(to.yPt),
           ]),
         }))
-        .sort((left, right) => left.id.localeCompare(right.id));
+        .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
       const drawingRecords = retained
         .filter(({ kind, flowBounds, bounds }) =>
           (kind === 'drawing' && (flowBounds ?? bounds)
@@ -69,7 +69,7 @@
       const drawings = [...new Map(
         drawingRecords.map((record) => [record.id, record]),
       ).values()]
-        .sort((left, right) => left.id.localeCompare(right.id));
+        .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
       return {
         pageBoxes: layout.pages.map(({ geometry }) => ({
           widthPt: normalizeNumber(geometry.widthPt),

@@ -88,6 +88,8 @@ function paragraphRangePartitions(layout: DocumentLayout): void {
     .filter((record) => record.kind === 'paragraph') as unknown as ParagraphLayout[];
   expect(paragraphs.length).toBeGreaterThan(0);
   for (const paragraph of paragraphs) {
+    expect(paragraph.lines.length, `${paragraph.id} has no retained lines`)
+      .toBeGreaterThan(0);
     let previousEnd = paragraph.lines[0]?.range.start ?? 0;
     for (const line of paragraph.lines) {
       expect(line.range.start).toBe(previousEnd);
@@ -215,6 +217,10 @@ describe('synthetic DOCX conformance matrix', () => {
     const feasible = [...feasiblePairKeys()].sort();
     const covered = [...coveredPairKeys(CONFORMANCE_CASES)].sort();
     expect(covered).toEqual(feasible);
+    expect(feasible).toContain('story=header|fontSource=theme');
+    expect(feasible).not.toContain('story=header|container=table');
+    expect(feasible).toContain('object=floating|anchorReference=paragraph');
+    expect(feasible).not.toContain('object=inline|anchorReference=page');
     expect(CONFORMANCE_CASES.length).toBeGreaterThanOrEqual(12);
     expect(CONFORMANCE_CASES.length).toBeLessThanOrEqual(40);
     expect(new Set(CONFORMANCE_CASES.map(({ id }) => id)).size)

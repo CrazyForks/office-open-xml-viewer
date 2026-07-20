@@ -136,14 +136,10 @@ jobs:
       - name: Build WASM
         run: pnpm build:wasm
 
-      # Redistributable synthetic DOCX bytes exercise the real WASM parser and
-      # retained layout without the gitignored private-sample corpus.
-      - name: DOCX synthetic conformance (deterministic services)
-        run: pnpm vitest run packages/docx/src/conformance/layout.test.ts
-
       # Unit tests. Most cover pure-logic modules, but the packages/node canvas
       # probes dynamically import the WASM parsers (built above) and skia-canvas,
-      # so they run AFTER Build WASM. OOXML_REQUIRE_SKIA=1 turns a missing binding
+      # so they run AFTER Build WASM. This also includes the redistributable DOCX
+      # synthetic conformance corpus. OOXML_REQUIRE_SKIA=1 turns a missing binding
       # from a silent skip into a hard failure, guaranteeing the probes execute.
       - name: Unit tests
         run: pnpm test
@@ -261,4 +257,4 @@ jobs:
       # each engine. Native-shaped text coordinates are intentionally not
       # compared between engines.
       - name: DOCX synthetic conformance (all browser engines)
-        run: pnpm --filter @silurus/ooxml-docx exec playwright test --config playwright.config.ts conformance.spec.ts
+        run: pnpm --filter @silurus/ooxml-docx conformance
