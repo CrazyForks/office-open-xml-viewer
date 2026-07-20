@@ -1825,12 +1825,20 @@ fn parse_body_elements_in_story(
 
     for (child, cover_break_after) in body_children {
         let source_body_index = body.len();
-        let final_body_section = Some(child.id()) == body_level_sect_id;
+        let mut child_diagnostics = Vec::new();
         match child.tag_name().name() {
             "p" => {
-                let result = parse_paragraph(
-                    child, style_map, num_map, media_map, chart_map, rel_map, theme, None,
+                let result = parse_paragraph_with_diagnostics(
+                    child,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    None,
                     &mut field,
+                    &mut child_diagnostics,
                 );
                 let lone_break = if result.runs.len() == 1 {
                     match &result.runs[0] {
@@ -1896,7 +1904,7 @@ fn parse_body_elements_in_story(
                 }
             }
             "tbl" => {
-                let tbl = parse_table(
+                let tbl = parse_table_with_diagnostics(
                     child,
                     style_map,
                     num_map,
@@ -1910,6 +1918,7 @@ fn parse_body_elements_in_story(
                         .get(&child.id())
                         .copied()
                         .unwrap_or_else(|| LogicalTableSequenceContext::standalone(child)),
+                    &mut child_diagnostics,
                 );
                 body.push(BodyElement::Table(Box::new(tbl)));
             }
@@ -1930,13 +1939,11 @@ fn parse_body_elements_in_story(
         // Source paths are owned by the same cursor that built the serialized
         // body, not raw XML sibling ordinals. Paragraph splitting, unwrapped
         // content controls, loose section markers, and zero-yield children can
-        // all change that cursor. The final body-level sectPr belongs to the
-        // document body story itself and therefore uses the empty path.
-        if let Some(out) = diagnostics.as_deref_mut() {
-            if final_body_section {
-                collect_node_parse_diagnostics(child, Vec::new(), out);
-            } else if body.len() > source_body_index {
-                collect_node_parse_diagnostics(child, vec![source_body_index], out);
+        // all change that cursor. Pending facts were emitted only by the real
+        // paragraph/table parse paths after their visibility and MCE gates.
+        if body.len() > source_body_index {
+            if let Some(out) = diagnostics.as_deref_mut() {
+                commit_pending_parse_diagnostics(child_diagnostics, &[source_body_index], out);
             }
         }
         // ECMA-376 §17.5.2: a "Cover Pages" building block occupies its own page
@@ -1953,6 +1960,23 @@ fn parse_body_elements_in_story(
 
 const DOCUMENT_PART: &str = "word/document.xml";
 const MAX_POSITIVE_COORDINATE: i64 = 27_273_042_316_900;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct PendingParseDiagnostic {
+    code: &'static str,
+    severity: DiagnosticSeverity,
+}
+
+fn push_pending_parse_diagnostic(
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+    code: &'static str,
+    severity: DiagnosticSeverity,
+) {
+    if diagnostics.iter().any(|diagnostic| diagnostic.code == code) {
+        return;
+    }
+    diagnostics.push(PendingParseDiagnostic { code, severity });
+}
 
 fn push_parse_diagnostic(
     diagnostics: &mut Vec<ParseDiagnostic>,
@@ -1973,6 +1997,16 @@ fn push_parse_diagnostic(
     });
 }
 
+fn commit_pending_parse_diagnostics(
+    pending: Vec<PendingParseDiagnostic>,
+    path: &[usize],
+    diagnostics: &mut Vec<ParseDiagnostic>,
+) {
+    for diagnostic in pending {
+        push_parse_diagnostic(diagnostics, diagnostic.code, diagnostic.severity, path);
+    }
+}
+
 fn is_supported_text_effect(value: &str) -> bool {
     matches!(
         value,
@@ -1980,115 +2014,68 @@ fn is_supported_text_effect(value: &str) -> bool {
     )
 }
 
-fn positive_coordinate(value: &str) -> Option<i64> {
-    value
-        .trim()
-        .parse::<i64>()
-        .ok()
-        .filter(|coordinate| (0..=MAX_POSITIVE_COORDINATE).contains(coordinate))
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DrawingExtent {
+    Missing,
+    Invalid,
+    Valid { cx: i64, cy: i64 },
 }
 
-/// Collect facts that would otherwise disappear during parser normalization.
-///
-/// ECMA-376-1 Strict wml.xsd defines `w:effect/@w:val` as the closed
-/// ST_TextEffect enumeration. The renderer deliberately does not implement the
-/// animated/decorative values. `none` is fully supported and remains silent.
-///
-/// ECMA-376-1 Strict dml-wordprocessingDrawing.xsd requires `wp:extent` on both
-/// `wp:inline` and `wp:anchor`; dml-main.xsd makes both attributes required
-/// ST_PositiveCoordinate values in 0..=27273042316900. Zero is schema-valid but
-/// degenerate, so it is diagnosed separately from malformed geometry.
-fn collect_node_parse_diagnostics(
-    source: roxmltree::Node,
-    path: Vec<usize>,
-    diagnostics: &mut Vec<ParseDiagnostic>,
+/// Parse the exact `wp:extent` contract used by both drawing acquisition and
+/// parser diagnostics. ECMA-376 `CT_PositiveSize2D` requires both attributes;
+/// `ST_PositiveCoordinate` is an untrimmed integer in
+/// `0..=27273042316900`. Keeping one decision function prevents diagnostics
+/// from claiming that a drawing was omitted when the parser actually retained
+/// it (or missing an omission the parser actually made).
+fn drawing_extent(container: roxmltree::Node) -> DrawingExtent {
+    let Some(extent) = container.descendants().find(|node| {
+        node.is_element()
+            && is_wp_ns(node.tag_name().namespace())
+            && node.tag_name().name() == "extent"
+    }) else {
+        return DrawingExtent::Missing;
+    };
+    let Some((cx, cy)) = extent.attribute("cx").zip(extent.attribute("cy")) else {
+        return DrawingExtent::Missing;
+    };
+    let parse = |value: &str| {
+        value
+            .parse::<i64>()
+            .ok()
+            .filter(|coordinate| (0..=MAX_POSITIVE_COORDINATE).contains(coordinate))
+    };
+    match (parse(cx), parse(cy)) {
+        (Some(cx), Some(cy)) => DrawingExtent::Valid { cx, cy },
+        _ => DrawingExtent::Invalid,
+    }
+}
+
+fn drawing_extent_points(container: roxmltree::Node) -> Option<(f64, f64)> {
+    match drawing_extent(container) {
+        DrawingExtent::Valid { cx, cy } => Some((cx as f64 / 12700.0, cy as f64 / 12700.0)),
+        DrawingExtent::Missing | DrawingExtent::Invalid => None,
+    }
+}
+
+fn collect_text_effect_diagnostic(
+    run_properties: Option<roxmltree::Node>,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) {
-    // Follow the same MCE §9.3 branch selection as the actual run/drawing
-    // parser. Scanning both Choice and Fallback would report facts from markup
-    // that this consumer explicitly did not select.
-    let mut pending = vec![source];
-    while let Some(node) = pending.pop() {
-        if !node.is_element() {
-            continue;
-        }
-        if node.tag_name().name() == "AlternateContent" {
-            if let Some(selected) =
-                ooxml_common::mce::select_alternate_content(node, &docx_understands_drawing_ns)
-            {
-                pending.extend(selected.children().filter(|child| child.is_element()).rev());
-            }
-            continue;
-        }
-        if is_w_ns(node.tag_name().namespace())
-            && node.tag_name().name() == "r"
-            && child_w(node, "rPr").and_then(|properties| bool_prop(properties, "vanish"))
-                == Some(true)
-        {
-            continue;
-        }
-        let tag = node.tag_name();
-        if is_w_ns(tag.namespace()) && tag.name() == "effect" {
-            match attr_w(node, "val").as_deref() {
-                Some("none") => {}
-                Some(value) if is_supported_text_effect(value) => push_parse_diagnostic(
-                    diagnostics,
-                    PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT,
-                    DiagnosticSeverity::Warning,
-                    &path,
-                ),
-                _ => push_parse_diagnostic(
-                    diagnostics,
-                    PARSE_DIAGNOSTIC_CODE_INVALID_TEXT_EFFECT_VALUE,
-                    DiagnosticSeverity::Warning,
-                    &path,
-                ),
-            }
-        } else if is_wp_ns(tag.namespace()) && matches!(tag.name(), "inline" | "anchor") {
-            if drawing_container_hidden(node) {
-                continue;
-            }
-            let extent = node.children().find(|child| {
-                child.is_element()
-                    && is_wp_ns(child.tag_name().namespace())
-                    && child.tag_name().name() == "extent"
-            });
-            match extent {
-                None => push_parse_diagnostic(
-                    diagnostics,
-                    PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT,
-                    DiagnosticSeverity::Error,
-                    &path,
-                ),
-                Some(extent) => {
-                    let coordinates = extent
-                        .attribute("cx")
-                        .zip(extent.attribute("cy"))
-                        .map(|(cx, cy)| (positive_coordinate(cx), positive_coordinate(cy)));
-                    match coordinates {
-                        None => push_parse_diagnostic(
-                            diagnostics,
-                            PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT,
-                            DiagnosticSeverity::Error,
-                            &path,
-                        ),
-                        Some((Some(cx), Some(cy))) if cx == 0 || cy == 0 => push_parse_diagnostic(
-                            diagnostics,
-                            PARSE_DIAGNOSTIC_CODE_DEGENERATE_DRAWING_EXTENT,
-                            DiagnosticSeverity::Warning,
-                            &path,
-                        ),
-                        Some((Some(_), Some(_))) => {}
-                        Some(_) => push_parse_diagnostic(
-                            diagnostics,
-                            PARSE_DIAGNOSTIC_CODE_INVALID_DRAWING_EXTENT,
-                            DiagnosticSeverity::Error,
-                            &path,
-                        ),
-                    }
-                }
-            }
-        }
-        pending.extend(node.children().filter(|child| child.is_element()).rev());
+    let Some(effect) = run_properties.and_then(|properties| child_w(properties, "effect")) else {
+        return;
+    };
+    match attr_w(effect, "val").as_deref() {
+        Some("none") => {}
+        Some(value) if is_supported_text_effect(value) => push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT,
+            DiagnosticSeverity::Warning,
+        ),
+        _ => push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_INVALID_TEXT_EFFECT_VALUE,
+            DiagnosticSeverity::Warning,
+        ),
     }
 }
 
@@ -3049,6 +3036,7 @@ fn merge_section_refs(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn parse_paragraph(
     node: roxmltree::Node,
@@ -3061,7 +3049,35 @@ fn parse_paragraph(
     table_style_id: Option<&str>,
     field: &mut FieldState,
 ) -> DocParagraph {
-    parse_paragraph_cond_at_depth(
+    let mut ignored_diagnostics = Vec::new();
+    parse_paragraph_with_diagnostics(
+        node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        table_style_id,
+        field,
+        &mut ignored_diagnostics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_paragraph_with_diagnostics(
+    node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    table_style_id: Option<&str>,
+    field: &mut FieldState,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) -> DocParagraph {
+    parse_paragraph_cond_at_depth_with_diagnostics(
         node,
         style_map,
         num_map,
@@ -3073,6 +3089,7 @@ fn parse_paragraph(
         None,
         field,
         DepthGuard::root(),
+        diagnostics,
     )
 }
 
@@ -3092,6 +3109,38 @@ fn parse_paragraph_cond_at_depth(
     cond: Option<&CondFmt>,
     field: &mut FieldState,
     depth: DepthGuard,
+) -> DocParagraph {
+    let mut ignored_diagnostics = Vec::new();
+    parse_paragraph_cond_at_depth_with_diagnostics(
+        node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        table_style_id,
+        cond,
+        field,
+        depth,
+        &mut ignored_diagnostics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_paragraph_cond_at_depth_with_diagnostics(
+    node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    table_style_id: Option<&str>,
+    cond: Option<&CondFmt>,
+    field: &mut FieldState,
+    depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> DocParagraph {
     // Get style ID from pPr/pStyle. When absent, resolve_para falls back to the
     // paragraph style marked w:default="1" via StyleMap::default_para_style_id.
@@ -3338,8 +3387,19 @@ fn parse_paragraph_cond_at_depth(
     // Parse runs
     let mut runs = vec![];
     parse_para_content(
-        node, &base_run, style_map, num_map, media_map, chart_map, rel_map, theme, &mut runs, None,
-        field, depth,
+        node,
+        &base_run,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        &mut runs,
+        None,
+        field,
+        depth,
+        diagnostics,
     );
 
     // ECMA-376 §17.13.6.2 — bookmark destinations that start inside this
@@ -3524,13 +3584,27 @@ fn parse_para_content(
     // stack survives from one paragraph to the next.
     field: &mut FieldState,
     depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) {
     for child in element_children_flat(node) {
         match child.tag_name().name() {
             "r" => {
                 handle_run_in_para(
-                    child, base_run, style_map, num_map, media_map, chart_map, rel_map, theme,
-                    runs, field, None, None, revision, depth,
+                    child,
+                    base_run,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    runs,
+                    field,
+                    None,
+                    None,
+                    revision,
+                    depth,
+                    diagnostics,
                 );
             }
             "hyperlink" => {
@@ -3567,6 +3641,7 @@ fn parse_para_content(
                         anchor.clone(),
                         revision,
                         depth,
+                        diagnostics,
                     );
                 }
             }
@@ -3614,12 +3689,24 @@ fn parse_para_content(
                     Some(&inner),
                     field,
                     depth,
+                    diagnostics,
                 );
             }
             "smartTag" => {
                 parse_para_content(
-                    child, base_run, style_map, num_map, media_map, chart_map, rel_map, theme,
-                    runs, revision, field, depth,
+                    child,
+                    base_run,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    runs,
+                    revision,
+                    field,
+                    depth,
+                    diagnostics,
                 );
             }
             "fldSimple" => {
@@ -3706,6 +3793,7 @@ fn handle_run_in_para(
     link_anchor: Option<String>,
     revision: Option<&RunRevision>,
     depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) {
     // Inspect this run for field control characters or instruction text first.
     let mut fld_char_type: Option<String> = None;
@@ -3828,6 +3916,7 @@ fn handle_run_in_para(
         revision,
         in_toc,
         depth,
+        diagnostics,
     );
 }
 
@@ -4270,6 +4359,7 @@ fn parse_run_inner(
     // suppress the Hyperlink character style's blue/underline on TOC entries.
     in_toc: bool,
     depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) {
     // Merge run-level formatting
     let rpr_node = child_w(node, "rPr");
@@ -4293,6 +4383,7 @@ fn parse_run_inner(
     if fmt.vanish.unwrap_or(false) {
         return;
     }
+    collect_text_effect_diagnostic(rpr_node, diagnostics);
 
     // Word renders TOC-field hyperlinks with the surrounding TOC paragraph style,
     // NOT the Hyperlink character style's blue/underline — the entries carry
@@ -4857,6 +4948,7 @@ fn parse_run_inner(
                             revision,
                             in_toc,
                             depth,
+                            diagnostics,
                         );
                     }
                     // Attach ruby to the FIRST text run produced from rubyBase
@@ -4878,7 +4970,15 @@ fn parse_run_inner(
             }
             "drawing" => {
                 let mut drawing_runs = parse_inline_drawing(
-                    style_map, num_map, child, media_map, chart_map, rel_map, theme, depth,
+                    style_map,
+                    num_map,
+                    child,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    depth,
+                    diagnostics,
                 );
                 attach_anchor_host_metrics(&mut drawing_runs);
                 runs.extend(drawing_runs);
@@ -4975,8 +5075,15 @@ fn parse_run_inner(
                     for inner in selected.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
                             let mut drawing_runs = parse_inline_drawing(
-                                style_map, num_map, inner, media_map, chart_map, rel_map, theme,
+                                style_map,
+                                num_map,
+                                inner,
+                                media_map,
+                                chart_map,
+                                rel_map,
+                                theme,
                                 depth,
+                                diagnostics,
                             );
                             attach_anchor_host_metrics(&mut drawing_runs);
                             runs.extend(drawing_runs);
@@ -5024,7 +5131,15 @@ fn parse_run_inner(
                     .find(|n| n.is_element() && n.tag_name().name() == "drawing");
                 if let Some(drawing) = drawing {
                     let mut drawing_runs = parse_inline_drawing(
-                        style_map, num_map, drawing, media_map, chart_map, rel_map, theme, depth,
+                        style_map,
+                        num_map,
+                        drawing,
+                        media_map,
+                        chart_map,
+                        rel_map,
+                        theme,
+                        depth,
+                        diagnostics,
                     );
                     attach_anchor_host_metrics(&mut drawing_runs);
                     runs.extend(drawing_runs);
@@ -5118,11 +5233,7 @@ fn resolve_inline_blip(
     let duotone = blip_fill.and_then(|bf| parse_blip_duotone_docx(bf, theme));
     // §20.1.8.6 alphaModFix opacity (fraction, or None when opaque).
     let alpha = blip_fill.and_then(parse_blip_alpha);
-    let extent = node
-        .descendants()
-        .find(|n| n.tag_name().name() == "extent")?;
-    let cx: f64 = extent.attribute("cx").and_then(|v| v.parse().ok())?;
-    let cy: f64 = extent.attribute("cy").and_then(|v| v.parse().ok())?;
+    let (width_pt, height_pt) = drawing_extent_points(node)?;
     Some(InlineBlip {
         image_path,
         mime_type,
@@ -5130,8 +5241,8 @@ fn resolve_inline_blip(
         src_rect,
         duotone,
         alpha,
-        width_pt: cx / 12700.0,
-        height_pt: cy / 12700.0,
+        width_pt,
+        height_pt,
     })
 }
 
@@ -5222,6 +5333,25 @@ fn parse_inline_drawing(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     depth: DepthGuard,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) -> Vec<DocRun> {
+    let runs = parse_inline_drawing_impl(
+        style_map, num_map, node, media_map, chart_map, rel_map, theme, depth,
+    );
+    collect_drawing_extent_diagnostic(node, media_map, chart_map, &runs, diagnostics);
+    runs
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_inline_drawing_impl(
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    node: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    depth: DepthGuard,
 ) -> Vec<DocRun> {
     // Distinguish inline vs anchor
     let is_anchor = node.descendants().any(|n| n.tag_name().name() == "anchor");
@@ -5278,39 +5408,30 @@ fn parse_inline_drawing(
                         // the inline-image contract; a chart without one is dropped
                         // rather than emitted at zero size. If absent, fall through to
                         // the ordinary image path (which will also drop it).
-                        if let Some(extent) = container
-                            .descendants()
-                            .find(|n| n.tag_name().name() == "extent")
-                        {
-                            let cx: Option<f64> =
-                                extent.attribute("cx").and_then(|v| v.parse().ok());
-                            let cy: Option<f64> =
-                                extent.attribute("cy").and_then(|v| v.parse().ok());
-                            if let (Some(cx), Some(cy)) = (cx, cy) {
-                                return vec![DocRun::Chart(Box::new(ChartRun {
-                                    chart: chart.clone(),
-                                    width_pt: cx / 12700.0,
-                                    height_pt: cy / 12700.0,
-                                    anchor: false,
-                                    anchor_x_pt: 0.0,
-                                    anchor_y_pt: 0.0,
-                                    anchor_x_from_margin: false,
-                                    anchor_y_from_para: false,
-                                    // Inline: anchor-only fields absent.
-                                    wrap_mode: None,
-                                    dist_top: 0.0,
-                                    dist_bottom: 0.0,
-                                    dist_left: 0.0,
-                                    dist_right: 0.0,
-                                    wrap_side: None,
-                                    allow_overlap: true,
-                                    anchor_x_align: None,
-                                    anchor_y_align: None,
-                                    anchor_x_relative_from: None,
-                                    anchor_y_relative_from: None,
-                                    anchor_acquisition: None,
-                                }))];
-                            }
+                        if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
+                            return vec![DocRun::Chart(Box::new(ChartRun {
+                                chart: chart.clone(),
+                                width_pt,
+                                height_pt,
+                                anchor: false,
+                                anchor_x_pt: 0.0,
+                                anchor_y_pt: 0.0,
+                                anchor_x_from_margin: false,
+                                anchor_y_from_para: false,
+                                // Inline: anchor-only fields absent.
+                                wrap_mode: None,
+                                dist_top: 0.0,
+                                dist_bottom: 0.0,
+                                dist_left: 0.0,
+                                dist_right: 0.0,
+                                wrap_side: None,
+                                allow_overlap: true,
+                                anchor_x_align: None,
+                                anchor_y_align: None,
+                                anchor_x_relative_from: None,
+                                anchor_y_relative_from: None,
+                                anchor_acquisition: None,
+                            }))];
                         }
                     }
                 }
@@ -5463,36 +5584,29 @@ fn parse_inline_drawing(
                     // Same `<wp:extent>` (cx/cy EMU → pt) contract as the inline
                     // chart path: a chart without a parseable extent falls
                     // through to the blip path (which also drops it).
-                    if let Some(extent) = container
-                        .descendants()
-                        .find(|n| n.tag_name().name() == "extent")
-                    {
-                        let cx: Option<f64> = extent.attribute("cx").and_then(|v| v.parse().ok());
-                        let cy: Option<f64> = extent.attribute("cy").and_then(|v| v.parse().ok());
-                        if let (Some(cx), Some(cy)) = (cx, cy) {
-                            return vec![DocRun::Chart(Box::new(ChartRun {
-                                chart: chart.clone(),
-                                width_pt: cx / 12700.0,
-                                height_pt: cy / 12700.0,
-                                anchor: true,
-                                anchor_x_pt: pos_x,
-                                anchor_y_pt: pos_y,
-                                anchor_x_from_margin: x_from_margin,
-                                anchor_y_from_para: y_from_para,
-                                wrap_mode: anchor_meta.wrap_mode.clone(),
-                                dist_top: anchor_meta.dist_top,
-                                dist_bottom: anchor_meta.dist_bottom,
-                                dist_left: anchor_meta.dist_left,
-                                dist_right: anchor_meta.dist_right,
-                                wrap_side: anchor_meta.wrap_side.clone(),
-                                allow_overlap: anchor_meta.allow_overlap,
-                                anchor_x_align: x_align.clone(),
-                                anchor_y_align: y_align.clone(),
-                                anchor_x_relative_from: rel_h.clone(),
-                                anchor_y_relative_from: rel_v.clone(),
-                                anchor_acquisition: Some(anchor_acquisition.clone()),
-                            }))];
-                        }
+                    if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
+                        return vec![DocRun::Chart(Box::new(ChartRun {
+                            chart: chart.clone(),
+                            width_pt,
+                            height_pt,
+                            anchor: true,
+                            anchor_x_pt: pos_x,
+                            anchor_y_pt: pos_y,
+                            anchor_x_from_margin: x_from_margin,
+                            anchor_y_from_para: y_from_para,
+                            wrap_mode: anchor_meta.wrap_mode.clone(),
+                            dist_top: anchor_meta.dist_top,
+                            dist_bottom: anchor_meta.dist_bottom,
+                            dist_left: anchor_meta.dist_left,
+                            dist_right: anchor_meta.dist_right,
+                            wrap_side: anchor_meta.wrap_side.clone(),
+                            allow_overlap: anchor_meta.allow_overlap,
+                            anchor_x_align: x_align.clone(),
+                            anchor_y_align: y_align.clone(),
+                            anchor_x_relative_from: rel_h.clone(),
+                            anchor_y_relative_from: rel_v.clone(),
+                            anchor_acquisition: Some(anchor_acquisition.clone()),
+                        }))];
                     }
                 }
             }
@@ -5643,6 +5757,99 @@ fn parse_inline_drawing(
         anchor_y_relative_from: rel_v.clone(),
         anchor_acquisition: Some(anchor_acquisition),
     }))]
+}
+
+/// Diagnose only extent decisions made by the real DrawingML acquisition path.
+///
+/// A shape/group obtains its geometry from `a:xfrm`, so `wp:extent` is not a
+/// retention precondition there. For a picture/chart, missing or invalid
+/// extent is reported only when the other payload input resolves and no run was
+/// emitted; a valid zero extent is reported only when an Image/Chart run was
+/// actually retained. This keeps the fixed "was omitted" messages factual.
+fn collect_drawing_extent_diagnostic(
+    drawing: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    runs: &[DocRun],
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) {
+    let Some(container) = drawing.descendants().find(|node| {
+        node.is_element()
+            && is_wp_ns(node.tag_name().namespace())
+            && matches!(node.tag_name().name(), "inline" | "anchor")
+    }) else {
+        return;
+    };
+    if drawing_container_hidden(container) {
+        return;
+    }
+
+    let retained_extent_consumer = runs
+        .iter()
+        .any(|run| matches!(run, DocRun::Image(_) | DocRun::Chart(_)));
+    if !retained_extent_consumer {
+        // The implemented group/shape branches size from `a:xfrm` and never
+        // consult `wp:extent`; do not blame extent if such a payload is present.
+        if container
+            .descendants()
+            .any(|node| matches!(node.tag_name().name(), "wgp" | "wsp"))
+        {
+            return;
+        }
+        let chart_resolves = container
+            .descendants()
+            .find(|node| node.tag_name().name() == "graphicData")
+            .filter(|graphic_data| {
+                graphic_data.attribute("uri").is_some_and(|uri| {
+                    uri.contains("drawingml/2006/chart")
+                        || uri.contains("chartex")
+                        || uri.contains("chartEx")
+                })
+            })
+            .and_then(|_| {
+                container
+                    .descendants()
+                    .find(|node| node.tag_name().name() == "chart")
+            })
+            .and_then(|chart| {
+                attr_ns(
+                    &chart,
+                    relationships::TRANSITIONAL,
+                    relationships::STRICT,
+                    "id",
+                )
+            })
+            .is_some_and(|rid| chart_map.contains_key(rid));
+        let blip_resolves = container
+            .descendants()
+            .find(|node| node.tag_name().name() == "blip")
+            .and_then(|blip| resolve_blip_urls(blip, media_map))
+            .is_some();
+        if !chart_resolves && !blip_resolves {
+            return;
+        }
+    }
+
+    match drawing_extent(container) {
+        DrawingExtent::Missing if !retained_extent_consumer => push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT,
+            DiagnosticSeverity::Error,
+        ),
+        DrawingExtent::Invalid if !retained_extent_consumer => push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_INVALID_DRAWING_EXTENT,
+            DiagnosticSeverity::Error,
+        ),
+        DrawingExtent::Valid { cx, cy } if retained_extent_consumer && (cx == 0 || cy == 0) => {
+            push_pending_parse_diagnostic(
+                diagnostics,
+                PARSE_DIAGNOSTIC_CODE_DEGENERATE_DRAWING_EXTENT,
+                DiagnosticSeverity::Warning,
+            );
+        }
+        DrawingExtent::Missing | DrawingExtent::Invalid | DrawingExtent::Valid { .. } => {}
+    }
 }
 
 fn parse_on_off(value: &str) -> Option<bool> {
@@ -9650,6 +9857,36 @@ fn parse_table(
     table_positioning_context: TablePositioningContext,
     logical_sequence: LogicalTableSequenceContext,
 ) -> DocTable {
+    let mut ignored_diagnostics = Vec::new();
+    parse_table_with_diagnostics(
+        node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        depth,
+        table_positioning_context,
+        logical_sequence,
+        &mut ignored_diagnostics,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_table_with_diagnostics(
+    node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    depth: DepthGuard,
+    table_positioning_context: TablePositioningContext,
+    logical_sequence: LogicalTableSequenceContext,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) -> DocTable {
     let tbl_pr = child_w(node, "tblPr");
     let tbl_grid = child_w(node, "tblGrid");
 
@@ -10057,6 +10294,7 @@ fn parse_table(
             style_cant_split,
             depth,
             table_positioning_context,
+            diagnostics,
         );
         rows.push(row);
         all_cell_conds.push(cell_conds);
@@ -10286,6 +10524,7 @@ fn parse_table_row(
     // Recursion-depth guard threaded from the owning table (see `parse_table`).
     depth: DepthGuard,
     table_positioning_context: TablePositioningContext,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
     let tr_height_node = tr_pr.and_then(|p| child_w(p, "trHeight"));
@@ -10354,6 +10593,7 @@ fn parse_table_row(
             cond,
             depth,
             table_positioning_context,
+            diagnostics,
         );
         cells.push(cell);
     }
@@ -10385,6 +10625,7 @@ fn parse_table_cell(
     // Recursion-depth guard threaded from the owning row (see `parse_table`).
     depth: DepthGuard,
     table_positioning_context: TablePositioningContext,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> DocTableCell {
     let tc_pr = child_w(node, "tcPr");
 
@@ -10486,7 +10727,7 @@ fn parse_table_cell(
     for child in cell_children {
         match child.tag_name().name() {
             "p" => content.push(CellElement::Paragraph(Box::new(
-                parse_paragraph_cond_at_depth(
+                parse_paragraph_cond_at_depth_with_diagnostics(
                     child,
                     style_map,
                     num_map,
@@ -10498,6 +10739,7 @@ fn parse_table_cell(
                     cond,
                     &mut field,
                     depth,
+                    diagnostics,
                 ),
             ))),
             // A nested table resolves its OWN table style + conditional
@@ -10510,7 +10752,7 @@ fn parse_table_cell(
             // unaffected.
             "tbl" => {
                 if let Some(child_depth) = depth.descend() {
-                    content.push(CellElement::Table(Box::new(parse_table(
+                    content.push(CellElement::Table(Box::new(parse_table_with_diagnostics(
                         child,
                         style_map,
                         num_map,
@@ -10524,6 +10766,7 @@ fn parse_table_cell(
                             .get(&child.id())
                             .copied()
                             .unwrap_or_else(|| LogicalTableSequenceContext::standalone(child)),
+                        diagnostics,
                     ))));
                 }
             }
@@ -11649,6 +11892,7 @@ mod tests {
         let mut runs = Vec::new();
         let mut field = FieldState::default();
         let mut num_map = NumberingMap::default();
+        let mut diagnostics = Vec::new();
         parse_para_content(
             doc.root_element(),
             base_run,
@@ -11662,6 +11906,7 @@ mod tests {
             None,
             &mut field,
             DepthGuard::root(),
+            &mut diagnostics,
         );
         runs
     }
@@ -15858,6 +16103,7 @@ mod anchor_image_relative_from_tests {
         theme: &ThemeColors,
     ) -> Vec<DocRun> {
         let mut num_map = NumberingMap::default();
+        let mut diagnostics = Vec::new();
         super::parse_inline_drawing(
             style_map,
             &mut num_map,
@@ -15867,6 +16113,7 @@ mod anchor_image_relative_from_tests {
             &HashMap::new(),
             theme,
             DepthGuard::root(),
+            &mut diagnostics,
         )
     }
 

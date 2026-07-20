@@ -130,6 +130,22 @@ describe('private parser diagnostic mapping', () => {
     }]);
     expect(JSON.stringify(mapped)).not.toContain('PRIVATE_SENTINEL');
     expect(JSON.stringify(mapped)).not.toContain('private/sentinel.xml');
+    expect(mapParseDiagnostics(null, 1)).toEqual([{
+      code: 'INVALID_VALUE',
+      severity: 'warning',
+      message: 'The parser diagnostic contract did not match this renderer build',
+    }]);
+  });
+
+  it('preserves validated nested numeric source coordinates', () => {
+    expect(mapParseDiagnostics([
+      wire('UNSUPPORTED_TEXT_EFFECT', 'warning', [0, 3, 2]),
+    ], 1)).toEqual([{
+      code: 'UNSUPPORTED_FEATURE',
+      severity: 'warning',
+      source: { story: 'body', storyInstance: 'body', path: [0, 3, 2] },
+      message: 'WordprocessingML text effects are not rendered',
+    }]);
   });
 
   it('keeps the Rust emitter and TypeScript mapper code sets exhaustive', () => {
