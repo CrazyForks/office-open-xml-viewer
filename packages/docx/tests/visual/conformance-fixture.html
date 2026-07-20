@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DOCX synthetic conformance fixture</title>
+</head>
+<body>
+  <script type="module">
+    import { DocxDocument } from '/src/index.ts';
+    import { createLayoutServices, layoutDocument } from '/src/renderer.ts';
+    import {
+      assertDocumentLayout,
+      layoutFingerprint,
+    } from '/src/layout/invariants.ts';
+    import { CONFORMANCE_CASES } from '/src/conformance/cases.ts';
+    import { generateConformanceDocx } from '/src/conformance/generate.ts';
+
+    const finiteRun = (run) =>
+      ['x', 'y', 'w', 'h', 'fontSize'].every((key) => Number.isFinite(run[key]))
+      && run.w >= 0 && run.h >= 0 && run.fontSize >= 0;
+
+    const normalizeNumber = (value) => {
+      const rounded = Number(value.toFixed(6));
+      return Object.is(rounded, -0) ? 0 : rounded;
+    };
+
+    const records = (root) => {
+      const output = [];
+      const visit = (value) => {
+        if (value === null || typeof value !== 'object') return;
+        if (Array.isArray(value)) {
+          value.forEach(visit);
+          return;
+        }
+        output.push(value);
+        Object.values(value).forEach(visit);
+      };
+      visit(root);
+      return output;
+    };
+
+    const authoredGeometry = (layout) => {
+      const retained = layout.pages.flatMap((page) =>
+        page.layers.roots.flatMap(({ node }) => records(node)));
+      const tables = retained
+        .filter(({ kind, columnWidthsPt, borders }) =>
+          kind === 'table' && Array.isArray(columnWidthsPt) && Array.isArray(borders))
+        .map(({ id, columnWidthsPt, borders }) => ({
+          id,
+          columnWidthsPt: columnWidthsPt.map(normalizeNumber),
+          borderEndpoints: borders.map(({ from, to }) => [
+            normalizeNumber(from.xPt),
+            normalizeNumber(from.yPt),
+            normalizeNumber(to.xPt),
+            normalizeNumber(to.yPt),
+          ]),
+        }))
+        .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+      const drawingRecords = retained
+        .filter(({ kind, flowBounds, bounds }) =>
+          (kind === 'drawing' && (flowBounds ?? bounds)
+            && typeof (flowBounds ?? bounds) === 'object')
+          || (kind === 'resource' && bounds && typeof bounds === 'object'))
+        .map(({ id, drawingId, resourceKey, flowBounds, bounds }) => ({
+          id: id ?? drawingId ?? resourceKey,
+          widthPt: normalizeNumber((flowBounds ?? bounds).widthPt),
+          heightPt: normalizeNumber((flowBounds ?? bounds).heightPt),
+        }));
+      const drawings = [...new Map(
+        drawingRecords.map((record) => [record.id, record]),
+      ).values()]
+        .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+      return {
+        pageBoxes: layout.pages.map(({ geometry }) => ({
+          widthPt: normalizeNumber(geometry.widthPt),
+          heightPt: normalizeNumber(geometry.heightPt),
+          contentTopPt: normalizeNumber(geometry.contentTopPt),
+          contentBottomPt: normalizeNumber(geometry.contentBottomPt),
+        })),
+        tables,
+        drawings,
+      };
+    };
+
+    window.runConformanceCase = async (index) => {
+      const testCase = CONFORMANCE_CASES[index];
+      if (!testCase) throw new RangeError(`unknown conformance case ${index}`);
+      const bytes = generateConformanceDocx(testCase);
+      const main = await DocxDocument.load(bytes.slice().buffer, {
+        useGoogleFonts: false,
+      });
+      const worker = await DocxDocument.load(bytes.slice().buffer, {
+        mode: 'worker',
+        useGoogleFonts: false,
+      });
+      try {
+        const services = createLayoutServices(main.document);
+        const layout = layoutDocument(main.document, services, { currentDateMs: 0 });
+        assertDocumentLayout(layout);
+        const clonedLayout = structuredClone(layout);
+        if (JSON.stringify(clonedLayout) !== JSON.stringify(layout)) {
+          throw new Error('retained layout changed across structuredClone');
+        }
+
+        const mainRuns = [];
+        const workerRuns = [];
+        for (let pageIndex = 0; pageIndex < main.pageCount; pageIndex += 1) {
+          mainRuns.push(await main.collectPageRuns(pageIndex, { width: 612, dpr: 1 }));
+          workerRuns.push(await worker.collectPageRuns(pageIndex, { width: 612, dpr: 1 }));
+        }
+        const mainSizes = Array.from(
+          { length: main.pageCount },
+          (_, pageIndex) => main.pageSize(pageIndex),
+        );
+        const workerSizes = Array.from(
+          { length: worker.pageCount },
+          (_, pageIndex) => worker.pageSize(pageIndex),
+        );
+        const text = mainRuns.flat().map(({ text: runText }) => runText).join('');
+
+        return {
+          caseId: testCase.id,
+          expected: testCase.expected,
+          pageCount: main.pageCount,
+          mainSizes,
+          workerSizes,
+          runsFinite: mainRuns.flat().every(finiteRun)
+            && workerRuns.flat().every(finiteRun),
+          targetTextPresent: text.includes(testCase.expected.targetText),
+          cloneSafe: true,
+          layoutFingerprint: layoutFingerprint(layout),
+          mainWorkerParity: {
+            pageCount: main.pageCount === worker.pageCount,
+            sizes: JSON.stringify(mainSizes) === JSON.stringify(workerSizes),
+            runs: JSON.stringify(mainRuns) === JSON.stringify(workerRuns),
+          },
+          authoredGeometry: authoredGeometry(layout),
+        };
+      } finally {
+        main.destroy();
+        worker.destroy();
+      }
+    };
+
+    document.body.dataset.status = 'ready';
+    document.body.dataset.caseCount = String(CONFORMANCE_CASES.length);
+  </script>
+</body>
+</html>
