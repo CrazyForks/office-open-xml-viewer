@@ -1,15 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { calculateRowHeight } from './renderer.js';
-import {
-  resolveSectionLayoutContext,
-  type DocumentLayoutSettings,
-} from './layout-context.js';
-import type { DocTable, DocTableRow, DocTableCell, DocParagraph } from './types.js';
-
-// The render/measure state type, taken from calculateRowHeight's signature so
-// the test does not depend on RenderState being exported (mirrors
-// table-row-height.test's EMPTY_STATE pattern).
-type MeasureState = Parameters<typeof calculateRowHeight>[4];
+import { layoutBodyTableRowAdvances } from './test-support/document-layout.test-support.js';
+import type {
+  DocTable,
+  DocTableRow,
+  DocTableCell,
+  DocParagraph,
+  SectionProps,
+} from './types.js';
 
 // ECMA-376 §17.3.1.12 (`<w:ind>`) + §17.4.80 (auto row height): a table cell's
 // auto row height is the tallest cell's measured CONTENT height. The content is
@@ -32,7 +29,7 @@ type MeasureState = Parameters<typeof calculateRowHeight>[4];
 // lines); the un-indented cell stays one line. Pre-fix both measured one line
 // (equal heights) — so this fails Red and passes Green.
 
-function makeMeasureState(): MeasureState {
+function makeMeasureContext(): CanvasRenderingContext2D {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const ctx = {
@@ -57,45 +54,21 @@ function makeMeasureState(): MeasureState {
     restore() {},
     measureText2() {},
   };
-  const kinsoku = {
-    enabled: false,
-    lineStartForbidden: new Set<number>(),
-    lineEndForbidden: new Set<number>(),
-  };
-  const layoutSettings: DocumentLayoutSettings = {
-    kinsoku,
-    defaultTabPt: 36,
-    documentHasEastAsianText: false,
-    compat: {
-      adjustLineHeightInTable: false,
-      useFeLayout: false,
-      balanceSingleByteDoubleByteWidth: false,
-    },
-  };
-  const sectionLayout = resolveSectionLayoutContext(layoutSettings, {
-    pageWidth: 500,
-    pageHeight: 1000,
-    marginTop: 0,
-    marginRight: 0,
-    marginBottom: 0,
-    marginLeft: 0,
-    headerDistance: 0,
-    footerDistance: 0,
-    titlePage: false,
-    evenAndOddHeaders: false,
-  });
-  return {
-    ctx: ctx as unknown as CanvasRenderingContext2D,
-    scale: 1,
-    fontFamilyClasses: {},
-    docGrid: { type: null, linePitchPt: null, charSpacePt: null },
-    layoutSettings,
-    sectionLayout,
-    docEastAsian: false,
-    kinsoku,
-    defaultTabPt: 36,
-  } as unknown as MeasureState;
+  return ctx as unknown as CanvasRenderingContext2D;
 }
+
+const SECTION: SectionProps = {
+  pageWidth: 500,
+  pageHeight: 1000,
+  marginTop: 0,
+  marginRight: 0,
+  marginBottom: 0,
+  marginLeft: 0,
+  headerDistance: 0,
+  footerDistance: 0,
+  titlePage: false,
+  evenAndOddHeaders: false,
+};
 
 function para(text: string, indentFirst: number): DocParagraph {
   return {
@@ -170,24 +143,31 @@ function table(): DocTable {
   } as unknown as DocTable;
 }
 
-describe('calculateRowHeight — paragraph indent affects wrap (§17.3.1.12 / §17.4.80)', () => {
-  const COLS = [120];
-  const SCALE = 1;
+describe('canonical retained row height — paragraph indent affects wrap (§17.3.1.12 / §17.4.80)', () => {
   const t = table();
+  const retainedAdvance = (p: DocParagraph) => {
+    const advance = layoutBodyTableRowAdvances(
+      { ...t, rows: [rowWith(p)] },
+      SECTION,
+      makeMeasureContext(),
+    )[0];
+    if (advance === undefined) throw new Error('Canonical table omitted the row');
+    return advance;
+  };
   // "WORD ALPHA" = 10 glyphs × 10 px = 100 px. Fits the 120 px column on one
   // line with no indent. With a 60 px first-line indent the first line only has
   // 60 px, so it breaks after "WORD" (40 px) and "ALPHA" wraps to a second line.
   const TEXT = 'WORD ALPHA';
 
   it('un-indented cell stays one line', () => {
-    const h = calculateRowHeight(rowWith(para(TEXT, 0)), t, COLS, SCALE, makeMeasureState());
+    const h = retainedAdvance(para(TEXT, 0));
     // One 10 px line box (+ its descent). Comfortably below two lines.
     expect(h).toBeLessThan(16);
   });
 
   it('first-line-indent cell wraps to two lines and the row grows to fit', () => {
-    const h1 = calculateRowHeight(rowWith(para(TEXT, 0)), t, COLS, SCALE, makeMeasureState());
-    const h2 = calculateRowHeight(rowWith(para(TEXT, 60)), t, COLS, SCALE, makeMeasureState());
+    const h1 = retainedAdvance(para(TEXT, 0));
+    const h2 = retainedAdvance(para(TEXT, 60));
     // The indented cell wraps to a second line, so its row must be ~2× taller.
     expect(h2).toBeGreaterThan(h1 * 1.8);
   });

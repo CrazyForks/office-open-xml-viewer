@@ -1,23 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import {
-  resolveSectionLayoutContext,
-  toLegacyDocGridContext,
-  type DocumentLayoutSettings,
-} from './layout-context.js';
-import { calculateRowHeight } from './renderer.js';
+import { layoutBodyTableRowAdvances } from './test-support/document-layout.test-support.js';
 import type {
   DocParagraph,
   DocTable,
   DocTableCell,
   DocTableRow,
+  SectionProps,
 } from './types.js';
 
-type MeasureState = Parameters<typeof calculateRowHeight>[4];
-
-function makeMeasureState(
-  adjustLineHeightInTable: boolean,
-  docGridType: 'lines' | 'snapToChars' = 'lines',
-): MeasureState {
+function makeMeasureContext(): CanvasRenderingContext2D {
   let font = '10px serif';
   // The mock glyph box is a flat 1.0×em (ascent 0.8 + descent 0.2 of the
   // CURRENT font size). No run family is in the core metric table, so every
@@ -42,22 +33,11 @@ function makeMeasureState(
     save() {},
     restore() {},
   };
-  const kinsoku = {
-    enabled: false,
-    lineStartForbidden: new Set<number>(),
-    lineEndForbidden: new Set<number>(),
-  };
-  const layoutSettings: DocumentLayoutSettings = {
-    kinsoku,
-    defaultTabPt: 36,
-    documentHasEastAsianText: true,
-    compat: {
-      adjustLineHeightInTable,
-      useFeLayout: false,
-      balanceSingleByteDoubleByteWidth: false,
-    },
-  };
-  const sectionLayout = resolveSectionLayoutContext(layoutSettings, {
+  return ctx as unknown as CanvasRenderingContext2D;
+}
+
+function section(docGridType: 'lines' | 'snapToChars' = 'lines'): SectionProps {
+  return {
     pageWidth: 200,
     pageHeight: 300,
     marginTop: 20,
@@ -70,19 +50,7 @@ function makeMeasureState(
     evenAndOddHeaders: false,
     docGridType,
     docGridLinePitch: 20,
-  });
-
-  return {
-    ctx: ctx as unknown as CanvasRenderingContext2D,
-    scale: 1,
-    fontFamilyClasses: {},
-    docGrid: toLegacyDocGridContext(sectionLayout),
-    layoutSettings,
-    sectionLayout,
-    docEastAsian: true,
-    kinsoku,
-    defaultTabPt: 36,
-  } as unknown as MeasureState;
+  };
 }
 
 function paragraph(): DocParagraph {
@@ -200,30 +168,34 @@ function table(): DocTable {
   } as unknown as DocTable;
 }
 
+function retainedAdvance(
+  tableRow: DocTableRow,
+  adjustLineHeightInTable: boolean,
+  docGridType: 'lines' | 'snapToChars' = 'lines',
+): number {
+  const t = table();
+  const advance = layoutBodyTableRowAdvances(
+    { ...t, rows: [tableRow] },
+    section(docGridType),
+    makeMeasureContext(),
+    { adjustLineHeightInTable },
+  )[0];
+  if (advance === undefined) throw new Error('Canonical table omitted the row');
+  return advance;
+}
+
 describe('table-cell line grid compatibility', () => {
   it('keeps cell text at natural height when compatibility is disabled', () => {
-    expect(calculateRowHeight(row(), table(), [100], 1, makeMeasureState(false))).toBe(10);
+    expect(retainedAdvance(row(), false)).toBe(10);
   });
 
   it('applies the section line pitch when compatibility is enabled', () => {
-    expect(calculateRowHeight(row(), table(), [100], 1, makeMeasureState(true))).toBe(20);
+    expect(retainedAdvance(row(), true)).toBe(20);
   });
 
   it('gates the line axis of snapToChars by the same compatibility setting', () => {
-    expect(calculateRowHeight(
-      row(),
-      table(),
-      [100],
-      1,
-      makeMeasureState(false, 'snapToChars'),
-    )).toBe(10);
-    expect(calculateRowHeight(
-      row(),
-      table(),
-      [100],
-      1,
-      makeMeasureState(true, 'snapToChars'),
-    )).toBe(20);
+    expect(retainedAdvance(row(), false, 'snapToChars')).toBe(10);
+    expect(retainedAdvance(row(), true, 'snapToChars')).toBe(20);
   });
 });
 
@@ -260,7 +232,7 @@ describe('docGrid line-cell integration through the cell measure path', () => {
     // pitch), then keeps the ordinary 10pt line at one pitch. This fixture
     // records Office compatibility; the standards do not define this precise
     // tall-line exception.
-    expect(calculateRowHeight(rowWith(para), table(), [100], 1, makeMeasureState(true)))
+    expect(retainedAdvance(rowWith(para), true))
       .toBeCloseTo(14 * 3269 / 2048 + 20, 12);
   });
 
@@ -276,7 +248,7 @@ describe('docGrid line-cell integration through the cell measure path', () => {
       { type: 'break', breakType: 'line' },
       { text: 'う', fontSize: 10 },
     ]);
-    expect(calculateRowHeight(rowWith(para), table(), [100], 1, makeMeasureState(true)))
+    expect(retainedAdvance(rowWith(para), true))
       .toBe(60); // 40 (2 cells) + 20 (1 cell)
   });
 
@@ -291,7 +263,7 @@ describe('docGrid line-cell integration through the cell measure path', () => {
       { type: 'break', breakType: 'line' },
       { text: 'Hello', fontSize: 22 },
     ]);
-    expect(calculateRowHeight(rowWith(para), table(), [100], 1, makeMeasureState(true)))
+    expect(retainedAdvance(rowWith(para), true))
       .toBe(42); // 20 (CJK, 1 cell) + 22 (Latin, natural above the one-cell floor)
   });
 });
