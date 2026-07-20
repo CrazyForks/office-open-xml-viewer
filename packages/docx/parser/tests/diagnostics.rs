@@ -308,9 +308,11 @@ fn extent_diagnostics_match_the_actual_picture_retention_decision() {
         <w:p>{}</w:p>
         <w:p>{}</w:p>
         <w:p>{}</w:p>
+        <w:p>{}</w:p>
         "#,
         picture(r#"<wp:extent cx="27273042316900" cy="+1"/>"#),
         picture(r#"<wp:extent cx=" 12700 " cy="12700"/>"#),
+        picture(r#"<wp:extent cx="&#x3000;12700" cy="12700"/>"#),
         picture(r#"<wp:extent cx="-1" cy="12700"/>"#),
         picture(r#"<wp:extent cx="12700.5" cy="12700"/>"#),
         picture(r#"<wp:extent cx="1e6" cy="12700"/>"#),
@@ -337,8 +339,9 @@ fn extent_diagnostics_match_the_actual_picture_retention_decision() {
             ("INVALID_DRAWING_EXTENT", 3),
             ("INVALID_DRAWING_EXTENT", 4),
             ("INVALID_DRAWING_EXTENT", 5),
-            ("DEGENERATE_DRAWING_EXTENT", 6),
-            ("MISSING_DRAWING_EXTENT", 7),
+            ("INVALID_DRAWING_EXTENT", 6),
+            ("DEGENERATE_DRAWING_EXTENT", 7),
+            ("MISSING_DRAWING_EXTENT", 8),
         ]
     );
     assert_eq!(

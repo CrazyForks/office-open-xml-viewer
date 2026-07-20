@@ -2040,7 +2040,7 @@ fn drawing_extent(container: roxmltree::Node) -> DrawingExtent {
     };
     let parse = |value: &str| {
         value
-            .trim()
+            .trim_matches(|character| matches!(character, '\t' | '\n' | '\r' | ' '))
             .parse::<i64>()
             .ok()
             .filter(|coordinate| (0..=MAX_POSITIVE_COORDINATE).contains(coordinate))
