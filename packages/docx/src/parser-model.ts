@@ -63,6 +63,11 @@ import type {
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
+import {
+  wordTableCellSpacingValuePt,
+  wordTableMarginValuePt,
+  wordTableRowHeightRule,
+} from './layout/table-compatibility.js';
 
 export interface InternalRunFontSlots {
   readonly direct: TextFontSlots;
@@ -276,8 +281,9 @@ export interface TableMarginAcquisitionWire {
 
 export interface TableLayoutAcquisitionWire {
   readonly effectiveStyleId: string | null;
-  /** Word-effective flow participation after [MS-OI29500] 2.1.162(b-c), not
-   * the lexical presence/absence of the public `tblpPr` compatibility field. */
+  /** Effective flow participation under
+   * `word-effective-floating-table-positioning`, not lexical `tblpPr`
+   * presence/absence. */
   readonly ordinaryFlow: boolean;
   /** Parser-owned ECMA-376 Part 1 §17.4.37 logical-table membership. The parser
    * assigns one id per logical table (a standalone table receives its own id),
@@ -374,13 +380,14 @@ export function tableAcquisitionInput(table: Readonly<DocTable>): TableAcquisiti
   return input;
 }
 
-/** Word-effective flow classification acquired before tblpPr defaults erase the
- * distinction between authored positioning and an ignored positioning payload. */
+/** Effective flow classification acquired before tblpPr defaults erase the
+ * distinction governed by `word-effective-floating-table-positioning`. */
 export function tableParticipatesInOrdinaryFlow(table: Readonly<DocTable>): boolean {
   return tableFormatInput(table).ordinaryFlow;
 }
 
-/** Positioning payload only when Word treats the authored tblpPr as effective. */
+/** Positioning payload only when `word-effective-floating-table-positioning`
+ * treats the authored tblpPr as effective. */
 export function effectiveTablePositioning(table: Readonly<DocTable>): TblpPr | null {
   return tableFormatInput(table).positioning === null ? null : (table.tblpPr ?? null);
 }
@@ -458,11 +465,13 @@ function normalizedTableHeightRule(rule: string): TableRowHeightInput['rule'] {
 }
 
 function privateTableRowHeight(height: TableRowHeightAcquisitionWire): TableRowHeightInput {
-  // ECMA-376 §17.4.80 defaults omitted hRule to auto, but Word intentionally
-  // differs: [MS-OI29500] 2.1.180 treats an omitted hRule as atLeast. Authored
-  // presence is therefore semantic input, not a parser implementation detail.
+  // `word-omitted-row-height-rule-at-least`: authored presence is semantic
+  // input, not a parser implementation detail.
   return {
-    rule: height.ruleAuthored ? normalizedTableHeightRule(height.rule) : 'atLeast',
+    rule: wordTableRowHeightRule(
+      normalizedTableHeightRule(height.rule),
+      height.ruleAuthored,
+    ),
     valuePt: tableTwipsValuePt(height.value),
   };
 }
@@ -483,12 +492,12 @@ function wordTableCellSpacingPt(
 ): number | null {
   for (const width of widths) {
     if (!width) continue;
-    // Word resolves authored pct/auto spacing to zero at that precedence scope
-    // instead of exposing a lower scope ([MS-OI29500] 2.1.152–154).
+    // `word-table-cell-spacing-scope-shadow` resolves authored pct/auto/nil at
+    // this precedence scope instead of exposing a lower scope.
     const kind = effectiveTableWidthKind(width);
-    if (kind === 'pct' || kind === 'auto' || kind === 'nil') return 0;
     const valuePt = tableDxaPtFromLexical(width);
-    if (valuePt !== null) return valuePt;
+    const resolved = wordTableCellSpacingValuePt(kind, valuePt);
+    if (resolved !== null) return resolved;
   }
   return null;
 }
@@ -503,17 +512,12 @@ function wordTableMarginPt(
 ): number | null {
   if (!width) return null;
   const kind = effectiveTableWidthKind(width);
-  if (kind === 'dxa') return tableTwipsValuePt(width.value ?? '0');
-  // Individual-cell margin exceptions ignore pct/auto/nil. The default
-  // leading/trailing table margin differs in Word: pct/auto becomes zero
-  // ([MS-OI29500] 2.1.125/.146), while nil keeps ST_TblWidth's zero meaning.
-  if (scope === 'cell' || scope === 'exception') return null;
-  if (edge === 'start' || edge === 'end') {
-    if (kind === 'pct' || kind === 'auto' || kind === 'nil') return 0;
-  }
-  // Word ignores nil top/bottom margin elements ([MS-OI29500] 2.1.116/.177,
-  // also referenced by the corresponding default-margin sections).
-  return null;
+  return wordTableMarginValuePt({
+    kind,
+    dxaValuePt: kind === 'dxa' ? tableTwipsValuePt(width.value ?? '0') : null,
+    scope,
+    edge,
+  });
 }
 
 function effectiveTableCellMargins(
@@ -658,8 +662,8 @@ export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
       ? null
       : floatingTablePositionInput(table.tblpPr),
     rows,
-    // Word applies selected first-row tblPrEx values table-wide
-    // ([MS-OI29500] 2.1.156/.158/.167).
+    // `word-first-row-table-exception-scope` applies these selected facts
+    // table-wide.
     firstRowException: rows[0]?.exception ?? null,
   }, 'DOCX table format input') as TableFormatInput;
   tableFormatInputs.set(table, input);
@@ -849,9 +853,8 @@ function tablePreferredWidthPt(
 ): number | null {
   const exception = firstRowException?.preferredWidth ?? null;
   if (firstRowException?.preferredWidthAuthored) {
-    // [MS-OI29500] 2.1.167 applies a first-row tblPrEx/tblW to the whole
-    // table. Authored auto/nil/zero values therefore shadow the parent tblW
-    // without becoming an invented physical length.
+    // `word-first-row-table-exception-scope`: authored auto/nil/zero values
+    // shadow the parent tblW without becoming an invented physical length.
     if (exception?.kind === 'dxa') return exception.value > 0 ? exception.value : null;
     if (exception?.kind === 'pct') {
       return exception.value > 0 ? exception.value * availableWidthPt : null;

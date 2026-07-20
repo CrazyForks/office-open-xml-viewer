@@ -23,6 +23,9 @@ const ALLOWED_DECLARATION_FILES = new Set([
   COMPATIBILITY_OWNER,
   `${DOCX_SOURCE}/layout/anchor-compatibility.ts`,
   `${DOCX_SOURCE}/layout/body-pagination-compatibility.ts`,
+  `${DOCX_SOURCE}/layout/line-compatibility.ts`,
+  `${DOCX_SOURCE}/layout/paint-compatibility.ts`,
+  `${DOCX_SOURCE}/layout/script-compatibility.ts`,
   `${DOCX_SOURCE}/layout/section-compatibility.ts`,
   `${DOCX_SOURCE}/layout/table-compatibility.ts`,
 ]);
@@ -399,7 +402,7 @@ function options(argv) {
 }
 
 const observationMarker =
-  /\[MS-[A-Z0-9]+\]|\bobserved (?:Word|Office)\b|\bWord-compatible\b|\bWord(?:'s)? (?:uses|applies|adds|treats|admits|keeps|places|starts|does|doesn't|ignores|clips|measured|runtime)\b/i;
+  /\[MS-[A-Z0-9]+\]|\b(?:[Oo]bserved|[Mm]easured|[Vv]erified|[Aa]djudicated|[Rr]ecorded)\b[^\n]{0,120}\b(?:Word|Office)\b|\b(?:matching|following|exactly\s+like|where)\s+(?:Word|Office)\b|\b(?:Word|Office)(?:'s)?[- ](?:observed|verified|measured|adjudicated|compatible|runtime|specific|defined)\b|\b(?:Word|Office)(?:'s)?\s+[^.\n]{0,80}\b(?:default|pen)\b|\b(?:Word|Office)(?:'s)?\b[^.\n]{0,40}\b(?:uses|applies|adds|treats|admits|keeps|places|starts|does|doesn't|ignores|clips|clamps|pins|measures|renders|draws|fills|resolves|confirms|defers|emits|paints|centres|centers|collapses|aligns|reserves|lays|flows|widens|advances|classifies|breaks|counts|runs|excludes|honors|honours|formats|swaps|writes|stores|layers|anchors|moves|suppresses|never)\b|\b(?:Word|Office)(?:'s)?\s+(?:GT|ground truth|markup|output PDFs?|PDFs?|PDF export|behavior|behaviour|compatibility)\b/;
 
 function observationKeys(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
@@ -431,6 +434,14 @@ function verifyObservationBaseline(root, observations) {
     fail(
       'INLINE_COMPATIBILITY_OBSERVATION',
       added.join('\n'),
+    );
+  }
+  const observed = new Set(observations);
+  const stale = baseline.observations.filter((entry) => !observed.has(entry));
+  if (stale.length > 0) {
+    fail(
+      'STALE_COMPATIBILITY_OBSERVATION_BASELINE',
+      stale.join('\n'),
     );
   }
 }

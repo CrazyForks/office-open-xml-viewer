@@ -296,8 +296,8 @@ function materializeStackingContext(roots: readonly PageLayerRoot[]): readonly P
 
 /** Build the final immutable page paint plan. ECMA-376 §20.4.2.3 ordering is
  * applied only within an equivalent story stacking context; cross-story order
- * remains the explicit root order until separately evidenced Office behavior
- * authorizes a compatibility change. */
+ * remains the explicit root order unless a separately registered compatibility
+ * rule authorizes a change. */
 export function buildPageLayers(entries: readonly PageLayerNode[]): PageLayers {
   const roots = Object.freeze(entries.map(({ layer, node, coordinateSpace }) => Object.freeze({
     layer,

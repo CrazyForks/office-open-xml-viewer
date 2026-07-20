@@ -16,13 +16,20 @@ function fixture() {
     { recursive: true },
   );
   const references = [
-    ['packages/docx/src/layout/coordinate-space.test.ts', 'maps Transitional text direction %s to %s'],
-    ['packages/docx/src/float-line-start-one-inch.test.ts', '(e) the boundary is identical across scales (absolute pt width)'],
-    ['packages/docx/src/layout/floats.test.ts', 'keeps observed different-paragraph displacement on exclusion bounds'],
-    ['packages/docx/src/float-table-page-fit.test.ts', '(g) DEFERS a page-anchored floating table when its raw band intersects an existing table float'],
+    ['packages/docx/src/layout/coordinate-space.test.ts', ['maps Transitional text direction %s to %s']],
+    ['packages/docx/src/float-line-start-one-inch.test.ts', [
+      '(e) the boundary is identical across scales (absolute pt width)',
+      'keeps an anchor-host metric-only line on the paragraph-mark threshold',
+    ]],
+    ['packages/docx/src/layout/floats.test.ts', ['keeps observed different-paragraph displacement on exclusion bounds']],
+    ['packages/docx/src/float-table-page-fit.test.ts', ['(g) DEFERS a page-anchored floating table when its raw band intersects an existing table float']],
   ];
-  for (const [path, title] of references) {
-    write(root, path, `it(${JSON.stringify(title)}, () => {});\n`);
+  for (const [path, titles] of references) {
+    write(
+      root,
+      path,
+      titles.map((title) => `it(${JSON.stringify(title)}, () => {});`).join('\n'),
+    );
   }
   write(
     root,
@@ -53,7 +60,7 @@ function run(root) {
 test('accepts literal rules with live regression evidence', () => {
   const result = run(fixture());
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /verified \(4 rules\)/);
+  assert.match(result.stdout, /verified \(5 rules\)/);
 });
 
 test('rejects a stale regression test title', () => {
@@ -245,6 +252,42 @@ test('rejects a new inline Office observation outside compatibility modules', ()
   assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
 });
 
+test('detects varied Office observation language outside compatibility modules', () => {
+  const claims = [
+    'Word renders an undocumented branch here.',
+    'Word draws an undocumented branch here.',
+    'Word fills an undocumented branch here.',
+    'Word resolves an undocumented branch here.',
+    'Word collapses an undocumented branch here.',
+    'Word ground truth requires an undocumented branch here.',
+    'Word-observed behavior requires an undocumented branch here.',
+    'Observed Windows Word behavior requires an undocumented branch here.',
+    'Observed Word offsets require an undocumented branch here.',
+    "Word's hierarchy default is undocumented.",
+    "This moves exactly like Word's pen.",
+    'No fixture pins where Word clamps the box.',
+    'Word — which paints the whole merged span.',
+    'Word pins the baseline.',
+    'This was measured against the Word PDFs.',
+    'This is matching Word.',
+  ];
+  for (const claim of claims) {
+    const root = fixture();
+    write(root, 'packages/docx/src/layout/table.ts',
+      `// ${claim}\nexport const value = 1;\n`);
+    const result = run(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
+  }
+});
+
+test('does not treat a lowercase generic word as a compatibility claim', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/table.ts',
+    '// The next word uses the inherited style.\nexport const value = 1;\n');
+  assert.equal(run(root).status, 0);
+});
+
 test('does not exempt an unreviewed file merely because its name ends in compatibility', () => {
   const root = fixture();
   write(root, 'packages/docx/src/layout/rogue-compatibility.ts',
@@ -268,4 +311,18 @@ test('allows only an exact transitional observation-baseline entry', () => {
   const changed = run(root);
   assert.equal(changed.status, 1);
   assert.match(changed.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
+});
+
+test('rejects stale transitional observation-baseline entries', () => {
+  const root = fixture();
+  write(root, 'scripts/docx-compatibility-observation-baseline.json',
+    `${JSON.stringify({
+      version: 1,
+      observations: [
+        'packages/docx/src/layout/table.ts::// Word uses a removed legacy branch.',
+      ],
+    }, null, 2)}\n`);
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /STALE_COMPATIBILITY_OBSERVATION_BASELINE/);
 });

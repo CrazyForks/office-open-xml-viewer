@@ -410,7 +410,7 @@ function fitToAvailableWidth(
   // The jointly retained minima do not fit, so §17.18.87 now permits forced
   // line breaks. It does not prescribe the final track distribution; reuse the
   // proportional reduction defined by its fixed-layout guidance as an explicit
-  // deterministic solver policy, not as an Office-specific empirical constant.
+  // deterministic solver policy, not as a compatibility constant.
   const scale = Math.max(0, availableWidthPt) / afterSlackPt;
   return cleanWidths(result.map((width) => width * scale));
 }

@@ -79,12 +79,9 @@ describe('calculateRowHeight — ST_HeightRule (§17.4.80 / §17.18.37)', () => 
     expect(h).toBe(600 * SCALE);
   });
 
-  // Word-compatible deviation from the §17.4.80 literal: with hRule omitted
-  // (spec default = auto) and @val present, Word honors @val as a lower bound.
-  // Ground truth is the Word output PDF — sample-11.docx's December calendar
-  // date rows measure exactly trHeight @val 576 / 20 = 28.8 pt. See the
-  // resolveSingleRowHeight docstring (table-geometry.ts) for the full rationale.
-  it('auto with @val — @val is honored as a lower bound (Word-compatible)', () => {
+  // `word-authored-auto-row-height-floor`: an authored auto height remains a
+  // lower bound in the retained model.
+  it('auto with @val — @val is honored as a lower bound', () => {
     const h = calculateRowHeight(rowWith(600, 'auto'), t, COLS, SCALE, EMPTY_STATE);
     expect(h).toBe(600 * SCALE);
   });

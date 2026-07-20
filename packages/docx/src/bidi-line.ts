@@ -17,6 +17,7 @@ import {
   buildVisualOrder,
   type BidiClass,
 } from '@silurus/ooxml-core';
+import { wordRtlAmbiguousCharacter } from './layout/script-compatibility.js';
 
 /** A laid-out segment as seen here: only its optional text matters for bidi.
  *  Typed as `unknown` element so the renderer's LayoutSeg union (whose image /
@@ -61,14 +62,6 @@ export interface LineVisualOrder {
   rtl: boolean[];
 }
 
-/** Punctuation/symbols — the "ambiguous" characters a run-level `<w:rtl>`
- *  resolves to RTL (§17.3.2.30). Whitespace is deliberately EXCLUDED: an
- *  inter-word space classified R would reverse the mutual order of English
- *  words inside an rtl-marked run, which Word does not do. Letters/digits are
- *  excluded too — strong chars keep their class, and digits are handled by the
- *  separate `digitsAsAN` (w:lang-gated) override. */
-const AMBIGUOUS_CHAR = /[\p{P}\p{S}]/u;
-
 /**
  * Compute the visual draw order of a line's segments under `baseRtl`. Text
  * segments contribute their text; non-text segments contribute one neutral
@@ -77,15 +70,18 @@ const AMBIGUOUS_CHAR = /[\p{P}\p{S}]/u;
  * practice because they are space-split); Canvas resolves any residual
  * intra-segment bidi when the slice is drawn with the matching `ctx.direction`.
  *
- * A run-level `<w:rtl>` (§17.3.2.30) gives the run's AMBIGUOUS characters
- * right-to-left characteristics. This is modelled as a UAX#9 §4.3 HL1
- * Bidi_Class override (punctuation/symbols → R), NOT as an RLE…PDF embedding:
+ * A run-level `<w:rtl>` (§17.3.2.30) gives punctuation and symbols
+ * right-to-left characteristics. Under
+ * `word-rtl-run-ambiguous-class-override`, this is modelled as a UAX #9 §4.3
+ * HL1 Bidi_Class override (punctuation/symbols → R), not as an RLE…PDF
+ * embedding; whitespace and strong letters retain their ordinary classes, and
+ * digits use the separate language-gated `digitsAsAN` override:
  * an embedding raises the run's level above the paragraph base, which strands
  * sibling base-level content on the wrong side (e.g. a trailing "." run after
  * "2022" in an RTL paragraph was over-embedded to level 3 and reordered to
- * "2022." where Word renders ".2022"). With the class override the run's
- * neutrals resolve RTL at the BASE level, exactly like Word: a literal "1. "
- * prefix mirrors to ".1", while strong-Latin content keeps its even (LTR)
+ * "2022." instead of the recorded ".2022"). With the class override the run's
+ * neutrals resolve RTL at the base level: a literal "1. " prefix mirrors to
+ * ".1", while strong-Latin content keeps its even (LTR)
  * level so English words in an rtl-marked run keep their LTR word order.
  */
 export function computeLineVisualOrder(
@@ -108,7 +104,8 @@ export function computeLineVisualOrder(
   //    Separator) — a tab character's real Bidi_Class. Rules L1/L2 then reset it
   //    to the paragraph level and reorder each tab-delimited CELL independently,
   //    so an RTL paragraph's tab-aligned cells appear in mirrored (leading-cell-
-  //    at-the-right) order, matching Word. Modelled as a class override rather
+  //    at-the-right) order. `word-rtl-run-ambiguous-class-override` records this
+  //    compatibility mapping. Modelled as a class override rather
   //    than by emitting a literal "\t" so the segment↔code-unit mapping stays
   //    1:1 (every non-text inline object is one code unit).
   // `undefined` until any segment opts in, so the pure algorithm runs for
@@ -136,7 +133,7 @@ export function computeLineVisualOrder(
         const c = full.charCodeAt(k);
         if (digitsAN && c >= 0x30 && c <= 0x39) {
           ov[k] = 'AN';
-        } else if (rtlMarked && AMBIGUOUS_CHAR.test(full[k])) {
+        } else if (rtlMarked && wordRtlAmbiguousCharacter(full[k])) {
           ov[k] = 'R';
         }
       }
@@ -155,7 +152,7 @@ export function computeLineVisualOrder(
   // (255-removed → paragraph level), then UAX#9 L2 permutes them — the shared
   // `buildVisualOrder` back half. No level forcing for rtl-marked segments:
   // Latin letters keep their even (LTR) level (so English words in an rtl-marked
-  // run keep their mutual LTR order, as Word renders them), while the run's
+  // run keep their mutual LTR order), while the run's
   // punctuation resolves to the odd level via the §17.3.2.30 class override
   // above.
   const { order } = buildVisualOrder(levels, paragraphLevel, segStart);
@@ -163,7 +160,7 @@ export function computeLineVisualOrder(
   // Direction hint = "does the segment contain ANY odd-level unit". A
   // digits-with-punctuation slice like "1. " has its "." resolve to the odd
   // level, so the slice draws with ctx.direction rtl and Canvas mirrors it to
-  // ".1" exactly as Word does — whereas a pure-Latin slice is all-even and
+  // ".1" under the registered override — whereas a pure-Latin slice is all-even and
   // keeps its LTR rendering. This is docx-specific (pptx/xlsx use plain
   // first-unit level parity), so it stays here rather than in buildVisualOrder.
   const rtl: boolean[] = new Array(n);
@@ -250,12 +247,9 @@ export function jcIsFullyJustified(alignment: string | undefined): boolean {
 }
 
 /** ECMA-376 §17.18.44 — whether a `w:jc` value also stretches the paragraph's
- *  LAST line. `distribute` fills its final line too (unlike `both`). But
- *  `thaiDistribute` does NOT: measured against the Word-exported ground truth
- *  (issue #959 adjudication fixture), a thaiDistribute paragraph's final line is
- *  left flush-left and ragged — reaching only its natural width — exactly like
- *  `both`, while its non-final lines are fully justified across the Thai clusters.
- *  So only `distribute` stretches the last line. */
+ *  last line. `word-thai-distribute-cluster-policy` records that
+ *  `thaiDistribute`, like `both`, leaves its final line ragged; only
+ *  `distribute` stretches the last line. */
 export function jcStretchesLastLine(alignment: string | undefined): boolean {
   return alignment === 'distribute';
 }

@@ -234,14 +234,34 @@ it, propagate immutable rule IDs on retained result values and aggregate only
 from the accepted final layout tree. Never introduce a mutable collector whose
 contents can retain rejected probes or convergence candidates.
 
-- [ ] **C2a-2: Isolate paint-side compatibility decisions**
+- [x] **C2a-2: Isolate paint-side and supported model-boundary compatibility decisions**
 
-Name and evidence the remaining observations in `renderer.ts` and its legacy
-paint helpers without performing the C3 extraction. Move only decision data and
-pure predicates; geometry and paint ownership remain unchanged. Shrink the
-observation baseline in the same PR.
+Name and evidence the remaining observations in `renderer.ts`, its legacy paint
+helpers, and the supported table-model boundary in `parser-model.ts` / `types.ts`
+without performing the C3 extraction or C2b unsupported-content diagnostics.
+Move only decision data and pure predicates; geometry, paint ownership, and the
+public model remain unchanged. Reconcile legacy comments that claim Office
+behavior with retained owners that deliberately treat the same policy as
+implementation-defined. Expand the observation scanner to cover the remaining
+Office-claim verbs, require its baseline to match exactly, and shrink that
+baseline in the same PR.
 
-- [ ] **C2a-3: Review, broad-verify, and merge**
+Private-sample observations use public behavior-pinning regression tests as
+evidence; private filenames and content never enter committed rule records.
+Normative OOXML/UAX behavior, deterministic renderer policy, and deliberately
+unsupported Office behavior are classified explicitly instead of being promoted
+to compatibility rules. In particular, keep the draw-only #990 baseline rule
+distinct from the #981 trailing-mark pagination-admission rule.
+
+The exact transitional observation baseline may retain the encryption note and
+the pre-existing nested-table marker comment inside
+`measureCellContentHeightPx`. The latter declaration is byte-frozen by the
+layout-boundary baseline, so C2a records the behavior as
+`word-trailing-structural-cell-marker` without rewriting that one legacy
+comment. C3 removes the frozen declaration and this final transitional entry;
+adding any other inline observation remains a CI failure.
+
+- [x] **C2a-3: Review, broad-verify, and merge**
 
 Use independent specification/evidence review for each C2a PR. Mark issue
 #1037's compatibility-isolation item complete only after both layout and paint

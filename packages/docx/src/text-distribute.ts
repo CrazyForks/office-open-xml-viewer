@@ -14,24 +14,18 @@
 // The `both` clause "inter-word, not inter-character within each word" is written
 // for LATIN script, where a word is a run of letters delimited by spaces. CJK has
 // no inter-word spaces and each ideograph behaves as its own word, so an
-// inter-CJK boundary IS an inter-word boundary, not an intra-word one. Word
-// confirms this empirically: in the sample-9 Word PDF a pure-CJK `both` line that
-// wrapped — with NO ASCII spaces at all — is filled exactly to the right text
-// margin (pdftotext -bbox: the 0-space line reaches xMax 523.0pt, the page's
-// right margin, while the paragraph's natural last line stops short at 358.0pt).
-// The only mechanism that can fill a space-free line is adding pitch at inter-CJK
-// boundaries, so Word's `both` widens BOTH inter-word ASCII spaces AND inter-CJK
-// boundaries; it does NOT widen the boundary between two Latin letters of one
-// word.
+// inter-CJK boundary is an inter-word boundary, not an intra-word one.
+// `word-cjk-both-inter-character-expansion` records the resulting compatibility
+// behavior: `both` widens ASCII word gaps and inter-CJK boundaries, but not the
+// boundary between two Latin letters in one word.
 //
 // `both` and `distribute` select the same gap opportunities and differ only in
 // the last line: `both` leaves the paragraph's final line natural, `distribute`
 // fills it too — a policy the RENDERER owns (it decides whether to call this for
 // a given line). NOTE: per spec `distribute` should additionally add pitch
-// between Latin letters within a word ("all characters on the line"); that
-// pure-Latin refinement is unimplemented (rare, and it needs a Word ground truth)
-// and is tracked as a follow-up — CJK content, this kernel's target, is
-// unaffected.
+// between Latin letters within a word ("all characters on the line"). That
+// pure-Latin refinement is explicitly unsupported pending independent evidence;
+// CJK content, this kernel's target, is unaffected.
 //
 // The gap geometry itself lives in the shared kernel
 // `@silurus/ooxml-core` → `distributeLineSlack` (packages/core/src/text/
@@ -90,7 +84,8 @@ export type {
  *                       span (Thai/Lao/Khmer) whose both sides are SEA, so a
  *                       space-free Thai line is justified by widening inter-cluster
  *                       gaps (a combining mark stays glued to its base). Off for
- *                       `both`/`distribute`, which leave SEA text ragged (Word GT).
+ *                       `both`/`distribute` per
+ *                       `word-thai-distribute-cluster-policy`.
  * @returns The distribution, or `null` when nothing stretches.
  */
 export function distributeLineSlack(

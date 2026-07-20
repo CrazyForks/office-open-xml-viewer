@@ -8,18 +8,15 @@ import type { ImageRun } from './types.js';
 // logical layout frame. This pins the CRITICAL fix (PR #770 review): the raw
 // positionH/positionV offsets must NOT be fed unrotated into the logical frame;
 // they resolve physically and map through `physicalToLogicalAnchorBox`, so after
-// the +90° page paint the image lands at Word's physical centroid.
-//
-// Ground truth = private/sample-26.docx + sample-26.pdf (Word landscape vertical
-// newspaper). All numbers are pt (scale=1 ⇒ px==pt):
-//   page: 842 × 595.05 (landscape); physical margins L=56.7 T=70.9 R=56.7 B=70.9
-//   anchor: positionH margin +387.6, positionV margin +327.0; extent 96.2 × 123.0
-//   Word/PDF physical centroid: (492.4, 459.35)
+// the +90° page paint the image lands at the recorded physical centroid. The
+// fixture below contains only the minimal redistributable geometry needed to
+// preserve that behavior.
 
 // A vertical RenderState carries the LOGICAL (swapped) geometry PLUS `verticalPhys`
 // (the physical page geometry the anchor path resolves against). Mirror what the
-// baseState writer builds for sample-26. resolveAnchorBox reads only geometry
-// fields, so a minimal cast stand-in suffices (as in anchor-image-relativefrom).
+// baseState writer builds for a vertical section. resolveAnchorBox reads only
+// geometry fields, so a minimal cast stand-in suffices (as in
+// anchor-image-relativefrom).
 const PHYS_W = 842;
 const PHYS_H = 595.05;
 const PHYS_ML = 56.7;
@@ -29,7 +26,7 @@ const PHYS_MB = 70.9;
 
 const verticalState = {
   scale: 1,
-  // Logical (swapped) geometry — verticalLayoutSection(sample-26 physical):
+  // Logical (swapped) geometry produced by verticalLayoutSection:
   pageWidth: PHYS_H, // logical width = physical height
   marginLeft: PHYS_MT, // logical left = physical top
   marginRight: PHYS_MB, // logical right = physical bottom
@@ -48,8 +45,7 @@ const verticalState = {
   },
 } as unknown as RenderState;
 
-// sample-26's floated image: wrapSquare, positionH/V relativeFrom="margin".
-const sample26Image: ImageRun = {
+const recordedAnchor: ImageRun = {
   imagePath: 'word/media/image1.png',
   mimeType: 'image/png',
   widthPt: 96.2,
@@ -82,16 +78,16 @@ function physicalCentroid(
 }
 
 describe('resolveAnchorBox — vertical (tbRl) physical anchor mapping (§20.4.3.x)', () => {
-  it('lands the sample-26 image at Word/PDF physical centroid (492.4, 459.35)', () => {
-    const box = __test_resolveAnchorBox(sample26Image, verticalState, 0);
+  it('lands an upright-section anchor at the recorded physical centroid', () => {
+    const box = __test_resolveAnchorBox(recordedAnchor, verticalState, 0);
     const { cx, cy } = physicalCentroid(box, PHYS_W);
-    // ±0.5px of the PDF ground truth (Word centroid 492.4, 459.35).
+    // ±0.5px of the recorded reference centroid.
     expect(cx).toBeCloseTo(492.4, 1);
     expect(cy).toBeCloseTo(459.35, 1);
   });
 
   it('returns the logical-projected box (w↔h swap) so the flow wraps correctly', () => {
-    const box = __test_resolveAnchorBox(sample26Image, verticalState, 0);
+    const box = __test_resolveAnchorBox(recordedAnchor, verticalState, 0);
     // Physical TL is (ML+posH, MT+posV) = (444.3, 397.9); project to logical.
     const expected = physicalToLogicalAnchorBox(
       PHYS_ML + 387.6,
@@ -107,7 +103,7 @@ describe('resolveAnchorBox — vertical (tbRl) physical anchor mapping (§20.4.3
   });
 
   it('rotates dist* padding one quarter-turn (physical T/B ↦ logical L/R)', () => {
-    const box = __test_resolveAnchorBox(sample26Image, verticalState, 0);
+    const box = __test_resolveAnchorBox(recordedAnchor, verticalState, 0);
     // physical distTop/distBottom (0) ↦ logical dl/dr; physical distRight/distLeft
     // (9) ↦ logical dt/db.
     expect(box.dl).toBe(0);

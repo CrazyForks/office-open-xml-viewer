@@ -73,6 +73,15 @@ export const WORD_PAGE_ANCHORED_TABLE_COLLISION_DEFERRAL = defineCompatibilityRu
   description: 'Preserve the established Word-compatible pagination behavior that defers an absolute page- or margin-anchored floating table when its authored object band intersects an existing floating-table text-exclusion band on the page.',
 });
 
+export const WORD_EMPTY_MARK_FLOAT_SIDE_GAP = defineCompatibilityRule({
+  id: 'word-empty-mark-float-side-gap',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/float-line-start-one-inch.test.ts#keeps an anchor-host metric-only line on the paragraph-mark threshold',
+  },
+  description: 'An empty or anchor-only paragraph-mark line may start beside a square-wrapped object when the available side gap can hold the paragraph mark em; the one-inch content-line threshold does not apply.',
+});
+
 /** Word compatibility width from issue #676, in points. ECMA-376
  * §20.4.2.17 defines square wrapping but no minimum side-gap width. */
 export const WORD_MIN_LINE_START_PT = 72;
@@ -83,4 +92,11 @@ export const LINE_START_GAP_EPS_PT = 0.05;
 
 export function wordMinLineStartPx(scale: number): number {
   return (WORD_MIN_LINE_START_PT - LINE_START_GAP_EPS_PT) * scale;
+}
+
+export function wordEmptyMarkMinimumStartWidthPx(
+  paragraphMarkEmPt: number,
+  scale: number,
+): number {
+  return paragraphMarkEmPt * scale;
 }

@@ -13,10 +13,10 @@ import type {
 
 // ECMA-376 §17.3.2.6 — `<w:color w:val="auto"/>` (or no color anywhere in the
 // style hierarchy) means the consumer picks a color that CONTRASTS with the
-// background BEHIND the run. sample-28 p.17: a table cell with a near-black fill
-// (`<w:tcPr><w:shd w:fill="0C0C0C"/>`) holds a run with NO color, so Word paints
-// the text WHITE. The run has no run-level `<w:shd>`, so the effective background
-// is the CELL shading — which must be folded into the auto-contrast decision.
+// background BEHIND the run. The synthetic case below uses a table cell with a
+// near-black fill and a run with no authored color. The run has no run-level
+// `<w:shd>`, so the effective background is the CELL shading and must be folded
+// into the auto-contrast decision.
 //
 // These tests capture the canvas fillStyle at each fillText so the glyph color is
 // asserted directly (autoContrastColor's own black/white math is unit-tested in
@@ -118,9 +118,9 @@ async function renderGlyphs(cells: DocTableCell[]): Promise<DrawnGlyph[]> {
   return glyphs;
 }
 
-describe('auto text color folds in table-cell shading (§17.3.2.6, sample-28 p.17)', () => {
-  it('paints a COLOR-LESS run WHITE inside a near-black cell (fill=0C0C0C) — the real sample-28 shape', async () => {
-    // sample-28's black cells: the run has NO `<w:color>` element anywhere in the
+describe('auto text color folds in table-cell shading (§17.3.2.6)', () => {
+  it('paints a color-less run white inside a near-black cell', async () => {
+    // The run has NO `<w:color>` element anywhere in the
     // style hierarchy, so the parser resolves color=null AND colorAuto=false
     // (styles.rs: an absent element is pure inherit; explicit w:val="auto" is the
     // only colorAuto producer). §17.3.2.6: "If this element is never applied in
@@ -129,9 +129,9 @@ describe('auto text color folds in table-cell shading (§17.3.2.6, sample-28 p.1
     // behind the run's content" — the never-applied state IS auto. A resolved-null
     // run on a dark cell fill must therefore paint white.
     // (An earlier revision of this test hardcoded colorAuto: true — a state the
-    // real fixture never produces — which validated the renderer branch while
-    // hiding that it was unreachable for the actual document. Keep this case on
-    // the parser-realistic shape: color null, colorAuto absent.)
+    // parser-realistic shape never produces — which validated the renderer
+    // branch while hiding that the never-authored case was unreachable. Keep
+    // this case on the parser-realistic shape: color null, colorAuto absent.)
     const glyphs = await renderGlyphs([
       cell([cellPara(textRun('X'))], '0C0C0C'),
     ]);

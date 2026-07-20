@@ -17,6 +17,7 @@ import {
 import type { DocParagraph } from './types.js';
 import type { WrapOracle } from './layout/float-wrap-oracle.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
+import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
 
 export type { LineLayoutEnvironment } from './line-layout.js';
 export { createFloatWrapOracle } from './layout/float-wrap-oracle.js';
@@ -148,7 +149,10 @@ export function measureParagraph(
       markTopPt = placement.wrap.lineWindow({
         topYPt: markTopPt,
         minimumStartWidthPt: getDefaultFontSize(paragraph),
-        squareMinimumStartWidthPt: getDefaultFontSize(paragraph),
+        squareMinimumStartWidthPt: wordEmptyMarkMinimumStartWidthPx(
+          getDefaultFontSize(paragraph),
+          1,
+        ),
         probeHeightPt: markAdvancePt,
         paragraphXPt,
         maximumWidthPt: paragraphWidthPt,
@@ -195,7 +199,10 @@ export function measureParagraph(
         columnXPt: placement.paragraphXPt,
         columnWidthPt: placement.availableWidthPt,
         floats: [],
-        paragraphMarkLineStartWidth: getDefaultFontSize(paragraph),
+        paragraphMarkLineStartWidth: wordEmptyMarkMinimumStartWidthPx(
+          getDefaultFontSize(paragraph),
+          1,
+        ),
         lineWindow: (input) => placement.wrap!.lineWindow(input),
         lineBoxH: (ascent, descent, _hasRuby, intendedSingle, eastAsian, gridCountSingle) => lineBoxHeight(
           context.lineSpacing,

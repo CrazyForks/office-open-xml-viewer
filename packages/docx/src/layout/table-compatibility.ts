@@ -64,6 +64,105 @@ export const WORD_POSITIONED_TABLE_ADJACENCY_EXCLUSION = defineCompatibilityRule
   description: 'Word excludes effectively positioned tables from the logical adjacent-table sequence before retained layout consumes the parser-owned sequence identity.',
 });
 
+export const WORD_TABLE_BORDER_WEIGHT_PRECEDENCE = defineCompatibilityRule({
+  id: 'word-table-border-weight-precedence',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §2.1.169',
+  },
+  description: 'Use the documented Word border numbers for shared-cell conflict weight and force dotted and dashed borders to a complete weight of one.',
+});
+
+export const WORD_OMITTED_ROW_HEIGHT_RULE_AT_LEAST = defineCompatibilityRule({
+  id: 'word-omitted-row-height-rule-at-least',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §2.1.180',
+  },
+  description: 'Treat an omitted trHeight hRule as atLeast while retaining an explicitly authored auto rule as authored input.',
+});
+
+export const WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR = defineCompatibilityRule({
+  id: 'word-authored-auto-row-height-floor',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/table-row-height.test.ts#auto with @val — @val is honored as a lower bound',
+  },
+  description: 'Preserve the established legacy-model behavior that an auto row with an authored height value uses that value as a lower bound.',
+});
+
+export const WORD_EFFECTIVE_FLOATING_TABLE_POSITIONING = defineCompatibilityRule({
+  id: 'word-effective-floating-table-positioning',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §2.1.162',
+  },
+  description: 'Use parser-retained effective positioning status rather than lexical tblpPr presence to decide whether a table leaves ordinary flow.',
+});
+
+export const WORD_TABLE_CELL_SPACING_SCOPE_SHADOW = defineCompatibilityRule({
+  id: 'word-table-cell-spacing-scope-shadow',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §§2.1.152, 2.1.153, 2.1.154',
+  },
+  description: 'At each table-cell-spacing precedence scope, pct, auto, and nil resolve to zero and shadow lower scopes instead of being treated as absent.',
+});
+
+export const WORD_TABLE_MARGIN_SCOPE_SHADOW = defineCompatibilityRule({
+  id: 'word-table-margin-scope-shadow',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §§2.1.116, 2.1.125, 2.1.146, 2.1.177',
+  },
+  description: 'Preserve the documented scope-specific treatment of non-dxa table cell margins: leading/trailing defaults may resolve to zero while cell/exception and nil top/bottom values remain ignored.',
+});
+
+export const WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE = defineCompatibilityRule({
+  id: 'word-first-row-table-exception-scope',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §§2.1.156, 2.1.158, 2.1.167',
+  },
+  description: 'Apply the supported first-row table-property exception facts at table scope, including authored preferred-width shadowing.',
+});
+
+export const WORD_TRAILING_STRUCTURAL_CELL_MARKER = defineCompatibilityRule({
+  id: 'word-trailing-structural-cell-marker',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/compatibility.test.ts#drops only an empty trailing paragraph after a non-paragraph cell block',
+  },
+  description: 'Exclude the required empty trailing cell paragraph from row-height and vertical-alignment measurements when it follows a visible non-paragraph block.',
+});
+
+export const WORD_CELL_VERTICAL_ALIGNMENT_INK_BLOCK = defineCompatibilityRule({
+  id: 'word-cell-vertical-alignment-ink-block',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/cell-valign-leading-spacing.test.ts#inked block is vertically centred in the cell (midpoint = cell midpoint)',
+  },
+  description: 'Center or bottom-align the visible cell ink block without charging the first paragraph spaceBefore or final paragraph spaceAfter at the cell edges.',
+});
+
+export const WORD_VERTICAL_MERGE_TERMINAL_BORDER = defineCompatibilityRule({
+  id: 'word-vertical-merge-terminal-border',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/cell-border-conflict-render.test.ts#uses the final continuation cell border at the bottom of a vertical merge',
+  },
+  description: 'Resolve the bottom edge of a vertically merged cell from its terminal continuation cell before applying shared-edge conflict rules.',
+});
+
+export const WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE = defineCompatibilityRule({
+  id: 'word-vertical-section-upright-block-table',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/vertical-table-upright.test.ts#the table advances the flow by its PHYSICAL WIDTH; body text stays vertical',
+  },
+  description: 'Paint a block table in an upright physical frame within a vertical section and charge its physical width as the body-flow advance.',
+});
+
 export function wordExactRowFloorPt(
   authoredHeightPt: number | null,
   bottomCellMarginsPt: readonly number[],
@@ -118,4 +217,103 @@ export function wordClipsOverPageCantSplitRow(input: Readonly<{
 }>): boolean {
   return input.compatibility === 'word'
     && input.availableHeightPt + input.epsilonPt >= input.freshPageHeightPt;
+}
+
+export const WORD_TABLE_BORDER_STYLE_PRECEDENCE = Object.freeze([
+  'single', 'thick', 'double', 'dotted', 'dashed', 'dotDash', 'dotDotDash', 'triple',
+  'thinThickSmallGap', 'thickThinSmallGap', 'thinThickThinSmallGap', 'thinThickMediumGap',
+  'thickThinMediumGap', 'thinThickThinMediumGap', 'thinThickLargeGap', 'thickThinLargeGap',
+  'thinThickThinLargeGap', 'wave', 'doubleWave', 'dashSmallGap', 'dashDotStroked',
+  'threeDEmboss', 'threeDEngrave', 'outset', 'inset',
+] as const);
+
+const WORD_BORDER_NUMBER: Readonly<Record<string, number>> = Object.freeze({
+  single: 1,
+  thick: 2,
+  double: 3,
+  dotDash: 8,
+  dotDotDash: 9,
+  triple: 10,
+  thinThickSmallGap: 11,
+  thickThinSmallGap: 12,
+  thinThickThinSmallGap: 13,
+  thinThickMediumGap: 14,
+  thickThinMediumGap: 15,
+  thinThickThinMediumGap: 16,
+  thinThickLargeGap: 17,
+  thickThinLargeGap: 18,
+  thinThickThinLargeGap: 19,
+  wave: 20,
+  doubleWave: 21,
+  dashSmallGap: 22,
+  dashDotStroked: 23,
+  threeDEmboss: 24,
+  threeDEngrave: 25,
+  outset: 26,
+  inset: 27,
+});
+
+export function wordTableBorderWeight(
+  style: string,
+  widthPt: number,
+): number {
+  if (style === 'dotted' || style === 'dashed') return 1;
+  return Math.max(0, widthPt) * 8 * (WORD_BORDER_NUMBER[style] ?? 0);
+}
+
+export function wordNilBorderSuppressesSharedEdge(
+  firstStyle: string | null | undefined,
+  secondStyle: string | null | undefined,
+): boolean {
+  return firstStyle === 'nil' || secondStyle === 'nil';
+}
+
+export function wordTableRowHeightRule(
+  normalizedRule: 'exact' | 'atLeast' | 'auto',
+  authored: boolean,
+): 'exact' | 'atLeast' | 'auto' {
+  return authored ? normalizedRule : 'atLeast';
+}
+
+export function wordAuthoredAutoRowHeightUsesFloor(
+  rule: string | null | undefined,
+  authoredHeight: number | null | undefined,
+): boolean {
+  return rule === 'auto'
+    && authoredHeight !== null
+    && authoredHeight !== undefined;
+}
+
+export function wordTableCellSpacingValuePt(
+  kind: string,
+  dxaValuePt: number | null,
+): number | null {
+  if (kind === 'pct' || kind === 'auto' || kind === 'nil') return 0;
+  return dxaValuePt;
+}
+
+export function wordTableMarginValuePt(input: Readonly<{
+  kind: string;
+  dxaValuePt: number | null;
+  scope: 'cell' | 'exception' | 'table' | 'style';
+  edge: 'top' | 'bottom' | 'start' | 'end';
+}>): number | null {
+  if (input.kind === 'dxa') return input.dxaValuePt;
+  if (input.scope === 'cell' || input.scope === 'exception') return null;
+  if (input.edge === 'start' || input.edge === 'end') {
+    if (input.kind === 'pct' || input.kind === 'auto' || input.kind === 'nil') return 0;
+  }
+  return null;
+}
+
+export function wordDropsTrailingStructuralCellMarker(input: Readonly<{
+  contentLength: number;
+  previousKind: string | undefined;
+  lastKind: string | undefined;
+  lastParagraphRunCount: number | undefined;
+}>): boolean {
+  return input.contentLength >= 2
+    && input.lastKind === 'paragraph'
+    && input.previousKind !== 'paragraph'
+    && input.lastParagraphRunCount === 0;
 }

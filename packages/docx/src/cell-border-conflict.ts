@@ -1,20 +1,27 @@
 import type { BorderSpec, CellBorders, TableBorders } from './types';
+import {
+  wordNilBorderSuppressesSharedEdge,
+  WORD_TABLE_BORDER_STYLE_PRECEDENCE,
+  wordTableBorderWeight,
+} from './layout/table-compatibility.js';
 
 /**
  * ECMA-376 §17.4.66 (tcBorders) — adjacent table cell border conflict resolution.
  *
  * When cell spacing is zero, two cells that share an interior gridline each
- * contribute a border for that edge. Word displays exactly ONE of them, chosen
- * by the following rules (applied in order); this module is the pure kernel that
+ * contribute a border for that edge. This module displays exactly ONE of them,
+ * chosen by the following rules (applied in order), and is the pure kernel that
  * decides the winner. The renderer ({@link drawTableRows}) supplies the two
  * candidates for each shared edge and draws only the returned winner, so a
  * gridline is drawn once with the correct spec (no more "last cell painted wins").
  *
- * Rules (ECMA-376 §17.4.66 with Word deviations in [MS-OI29500] 2.1.169):
- *   0. `none` loses to the opposing border; `nil` suppresses the shared edge.
+ * Rules (ECMA-376 §17.4.66 plus the registered table-border compatibility
+ * rules):
+ *   0. `none` loses to the opposing border;
+ *      `word-nil-table-border-suppression` suppresses the shared edge.
  *   1. A CELL border always beats a TABLE(-level or table-style) border.
- *   2. Weight = border width in eighth-points × Word border number; dotted and
- *      dashed have weight 1 regardless of width.
+ *   2. `word-table-border-weight-precedence` supplies the border-number weight;
+ *      dotted and dashed have weight 1 regardless of width.
  *   3. Equal weight ⇒ the style higher on the precedence list wins.
  *   4. Identical style ⇒ the darker colour wins, by three successive brightness
  *      formulas: R+B+2G, then B+2G, then G (smaller value wins each).
@@ -85,59 +92,14 @@ export function resolveCellEdges(
   return { top, bottom, left, right };
 }
 
-/** [MS-OI29500] 2.1.169 — Word's border number. Dotted and dashed are
- * handled separately because Word fixes their complete weight at 1. */
-const BORDER_NUMBER: Record<string, number> = {
-  single: 1,
-  thick: 2,
-  double: 3,
-  dotDash: 8,
-  dotDotDash: 9,
-  triple: 10,
-  thinThickSmallGap: 11,
-  thickThinSmallGap: 12,
-  thinThickThinSmallGap: 13,
-  thinThickMediumGap: 14,
-  thickThinMediumGap: 15,
-  thinThickThinMediumGap: 16,
-  thinThickLargeGap: 17,
-  thickThinLargeGap: 18,
-  thinThickThinLargeGap: 19,
-  wave: 20,
-  doubleWave: 21,
-  dashSmallGap: 22,
-  dashDotStroked: 23,
-  threeDEmboss: 24,
-  threeDEngrave: 25,
-  outset: 26,
-  inset: 27,
-};
-
-/** §17.4.66 rule #3 precedence list — index 0 is the highest priority. Identical
- *  to the BORDER_NUMBER ordering (single first … inset last); a smaller index
- *  wins a weight tie. */
-const PRECEDENCE: string[] = [
-  'single', 'thick', 'double', 'dotted', 'dashed', 'dotDash', 'dotDotDash', 'triple',
-  'thinThickSmallGap', 'thickThinSmallGap', 'thinThickThinSmallGap', 'thinThickMediumGap',
-  'thickThinMediumGap', 'thinThickThinMediumGap', 'thinThickLargeGap', 'thickThinLargeGap',
-  'thinThickThinLargeGap', 'wave', 'doubleWave', 'dashSmallGap', 'dashDotStroked',
-  'threeDEmboss', 'threeDEngrave', 'outset', 'inset',
-];
-
-function borderNumber(style: string): number {
-  return BORDER_NUMBER[style] ?? 0;
-}
 function borderWeight(spec: BorderSpec): number {
-  if (spec.style === 'dotted' || spec.style === 'dashed') return 1;
-  return Math.max(0, spec.width) * 8 * borderNumber(spec.style);
+  return wordTableBorderWeight(spec.style, spec.width);
 }
 function precedenceIndex(style: string): number {
-  const i = PRECEDENCE.indexOf(style);
-  return i === -1 ? PRECEDENCE.length : i; // unknown ⇒ lowest priority
-}
-
-function isNil(spec: BorderSpec): boolean {
-  return spec.style === 'nil';
+  const i = WORD_TABLE_BORDER_STYLE_PRECEDENCE.indexOf(
+    style as (typeof WORD_TABLE_BORDER_STYLE_PRECEDENCE)[number],
+  );
+  return i === -1 ? WORD_TABLE_BORDER_STYLE_PRECEDENCE.length : i;
 }
 
 /** Parse a 6-hex colour to (r,g,b). `null`/auto ⇒ black (0,0,0): §17.4.66's
@@ -180,9 +142,9 @@ export function resolveBorderConflict(
   a: BorderCandidate | null,
   b: BorderCandidate | null,
 ): BorderCandidate | null {
-  // Word differs from the base ECMA rule here: nil suppresses the shared edge,
-  // while none merely contributes no competing border ([MS-OI29500] 2.1.169).
-  if ((a && isNil(a.spec)) || (b && isNil(b.spec))) return null;
+  // `word-nil-table-border-suppression`: nil suppresses the shared edge, while
+  // none merely contributes no competing border.
+  if (wordNilBorderSuppressesSharedEdge(a?.spec.style, b?.spec.style)) return null;
   const av = a && a.spec.style !== 'none' ? a : null;
   const bv = b && b.spec.style !== 'none' ? b : null;
   if (!av && !bv) return null;
