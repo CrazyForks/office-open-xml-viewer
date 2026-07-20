@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  resolveBlockFlowAdmission,
   resolveFloatPlacement,
+  resolvePageAnchoredTableDeferral,
   type FloatPlacementParticipant,
 } from './floats.js';
 
@@ -10,6 +12,7 @@ const participant = (
   xPt: number,
   paragraphId: number,
   exclusionPaddingPt = 0,
+  tableOverlap: 'never' | 'overlap' = 'overlap',
 ): FloatPlacementParticipant => Object.freeze({
   occurrenceId,
   kind,
@@ -21,7 +24,8 @@ const participant = (
     widthPt: 10 + exclusionPaddingPt * 2,
     heightPt: 10 + exclusionPaddingPt * 2,
   }),
-});
+  ...(kind === 'table' ? { tableOverlap } : {}),
+}) as FloatPlacementParticipant;
 
 describe('float displacement policy', () => {
   it('applies DrawingML allowOverlap=false only against DrawingML object bounds', () => {
@@ -43,17 +47,50 @@ describe('float displacement policy', () => {
   });
 
   it('applies tblOverlap=never to raw floating-table extents, not text padding', () => {
-    const moving = participant('moving', 'table', 0, 2, 3);
-    const blocker = participant('blocker', 'table', 0, 1, 4);
+    const moving = participant('moving', 'table', 0, 2, 3, 'never');
+    const blocker = participant('blocker', 'table', 0, 1, 4, 'overlap');
     const result = resolveFloatPlacement({
       moving,
       blockers: [blocker],
-      avoidance: { kind: 'floating-table-never' },
+      avoidance: { kind: 'none' },
       rightBoundaryPt: 100,
     });
 
     expect(result.bounds.xPt).toBe(10);
     expect(result.exclusionBounds.xPt).toBe(7);
+  });
+
+  it('enforces blocker-side tblOverlap=never even within the same paragraph', () => {
+    const moving = participant('moving', 'table', 0, 2, 3, 'overlap');
+    const blocker = participant('blocker', 'table', 0, 2, 4, 'never');
+    const result = resolveFloatPlacement({
+      moving,
+      blockers: [blocker],
+      avoidance: {
+        kind: 'word-different-paragraph',
+        paragraphId: moving.paragraphId,
+      },
+      rightBoundaryPt: 100,
+    });
+
+    expect(result.bounds.xPt).toBe(10);
+    expect(result.exclusionBounds.xPt).toBe(7);
+    expect(result.appliedCompatibilityRuleIds).toEqual([]);
+  });
+
+  it('enforces tblOverlap=never in both source orders on raw bounds', () => {
+    const place = (
+      movingOverlap: 'never' | 'overlap',
+      blockerOverlap: 'never' | 'overlap',
+    ) => resolveFloatPlacement({
+      moving: participant('moving', 'table', 0, 2, 3, movingOverlap),
+      blockers: [participant('blocker', 'table', 0, 1, 4, blockerOverlap)],
+      avoidance: { kind: 'none' } as const,
+      rightBoundaryPt: 100,
+    });
+
+    expect(place('never', 'overlap').bounds.xPt).toBe(10);
+    expect(place('overlap', 'never').bounds.xPt).toBe(10);
   });
 
   it('uses the supplied page or cell right boundary before moving down', () => {
@@ -150,5 +187,73 @@ describe('float displacement policy', () => {
     expect(result.bounds).toBe(moving.bounds);
     expect(result.exclusionBounds).toBe(moving.exclusionBounds);
     expect(result.displacement).toEqual({ xPt: 0, yPt: 0 });
+  });
+});
+
+describe('block flow admission around floating-table exclusions', () => {
+  const table = (
+    occurrenceId: string,
+    yPt: number,
+    heightPt: number,
+  ): FloatPlacementParticipant => Object.freeze({
+    occurrenceId,
+    kind: 'table',
+    tableOverlap: 'overlap',
+    paragraphId: 0,
+    bounds: Object.freeze({ xPt: 0, yPt, widthPt: 20, heightPt }),
+    exclusionBounds: Object.freeze({ xPt: 0, yPt, widthPt: 20, heightPt }),
+  });
+
+  const admit = (blockers: readonly FloatPlacementParticipant[]) =>
+    resolveBlockFlowAdmission({
+      inlineStartPt: 0,
+      inlineEndPt: 20,
+      blockStartPt: 0,
+      blockExtentPt: 10,
+      blockers,
+      overlapEpsilonPt: 0.01,
+    }).blockStartPt;
+
+  it('follows a finite chain of newly intersecting exclusion bands', () => {
+    expect(admit([
+      table('first', 0, 10),
+      table('second', 12, 18),
+    ])).toBe(30);
+  });
+
+  it('is independent of blocker order and does not jump to an unreachable band', () => {
+    const first = table('first', 0, 10);
+    const second = table('second', 12, 18);
+    const unreachable = table('unreachable', 100, 100);
+
+    expect(admit([first, second, unreachable])).toBe(30);
+    expect(admit([unreachable, second, first])).toBe(30);
+  });
+
+  it('treats an edge overlap within the supplied epsilon as clear', () => {
+    expect(admit([table('touching', -10.005, 10)])).toBe(0);
+  });
+});
+
+describe('page-anchored floating-table compatibility admission', () => {
+  it('defers on the existing table text-exclusion band and reports the rule', () => {
+    const blocker = Object.freeze({
+      ...participant('blocker', 'table', 20, 1, 5, 'overlap'),
+      bounds: Object.freeze({ xPt: 20, yPt: 0, widthPt: 10, heightPt: 10 }),
+      exclusionBounds: Object.freeze({ xPt: 15, yPt: -5, widthPt: 20, heightPt: 20 }),
+    }) as FloatPlacementParticipant;
+    const result = resolvePageAnchoredTableDeferral({
+      // Raw table extents do not overlap; only the blocker exclusion does.
+      bounds: { xPt: 10, yPt: 0, widthPt: 6, heightPt: 10 },
+      blockers: [blocker],
+      overlapEpsilonPt: 0.01,
+    });
+
+    expect(result).toEqual({
+      defer: true,
+      appliedCompatibilityRuleIds: [
+        'word-page-anchored-table-collision-deferral',
+      ],
+    });
   });
 });

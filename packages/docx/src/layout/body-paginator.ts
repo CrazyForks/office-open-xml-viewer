@@ -104,6 +104,10 @@ import {
   translateStoryLayout,
 } from './stories.js';
 import { LayoutInvariantError } from './diagnostics.js';
+import {
+  ExactConvergenceError,
+  convergeExactState,
+} from './convergence.js';
 
 class FootnoteAdmissionOverflowError extends Error {
   readonly code = 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE' as const;
@@ -1923,19 +1927,41 @@ function paginateBodyWithAnchorConvergence(
     && entry.block.kind === 'paragraph'
     && (entry.block.pageOwnedAnchorOccurrenceIds?.length ?? 0) > 0
   ));
-  let plan: ReturnType<typeof pageAnchorDestinationPlan> | null = null;
-  const seen = new Set<string>();
-  while (true) {
-    const pass = paginateBodyPass(input, services, options, reserves, plan, balancePlan);
-    const nextPlan = pageAnchorDestinationPlan(pass.layout);
-    if (!hasPageOwnedAnchors) return pass;
-    const nextIdentity = anchorPlanIdentity(nextPlan);
-    if (plan !== null && nextIdentity === anchorPlanIdentity(plan)) return pass;
-    if (seen.has(nextIdentity)) {
-      throw new Error('Page-anchor destination acquisition did not converge');
+  if (!hasPageOwnedAnchors) {
+    return paginateBodyPass(input, services, options, reserves, null, balancePlan);
+  }
+  try {
+    return convergeExactState({
+      step: (previous: Readonly<{
+        pass: ReturnType<typeof paginateBodyPass>;
+        plan: ReturnType<typeof pageAnchorDestinationPlan>;
+      }> | null) => {
+        const pass = paginateBodyPass(
+          input,
+          services,
+          options,
+          reserves,
+          previous?.plan ?? null,
+          balancePlan,
+        );
+        return Object.freeze({
+          pass,
+          plan: pageAnchorDestinationPlan(pass.layout),
+        });
+      },
+      stateOf: (value) => anchorPlanIdentity(value.plan),
+      limit: 16,
+    }).value.pass;
+  } catch (error) {
+    if (error instanceof ExactConvergenceError) {
+      throw new LayoutInvariantError(
+        'NON_CONVERGENCE',
+        error.reason === 'cycle'
+          ? 'Page-anchor destination acquisition repeated an exact-state cycle'
+          : 'Page-anchor destination acquisition reached the operational pass limit 16',
+      );
     }
-    seen.add(nextIdentity);
-    plan = nextPlan;
+    throw error;
   }
 }
 

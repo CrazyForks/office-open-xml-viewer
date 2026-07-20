@@ -210,27 +210,99 @@ function assertNoProductionTestSupportImports(root) {
 function assertFloatPlacementAuthority(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
   const authority = `${LAYOUT_SOURCE}/floats.ts`;
+  const kernel = `${LAYOUT_SOURCE}/axis-aligned-overlap.ts`;
+  const wrap = `${LAYOUT_SOURCE}/float-wrap.ts`;
+  const compatibility = `${LAYOUT_SOURCE}/compatibility.ts`;
+  const compatibilityFacade = `${DOCX_SOURCE}/float-layout.ts`;
+  const allowedKernelImports = new Map([
+    [authority, [
+      'AxisAlignedRect',
+      'axisAlignedRectsOverlap',
+      'resolveAxisAlignedOverlap',
+    ]],
+    [wrap, ['axisAlignedRectsOverlap']],
+  ]);
+  const floatCompatibilityName = /^(?:WORD_FLOAT_|WORD_PAGE_ANCHORED_TABLE_|WORD_SQUARE_LINE_|WORD_MIN_LINE_START_PT$|LINE_START_GAP_EPS_PT$|wordMinLineStartPx$)/;
   for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
     const source = sourceFile(path);
     const file = posixPath(relative(root, path));
-    for (const statement of source.statements) {
-      if (!ts.isImportDeclaration(statement)
-        || !ts.isStringLiteralLike(statement.moduleSpecifier)
-        || !statement.importClause?.namedBindings
-        || !ts.isNamedImports(statement.importClause.namedBindings)) continue;
-      const importsKernel = statement.importClause.namedBindings.elements.some(
-        (element) => (element.propertyName?.text ?? element.name.text)
-          === 'resolveAxisAlignedOverlap',
-      );
-      if (!importsKernel) continue;
-      const dependency = resolveLocalImport(path, statement.moduleSpecifier.text);
+    for (const edge of moduleEdges(path)) {
+      if (!edge.literal) continue;
+      const dependency = resolveLocalImport(path, edge.specifier);
       const dependencyFile = dependency ? posixPath(relative(root, dependency)) : null;
-      if (file !== authority
-        || dependencyFile !== `${LAYOUT_SOURCE}/axis-aligned-overlap.ts`) {
+      if (dependencyFile === kernel) {
+        const expected = allowedKernelImports.get(file);
+        const actual = [...(edge.importedNames ?? [])].sort();
+        if (edge.kind !== 'import'
+          || edge.bare
+          || edge.aliased
+          || !expected
+          || JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
+          fail(
+            'FLOAT_PLACEMENT_AUTHORITY',
+            `${file} -> ${dependencyFile} (${edge.kind}:${actual.join(',')})`,
+          );
+        }
+      }
+      if ((edge.importedNames ?? []).some((name) => floatCompatibilityName.test(name))) {
+        if ((dependencyFile !== compatibility && dependencyFile !== compatibilityFacade)
+          || edge.aliased) {
+          fail(
+            'FLOAT_COMPATIBILITY_AUTHORITY',
+            `${file} -> ${dependencyFile ?? edge.specifier}`,
+          );
+        }
+      }
+    }
+    const visit = (node) => {
+      if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node))
+        && node.text === 'resolveAxisAlignedOverlap'
+        && file !== kernel
+        && file !== authority) {
         fail(
           'FLOAT_PLACEMENT_AUTHORITY',
-          `${file} -> ${dependencyFile ?? statement.moduleSpecifier.text}`,
+          `${file} references resolveAxisAlignedOverlap`,
         );
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(source, visit);
+    for (const statement of source.statements) {
+      if (ts.isVariableStatement(statement)) {
+        const exported = statement.modifiers?.some(
+          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+        );
+        for (const declaration of statement.declarationList.declarations) {
+          if (!ts.isIdentifier(declaration.name)) continue;
+          const name = declaration.name.text;
+          if (floatCompatibilityName.test(name) && file !== compatibility) {
+            fail('FLOAT_COMPATIBILITY_AUTHORITY', `${file} declares ${name}`);
+          }
+          if (name === 'FLOAT_OVERLAP_EPS' || name === 'FLOAT_PAGE_RIGHT_SLACK') {
+            const expected = name === 'FLOAT_OVERLAP_EPS' ? 0.01 : 0.5;
+            if (file !== authority
+              || !exported
+              || !declaration.initializer
+              || !ts.isNumericLiteral(declaration.initializer)
+              || Number(declaration.initializer.text) !== expected) {
+              fail('FLOAT_NUMERIC_POLICY', `${file} declares ${name}`);
+            }
+          }
+          if (file === authority
+            && exported
+            && declaration.initializer
+            && ts.isIdentifier(declaration.initializer)
+            && declaration.initializer.text === 'resolveAxisAlignedOverlap') {
+            fail('FLOAT_PLACEMENT_AUTHORITY', `${file} re-exports the displacement kernel`);
+          }
+        }
+      }
+      if (ts.isExportDeclaration(statement) && statement.exportClause
+        && ts.isNamedExports(statement.exportClause)
+        && statement.exportClause.elements.some((element) =>
+          (element.propertyName?.text ?? element.name.text) === 'resolveAxisAlignedOverlap'
+          || element.name.text === 'resolveAxisAlignedOverlap')) {
+        fail('FLOAT_PLACEMENT_AUTHORITY', `${file} re-exports the displacement kernel`);
       }
     }
   }

@@ -670,9 +670,7 @@ export interface FloatingTableReferenceFramesPt {
   readonly text: LayoutRect;
 }
 
-/** Point-space snapshot used while final table-fragment float placement is probed. */
-export interface FloatRegistryEntryPt {
-  readonly kind: 'table' | 'shape' | 'frame';
+interface FloatRegistryEntryCorePt {
   readonly occurrenceId: string;
   readonly paragraphId: number;
   readonly bounds: LayoutRect;
@@ -694,6 +692,21 @@ export interface FloatRegistryEntryPt {
   }>;
   readonly wrapPolygon?: readonly PointPt[];
 }
+
+/** Point-space snapshot used while final table-fragment float placement is
+ * probed. A table entry must retain its §17.4.56 fact because a blocker-side
+ * `never` constrains tables placed later in source order. */
+export type FloatRegistryEntryPt =
+  | Readonly<FloatRegistryEntryCorePt & {
+      readonly kind: 'table';
+      readonly overlap: 'never' | 'overlap';
+    }>
+  | Readonly<FloatRegistryEntryCorePt & {
+      readonly kind: 'shape';
+    }>
+  | Readonly<FloatRegistryEntryCorePt & {
+      readonly kind: 'frame';
+    }>;
 
 export type FloatRegistryCoordinateSpace = Exclude<
   LayoutCoordinateSpace,

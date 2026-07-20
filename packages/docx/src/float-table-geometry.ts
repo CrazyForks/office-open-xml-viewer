@@ -14,7 +14,14 @@
 
 import type { TblpPr } from './types.js';
 import type { RenderState } from './renderer.js';
-import { resolveFloatOverlap } from './float-layout.js';
+import {
+  FLOAT_OVERLAP_EPS,
+  FLOAT_PAGE_RIGHT_SLACK,
+  floatRectParticipant,
+  floatingTableAvoidance,
+  resolveFloatPlacement,
+  type FloatPlacementParticipant,
+} from './layout/floats.js';
 import { resolvePointSpaceFloatingTableBoxPt } from './layout/floating-table-transaction.js';
 export {
   resolveFloatingTableBoxPt,
@@ -101,22 +108,34 @@ export function computeFloatTableBox(
     },
   }, tableW, tableH, skipVClamp);
   if (!overlapResolution || box.w <= 0 || box.h <= 0) return box;
-  const resolved = resolveFloatOverlap(
-    box.x,
-    box.y,
-    box.w,
-    box.h,
-    tp.leftFromText * sc,
-    tp.rightFromText * sc,
-    tp.topFromText * sc,
-    tp.bottomFromText * sc,
-    state.floatParaSeq,
-    overlapResolution.allowOverlap,
-    'table',
-    state.pageWidth * sc,
-    state.floats,
-  );
-  return { ...box, x: resolved.x, y: resolved.y };
+  const tableOverlap = overlapResolution.allowOverlap ? 'overlap' : 'never';
+  const moving: FloatPlacementParticipant = {
+    occurrenceId: 'display-moving-table',
+    kind: 'table',
+    tableOverlap,
+    paragraphId: state.floatParaSeq,
+    bounds: {
+      xPt: box.x,
+      yPt: box.y,
+      widthPt: box.w,
+      heightPt: box.h,
+    },
+    exclusionBounds: {
+      xPt: box.x - tp.leftFromText * sc,
+      yPt: box.y - tp.topFromText * sc,
+      widthPt: box.w + (tp.leftFromText + tp.rightFromText) * sc,
+      heightPt: box.h + (tp.topFromText + tp.bottomFromText) * sc,
+    },
+  };
+  const resolved = resolveFloatPlacement({
+    moving,
+    blockers: state.floats.map(floatRectParticipant),
+    avoidance: floatingTableAvoidance(tableOverlap, state.floatParaSeq),
+    rightBoundaryPt: state.pageWidth * sc,
+    overlapEpsilonPt: FLOAT_OVERLAP_EPS,
+    rightBoundarySlackPt: FLOAT_PAGE_RIGHT_SLACK,
+  });
+  return { ...box, x: resolved.bounds.xPt, y: resolved.bounds.yPt };
 }
 
 /**
@@ -156,9 +175,10 @@ export function registerTableFloat(
   // fixing the exclusion rect. allowOverlap=false (tblOverlap="never") forces
   // avoidance of OTHER FLOATING TABLES only — §17.4.56 scopes "never" to other
   // floating tables, NOT DrawingML anchors (§20.4.2.3) or text frames. The
-  // kind==='table' tag below makes resolveFloatOverlap limit blockers to tables.
+  // typed table participant makes resolveFloatPlacement limit normative
+  // blockers to tables and retain this fact for tables placed later.
   // allowOverlap=true only avoids OTHER paragraphs' floats (the implementation-
-  // defined scope documented on resolveFloatOverlap).
+  // defined scope named in compatibility.ts).
   pushFloatRect(state, {
     x: box.x,
     y: box.y,
@@ -166,13 +186,13 @@ export function registerTableFloat(
     h: box.h,
     dl, dr, dt, db,
     kind: 'table',
+    tableOverlap: allowOverlap ? 'overlap' : 'never',
     mode: 'square',
     side,
     imageKey: '', // non-image float: the table is painted by renderFloatTable.
     drawn: true, // painted by renderFloatTable; deferred image path must skip it.
     paraId,
     avoidOverlap: !preResolved,
-    allowOverlap,
   });
 }
 

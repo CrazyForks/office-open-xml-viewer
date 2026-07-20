@@ -3,6 +3,7 @@ import {
   defineCompatibilityRule,
   LINE_START_GAP_EPS_PT,
   WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT,
+  WORD_PAGE_ANCHORED_TABLE_COLLISION_DEFERRAL,
   WORD_MIN_LINE_START_PT,
   WORD_SQUARE_LINE_START_ONE_INCH,
   WORD_SECTION_BTLR_TBRL_PAGE_FRAME,
@@ -110,6 +111,13 @@ describe('float compatibility evidence', () => {
   it('names the established different-paragraph displacement policy', () => {
     expect(WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT).toMatchObject({
       id: 'word-float-different-paragraph-displacement',
+      evidence: { kind: 'regression-test' },
+    });
+  });
+
+  it('names absolute floating-table collision deferral as compatibility behavior', () => {
+    expect(WORD_PAGE_ANCHORED_TABLE_COLLISION_DEFERRAL).toMatchObject({
+      id: 'word-page-anchored-table-collision-deferral',
       evidence: { kind: 'regression-test' },
     });
   });

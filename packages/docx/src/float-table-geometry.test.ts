@@ -311,7 +311,8 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
     const st = makeState({
       floatParaSeq: 1,
       floats: [{
-        kind: 'table', mode: 'square', imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
+        kind: 'table', tableOverlap: 'overlap', mode: 'square',
+        imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
         xLeft: 0, xRight: 200, yTop: 300, yBottom: 360, side: 'bothSides',
         distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0, drawn: true,
       }],
@@ -330,9 +331,55 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
     expect(f.xLeft).toBe(195);
   });
 
+  it('an overlap-permitted table clears a blocker-side tblOverlap=never fact', () => {
+    const blocker: FloatRect = {
+      kind: 'table',
+      tableOverlap: 'never',
+      mode: 'square',
+      imageKey: '',
+      imageX: 0,
+      imageY: 300,
+      imageW: 200,
+      imageH: 60,
+      xLeft: -5,
+      xRight: 207,
+      yTop: 296,
+      yBottom: 368,
+      side: 'bothSides',
+      distLeft: 5,
+      distRight: 7,
+      distTop: 4,
+      distBottom: 8,
+      paraId: 1,
+      drawn: true,
+    };
+    const st = makeState({ floatParaSeq: 1, floats: [blocker] });
+    const tp = tblp({
+      horzAnchor: 'page',
+      tblpX: 0,
+      vertAnchor: 'page',
+      tblpY: 320,
+      leftFromText: 3,
+      rightFromText: 9,
+    });
+    const resolved = computeFloatTableBox(
+      tp,
+      st as never,
+      0,
+      100,
+      20,
+      false,
+      { allowOverlap: true },
+    );
+
+    // Same paragraph ID disables the Word compatibility path. §17.4.56 still
+    // clears the blocker on its raw right edge (200), not its padded edge (207).
+    expect(resolved.x).toBe(200);
+  });
+
   it('appends a pre-resolved parent exactly after its retained child entry', () => {
     const child: FloatRect = {
-      kind: 'table', mode: 'square', imageKey: 'nested-child',
+      kind: 'table', tableOverlap: 'never', mode: 'square', imageKey: 'nested-child',
       imageX: 20, imageY: 30, imageW: 60, imageH: 20,
       xLeft: 20, xRight: 80, yTop: 30, yBottom: 50, side: 'bothSides',
       distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
@@ -370,11 +417,17 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
   describe('overlap="never" scopes to other floating tables only (§17.4.56)', () => {
     // A blocker occupying [0,200]×[300,360], anchored in another paragraph,
     // parameterized by kind so we can assert table-vs-non-table behavior.
-    const blocker = (kind: FloatRect['kind']): FloatRect => ({
-      kind, mode: 'square', imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
+    const blocker = (kind: FloatRect['kind']): FloatRect => {
+      const core = {
+        mode: 'square' as const,
+        imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
       xLeft: 0, xRight: 200, yTop: 300, yBottom: 360, side: 'bothSides',
       distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0, drawn: true,
-    });
+      };
+      return kind === 'table'
+        ? { ...core, kind: 'table', tableOverlap: 'overlap' }
+        : { ...core, kind };
+    };
     // A never-overlap floating table seated at page-left x=0, overlapping [0,200].
     const seatNeverTable = (blockers: FloatRect[]): FloatRect => {
       const st = makeState({ floatParaSeq: 1, floats: blockers });
@@ -549,6 +602,7 @@ describe('retained floating table placement (§17.4.57)', () => {
     expect(() => validateFloatingTableRegistryDelta(delta, current)).not.toThrow();
     expect(delta.entries[0]).toMatchObject({
       occurrenceId: placement.occurrenceId,
+      overlap: 'never',
       paragraphId: 7,
       bounds: resolution.placement.bounds,
       exclusionBounds: resolution.placement.exclusionBounds,
@@ -557,6 +611,48 @@ describe('retained floating table placement (§17.4.57)', () => {
       ...current,
       nextParagraphId: 8,
     })).toThrow('base/domain mismatch');
+  });
+
+  it('retains blocker-side tblOverlap=never across point-space transactions', () => {
+    const placement = Object.freeze({
+      ...retainedFloatingPlacement(),
+      overlap: 'overlap' as const,
+      occurrenceId: 'moving-overlap-table',
+    });
+    const blockerBounds = Object.freeze({
+      xPt: 125,
+      yPt: 256,
+      widthPt: 80,
+      heightPt: 40,
+    });
+    const blocker = Object.freeze({
+      kind: 'table' as const,
+      overlap: 'never' as const,
+      occurrenceId: 'blocker-never-table',
+      paragraphId: 7,
+      bounds: blockerBounds,
+      exclusionBounds: Object.freeze({
+        xPt: 120,
+        yPt: 251,
+        widthPt: 90,
+        heightPt: 50,
+      }),
+    });
+
+    const resolution = resolveFloatingTablePlacementInTransaction(
+      placement,
+      retainedReferenceFrames,
+      beginFloatingTablePlacementTransaction([blocker], 7),
+    );
+
+    // Same paragraph ID prevents the Word compatibility rule from masking the
+    // normative blocker-side fact. Placement clears the raw edge at x=205,
+    // not the padded exclusion edge at x=210.
+    expect(resolution.placement.bounds.xPt).toBe(205);
+    expect(resolution.transaction.delta[0]).toMatchObject({
+      overlap: 'overlap',
+      paragraphId: 7,
+    });
   });
 
   it('re-resolves an upright nested float in a fresh physical-page domain', () => {

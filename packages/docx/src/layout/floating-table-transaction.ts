@@ -1,6 +1,8 @@
 import {
   FLOAT_OVERLAP_EPS,
   FLOAT_PAGE_RIGHT_SLACK,
+  floatRegistryParticipant,
+  floatingTableAvoidance,
   resolveFloatPlacement,
   type FloatPlacementParticipant,
 } from './floats.js';
@@ -128,16 +130,6 @@ export function resolveFloatingTablePlacement(
   );
 }
 
-function registryParticipant(entry: FloatRegistryEntryPt): FloatPlacementParticipant {
-  return {
-    occurrenceId: entry.occurrenceId,
-    kind: entry.kind === 'shape' ? 'drawingml' : entry.kind,
-    paragraphId: entry.paragraphId,
-    bounds: entry.bounds,
-    exclusionBounds: entry.exclusionBounds,
-  };
-}
-
 export function floatingTableRegistryDelta(
   snapshot: FloatRegistrySnapshotPt,
   entries: readonly FloatRegistryEntryPt[],
@@ -223,6 +215,7 @@ export function resolveFloatingTablePlacementInTransaction(
   const participant: FloatPlacementParticipant = {
     occurrenceId: placement.occurrenceId,
     kind: 'table',
+    tableOverlap: placement.overlap,
     paragraphId: transaction.nextParagraphId,
     bounds: initial.bounds,
     exclusionBounds: initial.exclusionBounds,
@@ -231,13 +224,11 @@ export function resolveFloatingTablePlacementInTransaction(
     moving: participant,
     blockers: registry
       .filter((entry) => entry.kind !== 'shape' || entry.wrap !== undefined)
-      .map(registryParticipant),
-    avoidance: placement.overlap === 'never'
-      ? { kind: 'floating-table-never' }
-      : {
-          kind: 'word-different-paragraph',
-          paragraphId: transaction.nextParagraphId,
-        },
+      .map(floatRegistryParticipant),
+    avoidance: floatingTableAvoidance(
+      placement.overlap,
+      transaction.nextParagraphId,
+    ),
     rightBoundaryPt: endX(frames.page),
     // Preserve the numeric policy used by the former scalar adapter. This is
     // especially important at an authored page edge, where sub-twip rounding
@@ -253,6 +244,7 @@ export function resolveFloatingTablePlacementInTransaction(
   const entry = Object.freeze({
     kind: 'table' as const,
     occurrenceId: placement.occurrenceId,
+    overlap: placement.overlap,
     paragraphId: transaction.nextParagraphId,
     bounds: finalPlacement.bounds,
     exclusionBounds: finalPlacement.exclusionBounds,

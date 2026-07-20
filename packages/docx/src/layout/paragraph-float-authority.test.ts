@@ -5,7 +5,9 @@ import {
 } from './paragraph-float-authority.js';
 import type { FloatRect } from './float-wrap.js';
 
-const float = (overrides: Partial<FloatRect> = {}): FloatRect => ({
+const float = (
+  overrides: Partial<Extract<FloatRect, { kind: 'shape' }>> = {},
+): FloatRect => ({
   kind: 'shape',
   mode: 'square',
   imageKey: '',

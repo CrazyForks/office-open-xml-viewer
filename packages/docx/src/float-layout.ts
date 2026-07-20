@@ -18,7 +18,6 @@ export {
 export {
   FLOAT_OVERLAP_EPS,
   FLOAT_PAGE_RIGHT_SLACK,
-  resolveFloatOverlap,
 } from './layout/floats.js';
 
 export {

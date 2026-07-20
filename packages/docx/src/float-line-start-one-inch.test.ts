@@ -74,7 +74,7 @@ function leftBand(floatRightPx: number, floatBottomPx: number): FloatRect {
 function polygonFloat(
   authoredWrap: 'tight' | 'through',
   points: readonly Readonly<{ xPt: number; yPt: number }>[],
-  overrides: Partial<FloatRect> = {},
+  overrides: Partial<Extract<FloatRect, { kind: 'shape' }>> = {},
 ): FloatRect {
   const xs = points.map((point) => point.xPt);
   const ys = points.map((point) => point.yPt);
