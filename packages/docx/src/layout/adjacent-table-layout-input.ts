@@ -61,8 +61,8 @@ function physicalEdges(
 }
 
 /** Fold a source table's whole-table borders and this row's tblPrEx exception
- * borders into one edge set oriented to the group frame (none falls through,
- * nil is retained; [MS-OI29500] 2.1.169). */
+ * borders into one edge set oriented to the group frame. The compatibility
+ * border layer owns the none/nil distinction. */
 function foldSourceTableEdges(
   input: TableLayoutInput,
   row: TableRowLayoutInput,
@@ -239,7 +239,7 @@ interface RowPlan {
  * continuation cursor spans every authored row. SourceRef and node ids remain
  * untouched.
  *
- * WHY (flag for Fable review): §17.4.37 and [MS-OI29500] do not define how
+ * WHY (flag for final architecture review): the available specifications do not define how
  * independently authored tblGrid/alignment/bidiVisual payloads are reconciled
  * into a single physical grid. This union is a deterministic internal layout
  * policy that builds the transient column topology for seam-border and

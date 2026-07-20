@@ -5,6 +5,13 @@ import { snapshotPlainData } from './plain-data.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { firstAuthoredTableBorder } from './table-border-layer.js';
 import { unionLayoutRects } from './rect-union.js';
+import {
+  wordAlignedTableOriginPt,
+  wordAuthoredBorderParticipates,
+  wordExactRowFloorPt,
+  wordExactRowVerticalClipBounds,
+  wordSpacedCellUsesSeparatedBorderGrid,
+} from './table-compatibility.js';
 import type {
   BlockLayoutResult,
   FlowBlockPlacement,
@@ -217,11 +224,11 @@ function mergeEndRow(
 
 function semanticRowFloor(row: TableRowLayoutInput): number {
   if (row.heightRule === 'exact') {
-    // Word adds the largest bottom cell padding to an exact trHeight rather
-    // than treating that padding as part of the authored value
-    // ([MS-OI29500] 2.1.180(d)).
-    const bottomPaddingPt = Math.max(0, ...row.cells.map((cell) => cell.margins.bottomPt));
-    return Math.max(0, row.heightPt ?? 0) + bottomPaddingPt;
+    // Compatibility-owned exact-row floor.
+    return wordExactRowFloorPt(
+      row.heightPt,
+      row.cells.map((cell) => cell.margins.bottomPt),
+    );
   }
   if (row.heightRule === 'atLeast') return Math.max(0, row.heightPt ?? 0);
   // ECMA-376 §17.4.80: an explicit auto rule has no predetermined minimum.
@@ -543,9 +550,8 @@ function visibleBorder(candidate: BorderCandidate | null): TableBorderInput | nu
 }
 
 function authoredBorderParticipatesInConflict(border: TableBorderInput | null): boolean {
-  // Word treats `none` like omission in this cascade; `nil` is authored and
-  // participates by suppressing the complete edge ([MS-OI29500] 2.1.169).
-  return border !== null && border.authoredStyle !== 'none';
+  // Compatibility-owned none/nil distinction.
+  return wordAuthoredBorderParticipates(border?.authoredStyle);
 }
 
 function authoredInsideBorderIsEffective(
@@ -805,13 +811,10 @@ function materializeBorders(
     });
   });
 
-  // Non-zero spacing separates opposing cell edge boxes. Table borders remain
-  // on the shared grid while cell edges are inset. Word's narrower exception
-  // keeps conditional tcBorders insideH/insideV in conflict with the matching
-  // table inside border ([MS-OI29500] 2.1.136/.138); those winners are already
-  // retained on the inset cell edges above/below.
+  // Non-zero spacing separates opposing cell edge boxes. Compatibility-owned
+  // conditional inside-border winners remain on the inset cell edges.
   input.rows.forEach((row, rowIndex) => {
-    if (effectiveCellSpacingPt(row) <= 0) return;
+    if (!wordSpacedCellUsesSeparatedBorderGrid(effectiveCellSpacingPt(row))) return;
     const rowTopPt = rowY(rowIndex);
     const rowBottomPt = rowY(rowIndex + 1);
     const tableXPt = rowXPt[rowIndex] ?? 0;
@@ -904,10 +907,8 @@ function alignedTableOriginX(
       ? bounds.xPt + Math.max(0, bounds.widthPt - widthPt)
       : bounds.xPt;
   if (indentPt === 0) return aligned;
-  // ECMA-376 §17.4.50 normally ignores tblInd for non-leading alignment, but
-  // Word applies it for every alignment ([MS-OI29500] 2.1.155). Treat it as a
-  // signed leading-edge translation after alignment; bidi reverses the axis.
-  return bidiVisual ? aligned - indentPt : aligned + indentPt;
+  // Compatibility-owned signed leading-edge translation; bidi reverses the axis.
+  return wordAlignedTableOriginPt(aligned, indentPt, bidiVisual);
 }
 
 function unionInkBounds(flowBounds: LayoutRect, borders: readonly ResolvedBorderSegment[]): LayoutRect {
@@ -1055,17 +1056,10 @@ export function layoutTable(
           .slice(rowIndex, lastRowIndex + 1)
           .every((ownedRow) => ownedRow.heightRule === 'exact');
       const clipBounds = exactOwnedSpan
-        ? {
-            // Exact height clips vertical overflow, but Word does not use the
-            // cell's horizontal box as a clip. A nested table may have a
-            // negative indent or border ink outside that box and must remain
-            // visible. Retain the containing flow band's X extent while
-            // bounding only this row's Y interval.
-            xPt: placement.availableBounds.xPt,
-            yPt: cellFlowBounds.yPt,
-            widthPt: placement.availableBounds.widthPt,
-            heightPt: cellFlowBounds.heightPt,
-          }
+        ? wordExactRowVerticalClipBounds(
+            cellFlowBounds,
+            placement.availableBounds,
+          )
         : undefined;
       const blocks = cell.verticalMerge === 'continue'
         ? []

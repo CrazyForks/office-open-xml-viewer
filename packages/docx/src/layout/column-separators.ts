@@ -1,5 +1,6 @@
 import { transformPoint } from './coordinate-space.js';
 import type { ColumnSeparatorLayout, PageSectionRegion, PointPt } from './types.js';
+import { wordColumnSeparatorBlockBand } from './section-compatibility.js';
 
 function freezePoint(point: PointPt): PointPt {
   return Object.freeze(point);
@@ -13,9 +14,13 @@ export function columnSeparatorSegments(
   const segments: ColumnSeparatorLayout[] = [];
   for (const region of regions) {
     const { columns, columnSeparator } = region.section;
+    const band = wordColumnSeparatorBlockBand(
+      region.blockStartPt,
+      region.blockEndPt,
+    );
     if (!columnSeparator
       || columns.length < 2
-      || region.blockEndPt <= region.blockStartPt) continue;
+      || band.blockEndPt <= band.blockStartPt) continue;
     const ownedColumns = new Set(region.columnIndexes);
     const populationOrder = region.columnFlowDirection === 'rtl'
       ? columns.map((_, index) => index).reverse()
@@ -32,11 +37,11 @@ export function columnSeparatorSegments(
       segments.push(Object.freeze({
         start: freezePoint(transformPoint(region.coordinateSpace.logicalToPhysical, {
           xPt: inlinePt,
-          yPt: region.blockStartPt,
+          yPt: band.blockStartPt,
         })),
         end: freezePoint(transformPoint(region.coordinateSpace.logicalToPhysical, {
           xPt: inlinePt,
-          yPt: region.blockEndPt,
+          yPt: band.blockEndPt,
         })),
       }));
     }

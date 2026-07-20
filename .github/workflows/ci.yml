@@ -126,8 +126,10 @@ jobs:
       - name: DOCX layout boundary tests
         run: |
           pnpm test:docx-boundaries
+          pnpm test:docx-compatibility
           pnpm test:docx-public-api
           node scripts/check-docx-layout-boundaries.mjs
+          pnpm check:docx-compatibility
 
       # The WASM parsers are git-ignored build output; the TypeScript packages
       # import their generated .d.ts/.js, so typecheck requires building them first.
