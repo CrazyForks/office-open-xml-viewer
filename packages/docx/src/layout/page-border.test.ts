@@ -136,6 +136,37 @@ describe('retained page-border layout', () => {
     expect(result?.segments[0]?.color).toBe(expected);
   });
 
+  it.each([
+    [Number.NaN, 4, 0.5, 4],
+    [Number.POSITIVE_INFINITY, 4, 0.5, 4],
+    [Number.NEGATIVE_INFINITY, 4, 0.5, 4],
+    [1, Number.NaN, 1, 0],
+    [1, Number.POSITIVE_INFINITY, 1, 0],
+    [1, Number.NEGATIVE_INFINITY, 1, 0],
+  ])(
+    'normalizes non-finite width=%s and space=%s to width=%s and space=%s',
+    (width, space, expectedWidth, expectedSpace) => {
+      const result = materializePageBorderLayout(
+        {
+          offsetFrom: 'page',
+          display: 'allPages',
+          zOrder: 'front',
+          top: edge({ width, space }),
+        },
+        horizontalSection,
+        { widthPt: 200, heightPt: 200 },
+        true,
+      );
+
+      expect(result?.segments[0]).toMatchObject({
+        from: { xPt: 0, yPt: expectedSpace },
+        to: { xPt: 200, yPt: expectedSpace },
+        widthPt: expectedWidth,
+      });
+      expect(result?.segments[0]?.dashPatternPt?.every(Number.isFinite)).toBe(true);
+    },
+  );
+
   it('retains the section logical-to-physical page transform for vertical paint', () => {
     const verticalSection: SectionLayoutContext = {
       ...horizontalSection,

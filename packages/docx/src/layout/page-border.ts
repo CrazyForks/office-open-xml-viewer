@@ -32,19 +32,24 @@ function retainedColor(color: string | undefined): string {
     : '#000000';
 }
 
+function retainedSpace(edge: PageBorderEdge | undefined): number {
+  return edge !== undefined && Number.isFinite(edge.space) ? edge.space : 0;
+}
+
 function retainedSegment(
   edge: PageBorderEdge,
   edgeName: NonNullable<BorderSegment['edge']>,
   from: BorderSegment['from'],
   to: BorderSegment['to'],
 ): BorderSegment {
+  const widthPt = Number.isFinite(edge.width) ? edge.width : 0.5;
   return Object.freeze({
     edge: edgeName,
     from: Object.freeze(from),
     to: Object.freeze(to),
     color: retainedColor(edge.color),
-    widthPt: edge.width,
-    ...retainedBorderTreatment(edge.style, edge.width),
+    widthPt,
+    ...retainedBorderTreatment(edge.style, widthPt),
   });
 }
 
@@ -69,10 +74,10 @@ export function materializePageBorderLayout(
   const refBottomPt = fromText
     ? geometry.pageHeight - sectionBodyInsetPt(geometry.marginBottom)
     : geometry.pageHeight;
-  const topY = refTopPt + (pageBorders.top?.space ?? 0);
-  const bottomY = refBottomPt - (pageBorders.bottom?.space ?? 0);
-  const leftX = refLeftPt + (pageBorders.left?.space ?? 0);
-  const rightX = refRightPt - (pageBorders.right?.space ?? 0);
+  const topY = refTopPt + retainedSpace(pageBorders.top);
+  const bottomY = refBottomPt - retainedSpace(pageBorders.bottom);
+  const leftX = refLeftPt + retainedSpace(pageBorders.left);
+  const rightX = refRightPt - retainedSpace(pageBorders.right);
   const segments: BorderSegment[] = [];
 
   if (pageBorders.top) {
