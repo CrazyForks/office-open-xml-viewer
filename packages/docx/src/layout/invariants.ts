@@ -18,15 +18,44 @@ import type {
   DrawingPaintCommand,
   DrawingLayout,
   FlowDomain,
-  LayoutRect,
+  LayoutDiagnosticCode,
   LayoutPage,
+  LayoutRect,
   PageSectionRegion,
   PaintNode,
   PointPt,
+  SourceRef,
   SectionRegionCoordinateSpace,
   WritingMode,
 } from './types.js';
 import { unionLayoutRects } from './rect-union.js';
+
+const LAYOUT_DIAGNOSTIC_CODE_MEMBERS = {
+  FLOW_OVERLAP: true,
+  BOTTOM_MARGIN_INVASION: true,
+  FLOW_DOMAIN_INVASION: true,
+  INVALID_REFERENCE: true,
+  INVALID_GEOMETRY: true,
+  INVALID_VALUE: true,
+  NON_CONVERGENCE: true,
+  UNSUPPORTED_FEATURE: true,
+} as const satisfies Readonly<Record<LayoutDiagnosticCode, true>>;
+
+const SOURCE_STORY_MEMBERS = {
+  body: true,
+  header: true,
+  footer: true,
+  footnote: true,
+  endnote: true,
+  textbox: true,
+} as const satisfies Readonly<Record<SourceRef['story'], true>>;
+
+const LAYOUT_DIAGNOSTIC_CODES = new Set<LayoutDiagnosticCode>(
+  Object.keys(LAYOUT_DIAGNOSTIC_CODE_MEMBERS) as LayoutDiagnosticCode[],
+);
+const SOURCE_STORIES = new Set<SourceRef['story']>(
+  Object.keys(SOURCE_STORY_MEMBERS) as SourceRef['story'][],
+);
 
 function assertPlainData(value: unknown, path: string, ancestors = new WeakSet<object>()): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
@@ -381,6 +410,28 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
 
 function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
   assertPlainData(layout, 'layout');
+  layout.diagnostics.forEach((diagnostic, index) => {
+    const path = `diagnostics[${index}]`;
+    if (!LAYOUT_DIAGNOSTIC_CODES.has(diagnostic.code)) {
+      throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.code is unknown`);
+    }
+    if (diagnostic.severity !== 'warning' && diagnostic.severity !== 'error') {
+      throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.severity is unknown`);
+    }
+    if (typeof diagnostic.message !== 'string' || diagnostic.message.length === 0) {
+      throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.message is empty`);
+    }
+    if (diagnostic.source !== undefined) {
+      if (!SOURCE_STORIES.has(diagnostic.source.story)
+        || typeof diagnostic.source.storyInstance !== 'string'
+        || diagnostic.source.storyInstance.length === 0
+        || !Array.isArray(diagnostic.source.path)
+        || diagnostic.source.path.some((entry) =>
+          !Number.isSafeInteger(entry) || entry < 0)) {
+        throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.source is invalid`);
+      }
+    }
+  });
   const documentRetainedNodeIds = new Set<string>();
   layout.pages.forEach((page, pageIndex) => {
     if (!Number.isInteger(page.pageIndex) || page.pageIndex !== pageIndex) {

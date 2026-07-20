@@ -68,6 +68,10 @@ import {
   wordTableMarginValuePt,
   wordTableRowHeightRule,
 } from './layout/table-compatibility.js';
+import {
+  mapParseDiagnostics,
+  type ParseDiagnosticWire,
+} from './layout/diagnostics.js';
 
 export interface InternalRunFontSlots {
   readonly direct: TextFontSlots;
@@ -129,6 +133,7 @@ export type InternalMathRun = Extract<DocRun, { type: 'math' }> & {
 
 export interface InternalDocxDocumentModel extends DocxDocumentModel {
   fontFamilyCharsets?: Record<string, string>;
+  readonly diagnostics?: readonly ParseDiagnosticWire[];
   readonly __pageLayoutSettings?: Readonly<{
     mirrorMargins?: boolean;
     gutterAtTop?: boolean;
@@ -1347,6 +1352,10 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
     noteLayoutSettings: documentNoteLayoutSettingsInput(doc),
     pageLayoutSettings: documentPageLayoutSettingsInput(doc),
+    parserDiagnostics: mapParseDiagnostics(
+      (doc as InternalDocxDocumentModel).diagnostics,
+      doc.body.length,
+    ),
     sequence,
   }, 'DOCX body layout acquisition input') as BodyLayoutAcquisitionInput;
 }

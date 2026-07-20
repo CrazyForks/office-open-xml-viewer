@@ -275,7 +275,11 @@ inventories merge.
 - Modify: `packages/docx/parser/src/parser.rs`
 - Create: `packages/docx/parser/tests/diagnostics.rs`
 - Modify: `packages/docx/src/parser-model.ts`
+- Modify: `packages/docx/src/layout/body-layout-input.ts`
+- Modify: `packages/docx/src/layout/body-paginator.ts`
 - Modify: `packages/docx/src/layout/diagnostics.ts`
+- Modify: `packages/docx/src/layout/invariants.ts`
+- Modify: `packages/docx/src/layout/types.ts`
 - Create: `packages/docx/src/layout/diagnostics.test.ts`
 
 **Interfaces:**
@@ -305,14 +309,23 @@ The non-exported TypeScript parser boundary reads it through
 ParseDiagnosticWire[] }`; `packages/docx/src/types.ts` and the A1 public
 declaration baseline remain unchanged.
 
-- [ ] **C2b Step 1: Add failing parser-to-layout diagnostic tests**
+The initial closed contract distinguishes a valid but unsupported
+`w:rPr/w:effect`, an invalid ST_TextEffect value, and missing, invalid, or
+schema-valid zero-area `wp:extent` geometry. Parser source paths come from the
+actual emitted body cursor, including content-control expansion, paragraph
+splitting, MCE branch selection, and cover-page break removal. Unknown wire
+facts become one fixed, content-free contract-mismatch diagnostic; a
+cross-language test keeps the Rust code constants and TypeScript allowlist
+exhaustive.
+
+- [x] **C2b Step 1: Add failing parser-to-layout diagnostic tests**
 
 Build minimal OOXML for a recognized unsupported decoration, invalid geometry,
 unknown enum value, and a supported control case. Assert stable codes and source
 paths; assert layout maps recoverable cases to warnings, fatal geometry to an
 error, and the supported case to no diagnostic.
 
-- [ ] **C2b Step 2: Run tests to verify Red**
+- [x] **C2b Step 2: Run tests to verify Red**
 
 Run the Rust parser and TypeScript diagnostic tests. Expected: diagnostic fields
 and private wire mapping do not exist.
