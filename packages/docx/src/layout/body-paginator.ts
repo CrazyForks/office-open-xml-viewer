@@ -2130,6 +2130,19 @@ export function paginateBody(
         'docEnd',
       )
     : endnoteStories;
-  assertDocumentLayout(withEndnotes);
-  return deepFreezeDocumentLayout(withEndnotes) as DocumentLayout;
+  // Parser diagnostics are immutable source facts and must not participate in
+  // header/footer, anchor, or field-geometry convergence. Attach them exactly
+  // once to the final graph, before the ordinary invariant/freeze boundary.
+  const parserDiagnostics = input.parserDiagnostics ?? [];
+  const withParserDiagnostics = parserDiagnostics.length === 0
+    ? withEndnotes
+    : Object.freeze({
+        ...withEndnotes,
+        diagnostics: Object.freeze([
+          ...parserDiagnostics,
+          ...withEndnotes.diagnostics,
+        ]),
+      });
+  assertDocumentLayout(withParserDiagnostics);
+  return deepFreezeDocumentLayout(withParserDiagnostics) as DocumentLayout;
 }

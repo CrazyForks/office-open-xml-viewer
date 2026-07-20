@@ -8,7 +8,7 @@ import {
 } from './context.js';
 import type { SectionStartType, AuthoredBreak } from './paginator.js';
 import { snapshotPlainData } from './plain-data.js';
-import type { DeepReadonly, SourceRef } from './types.js';
+import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
 import { wordContinuousSectionRole } from './body-pagination-compatibility.js';
 
 export interface BodyParagraphSourceInput {
@@ -84,6 +84,8 @@ export interface BodyLayoutInput {
   readonly source: SourceRef;
   readonly initialSection: BodySectionLayoutInput;
   readonly sequence: readonly BodyLayoutSequenceEntry[];
+  /** Immutable parse facts; attached only after geometry convergence. */
+  readonly parserDiagnostics?: readonly LayoutDiagnostic[];
   /** §17.11 document-end note stories, in authored numbering order. */
   readonly endnoteIds?: readonly string[];
   readonly noteLayoutSettings?: Readonly<{
@@ -95,6 +97,7 @@ export interface BodyLayoutInput {
 export interface BodyLayoutAcquisitionInput {
   readonly sectionIndex: BodySectionIndexInput;
   readonly evenAndOddHeaders: boolean;
+  readonly parserDiagnostics?: readonly LayoutDiagnostic[];
   readonly endnoteIds?: readonly string[];
   readonly noteLayoutSettings: Readonly<{
     footnotePosition: string;
@@ -235,6 +238,7 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
     source: { story: 'body', storyInstance: 'body', path: [] },
     initialSection,
     sequence,
+    parserDiagnostics: acquired.parserDiagnostics ?? [],
     endnoteIds: acquired.endnoteIds ?? [],
     noteLayoutSettings: acquired.noteLayoutSettings,
   }, 'DOCX body layout input') as BodyLayoutInput;

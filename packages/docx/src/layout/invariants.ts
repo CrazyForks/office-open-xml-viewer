@@ -28,6 +28,26 @@ import type {
 } from './types.js';
 import { unionLayoutRects } from './rect-union.js';
 
+const LAYOUT_DIAGNOSTIC_CODES = new Set([
+  'FLOW_OVERLAP',
+  'BOTTOM_MARGIN_INVASION',
+  'FLOW_DOMAIN_INVASION',
+  'INVALID_REFERENCE',
+  'INVALID_GEOMETRY',
+  'INVALID_VALUE',
+  'NON_CONVERGENCE',
+  'UNSUPPORTED_FEATURE',
+]);
+
+const SOURCE_STORIES = new Set([
+  'body',
+  'header',
+  'footer',
+  'footnote',
+  'endnote',
+  'textbox',
+]);
+
 function assertPlainData(value: unknown, path: string, ancestors = new WeakSet<object>()): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
   if (typeof value === 'number') {
@@ -381,6 +401,28 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
 
 function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
   assertPlainData(layout, 'layout');
+  layout.diagnostics.forEach((diagnostic, index) => {
+    const path = `diagnostics[${index}]`;
+    if (!LAYOUT_DIAGNOSTIC_CODES.has(diagnostic.code)) {
+      throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.code is unknown`);
+    }
+    if (diagnostic.severity !== 'warning' && diagnostic.severity !== 'error') {
+      throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.severity is unknown`);
+    }
+    if (typeof diagnostic.message !== 'string' || diagnostic.message.length === 0) {
+      throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.message is empty`);
+    }
+    if (diagnostic.source !== undefined) {
+      if (!SOURCE_STORIES.has(diagnostic.source.story)
+        || typeof diagnostic.source.storyInstance !== 'string'
+        || diagnostic.source.storyInstance.length === 0
+        || !Array.isArray(diagnostic.source.path)
+        || diagnostic.source.path.some((entry) =>
+          !Number.isSafeInteger(entry) || entry < 0)) {
+        throw new LayoutInvariantError('INVALID_REFERENCE', `${path}.source is invalid`);
+      }
+    }
+  });
   const documentRetainedNodeIds = new Set<string>();
   layout.pages.forEach((page, pageIndex) => {
     if (!Number.isInteger(page.pageIndex) || page.pageIndex !== pageIndex) {

@@ -4,7 +4,7 @@ use ooxml_common::blip::{
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::drawing::{parse_xsd_bool, DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
-use ooxml_common::ns::{attr_ns, is_w_ns, math, relationships, wordprocessingml};
+use ooxml_common::ns::{attr_ns, is_w_ns, is_wp_ns, math, relationships, wordprocessingml};
 use ooxml_common::zip::read_zip_string;
 // Production parses go through `ooxml_common::depth::parse_guarded` (depth-guarded
 // before roxmltree's recursive tree builder). The `XmlDoc` alias survives only for
@@ -521,7 +521,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         }
     }
 
-    let body = parse_body_elements(
+    let (body, diagnostics) = parse_body_elements_with_diagnostics(
         body_node,
         &style_map,
         &mut num_map,
@@ -636,6 +636,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         settings: document_settings,
         page_layout_settings,
         note_layout_settings,
+        diagnostics,
         // Healthy document: no degradation (RB7). Only `degraded_document` sets this.
         parse_error: None,
     })
@@ -819,6 +820,7 @@ fn parse_notes(
             theme,
             &HashMap::new(),
             TablePositioningContext::IgnoredStory,
+            None,
         );
         out.push(crate::types::DocxNote { id, content });
     }
@@ -1613,7 +1615,35 @@ fn parse_body_elements(
         theme,
         section_hf,
         TablePositioningContext::Normal,
+        None,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_body_elements_with_diagnostics(
+    body_node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
+) -> (Vec<BodyElement>, Vec<ParseDiagnostic>) {
+    let mut diagnostics = Vec::new();
+    let body = parse_body_elements_in_story(
+        body_node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        section_hf,
+        TablePositioningContext::Normal,
+        Some(&mut diagnostics),
+    );
+    (body, diagnostics)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1764,6 +1794,7 @@ fn parse_body_elements_in_story(
     theme: &ThemeColors,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
     table_positioning_context: TablePositioningContext,
+    mut diagnostics: Option<&mut Vec<ParseDiagnostic>>,
 ) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
     let mut section_ordinal = 0usize;
@@ -1793,6 +1824,8 @@ fn parse_body_elements_in_story(
         logical_table_sequence_contexts(&body_children, style_map, table_positioning_context);
 
     for (child, cover_break_after) in body_children {
+        let source_body_index = body.len();
+        let final_body_section = Some(child.id()) == body_level_sect_id;
         match child.tag_name().name() {
             "p" => {
                 let result = parse_paragraph(
@@ -1894,6 +1927,18 @@ fn parse_body_elements_in_story(
             }
             _ => {}
         }
+        // Source paths are owned by the same cursor that built the serialized
+        // body, not raw XML sibling ordinals. Paragraph splitting, unwrapped
+        // content controls, loose section markers, and zero-yield children can
+        // all change that cursor. The final body-level sectPr belongs to the
+        // document body story itself and therefore uses the empty path.
+        if let Some(out) = diagnostics.as_deref_mut() {
+            if final_body_section {
+                collect_node_parse_diagnostics(child, Vec::new(), out);
+            } else if body.len() > source_body_index {
+                collect_node_parse_diagnostics(child, vec![source_body_index], out);
+            }
+        }
         // ECMA-376 §17.5.2: a "Cover Pages" building block occupies its own page
         // in Word — the following content (even a "continuous" section) starts on
         // the next page. Emit the page break after the cover's content.
@@ -1903,7 +1948,148 @@ fn parse_body_elements_in_story(
         }
     }
 
-    apply_cover_page_breaks(body, cover_break_positions)
+    apply_cover_page_breaks(body, cover_break_positions, diagnostics)
+}
+
+const DOCUMENT_PART: &str = "word/document.xml";
+const MAX_POSITIVE_COORDINATE: i64 = 27_273_042_316_900;
+
+fn push_parse_diagnostic(
+    diagnostics: &mut Vec<ParseDiagnostic>,
+    code: &'static str,
+    severity: DiagnosticSeverity,
+    path: &[usize],
+) {
+    if diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == code && diagnostic.part == DOCUMENT_PART && diagnostic.path == path
+    }) {
+        return;
+    }
+    diagnostics.push(ParseDiagnostic {
+        code: code.to_string(),
+        severity,
+        part: DOCUMENT_PART.to_string(),
+        path: path.to_vec(),
+    });
+}
+
+fn is_supported_text_effect(value: &str) -> bool {
+    matches!(
+        value,
+        "blinkBackground" | "lights" | "antsBlack" | "antsRed" | "shimmer" | "sparkle" | "none"
+    )
+}
+
+fn positive_coordinate(value: &str) -> Option<i64> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|coordinate| (0..=MAX_POSITIVE_COORDINATE).contains(coordinate))
+}
+
+/// Collect facts that would otherwise disappear during parser normalization.
+///
+/// ECMA-376-1 Strict wml.xsd defines `w:effect/@w:val` as the closed
+/// ST_TextEffect enumeration. The renderer deliberately does not implement the
+/// animated/decorative values. `none` is fully supported and remains silent.
+///
+/// ECMA-376-1 Strict dml-wordprocessingDrawing.xsd requires `wp:extent` on both
+/// `wp:inline` and `wp:anchor`; dml-main.xsd makes both attributes required
+/// ST_PositiveCoordinate values in 0..=27273042316900. Zero is schema-valid but
+/// degenerate, so it is diagnosed separately from malformed geometry.
+fn collect_node_parse_diagnostics(
+    source: roxmltree::Node,
+    path: Vec<usize>,
+    diagnostics: &mut Vec<ParseDiagnostic>,
+) {
+    // Follow the same MCE §9.3 branch selection as the actual run/drawing
+    // parser. Scanning both Choice and Fallback would report facts from markup
+    // that this consumer explicitly did not select.
+    let mut pending = vec![source];
+    while let Some(node) = pending.pop() {
+        if !node.is_element() {
+            continue;
+        }
+        if node.tag_name().name() == "AlternateContent" {
+            if let Some(selected) =
+                ooxml_common::mce::select_alternate_content(node, &docx_understands_drawing_ns)
+            {
+                pending.extend(selected.children().filter(|child| child.is_element()).rev());
+            }
+            continue;
+        }
+        if is_w_ns(node.tag_name().namespace())
+            && node.tag_name().name() == "r"
+            && child_w(node, "rPr").and_then(|properties| bool_prop(properties, "vanish"))
+                == Some(true)
+        {
+            continue;
+        }
+        let tag = node.tag_name();
+        if is_w_ns(tag.namespace()) && tag.name() == "effect" {
+            match attr_w(node, "val").as_deref() {
+                Some("none") => {}
+                Some(value) if is_supported_text_effect(value) => push_parse_diagnostic(
+                    diagnostics,
+                    PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT,
+                    DiagnosticSeverity::Warning,
+                    &path,
+                ),
+                _ => push_parse_diagnostic(
+                    diagnostics,
+                    PARSE_DIAGNOSTIC_CODE_INVALID_TEXT_EFFECT_VALUE,
+                    DiagnosticSeverity::Warning,
+                    &path,
+                ),
+            }
+        } else if is_wp_ns(tag.namespace()) && matches!(tag.name(), "inline" | "anchor") {
+            if drawing_container_hidden(node) {
+                continue;
+            }
+            let extent = node.children().find(|child| {
+                child.is_element()
+                    && is_wp_ns(child.tag_name().namespace())
+                    && child.tag_name().name() == "extent"
+            });
+            match extent {
+                None => push_parse_diagnostic(
+                    diagnostics,
+                    PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT,
+                    DiagnosticSeverity::Error,
+                    &path,
+                ),
+                Some(extent) => {
+                    let coordinates = extent
+                        .attribute("cx")
+                        .zip(extent.attribute("cy"))
+                        .map(|(cx, cy)| (positive_coordinate(cx), positive_coordinate(cy)));
+                    match coordinates {
+                        None => push_parse_diagnostic(
+                            diagnostics,
+                            PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT,
+                            DiagnosticSeverity::Error,
+                            &path,
+                        ),
+                        Some((Some(cx), Some(cy))) if cx == 0 || cy == 0 => push_parse_diagnostic(
+                            diagnostics,
+                            PARSE_DIAGNOSTIC_CODE_DEGENERATE_DRAWING_EXTENT,
+                            DiagnosticSeverity::Warning,
+                            &path,
+                        ),
+                        Some((Some(_), Some(_))) => {}
+                        Some(_) => push_parse_diagnostic(
+                            diagnostics,
+                            PARSE_DIAGNOSTIC_CODE_INVALID_DRAWING_EXTENT,
+                            DiagnosticSeverity::Error,
+                            &path,
+                        ),
+                    }
+                }
+            }
+        }
+        pending.extend(node.children().filter(|child| child.is_element()).rev());
+    }
 }
 
 /// Drop a cover's synthetic page break (emitted at `cover_break_positions` by the
@@ -1928,6 +2114,7 @@ fn parse_body_elements_in_story(
 fn apply_cover_page_breaks(
     body: Vec<BodyElement>,
     cover_break_positions: Vec<usize>,
+    diagnostics: Option<&mut Vec<ParseDiagnostic>>,
 ) -> Vec<BodyElement> {
     if cover_break_positions.is_empty() {
         return body;
@@ -1948,6 +2135,18 @@ fn apply_cover_page_breaks(
         .collect();
     if drop.is_empty() {
         return body;
+    }
+    if let Some(diagnostics) = diagnostics {
+        for diagnostic in diagnostics {
+            let Some(source_index) = diagnostic.path.first_mut() else {
+                continue;
+            };
+            let removed_before = drop
+                .iter()
+                .filter(|&&removed| removed < *source_index)
+                .count();
+            *source_index = source_index.saturating_sub(removed_before);
+        }
     }
     body.into_iter()
         .enumerate()

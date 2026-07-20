@@ -1,6 +1,33 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+pub const PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT: &str = "UNSUPPORTED_TEXT_EFFECT";
+pub const PARSE_DIAGNOSTIC_CODE_INVALID_TEXT_EFFECT_VALUE: &str = "INVALID_TEXT_EFFECT_VALUE";
+pub const PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT: &str = "MISSING_DRAWING_EXTENT";
+pub const PARSE_DIAGNOSTIC_CODE_INVALID_DRAWING_EXTENT: &str = "INVALID_DRAWING_EXTENT";
+pub const PARSE_DIAGNOSTIC_CODE_DEGENERATE_DRAWING_EXTENT: &str = "DEGENERATE_DRAWING_EXTENT";
+
+/// Private parser-to-layout diagnostic severity. This wire is intentionally
+/// smaller than the public document model: diagnostics carry stable facts and
+/// source coordinates, never authored text or raw invalid lexical values.
+#[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticSeverity {
+    Warning,
+    Error,
+}
+
+/// One parser-owned fact that layout cannot otherwise recover after the
+/// authored node is normalized or omitted.
+#[derive(Serialize, Debug, Clone, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParseDiagnostic {
+    pub code: String,
+    pub severity: DiagnosticSeverity,
+    pub part: String,
+    pub path: Vec<usize>,
+}
+
 #[derive(Serialize, Debug, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Document {
@@ -86,6 +113,10 @@ pub struct Document {
         skip_serializing_if = "Option::is_none"
     )]
     pub note_layout_settings: Option<NoteLayoutSettingsWire>,
+    /// Private parser/layout wire. Empty for conforming, fully-supported input,
+    /// and omitted so the stable public document JSON remains unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub diagnostics: Vec<ParseDiagnostic>,
     /// RB7 partial degradation: set when `word/document.xml` — the body part —
     /// could not be read or parsed. The document still "opens" (so the viewer
     /// shows a placeholder page instead of throwing an opaque error) with an
