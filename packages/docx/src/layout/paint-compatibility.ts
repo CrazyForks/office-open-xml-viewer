@@ -13,7 +13,7 @@ export const WORD_PARAGRAPH_SHADING_BORDER_BOX = defineCompatibilityRule({
   id: 'word-paragraph-shading-border-box',
   evidence: {
     kind: 'regression-test',
-    reference: 'packages/docx/src/para-shading-border.test.ts#extends the fill by a present border edge’s space (matching drawParaBorders)',
+    reference: 'packages/docx/src/layout/paragraph.test.ts#extends paragraph shading through visible border spacing',
   },
   description: 'Extend paragraph shading through each visible paragraph-border spacing interval so the fill reaches the painted border box.',
 });

@@ -392,8 +392,8 @@ export interface LayoutImageSeg extends LayoutSegSource {
    *  {@link LayoutImageSeg.heightPt}) and painted with the shared `renderChart`
    *  instead of blitting a bitmap: an inline chart seg flows with the text and
    *  is drawn at its flow position; an anchored chart seg (`anchor: true`,
-   *  §20.4.2.3) is zero-width in the flow and the chart is drawn at its
-   *  absolute page box by `renderAnchorImages`. `imagePath`/`mimeType` are
+   *  §20.4.2.3) is zero-width in the flow and retained at its absolute page
+   *  box by anchor acquisition. `imagePath`/`mimeType` are
    *  empty sentinels for a chart seg — no blip is fetched (the bitmap-prefetch
    *  walk keys off `run.type === 'image'` and never sees a chart run). */
   chart?: ChartModel;
@@ -1439,8 +1439,8 @@ export function paragraphMarkLineHeight(
  * `word-trailing-empty-mark-baseline-admission` (#981).
  *
  * NOTE: this stays the CENTRED baseline even though VISIBLE lineRule=auto content
- * lines now draw a PINNED baseline ({@link drawParagraphLine} / #990: multiplier
- * leading placed entirely below the glyphs). The pagination consumer is inkless
+ * lines now use a PINNED baseline (#990: multiplier leading placed entirely
+ * below the glyphs). The pagination consumer is inkless
  * (mark-only), so the pinned glyph baseline never reaches it, and the #981 page
  * fit is pinned by that admission rule — changing it would move page boundaries.
  * `word-auto-multiple-baseline-pin` is therefore intentionally DRAW-ONLY.
@@ -1904,9 +1904,8 @@ export function splitTextForLayout(text: string): string[] {
  *  element is omitted, then automatic tab stops should be generated at 720
  *  twentieths of a point (0.5")", i.e. 36 pt. Used ONLY as the fallback when a
  *  document carries no `<w:defaultTabStop>`; a document that sets one overrides
- *  this via {@link resolveDefaultTabPt}. Shared by the line layout
- *  (`layoutLines`) and the numbered-list marker's trailing-tab advance
- *  (`renderParagraph`). */
+ *  this via {@link resolveDefaultTabPt}. Shared by line layout and the
+ *  numbered-list marker's retained trailing-tab advance. */
 export const DEFAULT_TAB_PT = 36;
 
 /** Knuth-Plass shrink tolerance: the fraction by which the line breaker may
@@ -2614,7 +2613,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       // A `<wp:anchor>` (floating) chart (§20.4.2.3) carries `anchor: true` and
       // its parsed page-offset fields, exactly like an anchor ImageRun: the
       // measure pass zeroes an anchor seg's width (it is not part of the inline
-      // flow) and `renderAnchorImages` draws it at the resolved absolute box.
+      // flow) and anchor acquisition retains it at the resolved absolute box.
       const chartRun = run as unknown as import('./types').ChartRun & { type: 'chart' };
       segs.push({
         imagePath: '',

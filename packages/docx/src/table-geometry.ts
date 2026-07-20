@@ -3,15 +3,9 @@
 //
 // The trHeight rule (exact / atLeast / auto), the auto/no-floor minimum, the
 // gridSpan column slicing, and the vMerge restart-span post-pass are pure
-// structural math that does NOT depend on whether the caller works in pt
-// (paginator) or px (paint) units. This module factors that skeleton out of
-// renderer.ts so the rule is expressed once: previously both
-// `computeTableRowHeights` (pt) and `computeTableLayout`/`calculateRowHeight`
-// (px) re-implemented it, and #523 had to patch the identical regression in two
-// places. The two callers still differ in HOW a cell's content height is
-// measured (the paginator's `estimateParagraphHeight` cursor-walk vs the paint
-// pass's `measureParaHeight`); that measurement is supplied as a callback and is
-// deliberately NOT unified here — see the note on `measureCellContentHeight`.
+// structural math that does NOT depend on whether the caller works in pt or
+// scaled device units. The caller supplies cell-content measurement, keeping
+// this compatibility kernel independent of paragraph acquisition details.
 //
 // Only DocTable/DocTableRow/DocTableCell types are imported (erased at runtime),
 // so there is no import cycle with renderer.ts.
@@ -63,15 +57,10 @@ export function findMergeEndRow(table: DocTable, startRi: number, startCi: numbe
   return endRi;
 }
 
-/** Measure the content height (already in the target units — px at `scale`, or
- *  pt at `scale=1`) of a single cell laid out at the given total cell width
- *  (`cellWidth`, the summed widths of the grid columns it spans). MUST include
- *  the cell's top/bottom margins. The two callers pass DIFFERENT measurers — the
- *  paginator mirrors `renderParagraph`'s float-aware cursor walk
- *  (`estimateParagraphHeight`); the paint pass uses the lighter `measureParaHeight`
- *  + explicit spaceBefore/After. They are not equivalent (e.g. an empty East
- *  Asian paragraph mark on a docGrid rounds to a different cell count), so this
- *  skeleton keeps each caller's measurer intact rather than choosing one. */
+/** Measure the content height (already in the target units — scaled device
+ *  units at `scale`, or pt at `scale=1`) of a single cell laid out at the given
+ *  total cell width (`cellWidth`, the summed widths of the grid columns it
+ *  spans). MUST include the cell's top/bottom margins. */
 export type MeasureCellContentHeight = (cell: DocTableCell, cellWidth: number) => number;
 
 interface TableGridOwner {
@@ -224,8 +213,8 @@ export function resolvedHorizontalBoundaryWidths(table: DocTable): number[] {
  * at `MIN_ROW_HEIGHT_PT × scale`. A `vMerge=restart` cell is excluded (its
  * content is distributed across the span, not absorbed by its first row) and a
  * `vMerge=continue` cell renders no content. This is the single source of the
- * trHeight rule, shared by {@link resolveTableRowHeights} and the exported
- * `calculateRowHeight`.
+ * trHeight rule, shared by {@link resolveTableRowHeights} and direct
+ * compatibility tests of a single row.
  */
 export function resolveSingleRowHeight(
   row: DocTableRow,

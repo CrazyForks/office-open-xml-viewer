@@ -40,6 +40,7 @@ function projectMeasuredSegment(
   context: ParagraphLayoutContext = acquisitionContext,
   layoutServices?: unknown,
   anchorFrames?: Parameters<typeof paragraphLayoutFromMeasurement>[1]['anchorFrames'],
+  paragraphBorderEdges?: Parameters<typeof paragraphLayoutFromMeasurement>[1]['paragraphBorderEdges'],
 ) {
   const measured = {
     lines: [{
@@ -66,6 +67,7 @@ function projectMeasuredSegment(
     environment: { documentHasEastAsianText: false, layoutServices } as never,
     exclusions: [],
     ...(anchorFrames ? { anchorFrames } : {}),
+    ...(paragraphBorderEdges ? { paragraphBorderEdges } : {}),
   }, measured);
 }
 
@@ -609,6 +611,83 @@ describe('layoutParagraph', () => {
     expect(node.borders.find((border) => border.edge === 'bottom')).toMatchObject({
       authoredStyle: 'double', style: 'double', dashPatternPt: [],
     });
+  });
+
+  it('extends paragraph shading through visible border spacing', () => {
+    const segment = {
+      text: 'AB', sourceRunIndex: 0, measuredWidth: 10,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+      shapedClusters: [
+        { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 5 },
+        { range: { start: 1, end: 2 }, offsetPt: 5, advancePt: 5 },
+      ],
+    } as unknown as LayoutTextSeg;
+    const edge = (space: number, style = 'single') => ({
+      style, width: 2, space, color: '123456',
+    });
+    const formatted = {
+      type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, tabStops: [],
+      runs: [{ type: 'text', text: 'AB', fontSize: 10, fontFamily: 'Test Sans' }],
+      shading: 'E0E0E0',
+      borders: {
+        top: edge(1),
+        right: edge(3),
+        bottom: edge(5, 'none'),
+        left: edge(2),
+        between: null,
+      },
+    } as unknown as DocParagraph;
+
+    const node = projectMeasuredSegment(formatted, segment);
+
+    // ECMA-376 §17.3.1.31: shading owns the retained border box, including
+    // each visible §17.3.1.7 spacing interval. A `none` edge contributes none.
+    expect(node.shading).toEqual({ color: '#E0E0E0' });
+    expect(node.inkBounds).toEqual({
+      xPt: 8, yPt: 9, widthPt: 105, heightPt: 13,
+    });
+  });
+
+  it('uses a retained between edge and suppresses an unowned bottom edge', () => {
+    const segment = {
+      text: 'AB', sourceRunIndex: 0, measuredWidth: 10,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+      shapedClusters: [
+        { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 5 },
+        { range: { start: 1, end: 2 }, offsetPt: 5, advancePt: 5 },
+      ],
+    } as unknown as LayoutTextSeg;
+    const edge = (space: number) => ({
+      style: 'single', width: 2, space, color: '123456',
+    });
+    const formatted = {
+      type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, tabStops: [],
+      runs: [{ type: 'text', text: 'AB', fontSize: 10, fontFamily: 'Test Sans' }],
+      shading: 'E0E0E0',
+      borders: {
+        top: edge(9),
+        right: null,
+        bottom: edge(7),
+        left: null,
+        between: edge(2),
+      },
+    } as unknown as DocParagraph;
+
+    const node = projectMeasuredSegment(
+      formatted,
+      segment,
+      acquisitionContext,
+      undefined,
+      undefined,
+      { top: 'between', bottom: 'none' },
+    );
+
+    expect(node.inkBounds).toEqual({
+      xPt: 10, yPt: 8, widthPt: 100, heightPt: 14,
+    });
+    expect(node.borders.map((border) => border.edge)).toEqual(['between']);
   });
 
   it.each([

@@ -8,47 +8,10 @@ import type {
   SectionProps,
 } from './types';
 
-// ECMA-376 §17.3.1.7 / §17.3.1.31 — the paragraph shading fill and the paragraph
-// BORDER box must have the SAME height. renderParagraph paints the shading BEFORE
-// the draw loop (it is the background) using `paintedParagraphHeight`, which
-// REPLAYS the loop's per-line `state.y` advancement; it then draws the bottom
-// border AFTER the loop at `state.y − textAreaTopY`. Equality therefore holds
-// BY CONSTRUCTION — but only as long as `paintedParagraphHeight` replays EXACTLY
-// the same `state.y` mutations the draw loop performs. Today `drawParagraphLine`
-// mutates `state.y` in exactly two places (the `line.topY` float-clearance
-// max-jump, then `state.y += lineHForLine(line)`), and `paintedParagraphHeight`
-// mirrors both.
-//
-// The existing unit tests in `para-shading-border.test.ts` pin
-// `paintedParagraphHeight` against a HAND-REPLAY of that SAME formula, so they
-// would NOT notice if someone added a THIRD `state.y` mutation to the real draw
-// loop (the replay would silently drift from the loop). This end-to-end test
-// closes that gap: it renders a real bordered + shaded MULTI-LINE paragraph
-// through renderDocumentToCanvas → renderParagraph → drawParagraphLine and asserts
-// the drawn shading rect and the drawn bottom border coincide. A new state.y
-// mutation in the draw loop would move the bottom border relative to the
-// pre-computed shading height and fail this test.
-//
-// Assertion approach chosen: DIRECT BORDER CAPTURE. With `space:0` on every edge
-// and a single-style bottom border, `paraShadingRect` does NOT extend the fill
-// box (so the shading rect bottom == textAreaTopY + paintedH) and the bottom
-// border is a `single` edge — which `drawBorderLine` renders via
-// `strokeCrispSegment`'s beginPath/moveTo/lineTo/stroke. We record the horizontal
-// stroked segments and take the bottom-most one as the bottom border edge y, then
-// assert it equals the shading rect bottom. This is exact and does not depend on a
-// trailing paragraph's flow position. (The crispness nudge in strokeCrispSegment
-// is sub-pixel; at dpr:1 with integer-ish coordinates we allow a tiny tolerance.)
-//
-// Scope: this covers the NORMAL-FLOW multi-line case only. That already catches a
-// third `state.y` mutation on the common draw path (verified: injecting an extra
-// `state.y += 1` per line drifts the bottom border ~one px/line past the shading
-// bottom and fails the coupling assert). The FLOAT-CLEARANCE `topY` max-jump branch
-// is DELIBERATELY OMITTED here: reproducing an in-paragraph `line.topY` jump end-to-
-// end needs a preceding float whose band overlaps only some of the shaded
-// paragraph's lines — fragile geometry (image sizing, wrap band overlap) with high
-// flake risk for little added coverage. That branch is already pinned by the pure
-// `paintedParagraphHeight` float test in `para-shading-border.test.ts`, and both
-// mutations a 3rd would sit beside are on the path this test exercises.
+// ECMA-376 §17.3.1.7 / §17.3.1.31 — paragraph shading fills the retained border
+// box. This integration test exercises the canonical layout-and-paint path and
+// records the resulting Canvas operations: a multi-line paragraph's shading
+// edges must meet its retained top and bottom border segments.
 
 interface FillRectCall { x: number; y: number; w: number; h: number; fillStyle: string; }
 interface HStroke { y: number; strokeStyle: string; }
@@ -169,8 +132,7 @@ function docOf(...paras: DocParagraph[]): DocxDocumentModel {
 describe('paragraph shading meets the bottom border, end-to-end (§17.3.1.7)', () => {
   it('the drawn shading rect bottom coincides with the drawn bottom border (multi-line)', async () => {
     const { canvas, fillRects, hStrokes, textBaselines } = makeRecordingCanvas();
-    // Many short words → wraps to several lines at PAGE_WIDTH=120, exercising the
-    // `state.y += lineHForLine` summation (not a single-line shortcut).
+    // Many short words wrap to several retained lines at PAGE_WIDTH=120.
     const text = 'aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp qq rr ss tt';
     await renderDocumentToCanvas(docOf(borderedShadedPara(text)), canvas, 0, {
       dpr: 1, width: PAGE_WIDTH, // scale = width / pageWidthPt(=120) = 1 px per pt
@@ -193,24 +155,14 @@ describe('paragraph shading meets the bottom border, end-to-end (§17.3.1.7)', (
     const bottomBorderY = Math.max(...borderStrokes.map((s) => s.y));
     const topBorderY = Math.min(...borderStrokes.map((s) => s.y));
 
-    // Coupling: shading rect bottom (== textAreaTopY + paintedH) equals the drawn
-    // bottom border edge (== textAreaTopY + textH). If a future change adds a third
-    // state.y mutation to the draw loop, paintedH drifts from textH and this fails.
-    //
-    // `strokeCrispSegment` nudges a thin (odd device-width) axis-aligned stroke by
-    // up to 0.5 px perpendicular to snap it onto a crisp device row (crispOffset);
-    // that nudge is a sub-pixel rendering detail orthogonal to the height coupling,
-    // so we allow a 0.75 px slack (< 1 px, safely below a full line). Both edges get
-    // the SAME nudge, so the border-box height itself is exact regardless.
+    // Axis-aligned strokes can receive a sub-pixel device snap, so allow less
+    // than one pixel while requiring both shading edges to meet their borders.
     const NUDGE = 0.75;
     expect(Math.abs(shading.y + shading.h - bottomBorderY)).toBeLessThan(NUDGE);
     // The shading top also meets the top border (sanity: no vertical drift).
     expect(Math.abs(shading.y - topBorderY)).toBeLessThan(NUDGE);
 
-    // Multi-line proof: the text drew on at least THREE distinct baselines, so the
-    // `state.y += lineHForLine` summation ran over multiple lines (not a single-line
-    // shortcut that would happen to line up top and bottom borders too). Distinct
-    // baselines are the direct witness of how many lines the draw loop advanced past.
+    // Distinct baselines prove this is a multi-line retained paragraph.
     const distinctBaselines = new Set(textBaselines.map((y) => Math.round(y))).size;
     expect(distinctBaselines).toBeGreaterThanOrEqual(3);
 

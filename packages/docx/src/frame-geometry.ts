@@ -442,7 +442,7 @@ export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderStat
     // (resolveLineFloatWindow then takes the widest free gap around it).
     side: fp.dropCap === 'drop' || fp.dropCap === 'margin' ? 'right' : 'bothSides',
     imageKey: box.exclusionId ?? '',
-    drawn: true, // painted by renderFrameParagraph; deferred path must skip it.
+    drawn: true, // retained frame paint owns it; deferred resource paint must skip it.
     paraId,
     avoidOverlap: false, // frames opt out of overlap re-seating.
   });

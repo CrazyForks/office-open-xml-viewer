@@ -662,9 +662,9 @@ export type DocRun =
  *  core `renderChart` consumes (identical to what pptx/xlsx pass), so a docx
  *  chart draws at the same quality through the same code path. `widthPt`/
  *  `heightPt` are the `<wp:extent>` natural size. An inline chart flows as an
- *  inline box of that size; an anchored chart (§20.4.2.3) is painted via
- *  `registerAnchorFloats` when it wraps text, or by `renderAnchorImages` for
- *  wrapNone/no-wrap anchors — all paths use `renderChart`. */
+ *  inline box of that size; anchor acquisition retains an anchored chart
+ *  (§20.4.2.3) at its resolved page box while contributing wrap exclusions
+ *  when required — all paint paths use `renderChart`. */
 export interface ChartRun {
   chart: ChartModel;
   widthPt: number;
