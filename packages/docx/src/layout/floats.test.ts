@@ -78,6 +78,22 @@ describe('float displacement policy', () => {
     expect(result.appliedCompatibilityRuleIds).toEqual([]);
   });
 
+  it('does not attribute pairwise table displacement to the Word compatibility rule', () => {
+    const moving = participant('moving', 'table', 0, 2, 0, 'overlap');
+    const result = resolveFloatPlacement({
+      moving,
+      blockers: [participant('blocker', 'table', 0, 1, 0, 'never')],
+      avoidance: {
+        kind: 'word-different-paragraph',
+        paragraphId: moving.paragraphId,
+      },
+      rightBoundaryPt: 100,
+    });
+
+    expect(result.bounds.xPt).toBe(10);
+    expect(result.appliedCompatibilityRuleIds).toEqual([]);
+  });
+
   it('enforces tblOverlap=never in both source orders on raw bounds', () => {
     const place = (
       movingOverlap: 'never' | 'overlap',
@@ -141,6 +157,67 @@ describe('float displacement policy', () => {
     expect(result.appliedCompatibilityRuleIds).toEqual([
       'word-float-different-paragraph-displacement',
     ]);
+  });
+
+  it('keeps the compatibility exclusion band within the right boundary and slack', () => {
+    const moving: FloatPlacementParticipant = Object.freeze({
+      occurrenceId: 'moving',
+      kind: 'table',
+      tableOverlap: 'overlap',
+      paragraphId: 2,
+      bounds: Object.freeze({
+        xPt: 20,
+        yPt: 10,
+        widthPt: 45,
+        heightPt: 10,
+      }),
+      exclusionBounds: Object.freeze({
+        xPt: 20,
+        yPt: 10,
+        widthPt: 53,
+        heightPt: 10,
+      }),
+    });
+    const blocker: FloatPlacementParticipant = Object.freeze({
+      occurrenceId: 'blocker',
+      kind: 'frame',
+      paragraphId: 1,
+      bounds: Object.freeze({
+        xPt: 0,
+        yPt: 0,
+        widthPt: 50,
+        heightPt: 50,
+      }),
+      exclusionBounds: Object.freeze({
+        xPt: 0,
+        yPt: 0,
+        widthPt: 50,
+        heightPt: 50,
+      }),
+    });
+    const place = (rightBoundaryPt: number) => resolveFloatPlacement({
+      moving,
+      blockers: [blocker],
+      avoidance: {
+        kind: 'word-different-paragraph',
+        paragraphId: moving.paragraphId,
+      },
+      rightBoundaryPt,
+      overlapEpsilonPt: 0.01,
+      rightBoundarySlackPt: 0.5,
+    });
+
+    const constrained = place(100);
+    expect(constrained.bounds).toMatchObject({ xPt: 20, yPt: 50 });
+    expect(constrained.exclusionBounds.xPt + constrained.exclusionBounds.widthPt)
+      .toBeLessThanOrEqual(100.5);
+    expect(constrained.appliedCompatibilityRuleIds).toEqual([
+      'word-float-different-paragraph-displacement',
+    ]);
+
+    expect(place(110).bounds).toMatchObject({ xPt: 50, yPt: 10 });
+    expect(place(102.5).bounds).toMatchObject({ xPt: 50, yPt: 10 });
+    expect(place(102.48).bounds).toMatchObject({ xPt: 20, yPt: 50 });
   });
 
   it('reports a Word compatibility rule only when it changes placement', () => {

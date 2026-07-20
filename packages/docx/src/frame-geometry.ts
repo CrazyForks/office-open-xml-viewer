@@ -365,7 +365,7 @@ export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
     };
     const moving: FloatPlacementParticipant = o.kind === 'table'
       ? { ...core, kind: 'table', tableOverlap: o.tableOverlap! }
-      : { ...core, kind: 'drawingml' };
+      : { ...core, kind: o.kind === 'frame' ? 'frame' : 'drawingml' };
     const resolved = resolveFloatPlacement({
       moving,
       blockers: state.floats.map(floatRectParticipant),

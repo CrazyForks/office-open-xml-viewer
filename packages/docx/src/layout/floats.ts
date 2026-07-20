@@ -216,6 +216,7 @@ function compatibilityBlockerInObjectSpace(
 function resolveObjectPosition(
   input: ResolveFloatPlacementInput,
   blockers: readonly AxisAlignedRect[],
+  rightBoundaryPt = input.rightBoundaryPt,
 ): Readonly<{ left: number; top: number }> {
   const movingRect = axisRect(input.moving.bounds);
   if (blockers.length === 0) {
@@ -223,7 +224,7 @@ function resolveObjectPosition(
   }
   return resolveAxisAlignedOverlap(movingRect, blockers, {
     overlapEpsilon: input.overlapEpsilonPt ?? 0,
-    rightBoundary: input.rightBoundaryPt,
+    rightBoundary: rightBoundaryPt,
     rightBoundarySlack: input.rightBoundarySlackPt ?? 0,
   });
 }
@@ -258,11 +259,29 @@ export function resolveFloatPlacement(
           ? []
           : [compatibilityBlockerInObjectSpace(moving, blocker)])
     : [];
-  const normative = resolveObjectPosition(input, normativeBlockers);
-  const resolved = resolveObjectPosition(
+  const movingRightPaddingPt = moving.exclusionBounds.xPt
+    + moving.exclusionBounds.widthPt
+    - moving.bounds.xPt
+    - moving.bounds.widthPt;
+  // Compatibility displacement historically resolved the moving exclusion
+  // rectangle. Its right edge, not only the object edge, must fit within the
+  // caller's boundary and slack after converting the collision into object
+  // space.
+  const rightBoundaryPt = avoidance.kind === 'word-different-paragraph'
+    ? input.rightBoundaryPt - movingRightPaddingPt
+    : input.rightBoundaryPt;
+  const normative = resolveObjectPosition(
     input,
-    [...normativeBlockers, ...compatibilityBlockers],
+    normativeBlockers,
+    rightBoundaryPt,
   );
+  const resolved = compatibilityBlockers.length === 0
+    ? normative
+    : resolveObjectPosition(
+        input,
+        [...normativeBlockers, ...compatibilityBlockers],
+        rightBoundaryPt,
+      );
   const xPt = resolved.left - moving.bounds.xPt;
   const yPt = resolved.top - moving.bounds.yPt;
   const compatibilityChangedPlacement = resolved.left !== normative.left

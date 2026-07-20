@@ -3475,12 +3475,18 @@ function createConcreteBodyLayoutKernel(
                   fragment: NonNullable<ReturnType<typeof takeTableFragment>['fragment']>;
                   resolved: ReturnType<typeof resolveFloatingTablePlacementInTransaction>;
                   nestedEntries: readonly FloatRegistryEntryPt[];
+                  fingerprint: string;
                 }>;
             let transaction: FloatingParentTransactionPass;
             try {
               transaction = convergeExactState<FloatingParentTransactionPass>({
                 step: (previous) => {
                   if (previous?.kind === 'fresh-flow-region') return previous;
+                  if (previous?.kind === 'candidate'
+                    && previous.resolved.placement.xPt === previous.parentFrame.xPt
+                    && previous.resolved.placement.yPt === previous.parentFrame.yPt) {
+                    return previous;
+                  }
                   const parentFrame = previous?.resolved.placement ?? {
                     xPt: raw.x,
                     yPt: raw.y,
@@ -3565,6 +3571,15 @@ function createConcreteBodyLayoutKernel(
                       floatRegistry.flowDomainId,
                     ),
                   );
+                  const fingerprint = JSON.stringify({
+                    parentFrame: {
+                      xPt: resolved.placement.xPt,
+                      yPt: resolved.placement.yPt,
+                    },
+                    fragment: result.fragment,
+                    nestedEntries,
+                    resolvedBounds: resolved.placement.bounds,
+                  });
                   return Object.freeze({
                     kind: 'candidate' as const,
                     parentFrame: Object.freeze({
@@ -3575,19 +3590,12 @@ function createConcreteBodyLayoutKernel(
                     fragment: result.fragment,
                     resolved,
                     nestedEntries,
+                    fingerprint,
                   });
                 },
                 stateOf: (value) => value.kind === 'fresh-flow-region'
                   ? 'fresh-flow-region'
-                  : JSON.stringify({
-                      parentFrame: {
-                        xPt: value.resolved.placement.xPt,
-                        yPt: value.resolved.placement.yPt,
-                      },
-                      fragment: value.result.fragment,
-                      nestedEntries: value.nestedEntries,
-                      resolvedBounds: value.resolved.placement.bounds,
-                    }),
+                  : value.fingerprint,
                 limit: 16,
               }).value;
             } catch (error) {
