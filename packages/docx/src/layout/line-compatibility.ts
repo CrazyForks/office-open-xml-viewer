@@ -165,9 +165,9 @@ export function wordFarEastSingleLinePx(
 export function wordGridAtLeastLineHeightPx(
   naturalPx: number,
   authoredMinimumPx: number,
-  pitchPx: number,
+  gridMinimumPx: number,
 ): number {
-  return Math.max(naturalPx, authoredMinimumPx, pitchPx);
+  return Math.max(naturalPx, authoredMinimumPx, gridMinimumPx);
 }
 
 export function wordDegenerateLineSpacingIsSingle(
@@ -177,16 +177,16 @@ export function wordDegenerateLineSpacingIsSingle(
   return (rule === 'exact' || rule === 'auto') && value <= 0;
 }
 
-export function wordAutoMultipleCenterBoxPx(input: Readonly<{
-  autoMultiple: boolean;
-  compressedAuto: boolean;
-  glyphNaturalPx: number;
-  intendedSinglePx: number;
-  lineHeightPx: number;
-}>): number {
-  return input.autoMultiple && !input.compressedAuto
-    ? Math.max(input.glyphNaturalPx, input.intendedSinglePx)
-    : input.lineHeightPx;
+export function wordAutoMultipleCenterBoxPx(
+  autoMultiple: boolean,
+  compressedAuto: boolean,
+  glyphNaturalPx: number,
+  intendedSinglePx: number,
+  lineHeightPx: number,
+): number {
+  return autoMultiple && !compressedAuto
+    ? Math.max(glyphNaturalPx, intendedSinglePx)
+    : lineHeightPx;
 }
 
 export function wordVisibleLineMetricPx(
@@ -197,13 +197,15 @@ export function wordVisibleLineMetricPx(
 }
 
 export function wordFirstJustifiedContentSegment(
-  segments: readonly unknown[],
+  segments: readonly object[],
   bidi: boolean,
-  textOf: (segment: unknown) => string | undefined,
 ): number {
   if (bidi) return 0;
   for (let index = 0; index < segments.length; index += 1) {
-    const text = textOf(segments[index]);
+    const segment = segments[index];
+    const text = 'text' in segment && typeof segment.text === 'string'
+      ? segment.text
+      : undefined;
     if (text === undefined || /\S/.test(text)) return index;
   }
   return 0;

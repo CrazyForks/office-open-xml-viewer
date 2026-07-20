@@ -1479,10 +1479,9 @@ export function paragraphMarkBelowBaselinePt(
  * non-complex (Latin/CJK) text. `bCs`/`iCs` are INDEPENDENT toggles: an absent
  * `bCs`/`iCs` does not inherit `b`/`i`'s value, so a complex-script run that
  * carries only `w:b`/`w:i` renders non-bold/upright (`csBold = boldCs ?? false`,
- * `csItalic = italicCs ?? false`). Adjudicated in issue #937 against Word: the
- * numbered Arabic headings in sample-7 carry `w:rtl`+`w:cs`+`w:b` WITHOUT
- * `w:bCs` therefore remains regular-weight; similarly, `w:i` without `w:iCs`
- * remains upright while plain Latin `w:i` renders italic.
+ * `csItalic = italicCs ?? false`). Thus `w:b` without `w:bCs` remains regular
+ * weight, and `w:i` without `w:iCs` remains upright, while the corresponding
+ * non-complex text uses the Latin-axis toggle.
  */
 /**
  * Split a `w:smallCaps` (§17.3.2.33) run into maximal pieces by character class
@@ -3055,7 +3054,7 @@ export function layoutLines(
     if (!baseRtl) return;
     if (!currentLine.some((s) => 'isTab' in s)) return;
     // LOGICAL order — the reading-frame walk resolves the Nth tab against the
-    // Nth-reachable stop, exactly like Word's pen. Do NOT feed the VISUAL
+    // Nth-reachable stop in the logical reading frame. Do not feed the visual
     // sequence here: UAX#9 L2 reverses cells AND tabs together, so a
     // visual-order walk assigns the stops in reverse and paints the leader in
     // the wrong cell gap (the #830 follow-up bug — the TOC underscore leader
@@ -3269,15 +3268,13 @@ export function layoutLines(
   // ECMA-376 §17.3.2.19 `<w:kern>` — set `ctx.fontKerning` to match how the PAINT
   // pass will draw a run, so a kerned run measures exactly as it is drawn
   // (measure==paint). Returns the value to restore afterwards (only when the run
-  // opts in). Kerning is enabled only when the run declares `w:kern` AND its font
+  // opts in). Kerning is enabled only when the run declares `w:kern` and its font
   // size is at or above the threshold (the spec's "smallest font size which shall
   // have its kerning automatically adjusted"). A run that does not opt in leaves
-  // `ctx.fontKerning` at its inherited value rather than being forced off — Word's
-  // hierarchy default is off, but the browser default `'auto'` already produced
-  // the ±1–2px body-text behaviour the existing references were captured against;
-  // forcing `'none'` document-wide is a separate decision measured against the
-  // Word PDFs (see the WD4 report), not made here. `setSegKerning` mirrors the
-  // paint-side `paintSegKerning` in renderer.ts EXACTLY.
+  // `ctx.fontKerning` at its inherited value rather than forcing a document-wide
+  // default. Such a default is a separate unsupported policy, not part of this
+  // run-level implementation. `setSegKerning` mirrors the paint-side
+  // `paintSegKerning` in renderer.ts exactly.
   const setSegKerning = (s: LayoutTextSeg): CanvasFontKerning | null => {
     if (s.kerning == null) return null;
     const prev = ctx.fontKerning;

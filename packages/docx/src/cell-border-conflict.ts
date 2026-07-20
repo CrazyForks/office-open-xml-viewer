@@ -1,6 +1,7 @@
 import type { BorderSpec, CellBorders, TableBorders } from './types';
 import {
   wordNilBorderSuppressesSharedEdge,
+  WORD_TABLE_BORDER_STYLE_PRECEDENCE,
   wordTableBorderWeight,
 } from './layout/table-compatibility.js';
 
@@ -91,23 +92,14 @@ export function resolveCellEdges(
   return { top, bottom, left, right };
 }
 
-/** §17.4.66 rule #3 precedence list — index 0 is the highest priority. Identical
- *  to the registered border-number ordering (single first … inset last); a
- *  smaller index wins a weight tie. */
-const PRECEDENCE: string[] = [
-  'single', 'thick', 'double', 'dotted', 'dashed', 'dotDash', 'dotDotDash', 'triple',
-  'thinThickSmallGap', 'thickThinSmallGap', 'thinThickThinSmallGap', 'thinThickMediumGap',
-  'thickThinMediumGap', 'thinThickThinMediumGap', 'thinThickLargeGap', 'thickThinLargeGap',
-  'thinThickThinLargeGap', 'wave', 'doubleWave', 'dashSmallGap', 'dashDotStroked',
-  'threeDEmboss', 'threeDEngrave', 'outset', 'inset',
-];
-
 function borderWeight(spec: BorderSpec): number {
   return wordTableBorderWeight(spec.style, spec.width);
 }
 function precedenceIndex(style: string): number {
-  const i = PRECEDENCE.indexOf(style);
-  return i === -1 ? PRECEDENCE.length : i; // unknown ⇒ lowest priority
+  const i = WORD_TABLE_BORDER_STYLE_PRECEDENCE.indexOf(
+    style as (typeof WORD_TABLE_BORDER_STYLE_PRECEDENCE)[number],
+  );
+  return i === -1 ? WORD_TABLE_BORDER_STYLE_PRECEDENCE.length : i;
 }
 
 /** Parse a 6-hex colour to (r,g,b). `null`/auto ⇒ black (0,0,0): §17.4.66's

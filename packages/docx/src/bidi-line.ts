@@ -62,12 +62,6 @@ export interface LineVisualOrder {
   rtl: boolean[];
 }
 
-/** Punctuation/symbols — the "ambiguous" characters a run-level `<w:rtl>`
- *  resolves to RTL (§17.3.2.30). Under
- *  `word-rtl-run-ambiguous-class-override`, whitespace and strong
- *  letters/digits retain their ordinary classes; digits have the separate
- *  `digitsAsAN` language-gated override. */
-
 /**
  * Compute the visual draw order of a line's segments under `baseRtl`. Text
  * segments contribute their text; non-text segments contribute one neutral
@@ -76,15 +70,18 @@ export interface LineVisualOrder {
  * practice because they are space-split); Canvas resolves any residual
  * intra-segment bidi when the slice is drawn with the matching `ctx.direction`.
  *
- * A run-level `<w:rtl>` (§17.3.2.30) gives the run's AMBIGUOUS characters
- * right-to-left characteristics. This is modelled as a UAX#9 §4.3 HL1
- * Bidi_Class override (punctuation/symbols → R), NOT as an RLE…PDF embedding:
+ * A run-level `<w:rtl>` (§17.3.2.30) gives punctuation and symbols
+ * right-to-left characteristics. Under
+ * `word-rtl-run-ambiguous-class-override`, this is modelled as a UAX #9 §4.3
+ * HL1 Bidi_Class override (punctuation/symbols → R), not as an RLE…PDF
+ * embedding; whitespace and strong letters retain their ordinary classes, and
+ * digits use the separate language-gated `digitsAsAN` override:
  * an embedding raises the run's level above the paragraph base, which strands
  * sibling base-level content on the wrong side (e.g. a trailing "." run after
  * "2022" in an RTL paragraph was over-embedded to level 3 and reordered to
  * "2022." instead of the recorded ".2022"). With the class override the run's
- * neutrals resolve RTL at the BASE level, exactly like Word: a literal "1. "
- * prefix mirrors to ".1", while strong-Latin content keeps its even (LTR)
+ * neutrals resolve RTL at the base level: a literal "1. " prefix mirrors to
+ * ".1", while strong-Latin content keeps its even (LTR)
  * level so English words in an rtl-marked run keep their LTR word order.
  */
 export function computeLineVisualOrder(

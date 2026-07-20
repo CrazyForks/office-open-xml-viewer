@@ -184,13 +184,12 @@ export function resolveAlignedPosV(
  * The floor is `containerStart` (container top): a box TALLER than its container
  * pins to the top and is allowed to overflow the bottom (clamping to
  * `end − boxH < start` would push it ABOVE the container top, which is worse). For
- * vAnchor="page" the container is the physical page [0, pageH], matching the
- * sample-17/18 physical-bottom measurements. For vAnchor="margin" the clamp
- * target (container end = the bottom text margin) is NOT independently observed —
- * no fixture pins where Word clamps a margin-anchored overflow — so it is ASSUMED
- * to be the container's own end (the margin band bottom), symmetric with the page
- * case. Callers pass the SAME `frameYContainer(vAnchor,…)` band the placement was
- * resolved against, so the clamp target always matches the anchor semantics.
+ * vAnchor="page" the container is the physical page [0, pageH]. The
+ * vAnchor="margin" target is explicitly implementation-defined because
+ * ECMA-376 does not specify the overflow clamp: use the owning margin band's
+ * end, symmetric with the page case. Callers pass the same
+ * `frameYContainer(vAnchor,…)` band used for placement, so the target remains
+ * consistent with the anchor semantics.
  *
  * Only meaningful for vAnchor=page/margin: the caller gates on that (vAnchor=text
  * is handled by pagination, and its band start/end ride the flow cursor, so this

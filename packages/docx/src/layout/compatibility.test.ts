@@ -100,6 +100,7 @@ import {
   WORD_POSITIONED_TABLE_ADJACENCY_EXCLUSION,
   WORD_SPACED_CELL_INSIDE_BORDER_CONFLICT,
   WORD_TABLE_BORDER_WEIGHT_PRECEDENCE,
+  WORD_TABLE_BORDER_STYLE_PRECEDENCE,
   WORD_TABLE_CELL_SPACING_SCOPE_SHADOW,
   WORD_TABLE_INDENT_ALL_ALIGNMENTS,
   WORD_TABLE_MARGIN_SCOPE_SHADOW,
@@ -428,31 +429,17 @@ describe('layout compatibility inventory', () => {
     expect(wordGridAtLeastLineHeightPx(28, 18, 18)).toBe(28);
     expect(wordDegenerateLineSpacingIsSingle('exact', 0)).toBe(true);
     expect(wordDegenerateLineSpacingIsSingle('atLeast', 0)).toBe(false);
-    expect(wordAutoMultipleCenterBoxPx({
-      autoMultiple: true,
-      compressedAuto: false,
-      glyphNaturalPx: 10,
-      intendedSinglePx: 12,
-      lineHeightPx: 24,
-    })).toBe(12);
-    expect(wordAutoMultipleCenterBoxPx({
-      autoMultiple: true,
-      compressedAuto: true,
-      glyphNaturalPx: 10,
-      intendedSinglePx: 12,
-      lineHeightPx: 6,
-    })).toBe(6);
+    expect(wordAutoMultipleCenterBoxPx(true, false, 10, 12, 24)).toBe(12);
+    expect(wordAutoMultipleCenterBoxPx(true, true, 10, 12, 6)).toBe(6);
     expect(wordVisibleLineMetricPx(20, 8)).toBe(8);
     expect(wordVisibleLineMetricPx(20, undefined)).toBe(20);
     expect(wordFirstJustifiedContentSegment(
       [{ text: '  ' }, { text: 'body' }],
       false,
-      (segment) => (segment as { text?: string }).text,
     )).toBe(1);
     expect(wordFirstJustifiedContentSegment(
       [{ text: '  ' }, { text: 'body' }],
       true,
-      (segment) => (segment as { text?: string }).text,
     )).toBe(0);
     expect(wordRubyUniformLineHeightPx(true, [12, 18, 14])).toBe(18);
     expect(wordRubyUniformLineHeightPx(false, [12, 18, 14])).toBe(0);
@@ -465,6 +452,9 @@ describe('layout compatibility inventory', () => {
   });
 
   it('pins supported table-model compatibility helper branches', () => {
+    expect(WORD_TABLE_BORDER_STYLE_PRECEDENCE[0]).toBe('single');
+    expect(WORD_TABLE_BORDER_STYLE_PRECEDENCE.at(-1)).toBe('inset');
+    expect(Object.isFrozen(WORD_TABLE_BORDER_STYLE_PRECEDENCE)).toBe(true);
     expect(wordTableBorderWeight('single', 1.5)).toBe(12);
     expect(wordTableBorderWeight('dotted', 99)).toBe(1);
     expect(wordTableBorderWeight('unknown', 2)).toBe(0);

@@ -1612,8 +1612,8 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
  *
  *    - `btLr`  (≡ Strict `lr`)  — its NOMINAL semantics are bottom-to-top /
  *                                 left-to-right, but the registered
- *                                 `word-section-btlr-tbrl-page-frame` behavior is
- *                                 `word-section-btlr-tbrl-page-frame`: section
+ *                                 `word-section-btlr-tbrl-page-frame` behavior
+ *                                 makes the section
  *                                 `btLr` uses the horizontal layout rotated +90° CW
  *                                 WHOLESALE: same page frame as `tbRl` (columns
  *                                 right→left, advance top→bottom — neither axis
@@ -5993,13 +5993,13 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // lineBoxHeight's `natural`); the multiplier's extra then falls below. Below
     // 1×, centre against the authored compressed line box itself.
     const compressedAuto = autoMultiple && (para.lineSpacing?.value ?? 1) < 1;
-    const centerBox = wordAutoMultipleCenterBoxPx({
+    const centerBox = wordAutoMultipleCenterBoxPx(
       autoMultiple,
       compressedAuto,
-      glyphNaturalPx: glyphNatural,
-      intendedSinglePx: visibleIntendedSingle,
-      lineHeightPx: lineH,
-    });
+      glyphNatural,
+      visibleIntendedSingle,
+      lineH,
+    );
     const baseline = state.y + (centerBox - glyphNatural) / 2 + visibleAscent;
 
     // Per-line X range (may be narrower than paraW when wrapping around floats).
@@ -6069,11 +6069,6 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     const firstContentSi = wordFirstJustifiedContentSegment(
       line.segments,
       paraNeedsBidi,
-      (segment) => (
-        'text' in (segment as object)
-          ? (segment as LayoutTextSeg).text
-          : undefined
-      ),
     );
     // Shrink-to-fit compression for a NON-justified line that overflows the box
     // (lineSlack < 0). layoutLines placed the whole line here on the promise that
@@ -7876,21 +7871,18 @@ function resolveAnchorBox(
   // `<wp:positionH/V>@relativeFrom` string (e.g. "margin", "topMargin") is
   // threaded through so xContainer/yContainer pick the correct container.
   // Without it a `relativeFrom="margin"` + `align="top"` image would degrade
-  // to the page-relative top edge (Y=0 → inside the top margin), which is
-  // exactly the sample-11 misplacement before this wire-up. ImageRun carries
-  // no pctPos/sizeRel, so those args remain null and the legacy boolean
+  // to the page-relative top edge (Y=0 → inside the top margin). ImageRun
+  // carries no pctPos/sizeRel, so those args remain null and the legacy boolean
   // anchorXFromMargin / anchorYFromPara hints still gate page-vs-margin when
   // no raw relativeFrom is present. When align is absent, resolveAnchorX/Y
   // fall back to the offset path.
   if (state.verticalPhys) {
     // `word-vertical-section-physical-drawing-layer`: resolve positionH/V in
-    // the physical page frame, independently of rotated text flow, then
-    // the box in physical space, then project it into the swapped logical layout
-    // frame the body text flows in — so the float-exclusion band and the
-    // (drawUprightBox-un-swapped) painted image share one geometry. A
-    // Under `word-vertical-section-physical-drawing-layer`,
-    // `paragraph`/`line`-relative positionV anchors from the PHYSICAL TOP of
-    // the anchor paragraph's COLUMN. That physical y is
+    // the physical page frame independently of rotated text flow, resolve the
+    // box there, then project it into the swapped logical layout frame. The
+    // float-exclusion band and the drawUprightBox-un-swapped painted image
+    // therefore share one geometry. A `paragraph`/`line`-relative positionV
+    // anchors from the physical top of the anchor paragraph's column. That y is
     // the column band's logical x start (`state.contentX`; physical y =
     // logical x under the +90° page paint) — NOT the logical flow `paraBaseY`,
     // which lies on the column-progression axis and would rotate the offset.

@@ -219,6 +219,14 @@ export function wordClipsOverPageCantSplitRow(input: Readonly<{
     && input.availableHeightPt + input.epsilonPt >= input.freshPageHeightPt;
 }
 
+export const WORD_TABLE_BORDER_STYLE_PRECEDENCE = Object.freeze([
+  'single', 'thick', 'double', 'dotted', 'dashed', 'dotDash', 'dotDotDash', 'triple',
+  'thinThickSmallGap', 'thickThinSmallGap', 'thinThickThinSmallGap', 'thinThickMediumGap',
+  'thickThinMediumGap', 'thinThickThinMediumGap', 'thinThickLargeGap', 'thickThinLargeGap',
+  'thinThickThinLargeGap', 'wave', 'doubleWave', 'dashSmallGap', 'dashDotStroked',
+  'threeDEmboss', 'threeDEngrave', 'outset', 'inset',
+] as const);
+
 const WORD_BORDER_NUMBER: Readonly<Record<string, number>> = Object.freeze({
   single: 1,
   thick: 2,

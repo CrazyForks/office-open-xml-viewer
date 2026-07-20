@@ -262,6 +262,11 @@ test('detects varied Office observation language outside compatibility modules',
     'Word ground truth requires an undocumented branch here.',
     'Word-observed behavior requires an undocumented branch here.',
     'Observed Windows Word behavior requires an undocumented branch here.',
+    'Observed Word offsets require an undocumented branch here.',
+    "Word's hierarchy default is undocumented.",
+    "This moves exactly like Word's pen.",
+    'No fixture pins where Word clamps the box.',
+    'This was measured against the Word PDFs.',
     'This is matching Word.',
   ];
   for (const claim of claims) {
