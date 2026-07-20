@@ -712,7 +712,7 @@ describe('textRunsForPage', () => {
     });
   });
 
-  it('keeps the single retained drawings-array ordinal when anchor metadata is mixed', () => {
+  it('uses the retained paragraph run ordinal when anchor metadata is mixed', () => {
     const anchoredBox = textBox('anchored-box', 'A');
     const inlineBox = textBox('inline-box', 'I');
     const anchored = anchoredDrawing('anchored-drawing', anchoredBox.id, {
@@ -741,7 +741,7 @@ describe('textRunsForPage', () => {
       documentLayout(page(layers, [body.id])),
       0,
       { scale: 1 },
-    ).map((run) => run.text)).toEqual(['B', 'A', 'I']);
+    ).map((run) => run.text)).toEqual(['B', 'I', 'A']);
   });
 
   it.each([0, -1, Number.NaN])('rejects a non-positive display scale %s', (scale) => {

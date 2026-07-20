@@ -270,14 +270,20 @@ function moduleEdges(path) {
     if (ts.isExportDeclaration(statement)
       && statement.moduleSpecifier
       && ts.isStringLiteral(statement.moduleSpecifier)) {
+      const bindings = statement.exportClause && ts.isNamedExports(statement.exportClause)
+        ? statement.exportClause.elements
+        : [];
       edges.push({
         kind: 'export',
         specifier: statement.moduleSpecifier.text,
         typeOnly: exportIsTypeOnly(statement),
         literal: true,
-        importedNames: statement.exportClause && ts.isNamedExports(statement.exportClause)
-          ? statement.exportClause.elements.map((element) => element.propertyName?.text ?? element.name.text)
+        importedNames: bindings.length > 0
+          ? bindings.map((element) => element.propertyName?.text ?? element.name.text)
           : ['*'],
+        aliased: bindings.some((element) => (
+          element.propertyName && element.propertyName.text !== element.name.text
+        )),
       });
     }
   }
@@ -376,6 +382,7 @@ function paintBoundaryViolations(root) {
           && dependency === layoutAffine
           && edge.kind === 'export'
           && !edge.typeOnly
+          && !edge.aliased
           && edge.importedNames?.length === LAYOUT_AFFINE_EXPORTS.size
           && edge.importedNames.every((name) => LAYOUT_AFFINE_EXPORTS.has(name));
         const allowedContract = (edge.typeOnly && dependency === layoutTypes)

@@ -198,9 +198,19 @@ function visitParagraph(
     paragraph.textBoxes.map((textBox) => [textBox.id, textBox]),
   );
   const ownedTextBoxIds = new Set<string>();
-  // Paragraph retention walks authored runs in order. Keep that single ordinal
-  // domain instead of mixing anchor run indexes with drawings-array indexes.
-  for (const drawing of paragraph.drawings) {
+  const drawingsInSourceOrder = paragraph.drawings
+    .map((drawing, index) => {
+      const runIndex = drawing.source.path.at(-1);
+      if (runIndex === undefined || !Number.isSafeInteger(runIndex) || runIndex < 0) {
+        throw new Error(`Drawing ${drawing.id} has no retained paragraph run index`);
+      }
+      return { drawing, index, runIndex };
+    })
+    .sort((left, right) => left.runIndex - right.runIndex || left.index - right.index);
+  // Both anchored and inline drawings retain their paragraph run index as the
+  // terminal SourceRef path component. That is the one comparable source-order
+  // domain; anchor stacking ordinals and drawings-array indexes are not mixed.
+  for (const { drawing } of drawingsInSourceOrder) {
     for (const id of drawing.textBoxIds ?? []) ownedTextBoxIds.add(id);
     visitDrawingTextBoxes(textBoxesById, drawing, projection, context);
   }

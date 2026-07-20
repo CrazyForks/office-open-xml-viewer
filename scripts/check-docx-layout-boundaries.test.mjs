@@ -455,6 +455,14 @@ test('paint reaches layout affine algebra only through the exact reviewed facade
     `export { ${names.slice(0, -1).join(', ')} } from '../layout/affine.js';\n`);
   expectDiagnostic(incomplete, 'FORBIDDEN_PAINT_EDGE', 'incomplete affine facade', '--final');
 
+  const aliased = initializeCanonicalFixture('docx-layout-boundary-paint-affine-aliased-');
+  write(aliased, 'packages/docx/src/paint/affine.ts',
+    "export { composeAffine,\n"
+      + '  inverseMapAffinePoint as inverseMapAffineVector,\n'
+      + '  inverseMapAffineVector as inverseMapAffinePoint,\n'
+      + "  mapAffinePoint, quarterTurnAffine, scaleAffine, translationAffine } from '../layout/affine.js';\n");
+  expectDiagnostic(aliased, 'FORBIDDEN_PAINT_EDGE', 'aliased affine facade', '--final');
+
   const direct = initializeCanonicalFixture('docx-layout-boundary-paint-affine-direct-');
   write(direct, 'packages/docx/src/paint/helper.ts',
     "import { composeAffine } from '../layout/affine.js';\nvoid composeAffine;\n");
