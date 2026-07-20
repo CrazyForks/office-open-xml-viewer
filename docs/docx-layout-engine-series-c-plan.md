@@ -234,7 +234,7 @@ it, propagate immutable rule IDs on retained result values and aggregate only
 from the accepted final layout tree. Never introduce a mutable collector whose
 contents can retain rejected probes or convergence candidates.
 
-- [ ] **C2a-2: Isolate paint-side and supported model-boundary compatibility decisions**
+- [x] **C2a-2: Isolate paint-side and supported model-boundary compatibility decisions**
 
 Name and evidence the remaining observations in `renderer.ts`, its legacy paint
 helpers, and the supported table-model boundary in `parser-model.ts` / `types.ts`
@@ -261,7 +261,7 @@ layout-boundary baseline, so C2a records the behavior as
 comment. C3 removes the frozen declaration and this final transitional entry;
 adding any other inline observation remains a CI failure.
 
-- [ ] **C2a-3: Review, broad-verify, and merge**
+- [x] **C2a-3: Review, broad-verify, and merge**
 
 Use independent specification/evidence review for each C2a PR. Mark issue
 #1037's compatibility-isolation item complete only after both layout and paint
