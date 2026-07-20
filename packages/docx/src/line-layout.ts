@@ -1162,9 +1162,9 @@ export function lineBoxHeight(
   // For `auto`/single spacing the multiplier applies to the intended font's
   // design line height (ECMA-376 §17.3.1.33). When the document's font is
   // substituted, the Canvas glyph extent (`glyphNatural`) understates that —
-  // see font-metrics.ts. `base` restores the intended single-line height so
-  // line spacing matches Word, while never dropping below the substituted
-  // glyph extent (so glyphs are not clipped). Grid-snapped lines are governed
+  // see font-metrics.ts. `base` restores the intended single-line height while
+  // never dropping below the substituted glyph extent, so glyphs are not
+  // clipped. Grid-snapped lines are governed
   // by the grid pitch instead, so the metric correction stays out of them.
   const natural = Math.max(glyphNatural, intendedSinglePx);
   const hasGrid = isGridLineRule(grid);

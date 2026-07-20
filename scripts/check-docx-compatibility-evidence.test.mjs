@@ -266,6 +266,8 @@ test('detects varied Office observation language outside compatibility modules',
     "Word's hierarchy default is undocumented.",
     "This moves exactly like Word's pen.",
     'No fixture pins where Word clamps the box.',
+    'Word — which paints the whole merged span.',
+    'Word pins the baseline.',
     'This was measured against the Word PDFs.',
     'This is matching Word.',
   ];

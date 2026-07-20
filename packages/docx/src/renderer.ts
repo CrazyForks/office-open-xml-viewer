@@ -4714,25 +4714,6 @@ function cellAtGridColumn(
   return null;
 }
 
-/** ECMA-376 §17.4.85 — re-open a vMerge span that crosses INTO a continuation
- *  slice. When an over-tall span is broken at an interior row boundary, the
- *  slice's first body row (`rows[start]`) inherits `vMerge=continue` cells whose
- *  `restart` sits on an earlier page. {@link drawTableRows} skips a bare continue
- *  cell ("drawn by its restart partner"), so without this the re-opened cell box
- *  would not be painted at all. For each such continue cell, walk UP `rows` to its
- *  owning restart and:
- *   - if that restart is a REPEATED header row already prepended to this slice
- *     (`restartRi < headerCount`, and headers repeat), leave the continue cell as
- *     is — the prepended header restart already spans the body rows, so promoting
- *     here would draw a SECOND box (review finding, §17.4.78);
- *   - otherwise promote it to `restart`, cloning the OWNING RESTART cell's
- *     presentation (background / borders / vAlign) so the continuation box matches
- *     Word — which paints the whole merged span from the restart cell — rather than
- *     the continue cell's own (usually empty) properties. Content is dropped: the
- *     merged content stayed with the restart row on the first piece, so the re-
- *     opened box is empty (no duplication). The grid footprint (`colSpan`) is kept
- *     from the continue cell so the row's column math is unchanged.
- *  Runtime-only clone: the parsed rows/cells are never mutated. */
 /**
  * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — the registered
  * `word-contextual-spacing-per-side` semantics, identical in body, table cell,
@@ -5956,8 +5937,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // (line/lineRule); `word-auto-multiple-baseline-pin` owns the draw-only
     // placement within the box:
     //   • lineRule="auto" is MULTIPLE spacing — `w:line` is a 240ths-of-a-line
-    //     multiplier. Word pins the baseline at the natural ascent from the box
-    //     top and places the multiplier's extra leading ENTIRELY BELOW the
+    //     multiplier. Pin the baseline at the natural ascent from the box top
+    //     and place the multiplier's extra leading entirely below the
     //     glyphs; it does NOT centre the natural line in the enlarged box.
     //     (Measured in the #981/#990 follow-up: a 2.0× 48pt title was displaced
     //     ~22pt when centred.) The substituted-font single-line FLOOR
