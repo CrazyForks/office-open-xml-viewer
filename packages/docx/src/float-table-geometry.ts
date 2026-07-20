@@ -61,8 +61,9 @@ export function computeFloatTableBox(
   paraTop: number,
   tableW: number,
   tableH: number,
-  /** When true, skip the observed Office vertAnchor=page/margin bottom-clamp so
-   *  the raw absolute box is returned. The paginator
+  /** When true, skip the renderer's implementation-defined
+   *  vertAnchor=page/margin bottom clamp so the raw absolute box is returned.
+   *  The paginator
    *  uses this to find where a page/margin-anchored table that overflows the text
    *  region must be row-split: the raw tblpY top drives slice 1's
    *  position, and clamping (which pins a too-tall box to the container top) would

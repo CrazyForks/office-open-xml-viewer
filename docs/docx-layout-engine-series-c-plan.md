@@ -234,12 +234,24 @@ it, propagate immutable rule IDs on retained result values and aggregate only
 from the accepted final layout tree. Never introduce a mutable collector whose
 contents can retain rejected probes or convergence candidates.
 
-- [ ] **C2a-2: Isolate paint-side compatibility decisions**
+- [ ] **C2a-2: Isolate paint-side and supported model-boundary compatibility decisions**
 
-Name and evidence the remaining observations in `renderer.ts` and its legacy
-paint helpers without performing the C3 extraction. Move only decision data and
-pure predicates; geometry and paint ownership remain unchanged. Shrink the
-observation baseline in the same PR.
+Name and evidence the remaining observations in `renderer.ts`, its legacy paint
+helpers, and the supported table-model boundary in `parser-model.ts` / `types.ts`
+without performing the C3 extraction or C2b unsupported-content diagnostics.
+Move only decision data and pure predicates; geometry, paint ownership, and the
+public model remain unchanged. Reconcile legacy comments that claim Office
+behavior with retained owners that deliberately treat the same policy as
+implementation-defined. Expand the observation scanner to cover the remaining
+Office-claim verbs, require its baseline to match exactly, and shrink that
+baseline in the same PR.
+
+Private-sample observations use public behavior-pinning regression tests as
+evidence; private filenames and content never enter committed rule records.
+Normative OOXML/UAX behavior, deterministic renderer policy, and deliberately
+unsupported Office behavior are classified explicitly instead of being promoted
+to compatibility rules. In particular, keep the draw-only #990 baseline rule
+distinct from the #981 trailing-mark pagination-admission rule.
 
 - [ ] **C2a-3: Review, broad-verify, and merge**
 

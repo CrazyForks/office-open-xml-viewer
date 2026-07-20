@@ -188,6 +188,17 @@ import {
 import { canonicalCanvasPaintResourceHandlers } from './paint/canonical-resource-handlers.js';
 import { paintPlacedParagraphLayout, paintTextBoxLayout } from './paint/canvas-text.js';
 import { paintDrawingLayout } from './paint/canvas-drawing.js';
+import {
+  wordEmptyMarkMinimumStartWidthPx,
+} from './layout/compatibility.js';
+import { wordPageLevelAnchorY } from './layout/anchor-compatibility.js';
+import {
+  wordAutoMultipleCenterBoxPx,
+  wordFirstJustifiedContentSegment,
+  wordRubyUniformLineHeightPx,
+  wordVisibleLineMetricPx,
+} from './layout/line-compatibility.js';
+import { WORD_TRACK_CHANGE_AUTHOR_COLORS } from './layout/paint-compatibility.js';
 import type { CanvasPaintResourcePainter } from './paint/types.js';
 import { createDocumentPaintResourceRegistry } from './layout/production-paint-resources.js';
 import {
@@ -1249,28 +1260,19 @@ export function dropColorReplacedCache(fetchImage: DocxFetchImage): void {
   colorReplacedByFetch.delete(fetchImage);
 }
 
-/** Picks a stable colour for a track-changes author. Mirrors Word's behaviour
- *  of cycling through a fixed palette (Word uses 8 hues then alternates).
- *  An empty / missing author maps to the first colour. */
-const TRACK_CHANGE_AUTHOR_PALETTE = [
-  '#C00000', // red
-  '#0070C0', // blue
-  '#00B050', // green
-  '#7030A0', // purple
-  '#E97132', // orange
-  '#196B24', // dark green
-  '#9E480E', // brown
-  '#525252', // grey
-];
+/** Stable deterministic author indexing over
+ * `word-track-change-author-palette`. An empty author uses the first colour. */
 function authorColor(author?: string): string {
-  if (!author) return TRACK_CHANGE_AUTHOR_PALETTE[0];
+  if (!author) return WORD_TRACK_CHANGE_AUTHOR_COLORS[0];
   // Simple FNV-1a style hash so the same author always gets the same colour.
   let h = 0x811c9dc5;
   for (let i = 0; i < author.length; i++) {
     h ^= author.charCodeAt(i);
     h = Math.imul(h, 0x01000193);
   }
-  return TRACK_CHANGE_AUTHOR_PALETTE[Math.abs(h) % TRACK_CHANGE_AUTHOR_PALETTE.length];
+  return WORD_TRACK_CHANGE_AUTHOR_COLORS[
+    Math.abs(h) % WORD_TRACK_CHANGE_AUTHOR_COLORS.length
+  ];
 }
 
 function collectImagePairs(doc: DocxDocumentModel, layoutServices: LayoutServices): ImagePair[] {
@@ -1609,8 +1611,9 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
  *                                 left-to-right, but Word ground truth (issue #988
  *                                 re-adjudication, correcting the batch-3
  *                                 adjudication ① with raster proof on asymmetric
- *                                 glyphs) shows Word renders a SECTION-level
- *                                 `btLr` as the HORIZONTAL layout rotated +90° CW
+ *                                 glyphs) is registered as
+ *                                 `word-section-btlr-tbrl-page-frame`: section
+ *                                 `btLr` uses the horizontal layout rotated +90° CW
  *                                 WHOLESALE: same page frame as `tbRl` (columns
  *                                 right→left, advance top→bottom — neither axis
  *                                 honors the nominal bottom-to-top/left-to-right),
@@ -4730,9 +4733,9 @@ function cellAtGridColumn(
  *     from the continue cell so the row's column math is unchanged.
  *  Runtime-only clone: the parsed rows/cells are never mutated. */
 /**
- * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — Word-adjudicated PER-SIDE
- * semantics (issue #1015, fixture sample-57 ground truth; identical in body,
- * table cell, and text box).
+ * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — the registered
+ * `word-contextual-spacing-per-side` semantics, identical in body, table cell,
+ * and text box.
  *
  * The §17.3.1.33 collapsed inter-paragraph gap decomposes as
  *   gap = prevContrib + currContrib
@@ -4742,9 +4745,8 @@ function cellAtGridColumn(
  * neighbour shares its paragraph style drops ITS OWN contribution only:
  *   - prev toggles → gap = max(before − after, 0)  — matches the spec's worked
  *     example (after=10pt, before=12pt → 2pt);
- *   - curr toggles → gap = after — Word renders prev's spaceAfter intact (the
- *     spec-literal "subtract this paragraph's before from the net" would give
- *     0; Word measured 10pt on sample-57 case 2);
+ *   - curr toggles → gap = after — the previous spaceAfter contribution remains
+ *     intact (the spec-literal net-minus-before reading would give 0);
  *   - both toggle  → gap = 0 (each side's contribution dropped; the
  *     decomposition is non-negative so no explicit floor is needed).
  *
@@ -5555,9 +5557,8 @@ function renderParagraph(
 
   // Collect all text segments with formatting (resolving field runs against page context)
   const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
-  // Word renders ruby paragraphs with consistent line spacing — every line
-  // in a paragraph that carries ANY furigana snaps to the same pitch
-  // multiple. Compute once at paragraph scope and share with the line loop.
+  // `word-ruby-paragraph-uniform-line-advance`: compute the paragraph-wide
+  // ruby line height once and share it with the line loop.
   const paraHasRuby = paragraphContext.hasRuby;
   const grid = paraGrid(para, state);
 
@@ -5567,22 +5568,11 @@ function renderParagraph(
   // §20.4.2.17). The displacement below — flow the mark line below the float band
   // when the side gap cannot hold the pilcrow — has no dedicated §x.x.x: the only
   // SPEC-mandated flow of a line onto a float-free region is the explicit
-  // `<w:br w:clear>` of §17.18.3, which is not what fires here. The TRIGGER for an
-  // EMPTY paragraph mark is Word's measured behaviour: the mark stays BESIDE the
-  // float as long as the free side-gap can hold the pilcrow itself (its em width),
-  // and drops below only when the gap is narrower than that — i.e. effectively a
-  // full-width float band. This is NARROWER than the 1-inch rule Word applies to
-  // CONTENT lines (issue #676, wordMinLineStartPx): an empty mark in a ~62pt gap
-  // (under 1 inch) still sits beside the float — flowing it below at 1 inch pushed
-  // sample-12's caption + CONCLUSION onto the next page (#676 over-generalized the
-  // content-line threshold onto empty marks; this restores the pilcrow threshold).
-  // Grounded from sample-9 p.4 (full-width band → drops below, carrying
-  // its wrapNone anchor image) and sample-12 p.2 (~62pt gap → beside). Without the
-  // drop-below an empty mark wedges into a sub-pilcrow sliver beside a full-width
-  // float band and the following paragraphs (and any wrapNone image they anchor)
-  // stay pinned inside the band. We resolve the mark line's flowed top here and
-  // use it for the mark advance, the shading/border rect, and the
-  // paragraph-relative base of any wrapNone anchor image drawn below.
+  // `<w:br w:clear>` of §17.18.3, which is not what fires here.
+  // `word-empty-mark-float-side-gap` supplies the narrower paragraph-mark em
+  // threshold, while `word-square-line-start-one-inch` remains content-only.
+  // Resolve the mark line's flowed top here and reuse it for the mark advance,
+  // shading/border rect, and any wrapNone drawing anchored below.
   const markProbeHeight = paragraphMarkLineHeight(
     para,
     scale,
@@ -5598,10 +5588,8 @@ function renderParagraph(
   );
   const resolveEmptyMarkTop = (): number => {
     if (state.floats.length === 0) return textAreaTopY;
-    // Required side-gap for the mark line: the pilcrow's em width
-    // (paragraphMarkEmPx) — the empty-mark threshold, NOT the 1-inch content-line
-    // rule (issue #676). A gap narrower than the pilcrow cannot hold the
-    // mark, so it flows below the band.
+    // Required side-gap comes from `word-empty-mark-float-side-gap`, not the
+    // one-inch content-line rule.
     const win = resolveLineFloatWindow(
       textAreaTopY, paragraphMarkEmPx(para, scale), markProbeHeight, paraX, paraW, state.floats,
       // Raw COLUMN band for the topAndBottom gate (§20.4.2.20 / §17.6.4): an
@@ -5773,17 +5761,23 @@ function renderParagraph(
     return;
   }
 
-  // For paragraphs that carry any ruby annotation, Word renders every line
-  // at the SAME height. Per the user's note: when the section's docGrid is
-  // active, Word widens the grid pitch to accommodate the tallest required
-  // line (ruby + base + leading), then ALL lines in the paragraph use that
-  // widened pitch — both ruby-bearing and non-ruby lines share the same
-  // baseline grid, otherwise the lines drift. We mimic this by computing
-  // uniformLineH = ceil(max natural / pitch) * pitch when docGrid is on,
-  // else just the max natural.
+  // `word-ruby-paragraph-uniform-line-advance`: all lines share the maximum
+  // ruby-bearing advance, snapped to the active grid when present.
   const uniformLineH = paraHasRuby
     ? snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, paragraphContext.hasEastAsianText))),
+        wordRubyUniformLineHeightPx(
+          true,
+          lines.map(l => lineBoxHeight(
+            para.lineSpacing,
+            l.ascent,
+            l.descent,
+            scale,
+            grid,
+            true,
+            l.intendedSingle,
+            paragraphContext.hasEastAsianText,
+          )),
+        ),
         grid,
         scale,
       )
@@ -5982,14 +5976,14 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // centred below-baseline extent that is deliberately left unchanged; see
     // lineBelowBaselinePx in line-layout.ts.)
     const lineH = lineHForLine(line);
-    // A floating-anchor host can reserve line/grid height while painting no
-    // glyph. Keep that reservation in `lineH`, but position visible ink from
-    // the segments that actually draw. This preserves the host paragraph's
-    // advance without letting a differently-sized zero-ink run lower adjacent
-    // caption text (Word-compatible mixed-anchor behavior).
-    const visibleAscent = line.visibleAscent ?? line.ascent;
-    const visibleDescent = line.visibleDescent ?? line.descent;
-    const visibleIntendedSingle = line.visibleIntendedSingle ?? line.intendedSingle;
+    // `word-mixed-anchor-visible-line-metrics`: keep the host reservation in
+    // lineH while positioning visible ink from metrics that actually draw.
+    const visibleAscent = wordVisibleLineMetricPx(line.ascent, line.visibleAscent);
+    const visibleDescent = wordVisibleLineMetricPx(line.descent, line.visibleDescent);
+    const visibleIntendedSingle = wordVisibleLineMetricPx(
+      line.intendedSingle,
+      line.visibleIntendedSingle,
+    );
     const glyphNatural = visibleAscent + visibleDescent;
     const autoMultiple =
       para.lineSpacing?.rule === 'auto' && !paraHasRuby && !isGridLineRule(grid);
@@ -5998,9 +5992,13 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // lineBoxHeight's `natural`); the multiplier's extra then falls below. Below
     // 1×, centre against the authored compressed line box itself.
     const compressedAuto = autoMultiple && (para.lineSpacing?.value ?? 1) < 1;
-    const centerBox = autoMultiple && !compressedAuto
-      ? Math.max(glyphNatural, visibleIntendedSingle)
-      : lineH;
+    const centerBox = wordAutoMultipleCenterBoxPx({
+      autoMultiple,
+      compressedAuto,
+      glyphNaturalPx: glyphNatural,
+      intendedSinglePx: visibleIntendedSingle,
+      lineHeightPx: lineH,
+    });
     const baseline = state.y + (centerBox - glyphNatural) / 2 + visibleAscent;
 
     // Per-line X range (may be narrower than paraW when wrapping around floats).
@@ -6065,18 +6063,17 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     let segStretch: Map<number, SegStretch> | null = null;
     let distPerGap = 0;
     let kashidaPlan: Map<number, KashidaSegmentPlan> | null = null;
-    // First content segment in reading order. Leading-whitespace segments before
-    // it (a paragraph's 字下げ indent) are NOT stretched — Word keeps the indent
-    // fixed and distributes slack only across the line content (§17.18.44). Only
-    // meaningful for LTR: under bidi the logical-leading segment is not the
-    // visually-leading one, so leave the skip off (0) there.
-    let firstContentSi = 0;
-    if (!paraNeedsBidi) {
-      for (let i = 0; i < segCount; i++) {
-        const seg = line.segments[i];
-        if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
-      }
-    }
+    // `word-justification-leading-indent-exclusion`: skip leading indent
+    // whitespace only in logical left-to-right order.
+    const firstContentSi = wordFirstJustifiedContentSegment(
+      line.segments,
+      paraNeedsBidi,
+      (segment) => (
+        'text' in (segment as object)
+          ? (segment as LayoutTextSeg).text
+          : undefined
+      ),
+    );
     // Shrink-to-fit compression for a NON-justified line that overflows the box
     // (lineSlack < 0). layoutLines placed the whole line here on the promise that
     // its inter-word spaces would be squeezed by up to SPACE_SHRINK_RATIO (its fit
@@ -6245,8 +6242,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // compresses it so the final glyph lands on the right margin instead of
     // overflowing. Gaps open at inter-word spaces AND — for expansion — inter-CJK
     // boundaries, so a pure-CJK `both`/`distribute` line fills the margin too
-    // (Word fills CJK `both` lines by adding inter-character pitch; see
-    // text-distribute.ts). distributeLineSlack returns, per logical segment, the
+    // through inter-character pitch (see text-distribute.ts).
+    // distributeLineSlack returns, per logical segment, the
     // internal split points and a trailing-gap flag; the draw loop applies
     // `perGap` at each. Only computed when the line is a justify candidate
     // (jc=both/distribute, not the last line unless distribute) — a NON-justified
@@ -6584,7 +6581,7 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         // that is BACKEND-DEPENDENT: Chrome reorders the trailing space to the
         // left, whereas skia-canvas (the server/VRT/MCP rendering backend)
         // left-anchors the logical string and leaves the space on the physical
-        // RIGHT — so the space lands on the wrong (outer) side and the word renders
+        // RIGHT — so the space lands on the wrong (outer) side and the token renders
         // FLUSH against its reading-next neighbour (the gap collapses; most visible
         // as a two-word label / table cell where the single inter-word gap is lost).
         // Position the whitespace EXPLICITLY instead: draw the trailing-whitespace-
@@ -7796,7 +7793,7 @@ export const __test_renderInlineImage = (
 /** ECMA-376 §17.6.20 + §20.4.3.x — a RenderState view whose page/margin geometry
  *  is the PHYSICAL (un-rotated) page, used to resolve a DrawingML anchor's
  *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
- *  (Word places the drawing layer independently of the text-flow rotation). Only
+ *  under `word-vertical-section-physical-drawing-layer`. Only
  *  the geometry fields `xContainer`/`yContainer`/`resolveAnchorX`/`resolveAnchorY`
  *  read are overridden (scale, page size, margins, `pageH`); everything else is
  *  the live logical state. Callers map the resolved physical box back into the
@@ -7819,8 +7816,9 @@ function physicalAnchorState(state: RenderState): RenderState {
 
 /** ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②/④) — a RenderState view whose
  *  geometry AND text flags are PHYSICAL, for content that stays UPRIGHT inside a
- *  vertical (tbRl) section: anchored shapes and block tables. Word resolves and
- *  paints these against the un-rotated physical page — cell/label text is
+ *  vertical (tbRl) section: anchored shapes and block tables. Under
+ *  `word-vertical-section-physical-drawing-layer`, these resolve and paint
+ *  against the un-rotated physical page — cell/label text is
  *  horizontal — so on top of {@link physicalAnchorState}'s page/margin un-swap
  *  this view also re-points the content band at the physical margins and clears
  *  the vertical flags (no per-glyph counter-rotation, no +90° text-layer
@@ -7879,8 +7877,8 @@ function resolveAnchorBox(
   // no raw relativeFrom is present. When align is absent, resolveAnchorX/Y
   // fall back to the offset path.
   if (state.verticalPhys) {
-    // ECMA-376 §17.6.20 (tbRl): the anchor's positionH/V are PHYSICAL-page
-    // relative (the drawing layer is not rotated with the text flow). Resolve
+    // `word-vertical-section-physical-drawing-layer`: resolve positionH/V in
+    // the physical page frame, independently of rotated text flow, then
     // the box in physical space, then project it into the swapped logical layout
     // frame the body text flows in — so the float-exclusion band and the
     // (drawUprightBox-un-swapped) painted image share one geometry. A
@@ -7917,12 +7915,10 @@ function resolveAnchorBox(
   return { x, y, w, h, dl, dr, dt, db };
 }
 
-/** ECMA-376 §20.4.3.2 / §20.4.3.5 — a `<wp:positionV>` `relativeFrom` value
+/** `word-page-level-float-prescan` classifies a `<wp:positionV>` reference
  *  that resolves the float's Y INDEPENDENTLY of its anchoring paragraph (vs.
  *  `paragraph` / `line` / `character` which resolve against the paragraph's
- *  top). When Y is page-level, Word treats the float as page-positioned: it
- *  is laid out as soon as the page is opened and earlier paragraphs on the
- *  same page wrap around it. {@link preRegisterPageFloats} uses this to
+ *  top). {@link preRegisterPageFloats} uses this to
  *  hoist such floats to page-start; paragraph-local Y still flows the legacy
  *  per-paragraph path.
  *
@@ -7931,15 +7927,7 @@ function resolveAnchorBox(
  *  (`anchorYFromPara=false` ⇒ page-absolute offset), so it qualifies as
  *  page-level too. */
 function isPageLevelAnchorY(rf: string | null | undefined, fromPara: boolean): boolean {
-  if (rf == null) return !fromPara;
-  switch (rf) {
-    case 'paragraph':
-    case 'line':
-    case 'character':
-      return false;
-    default:
-      return true;
-  }
+  return wordPageLevelAnchorY(rf, fromPara);
 }
 
 /** True when this run is a wrap float whose vertical placement is page-level
@@ -8425,9 +8413,8 @@ function drawTableRows(
           leftCol: ci === 0,
           rightCol: ci + span === colWidths.length,
         };
-        // ECMA-376 §17.4.81: an exact row height is honored verbatim and
-        // content taller than the row is clipped to the row box (Word clips;
-        // we would otherwise overflow into neighboring rows). A vMerge=restart
+        // `word-exact-row-vertical-clip-only`: an exact single-row cell clips
+        // vertical overflow to its row box. A vMerge=restart
         // cell spans multiple rows, so it is never governed by a single row's
         // exact height — only single-row cells clip.
         const clipExact = row.rowHeightRule === 'exact' && cell.vMerge !== true;
@@ -8759,9 +8746,8 @@ function renderFloatTable(table: DocTable, state: RenderState): void {
 }
 
 function renderTable(table: DocTable, state: RenderState): void {
-  // ECMA-376 §17.4.57 + [MS-OI29500] §2.1.162: divert only an
-  // effectively positioned table to the out-of-flow path; Word can ignore an
-  // authored tblpPr, so lexical presence alone is not this branch condition.
+  // `word-effective-floating-table-positioning`: divert only an effectively
+  // positioned table; lexical tblpPr presence is not the branch condition.
   if (!tableParticipatesInOrdinaryFlow(table)) {
     renderFloatTable(table, state);
     return;
@@ -8993,9 +8979,19 @@ function measureCellParagraphWindow(
     );
     const uniformLineH = paraHasRuby
       ? snapParaLineToGrid(
-          Math.max(0, ...paintLines.map((l) => lineBoxHeight(
-            para.lineSpacing, l.ascent, l.descent, scale, grid, true, l.intendedSingle, eastAsian,
-          ))),
+          wordRubyUniformLineHeightPx(
+            true,
+            paintLines.map((l) => lineBoxHeight(
+              para.lineSpacing,
+              l.ascent,
+              l.descent,
+              scale,
+              grid,
+              true,
+              l.intendedSingle,
+              eastAsian,
+            )),
+          ),
           grid,
           scale,
         )
@@ -9397,7 +9393,7 @@ function drawBorderLine(
 
 /**
  * ECMA-376 §17.3.1.7 — paragraph-border merge context for a run of consecutive
- * identically-bordered paragraphs. Word draws ONE box around such a run:
+ * identically-bordered paragraphs. The renderer draws one box around the run:
  *   - the `top` edge only on the FIRST paragraph,
  *   - the `bottom` edge only on the LAST paragraph,
  *   - the `<w:between>` edge (if any) at every INNER join,
@@ -9453,11 +9449,9 @@ export function paintedParagraphHeight<L extends { topY?: number }>(
   return y - textAreaTopY;
 }
 
-/** ECMA-376 §17.3.1.31 — paragraph shading fills the border BOX, not just the
- *  text extent. §17.3.1.31 itself only says the shading sets the paragraph's
- *  background color and is SILENT on border geometry; the fill-to-border is
- *  observed Word behavior: Word fills the border box, and §17.3.1.7 places each
- *  border's `w:space` OUTSIDE the text box (applied by {@link drawParaBorders}), so
+/** `word-paragraph-shading-border-box`: paragraph shading fills the border box,
+ *  not just the text extent. §17.3.1.7 places each border's `w:space` outside
+ *  the text box (applied by {@link drawParaBorders}), so
  *  the shading reaches those borders. Return the content box grown by each PRESENT
  *  border's space, using the SAME per-edge conditions as drawParaBorders so the
  *  fill meets the border exactly. Without a bordered edge (or no borders at all)
@@ -9647,24 +9641,11 @@ function markerDisplayText(num: NumberingInfo): string {
   return symbolFontToUnicode(num.text, num.fontFamily ?? null);
 }
 
-/** Minimum clear side-gap (px) an EMPTY paragraph-mark line needs before it may
- *  START beside a float rather than flow below the float band — the pilcrow's own
- *  em width (the paragraph-mark font size × scale). Distinct from the 1-inch
- *  CONTENT-line rule (`wordMinLineStartPx`, issue #676): Word keeps an empty mark
- *  beside a float whenever the gap can hold the pilcrow, and drops it below only
- *  when the gap is narrower than that — i.e. effectively a full-width band. See
- *  WORD_MIN_LINE_START_PT's SCOPE note. Grounded from sample-9 p.4 (a full-width
- *  float band → the mark drops below, carrying its wrapNone anchor image, PR
- *  b897bbf) AND sample-12 p.2 (a ~62pt side-gap under 1 inch where the figure's
- *  nine trailing blank-line marks stay beside the float; flowing them below at
- *  1 inch pushed the caption + CONCLUSION onto page 3 — the regression #676
- *  introduced, which this restores). Single source of truth for the literally-empty /
- *  anchor-only paragraph sites — the paint pass `resolveEmptyMarkTop` and the
- *  paginator mirror `flowMarkLine` — so the two agree bit-for-bit. (A content
- *  paragraph's trailing-break empty final line stays on the 1-inch content-line
- *  rule inside `layoutLines`; see WORD_MIN_LINE_START_PT's SCOPE note.) */
+/** Minimum clear side-gap under `word-empty-mark-float-side-gap`.
+ * The caller supplies the paragraph-mark em; content lines retain
+ * `word-square-line-start-one-inch`. */
 function paragraphMarkEmPx(para: DocParagraph, scale: number): number {
-  return getDefaultFontSize(para) * scale;
+  return wordEmptyMarkMinimumStartWidthPx(getDefaultFontSize(para), scale);
 }
 
 // ───────────────────────────────────────────────────────────────────────────

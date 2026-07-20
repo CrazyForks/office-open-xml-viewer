@@ -17,6 +17,7 @@ import {
   buildVisualOrder,
   type BidiClass,
 } from '@silurus/ooxml-core';
+import { wordRtlAmbiguousCharacter } from './layout/script-compatibility.js';
 
 /** A laid-out segment as seen here: only its optional text matters for bidi.
  *  Typed as `unknown` element so the renderer's LayoutSeg union (whose image /
@@ -62,12 +63,10 @@ export interface LineVisualOrder {
 }
 
 /** Punctuation/symbols — the "ambiguous" characters a run-level `<w:rtl>`
- *  resolves to RTL (§17.3.2.30). Whitespace is deliberately EXCLUDED: an
- *  inter-word space classified R would reverse the mutual order of English
- *  words inside an rtl-marked run, which Word does not do. Letters/digits are
- *  excluded too — strong chars keep their class, and digits are handled by the
- *  separate `digitsAsAN` (w:lang-gated) override. */
-const AMBIGUOUS_CHAR = /[\p{P}\p{S}]/u;
+ *  resolves to RTL (§17.3.2.30). Under
+ *  `word-rtl-run-ambiguous-class-override`, whitespace and strong
+ *  letters/digits retain their ordinary classes; digits have the separate
+ *  `digitsAsAN` language-gated override. */
 
 /**
  * Compute the visual draw order of a line's segments under `baseRtl`. Text
@@ -83,7 +82,7 @@ const AMBIGUOUS_CHAR = /[\p{P}\p{S}]/u;
  * an embedding raises the run's level above the paragraph base, which strands
  * sibling base-level content on the wrong side (e.g. a trailing "." run after
  * "2022" in an RTL paragraph was over-embedded to level 3 and reordered to
- * "2022." where Word renders ".2022"). With the class override the run's
+ * "2022." instead of the recorded ".2022"). With the class override the run's
  * neutrals resolve RTL at the BASE level, exactly like Word: a literal "1. "
  * prefix mirrors to ".1", while strong-Latin content keeps its even (LTR)
  * level so English words in an rtl-marked run keep their LTR word order.
@@ -136,7 +135,7 @@ export function computeLineVisualOrder(
         const c = full.charCodeAt(k);
         if (digitsAN && c >= 0x30 && c <= 0x39) {
           ov[k] = 'AN';
-        } else if (rtlMarked && AMBIGUOUS_CHAR.test(full[k])) {
+        } else if (rtlMarked && wordRtlAmbiguousCharacter(full[k])) {
           ov[k] = 'R';
         }
       }
@@ -155,7 +154,7 @@ export function computeLineVisualOrder(
   // (255-removed → paragraph level), then UAX#9 L2 permutes them — the shared
   // `buildVisualOrder` back half. No level forcing for rtl-marked segments:
   // Latin letters keep their even (LTR) level (so English words in an rtl-marked
-  // run keep their mutual LTR order, as Word renders them), while the run's
+  // run keep their mutual LTR order), while the run's
   // punctuation resolves to the odd level via the §17.3.2.30 class override
   // above.
   const { order } = buildVisualOrder(levels, paragraphLevel, segStart);
@@ -163,7 +162,7 @@ export function computeLineVisualOrder(
   // Direction hint = "does the segment contain ANY odd-level unit". A
   // digits-with-punctuation slice like "1. " has its "." resolve to the odd
   // level, so the slice draws with ctx.direction rtl and Canvas mirrors it to
-  // ".1" exactly as Word does — whereas a pure-Latin slice is all-even and
+  // ".1" under the registered override — whereas a pure-Latin slice is all-even and
   // keeps its LTR rendering. This is docx-specific (pptx/xlsx use plain
   // first-unit level parity), so it stays here rather than in buildVisualOrder.
   const rtl: boolean[] = new Array(n);

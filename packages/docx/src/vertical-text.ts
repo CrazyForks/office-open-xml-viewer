@@ -54,6 +54,7 @@
 // upright/substitute glyph handling entirely (issue #988 re-adjudication: every
 // glyph rides the page rotation — see RenderState.verticalAllRotated).
 
+import { wordPreservesVerticalTuCorner } from './layout/script-compatibility.js';
 import {
   verticalOrientation,
   verticalFormSubstitute,
@@ -567,16 +568,16 @@ export function drawVerticalRunWithCapability(
       // the old `+0.12em` font-tuned heuristic. Skipped when the ． corner nudge is
       // active (`off.dy`), which is a self-contained upper-right cell placement.
       //
-      // NOT applied to a substituted Tu punctuation form (comma/full stop 、。，
-      // → FE10–FE12): those glyphs are DESIGNED with their ink in the cell's
-      // upper-right corner (JIS X 4051 §4.3 kutōten placement — Word keeps them
-      // there, PDF-verified on sample-26: 、 ink at −0.32em along-column). Ink-
+      // Under `word-vertical-tu-corner-placement`, this is NOT applied to a
+      // substituted Tu punctuation form (comma/full stop 、。， → FE10–FE12):
+      // those glyphs are designed with their ink in the cell's upper-right
+      // corner (JIS X 4051 §4.3 kutōten placement). Ink-
       // centring would force that intentional offset back to the geometric cell
       // centre, dropping the comma/full stop LOW — the reported "、。 sit too low"
       // defect (#771). Drawing them em-box-centred preserves the font's corner
       // design. The Tr brackets DO get the correction: their two halves must sit a
       // full cell apart and the font centres the em box, not the ink (#792).
-      const isPunctSubstitute = puncCp !== null;
+      const isPunctSubstitute = wordPreservesVerticalTuCorner(puncCp);
       const alongEm =
         off.dy === 0 && !isPunctSubstitute
           ? inkCenterAboveMiddlePx(ctx, drawStr) / fontPx
@@ -802,9 +803,10 @@ export interface Box {
  * layout frame the vertical (tbRl) renderer flows text in (ECMA-376 §17.6.20 +
  * §20.4.3.x).
  *
- * A `<wp:positionH>` / `<wp:positionV>` anchor is resolved against the PHYSICAL
- * page — Word places the drawing layer before/independently of the text-flow
- * rotation, so the image stays upright at physical `(px, py, w, h)` exactly as in
+ * Under `word-vertical-section-physical-drawing-layer`, a
+ * `<wp:positionH>` / `<wp:positionV>` anchor resolves against the physical page
+ * independently of text-flow rotation, so the image stays upright at
+ * physical `(px, py, w, h)` exactly as in
  * a horizontal document. The body text, however, is laid out in the logical frame
  * that the page paint transform `physical = (cssWidth − logical.y, logical.x)`
  * maps to physical. Inverting that transform (`logical.x = physical.y`,

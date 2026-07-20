@@ -80,6 +80,13 @@ import {
   shapeRunToDocRun,
 } from './layout/text.js';
 import type { MathLayoutResource } from './layout/resources.js';
+import {
+  wordDegenerateLineSpacingIsSingle,
+  wordEastAsianGridLineCells,
+  wordFarEastSingleLinePx,
+  wordGridAtLeastLineHeightPx,
+} from './layout/line-compatibility.js';
+import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
 
 export interface LineBoundary {
   segIndex: number;
@@ -166,10 +173,10 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  When true the segment's text is treated as a strong-RTL embedding in the
    *  per-line bidi pass (so leading digits / neutrals resolve RTL). */
   rtl?: boolean;
-  /** UAX#9 §4.3 HL1 / Word behaviour: classify this segment's European digits
+  /** `word-rtl-run-ambiguous-class-override`: classify this segment's European digits
    *  (U+0030–0039) as Arabic-Number (AN) in the per-line bidi pass, so a date
    *  like "28-02-2026" in an Arabic complex-script run reorders to "2026-02-28"
-   *  exactly as Word renders it (ECMA-376 §17.3.2.20 w:lang w:bidi). */
+   *  in the registered order (ECMA-376 §17.3.2.20 w:lang w:bidi). */
   digitsAsAN?: boolean;
   /** ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`) DECLARED on the
    *  originating run, retained purely for a line-box DESIGN-LINE FLOOR. Word
@@ -563,9 +570,9 @@ export interface LineLayoutEnvironment {
 // synchronously; drawing blits the image. Skipped entirely for math-free documents.
 /** Arabic-script faces that hosts rarely ship; we substitute them with Noto
  *  Naskh/Sans Arabic web fonts (see DOCX_GOOGLE_FONTS in document.ts — this
- *  list MUST mirror the Arabic entries there). A run whose font is one of these
- *  contains BOTH Arabic and Latin/digit glyphs that Word renders from the same
- *  single face, so the fallback chain must keep both scripts stylistically
+ *  list MUST mirror the Arabic entries there). A source run whose font is one
+ *  of these contains both Arabic and Latin/digit glyphs in one requested face,
+ *  so the fallback chain must keep both scripts stylistically
  *  consistent (Arabic substitute first, serif Latin companion before the sans
  *  generics) rather than letting Latin/digits leak to a CJK sans face. */
 export const ARABIC_SUBSTITUTE_FONTS = new Set([
@@ -758,7 +765,7 @@ export function normalizeFontFamilyUncached(
 
   // 0) Arabic-script faces substituted by Noto Naskh/Sans Arabic. A single
   //    Sakkal Majalla / Traditional Arabic run carries Arabic glyphs AND
-  //    Latin letters/digits; Word draws both from that one face. The browser
+  //    Latin letters/digits; the source run assigns both to that one face. The browser
   //    resolves each glyph against the chain in order, so the Arabic substitute
   //    MUST come first — otherwise the Latin/digit glyphs are grabbed by the
   //    first chain member that has them (e.g. the CJK "Noto Sans JP"), and
@@ -1104,20 +1111,20 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  * point sits on the boundary — the geometric reading is that it still FITS).
  * For a mixed-size line, callers supply the tallest run's resolved height
  * (§17.3.1.33 tallest-run line box). ECMA-376 defines `linePitch` as one
- * single-spaced line; spreading taller lines over whole cells is Word runtime
- * behaviour. Returns at least 1 for every finite `naturalPx >= 0`.
+ * single-spaced line; taller-line spreading is governed by
+ * `word-east-asian-grid-line-allocation`. Returns at least 1 for every finite
+ * `naturalPx >= 0`.
  */
 export function docGridLineCells(naturalPx: number, pitchPx: number): number {
-  return pitchPx > 0 ? Math.max(1, Math.ceil(naturalPx / pitchPx)) : 1;
+  return wordEastAsianGridLineCells(naturalPx, pitchPx);
 }
 
 /** Deterministic single-line height used to count docGrid cells for one East
  * Asian text run. Tabled fonts contribute their recorded design height.
  *
- * Word's Far-East single-line height is 1.3 × the font's hhea box: measured for
- * Yu Mincho in the issue #1013 sample-58 sweep and corroborated by Meiryo, whose
- * usWin sum is designed as 1.3 × its hhea box. The factor is font-independent
- * Word runtime behaviour, not an ECMA-376 rule (§17.6.5 does not define it).
+ * The `word-east-asian-grid-line-allocation` rule supplies the 1.3 × hhea-box
+ * fallback measured for the Far East grid path; §17.6.5 does not define this
+ * factor.
  *
  * An untabled font's hhea box is unknown, so the fallback assumes 1.0em. That is
  * exact for the legacy full-frame Japanese fonts that dominate the untabled
@@ -1134,7 +1141,7 @@ export function docGridLineCells(naturalPx: number, pitchPx: number): number {
  * fontTools-extracted MS Mincho/MS Gothic hhea metrics in core WIN_METRICS when
  * those font binaries are available. */
 export function eastAsianGridCountSinglePx(intendedSinglePx: number, emPx: number): number {
-  return intendedSinglePx > 0 ? intendedSinglePx : emPx * 1.3;
+  return wordFarEastSingleLinePx(intendedSinglePx, emPx);
 }
 
 /**
@@ -1204,7 +1211,8 @@ export function lineBoxHeight(
   // a one-cell floor (demo/sample-1: an 18pt heading on an 18pt pitch stays
   // ~20.7px, not 36). ECMA-376 Part 1 only defines the natural ≤ pitch case
   // (§17.6.5 / §17.3.1.32); the East-Asian cell rounding for taller lines is
-  // Word runtime behaviour, so it is gated on the line's script.
+  // `word-east-asian-grid-line-allocation` therefore gates whole-cell
+  // allocation on the line's script.
   const gridSingleCell = (): number => {
     if (!eastAsian) return Math.max(glyphNatural, pitchPx);
     // Ruby lines reserve real furigana height (base + rt); honor the measured
@@ -1241,7 +1249,8 @@ export function lineBoxHeight(
   // §17.3.1.33 does not define (read literally, an `exact` line of 0 would
   // collapse the line box to no height; some generators emit
   // `<w:spacing w:line="0" w:lineRule="exact"/>` on table cells, e.g. sample-7).
-  // Word's native model has no such state: per the [MS-DOC] LSPD structure,
+  // `word-degenerate-line-spacing-single` follows the native LSPD
+  // representation:
   // "exact" spacing is encoded as a negative dyaLine ("the line spacing, in
   // twips, is exactly 0x10000 minus dyaLine", so an exact 0 is unrepresentable)
   // and a non-negative dyaLine in twips mode is "dyaLine or the number of twips
@@ -1251,7 +1260,7 @@ export function lineBoxHeight(
   // exact/auto line <= 0 as single spacing. (LSPD's max() rule is the twips
   // mode; applying the same fallback to a degenerate auto multiplier <= 0 is
   // the analogous non-collapsing reading.)
-  if ((ls.rule === 'exact' || ls.rule === 'auto') && ls.value <= 0) {
+  if (wordDegenerateLineSpacingIsSingle(ls.rule, ls.value)) {
     return hasGrid ? gridSingleCell() : natural;
   }
   if (ls.rule === 'auto') {
@@ -1265,16 +1274,13 @@ export function lineBoxHeight(
   if (ls.rule === 'atLeast') {
     // §17.18.48 establishes the authored minimum and §17.6.5 establishes the
     // grid pitch, but neither clause specifies how a tall, plain line with an
-    // explicit atLeast value combines with whole-cell grid allocation. Windows
-    // Word output leaves that line at its raw content height while later
-    // ordinary lines remain on one pitch. Preserve that observed compatibility
-    // behavior here. Ruby and inherited-only spacing retain the established
-    // whole-cell path because their separate fixtures require it.
-    return Math.max(
-      natural,
-      ls.value * scale,
-      hasGrid ? (hasRuby || inheritedOnly ? gridSingleCell() : pitchPx) : 0,
-    );
+    // explicit atLeast value combines with whole-cell grid allocation.
+    // `word-grid-at-least-tall-line-unsnapped` preserves the raw content height;
+    // ruby and inherited-only spacing retain their established whole-cell path.
+    const gridMinimum = hasGrid
+      ? (hasRuby || inheritedOnly ? gridSingleCell() : pitchPx)
+      : 0;
+    return wordGridAtLeastLineHeightPx(natural, ls.value * scale, gridMinimum);
   }
   return natural;
 }
@@ -1469,15 +1475,15 @@ export function paragraphMarkLineHeight(
  * `lastLineBelowBaselinePt` field) and — via {@link paragraphMarkBelowBaselinePt}
  * — an empty paragraph's mark line. Its ONE consumer (renderer.ts
  * `trailingMarkOverflow`) reads it only for an inkless trailing MARK: the
- * whitespace such a paragraph may let overflow the bottom content edge, matching
- * Word's measured page fit (#981).
+ * whitespace such a paragraph may let overflow the bottom content edge under
+ * `word-trailing-empty-mark-baseline-admission` (#981).
  *
  * NOTE: this stays the CENTRED baseline even though VISIBLE lineRule=auto content
  * lines now draw a PINNED baseline ({@link drawParagraphLine} / #990: multiplier
  * leading placed entirely below the glyphs). The pagination consumer is inkless
  * (mark-only), so the pinned glyph baseline never reaches it, and the #981 page
- * fit was verified against Word with this half-leading extent — changing it would
- * move page boundaries. The pin is therefore intentionally DRAW-ONLY.
+ * fit is pinned by that admission rule — changing it would move page boundaries.
+ * `word-auto-multiple-baseline-pin` is therefore intentionally DRAW-ONLY.
  */
 export function lineBelowBaselinePx(advancePx: number, ascentPx: number, descentPx: number): number {
   return Math.max(0, (advancePx - ascentPx + descentPx) / 2);
@@ -1515,9 +1521,8 @@ export function paragraphMarkBelowBaselinePt(
  * carries only `w:b`/`w:i` renders non-bold/upright (`csBold = boldCs ?? false`,
  * `csItalic = italicCs ?? false`). Adjudicated in issue #937 against Word: the
  * numbered Arabic headings in sample-7 carry `w:rtl`+`w:cs`+`w:b` WITHOUT
- * `w:bCs` and Word draws them at regular weight; sample-41's cs-italic Case A/C
- * carry `w:i` without `w:iCs` and render upright, matching the explicit-OFF
- * Case B (only Case D's plain Latin `w:i` renders italic).
+ * `w:bCs` therefore remains regular-weight; similarly, `w:i` without `w:iCs`
+ * remains upright while plain Latin `w:i` renders italic.
  */
 /**
  * Split a `w:smallCaps` (§17.3.2.33) run into maximal pieces by character class
@@ -1798,10 +1803,10 @@ export function isRtlBidiLang(langBidi: string | undefined, runIsRtl: boolean): 
  * order. Used only when a run has NO explicit `w:rtl`/`w:cs` (which would force
  * the whole run to cs); otherwise the caller treats the entire piece as cs.
  *
- * Digits / spaces / punctuation (neutral, non-cs) attach to the PRECEDING slice
- * so a number embedded in Arabic ("نص 12 نص") does not fragment the word into
- * extra segments — Word keeps such weak/neutral characters with the script they
- * border. A leading neutral run takes the first strong slice's class.
+ * Under `word-neutral-script-attachment`, digits / spaces / punctuation attach
+ * to the PRECEDING slice so a number embedded in Arabic ("نص 12 نص") does not
+ * fragment into extra segments. A leading neutral run takes the first strong
+ * slice's class.
  */
 export function splitByComplexScript(text: string): { text: string; cs: boolean }[] {
   const out: { text: string; cs: boolean }[] = [];
@@ -1811,8 +1816,7 @@ export function splitByComplexScript(text: string): { text: string; cs: boolean 
     const cp = ch.codePointAt(0) as number;
     // Neutral (non-letter) characters do not switch the active class; they ride
     // with whatever script is currently open (or the next one if none yet).
-    const isLetter = /\p{L}/u.test(ch);
-    if (!isLetter) {
+    if (wordNeutralAttachesToActiveScript(ch)) {
       buf += ch;
       continue;
     }
@@ -1846,8 +1850,8 @@ export function splitByComplexScript(text: string): { text: string; cs: boolean 
  * Boundary rule: classification is purely per code point (every CJK code point
  * opens/continues an `ea` run; every other code point a `latin` run). This is
  * intentionally simpler than {@link splitByComplexScript}'s neutral-attachment —
- * a digit between two ideographs is Latin/ascii either way (Word renders ASCII
- * digits with the ascii face), and a single fillText anchors to the cumulative
+ * a digit between two ideographs is Latin/ascii either way (§17.3.2.26 assigns
+ * ASCII digits to the ascii face), and a single fillText anchors to the cumulative
  * whole-string advance, so the visible spacing is unchanged.
  *
  * NOTE: this split decides the FONT slot only. Whether a resulting segment is
@@ -1883,7 +1887,7 @@ export function splitByEastAsia(text: string): { text: string; ea: boolean }[] {
  * separators between them, so a date in an AN-classified Arabic run can be
  * reordered group-by-group by the per-line bidi pass (which works at segment
  * granularity). "28-02-2026" → ["28","-","02","-","2026"], which the RTL reorder
- * then lays out right-to-left as Word does.
+ * then enters the right-to-left layout pass.
  *
  * EXCEPTION — ECMA-376 relies on UAX#9 W4: a SINGLE common separator (CS) sitting
  * between two numbers of the same type joins them into ONE number. So a decimal /
@@ -2993,8 +2997,9 @@ export function layoutLines(
   let currentLineTopY = wrapCtx?.startPageY ?? 0;
 
   // Square-only compatibility side-space (px) a CONTENT line needs before it may
-  // START beside a square object rather than flow below its band. Word's measured rule is 1 inch
-  // (wordMinLineStartPx(scale) — the 1-inch requirement less a one-twip rounding
+  // START beside a square object rather than flow below its band.
+  // `word-square-line-start-one-inch` supplies the requirement and tolerance via
+  // wordMinLineStartPx(scale),
   // tolerance), INDEPENDENT of a content line's text — the same threshold for a
   // short-token line and a long-word line (a first word that overruns the ≥1-inch
   // gap is force-broken there by the over-long-word char-break below, matching
@@ -3010,9 +3015,8 @@ export function layoutLines(
   // (renderer.ts) against the NARROWER pilcrow-em threshold. An anchorHost-only
   // paragraph still enters layoutLines so its anchor-character metrics size the
   // mark line, but `isParagraphMarkOnlyFlow` selects the same narrow threshold
-  // for its first line. Word keeps either mark beside a float down to a sub-inch
-  // gap and drops it below only for a full-width band. #676 over-generalized 1
-  // inch onto marks and pushed following content to the next page. Inline
+  // for its first line. `word-empty-mark-float-side-gap` supplies that narrower
+  // threshold. #676 over-generalized one inch onto marks; inline
   // content (including a content paragraph's trailing-break final line) keeps
   // the square-only 1-inch rule. Tight/through are governed by their polygon
   // openings (§20.4.2.18/.19), for which there is no corresponding evidence.
@@ -4320,7 +4324,7 @@ export function layoutLines(
         addToLine(s, w, h, asc, desc, trailingSpaceW);
         continue;
       }
-      // Latin word does not fit on the current (non-empty) line: move it to a fresh
+      // Latin token does not fit on the current (non-empty) line: move it to a fresh
       // line and re-process. There it either fits, or — when it is wider than the
       // whole column — the empty-line branch above breaks it at the character level
       // (overflow-wrap). Re-queueing rather than force-adding is what lets that

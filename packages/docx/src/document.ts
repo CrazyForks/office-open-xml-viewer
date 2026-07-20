@@ -386,8 +386,9 @@ export class DocxDocument {
   /**
    * ECMA-376 §17.13.4 — the document's comments (`word/comments.xml`), each with
    * id / author / initials / date / plain-text body. Comments are a data-only
-   * API: they are NOT drawn on the page (Word renders them in a margin pane /
-   * balloons, which this viewer does not reproduce). Use this to build a review
+   * API: they are NOT drawn on the page (authoring applications may display
+   * them in a margin pane / balloons, which this viewer does not reproduce).
+   * Use this to build a review
    * panel, export an annotation list, etc. Returns `[]` when the document has no
    * comments part. The same data is also reachable via `document.comments`.
    */

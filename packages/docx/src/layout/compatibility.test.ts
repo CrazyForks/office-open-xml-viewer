@@ -3,22 +3,61 @@ import {
   defineCompatibilityRule,
   LINE_START_GAP_EPS_PT,
   WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT,
+  WORD_EMPTY_MARK_FLOAT_SIDE_GAP,
   WORD_PAGE_ANCHORED_TABLE_COLLISION_DEFERRAL,
   WORD_MIN_LINE_START_PT,
   WORD_SQUARE_LINE_START_ONE_INCH,
   WORD_SECTION_BTLR_TBRL_PAGE_FRAME,
+  wordEmptyMarkMinimumStartWidthPx,
   wordMinLineStartPx,
 } from './compatibility.js';
 import {
   WORD_PRE_BREAK_ANCHOR_PARAGRAPH,
   WORD_PRE_BREAK_INLINE_DRAWING_GROUP,
   WORD_CONTINUOUS_SECTION_MARK_SPACING,
+  WORD_CONTEXTUAL_SPACING_PER_SIDE,
   WORD_TERMINAL_COLUMN_BREAK,
 } from './body-pagination-compatibility.js';
 import {
+  WORD_PAGE_LEVEL_FLOAT_PRESCAN,
+  WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER,
   WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
+  wordPageLevelAnchorY,
   wordZeroRelativeSizeUsesExtent,
 } from './anchor-compatibility.js';
+import {
+  WORD_AUTO_MULTIPLE_BASELINE_PIN,
+  WORD_DEGENERATE_LINE_SPACING_SINGLE,
+  WORD_EAST_ASIAN_GRID_LINE_ALLOCATION,
+  WORD_FAR_EAST_SINGLE_LINE_FACTOR,
+  WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED,
+  WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
+  WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
+  WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
+  wordAutoMultipleCenterBoxPx,
+  wordDegenerateLineSpacingIsSingle,
+  wordEastAsianGridLineCells,
+  wordFarEastSingleLinePx,
+  wordFirstJustifiedContentSegment,
+  wordGridAtLeastLineHeightPx,
+  wordRubyUniformLineHeightPx,
+  wordVisibleLineMetricPx,
+} from './line-compatibility.js';
+import {
+  WORD_PARAGRAPH_SHADING_BORDER_BOX,
+  WORD_TRACK_CHANGE_AUTHOR_COLORS,
+  WORD_TRACK_CHANGE_AUTHOR_PALETTE,
+} from './paint-compatibility.js';
+import {
+  WORD_KASHIDA_FINAL_FORM_PRIORITY,
+  WORD_NEUTRAL_SCRIPT_ATTACHMENT,
+  WORD_RTL_RUN_AMBIGUOUS_CLASS_OVERRIDE,
+  WORD_VERTICAL_TU_CORNER_PLACEMENT,
+  wordKashidaFinalFormApplies,
+  wordNeutralAttachesToActiveScript,
+  wordPreservesVerticalTuCorner,
+  wordRtlAmbiguousCharacter,
+} from './script-compatibility.js';
 import {
   WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
   WORD_CONTINUOUS_SECTION_PAGE_NUMBER_RESTART,
@@ -33,17 +72,30 @@ import {
 import {
   WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING,
   WORD_EXACT_ROW_VERTICAL_CLIP_ONLY,
+  WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR,
+  WORD_EFFECTIVE_FLOATING_TABLE_POSITIONING,
+  WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE,
   WORD_NIL_TABLE_BORDER_SUPPRESSION,
+  WORD_OMITTED_ROW_HEIGHT_RULE_AT_LEAST,
   WORD_OVER_PAGE_CANT_SPLIT_CLIP,
   WORD_POSITIONED_TABLE_ADJACENCY_EXCLUSION,
   WORD_SPACED_CELL_INSIDE_BORDER_CONFLICT,
+  WORD_TABLE_BORDER_WEIGHT_PRECEDENCE,
+  WORD_TABLE_CELL_SPACING_SCOPE_SHADOW,
   WORD_TABLE_INDENT_ALL_ALIGNMENTS,
+  WORD_TABLE_MARGIN_SCOPE_SHADOW,
   wordAlignedTableOriginPt,
+  wordAuthoredAutoRowHeightUsesFloor,
   wordAuthoredBorderParticipates,
   wordClipsOverPageCantSplitRow,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
+  wordNilBorderSuppressesSharedEdge,
   wordSpacedCellInsideBorderOverridesTable,
+  wordTableBorderWeight,
+  wordTableCellSpacingValuePt,
+  wordTableMarginValuePt,
+  wordTableRowHeightRule,
 } from './table-compatibility.js';
 
 describe('defineCompatibilityRule', () => {
@@ -129,6 +181,7 @@ describe('defineCompatibilityRule', () => {
       WORD_PRE_BREAK_ANCHOR_PARAGRAPH,
       WORD_PRE_BREAK_INLINE_DRAWING_GROUP,
       WORD_CONTINUOUS_SECTION_MARK_SPACING,
+      WORD_CONTEXTUAL_SPACING_PER_SIDE,
     ];
 
     expect(rules.map((rule) => (
@@ -139,6 +192,7 @@ describe('defineCompatibilityRule', () => {
       'packages/docx/src/pagination.test.ts#does not push an anchor-only pre-break paragraph to a new page just for its empty mark',
       'packages/docx/src/pagination.test.ts#moves a preceding image with its pre-break callout when the pair only fits fresh',
       'packages/docx/src/body-layout-input.test.ts#projects mutually exclusive collapsed-mark and drop-previous-after roles',
+      'packages/docx/src/contextual-spacing-body-paint.test.ts#paints the adjudicated six-case gap table',
     ]);
   });
 });
@@ -191,6 +245,29 @@ describe('layout compatibility inventory', () => {
       WORD_EXACT_ROW_VERTICAL_CLIP_ONLY,
       WORD_OVER_PAGE_CANT_SPLIT_CLIP,
       WORD_POSITIONED_TABLE_ADJACENCY_EXCLUSION,
+      WORD_EAST_ASIAN_GRID_LINE_ALLOCATION,
+      WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED,
+      WORD_DEGENERATE_LINE_SPACING_SINGLE,
+      WORD_AUTO_MULTIPLE_BASELINE_PIN,
+      WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
+      WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
+      WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
+      WORD_NEUTRAL_SCRIPT_ATTACHMENT,
+      WORD_RTL_RUN_AMBIGUOUS_CLASS_OVERRIDE,
+      WORD_KASHIDA_FINAL_FORM_PRIORITY,
+      WORD_VERTICAL_TU_CORNER_PLACEMENT,
+      WORD_TRACK_CHANGE_AUTHOR_PALETTE,
+      WORD_PARAGRAPH_SHADING_BORDER_BOX,
+      WORD_EMPTY_MARK_FLOAT_SIDE_GAP,
+      WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER,
+      WORD_PAGE_LEVEL_FLOAT_PRESCAN,
+      WORD_TABLE_BORDER_WEIGHT_PRECEDENCE,
+      WORD_OMITTED_ROW_HEIGHT_RULE_AT_LEAST,
+      WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR,
+      WORD_EFFECTIVE_FLOATING_TABLE_POSITIONING,
+      WORD_TABLE_CELL_SPACING_SCOPE_SHADOW,
+      WORD_TABLE_MARGIN_SCOPE_SHADOW,
+      WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE,
     ];
 
     expect(new Set(rules.map((rule) => rule.id)).size).toBe(rules.length);
@@ -255,5 +332,98 @@ describe('layout compatibility inventory', () => {
       ...trailingMark,
       hasFollowingInk: false,
     })).toBe(0);
+  });
+
+  it('pins East Asian grid allocation and the untabled Far East metric factor', () => {
+    expect(WORD_FAR_EAST_SINGLE_LINE_FACTOR).toBe(1.3);
+    expect(wordEastAsianGridLineCells(17.19, 18)).toBe(1);
+    expect(wordEastAsianGridLineCells(20.06, 18)).toBe(2);
+    expect(wordEastAsianGridLineCells(0, 18)).toBe(1);
+    expect(wordFarEastSingleLinePx(22, 10)).toBe(22);
+    expect(wordFarEastSingleLinePx(0, 10)).toBe(13);
+  });
+
+  it('pins the eight track-change author colors independently of author indexing', () => {
+    expect(WORD_TRACK_CHANGE_AUTHOR_COLORS).toEqual([
+      '#C00000', '#0070C0', '#00B050', '#7030A0',
+      '#E97132', '#196B24', '#9E480E', '#525252',
+    ]);
+    expect(Object.isFrozen(WORD_TRACK_CHANGE_AUTHOR_COLORS)).toBe(true);
+  });
+
+  it('keeps neutral characters attached to the active script slice', () => {
+    expect(wordNeutralAttachesToActiveScript(' ')).toBe(true);
+    expect(wordNeutralAttachesToActiveScript('1')).toBe(true);
+    expect(wordNeutralAttachesToActiveScript('.')).toBe(true);
+    expect(wordNeutralAttachesToActiveScript('A')).toBe(false);
+    expect(wordNeutralAttachesToActiveScript('ش')).toBe(false);
+  });
+
+  it('pins paint and legacy-text compatibility helper branches', () => {
+    expect(wordEmptyMarkMinimumStartWidthPx(12, 2)).toBe(24);
+    expect(wordPageLevelAnchorY('margin', false)).toBe(true);
+    expect(wordPageLevelAnchorY('line', false)).toBe(false);
+    expect(wordPageLevelAnchorY(null, false)).toBe(true);
+    expect(wordPageLevelAnchorY(undefined, true)).toBe(false);
+    expect(wordGridAtLeastLineHeightPx(28, 18, 18)).toBe(28);
+    expect(wordDegenerateLineSpacingIsSingle('exact', 0)).toBe(true);
+    expect(wordDegenerateLineSpacingIsSingle('atLeast', 0)).toBe(false);
+    expect(wordAutoMultipleCenterBoxPx({
+      autoMultiple: true,
+      compressedAuto: false,
+      glyphNaturalPx: 10,
+      intendedSinglePx: 12,
+      lineHeightPx: 24,
+    })).toBe(12);
+    expect(wordAutoMultipleCenterBoxPx({
+      autoMultiple: true,
+      compressedAuto: true,
+      glyphNaturalPx: 10,
+      intendedSinglePx: 12,
+      lineHeightPx: 6,
+    })).toBe(6);
+    expect(wordVisibleLineMetricPx(20, 8)).toBe(8);
+    expect(wordVisibleLineMetricPx(20, undefined)).toBe(20);
+    expect(wordFirstJustifiedContentSegment(
+      [{ text: '  ' }, { text: 'body' }],
+      false,
+      (segment) => (segment as { text?: string }).text,
+    )).toBe(1);
+    expect(wordFirstJustifiedContentSegment(
+      [{ text: '  ' }, { text: 'body' }],
+      true,
+      (segment) => (segment as { text?: string }).text,
+    )).toBe(0);
+    expect(wordRubyUniformLineHeightPx(true, [12, 18, 14])).toBe(18);
+    expect(wordRubyUniformLineHeightPx(false, [12, 18, 14])).toBe(0);
+    expect(wordRtlAmbiguousCharacter('.')).toBe(true);
+    expect(wordRtlAmbiguousCharacter('A')).toBe(false);
+    expect(wordKashidaFinalFormApplies(3, 3)).toBe(true);
+    expect(wordKashidaFinalFormApplies(2, 3)).toBe(false);
+    expect(wordPreservesVerticalTuCorner(0xfe11)).toBe(true);
+    expect(wordPreservesVerticalTuCorner(null)).toBe(false);
+  });
+
+  it('pins supported table-model compatibility helper branches', () => {
+    expect(wordTableBorderWeight('single', 1.5)).toBe(12);
+    expect(wordTableBorderWeight('dotted', 99)).toBe(1);
+    expect(wordTableBorderWeight('unknown', 2)).toBe(0);
+    expect(wordNilBorderSuppressesSharedEdge('nil', 'single')).toBe(true);
+    expect(wordNilBorderSuppressesSharedEdge('none', 'single')).toBe(false);
+    expect(wordTableRowHeightRule('auto', false)).toBe('atLeast');
+    expect(wordTableRowHeightRule('auto', true)).toBe('auto');
+    expect(wordAuthoredAutoRowHeightUsesFloor('auto', 0)).toBe(true);
+    expect(wordAuthoredAutoRowHeightUsesFloor('atLeast', 10)).toBe(false);
+    expect(wordTableCellSpacingValuePt('pct', null)).toBe(0);
+    expect(wordTableCellSpacingValuePt('dxa', 4)).toBe(4);
+    expect(wordTableMarginValuePt({
+      kind: 'pct', dxaValuePt: null, scope: 'table', edge: 'start',
+    })).toBe(0);
+    expect(wordTableMarginValuePt({
+      kind: 'nil', dxaValuePt: null, scope: 'table', edge: 'top',
+    })).toBeNull();
+    expect(wordTableMarginValuePt({
+      kind: 'dxa', dxaValuePt: 3, scope: 'cell', edge: 'bottom',
+    })).toBe(3);
   });
 });

@@ -18,6 +18,7 @@
 
 import type { DocTable, DocTableRow, DocTableCell } from './types.js';
 import { resolveBorderConflict, resolveCellEdges } from './cell-border-conflict.js';
+import { wordAuthoredAutoRowHeightUsesFloor } from './layout/table-compatibility.js';
 
 /** Minimum table-row height (pt) when no `w:trHeight` floor applies — i.e. an
  *  `auto` row, or `atLeast`/`exact` with no `@val`. ECMA-376 leaves the auto
@@ -227,10 +228,9 @@ export function resolvedHorizontalBoundaryWidths(table: DocTable): number[] {
  * Height of ONE row (ECMA-376 §17.4.80 / §17.18.37 ST_HeightRule + gridSpan),
  * EXCLUDING the §17.4.85 vMerge span extension (the caller / the table-level
  * resolver applies that in a post-pass). `exact` returns exactly `@val × scale`;
- * `atLeast` floors at `@val × scale`; `auto` with `@val` present also floors at
- * `@val × scale` (intentional Word-compatible deviation from the §17.4.80
- * literal "ignored" — see the resolver docstring above for the rationale and
- * the sample-11.docx December calendar evidence). `auto` with no `@val` floors
+ * `atLeast` floors at `@val × scale`;
+ * `word-authored-auto-row-height-floor` gives an `auto` row with `@val` the
+ * same floor despite the §17.4.80 literal "ignored". `auto` with no `@val` floors
  * at `MIN_ROW_HEIGHT_PT × scale`. A `vMerge=restart` cell is excluded (its
  * content is distributed across the span, not absorbed by its first row) and a
  * `vMerge=continue` cell renders no content. This is the single source of the
@@ -244,14 +244,14 @@ export function resolveSingleRowHeight(
   measureCellContentHeight: MeasureCellContentHeight,
 ): number {
   if (row.rowHeight != null && row.rowHeightRule === 'exact') return row.rowHeight * scale;
-  // §17.4.80 literal says `auto` ignores `@val`. Word's output PDFs disagree:
-  // when `hRule` is omitted and `@val` is present, Word treats `@val` as a
-  // lower bound (atLeast-equivalent). Deliberate deviation to match Word —
-  // ground truth is the Word output PDF (sample-11.docx calendar date rows
-  // measured at exactly `@val` 576 / 20 = 28.8 pt). With `@val` absent, auto
-  // still collapses to the implementation-defined minimum.
+  // `word-authored-auto-row-height-floor` owns the legacy-model deviation from
+  // §17.4.80's literal auto behavior. With `@val` absent, auto still collapses
+  // to the implementation-defined minimum.
   let rowH =
-    row.rowHeight != null && (row.rowHeightRule === 'atLeast' || row.rowHeightRule === 'auto')
+    row.rowHeight != null && (
+      row.rowHeightRule === 'atLeast'
+      || wordAuthoredAutoRowHeightUsesFloor(row.rowHeightRule, row.rowHeight)
+    )
       ? row.rowHeight * scale
       : MIN_ROW_HEIGHT_PT * scale;
 

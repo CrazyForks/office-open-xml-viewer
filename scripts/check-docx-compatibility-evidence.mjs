@@ -23,6 +23,9 @@ const ALLOWED_DECLARATION_FILES = new Set([
   COMPATIBILITY_OWNER,
   `${DOCX_SOURCE}/layout/anchor-compatibility.ts`,
   `${DOCX_SOURCE}/layout/body-pagination-compatibility.ts`,
+  `${DOCX_SOURCE}/layout/line-compatibility.ts`,
+  `${DOCX_SOURCE}/layout/paint-compatibility.ts`,
+  `${DOCX_SOURCE}/layout/script-compatibility.ts`,
   `${DOCX_SOURCE}/layout/section-compatibility.ts`,
   `${DOCX_SOURCE}/layout/table-compatibility.ts`,
 ]);
@@ -399,7 +402,7 @@ function options(argv) {
 }
 
 const observationMarker =
-  /\[MS-[A-Z0-9]+\]|\bobserved (?:Word|Office)\b|\bWord-compatible\b|\bWord(?:'s)? (?:uses|applies|adds|treats|admits|keeps|places|starts|does|doesn't|ignores|clips|measured|runtime)\b/i;
+  /\[MS-[A-Z0-9]+\]|\bobserved (?:Word|Office)\b|\bWord-compatible\b|\bWord(?:'s)? (?:uses|applies|adds|treats|admits|keeps|places|starts|does|doesn't|ignores|clips|measured|runtime|renders|draws|fills|resolves)\b/i;
 
 function observationKeys(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
@@ -431,6 +434,14 @@ function verifyObservationBaseline(root, observations) {
     fail(
       'INLINE_COMPATIBILITY_OBSERVATION',
       added.join('\n'),
+    );
+  }
+  const observed = new Set(observations);
+  const stale = baseline.observations.filter((entry) => !observed.has(entry));
+  if (stale.length > 0) {
+    fail(
+      'STALE_COMPATIBILITY_OBSERVATION_BASELINE',
+      stale.join('\n'),
     );
   }
 }

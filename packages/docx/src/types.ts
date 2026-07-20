@@ -1332,8 +1332,8 @@ export interface ImageRun {
 
 /**
  * ECMA-376 §17.4.57 `<w:tblpPr>` — authored floating-table positioning.
- * Word can ignore this payload under [MS-OI29500] §2.1.162(b-e), so lexical
- * presence alone does not determine whether the table leaves ordinary flow.
+ * Under `word-effective-floating-table-positioning`, lexical presence alone
+ * does not determine whether the table leaves ordinary flow.
  * All fields are optional in the source.
  */
 export interface TblpPr {
@@ -1346,9 +1346,9 @@ export interface TblpPr {
   horzAnchor: 'text' | 'margin' | 'page' | string;
   /** True iff the source `<w:tblpPr>` carried ANY horizontal positioning hint
    *  (horzAnchor, tblpX, or tblpXSpec). When false, no horizontal position was
-   *  given: ECMA-376's literal default is the page edge, but Word places such a
-   *  table at the anchor paragraph's text/column left. computeFloatTableBox uses
-   *  this flag to apply that Word-runtime placement. */
+   *  given. The retained floating-table resolver uses the text/column frame for
+   *  this compatibility default rather than claiming an application-specific
+   *  normative placement. */
   horzSpecified: boolean;
   /** §17.4.57 ST_VAnchor {text,margin,page}. Default 'page'. */
   vertAnchor: 'text' | 'margin' | 'page' | string;
@@ -1398,10 +1398,9 @@ export interface DocTable {
    * is placed rightmost, and flips per-cell left/right borders accordingly.
    */
   bidiVisual?: boolean;
-  /** ECMA-376 §17.4.57 `<w:tblpPr>` authored positioning payload. Word can
-   *  ignore it under [MS-OI29500] §2.1.162, but the lexical payload remains
-   *  available for compatibility; presence alone is therefore not an
-   *  effective-floating test. */
+  /** ECMA-376 §17.4.57 `<w:tblpPr>` authored positioning payload. The lexical
+   *  payload remains available under `word-effective-floating-table-positioning`;
+   *  presence alone is not an effective-floating test. */
   tblpPr?: TblpPr;
   /** ECMA-376 §17.4.56 `<w:tblOverlap w:val>` — 'never' | 'overlap'. 'never' ⇒
    *  the floating table must be repositioned to avoid overlapping other floats.

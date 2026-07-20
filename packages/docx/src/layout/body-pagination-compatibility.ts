@@ -41,6 +41,15 @@ export const WORD_CONTINUOUS_SECTION_MARK_SPACING = defineCompatibilityRule({
   description: 'The retained body input projects the established continuous-section empty-mark spacing behavior into one mutually exclusive role before pagination.',
 });
 
+export const WORD_CONTEXTUAL_SPACING_PER_SIDE = defineCompatibilityRule({
+  id: 'word-contextual-spacing-per-side',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/contextual-spacing-body-paint.test.ts#paints the adjudicated six-case gap table',
+  },
+  description: 'For same-style adjacent paragraphs, contextualSpacing removes only the contribution owned by each toggling side; a current-only toggle preserves the previous paragraph spaceAfter contribution.',
+});
+
 /** Compatibility projection governed by {@link WORD_CONTINUOUS_SECTION_MARK_SPACING}. */
 export function wordContinuousSectionRole(
   sequence: BodyLayoutInput['sequence'],
