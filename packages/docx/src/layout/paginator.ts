@@ -9,7 +9,6 @@ import {
   uprightPhysicalExtent,
   writingModeFromTextDirection,
 } from './coordinate-space.js';
-import { defineCompatibilityRule } from './compatibility.js';
 import type { PaintNode } from './types.js';
 
 export type PageAdvanceReason =
@@ -33,15 +32,6 @@ export type AuthoredBreak =
   | 'lastRenderedPageBreak';
 
 export type PhysicalPageParity = 'odd' | 'even';
-
-export const ESTABLISHED_NEXT_COLUMN_PAGE_ADVANCE = defineCompatibilityRule({
-  id: 'established-next-column-page-advance',
-  evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/layout/paginator.test.ts#advances nextColumn to the next page when the outgoing column has no same-page successor',
-  },
-  description: 'When §17.18.77 has no following column on the current page, continue in the incoming section on the following page, preserving the established pre-cutover non-continuous section behavior instead of rejecting the document.',
-});
 
 export class UnsupportedPageFlowTransitionError extends Error {
   readonly code = 'NEXT_COLUMN_DESTINATION_UNAVAILABLE' as const;
@@ -537,8 +527,8 @@ export function beginSection(
       // §17.18.77 defines nextColumn as the following column on the page. Once
       // the active region has no such column (including a one-column section),
       // the next flow destination is the incoming section's first column on the
-      // following page. Compatibility contract:
-      // ESTABLISHED_NEXT_COLUMN_PAGE_ADVANCE.
+      // following page. This is the retained solver's total transition policy
+      // for a valid break whose same-page destination does not exist.
       const nextPage = advanceToPage(state, section, 'section-break');
       return transition(nextPage.state, [
         ...nextPage.events,

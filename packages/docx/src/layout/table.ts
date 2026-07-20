@@ -5,6 +5,12 @@ import { snapshotPlainData } from './plain-data.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { firstAuthoredTableBorder } from './table-border-layer.js';
 import { unionLayoutRects } from './rect-union.js';
+import {
+  wordAlignedTableOriginPt,
+  wordExactRowFloorPt,
+  wordExactRowVerticalClipBounds,
+  wordSpacedCellInsideBorderOverridesTable,
+} from './table-compatibility.js';
 import type {
   BlockLayoutResult,
   FlowBlockPlacement,
@@ -217,11 +223,11 @@ function mergeEndRow(
 
 function semanticRowFloor(row: TableRowLayoutInput): number {
   if (row.heightRule === 'exact') {
-    // Word adds the largest bottom cell padding to an exact trHeight rather
-    // than treating that padding as part of the authored value
-    // ([MS-OI29500] 2.1.180(d)).
-    const bottomPaddingPt = Math.max(0, ...row.cells.map((cell) => cell.margins.bottomPt));
-    return Math.max(0, row.heightPt ?? 0) + bottomPaddingPt;
+    // Compatibility-owned exact-row floor.
+    return wordExactRowFloorPt(
+      row.heightPt,
+      row.cells.map((cell) => cell.margins.bottomPt),
+    );
   }
   if (row.heightRule === 'atLeast') return Math.max(0, row.heightPt ?? 0);
   // ECMA-376 §17.4.80: an explicit auto rule has no predetermined minimum.
@@ -542,23 +548,6 @@ function visibleBorder(candidate: BorderCandidate | null): TableBorderInput | nu
     : null;
 }
 
-function authoredBorderParticipatesInConflict(border: TableBorderInput | null): boolean {
-  // Word treats `none` like omission in this cascade; `nil` is authored and
-  // participates by suppressing the complete edge ([MS-OI29500] 2.1.169).
-  return border !== null && border.authoredStyle !== 'none';
-}
-
-function authoredInsideBorderIsEffective(
-  direct: TableBorderInput | null,
-  inside: TableBorderInput | null,
-): boolean {
-  // Inline physical/logical cell edges are the higher style-cascade layer.
-  // `none` behaves as omission, while `nil` is an authored suppression and
-  // therefore prevents a conditional inside edge underneath from resurfacing.
-  return !authoredBorderParticipatesInConflict(direct)
-    && authoredBorderParticipatesInConflict(inside);
-}
-
 function materializeBorders(
   input: TableLayoutInput,
   rowXPt: readonly number[],
@@ -646,6 +635,10 @@ function materializeBorders(
     const belowSpaced = boundary < input.rows.length
       && effectiveCellSpacingPt(input.rows[boundary]) > 0;
     if (aboveSpaced || belowSpaced) {
+      const boundarySpacingPt = Math.max(
+        effectiveCellSpacingPt(input.rows[boundary - 1]),
+        effectiveCellSpacingPt(input.rows[boundary]),
+      );
       const gridRow = belowSpaced ? boundary : boundary - 1;
       const tableXPt = rowXPt[gridRow] ?? 0;
       const edge = boundary === 0
@@ -676,10 +669,11 @@ function materializeBorders(
           ].some(({ side, directEdge }) => {
               const owner = side.owner;
               if (!owner) return false;
-              return authoredInsideBorderIsEffective(
-                owner.input.borders[directEdge],
-                owner.input.borders.insideH,
-              );
+              return wordSpacedCellInsideBorderOverridesTable({
+                spacingPt: boundarySpacingPt,
+                directStyle: owner.input.borders[directEdge]?.authoredStyle,
+                conditionalInsideStyle: owner.input.borders.insideH?.authoredStyle,
+              });
             });
           if (conditionalInsideOverridesTable) return;
           const startXPt = columnX(gridRow, column);
@@ -805,13 +799,12 @@ function materializeBorders(
     });
   });
 
-  // Non-zero spacing separates opposing cell edge boxes. Table borders remain
-  // on the shared grid while cell edges are inset. Word's narrower exception
-  // keeps conditional tcBorders insideH/insideV in conflict with the matching
-  // table inside border ([MS-OI29500] 2.1.136/.138); those winners are already
-  // retained on the inset cell edges above/below.
+  // ECMA-376 spacing separates opposing cell edge boxes. The narrow
+  // compatibility decision below only chooses conditional inside-border
+  // winners against the corresponding table inside border.
   input.rows.forEach((row, rowIndex) => {
-    if (effectiveCellSpacingPt(row) <= 0) return;
+    const spacingPt = effectiveCellSpacingPt(row);
+    if (spacingPt <= 0) return;
     const rowTopPt = rowY(rowIndex);
     const rowBottomPt = rowY(rowIndex + 1);
     const tableXPt = rowXPt[rowIndex] ?? 0;
@@ -825,10 +818,18 @@ function materializeBorders(
     });
     const conditionalInsideVBoundaries = new Set<number>();
     for (const cell of row.cells) {
-      if (authoredInsideBorderIsEffective(cell.borders.left, cell.borders.insideV)) {
+      if (wordSpacedCellInsideBorderOverridesTable({
+        spacingPt,
+        directStyle: cell.borders.left?.authoredStyle,
+        conditionalInsideStyle: cell.borders.insideV?.authoredStyle,
+      })) {
         conditionalInsideVBoundaries.add(cell.columnStart);
       }
-      if (authoredInsideBorderIsEffective(cell.borders.right, cell.borders.insideV)) {
+      if (wordSpacedCellInsideBorderOverridesTable({
+        spacingPt,
+        directStyle: cell.borders.right?.authoredStyle,
+        conditionalInsideStyle: cell.borders.insideV?.authoredStyle,
+      })) {
         conditionalInsideVBoundaries.add(cell.columnStart + cell.columnSpan);
       }
     }
@@ -848,7 +849,6 @@ function materializeBorders(
       }
     }
 
-    const spacingPt = effectiveCellSpacingPt(row);
     for (const cell of row.cells) {
       if (cell.verticalMerge === 'continue') continue;
       const lastRowIndex = cell.verticalMerge === 'restart'
@@ -904,10 +904,8 @@ function alignedTableOriginX(
       ? bounds.xPt + Math.max(0, bounds.widthPt - widthPt)
       : bounds.xPt;
   if (indentPt === 0) return aligned;
-  // ECMA-376 §17.4.50 normally ignores tblInd for non-leading alignment, but
-  // Word applies it for every alignment ([MS-OI29500] 2.1.155). Treat it as a
-  // signed leading-edge translation after alignment; bidi reverses the axis.
-  return bidiVisual ? aligned - indentPt : aligned + indentPt;
+  // Compatibility-owned signed leading-edge translation; bidi reverses the axis.
+  return wordAlignedTableOriginPt(aligned, indentPt, bidiVisual);
 }
 
 function unionInkBounds(flowBounds: LayoutRect, borders: readonly ResolvedBorderSegment[]): LayoutRect {
@@ -1055,17 +1053,10 @@ export function layoutTable(
           .slice(rowIndex, lastRowIndex + 1)
           .every((ownedRow) => ownedRow.heightRule === 'exact');
       const clipBounds = exactOwnedSpan
-        ? {
-            // Exact height clips vertical overflow, but Word does not use the
-            // cell's horizontal box as a clip. A nested table may have a
-            // negative indent or border ink outside that box and must remain
-            // visible. Retain the containing flow band's X extent while
-            // bounding only this row's Y interval.
-            xPt: placement.availableBounds.xPt,
-            yPt: cellFlowBounds.yPt,
-            widthPt: placement.availableBounds.widthPt,
-            heightPt: cellFlowBounds.heightPt,
-          }
+        ? wordExactRowVerticalClipBounds(
+            cellFlowBounds,
+            placement.availableBounds,
+          )
         : undefined;
       const blocks = cell.verticalMerge === 'continue'
         ? []

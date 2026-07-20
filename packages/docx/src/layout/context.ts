@@ -13,6 +13,7 @@ import {
   type SectionGridContext,
 } from '../layout-context.js';
 import type { DeepReadonly } from './types.js';
+import { wordBookFoldGutterEdge } from './section-compatibility.js';
 
 /**
  * Section facts that must change atomically at a page-flow boundary. Keeping the
@@ -133,9 +134,8 @@ export function effectivePhysicalSectionGeometry(
   if (bookFold) {
     pageWidth /= 2;
     // ECMA-376 §§17.15.1.11/.13 define a half-sheet editing page and automatic
-    // gutter placement. Word places the bisector on the right-margin side
-    // ([MS-OI29500] §§2.1.389/.391), so the authored gutter belongs there.
-    marginRight += policy.gutterPt;
+    // gutter placement; the bisector edge is compatibility-owned.
+    if (wordBookFoldGutterEdge() === 'right') marginRight += policy.gutterPt;
   } else if (policy.printTwoOnOne) {
     pageHeight /= 2;
     // §17.15.1.64 places each editing page on a half-sheet with its top margin

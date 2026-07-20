@@ -17,7 +17,7 @@ export const FLOAT_OVERLAP_EPS = 0.01;
 export const FLOAT_PAGE_RIGHT_SLACK = 0.5;
 
 /** Immutable object and text-exclusion geometry in one caller-selected
- * coordinate space. Normative object collisions use `bounds`; Word-compatible
+ * coordinate space. Normative object collisions use `bounds`; compatibility-only
  * text-wrap displacement uses `exclusionBounds`. */
 interface FloatPlacementParticipantCore {
   readonly occurrenceId: string;

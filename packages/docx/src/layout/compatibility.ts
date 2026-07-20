@@ -4,20 +4,37 @@ function requireText(value: string, field: string): void {
   if (value.trim() === '') throw new Error(`CompatibilityRule.${field} must not be empty`);
 }
 
-export function defineCompatibilityRule(rule: CompatibilityRule): DeepReadonly<CompatibilityRule> {
+export function defineCompatibilityRule<const Rule extends CompatibilityRule>(
+  rule: Rule,
+): DeepReadonly<Rule> {
   requireText(rule.id, 'id');
   requireText(rule.description, 'description');
-  if (rule.evidence.kind === 'microsoft-note'
-    || rule.evidence.kind === 'regression-test') {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(rule.id)) {
+    throw new Error('CompatibilityRule.id must be a stable kebab-case identifier');
+  }
+  if (rule.evidence.kind === 'microsoft-note') {
     requireText(rule.evidence.reference, 'evidence.reference');
+    if (!/^\[MS-[A-Z0-9]+\] §§?\d/.test(rule.evidence.reference)) {
+      throw new Error('CompatibilityRule.evidence.reference must identify a Microsoft specification section');
+    }
+  } else if (rule.evidence.kind === 'regression-test') {
+    requireText(rule.evidence.reference, 'evidence.reference');
+    if (!/^packages\/docx\/src\/.+\.(?:test|spec)\.tsx?#[^#]+$/.test(
+      rule.evidence.reference,
+    )) {
+      throw new Error('CompatibilityRule.evidence.reference must use DOCX path#test-title');
+    }
   } else {
     requireText(rule.evidence.syntheticFixtureId, 'evidence.syntheticFixtureId');
     requireText(rule.evidence.application, 'evidence.application');
     requireText(rule.evidence.version, 'evidence.version');
     requireText(rule.evidence.platform, 'evidence.platform');
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(rule.evidence.syntheticFixtureId)) {
+      throw new Error('CompatibilityRule.evidence.syntheticFixtureId must be kebab-case');
+    }
   }
   Object.freeze(rule.evidence);
-  return Object.freeze(rule);
+  return Object.freeze(rule) as DeepReadonly<Rule>;
 }
 
 export const WORD_SECTION_BTLR_TBRL_PAGE_FRAME = defineCompatibilityRule({
@@ -33,7 +50,7 @@ export const WORD_SQUARE_LINE_START_ONE_INCH = defineCompatibilityRule({
   id: 'word-square-line-start-one-inch',
   evidence: {
     kind: 'regression-test',
-    reference: 'packages/docx/src/float-line-start-one-inch.test.ts#uses the measured one-inch threshold at every scale',
+    reference: 'packages/docx/src/float-line-start-one-inch.test.ts#(e) the boundary is identical across scales (absolute pt width)',
   },
   description: 'Issue #676 records that Word starts a content line beside a square-wrapped object only when the free side gap is at least one inch; tight and through polygon openings and empty paragraph marks are outside this rule.',
 });

@@ -8,10 +8,7 @@ import type {
   PaintNode,
   ParagraphLayout,
 } from './types.js';
-
-// §17.6.8 leaves an absent distance implementation-defined; Word's observed
-// default is about 1/4 inch, so retain 18 pt.
-const DEFAULT_LINE_NUMBER_DISTANCE_PT = 18;
+import { wordLineNumberDistancePt } from './section-compatibility.js';
 
 export interface BodyFlowAllocation {
   readonly nodeId: string;
@@ -127,7 +124,7 @@ export function composeCanonicalSectionFlow(
             node,
             counter,
             Math.max(1, numbering.countBy),
-            numbering.distance ?? DEFAULT_LINE_NUMBER_DISTANCE_PT,
+            wordLineNumberDistancePt(numbering.distance),
             session,
           );
           node = numbered.paragraph;

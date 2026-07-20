@@ -61,7 +61,7 @@ function assertParserOwnedSequence(sequenceId: string, members: readonly Pending
 /**
  * Group the body sequence into ECMA-376 Part 1 §17.4.37 logical tables using
  * only the parser-owned `logicalSequenceId`. The parser has already applied the
- * standard's adjacency rule together with [MS-OI29500] 2.1.149(a)'s positioned-
+ * normative adjacency rule together with the compatibility-owned positioned-
  * table exclusion and table-style-identity validation, so directly adjacent
  * source tables carry the same id iff they form one logical table. This layer
  * only coalesces the maximal contiguous run sharing an id and validates the

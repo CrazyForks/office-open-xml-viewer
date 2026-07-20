@@ -11,6 +11,7 @@ import {
 import { LayoutInvariantError } from './diagnostics.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import { layoutTable, measureTableCellBlockFlowHeightPt } from './table.js';
+import { wordClipsOverPageCantSplitRow } from './table-compatibility.js';
 import type {
   FlowBlockPlacement,
   FloatRegistryDeltaPt,
@@ -179,8 +180,8 @@ function paginationRowHeight(source: RetainedTableAcquisition, rowIndex: number)
   const row = source.layout.rows[rowIndex];
   if (!row) return 0;
   // ECMA-376 §17.4.80 requires exact content to remain inside the authored row
-  // box. `layoutTable` has already resolved that track, including Word's largest
-  // bottom-cell-padding addition ([MS-OI29500] 2.1.180(d)); content overflow is
+  // box. `layoutTable` has already resolved the compatibility-owned exact track,
+  // including its bottom-cell-padding addition; content overflow is
   // paint-time clip ink and must not turn a fitting exact row into continuations.
   if (source.input.rows[rowIndex]?.heightRule === 'exact') return Math.max(0, row.heightPt);
   // A vertically merged owner's content requirement and its physical track can
@@ -1059,10 +1060,13 @@ export function takeTableFragment(
       if (context.availableHeightPt + EPSILON_PT < context.freshPageHeightPt) {
         return { fragment: null, nextCursor: cursor, requiresFreshPage: true };
       }
-      // [MS-OI29500] 2.1.120: Word starts an over-page cantSplit row on the
-      // fresh page and clips its overflow instead of synthesizing a continuation.
-      if (context.compatibility === 'word'
-        && context.availableHeightPt + EPSILON_PT >= context.freshPageHeightPt) {
+      // Compatibility-owned over-page cantSplit admission.
+      if (wordClipsOverPageCantSplitRow({
+        compatibility: context.compatibility,
+        availableHeightPt: context.availableHeightPt,
+        freshPageHeightPt: context.freshPageHeightPt,
+        epsilonPt: EPSILON_PT,
+      })) {
         selected.push(selectedWholeRow(row, 'source', 0, true, preparedRow.resolved));
         floatRegistry = preparedRow.registry;
         floatParagraphId = preparedRow.nextParagraphId;
@@ -1072,7 +1076,7 @@ export function takeTableFragment(
         break;
       }
     // ECMA-376 §17.4.6 permits a row taller than a full page to continue;
-      // only the documented Word compatibility mode clips it.
+      // only the explicit compatibility mode clips it.
     }
 
     // Floating overflow is not defined by §17.4.57. The retained floating

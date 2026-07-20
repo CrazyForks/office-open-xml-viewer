@@ -118,7 +118,7 @@ interface FloatRectCore {
   distRight: number;
   distTop: number;
   distBottom: number;
-  /** Identifier of the anchoring paragraph. Used only by the observed Office
+  /** Identifier of the anchoring paragraph. Used only by the named
    *  compatibility rule under allowOverlap=true: floats with the SAME paraId
    *  never displace each other, while different-paragraph floats do. ECMA-376
    *  does not define this scoping; see compatibility.ts and floats.ts. */

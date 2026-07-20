@@ -76,6 +76,10 @@ import {
   wordPreBreakHostAnchorExtentPt,
   wordPreBreakInlineDrawingResource,
 } from './body-pagination-compatibility.js';
+import {
+  wordContinuousSectionRestartDisplayNumber,
+  wordTrailingEmptyMarkAdmissionAllowancePt,
+} from './section-compatibility.js';
 import { bodyOccurrenceKey } from './source-key.js';
 import {
   convergeHeaderFooterReserves,
@@ -654,9 +658,8 @@ function locationAfter(
 }
 
 function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySectionLayoutInput>): DocumentLayout {
-  // §17.6.12 restart arithmetic is section-scoped, but observed Word keeps the
-  // outgoing owner on a shared continuous page and anchors the incoming restart
-  // to its first appearance there; its next owned page is therefore start + 1.
+  // Compatibility-owned continuous-section restart arithmetic anchors the
+  // incoming owner to its first appearance on the shared physical page.
   // Issue #804 locks the retained-layout and painted-footer observations together
   // in the continuous-section cases in page-number-field-render.test.ts.
   const contentFirstAppearance = sectionContentFirstAppearancePageIndices(
@@ -667,9 +670,11 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
   const pages = state.pages.map((draft) => {
     const owner = owners.get(draft.accumulator.sectionOccurrenceId)!;
     if (owner.sectionOccurrenceId !== priorOwner && owner.pageNumbering.start !== null) {
-      displayNumber = owner.pageNumbering.start + (
-        draft.accumulator.pageIndex
-          - (contentFirstAppearance.get(owner.sectionOccurrenceId) ?? draft.accumulator.pageIndex)
+      displayNumber = wordContinuousSectionRestartDisplayNumber(
+        owner.pageNumbering.start,
+        draft.accumulator.pageIndex,
+        contentFirstAppearance.get(owner.sectionOccurrenceId)
+          ?? draft.accumulator.pageIndex,
       );
     } else displayNumber += 1;
     priorOwner = owner.sectionOccurrenceId;
@@ -1200,17 +1205,19 @@ function paginateBodyPass(
         const pageBottomIsUnreserved = (reserves[state.flow.pageIndex]?.bottom ?? 0) === 0
           && state.footnoteReservePt === 0;
         const physicalRegionBottomIsActive = activeBlockEndPt(state) === activeRegion(state).blockEndPt;
-        // Word admits an undecorated empty mark by its baseline only at the physical body edge.
-        const trailingMarkAdmissionAllowancePt = cursor.boundary === null
-          && block.inkless === true
-          && isUndecoratedInklessMark(acquired.layout)
-          && !block.keepNext
-          && markReservePt === 0
-          && pageBottomIsUnreserved
-          && physicalRegionBottomIsActive
-          && hasFollowingInkContent(input, entryIndex + 1)
-          ? acquired.markBelowBaselinePt ?? 0
-          : 0;
+        // Compatibility-owned physical-edge empty-mark admission.
+        const trailingMarkAdmissionAllowancePt =
+          wordTrailingEmptyMarkAdmissionAllowancePt({
+            hasContinuationBoundary: cursor.boundary !== null,
+            inkless: block.inkless === true,
+            undecorated: isUndecoratedInklessMark(acquired.layout),
+            keepNext: block.keepNext,
+            markReservePt,
+            pageBottomIsUnreserved,
+            physicalRegionBottomIsActive,
+            hasFollowingInk: hasFollowingInkContent(input, entryIndex + 1),
+            markBelowBaselinePt: acquired.markBelowBaselinePt ?? 0,
+          });
         const selected = selectParagraphFragment(
           acquired.layout,
           cursor,

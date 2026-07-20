@@ -1,0 +1,271 @@
+import assert from 'node:assert/strict';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import test from 'node:test';
+
+const repositoryRoot = resolve(import.meta.dirname, '..');
+const checker = resolve(import.meta.dirname, 'check-docx-compatibility-evidence.mjs');
+
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), 'docx-compatibility-evidence-'));
+  cpSync(
+    resolve(repositoryRoot, 'packages/docx/src/layout/compatibility.ts'),
+    resolve(root, 'packages/docx/src/layout/compatibility.ts'),
+    { recursive: true },
+  );
+  const references = [
+    ['packages/docx/src/layout/coordinate-space.test.ts', 'maps Transitional text direction %s to %s'],
+    ['packages/docx/src/float-line-start-one-inch.test.ts', '(e) the boundary is identical across scales (absolute pt width)'],
+    ['packages/docx/src/layout/floats.test.ts', 'keeps observed different-paragraph displacement on exclusion bounds'],
+    ['packages/docx/src/float-table-page-fit.test.ts', '(g) DEFERS a page-anchored floating table when its raw band intersects an existing table float'],
+  ];
+  for (const [path, title] of references) {
+    write(root, path, `it(${JSON.stringify(title)}, () => {});\n`);
+  }
+  write(
+    root,
+    'scripts/docx-compatibility-microsoft-evidence.json',
+    readFileSync(
+      resolve(repositoryRoot, 'scripts/docx-compatibility-microsoft-evidence.json'),
+      'utf8',
+    ),
+  );
+  write(root, 'scripts/docx-compatibility-observation-baseline.json',
+    '{ "version": 1, "observations": [] }\n');
+  return root;
+}
+
+function write(root, path, source) {
+  const absolute = resolve(root, path);
+  mkdirSync(dirname(absolute), { recursive: true });
+  writeFileSync(absolute, source);
+}
+
+function run(root) {
+  return spawnSync(process.execPath, [checker, '--root', root], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+  });
+}
+
+test('accepts literal rules with live regression evidence', () => {
+  const result = run(fixture());
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /verified \(4 rules\)/);
+});
+
+test('rejects a stale regression test title', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/floats.test.ts', 'it("renamed", () => {});\n');
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_EVIDENCE_STALE/);
+});
+
+test('rejects a rule declaration outside the closed authority set', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/table.ts', `
+    import { defineCompatibilityRule } from './compatibility.js';
+    export const WORD_INLINE = defineCompatibilityRule({
+      id: 'word-inline',
+      evidence: {
+        kind: 'regression-test',
+        reference: 'packages/docx/src/layout/floats.test.ts#keeps observed different-paragraph displacement on exclusion bounds',
+      },
+      description: 'Inline rule',
+    });
+  `);
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_FACTORY_ACCESS|COMPATIBILITY_DECLARATION_AUTHORITY/);
+});
+
+test('rejects duplicate rule ids across compatibility modules', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/table-compatibility.ts', `
+    import { defineCompatibilityRule } from './compatibility.js';
+    export const WORD_DUPLICATE = defineCompatibilityRule({
+      id: 'word-square-line-start-one-inch',
+      evidence: { kind: 'microsoft-note', reference: '[MS-OI29500] §2.1.120' },
+      description: 'Duplicate rule',
+    });
+  `);
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_DUPLICATE_ID/);
+});
+
+test('rejects an aliased factory import', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/table-compatibility.ts', `
+    import { defineCompatibilityRule as defineRule } from './compatibility.js';
+    export const WORD_ALIAS = defineRule({
+      id: 'word-alias',
+      evidence: { kind: 'microsoft-note', reference: '[MS-OI29500] §2.1.120' },
+      description: 'Aliased factory',
+    });
+  `);
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_FACTORY_ACCESS/);
+});
+
+test('rejects namespace and binding access to the factory', () => {
+  for (const source of [
+    `
+      import * as compatibility from './compatibility.js';
+      export const WORD_NAMESPACE = compatibility.defineCompatibilityRule({
+        id: 'word-namespace',
+        evidence: { kind: 'microsoft-note', reference: '[MS-OI29500] §2.1.120' },
+        description: 'Namespace factory',
+      });
+    `,
+    `
+      import { defineCompatibilityRule } from './compatibility.js';
+      const defineRule = defineCompatibilityRule;
+      export const WORD_BINDING = defineRule({
+        id: 'word-binding',
+        evidence: { kind: 'microsoft-note', reference: '[MS-OI29500] §2.1.120' },
+        description: 'Bound factory',
+      });
+    `,
+  ]) {
+    const root = fixture();
+    write(root, 'packages/docx/src/layout/table-compatibility.ts', source);
+    const result = run(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /COMPATIBILITY_FACTORY_ACCESS/);
+  }
+});
+
+test('rejects factory re-export laundering', () => {
+  for (const source of [
+    "export { defineCompatibilityRule as defineRule } from './compatibility.js';\n",
+    "export * from './compatibility.js';\n",
+  ]) {
+    const root = fixture();
+    write(root, 'packages/docx/src/layout/factory-launder.ts', source);
+    const result = run(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /COMPATIBILITY_FACTORY_ACCESS/);
+  }
+});
+
+test('rejects dynamic and CommonJS loading of the compatibility owner', () => {
+  for (const [path, source] of [
+    [
+      'packages/docx/src/layout/dynamic-factory.mts',
+      "export const factory = await import('./compatibility.js');\n",
+    ],
+    [
+      'packages/docx/src/layout/commonjs-factory.cjs',
+      "module.exports = require('./compatibility.js');\n",
+    ],
+    [
+      'packages/docx/src/layout/template-factory.mts',
+      `
+        const compatibility = await import(\`./compatibility.js\`);
+        export const WORD_TEMPLATE = compatibility['defineCompatibilityRule']({
+          id: 'word-template',
+          evidence: {
+            kind: 'regression-test',
+            reference: 'packages/docx/src/layout/coordinate-space.test.ts#maps Transitional text direction %s to %s',
+          },
+          description: 'Template-loaded factory',
+        });
+      `,
+    ],
+  ]) {
+    const root = fixture();
+    write(root, path, source);
+    const result = run(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /COMPATIBILITY_FACTORY_ACCESS/);
+  }
+});
+
+test('scans production-importable mts and test-support modules', () => {
+  for (const path of [
+    'packages/docx/src/layout/hidden-rule.mts',
+    'packages/docx/src/layout/hidden-rule.test-support.ts',
+  ]) {
+    const root = fixture();
+    write(root, path, `
+      import { defineCompatibilityRule } from './compatibility.js';
+      export const WORD_HIDDEN = defineCompatibilityRule({
+        id: 'word-hidden',
+        evidence: { kind: 'microsoft-note', reference: '[MS-OI29500] §2.1.120' },
+        description: 'Hidden rule',
+      });
+    `);
+    const result = run(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /COMPATIBILITY_FACTORY_ACCESS|COMPATIBILITY_DECLARATION_AUTHORITY/);
+  }
+});
+
+test('rejects an unstructured Microsoft note reference', () => {
+  const root = fixture();
+  const source = readFileSync(
+    resolve(root, 'packages/docx/src/layout/compatibility.ts'),
+    'utf8',
+  ).replace(
+    "kind: 'regression-test',\n    reference: 'packages/docx/src/layout/coordinate-space.test.ts#maps Transitional text direction %s to %s'",
+    "kind: 'microsoft-note',\n    reference: 'MS note somewhere'",
+  );
+  write(root, 'packages/docx/src/layout/compatibility.ts', source);
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_MICROSOFT_REFERENCE/);
+});
+
+test('rejects a structured but uncatalogued Microsoft note reference', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/table-compatibility.ts', `
+    import { defineCompatibilityRule } from './compatibility.js';
+    export const WORD_UNKNOWN_NOTE = defineCompatibilityRule({
+      id: 'word-unknown-note',
+      evidence: { kind: 'microsoft-note', reference: '[MS-OI29500] §2.1.999999' },
+      description: 'Unknown Microsoft evidence',
+    });
+  `);
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_MICROSOFT_EVIDENCE/);
+});
+
+test('rejects a new inline Office observation outside compatibility modules', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/table.ts',
+    '// Word uses an undocumented magic branch here.\nexport const value = 1;\n');
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
+});
+
+test('does not exempt an unreviewed file merely because its name ends in compatibility', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/rogue-compatibility.ts',
+    '// Word uses an unevidenced branch here.\nexport const value = 1;\n');
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
+});
+
+test('allows only an exact transitional observation-baseline entry', () => {
+  const root = fixture();
+  const marker = 'packages/docx/src/layout/table.ts::// Word uses an evidenced legacy branch.';
+  write(root, 'packages/docx/src/layout/table.ts',
+    '// Word uses an evidenced legacy branch.\nexport const value = 1;\n');
+  write(root, 'scripts/docx-compatibility-observation-baseline.json',
+    `${JSON.stringify({ version: 1, observations: [marker] }, null, 2)}\n`);
+  assert.equal(run(root).status, 0);
+
+  write(root, 'packages/docx/src/layout/table.ts',
+    '// Word uses a changed legacy branch.\nexport const value = 1;\n');
+  const changed = run(root);
+  assert.equal(changed.status, 1);
+  assert.match(changed.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
+});

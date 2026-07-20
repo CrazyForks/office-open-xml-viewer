@@ -4,6 +4,10 @@ import type {
   AnchorEdgesInput,
   AnchorRawTransformInput,
 } from './anchor-input.js';
+import {
+  WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
+  wordZeroRelativeSizeUsesExtent,
+} from './anchor-compatibility.js';
 import { snapshotPlainData } from './plain-data.js';
 
 export interface AnchorFrameRect {
@@ -99,7 +103,7 @@ export interface AnchorSizeDiagnostic {
   readonly relativeFrom: string | null;
   readonly referenceFrame: ResolvedAxisDiagnostic['referenceFrame'] | null;
   readonly fraction: number | null;
-  readonly compatibilityFallback?: 'word-zero-relative-size';
+  readonly compatibilityFallback?: typeof WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK.id;
 }
 
 export interface AnchorEffectiveEdges {
@@ -410,7 +414,7 @@ function resolveSize(
           fraction: compatibilityRelative?.fraction ?? null,
           ...(compatibilityRelative === null
             ? {}
-            : { compatibilityFallback: 'word-zero-relative-size' as const }),
+            : { compatibilityFallback: WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK.id }),
         },
       },
     };
@@ -446,9 +450,9 @@ function resolveSize(
       ),
     };
   }
-  if (relative.fraction === 0) {
-    // [MS-ODRAWXML] notes 125/126: Word 2010 supports only positive pctWidth/
-    // pctHeight values. Retain the authored zero in acquisition, but use wp:extent.
+  if (wordZeroRelativeSizeUsesExtent(relative.fraction)) {
+    // Compatibility-owned zero-relative-size fallback; acquisition still
+    // retains the authored value while geometry uses wp:extent.
     return resolveExtent({
       relativeFrom: relative.relativeFrom,
       fraction: relative.fraction,
@@ -820,7 +824,8 @@ function frozenResult(result: AnchorFrameResult): AnchorFrameResult {
  * Resolves only retained point-space anchor geometry. It deliberately does not
  * choose flow ownership, collision placement, z-order, paint transforms, or a
  * compatibility fallback. See ECMA-376 Part 1 §§20.4.2.3, .6-.20 and
- * §§20.4.3.1-.7; [MS-OI29500] §§2.1.1354/.1357.
+ * §§20.4.3.1-.7; implementation-note evidence is owned by the compatibility
+ * decision module.
  */
 export function resolveAnchorFrame(input: AnchorFrameInput): AnchorFrameResult {
   const { acquisition, frames } = input;

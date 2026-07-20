@@ -173,12 +173,81 @@ policies retain their exact audited owners/values, and the displacement kernel
 cannot be reached through named/namespace/default imports, re-exports, dynamic
 imports, CommonJS, or string-key laundering.
 
-- [ ] **C1b Step 3: Review, broad-verify, and merge**
+- [x] **C1b Step 3: Review, broad-verify, and merge**
 
 Commit subject: `refactor(docx): unify float placement callers`.
 Use the roadmap review gate.
 
-### Task C2: Propagate diagnostics and add a synthetic conformance corpus
+### Task C2a: Isolate Office compatibility evidence
+
+> Design correction (2026-07-20): issue #1037 tracks compatibility isolation,
+> parser/layout diagnostics, and the conformance corpus as three independently
+> reviewable outcomes. C1 isolated float-specific rules but did not inventory
+> the remaining layout and paint observations. Complete C2a before diagnostics
+> so C2b can distinguish an unsupported fact from a named compatibility rule
+> and C2c can cite the correct rule identity.
+
+**Files:**
+
+- Modify: `packages/docx/src/layout/compatibility.ts`
+- Modify: `packages/docx/src/layout/compatibility.test.ts`
+- Create: `packages/docx/src/layout/anchor-compatibility.ts`
+- Create: `packages/docx/src/layout/section-compatibility.ts`
+- Create: `packages/docx/src/layout/table-compatibility.ts`
+- Modify: owning layout and paint modules only to delegate existing decisions
+- Create: `scripts/check-docx-compatibility-evidence.mjs`
+- Create: `scripts/check-docx-compatibility-evidence.test.mjs`
+- Create: `scripts/docx-compatibility-microsoft-evidence.json`
+- Create: `scripts/docx-compatibility-observation-baseline.json`
+- Modify: `.github/workflows/ci.yml`
+
+**Classification boundary:** A compatibility rule requires a Microsoft
+implementation note, a live regression-test reference, or a generated Office
+observation fixture. Normative OOXML behavior, deterministic solver direction,
+numeric tolerances, convergence/resource limits, and public API compatibility
+are not compatibility rules. Missing evidence remains unsupported/unresolved
+and belongs to C2b diagnostics; it is never promoted to an Office claim.
+
+- [x] **C2a-1: Isolate layout-side compatibility decisions**
+
+Add one generic immutable factory, module-local rule records, stable unique IDs,
+and pure decision helpers. Mechanically verify that every regression reference
+resolves to a live test title, every Microsoft-note section exists in the
+reviewed evidence catalog, rule IDs are globally unique, and rule declarations
+occur only in the reviewed compatibility modules. Reject aliased, namespace,
+re-exported, dynamic, CommonJS, and indirect-binding access to the factory, and
+scan every production-importable TypeScript/JavaScript module shape. Add a
+shrinking observation-comment baseline so new inline Office claims fail CI.
+The lexical observation scan is a one-way migration ratchet, not a semantic
+substitute for evidence review. Preserve every existing value and branch result.
+
+Do not register the retained `nextColumn` no-successor transition: absent an
+Office observation it is deterministic solver policy. Likewise, retained
+section-band column-separator geometry remains a layout ownership invariant,
+not an Office claim. Non-zero table-cell spacing remains normative OOXML;
+only the `[MS-OI29500]` inside-border conflict deviation is compatibility-owned.
+The Microsoft catalog is pinned to the reviewed published revision and section
+titles; the specification files themselves remain local and uncommitted.
+
+Runtime applied-rule tracing is not a C2a-1 acceptance condition. If C2b needs
+it, propagate immutable rule IDs on retained result values and aggregate only
+from the accepted final layout tree. Never introduce a mutable collector whose
+contents can retain rejected probes or convergence candidates.
+
+- [ ] **C2a-2: Isolate paint-side compatibility decisions**
+
+Name and evidence the remaining observations in `renderer.ts` and its legacy
+paint helpers without performing the C3 extraction. Move only decision data and
+pure predicates; geometry and paint ownership remain unchanged. Shrink the
+observation baseline in the same PR.
+
+- [ ] **C2a-3: Review, broad-verify, and merge**
+
+Use independent specification/evidence review for each C2a PR. Mark issue
+#1037's compatibility-isolation item complete only after both layout and paint
+inventories merge.
+
+### Task C2b: Propagate parser diagnostics
 
 **Files:**
 
@@ -188,23 +257,16 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/parser-model.ts`
 - Modify: `packages/docx/src/layout/diagnostics.ts`
 - Create: `packages/docx/src/layout/diagnostics.test.ts`
-- Create: `packages/docx/src/conformance/generate.ts`
-- Create: `packages/docx/src/conformance/cases.ts`
-- Create: `packages/docx/src/conformance/layout.test.ts`
-- Create: `packages/docx/tests/visual/conformance.spec.ts`
-- Modify: `packages/docx/playwright.config.ts`
-- Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
 
 - Consumes: parser-preserved unsupported/invalid facts and final layout fingerprints.
-- Produces: serialized `ParseDiagnostic`, mapped `LayoutDiagnostic`, generated minimal DOCX fixtures, and browser geometry assertions.
+- Produces: serialized `ParseDiagnostic` and mapped `LayoutDiagnostic`.
 
-**Specification evidence:** Every generated case records its ECMA-376 element
-and section or Microsoft implementation note beside the expected invariant.
-Parser diagnostics distinguish schema-recognized unsupported content, invalid
-values, and compatibility observations. A diagnostic never includes document
-text or private source content and never changes the exported TypeScript model.
+**Specification evidence:** Parser diagnostics distinguish schema-recognized
+unsupported content, invalid values, and compatibility observations. A
+diagnostic never includes document text or private source content and never
+changes the exported TypeScript model.
 
 ```rust
 #[derive(Debug, Clone, Serialize)]
@@ -219,18 +281,41 @@ pub struct ParseDiagnostic {
 
 Rust adds `diagnostics: Vec<ParseDiagnostic>` to its serialized document model.
 The non-exported TypeScript parser boundary reads it through
-`ParsedDocxDocumentModel = DocxDocumentModel & { diagnostics?:
+`InternalDocxDocumentModel = DocxDocumentModel & { diagnostics?:
 ParseDiagnosticWire[] }`; `packages/docx/src/types.ts` and the A1 public
 declaration baseline remain unchanged.
 
-- [ ] **Step 1: Add failing parser-to-layout diagnostic tests**
+- [ ] **C2b Step 1: Add failing parser-to-layout diagnostic tests**
 
 Build minimal OOXML for a recognized unsupported decoration, invalid geometry,
 unknown enum value, and a supported control case. Assert stable codes and source
 paths; assert layout maps recoverable cases to warnings, fatal geometry to an
 error, and the supported case to no diagnostic.
 
-- [ ] **Step 2: Add failing generated-corpus geometry tests**
+- [ ] **C2b Step 2: Run tests to verify Red**
+
+Run the Rust parser and TypeScript diagnostic tests. Expected: diagnostic fields
+and private wire mapping do not exist.
+
+- [ ] **C2b Step 3: Preserve diagnostics through the private wire boundary**
+
+Record stable parser codes without document text, map them at the parser/layout
+boundary, and include them in `DocumentLayout.diagnostics`. Rebuild WASM, run
+the parser and layout suites, typecheck, public API comparison, independent
+review, and merge.
+
+### Task C2c: Add a synthetic conformance corpus
+
+**Files:**
+
+- Create: `packages/docx/src/conformance/generate.ts`
+- Create: `packages/docx/src/conformance/cases.ts`
+- Create: `packages/docx/src/conformance/layout.test.ts`
+- Create: `packages/docx/tests/visual/conformance.spec.ts`
+- Modify: `packages/docx/playwright.config.ts`
+- Modify: `.github/workflows/ci.yml`
+
+- [ ] **C2c Step 1: Add failing generated-corpus geometry tests**
 
 Generate redistributable pairwise cases spanning story, container, paragraph,
 table, nested table, inline/floating object, direction, spacing, style source,
@@ -252,7 +337,7 @@ geometry, flow ownership, bottom-margin, structured-clone, text/source-range
 coverage, and exact same-browser main/worker fingerprint invariants. No empirical
 cross-browser text tolerance is permitted.
 
-- [ ] **Step 3: Run tests to verify Red**
+- [ ] **C2c Step 2: Run tests to verify Red**
 
 Run:
 
@@ -262,20 +347,18 @@ pnpm vitest run packages/docx/src/layout/diagnostics.test.ts packages/docx/src/c
 pnpm playwright test --config packages/docx/playwright.config.ts conformance.spec.ts --project=chrome
 ```
 
-Expected: diagnostic fields and generated fixture modules do not exist.
+Expected: generated fixture modules do not exist.
 
-- [ ] **Step 4: Preserve diagnostics and generate fixtures deterministically**
+- [ ] **C2c Step 3: Generate fixtures deterministically**
 
-Record stable parser codes without document text, map them at the parser/layout
-boundary, and include them in `DocumentLayout.diagnostics`. Implement a deterministic
-ZIP/XML generator using repository dependencies, with fixed timestamps and IDs,
+Implement a deterministic ZIP/XML generator using repository dependencies, with fixed timestamps and IDs,
 so generated bytes and deterministic-service expected fingerprints are stable.
 Broaden the DOCX Playwright config to include the committed visual/conformance
 test directory and add explicit Chrome, Firefox, and WebKit projects. CI runs
 node geometry on every change and all three browser projects on the existing
 browser-test cadence.
 
-- [ ] **Step 5: Rebuild and verify Green**
+- [ ] **C2c Step 4: Rebuild and verify Green**
 
 Run:
 
@@ -291,9 +374,9 @@ Expected: all checks pass and two consecutive corpus generations have identical
 hashes and deterministic-service fingerprints; browser tolerance and parity
 assertions pass in all configured projects.
 
-- [ ] **Step 6: Commit, independently review, fix, and merge PR C2**
+- [ ] **C2c Step 5: Commit, independently review, fix, and merge**
 
-Commit subject: `test(docx): add layout diagnostics and conformance corpus`.
+Commit subject: `test(docx): add synthetic conformance corpus`.
 Use the roadmap review gate.
 
 ### Task C3: Reduce renderer to an adapter and prove architectural completion

@@ -5,8 +5,8 @@ function freezePoint(point: PointPt): PointPt {
   return Object.freeze(point);
 }
 
-/** Geometry follows the retained section band because ink bounds cannot prove
- * where Word terminates a section-scoped column rule. */
+/** Geometry follows the retained section-owned band; content ink bounds are
+ * paint facts and cannot determine a section-scoped rule's layout extent. */
 export function columnSeparatorSegments(
   regions: readonly PageSectionRegion[],
 ): readonly ColumnSeparatorLayout[] {

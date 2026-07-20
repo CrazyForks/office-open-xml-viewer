@@ -78,7 +78,9 @@
     "lint": "ast-grep scan",
     "lint:test": "ast-grep test --skip-snapshot-tests",
     "test:docx-boundaries": "node --test scripts/check-docx-layout-boundaries.test.mjs",
+    "test:docx-compatibility": "node --test scripts/check-docx-compatibility-evidence.test.mjs",
     "test:docx-public-api": "node --test scripts/check-docx-public-api.test.mjs",
+    "check:docx-compatibility": "node scripts/check-docx-compatibility-evidence.mjs",
     "test:docx-package-build": "node --test scripts/check-docx-package-build.test.mjs"
   },
   "devDependencies": {
