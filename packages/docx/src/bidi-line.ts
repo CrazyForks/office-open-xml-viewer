@@ -107,7 +107,8 @@ export function computeLineVisualOrder(
   //    Separator) — a tab character's real Bidi_Class. Rules L1/L2 then reset it
   //    to the paragraph level and reorder each tab-delimited CELL independently,
   //    so an RTL paragraph's tab-aligned cells appear in mirrored (leading-cell-
-  //    at-the-right) order, matching Word. Modelled as a class override rather
+  //    at-the-right) order. `word-rtl-run-ambiguous-class-override` records this
+  //    compatibility mapping. Modelled as a class override rather
   //    than by emitting a literal "\t" so the segment↔code-unit mapping stays
   //    1:1 (every non-text inline object is one code unit).
   // `undefined` until any segment opts in, so the pure algorithm runs for
@@ -249,12 +250,9 @@ export function jcIsFullyJustified(alignment: string | undefined): boolean {
 }
 
 /** ECMA-376 §17.18.44 — whether a `w:jc` value also stretches the paragraph's
- *  LAST line. `distribute` fills its final line too (unlike `both`). But
- *  `thaiDistribute` does NOT: measured against the Word-exported ground truth
- *  (issue #959 adjudication fixture), a thaiDistribute paragraph's final line is
- *  left flush-left and ragged — reaching only its natural width — exactly like
- *  `both`, while its non-final lines are fully justified across the Thai clusters.
- *  So only `distribute` stretches the last line. */
+ *  last line. `word-thai-distribute-cluster-policy` records that
+ *  `thaiDistribute`, like `both`, leaves its final line ragged; only
+ *  `distribute` stretches the last line. */
 export function jcStretchesLastLine(alignment: string | undefined): boolean {
   return alignment === 'distribute';
 }

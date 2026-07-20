@@ -1,6 +1,7 @@
 {
   "version": 1,
   "observations": [
-    "packages/docx/src/document.ts::// in place when `opts.password` is supplied ([MS-OFFCRYPTO]); a"
+    "packages/docx/src/document.ts::// in place when `opts.password` is supplied ([MS-OFFCRYPTO]); a",
+    "packages/docx/src/renderer.ts::// visible content is a nested table, Word emits a trailing empty <w:p/> purely"
   ]
 }

@@ -371,9 +371,9 @@ function floatBlockedIntervals(
  *      Multiple objects are composed only after each `largest` object selects
  *      its own permitted side under §20.4.3.7. The widest remaining gap wins.
  *
- * The one-inch line-start rule is a Word compatibility policy observed for
- * square objects, not polygon geometry and not an ECMA-376 mandate. The prepared
- * API therefore receives square and polygon requirements separately.
+ * `word-square-line-start-one-inch` is a square-object compatibility rule, not
+ * polygon geometry and not an ECMA-376 mandate. The prepared API therefore
+ * receives square and polygon requirements separately.
  */
 export function resolveLineFloatWindow(
   topY: number,

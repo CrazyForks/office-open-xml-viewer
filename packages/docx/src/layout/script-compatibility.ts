@@ -18,6 +18,15 @@ export const WORD_RTL_RUN_AMBIGUOUS_CLASS_OVERRIDE = defineCompatibilityRule({
   description: 'Model an rtl-marked run as a higher-level UAX #9 override for punctuation and symbols only, leaving whitespace and strong letters at their ordinary classes.',
 });
 
+export const WORD_RTL_COMPLEX_SCRIPT_EUROPEAN_DIGITS_AN = defineCompatibilityRule({
+  id: 'word-rtl-complex-script-european-digits-an',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/bidi-line.test.ts#orders an AN-classified date as 2026-02-28',
+  },
+  description: 'Classify European digits as Arabic Number within an Arabic or Hebrew complex-script run so UAX #9 preserves the compatible visual ordering of digit groups and separators.',
+});
+
 export const WORD_KASHIDA_FINAL_FORM_PRIORITY = defineCompatibilityRule({
   id: 'word-kashida-final-form-priority',
   evidence: {

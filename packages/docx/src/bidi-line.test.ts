@@ -168,12 +168,10 @@ describe('computeLineVisualOrder', () => {
     expect(order).toEqual([2, 1, 0]);
   });
 
-  it('orders an AN-classified date to Word ordering (2026-02-28)', () => {
-    // sample-7 date cell: logical "28-02-2026" in an Arabic complex-script run
-    // (w:rtl, w:lang w:bidi="ae-AR"). The renderer pre-splits it into digit-
-    // group / separator segments and tags each with `digitsAsAN`. Under the
-    // RTL cell base, classifying the European digits as AN reorders the groups
-    // to Word's "2026-02-28" (UAX#9 §4.3 HL1 higher-level protocol).
+  it('orders an AN-classified date as 2026-02-28', () => {
+    // A logical "28-02-2026" in an Arabic complex-script run is pre-split into
+    // digit-group and separator segments tagged `digitsAsAN`. Under the RTL
+    // base, UAX #9 §4.3 HL1 reorders those groups to "2026-02-28".
     const segs = [
       { text: '28', rtl: true, digitsAsAN: true },
       { text: '-', rtl: true, digitsAsAN: true },

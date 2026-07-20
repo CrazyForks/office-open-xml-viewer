@@ -253,6 +253,14 @@ unsupported Office behavior are classified explicitly instead of being promoted
 to compatibility rules. In particular, keep the draw-only #990 baseline rule
 distinct from the #981 trailing-mark pagination-admission rule.
 
+The exact transitional observation baseline may retain the encryption note and
+the pre-existing nested-table marker comment inside
+`measureCellContentHeightPx`. The latter declaration is byte-frozen by the
+layout-boundary baseline, so C2a records the behavior as
+`word-trailing-structural-cell-marker` without rewriting that one legacy
+comment. C3 removes the frozen declaration and this final transitional entry;
+adding any other inline observation remains a CI failure.
+
 - [ ] **C2a-3: Review, broad-verify, and merge**
 
 Use independent specification/evidence review for each C2a PR. Mark issue

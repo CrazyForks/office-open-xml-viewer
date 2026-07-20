@@ -173,15 +173,11 @@ export function resolveAlignedPosV(
 }
 
 /**
- * Clamp an absolutely-positioned (vAnchor=page/margin) box so it stays inside its
- * vertical container band — Word ground truth (sample-17 Sec B frame,
- * sample-18 Sec B floating table): a `vAnchor="page"` box requesting a `y` that
- * would push its BOTTOM past the physical page edge is shifted UP so its bottom
- * sits exactly on the page bottom (measured 741.9pt = 841.9 − 100 for a 100pt
- * box), NOT left overflowing. This is the frame / floating-table analogue of the
- * pagination keep-with-anchor that a vAnchor="text" box gets instead (moving the
- * anchor cursor); page/margin boxes have an ABSOLUTE in-page y that pagination
- * cannot help, so the geometry clamps them here.
+ * Implementation-defined overflow policy for an absolutely positioned
+ * vAnchor=page/margin box: shift an overflowing bottom edge back into its
+ * vertical container. ECMA-376 does not define this clamp. Unlike a text-anchored
+ * box, an absolute page/margin position cannot be repaired by moving the flow
+ * cursor, so this local geometry policy keeps the full box reachable.
  *
  *   y = max(containerStart, containerEnd − boxH)
  *
@@ -285,12 +281,9 @@ export function computeFrameBox(
     frameY = vBand.start + (fp.y != null ? fp.y * sc : 0);
   }
 
-  // Word ground truth (sample-17 Sec B): a vAnchor=page/margin frame whose bottom
-  // would fall past its container is shifted UP to sit flush on the container
-  // bottom (physical page edge for page-anchored), not left overflowing. A
-  // vAnchor="text" frame is excluded — its overflow is handled by the paginator's
-  // keep-with-anchor (moving the anchor cursor), and its band rides the flow, so
-  // clamping here would be wrong. See clampAbsBoxIntoContainer.
+  // Apply the implementation-defined absolute-box overflow policy. A
+  // vAnchor="text" frame is excluded: its band moves with flow and pagination
+  // owns keep-with-anchor behavior. See clampAbsBoxIntoContainer.
   if (fp.vAnchor === 'page' || fp.vAnchor === 'margin') {
     frameY = clampAbsBoxIntoContainer(frameY, frameH, vBand);
   }
@@ -418,8 +411,8 @@ export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
  *   none      → no exclusion (text may overlap; the frame is drawn absolutely
  *               and following text starts at its normal Y).
  *   notBeside → topAndBottom (text never sits beside the frame).
- *   around / auto → square side wrap. "auto" is Word's application-defined
- *               default, effectively "around" in Word, so treated as around.
+ *   around / auto → square side wrap. `word-frame-auto-wrap-around` records
+ *               the application-defined mapping of auto to around.
  *   tight / through → a frame is a rectangle, so contour wrapping collapses to
  *               a square wrap (no contour follow for a rectangular frame).
  *

@@ -63,6 +63,87 @@ export const WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE = defineCompatibilityRule(
   description: 'Every line in a ruby-bearing paragraph uses the paragraph-wide maximum snapped line advance so its baseline rhythm remains uniform.',
 });
 
+export const WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION = defineCompatibilityRule({
+  id: 'word-fit-text-inter-character-expansion',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/fit-text.test.ts#distributes (val − Σnatural)/(n−1) as the inter-character gap, no trailing gap',
+  },
+  description: 'Expand a multi-character fitText region to its authored width by distributing the residual evenly across interior character gaps.',
+});
+
+export const WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION = defineCompatibilityRule({
+  id: 'word-cjk-both-inter-character-expansion',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/text-distribute.test.ts#§17.18.44: fills a wrapped pure-CJK line via inter-CJK pitch (expansion default)',
+  },
+  description: 'Treat inter-CJK boundaries as eligible inter-word gaps when expanding a non-final both-justified line that contains no spaces.',
+});
+
+export const WORD_THAI_DISTRIBUTE_CLUSTER_POLICY = defineCompatibilityRule({
+  id: 'word-thai-distribute-cluster-policy',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/thai-distribute.test.ts#fills non-final lines to the right margin under thaiDistribute',
+  },
+  description: 'Expand non-final thaiDistribute lines at Thai grapheme-cluster boundaries while retaining a natural-width final line.',
+});
+
+export const WORD_NUMERIC_DECIMAL_TAB_INFERENCE = defineCompatibilityRule({
+  id: 'word-numeric-decimal-tab-inference',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/decimal-tab-autoalign.test.ts#right-aligns numbers of different digit counts at the decimal tab',
+  },
+  description: 'Right-align an otherwise tab-less numeric paragraph at its leading decimal tab while leaving non-numeric and no-decimal-tab paragraphs unchanged.',
+});
+
+export const WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE = defineCompatibilityRule({
+  id: 'word-numbering-marker-overflow-tab-advance',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/numbered-marker-tab-advance.test.ts#advances the body past the marker to the next tab stop, not onto indentLeft',
+  },
+  description: 'When a numbering marker overruns its hanging-indent budget, advance the body to the next reachable tab stop beyond the marker edge.',
+});
+
+export const WORD_TAB_STOP_PAGE_EDGE_CLAMP = defineCompatibilityRule({
+  id: 'word-tab-stop-page-edge-clamp',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/rtl-tab-stops.test.ts#pins a page number to the left text margin when the stop is past it',
+  },
+  description: 'Clamp content assigned to a tab stop beyond the trailing text edge back onto that edge instead of placing ink outside the page content band.',
+});
+
+export const WORD_DICTIONARY_SEA_NATURAL_FIT = defineCompatibilityRule({
+  id: 'word-dictionary-sea-natural-fit',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/sea-justified-fit.test.ts#Rule 1: wraps the paragraph-final Thai word on a thaiDistribute closing line (zero space-shrink)',
+  },
+  description: 'Do not admit a dictionary Southeast-Asian word by compressing preceding inter-word spaces when its natural advance exceeds the remaining line width.',
+});
+
+export const WORD_DICTIONARY_SEA_ATOMIC_CHUNK = defineCompatibilityRule({
+  id: 'word-dictionary-sea-atomic-chunk',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/sea-justified-fit.test.ts#Rule 2: a no-space chunk that fits a full line moves whole instead of splitting',
+  },
+  description: 'Move a glued dictionary Southeast-Asian chunk to a fresh line whole when it fits that full line, using dictionary breaks only when the chunk itself is overlong.',
+});
+
+export const WORD_OVERLONG_TOKEN_EMERGENCY_BREAK = defineCompatibilityRule({
+  id: 'word-overlong-token-emergency-break',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/run-inline-formatting.test.ts#breaks a no-space token wider than the line at the character level',
+  },
+  description: 'Emergency-break a non-CJK token that is wider than an empty line at grapheme-safe character boundaries so it remains inside the content band.',
+});
+
 export const WORD_FAR_EAST_SINGLE_LINE_FACTOR = 1.3;
 
 export function wordEastAsianGridLineCells(

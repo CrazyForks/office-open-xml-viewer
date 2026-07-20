@@ -197,20 +197,10 @@ export function resolvedHorizontalBoundaryWidths(table: DocTable): number[] {
  *       atLeast — `@val` (× `scale`) is a lower bound; content can grow the row.
  *       auto    — by the literal text of §17.4.80, `@val` is IGNORED ("no
  *                 predetermined minimum or maximum size", advisory layout cache
- *                 only). However, Word's own output PDFs show `@val` being
- *                 honored as a LOWER BOUND (atLeast-equivalent) when `hRule` is
- *                 omitted and `@val` is present: e.g. sample-11.docx's December
- *                 2007 calendar emits `<w:trHeight w:val="576"/>` (hRule
- *                 omitted; spec default = auto) on its date rows, and Word lays
- *                 each such row out at exactly 576 / 20 = 28.8 pt — `@val` as a
- *                 floor (pdftotext -bbox confirms the date glyph rows sit on a
- *                 28.8 pt pitch; the larger ~43.2 pt visual cadence per WEEK is
- *                 that 28.8 pt date row PLUS an unmarked auto spacer row below
- *                 it, not a single `@val` row). XML inspection confirms no other
- *                 height information exists, so `@val` is the only signal that
- *                 produces Word's geometry. We deliberately deviate from the
- *                 §17.4.80 literal to follow Word's behavior. With `@val`
- *                 absent, auto falls back to `MIN_ROW_HEIGHT_PT`.
+ *                 only). `word-authored-auto-row-height-floor` owns the
+ *                 compatibility deviation that treats an authored auto value as
+ *                 a lower bound. With `@val` absent, auto falls back to
+ *                 `MIN_ROW_HEIGHT_PT`.
  *   - gridSpan: a cell's width is the sum of the `cell.colSpan` columns it
  *     anchors (clamped to the remaining columns).
  *   - ECMA-376 §17.4.85 (vMerge): a `vMerge=restart` cell's content occupies the

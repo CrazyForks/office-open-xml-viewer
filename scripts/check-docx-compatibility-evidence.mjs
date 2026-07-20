@@ -402,7 +402,7 @@ function options(argv) {
 }
 
 const observationMarker =
-  /\[MS-[A-Z0-9]+\]|\bobserved (?:Word|Office)\b|\bWord-compatible\b|\bWord(?:'s)? (?:uses|applies|adds|treats|admits|keeps|places|starts|does|doesn't|ignores|clips|measured|runtime|renders|draws|fills|resolves)\b/i;
+  /\[MS-[A-Z0-9]+\]|\b(?:observed|measured|verified|adjudicated|recorded)\b[^\n]{0,120}\b(?:Word|Office)\b|\b(?:matching|following)\s+(?:Word|Office)\b|\b(?:Word|Office)(?:'s)?[- ](?:observed|verified|measured|adjudicated|compatible|runtime|specific|defined)\b|\b(?:Word|Office)(?:'s)?\s+(?:uses|applies|adds|treats|admits|keeps|places|starts|does|doesn't|ignores|clips|measures|renders|draws|fills|resolves|confirms|defers|emits|paints|centres|centers|collapses|aligns|reserves|lays|flows|widens|advances|classifies|breaks|counts|runs|excludes|honors|honours|formats|swaps|writes|stores|layers|anchors|moves|suppresses|never)\b|\b(?:Word|Office)(?:'s)?\s+(?:GT|ground truth|markup|output PDFs?|PDF(?: export)?|behavior|behaviour|compatibility)\b/;
 
 function observationKeys(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);

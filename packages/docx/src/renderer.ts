@@ -198,7 +198,11 @@ import {
   wordRubyUniformLineHeightPx,
   wordVisibleLineMetricPx,
 } from './layout/line-compatibility.js';
-import { WORD_TRACK_CHANGE_AUTHOR_COLORS } from './layout/paint-compatibility.js';
+import {
+  WORD_TRACK_CHANGE_AUTHOR_COLORS,
+  wordTrackChangeDecoration,
+} from './layout/paint-compatibility.js';
+import { wordDropsTrailingStructuralCellMarker } from './layout/table-compatibility.js';
 import type { CanvasPaintResourcePainter } from './paint/types.js';
 import { createDocumentPaintResourceRegistry } from './layout/production-paint-resources.js';
 import {
@@ -938,9 +942,8 @@ export interface RenderState {
    *  byte-identical to the pre-vertical renderer. */
   verticalCJK?: boolean;
   /** ECMA-376 §17.6.20 + Part 4 §14.11.7 — set (always together with
-   *  {@link verticalCJK}) on a section-level `btLr` page. Word GT (issue #988
-   *  re-adjudication, raster-proven on asymmetric glyphs — the dakuten of 「び」
-   *  lands bottom-right): `btLr` shares the `tbRl` PAGE FRAME (swapped logical
+   *  {@link verticalCJK}) on a section-level `btLr` page. Under
+   *  `word-section-btlr-tbrl-page-frame`, `btLr` shares the `tbRl` PAGE FRAME (swapped logical
    *  layout, +90° page paint, columns right→left) but rotates EVERY glyph with
    *  the page — CJK is NOT counter-rotated upright, vertical punctuation forms
    *  (、。（） → U+FE1x/FE3x) are NOT substituted, and 縦中横 (§17.3.2.10) is
@@ -1597,8 +1600,8 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
 /** True when a section flows VERTICALLY (glyphs stack top→bottom, lines advance
  *  across the page). `<w:sectPr><w:textDirection>` uses the TRANSITIONAL
- *  ST_TextDirection enum (ECMA-376 Part 4 §14.11.7; Word writes these, not the
- *  Part 1 §17.18.93 Strict `tb|rl|lr|…` set):
+ *  ST_TextDirection enum (ECMA-376 Part 4 §14.11.7, rather than the Part 1
+ *  §17.18.93 Strict `tb|rl|lr|…` set):
  *    - `tbRl`  (≡ Strict `rl`)  — vertical, lines right→left: standard vertical
  *                                 Japanese; the only value in the samples.
  *    - `tbRlV` (≡ Strict `rlV`) — vertical R→L, non-EA glyphs rotated 90° CW.
@@ -1608,10 +1611,8 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
  *  glyph path already draws Latin sideways for).
  *
  *    - `btLr`  (≡ Strict `lr`)  — its NOMINAL semantics are bottom-to-top /
- *                                 left-to-right, but Word ground truth (issue #988
- *                                 re-adjudication, correcting the batch-3
- *                                 adjudication ① with raster proof on asymmetric
- *                                 glyphs) is registered as
+ *                                 left-to-right, but the registered
+ *                                 `word-section-btlr-tbrl-page-frame` behavior is
  *                                 `word-section-btlr-tbrl-page-frame`: section
  *                                 `btLr` uses the horizontal layout rotated +90° CW
  *                                 WHOLESALE: same page frame as `tbRl` (columns
@@ -1648,8 +1649,8 @@ function isVerticalTextDirection(td: string | null | undefined): boolean {
 
 /** True for a VERTICAL direction whose glyphs ALL ride the +90° page rotation
  *  (no CJK upright counter-rotation, no vertical punctuation forms, no 縦中横):
- *  section-level `btLr` per the issue #988 re-adjudication (Word GT, raster-
- *  proven — see {@link RenderState.verticalAllRotated}). The tbRl family keeps
+ *  section-level `btLr` under `word-section-btlr-tbrl-page-frame` (see
+ *  {@link RenderState.verticalAllRotated}). The tbRl family keeps
  *  the upright-CJK glyph path. Only meaningful when
  *  {@link isVerticalTextDirection} is already true. */
 function isAllRotatedVerticalTextDirection(td: string | null | undefined): boolean {
@@ -1690,9 +1691,9 @@ function verticalLayoutDoc(doc: DocxDocumentModel): DocxDocumentModel {
 }
 
 /** Inverse of {@link verticalLayoutSection}: map a vertical section's SWAPPED
- *  LOGICAL geometry back to its PHYSICAL page geometry. Used to render a vertical
- *  section's header/footer, which — per Word ground truth (issue #988) — stay
- *  HORIZONTAL at the physical top/bottom margins and do NOT rotate with the tbRl
+ *  LOGICAL geometry back to its PHYSICAL page geometry. Under
+ *  `word-vertical-section-physical-header-footer`, its header/footer stay
+ *  horizontal at the physical top/bottom margins and do not rotate with the tbRl
  *  body. Applying `verticalLayoutSection` then this returns the original section
  *  (a quarter-turn each way): physical margin{Top,Right,Bottom,Left} =
  *  logical margin{Left,Top,Right,Bottom}; header/footer distances are preserved. */
@@ -3433,9 +3434,9 @@ function createConcreteBodyLayoutKernel(
                 overlapEpsilonPt: FLOAT_OVERLAP_EPS,
               }).defer;
             if (pageAnchoredCollision) {
-              // Word defers an absolute page/margin table whose authored band is
-              // already owned by a table on this page; the fresh page preserves
-              // the authored anchor instead of converting it to a text continuation.
+              // `word-page-anchored-table-collision-deferral`: a fresh page
+              // preserves the authored absolute anchor instead of converting
+              // the colliding table to a text continuation.
               return Object.freeze({
                 layout: retained.layout,
                 blockExtentPt: 0,
@@ -4782,8 +4783,8 @@ function isInklessParagraph(p: DocParagraph): boolean {
 /**
  * ECMA-376 §17.3.1.29 + §17.3.2.41 — a paragraph with no visible inline content
  * whose paragraph MARK is vanished (hidden text). In the normal/print view
- * (settings hidden-text off — the view a Word PDF export renders) it is not
- * displayed at all, so it collapses to zero height: no mark line box, no
+ * (settings hidden-text off) it is not displayed, so it collapses to zero
+ * height: no mark line box, no
  * paragraph spacing, nothing painted. This is the paragraph-mark analogue of the
  * parser stripping hidden runs (`fmt.vanish` in parser.rs): a run of such empty
  * vanished paragraphs must not reserve vertical space (sample-28, issue #868 —
@@ -4828,7 +4829,8 @@ function hasInlineImage(p: DocParagraph): boolean {
  *
  *   - ECMA-376 §17.3.1.9 `<w:contextualSpacing>`: a same-style toggling
  *     paragraph drops its OWN contribution to the inter-paragraph gap
- *     ({@link contextualSpacingAdjust} — per-side, Word-adjudicated).
+ *     (`word-contextual-spacing-per-side`, projected by
+ *     {@link contextualSpacingAdjust}).
  *   - Adjacent-paragraph spacing OVERLAP: the gap between two paragraphs is
  *     `max(prevSpaceAfter, currSpaceBefore)`, not their sum. We subtract the
  *     overlap `min(prevSpaceAfter, effBefore)` so a 12pt space-after followed
@@ -5354,8 +5356,8 @@ function resolveNumberingMarker(
       // "1.1.1." whose glyphs exceed the hanging indent (the marker `indFirst`
       // budget), e.g. in a substitute font — the tab advances to the next stop
       // PAST the marker end instead, and the body follows it. Without this the
-      // body stays at indentLeft and the marker overprints it (sample-11's
-      // "1.1.1. Three" collided; Word advances "Three" to the next default tab).
+      // body stays at indentLeft and the marker overprints it.
+      // `word-numbering-marker-overflow-tab-advance` advances to the next stop.
       // markerEndFromIndent (jc-adjusted right edge from paraX) ≤ 0 ⇒ it fits
       // (right-aligned markers always do), leave the body at indentLeft.
       if (markerEndFromIndent > 0) {
@@ -5463,8 +5465,9 @@ function renderParagraph(
   // Register anchor floats from this paragraph. ECMA-376 §20.4.3.5: a
   // `positionV relativeFrom="paragraph"` float is positioned relative to "the
   // paragraph which contains the drawing anchor" — its TOP edge, BEFORE the
-  // paragraph's spaceBefore (Word anchors the float at the paragraph top, not the
-  // post-spaceBefore text area). So pass `paragraphStartY` (pre-spaceBefore),
+  // paragraph's spaceBefore. `word-paragraph-anchor-pre-spacing-origin`
+  // therefore passes `paragraphStartY` (pre-spaceBefore), not the
+  // post-spaceBefore text area,
   // identically for wrap AND wrapNone floats (renderAnchorImages below already
   // uses paragraphStartY). Anchoring wrap floats at the post-spaceBefore text top
   // placed them spaceBefore too low — e.g. sample-12's figure (anchor paragraph
@@ -5715,12 +5718,8 @@ function renderParagraph(
   // Decimal-tab auto-alignment. ECMA-376 (§17.3.1.37 tabs / §17.18.84 ST_TabJc
   // `decimal`) only positions content at a tab stop when an explicit tab
   // character advances to it; absent a tab, content starts at the indent. Word,
-  // however, aligns a bare number to a leading DECIMAL tab with NO tab character
-  // — the built-in "Decimal Aligned" paragraph style on table number cells does
-  // exactly this. sample-11's College table proves it: 110 / 103 / +7 etc. each
-  // right-align on the decimal tab at 18 pt (Word PDF bbox: per-column right
-  // edges coincide), where we previously left-aligned them. This is a deliberate
-  // Word-runtime deviation (user-approved); it is gated to NUMERIC content whose
+  // however, aligns a bare number to a leading DECIMAL tab with NO tab character.
+  // `word-numeric-decimal-tab-inference` gates this to numeric content whose
   // first tab stop is `decimal` and which carries no explicit tab, so ordinary
   // paragraphs are untouched. We right-edge align the number at the stop — the
   // same approximation the explicit-tab decimal path uses (frac=1; it does not
@@ -5820,8 +5819,9 @@ function renderParagraph(
   // + thaiDistribute variants) fully justify each line by expanding inter-word
   // spaces (and, for expansion, inter-CJK boundaries; thaiDistribute also opens
   // Thai grapheme-cluster boundaries). The last line is traditionally left-
-  // aligned (not stretched) for "both"/kashida AND "thaiDistribute" (Word GT,
-  // issue #959); only "distribute" also stretches the last line. The slack is
+  // aligned (not stretched) for "both"/kashida AND "thaiDistribute" under
+  // `word-thai-distribute-cluster-policy`; only "distribute" also stretches the
+  // last line. The slack is
   // divided across the eligible gaps. (jc classification lives in bidi-line so the
   // §17.18.44 knowledge stays single-source.)
   const isJustified = jcIsFullyJustified(para.alignment);
@@ -5939,7 +5939,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     // paths below. A `btLr` page (`state.verticalAllRotated`) is the horizontal
     // layout rotated wholesale — its glyphs draw through the ordinary
     // HORIZONTAL branches and ride the +90° page rotation, so CJK lies rotated
-    // 90° CW exactly like Word's GT. Horizontal pages: false, byte-identical.
+    // 90° CW under `word-section-btlr-tbrl-page-frame`. Horizontal pages:
+    // false, byte-identical.
     const verticalUpright = !!state.verticalCJK && !state.verticalAllRotated;
     // First-line indent and numbering prefix only apply to the paragraph's
     // ORIGINAL first line, not the first line of a continuation slice.
@@ -5952,8 +5953,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
     if (line.topY !== undefined && line.topY > state.y) state.y = line.topY;
 
     // Baseline placement inside the line box. §17.3.1.33 defines the box SIZE
-    // (line/lineRule); the placement WITHIN the box below is Word's OBSERVED
-    // behaviour, measured against its PDF export (#990), not an ECMA rule:
+    // (line/lineRule); `word-auto-multiple-baseline-pin` owns the draw-only
+    // placement within the box:
     //   • lineRule="auto" is MULTIPLE spacing — `w:line` is a 240ths-of-a-line
     //     multiplier. Word pins the baseline at the natural ascent from the box
     //     top and places the multiplier's extra leading ENTIRELY BELOW the
@@ -6165,8 +6166,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
       } else {
         const fallbackFontSize = getDefaultFontSize(para) * scale;
         // Marker ink (§17.9.24 + §17.3.1.29): the level rPr's own color wins;
-        // absent that, Word layers the level rPr over the PARAGRAPH MARK's run
-        // properties, so the mark's resolved color tints the bullet/number;
+        // absent that, the level rPr is layered over the PARAGRAPH MARK's run
+        // properties (§17.9.24), so the mark's resolved color tints the bullet/number;
         // else the default ink. An EXPLICIT `w:color w:val="auto"` on the
         // level (colorAuto, §17.3.2.6) breaks that mark fallback — auto is a
         // named automatic color, not "unset" — and lands on the default ink.
@@ -6304,7 +6305,8 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         residualSlack > 0,
         // §17.18.44 thaiDistribute: on expansion, also open a gap at every Thai/
         // Lao/Khmer grapheme-cluster boundary so a space-free SEA line justifies
-        // by inter-cluster pitch (Word GT: issue #959). `both`/`distribute` don't.
+        // by inter-cluster pitch under `word-thai-distribute-cluster-policy`.
+        // `both`/`distribute` do not.
         para.alignment === 'thaiDistribute' && residualSlack > 0,
       );
       segStretch = dist ? dist.perSeg : null;
@@ -6507,9 +6509,9 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           flushBorderGroup();
         }
 
-        // Track-changes overlay: paint insertions / deletions in the author's
-        // colour with the canonical Word markup (underline for insertions,
-        // strikethrough for deletions). The author hash gives stable colours
+        // `word-track-change-decoration`: paint insertions / deletions in the
+        // author's colour with underline / strikethrough respectively.
+        // The author hash gives stable colours
         // for the same reviewer across pages. Disabled when
         // `showTrackChanges: false` (the "Final / No Markup" view).
         const revActive = state.showTrackChanges && !!s.revision;
@@ -6540,9 +6542,9 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           //     an appropriate color based on the background color behind the
           //     run's content." The parser flattens docDefaults → styles → direct
           //     rPr into the resolved `s.color`, so `s.color == null && !colorAuto`
-          //     here IS exactly that never-applied state (sample-28 p.17: the
-          //     `w:fill="0C0C0C"` header cells' runs carry no w:color at any
-          //     level — Word paints them white).
+          //     here IS exactly that never-applied state.
+          // `word-auto-text-contrast-effective-background` owns the effective
+          // background selection before the deterministic black/white picker.
           // The never-applied state is gated on a NON-NULL effective background:
           // with no shading anywhere the "appropriate color against the page
           // background" is the application default text color, i.e. the public
@@ -7001,12 +7003,16 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
         // Compute the offset per line because each stroke sits at a different y.
         // Underline / strike run the SAME `decoW` as the box decorations: the
         // segment's grid-aware advance (§17.6.5) plus the interior + owned
-        // trailing-space justification pitch. Word runs the rule under a run's
-        // spaces (incl. their justified widening), so the line decoration tracks
+        // trailing-space justification pitch.
+        // `word-run-decoration-justified-advance` includes a run's widened spaces
+        // in the line decoration, so it tracks
         // the drawn advance and stays flush with the box fills (one width concept
         // for every decoration, matching the pptx renderer's run rules).
-        const isInsertion = revActive && s.revision?.kind === 'insertion';
-        const isDeletion = revActive && s.revision?.kind === 'deletion';
+        const revisionDecoration = wordTrackChangeDecoration(
+          revActive ? s.revision?.kind : null,
+        );
+        const isInsertion = revisionDecoration.underline;
+        const isDeletion = revisionDecoration.strike;
 
         if (s.underline || isInsertion) {
           // The docx underline anchor (byte-stable across releases): the single
@@ -7349,9 +7355,9 @@ function resolveShapeBox(
   // section text direction, exactly like the image path (resolveAnchorBox).
   // Resolve in the physical frame, then project into the swapped logical
   // layout frame (w↔h swapped) so the float-exclusion band and the flow all
-  // share one geometry. A `paragraph`/`line`-relative positionV anchors from
-  // the PHYSICAL TOP of the anchor paragraph's COLUMN (Word GT: margin-top +
-  // posOffset for a single-column body) — that physical y is the column
+  // share one geometry. Under `word-vertical-section-physical-drawing-layer`,
+  // a `paragraph`/`line`-relative positionV anchors from the PHYSICAL TOP of
+  // the anchor paragraph's COLUMN. That physical y is the column
   // band's logical x start (`state.contentX`, since physical y = logical x
   // under the +90° page paint), NOT the paragraph's logical flow
   // `paragraphTopPx`, which lies on the column-progression axis.
@@ -7425,11 +7431,11 @@ function shapeFillColor(fill: ShapeFill | null | undefined): string | null {
 
 /**
  * Draw a VML `<v:textpath>` text watermark (ECMA-376 Part 4 §19.1.2.23) into the
- * box `(x, y, w, h)` (device px). Word emits watermarks with the WordArt
- * `#_x0000_t136` shapetype, whose `fitshape` default STRETCHES the text to the
+ * box `(x, y, w, h)` (device px). The common WordArt
+ * `#_x0000_t136` watermark shapetype has a `fitshape` default that stretches the text to the
  * edges of the shape box — so the drawn size is derived from the box geometry,
- * not the nominal `font-size` in the textpath style (which Word writes as a
- * placeholder `1pt`). The text is:
+ * not the nominal `font-size` in the textpath style (commonly a placeholder
+ * `1pt`). The text is:
  *   - measured once at a reference size to get its natural advance/height,
  *   - non-uniformly scaled so it exactly fills `w × h` (fitshape),
  *   - rotated by `rotationDeg` (clockwise, §19.1.2.19) about the box centre,
@@ -7882,9 +7888,9 @@ function resolveAnchorBox(
     // the box in physical space, then project it into the swapped logical layout
     // frame the body text flows in — so the float-exclusion band and the
     // (drawUprightBox-un-swapped) painted image share one geometry. A
+    // Under `word-vertical-section-physical-drawing-layer`,
     // `paragraph`/`line`-relative positionV anchors from the PHYSICAL TOP of
-    // the anchor paragraph's COLUMN (issue #988 batch-3 adjudication ②: Word GT
-    // = margin-top + posOffset for a single-column body). That physical y is
+    // the anchor paragraph's COLUMN. That physical y is
     // the column band's logical x start (`state.contentX`; physical y =
     // logical x under the +90° page paint) — NOT the logical flow `paraBaseY`,
     // which lies on the column-progression axis and would rotate the offset.
@@ -8070,7 +8076,7 @@ function registerImageFloat(
   // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
   // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
   // permits overlap. Default true per §20.4.2.3.
-  // Implementation-defined (HEURISTIC, Word-mimicking, no ECMA-376 basis):
+  // Implementation-defined heuristic with no ECMA-376 basis:
   // displacing the later document-order float, the "other paragraphs only"
   // gate under allowOverlap=true, and the right-then-down re-seat using dist
   // padding as the float-to-float gap. See layout/floats.ts.
@@ -8477,12 +8483,10 @@ function drawTableRows(
   for (const j of jobs) {
     const { x, y, w, h } = j;
     const own = resolveCellEdges(j.cell.borders, table.borders, j.edges, mirror);
-    // ECMA-376 §17.4.66 / §17.4.85: a vertical merge is serialized as a
-    // restart cell followed by continuation cells. Its bottom boundary belongs
-    // to the LAST continuation cell, whose tcBorders can explicitly differ from
-    // the restart cell (commonly `bottom="nil"` to leave an adjacent area open).
-    // Using only the restart borders incorrectly falls through to table insideH
-    // and paints a rule that Word suppresses.
+    // `word-vertical-merge-terminal-border`: §17.4.66 / §17.4.85 serialize a
+    // vertical merge as a restart cell followed by continuation cells. Resolve
+    // the merged region's bottom boundary from the terminal continuation cell,
+    // whose tcBorders can differ from the restart cell.
     const terminalCell = j.lastRi > j.ri
       ? (cellAtGridColumn(table.rows[j.lastRi], j.ci, colWidths.length) ?? j.cell)
       : j.cell;
@@ -8753,32 +8757,20 @@ function renderTable(table: DocTable, state: RenderState): void {
     return;
   }
 
-  // ECMA-376 §17.6.20 + §17.4.80 (issue #988 batch-3 adjudication ④): a block
-  // table inside a vertical (tbRl) section renders UPRIGHT — its cells do NOT
-  // inherit the section text direction (cell text is horizontal), a fixed
-  // `tcW` is a PHYSICAL width, and `trHeight` exact/auto clip/grow along the
-  // physical vertical axis. Lay the table out with the PHYSICAL state view and
-  // paint it inside the inverse of the +90° page transform (the same physical
-  // frame the header/footer and anchored-shape paths re-enter). Its placement
-  // in the vertical flow: the physical TOP edge sits at the column axis start
-  // (the logical x band start, contentX ⇒ the physical top content margin —
-  // matching Word GT, both fixture tables pinned at the top margin) and the
-  // block advances the flow by its PHYSICAL WIDTH (logical Δy = tableW; the
-  // physical box spans x ∈ [cssW − y − tableW, cssW − y]). `w:jc`/`w:tblInd`
-  // placement along the flow axis and row-splitting across vertical pages are
-  // un-adjudicated follow-ups; the paginator charges the same tableW footprint
-  // (the canonical upright-table branch) so pagination and paint agree.
+  // `word-vertical-section-upright-block-table`: lay a block table in a tbRl
+  // section out in the physical page frame, so cell text remains horizontal,
+  // fixed tcW remains a physical width, and trHeight clips/grows on the physical
+  // vertical axis. Paint inside the inverse page transform and charge the
+  // table's physical width to logical flow, keeping pagination and paint on the
+  // same geometry. `w:jc`/`w:tblInd` placement along the flow axis and
+  // cross-page row splitting remain separate follow-ups.
   //
-  // WON'T-FIX (narrowed, issue #988 re-adjudication 2026-07-12; measurements in
-  // docx-vertical-table-cells.probe.test.ts): Word additionally flows the
-  // vertical text BELOW each top-anchored table and places a MULTI-table run in
-  // a page-level order that is NON-CAUSAL for a single forward pass — a later
-  // table displaces earlier text, tables progress left→right (reverse of the RTL
-  // text), and an auto table can overhang the right margin. §17.6.20/§17.4.80 do
-  // not define this and a plain block table has no wrapTopAndBottom, so we keep
-  // the causal RTL block-flow placement here rather than sample-fit a Word quirk
-  // (independently reviewed). Reproducing it would need a place-all-tables →
-  // register-exclusions → reflow pass, gated on a purpose-built fixture matrix.
+  // WON'T-FIX (issue #988 re-adjudication; see the purpose-built vertical-table
+  // probe): the remaining multi-table placement is non-causal for a forward
+  // pass. ECMA-376 §17.6.20/§17.4.80 do not define it and a plain block table has
+  // no wrapTopAndBottom, so this branch deliberately keeps causal RTL block-flow
+  // placement. A different policy would require place-all-tables →
+  // register-exclusions → reflow, backed by a dedicated fixture matrix.
   if (state.verticalPhys) {
     const cssW = state.verticalPhys.cssWidthPx;
     const physState = verticalPhysicalContentState(state);
@@ -9103,13 +9095,10 @@ function renderCell(
   const ml = cm.left * scale;
   const mr = cm.right * scale;
 
-  // ECMA-376 §17.6.5 defines w:docGrid as a section-level constraint on
-  // Cell paragraphs inherit the section's docGrid, but their line-spacing
-  // rule comes from the table style's pPr (see parse_table + StyleMap's
-  // `resolve_para` with a `table_style_id`). "Table Grid" sets line=240
-  // (M=1.0), so with docGrid a cell line box is `max(natural, pitch × 1.0)`
-  // = pitch (~18pt), matching Word's observed in-cell baseline advance
-  // on demo/sample-1 page 3.
+  // `word-east-asian-grid-line-allocation`: cell paragraphs inherit the
+  // section docGrid while their line-spacing rule can come from the table
+  // style's pPr. Resolve both through the same line-box authority used outside
+  // tables.
   const cellState: RenderState = {
     ...state,
     contentX: x + ml,
@@ -9125,50 +9114,29 @@ function renderCell(
     // background (e.g. a nested table). renderParagraph narrows this to the
     // paragraph shading when the paragraph declares its own.
     containerShading: cell.background ?? state.containerShading,
-    // ECMA-376 §17.4.57 / §20.4.2.x — a table cell is its own text container: the
-    // page's floating objects (anchor images, text frames, and floating TABLES)
-    // exclude MAIN-STORY text, NOT text inside a table cell. Word never flows cell
-    // content around a page float that happens to overlap the cell's box. Spreading
-    // `state.floats` into the cell made a cell paragraph's line layout skip past an
-    // OUTER float's wrap band (skipPastTopAndBottom / resolveLineFloatWindow read
-    // `state.floats`), pushing the cell's first line down — measured on sample-28
-    // p.17, where a vAlign="center" header cell's text was displaced ~17 px below
-    // its centred slot by the projects float's band overlapping the cell. Give the
-    // cell an isolated (empty) float set so its content lays out only against the
-    // cell box; an in-cell anchor float then also stays scoped to the cell instead
-    // of leaking onto the page. floatParaSeq restarts at 0 for the same isolation.
+    // ECMA-376 §17.4.57 / §20.4.2.x: a table cell is an independent text
+    // container. Page-level float exclusions belong to the main-story layout
+    // domain, so give the cell an isolated float set. An in-cell anchor likewise
+    // remains scoped to the cell; floatParaSeq restarts for the same reason.
     floats: [],
     floatParaSeq: 0,
   };
 
   if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
-    // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. When a cell's
-    // visible content is a nested table, Word emits a trailing empty paragraph
-    // purely as that syntactic anchor. Including it in the centering content
-    // height would balloon contentH ≈ rowHeight and pin the visible block to
-    // the top of the cell — matching neither Word nor LibreOffice's
-    // rendering of resume "bar chart" cells. Skip a single trailing empty
-    // paragraph after a non-paragraph block.
+    // `word-trailing-structural-cell-marker`: exclude the terminal structural
+    // paragraph from the vertically aligned content block.
     const visibleContent = trimTrailingStructuralMarker(cell.content);
     // ONE vAlign content authority for split and unsplit cells alike: the
     // slice-aware, real-scale measure (measureCellElementHeight honors a piece
-    // clone's `lineSlice`, so a mid-row piece centres its OWN window — the
-    // Finding-1 invariant keeps the rescale machinery, never a scale-1 sum
-    // × scale). The box is the DRAWN cell box `h` (for a vMerge restart piece
-    // that is the span box on this page, which is exactly what Word centres
-    // against — measured on the split-form ground truth).
-    // ECMA-376 §17.3.1.33 + §17.4.83 (vAlign): Word collapses the FIRST
-    // paragraph's space-before and the LAST paragraph's space-after against the
-    // cell's content boundary when vertically aligning. Neither produces any ink
-    // (nothing surrounds them inside the cell), so including them in the
-    // vertically-aligned block height pushes the visible block off centre/bottom.
-    // Word vertically aligns the INKED block alone: a header cell whose only
-    // paragraph carries 6 pt space-before + 8 pt space-after still centres the
-    // ~16.8 pt line box, not 30.8 pt. The symmetric trim mirrors how block
-    // spacing collapses at a container edge (§17.3.1.33 describes spacing
-    // BETWEEN paragraphs, not at the frame boundary). Spacing BETWEEN two
-    // paragraphs inside the cell is left intact (handled by §17.3.1.33's
-    // contextual / max-overlap rules inside the paint pass).
+    // clone's `lineSlice`, so a mid-row piece centres its own window. The
+    // rescale machinery remains authoritative; never substitute a scale-1 sum
+    // multiplied by scale. The alignment box is the drawn cell box `h`, including
+    // the current-page span of a vertical merge.
+    //
+    // `word-cell-vertical-alignment-ink-block`: trim only the first paragraph's
+    // space-before and the last paragraph's space-after at the cell boundary.
+    // Interior paragraph spacing remains governed by §17.3.1.33 and the normal
+    // contextual/max-overlap rules.
     const firstEl = visibleContent[0];
     const sliceOf = (el: CellElement | undefined) =>
       (el as (CellElement & { lineSlice?: { start: number; end: number } }) | undefined)?.lineSlice;
@@ -9263,19 +9231,23 @@ function renderCell(
   }
 }
 
-/** Drop a trailing empty paragraph that follows a non-paragraph block (nested
- *  table). ECMA-376 §17.4.7 requires every cell to end with a paragraph; when
- *  the visible content is a nested table, Word's emitted trailing <w:p/> is a
- *  structural anchor with no visible role. Returns the original array if no
- *  such pattern matches. */
+/** Apply `word-trailing-structural-cell-marker`: drop an empty terminal
+ *  paragraph after a non-paragraph cell block. Returns the original array when
+ *  no such pattern matches. */
 function trimTrailingStructuralMarker(content: CellElement[]): CellElement[] {
-  if (content.length < 2) return content;
   const last = content[content.length - 1];
   const prev = content[content.length - 2];
-  if (last.type !== 'paragraph' || prev.type === 'paragraph') return content;
-  const lastPara = last as unknown as DocParagraph;
-  if (lastPara.runs.length > 0) return content;
-  return content.slice(0, -1);
+  const lastParagraphRunCount = last?.type === 'paragraph'
+    ? (last as unknown as DocParagraph).runs.length
+    : undefined;
+  return wordDropsTrailingStructuralCellMarker({
+    contentLength: content.length,
+    previousKind: prev?.type,
+    lastKind: last?.type,
+    lastParagraphRunCount,
+  })
+    ? content.slice(0, -1)
+    : content;
 }
 
 /** Render a cell's interleaved paragraphs and nested tables in document order.
@@ -9587,12 +9559,9 @@ function drawParaBorders(
  *  §17.3.1.7 places the bottom border `w:space` points below the text ("the space
  *  after the bottom of the text … before this border is drawn"), and §17.3.4 gives
  *  the border its own width (`w:sz`, eighths of a point). {@link drawParaBorders}
- *  strokes the line CENTERED on `textBottom + space`, so its outer (bottom) edge is
- *  at `textBottom + space + width/2`. Word reserves that whole extent in the flow —
- *  a bottom-bordered paragraph pushes the next paragraph BELOW the border rather
- *  than letting the following line box overlap it (the spec is silent on the flow
- *  reservation; this is Word's observed layout, verified against sample-14's
- *  reference-list rule, whose `space=1 sz=12` rule sat ~1.75 pt too high without it).
+ *  strokes the line centered on `textBottom + space`, so its outer bottom edge is
+ *  at `textBottom + space + width/2`. `word-paragraph-border-flow-reservation`
+ *  reserves that complete painted extent before the following content.
  *
  *  Returns 0 when there is no visible bottom edge, or when a same-border paragraph
  *  follows (the bottom edge is suppressed by the §17.3.1.7 merge — the box

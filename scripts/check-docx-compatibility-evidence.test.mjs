@@ -252,15 +252,33 @@ test('rejects a new inline Office observation outside compatibility modules', ()
   assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
 });
 
-test('detects render, draw, fill, and resolve Office claims', () => {
-  for (const verb of ['renders', 'draws', 'fills', 'resolves']) {
+test('detects varied Office observation language outside compatibility modules', () => {
+  const claims = [
+    'Word renders an undocumented branch here.',
+    'Word draws an undocumented branch here.',
+    'Word fills an undocumented branch here.',
+    'Word resolves an undocumented branch here.',
+    'Word collapses an undocumented branch here.',
+    'Word ground truth requires an undocumented branch here.',
+    'Word-observed behavior requires an undocumented branch here.',
+    'Observed Windows Word behavior requires an undocumented branch here.',
+    'This is matching Word.',
+  ];
+  for (const claim of claims) {
     const root = fixture();
     write(root, 'packages/docx/src/layout/table.ts',
-      `// Word ${verb} an undocumented branch here.\nexport const value = 1;\n`);
+      `// ${claim}\nexport const value = 1;\n`);
     const result = run(root);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
   }
+});
+
+test('does not treat a lowercase generic word as a compatibility claim', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/table.ts',
+    '// The next word uses the inherited style.\nexport const value = 1;\n');
+  assert.equal(run(root).status, 0);
 });
 
 test('does not exempt an unreviewed file merely because its name ends in compatibility', () => {

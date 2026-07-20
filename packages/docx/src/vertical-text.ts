@@ -507,7 +507,7 @@ export function drawVerticalRunWithCapability(
     // A vo=Tr code point with NO substituted vertical form whose fallback is
     // UPRIGHT rather than the generic UAX#50 §5 ROTATE — the fullwidth semicolon
     // ；(FF1B), whose FE14 vertical form is an upright dot-over-comma, not a
-    // rotation (Word-verified, issue #969 follow-up). It draws upright exactly
+    // rotation (UAX #50 / issue #969). It draws upright exactly
     // like the vo=U / vo=Tu cells; the colon ：is NOT here (its FE13 form IS a 90°
     // rotation, so it takes the rotate branch below → side-by-side dots).
     const uprightFallback = mode === 'rotate' && bracketCp === null && verticalTrUprightFallback(cp);
@@ -601,9 +601,8 @@ export function drawVerticalRunWithCapability(
       // available through the element/CSS route) is to ROTATE the glyph 90° CW;
       // a plain `fillText` in the +90° page frame IS that rotation, centred with
       // `center`/`middle` at the cell centre. For the colon this reproduces FE13's
-      // design directly (the two vertically-stacked dots become side by side),
-      // Word-verified (issue #969 follow-up); for the quotes the rotation matches the
-      // font's designed vertical form exactly (font-verified).
+      // design directly (the two vertically stacked dots become side by side);
+      // for quotes, the rotation follows the font's designed vertical form.
       //
       // An unreachable `ー〜～` uses this same plain UAX #50 Tr rotation. The removed
       // #1017/#1023 mirror/shear extrapolated an inaccessible glyph design from two
@@ -676,11 +675,9 @@ export function drawVerticalRun(
  *     cross-column (the glyphs' own left→right width) and local +y is the
  *     along-column (the text's height). Drawn `center`/`middle`, so the run's
  *     em box centres on the cell centre AND on the column centre-line.
- *   - `charScale` (§17.3.2.43 `w:w`) compresses the glyphs' WIDTH via
- *     `ctx.scale(charScale, 1)` in the upright local frame — i.e. across the
- *     column — matching Word (PDF-verified on sample-26: "２９" at w:w=67 spans
- *     ≈15.6 pt wide inside a 12 pt cell). It does NOT change the along-column
- *     cell height.
+ *   - `charScale` (§17.3.2.43 `w:w`) compresses glyph width through
+ *     `ctx.scale(charScale, 1)` in the upright local frame, across the column.
+ *     It does not change the along-column cell height.
  *   - `vertCompress` (§17.3.2.10) compresses the run's HEIGHT to one cell so the
  *     rotated text never grows the line: if the run's natural upright height
  *     (`fontBoundingBox*`) exceeds one em, scale the along-column axis down to

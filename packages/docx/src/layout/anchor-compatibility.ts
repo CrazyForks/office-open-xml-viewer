@@ -27,15 +27,42 @@ export const WORD_PAGE_LEVEL_FLOAT_PRESCAN = defineCompatibilityRule({
   description: 'A wrapping drawing whose vertical reference is page-level participates from page start so source-earlier paragraphs on that page see its exclusion.',
 });
 
+export const WORD_PARAGRAPH_ANCHOR_PRE_SPACING_ORIGIN = defineCompatibilityRule({
+  id: 'word-paragraph-anchor-pre-spacing-origin',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/anchor-paragraph-spacebefore.test.ts#anchors a wrapSquare paragraph float at the pre-spaceBefore paragraph top',
+  },
+  description: 'Resolve a paragraph-relative anchored drawing from the paragraph top before applying the paragraph spaceBefore contribution.',
+});
+
+export const WORD_VERTICAL_SECTION_PHYSICAL_HEADER_FOOTER = defineCompatibilityRule({
+  id: 'word-vertical-section-physical-header-footer',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/vertical-header-footer.test.ts#recovers the physical page box + margins from the logical (swapped) section',
+  },
+  description: 'Paint a vertical section header and footer in the unrotated physical page frame rather than rotating them with the body text flow.',
+});
+
+export const WORD_FRAME_AUTO_WRAP_AROUND = defineCompatibilityRule({
+  id: 'word-frame-auto-wrap-around',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/frame-geometry.test.ts#wrap="around" and "auto" → square float (auto ≡ around in Word)',
+  },
+  description: 'Resolve an authored frame wrap value of auto through the same square side-wrap path as around.',
+});
+
 export function wordZeroRelativeSizeUsesExtent(fraction: number): boolean {
   return fraction === 0;
 }
 
 export function wordPageLevelAnchorY(
   relativeFrom: string | null | undefined,
-  legacyFromParagraph: boolean,
+  paragraphRelativeFallback: boolean,
 ): boolean {
-  if (relativeFrom == null) return !legacyFromParagraph;
+  if (relativeFrom == null) return !paragraphRelativeFallback;
   return relativeFrom !== 'paragraph'
     && relativeFrom !== 'line'
     && relativeFrom !== 'character';

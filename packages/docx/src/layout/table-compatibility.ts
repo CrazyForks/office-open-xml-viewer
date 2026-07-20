@@ -86,9 +86,9 @@ export const WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR = defineCompatibilityRule({
   id: 'word-authored-auto-row-height-floor',
   evidence: {
     kind: 'regression-test',
-    reference: 'packages/docx/src/table-row-height.test.ts#auto with @val — @val is honored as a lower bound (Word-compatible)',
+    reference: 'packages/docx/src/table-row-height.test.ts#auto with @val — @val is honored as a lower bound',
   },
-  description: 'Preserve the established legacy-model behavior that an auto row with an authored finite height value uses that value as a lower bound.',
+  description: 'Preserve the established legacy-model behavior that an auto row with an authored height value uses that value as a lower bound.',
 });
 
 export const WORD_EFFECTIVE_FLOATING_TABLE_POSITIONING = defineCompatibilityRule({
@@ -125,6 +125,42 @@ export const WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE = defineCompatibilityRule({
     reference: '[MS-OI29500] §§2.1.156, 2.1.158, 2.1.167',
   },
   description: 'Apply the supported first-row table-property exception facts at table scope, including authored preferred-width shadowing.',
+});
+
+export const WORD_TRAILING_STRUCTURAL_CELL_MARKER = defineCompatibilityRule({
+  id: 'word-trailing-structural-cell-marker',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/compatibility.test.ts#drops only an empty trailing paragraph after a non-paragraph cell block',
+  },
+  description: 'Exclude the required empty trailing cell paragraph from row-height and vertical-alignment measurements when it follows a visible non-paragraph block.',
+});
+
+export const WORD_CELL_VERTICAL_ALIGNMENT_INK_BLOCK = defineCompatibilityRule({
+  id: 'word-cell-vertical-alignment-ink-block',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/cell-valign-leading-spacing.test.ts#inked block is vertically centred in the cell (midpoint = cell midpoint)',
+  },
+  description: 'Center or bottom-align the visible cell ink block without charging the first paragraph spaceBefore or final paragraph spaceAfter at the cell edges.',
+});
+
+export const WORD_VERTICAL_MERGE_TERMINAL_BORDER = defineCompatibilityRule({
+  id: 'word-vertical-merge-terminal-border',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/cell-border-conflict-render.test.ts#uses the final continuation cell border at the bottom of a vertical merge',
+  },
+  description: 'Resolve the bottom edge of a vertically merged cell from its terminal continuation cell before applying shared-edge conflict rules.',
+});
+
+export const WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE = defineCompatibilityRule({
+  id: 'word-vertical-section-upright-block-table',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/vertical-table-upright.test.ts#the table advances the flow by its PHYSICAL WIDTH; body text stays vertical',
+  },
+  description: 'Paint a block table in an upright physical frame within a vertical section and charge its physical width as the body-flow advance.',
 });
 
 export function wordExactRowFloorPt(
@@ -237,8 +273,7 @@ export function wordAuthoredAutoRowHeightUsesFloor(
 ): boolean {
   return rule === 'auto'
     && authoredHeight !== null
-    && authoredHeight !== undefined
-    && Number.isFinite(authoredHeight);
+    && authoredHeight !== undefined;
 }
 
 export function wordTableCellSpacingValuePt(
@@ -261,4 +296,16 @@ export function wordTableMarginValuePt(input: Readonly<{
     if (input.kind === 'pct' || input.kind === 'auto' || input.kind === 'nil') return 0;
   }
   return null;
+}
+
+export function wordDropsTrailingStructuralCellMarker(input: Readonly<{
+  contentLength: number;
+  previousKind: string | undefined;
+  lastKind: string | undefined;
+  lastParagraphRunCount: number | undefined;
+}>): boolean {
+  return input.contentLength >= 2
+    && input.lastKind === 'paragraph'
+    && input.previousKind !== 'paragraph'
+    && input.lastParagraphRunCount === 0;
 }

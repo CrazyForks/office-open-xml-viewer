@@ -164,7 +164,8 @@ export interface HeaderFooter {
  *  DISPLAYED page number are carried:
  *  - `start` — the number shown on the FIRST page of the section (§17.6.12);
  *    absent ⇒ numbering continues from the previous section's highest number.
- *    Kept as a possibly-zero / possibly-negative integer (Word writes `start="0"`).
+ *    Kept as a possibly-zero / possibly-negative integer; zero is valid source
+ *    markup.
  *  - `fmt` — the ST_NumberFormat (§17.18.59) for the section's page numbers
  *    (decimal / upperRoman / lowerLetter / …); absent ⇒ decimal.
  *  `chapStyle`/`chapSep` (chapter-prefixed numbering) are out of scope for this
@@ -233,8 +234,8 @@ export interface LineNumbering {
  *  `SectionGeom`. Carried on a {@link BodyElement} `sectionBreak` arm (`geom`) so a
  *  mid-body section keeps its own page size; the FINAL section's geometry lives on
  *  {@link DocxDocumentModel.section}. Canonical layout retains the resolved page
- *  box on each physical page. `orient` is omitted — Word swaps w/h for landscape, so verbatim w/h
- *  already give the correct dims.
+ *  box on each physical page. `orient` is omitted because the parsed landscape
+ *  geometry already carries the resolved width and height.
  *
  *  ⚠ Spread over the body-level {@link SectionProps} in `renderDocumentToCanvas`
  *  (`{ ...doc.section, ...pageGeom }`): only add per-section PAGE-BOX fields that
@@ -277,7 +278,7 @@ export interface SectionProps {
    *  SectionBreak marker. */
   sectionStart?: string | null;
   /** ECMA-376 §17.6.20 `<w:textDirection w:val>` — the section's flow direction,
-   *  using the TRANSITIONAL ST_TextDirection enum Word writes (Part 4 §14.11.7:
+   *  using the Transitional ST_TextDirection enum (Part 4 §14.11.7:
    *  `lrTb`|`tbRl`|`btLr`|`lrTbV`|`tbLrV`|`tbRlV`), NOT the Part 1 §17.18.93
    *  Strict set. Absent / `null` ⇒ "lrTb" (horizontal, left→right / top→bottom,
    *  the default). `"tbRl"` = vertical Japanese (glyphs stack top→bottom, lines
@@ -445,10 +446,9 @@ export interface DocParagraph {
   shading?: string | null;
   /** Force a page break before this paragraph (w:pageBreakBefore) */
   pageBreakBefore?: boolean;
-  /** ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — between adjacent SAME-style
-   *  paragraphs, a toggling paragraph drops its OWN contribution to the
-   *  collapsed inter-paragraph gap (per-side, Word-adjudicated — issue #1015;
-   *  see the renderer's `contextualSpacingAdjust`). */
+  /** ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — between adjacent same-style
+   *  paragraphs, `word-contextual-spacing-per-side` drops the toggling
+   *  paragraph's own contribution to the collapsed inter-paragraph gap. */
   contextualSpacing?: boolean;
   /** Keep paragraph on same page as the next paragraph (w:keepNext) */
   keepNext?: boolean;
@@ -474,12 +474,12 @@ export interface DocParagraph {
    *  anchor-only paragraph marks in East Asian documents use this axis for line
    *  metrics instead of the ASCII fallback. */
   defaultFontFamilyEastAsia?: string | null;
-  /** ECMA-376 §17.3.1.29 — the paragraph MARK run's resolved `w:color` (direct
+  /** ECMA-376 §17.3.1.29 — the paragraph mark run's resolved `w:color` (direct
    *  pPr/rPr → pStyle chain → docDefaults; hex 6 without `#`, lowercased; an
-   *  explicit `auto` surfaces as absent, §17.3.2.6). Word formats a numbering
-   *  marker with the level rPr (§17.9.24) layered over the mark's run
-   *  properties, so the renderer uses this as the marker-color fallback when
-   *  {@link NumberingInfo.color} is absent. */
+   *  explicit `auto` surfaces as absent, §17.3.2.6). The numbering level rPr
+   *  (§17.9.24) layers over the mark's run properties, so the renderer uses
+   *  this as the marker-color fallback when {@link NumberingInfo.color} is
+   *  absent. */
   paragraphMarkColor?: string | null;
   /**
    * ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `true` = RTL,
@@ -623,8 +623,8 @@ export interface NumberingInfo {
   /** ECMA-376 §17.9.24 — the numbering level rPr's `w:color` (hex 6 without
    *  `#`, lowercased). Colors the marker glyph only, never the paragraph's
    *  runs. Absent ⇒ the renderer falls back to
-   *  {@link DocParagraph.paragraphMarkColor} (§17.3.1.29 — Word layers the
-   *  level rPr over the paragraph mark's run properties) and finally to its
+   *  {@link DocParagraph.paragraphMarkColor} (§17.3.1.29 — the level rPr layers
+   *  over the paragraph mark's run properties) and finally to its
    *  default ink. An explicit `w:val="auto"` is absent here + {@link colorAuto}. */
   color?: string | null;
   /** ECMA-376 §17.3.2.6 / ST_HexColorAuto (§17.18.39) — true when the level
@@ -972,11 +972,10 @@ export interface ShapeText {
    *  identical field). */
   bidi?: boolean;
   /** ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — resolved through the style
-   *  chain in the parser. When set, this text-box paragraph drops its OWN
-   *  contribution to the collapsed gap against an ADJACENT paragraph that
-   *  shares its {@link ShapeText.styleId} (per-side, Word-adjudicated — issue
-   *  #1015; identical to {@link DocParagraph.contextualSpacing} via the
-   *  renderer's `contextualSpacingAdjust`). Absent ⇒ no suppression. */
+   *  chain in the parser. When set,
+   *  `word-contextual-spacing-per-side` drops this text-box paragraph's own
+   *  contribution against an adjacent paragraph with the same
+   *  {@link ShapeText.styleId}. Absent ⇒ no suppression. */
   contextualSpacing?: boolean;
   /** Resolved paragraph style id of this text-box paragraph — the explicit
    *  `<w:pStyle>`, else the document default paragraph style, else "Normal" (the
@@ -1197,10 +1196,10 @@ export interface RunRevision {
 
 export interface RubyAnnotation {
   text: string;
-  /** Annotation font size in pt. Word stores this as half-points in `<w:hps>`. */
+  /** Annotation font size in pt; `<w:hps>` stores half-points. */
   fontSizePt: number;
   /** Distance “between the phonetic guide base text and the phonetic guide
-   *  text” in pt. Word stores this as half-points in `<w:hpsRaise>`
+   *  text” in pt; `<w:hpsRaise>` stores half-points
    *  (ECMA-376 §17.3.3.12). */
   hpsRaisePt?: number;
 }
@@ -1377,8 +1376,7 @@ export interface DocTable {
   /** ECMA-376 §17.4.50 `<w:tblInd>` — indentation added before the table's
    *  LEADING edge (left in an LTR table, right in an RTL/`bidiVisual` table), in
    *  pt. SIGNED: a negative value pulls the table outward past the leading margin
-   *  toward the page edge (Word writes this for a header banner that must reach
-   *  the physical page edge). `type="dxa"` only; `pct`/`auto` are dropped by the
+   *  toward the page edge. `type="dxa"` only; `pct`/`auto` are dropped by the
    *  parser per §17.4.50. Absent ⇒ no direct indent. The renderer applies it only
    *  when the resolved `jc` is left/leading (§17.4.50). */
   tblInd?: number;

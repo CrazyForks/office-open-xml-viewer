@@ -19,7 +19,10 @@ import {
   WORD_TERMINAL_COLUMN_BREAK,
 } from './body-pagination-compatibility.js';
 import {
+  WORD_FRAME_AUTO_WRAP_AROUND,
   WORD_PAGE_LEVEL_FLOAT_PRESCAN,
+  WORD_PARAGRAPH_ANCHOR_PRE_SPACING_ORIGIN,
+  WORD_VERTICAL_SECTION_PHYSICAL_HEADER_FOOTER,
   WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER,
   WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
   wordPageLevelAnchorY,
@@ -27,13 +30,22 @@ import {
 } from './anchor-compatibility.js';
 import {
   WORD_AUTO_MULTIPLE_BASELINE_PIN,
+  WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
   WORD_DEGENERATE_LINE_SPACING_SINGLE,
+  WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
+  WORD_DICTIONARY_SEA_NATURAL_FIT,
   WORD_EAST_ASIAN_GRID_LINE_ALLOCATION,
   WORD_FAR_EAST_SINGLE_LINE_FACTOR,
+  WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
   WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED,
   WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
   WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
+  WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
+  WORD_NUMERIC_DECIMAL_TAB_INFERENCE,
+  WORD_OVERLONG_TOKEN_EMERGENCY_BREAK,
   WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
+  WORD_TAB_STOP_PAGE_EDGE_CLAMP,
+  WORD_THAI_DISTRIBUTE_CLUSTER_POLICY,
   wordAutoMultipleCenterBoxPx,
   wordDegenerateLineSpacingIsSingle,
   wordEastAsianGridLineCells,
@@ -44,13 +56,19 @@ import {
   wordVisibleLineMetricPx,
 } from './line-compatibility.js';
 import {
+  WORD_AUTO_TEXT_CONTRAST_EFFECTIVE_BACKGROUND,
+  WORD_PARAGRAPH_BORDER_FLOW_RESERVATION,
   WORD_PARAGRAPH_SHADING_BORDER_BOX,
+  WORD_RUN_DECORATION_JUSTIFIED_ADVANCE,
+  WORD_TRACK_CHANGE_DECORATION,
   WORD_TRACK_CHANGE_AUTHOR_COLORS,
   WORD_TRACK_CHANGE_AUTHOR_PALETTE,
+  wordTrackChangeDecoration,
 } from './paint-compatibility.js';
 import {
   WORD_KASHIDA_FINAL_FORM_PRIORITY,
   WORD_NEUTRAL_SCRIPT_ATTACHMENT,
+  WORD_RTL_COMPLEX_SCRIPT_EUROPEAN_DIGITS_AN,
   WORD_RTL_RUN_AMBIGUOUS_CLASS_OVERRIDE,
   WORD_VERTICAL_TU_CORNER_PLACEMENT,
   wordKashidaFinalFormApplies,
@@ -70,6 +88,7 @@ import {
   wordTrailingEmptyMarkAdmissionAllowancePt,
 } from './section-compatibility.js';
 import {
+  WORD_CELL_VERTICAL_ALIGNMENT_INK_BLOCK,
   WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING,
   WORD_EXACT_ROW_VERTICAL_CLIP_ONLY,
   WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR,
@@ -84,10 +103,14 @@ import {
   WORD_TABLE_CELL_SPACING_SCOPE_SHADOW,
   WORD_TABLE_INDENT_ALL_ALIGNMENTS,
   WORD_TABLE_MARGIN_SCOPE_SHADOW,
+  WORD_TRAILING_STRUCTURAL_CELL_MARKER,
+  WORD_VERTICAL_MERGE_TERMINAL_BORDER,
+  WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE,
   wordAlignedTableOriginPt,
   wordAuthoredAutoRowHeightUsesFloor,
   wordAuthoredBorderParticipates,
   wordClipsOverPageCantSplitRow,
+  wordDropsTrailingStructuralCellMarker,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
   wordNilBorderSuppressesSharedEdge,
@@ -252,15 +275,32 @@ describe('layout compatibility inventory', () => {
       WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
       WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
       WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
+      WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
+      WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
+      WORD_THAI_DISTRIBUTE_CLUSTER_POLICY,
+      WORD_NUMERIC_DECIMAL_TAB_INFERENCE,
+      WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
+      WORD_TAB_STOP_PAGE_EDGE_CLAMP,
+      WORD_DICTIONARY_SEA_NATURAL_FIT,
+      WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
+      WORD_OVERLONG_TOKEN_EMERGENCY_BREAK,
       WORD_NEUTRAL_SCRIPT_ATTACHMENT,
       WORD_RTL_RUN_AMBIGUOUS_CLASS_OVERRIDE,
+      WORD_RTL_COMPLEX_SCRIPT_EUROPEAN_DIGITS_AN,
       WORD_KASHIDA_FINAL_FORM_PRIORITY,
       WORD_VERTICAL_TU_CORNER_PLACEMENT,
       WORD_TRACK_CHANGE_AUTHOR_PALETTE,
       WORD_PARAGRAPH_SHADING_BORDER_BOX,
+      WORD_TRACK_CHANGE_DECORATION,
+      WORD_AUTO_TEXT_CONTRAST_EFFECTIVE_BACKGROUND,
+      WORD_RUN_DECORATION_JUSTIFIED_ADVANCE,
+      WORD_PARAGRAPH_BORDER_FLOW_RESERVATION,
       WORD_EMPTY_MARK_FLOAT_SIDE_GAP,
       WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER,
       WORD_PAGE_LEVEL_FLOAT_PRESCAN,
+      WORD_PARAGRAPH_ANCHOR_PRE_SPACING_ORIGIN,
+      WORD_VERTICAL_SECTION_PHYSICAL_HEADER_FOOTER,
+      WORD_FRAME_AUTO_WRAP_AROUND,
       WORD_TABLE_BORDER_WEIGHT_PRECEDENCE,
       WORD_OMITTED_ROW_HEIGHT_RULE_AT_LEAST,
       WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR,
@@ -268,6 +308,10 @@ describe('layout compatibility inventory', () => {
       WORD_TABLE_CELL_SPACING_SCOPE_SHADOW,
       WORD_TABLE_MARGIN_SCOPE_SHADOW,
       WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE,
+      WORD_TRAILING_STRUCTURAL_CELL_MARKER,
+      WORD_CELL_VERTICAL_ALIGNMENT_INK_BLOCK,
+      WORD_VERTICAL_MERGE_TERMINAL_BORDER,
+      WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE,
     ];
 
     expect(new Set(rules.map((rule) => rule.id)).size).toBe(rules.length);
@@ -351,6 +395,22 @@ describe('layout compatibility inventory', () => {
     expect(Object.isFrozen(WORD_TRACK_CHANGE_AUTHOR_COLORS)).toBe(true);
   });
 
+  it('maps visible track-change kinds to their revision decorations', () => {
+    expect(wordTrackChangeDecoration('insertion')).toEqual({
+      underline: true,
+      strike: false,
+    });
+    expect(wordTrackChangeDecoration('deletion')).toEqual({
+      underline: false,
+      strike: true,
+    });
+    expect(wordTrackChangeDecoration(null)).toEqual({
+      underline: false,
+      strike: false,
+    });
+    expect(Object.isFrozen(wordTrackChangeDecoration('insertion'))).toBe(true);
+  });
+
   it('keeps neutral characters attached to the active script slice', () => {
     expect(wordNeutralAttachesToActiveScript(' ')).toBe(true);
     expect(wordNeutralAttachesToActiveScript('1')).toBe(true);
@@ -413,6 +473,7 @@ describe('layout compatibility inventory', () => {
     expect(wordTableRowHeightRule('auto', false)).toBe('atLeast');
     expect(wordTableRowHeightRule('auto', true)).toBe('auto');
     expect(wordAuthoredAutoRowHeightUsesFloor('auto', 0)).toBe(true);
+    expect(wordAuthoredAutoRowHeightUsesFloor('auto', Number.POSITIVE_INFINITY)).toBe(true);
     expect(wordAuthoredAutoRowHeightUsesFloor('atLeast', 10)).toBe(false);
     expect(wordTableCellSpacingValuePt('pct', null)).toBe(0);
     expect(wordTableCellSpacingValuePt('dxa', 4)).toBe(4);
@@ -425,5 +486,32 @@ describe('layout compatibility inventory', () => {
     expect(wordTableMarginValuePt({
       kind: 'dxa', dxaValuePt: 3, scope: 'cell', edge: 'bottom',
     })).toBe(3);
+  });
+
+  it('drops only an empty trailing paragraph after a non-paragraph cell block', () => {
+    expect(wordDropsTrailingStructuralCellMarker({
+      contentLength: 2,
+      previousKind: 'table',
+      lastKind: 'paragraph',
+      lastParagraphRunCount: 0,
+    })).toBe(true);
+    expect(wordDropsTrailingStructuralCellMarker({
+      contentLength: 2,
+      previousKind: 'paragraph',
+      lastKind: 'paragraph',
+      lastParagraphRunCount: 0,
+    })).toBe(false);
+    expect(wordDropsTrailingStructuralCellMarker({
+      contentLength: 2,
+      previousKind: 'table',
+      lastKind: 'paragraph',
+      lastParagraphRunCount: 1,
+    })).toBe(false);
+    expect(wordDropsTrailingStructuralCellMarker({
+      contentLength: 1,
+      previousKind: undefined,
+      lastKind: 'paragraph',
+      lastParagraphRunCount: 0,
+    })).toBe(false);
   });
 });

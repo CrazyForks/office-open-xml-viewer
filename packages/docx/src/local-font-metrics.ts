@@ -7,13 +7,11 @@ import {
 import type { DocxDocumentModel } from './types.js';
 import { docxRenderedTextUsages } from './document-content.js';
 
-/** Word's Far-East single-line height for Meiryo is 1.3 × the selected face's
- * hhea design box. This is Office compatibility behavior, not an ECMA-376
- * formula: it is measured from Word output and already underpins the static
- * fallback in core. Resolving the exact local face makes the rule version-safe
- * (Meiryo 6.30 has a different hhea box from older builds) without encoding a
- * version-specific number. Meiryo UI is deliberately excluded: it is a distinct
- * family with different metrics and has no equivalent Word measurement here. */
+/** `word-east-asian-grid-line-allocation` uses 1.3 × the selected Meiryo face's
+ * hhea design box as its compatibility floor. Resolving the exact local face
+ * keeps the rule version-safe without a version-specific constant. Meiryo UI is
+ * deliberately excluded because it is a distinct family with different
+ * metrics and no registered evidence for this multiplier. */
 export function docxLocalMetricRequests(
   doc: DocxDocumentModel,
 ): LocalFontMetricRequest[] {
