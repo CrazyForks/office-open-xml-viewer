@@ -7,7 +7,9 @@ import {
 } from './axis-aligned-overlap.js';
 import type { LayoutRect } from './types.js';
 
-/** Display-space tolerance retained only for the temporary legacy registry. */
+/** Numerical tolerances retained by callers while C1b removes the temporary
+ * scalar registry. Point-space table transactions also used these exact values
+ * through that adapter before C1a and must preserve them explicitly. */
 export const FLOAT_OVERLAP_EPS = 0.01;
 export const FLOAT_PAGE_RIGHT_SLACK = 0.5;
 
@@ -112,12 +114,7 @@ export function resolveFloatPlacement(
     return blocker.paragraphId !== avoidance.paragraphId;
   });
   if (eligible.length === 0) {
-    return placement(
-      moving,
-      0,
-      0,
-      compatibility ? [WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT.id] : [],
-    );
+    return placement(moving, 0, 0, []);
   }
   const resolved = resolveAxisAlignedOverlap(
     axisRect(movingRect),
@@ -130,12 +127,11 @@ export function resolveFloatPlacement(
       rightBoundarySlack: input.rightBoundarySlackPt ?? 0,
     },
   );
-  return placement(
-    moving,
-    resolved.left - movingRect.xPt,
-    resolved.top - movingRect.yPt,
-    compatibility ? [WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT.id] : [],
-  );
+  const xPt = resolved.left - movingRect.xPt;
+  const yPt = resolved.top - movingRect.yPt;
+  return placement(moving, xPt, yPt, compatibility && (xPt !== 0 || yPt !== 0)
+    ? [WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT.id]
+    : []);
 }
 
 interface ScalarFloatParticipant {

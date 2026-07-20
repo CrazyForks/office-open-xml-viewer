@@ -29,8 +29,8 @@ describe('float displacement policy', () => {
     const result = resolveFloatPlacement({
       moving,
       blockers: [
-        participant('table', 'table', 0, 0),
-        participant('frame', 'frame', 0, 1),
+        participant('table', 'table', 10, 0),
+        participant('frame', 'frame', 20, 1),
         participant('drawing', 'drawingml', 0, 2),
       ],
       avoidance: { kind: 'drawingml-normative' },
@@ -104,6 +104,22 @@ describe('float displacement policy', () => {
     expect(result.appliedCompatibilityRuleIds).toEqual([
       'word-float-different-paragraph-displacement',
     ]);
+  });
+
+  it('reports a Word compatibility rule only when it changes placement', () => {
+    const moving = participant('moving', 'table', 0, 2, 2);
+    const result = resolveFloatPlacement({
+      moving,
+      blockers: [participant('other-paragraph', 'frame', 50, 1, 4)],
+      avoidance: {
+        kind: 'word-different-paragraph',
+        paragraphId: moving.paragraphId,
+      },
+      rightBoundaryPt: 100,
+    });
+
+    expect(result.displacement).toEqual({ xPt: 0, yPt: 0 });
+    expect(result.appliedCompatibilityRuleIds).toEqual([]);
   });
 
   it('preserves authored overlap when no avoidance policy applies', () => {

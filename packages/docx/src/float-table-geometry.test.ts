@@ -641,6 +641,38 @@ describe('retained floating table placement (§17.4.57)', () => {
     expect(secondResolution.transaction.nextParagraphId).toBe(9);
   });
 
+  it('preserves the established page-edge slack in retained point-space placement', () => {
+    const frames: FloatingTableReferenceFramesPt = Object.freeze({
+      ...retainedReferenceFrames,
+      page: Object.freeze({ xPt: 0, yPt: 0, widthPt: 259.75, heightPt: 800 }),
+    });
+    const first = Object.freeze({
+      ...retainedFloatingPlacement({
+        horzAnchor: 'page', vertAnchor: 'page', xPt: 100, yPt: 100,
+      }),
+      occurrenceId: 'page-edge-first',
+    });
+    const second = Object.freeze({
+      ...first,
+      occurrenceId: 'page-edge-second',
+    });
+    const firstResolution = resolveFloatingTablePlacementInTransaction(
+      first,
+      frames,
+      beginFloatingTablePlacementTransaction([], 0),
+    );
+    const secondResolution = resolveFloatingTablePlacementInTransaction(
+      second,
+      frames,
+      firstResolution.transaction,
+    );
+
+    expect(secondResolution.placement.bounds).toMatchObject({
+      xPt: 180,
+      yPt: 100,
+    });
+  });
+
   it('resolves text-relative offsets and exclusion padding entirely in point space', () => {
     const placement = retainedFloatingPlacement();
 

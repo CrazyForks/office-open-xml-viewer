@@ -1,4 +1,6 @@
 import {
+  FLOAT_OVERLAP_EPS,
+  FLOAT_PAGE_RIGHT_SLACK,
   resolveFloatPlacement,
   type FloatPlacementParticipant,
 } from './floats.js';
@@ -237,6 +239,11 @@ export function resolveFloatingTablePlacementInTransaction(
           paragraphId: transaction.nextParagraphId,
         },
     rightBoundaryPt: endX(frames.page),
+    // Preserve the numeric policy used by the former scalar adapter. This is
+    // especially important at an authored page edge, where sub-twip rounding
+    // must not turn a horizontal fit into a vertical displacement.
+    overlapEpsilonPt: FLOAT_OVERLAP_EPS,
+    rightBoundarySlackPt: FLOAT_PAGE_RIGHT_SLACK,
   });
   const finalPlacement = resolvedPlacement(
     placement,
