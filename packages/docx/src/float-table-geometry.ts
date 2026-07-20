@@ -190,8 +190,8 @@ export function registerTableFloat(
     tableOverlap: allowOverlap ? 'overlap' : 'never',
     mode: 'square',
     side,
-    imageKey: '', // non-image float: the table is painted by renderFloatTable.
-    drawn: true, // painted by renderFloatTable; deferred image path must skip it.
+    imageKey: '', // non-image float: retained table paint owns it.
+    drawn: true, // deferred resource paint must skip this retained table.
     paraId,
     avoidOverlap: !preResolved,
   });

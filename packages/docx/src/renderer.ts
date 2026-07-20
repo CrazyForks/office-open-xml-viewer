@@ -652,8 +652,8 @@ export interface RenderState {
    *  margin's MAGNITUDE (|margin|), NOT the signed pgMar value. A negative top/bottom
    *  margin (ST_SignedTwipsMeasure) measures the body |margin| from the page edge and
    *  overlaps the header/footer; `bodyMarginInsetPt` derives this at the writers
-   *  (baseState, buildMeasureState). Read as the column region top (renderBodyElements /
-   *  splitParagraphAcrossPages) and as the text-margin container for `relativeFrom=
+   *  (baseState, buildMeasureState). Read as the canonical column-region top
+   *  and as the text-margin container for `relativeFrom=
    *  "topMargin"/"bottomMargin"/"margin"` anchors/frames (anchor-geometry, frame-geometry;
    *  §17.18.100 — the text-margin location IS the body edge). Do NOT treat as the signed
    *  margin: the overflow decision keeps the sign separately (header/footerOverflowPt). */
@@ -1776,7 +1776,7 @@ async function renderDocumentToCanvasLeased(
     marginLeft: sec.marginLeft,
     marginRight: sec.marginRight,
     // §17.6.11: store the body inset (|margin|), the value the paint pass re-adds as a
-    // column's region top (state.marginTop, renderBodyElements); never the raw sign.
+    // canonical column-region top (state.marginTop); never the raw sign.
     marginTop: bodyTopPt,
     marginBottom: bodyBottomPt,
     pageWidth: sec.pageWidth,
@@ -4753,7 +4753,7 @@ function resolveShapeBox(
 
 /**
  * Resolve an anchor image's page-space box origin and dist* padding (px), shared
- * by registerAnchorFloats (wrap floats) and renderAnchorImages (wrapNone images).
+ * by legacy float registration and the canonical anchor acquisition bridge.
  *
  * X: margin-relative offsets add section.marginLeft (ECMA-376 §20.4.3.4
  * relativeFrom="margin"); otherwise anchorXPt is already page-absolute.
@@ -5234,20 +5234,17 @@ function registerShapeFloat(
 }
 
 /** Content height of a table cell laid out at total width `cellW`, in the target
- *  units the caller works in: px when `scale` is the device scale (paint pass),
- *  pt when `scale === 1` (paginator). Cell top/bottom margins plus each content
+ *  units the caller works in: scaled device units, or pt when `scale === 1`.
+ *  Cell top/bottom margins plus each content
  *  element measured at `measureCellElementHeight`. Adjacent paragraphs inside the
- *  cell collapse spacing the same way `renderCellContent` does (ECMA-376
+ *  cell collapse spacing according to the retained table-flow rule (ECMA-376
  *  §17.3.1.33 contextualSpacing + spaceAfter/spaceBefore overlap = max not sum),
- *  so the measured height matches the painted height.
+ *  so the measured height matches the acquired height.
  *
- *  B2 table stage 1a — this is the SINGLE cell-content measurer for the whole
- *  package. The paginator ({@link computeTableRowHeights}, scale 1), the paint
- *  layout ({@link computeTableLayout}, device scale), and the exported
- *  {@link calculateRowHeight} all resolve a cell's height through here, so a
- *  table's rows can never be sized by two different measurers. Unit-agnostic: it
- *  is the same formula at any `scale`, and at scale 1 it returns exactly the pt
- *  height the device-scale paint pass will produce ÷ scale. */
+ *  This is the remaining legacy measurement bridge used by
+ *  {@link computeTableRowHeights}. Canonical table acquisition owns production
+ *  row geometry; the bridge remains isolated until its callers move under the
+ *  layout subsystem. */
 function measureCellContentHeightPx(
   cell: DocTableCell,
   table: DocTable,
@@ -5558,10 +5555,10 @@ function drawBorderLine(
  *   - the `bottom` edge only on the LAST paragraph,
  *   - the `<w:between>` edge (if any) at every INNER join,
  *   - `left`/`right` always (they form the box sides).
- * The paint loops (renderBodyElements / renderParaList) detect adjacency and
- * pass `suppressTop` when a same-border paragraph precedes this one, and
- * `suppressBottom` when one follows. When `suppressTop` is set the `between`
- * edge (if defined) is drawn at the top join instead of the `top` edge.
+ * Canonical paragraph acquisition resolves adjacency before paint. This
+ * compatibility shape remains for the legacy measurement bridge: `suppressTop`
+ * selects the `between` edge at an inner join, while `suppressBottom` omits the
+ * final edge when the run continues.
  */
 export interface ParaBorderMerge {
   /** A same-border paragraph is adjacent above ⇒ don't draw this `top` edge
@@ -5606,8 +5603,8 @@ export interface ParaBorderSegment {
  *
  *  §17.3.1.7 places the bottom border `w:space` points below the text ("the space
  *  after the bottom of the text … before this border is drawn"), and §17.3.4 gives
- *  the border its own width (`w:sz`, eighths of a point). {@link drawParaBorders}
- *  strokes the line centered on `textBottom + space`, so its outer bottom edge is
+ *  the border its own width (`w:sz`, eighths of a point). The retained border
+ *  stroke is centered on `textBottom + space`, so its outer bottom edge is
  *  at `textBottom + space + width/2`. `word-paragraph-border-flow-reservation`
  *  reserves that complete painted extent before the following content.
  *

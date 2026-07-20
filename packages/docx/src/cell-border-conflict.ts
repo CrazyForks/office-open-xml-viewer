@@ -11,9 +11,9 @@ import {
  * When cell spacing is zero, two cells that share an interior gridline each
  * contribute a border for that edge. This module displays exactly ONE of them,
  * chosen by the following rules (applied in order), and is the pure kernel that
- * decides the winner. The renderer ({@link drawTableRows}) supplies the two
- * candidates for each shared edge and draws only the returned winner, so a
- * gridline is drawn once with the correct spec (no more "last cell painted wins").
+ * decides the winner. Canonical table border acquisition supplies the two
+ * candidates for each shared edge and retains only the returned winner, so a
+ * gridline is painted once with the correct spec (no more "last cell wins").
  *
  * Rules (ECMA-376 §17.4.66 plus the registered table-border compatibility
  * rules):

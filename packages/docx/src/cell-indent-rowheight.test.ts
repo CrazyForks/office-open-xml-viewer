@@ -11,11 +11,10 @@ import type {
 // ECMA-376 §17.3.1.12 (`<w:ind>`) + §17.4.80 (auto row height): a table cell's
 // auto row height is the tallest cell's measured CONTENT height. The content is
 // laid out inside `cellWidth − cell margins − the paragraph's own left/right
-// indent`, with the FIRST line further inset by `<w:ind w:firstLine>`. The paint
-// path (`renderParagraph`) and the paginator (`estimateParagraphHeight`) both
-// apply those indents; the per-row measurer (`measureParaHeight`) must too, or a
-// cell whose paragraph carries a first-line indent that forces a wrap is sized
-// for FEWER lines than it paints and overflows into the next row.
+// indent`, with the FIRST line further inset by `<w:ind w:firstLine>`. Canonical
+// table acquisition must use that same retained paragraph geometry when sizing
+// the row; otherwise a first-line indent that forces a wrap can size the row for
+// FEWER lines than the retained paint tree contains and overflow the next row.
 //
 // sample-11.docx exposes this: the "City or Town" header cell and the
 // "Cedar University" data cells carry `w:firstLine=432` (21.6 pt). At their
