@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { BodyElement, DocxDocumentModel, SectionProps } from './types.js';
 import {
   attachDocumentLayoutVariants,
   selectDocumentLayoutPage,
 } from './layout/document-layout-variants.js';
-import { layoutVariantStoreOf } from './layout/runtime-state.js';
+import {
+  attachDocumentLayoutRuntime,
+  documentLayoutRuntimeOf,
+  layoutVariantStoreOf,
+} from './layout/runtime-state.js';
 import type { DeepReadonly, DocumentLayout, LayoutServices } from './layout/types.js';
 import type {
   DocumentMeta,
@@ -16,6 +20,7 @@ import { DocxDocument } from './document.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { stableFingerprint } from './layout/fingerprint.js';
 import { buildBookmarkPageMap } from './bookmark-nav.js';
+import { textRunsForSelectedPage } from './text-run-projection.js';
 
 function services(): LayoutServices {
   return Object.freeze({
@@ -220,6 +225,62 @@ describe('render worker canonical layout parity', () => {
     expect(workerServices.text.fingerprint).toBe(mainServices.text.fingerprint);
     expect(workerServices.images.fingerprint).toBe(mainServices.images.fingerprint);
     expect(workerServices.math.fingerprint).toBe(mainServices.math.fingerprint);
+  });
+
+  it('projects equal main and worker run arrays from equal retained variants', () => {
+    const model = realModel();
+    const mainServices = createLayoutServices(model, { measureContext: measureContext() });
+    const workerServices = createLayoutServices(model, { measureContext: measureContext() });
+    attachDocumentLayoutVariants({
+      model, services: mainServices, defaultCurrentDateMs: 10,
+      buildLayout: (options) => layoutDocument(model, mainServices, options),
+    });
+    retainRenderWorkerDocumentLayout(model, workerServices, 10);
+
+    const options = {
+      currentDate: Date.UTC(2222, 0, 1),
+      defaultCurrentDateMs: 10,
+      width: 816,
+    };
+    expect(textRunsForSelectedPage(workerServices, 0, options)).toEqual(
+      textRunsForSelectedPage(mainServices, 0, options),
+    );
+  });
+
+  it('collects main-thread runs without constructing any Canvas', async () => {
+    const model = realModel();
+    const layoutServices = createLayoutServices(model, {
+      measureContext: measureContext(),
+    });
+    attachDocumentLayoutVariants({
+      model,
+      services: layoutServices,
+      defaultCurrentDateMs: 10,
+      buildLayout: (options) => layoutDocument(model, layoutServices, options),
+    });
+    const document = Object.create(DocxDocument.prototype) as DocxDocument;
+    attachDocumentLayoutRuntime(document, 10);
+    documentLayoutRuntimeOf(document).services = layoutServices;
+    Object.assign(document, { _mode: 'main' });
+    const offscreen = vi.fn(() => {
+      throw new Error('collectPageRuns must not construct OffscreenCanvas');
+    });
+    const createElement = vi.fn(() => {
+      throw new Error('collectPageRuns must not construct HTMLCanvasElement');
+    });
+    vi.stubGlobal('OffscreenCanvas', offscreen);
+    vi.stubGlobal('document', { createElement });
+    try {
+      const runs = await document.collectPageRuns(0, {
+        width: 816,
+        currentDate: Date.UTC(2222, 0, 1),
+      });
+      expect(runs.map((run) => run.text).join('')).toBe('2222');
+      expect(offscreen).not.toHaveBeenCalled();
+      expect(createElement).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('retains complete default and dated layouts through the production worker wiring seam', () => {

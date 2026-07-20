@@ -211,15 +211,8 @@ describe('paintTableLayout', () => {
     expect(continuation.rows[0]?.cells[0]?.verticalMerge).toBe('continue');
   });
 
-  it('reports text-run bounds in final CSS pixels after placed table transforms', async () => {
-    const runs: Array<Readonly<{
-      text: string;
-      x: number;
-      y: number;
-      w: number;
-      h: number;
-      fontSize: number;
-    }>> = [];
+  it('paints text after placed table transforms', async () => {
+    const painted: string[] = [];
     const ctx = {
       globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
       font: '', textAlign: 'left' as CanvasTextAlign,
@@ -229,7 +222,7 @@ describe('paintTableLayout', () => {
       save() {}, restore() {}, beginPath() {}, rect() {}, clip() {},
       translate() {}, rotate() {}, scale() {}, fillRect() {}, strokeRect() {},
       setLineDash() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, drawImage() {},
-      fillText() {},
+      fillText(text: string) { painted.push(text); },
     } as unknown as PaintCanvas2D;
     const { paintPlacedTableLayout } = await import('./canvas-table.js');
 
@@ -238,19 +231,9 @@ describe('paintTableLayout', () => {
       scale: 2,
       dpr: 1,
       resources,
-      onTextRun: (run) => runs.push(run),
     });
 
-    expect(runs).toEqual([
-      expect.objectContaining({
-        text: 'child',
-        x: 224,
-        y: 444,
-        w: 40,
-        h: 20,
-        fontSize: 20,
-      }),
-    ]);
+    expect(painted).toEqual(['child']);
   });
 
   it('preserves a nested table alignment offset inside the outer cell content band', async () => {
@@ -294,7 +277,7 @@ describe('paintTableLayout', () => {
         }, ...outer.rows[0]!.cells.slice(1)],
       }],
     };
-    const runs: Array<{ x: number }> = [];
+    const painted: string[] = [];
     const ctx = {
       globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
       font: '', textAlign: 'left' as CanvasTextAlign,
@@ -304,24 +287,20 @@ describe('paintTableLayout', () => {
       save() {}, restore() {}, beginPath() {}, rect() {}, clip() {},
       translate() {}, rotate() {}, scale() {}, fillRect() {}, strokeRect() {},
       setLineDash() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, drawImage() {},
-      fillText() {},
+      fillText(text: string) { painted.push(text); },
     } as unknown as PaintCanvas2D;
     const { paintTableLayout } = await import('./canvas-table.js');
 
     paintTableLayout(withNested, {
       ctx, scale: 1, dpr: 1, resources,
-      onTextRun: (run) => runs.push({ x: run.x }),
     });
 
-    // outer content x=12 + nested-local paragraph x=22. The nested table's
-    // 20pt centered origin is already retained by its child geometry.
-    expect(runs).toEqual([{ x: 34 }]);
+    expect(painted).toEqual(['child']);
   });
 
   it('paints each explicitly resolved floating child once outside ordinary cell flow', async () => {
     const paintedText: string[] = [];
     const paintOrder: string[] = [];
-    const runs: Array<{ x: number; y: number }> = [];
     const target = {
       globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
       font: '', textAlign: 'left' as CanvasTextAlign,
@@ -383,13 +362,11 @@ describe('paintTableLayout', () => {
       { xPt: 110, yPt: 220 },
       {
         ctx, scale: 1, dpr: 1, resources,
-        onTextRun: (run) => runs.push({ x: run.x, y: run.y }),
       },
       floating,
     );
 
     expect(paintedText).toEqual(['child']);
-    expect(runs).toEqual([{ x: 202, y: 302 }]);
     expect(paintOrder.at(-1)).toBe('stroke:#445566');
 
     paintedText.length = 0;

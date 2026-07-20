@@ -5,7 +5,6 @@ import type {
   Matrix2DData,
 } from '../layout/types.js';
 import type { ResolvedPaintResource } from './resource-session.js';
-import type { TextRunPaintInfo } from './text-run-info.js';
 
 export interface PaintPageOptions {
   readonly scale: number;
@@ -75,7 +74,6 @@ export interface CanvasPaintContext {
    * production Canvas transform that can affect point geometry.
    */
   readonly pointToCss?: Matrix2DData;
-  readonly onTextRun?: (run: TextRunPaintInfo) => void;
   readonly layoutTranslationPt?: Readonly<{ xPt: number; yPt: number }>;
   readonly textBoxVerticalMode?: 'vert' | 'vert270' | 'eaVert' | 'mongolianVert';
   /** The page paint plan owns anchored drawings for this retained root. */

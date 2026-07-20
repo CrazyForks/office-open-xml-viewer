@@ -155,6 +155,5 @@ export function acquireAndPaintShapeTextBox(
         );
       },
     },
-    onTextRun: state?.onTextRun,
   });
 }

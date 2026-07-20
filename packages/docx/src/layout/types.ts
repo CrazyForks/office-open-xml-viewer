@@ -12,6 +12,7 @@ import type {
   DrawingMLShapePaintPlan,
   Duotone,
   Fill,
+  HyperlinkTarget,
 } from '@silurus/ooxml-core';
 
 export type { TextLayoutService } from './text.js';
@@ -374,7 +375,8 @@ export interface TextPlacement {
     | 'emphasis'
   )[];
   readonly decorations: readonly TextDecorationLayout[];
-  readonly hyperlink?: string;
+  /** Resolved ECMA-376 §17.16.22/§17.16.23 external or bookmark target. */
+  readonly hyperlink?: HyperlinkTarget;
 }
 
 export interface TabPlacement {

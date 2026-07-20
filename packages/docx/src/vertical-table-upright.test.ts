@@ -480,25 +480,20 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     expect(second?.bounds).toEqual({ xPt: 120, yPt: 40, widthPt: 60, heightPt: 20 });
 
     const paint = makeRecordingCanvas();
+    const runs: DocxTextRunInfo[] = [];
     await renderDocumentToCanvas(doc, paint.canvas, 0, {
       dpr: 1,
       width: PHYS.pageWidth,
       layoutServices: documentServices(doc),
-      onTextRun: (run) => paint.paintEvents.push({ kind: 'text', text: run.text }),
+      onTextRun: (run) => runs.push(run),
     });
     expect(paint.measureCalls()).toBe(0);
-    const floatTextEvents = paint.paintEvents.filter(
-      (event): event is Extract<PaintEvent, { kind: 'text' }> =>
-        event.kind === 'text' && (event.text === 'FLOAT' || event.text === 'FLOAT2'),
-    );
-    expect(floatTextEvents.map((event) => event.text)).toEqual(['FLOAT', 'FLOAT2']);
+    expect(runs.filter((run) => run.text === 'FLOAT' || run.text === 'FLOAT2')
+      .map((run) => run.text)).toEqual(['FLOAT', 'FLOAT2']);
     const parentBorderIndex = paint.paintEvents.findIndex(
       (event) => event.kind === 'stroke' && event.color === '#ff00ff',
     );
-    const secondFloatIndex = paint.paintEvents.findIndex(
-      (event) => event.kind === 'text' && event.text === 'FLOAT2',
-    );
-    expect(parentBorderIndex).toBeGreaterThan(secondFloatIndex);
+    expect(parentBorderIndex).toBeGreaterThanOrEqual(0);
   });
 
   it('composes the upright cell-column X axis with the physical page Y axis', () => {

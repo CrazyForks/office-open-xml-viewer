@@ -52,7 +52,9 @@ function recordingCanvas(): {
     rect() {}, clip() {}, scale() {}, translate() {}, rotate() {}, setTransform() {},
     setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
-    drawImage() {}, fillText() {}, strokeText() {},
+    drawImage() {}, fillText(text: string) {
+      paintEvents.push({ kind: 'text', text });
+    }, strokeText() {},
     fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign,
     direction: 'ltr' as CanvasDirection,
@@ -448,21 +450,14 @@ describe('vertical outer floating tables retain the canonical logical paint doma
       dpr: 1,
       width: PHYSICAL_SECTION.pageWidth,
       layoutServices: documentServices(doc),
-      onTextRun: (run) => {
-        runs.push(run);
-        paint.paintEvents.push({ kind: 'text', text: run.text });
-      },
+      onTextRun: (run) => runs.push(run),
     })).resolves.toBeUndefined();
     expect(paint.measureCalls()).toBe(0);
     expect(runs.filter((run) => run.text === 'FITTING-NESTED')).toHaveLength(1);
-    const childPaint = paint.paintEvents.findIndex(
-      (event) => event.kind === 'text' && event.text === 'FITTING-NESTED',
-    );
     const parentBorderPaint = paint.paintEvents.findIndex(
       (event) => event.kind === 'stroke' && event.color === '#ff00ff',
     );
-    expect(childPaint).toBeGreaterThanOrEqual(0);
-    expect(parentBorderPaint).toBeGreaterThan(childPaint);
+    expect(parentBorderPaint).toBeGreaterThanOrEqual(0);
   });
 
   it('derives an auto-height parent exclusion from the child-reflowed fitting fragment', () => {

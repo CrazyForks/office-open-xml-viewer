@@ -9,7 +9,6 @@ import {
   drawTateChuYokoRun,
   drawUprightBox,
   physicalToLogicalAnchorBox,
-  verticalTextLayerPlacement,
   verticalRunInkExtraPx,
   verticalRunInkExtraPxWithCapability,
 } from './vertical-text.js';
@@ -902,17 +901,5 @@ describe('physicalToLogicalAnchorBox (§17.6.20 + §20.4.3.x — physical anchor
     // Centroid matches Word / PDF ground truth.
     expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(492.4, 3);
     expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(459.35, 3);
-  });
-});
-
-describe('verticalTextLayerPlacement (§17.6.20 — overlay span physical placement)', () => {
-  it('maps a logical run top-left to the physical rotated placement', () => {
-    // Logical run at (100, 200) on an 842px-wide physical page.
-    const place = verticalTextLayerPlacement(100, 200, 842, true);
-    expect(place).toEqual({ left: 842 - 200, top: 100, transform: 'rotate(90deg)' });
-  });
-
-  it('returns null on a horizontal page (span placed at logical x/y, no transform)', () => {
-    expect(verticalTextLayerPlacement(100, 200, 842, false)).toBeNull();
   });
 });
