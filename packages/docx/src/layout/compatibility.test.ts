@@ -15,20 +15,17 @@ import {
   WORD_CONTINUOUS_SECTION_MARK_SPACING,
   WORD_TERMINAL_COLUMN_BREAK,
 } from './body-pagination-compatibility.js';
-import { ESTABLISHED_NEXT_COLUMN_PAGE_ADVANCE } from './page-flow-compatibility.js';
 import {
   WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
   wordZeroRelativeSizeUsesExtent,
 } from './anchor-compatibility.js';
 import {
   WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
-  WORD_COLUMN_SEPARATOR_SECTION_BAND,
   WORD_CONTINUOUS_SECTION_PAGE_NUMBER_RESTART,
   WORD_DEFAULT_LINE_NUMBER_DISTANCE,
   WORD_DEFAULT_LINE_NUMBER_DISTANCE_PT,
   WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
   wordBookFoldGutterEdge,
-  wordColumnSeparatorBlockBand,
   wordContinuousSectionRestartDisplayNumber,
   wordLineNumberDistancePt,
   wordTrailingEmptyMarkAdmissionAllowancePt,
@@ -46,7 +43,7 @@ import {
   wordClipsOverPageCantSplitRow,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
-  wordSpacedCellUsesSeparatedBorderGrid,
+  wordSpacedCellInsideBorderOverridesTable,
 } from './table-compatibility.js';
 
 describe('defineCompatibilityRule', () => {
@@ -132,7 +129,6 @@ describe('defineCompatibilityRule', () => {
       WORD_PRE_BREAK_ANCHOR_PARAGRAPH,
       WORD_PRE_BREAK_INLINE_DRAWING_GROUP,
       WORD_CONTINUOUS_SECTION_MARK_SPACING,
-      ESTABLISHED_NEXT_COLUMN_PAGE_ADVANCE,
     ];
 
     expect(rules.map((rule) => (
@@ -143,7 +139,6 @@ describe('defineCompatibilityRule', () => {
       'packages/docx/src/pagination.test.ts#does not push an anchor-only pre-break paragraph to a new page just for its empty mark',
       'packages/docx/src/pagination.test.ts#moves a preceding image with its pre-break callout when the pair only fits fresh',
       'packages/docx/src/body-layout-input.test.ts#projects mutually exclusive collapsed-mark and drop-previous-after roles',
-      'packages/docx/src/layout/paginator.test.ts#advances nextColumn to the next page when the outgoing column has no same-page successor',
     ]);
   });
 });
@@ -188,7 +183,6 @@ describe('layout compatibility inventory', () => {
       WORD_DEFAULT_LINE_NUMBER_DISTANCE,
       WORD_CONTINUOUS_SECTION_PAGE_NUMBER_RESTART,
       WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
-      WORD_COLUMN_SEPARATOR_SECTION_BAND,
       WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
       WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING,
       WORD_NIL_TABLE_BORDER_SUPPRESSION,
@@ -212,8 +206,21 @@ describe('layout compatibility inventory', () => {
     expect(wordAuthoredBorderParticipates('nil')).toBe(true);
     expect(wordAlignedTableOriginPt(100, 8, false)).toBe(108);
     expect(wordAlignedTableOriginPt(100, 8, true)).toBe(92);
-    expect(wordSpacedCellUsesSeparatedBorderGrid(0)).toBe(false);
-    expect(wordSpacedCellUsesSeparatedBorderGrid(0.1)).toBe(true);
+    expect(wordSpacedCellInsideBorderOverridesTable({
+      spacingPt: 0,
+      directStyle: null,
+      conditionalInsideStyle: 'single',
+    })).toBe(false);
+    expect(wordSpacedCellInsideBorderOverridesTable({
+      spacingPt: 1,
+      directStyle: 'none',
+      conditionalInsideStyle: 'single',
+    })).toBe(true);
+    expect(wordSpacedCellInsideBorderOverridesTable({
+      spacingPt: 1,
+      directStyle: 'nil',
+      conditionalInsideStyle: 'single',
+    })).toBe(false);
     expect(wordExactRowVerticalClipBounds(
       { xPt: 20, yPt: 30, widthPt: 40, heightPt: 50 },
       { xPt: 5, yPt: 10, widthPt: 100, heightPt: 200 },
@@ -231,10 +238,6 @@ describe('layout compatibility inventory', () => {
       epsilonPt: 0.0001,
     })).toBe(false);
     expect(wordContinuousSectionRestartDisplayNumber(4, 8, 6)).toBe(6);
-    expect(wordColumnSeparatorBlockBand(10, 40)).toEqual({
-      blockStartPt: 10,
-      blockEndPt: 40,
-    });
     expect(wordBookFoldGutterEdge()).toBe('right');
     const trailingMark = {
       hasContinuationBoundary: false,

@@ -27,15 +27,6 @@ export const WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION = defineCompatibilityRu
   description: 'At the unreserved physical body edge, Word admits an undecorated non-terminal empty paragraph mark by its baseline when later ink follows in the same flow.',
 });
 
-export const WORD_COLUMN_SEPARATOR_SECTION_BAND = defineCompatibilityRule({
-  id: 'word-column-separator-section-band',
-  evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/layout/page-factory.test.ts#retains section column separator geometry on the completed page',
-  },
-  description: 'Preserve the established Word-compatible column separator extent from the retained section band because content ink bounds do not determine where the section-scoped rule terminates.',
-});
-
 export const WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE = defineCompatibilityRule({
   id: 'word-book-fold-gutter-right-edge',
   evidence: {
@@ -80,13 +71,6 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
     && input.hasFollowingInk
     ? input.markBelowBaselinePt
     : 0;
-}
-
-export function wordColumnSeparatorBlockBand(
-  blockStartPt: number,
-  blockEndPt: number,
-): Readonly<{ blockStartPt: number; blockEndPt: number }> {
-  return Object.freeze({ blockStartPt, blockEndPt });
 }
 
 export function wordBookFoldGutterEdge(): 'right' {

@@ -192,12 +192,12 @@ Use the roadmap review gate.
 - Modify: `packages/docx/src/layout/compatibility.ts`
 - Modify: `packages/docx/src/layout/compatibility.test.ts`
 - Create: `packages/docx/src/layout/anchor-compatibility.ts`
-- Create: `packages/docx/src/layout/page-flow-compatibility.ts`
 - Create: `packages/docx/src/layout/section-compatibility.ts`
 - Create: `packages/docx/src/layout/table-compatibility.ts`
 - Modify: owning layout and paint modules only to delegate existing decisions
 - Create: `scripts/check-docx-compatibility-evidence.mjs`
 - Create: `scripts/check-docx-compatibility-evidence.test.mjs`
+- Create: `scripts/docx-compatibility-microsoft-evidence.json`
 - Create: `scripts/docx-compatibility-observation-baseline.json`
 - Modify: `.github/workflows/ci.yml`
 
@@ -212,10 +212,27 @@ and belongs to C2b diagnostics; it is never promoted to an Office claim.
 
 Add one generic immutable factory, module-local rule records, stable unique IDs,
 and pure decision helpers. Mechanically verify that every regression reference
-resolves to a live test title, Microsoft-note references are structured, rule
-IDs are globally unique, and rule declarations occur only in the reviewed
-compatibility modules. Add a shrinking observation-comment baseline so new
-inline Office claims fail CI. Preserve every existing value and branch result.
+resolves to a live test title, every Microsoft-note section exists in the
+reviewed evidence catalog, rule IDs are globally unique, and rule declarations
+occur only in the reviewed compatibility modules. Reject aliased, namespace,
+re-exported, dynamic, CommonJS, and indirect-binding access to the factory, and
+scan every production-importable TypeScript/JavaScript module shape. Add a
+shrinking observation-comment baseline so new inline Office claims fail CI.
+The lexical observation scan is a one-way migration ratchet, not a semantic
+substitute for evidence review. Preserve every existing value and branch result.
+
+Do not register the retained `nextColumn` no-successor transition: absent an
+Office observation it is deterministic solver policy. Likewise, retained
+section-band column-separator geometry remains a layout ownership invariant,
+not an Office claim. Non-zero table-cell spacing remains normative OOXML;
+only the `[MS-OI29500]` inside-border conflict deviation is compatibility-owned.
+The Microsoft catalog is pinned to the reviewed published revision and section
+titles; the specification files themselves remain local and uncommitted.
+
+Runtime applied-rule tracing is not a C2a-1 acceptance condition. If C2b needs
+it, propagate immutable rule IDs on retained result values and aggregate only
+from the accepted final layout tree. Never introduce a mutable collector whose
+contents can retain rejected probes or convergence candidates.
 
 - [ ] **C2a-2: Isolate paint-side compatibility decisions**
 

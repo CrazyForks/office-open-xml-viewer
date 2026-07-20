@@ -88,8 +88,14 @@ export function wordAlignedTableOriginPt(
   return bidiVisual ? alignedPt - indentPt : alignedPt + indentPt;
 }
 
-export function wordSpacedCellUsesSeparatedBorderGrid(spacingPt: number): boolean {
-  return spacingPt > 0;
+export function wordSpacedCellInsideBorderOverridesTable(input: Readonly<{
+  spacingPt: number;
+  directStyle: string | null | undefined;
+  conditionalInsideStyle: string | null | undefined;
+}>): boolean {
+  return input.spacingPt > 0
+    && !wordAuthoredBorderParticipates(input.directStyle)
+    && wordAuthoredBorderParticipates(input.conditionalInsideStyle);
 }
 
 export function wordExactRowVerticalClipBounds(

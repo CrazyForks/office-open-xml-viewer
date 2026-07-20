@@ -1,26 +1,21 @@
 import { transformPoint } from './coordinate-space.js';
 import type { ColumnSeparatorLayout, PageSectionRegion, PointPt } from './types.js';
-import { wordColumnSeparatorBlockBand } from './section-compatibility.js';
 
 function freezePoint(point: PointPt): PointPt {
   return Object.freeze(point);
 }
 
-/** Geometry follows the retained section band because ink bounds cannot prove
- * where Word terminates a section-scoped column rule. */
+/** Geometry follows the retained section-owned band; content ink bounds are
+ * paint facts and cannot determine a section-scoped rule's layout extent. */
 export function columnSeparatorSegments(
   regions: readonly PageSectionRegion[],
 ): readonly ColumnSeparatorLayout[] {
   const segments: ColumnSeparatorLayout[] = [];
   for (const region of regions) {
     const { columns, columnSeparator } = region.section;
-    const band = wordColumnSeparatorBlockBand(
-      region.blockStartPt,
-      region.blockEndPt,
-    );
     if (!columnSeparator
       || columns.length < 2
-      || band.blockEndPt <= band.blockStartPt) continue;
+      || region.blockEndPt <= region.blockStartPt) continue;
     const ownedColumns = new Set(region.columnIndexes);
     const populationOrder = region.columnFlowDirection === 'rtl'
       ? columns.map((_, index) => index).reverse()
@@ -37,11 +32,11 @@ export function columnSeparatorSegments(
       segments.push(Object.freeze({
         start: freezePoint(transformPoint(region.coordinateSpace.logicalToPhysical, {
           xPt: inlinePt,
-          yPt: band.blockStartPt,
+          yPt: region.blockStartPt,
         })),
         end: freezePoint(transformPoint(region.coordinateSpace.logicalToPhysical, {
           xPt: inlinePt,
-          yPt: band.blockEndPt,
+          yPt: region.blockEndPt,
         })),
       }));
     }

@@ -9,7 +9,6 @@ import {
   uprightPhysicalExtent,
   writingModeFromTextDirection,
 } from './coordinate-space.js';
-import { ESTABLISHED_NEXT_COLUMN_PAGE_ADVANCE } from './page-flow-compatibility.js';
 import type { PaintNode } from './types.js';
 
 export type PageAdvanceReason =
@@ -528,8 +527,8 @@ export function beginSection(
       // §17.18.77 defines nextColumn as the following column on the page. Once
       // the active region has no such column (including a one-column section),
       // the next flow destination is the incoming section's first column on the
-      // following page. Compatibility contract:
-      // ESTABLISHED_NEXT_COLUMN_PAGE_ADVANCE.
+      // following page. This is the retained solver's total transition policy
+      // for a valid break whose same-page destination does not exist.
       const nextPage = advanceToPage(state, section, 'section-break');
       return transition(nextPage.state, [
         ...nextPage.events,

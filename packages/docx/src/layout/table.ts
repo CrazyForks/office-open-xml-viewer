@@ -10,7 +10,7 @@ import {
   wordAuthoredBorderParticipates,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
-  wordSpacedCellUsesSeparatedBorderGrid,
+  wordSpacedCellInsideBorderOverridesTable,
 } from './table-compatibility.js';
 import type {
   BlockLayoutResult,
@@ -554,17 +554,6 @@ function authoredBorderParticipatesInConflict(border: TableBorderInput | null): 
   return wordAuthoredBorderParticipates(border?.authoredStyle);
 }
 
-function authoredInsideBorderIsEffective(
-  direct: TableBorderInput | null,
-  inside: TableBorderInput | null,
-): boolean {
-  // Inline physical/logical cell edges are the higher style-cascade layer.
-  // `none` behaves as omission, while `nil` is an authored suppression and
-  // therefore prevents a conditional inside edge underneath from resurfacing.
-  return !authoredBorderParticipatesInConflict(direct)
-    && authoredBorderParticipatesInConflict(inside);
-}
-
 function materializeBorders(
   input: TableLayoutInput,
   rowXPt: readonly number[],
@@ -652,6 +641,10 @@ function materializeBorders(
     const belowSpaced = boundary < input.rows.length
       && effectiveCellSpacingPt(input.rows[boundary]) > 0;
     if (aboveSpaced || belowSpaced) {
+      const boundarySpacingPt = Math.max(
+        effectiveCellSpacingPt(input.rows[boundary - 1]),
+        effectiveCellSpacingPt(input.rows[boundary]),
+      );
       const gridRow = belowSpaced ? boundary : boundary - 1;
       const tableXPt = rowXPt[gridRow] ?? 0;
       const edge = boundary === 0
@@ -682,10 +675,11 @@ function materializeBorders(
           ].some(({ side, directEdge }) => {
               const owner = side.owner;
               if (!owner) return false;
-              return authoredInsideBorderIsEffective(
-                owner.input.borders[directEdge],
-                owner.input.borders.insideH,
-              );
+              return wordSpacedCellInsideBorderOverridesTable({
+                spacingPt: boundarySpacingPt,
+                directStyle: owner.input.borders[directEdge]?.authoredStyle,
+                conditionalInsideStyle: owner.input.borders.insideH?.authoredStyle,
+              });
             });
           if (conditionalInsideOverridesTable) return;
           const startXPt = columnX(gridRow, column);
@@ -811,10 +805,12 @@ function materializeBorders(
     });
   });
 
-  // Non-zero spacing separates opposing cell edge boxes. Compatibility-owned
-  // conditional inside-border winners remain on the inset cell edges.
+  // ECMA-376 spacing separates opposing cell edge boxes. The narrow
+  // compatibility decision below only chooses conditional inside-border
+  // winners against the corresponding table inside border.
   input.rows.forEach((row, rowIndex) => {
-    if (!wordSpacedCellUsesSeparatedBorderGrid(effectiveCellSpacingPt(row))) return;
+    const spacingPt = effectiveCellSpacingPt(row);
+    if (spacingPt <= 0) return;
     const rowTopPt = rowY(rowIndex);
     const rowBottomPt = rowY(rowIndex + 1);
     const tableXPt = rowXPt[rowIndex] ?? 0;
@@ -828,10 +824,18 @@ function materializeBorders(
     });
     const conditionalInsideVBoundaries = new Set<number>();
     for (const cell of row.cells) {
-      if (authoredInsideBorderIsEffective(cell.borders.left, cell.borders.insideV)) {
+      if (wordSpacedCellInsideBorderOverridesTable({
+        spacingPt,
+        directStyle: cell.borders.left?.authoredStyle,
+        conditionalInsideStyle: cell.borders.insideV?.authoredStyle,
+      })) {
         conditionalInsideVBoundaries.add(cell.columnStart);
       }
-      if (authoredInsideBorderIsEffective(cell.borders.right, cell.borders.insideV)) {
+      if (wordSpacedCellInsideBorderOverridesTable({
+        spacingPt,
+        directStyle: cell.borders.right?.authoredStyle,
+        conditionalInsideStyle: cell.borders.insideV?.authoredStyle,
+      })) {
         conditionalInsideVBoundaries.add(cell.columnStart + cell.columnSpan);
       }
     }
@@ -851,7 +855,6 @@ function materializeBorders(
       }
     }
 
-    const spacingPt = effectiveCellSpacingPt(row);
     for (const cell of row.cells) {
       if (cell.verticalMerge === 'continue') continue;
       const lastRowIndex = cell.verticalMerge === 'restart'

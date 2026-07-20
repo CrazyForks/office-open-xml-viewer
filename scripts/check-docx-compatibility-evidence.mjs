@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
 const require = createRequire(new URL('../packages/docx/package.json', import.meta.url));
 const ts = require('typescript');
@@ -17,11 +17,12 @@ const DOCX_SOURCE = 'packages/docx/src';
 const COMPATIBILITY_OWNER = `${DOCX_SOURCE}/layout/compatibility.ts`;
 const OBSERVATION_BASELINE =
   'scripts/docx-compatibility-observation-baseline.json';
+const MICROSOFT_EVIDENCE_CATALOG =
+  'scripts/docx-compatibility-microsoft-evidence.json';
 const ALLOWED_DECLARATION_FILES = new Set([
   COMPATIBILITY_OWNER,
   `${DOCX_SOURCE}/layout/anchor-compatibility.ts`,
   `${DOCX_SOURCE}/layout/body-pagination-compatibility.ts`,
-  `${DOCX_SOURCE}/layout/page-flow-compatibility.ts`,
   `${DOCX_SOURCE}/layout/section-compatibility.ts`,
   `${DOCX_SOURCE}/layout/table-compatibility.ts`,
 ]);
@@ -43,10 +44,21 @@ function listFiles(root) {
 }
 
 function isProductionTypeScript(path) {
-  return /\.tsx?$/.test(path)
+  return /\.(?:[cm]?[jt]s|[jt]sx)$/.test(path)
     && !path.endsWith('.d.ts')
-    && !/\.(test|spec|stories|test-support)\.tsx?$/.test(path)
+    && !/\.(test|spec|stories)\.(?:[cm]?[jt]s|[jt]sx)$/.test(path)
     && !path.includes(`${sep}wasm${sep}`);
+}
+
+function compatibilityModuleTarget(root, file, specifier) {
+  if (!specifier.startsWith('.')) return false;
+  const absolute = resolve(root, dirname(file), specifier);
+  const candidates = [
+    absolute,
+    absolute.replace(/\.(?:[cm]?js)$/, '.ts'),
+  ];
+  return candidates.some((candidate) =>
+    posixPath(relative(root, candidate)) === COMPATIBILITY_OWNER);
 }
 
 function property(object, name) {
@@ -97,18 +109,95 @@ function exportName(call, file) {
   return declaration.name.text;
 }
 
-function verifyFactoryImport(source, file) {
+function verifyFactoryAccess(root, source, file, calls) {
+  const allowedIdentifiers = new Set(calls.map((call) => call.expression));
+  const factoryImports = [];
+
+  for (const statement of source.statements) {
+    if (ts.isImportDeclaration(statement)
+      && ts.isStringLiteral(statement.moduleSpecifier)
+      && compatibilityModuleTarget(root, file, statement.moduleSpecifier.text)) {
+      const clause = statement.importClause;
+      if (clause?.name || (clause?.namedBindings && ts.isNamespaceImport(clause.namedBindings))) {
+        fail(
+          'COMPATIBILITY_FACTORY_ACCESS',
+          `${file} must not default- or namespace-import the compatibility owner`,
+        );
+      }
+      if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) {
+          const importedName = element.propertyName?.text ?? element.name.text;
+          if (importedName !== 'defineCompatibilityRule') continue;
+          if (element.propertyName !== undefined
+            || element.name.text !== 'defineCompatibilityRule'
+            || !ALLOWED_DECLARATION_FILES.has(file)) {
+            fail(
+              'COMPATIBILITY_FACTORY_ACCESS',
+              `${file} must not alias or import defineCompatibilityRule outside declaration authority`,
+            );
+          }
+          factoryImports.push(element);
+          allowedIdentifiers.add(element.name);
+        }
+      }
+    }
+
+    if (ts.isExportDeclaration(statement)
+      && statement.moduleSpecifier
+      && ts.isStringLiteral(statement.moduleSpecifier)
+      && compatibilityModuleTarget(root, file, statement.moduleSpecifier.text)) {
+      if (!statement.exportClause) {
+        fail(
+          'COMPATIBILITY_FACTORY_ACCESS',
+          `${file} must not star-re-export the compatibility owner`,
+        );
+      }
+      if (ts.isNamedExports(statement.exportClause)
+        && statement.exportClause.elements.some((element) =>
+          (element.propertyName?.text ?? element.name.text) === 'defineCompatibilityRule')) {
+        fail(
+          'COMPATIBILITY_FACTORY_ACCESS',
+          `${file} must not re-export defineCompatibilityRule`,
+        );
+      }
+    }
+  }
+
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && node.arguments.length > 0) {
+      const [argument] = node.arguments;
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      const isCommonJsRequire = ts.isIdentifier(node.expression)
+        && node.expression.text === 'require';
+      if ((isDynamicImport || isCommonJsRequire)
+        && ts.isStringLiteral(argument)
+        && compatibilityModuleTarget(root, file, argument.text)) {
+        fail(
+          'COMPATIBILITY_FACTORY_ACCESS',
+          `${file} must not dynamically load the compatibility owner`,
+        );
+      }
+    }
+    if (ts.isIdentifier(node) && node.text === 'defineCompatibilityRule') {
+      const isOwnerDeclaration = file === COMPATIBILITY_OWNER
+        && ts.isFunctionDeclaration(node.parent)
+        && node.parent.name === node;
+      if (!isOwnerDeclaration && !allowedIdentifiers.has(node)) {
+        fail(
+          'COMPATIBILITY_FACTORY_ACCESS',
+          `${file} accesses defineCompatibilityRule outside a direct checked call`,
+        );
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return factoryImports;
+}
+
+function verifyFactoryImport(file, factoryImports) {
   if (file === COMPATIBILITY_OWNER) return;
-  const imports = source.statements.filter(ts.isImportDeclaration).filter((entry) =>
-    ts.isStringLiteral(entry.moduleSpecifier)
-    && entry.moduleSpecifier.text === './compatibility.js');
-  const exact = imports.flatMap((entry) => {
-    const bindings = entry.importClause?.namedBindings;
-    return bindings && ts.isNamedImports(bindings)
-      ? bindings.elements.filter((element) => element.name.text === 'defineCompatibilityRule')
-      : [];
-  });
-  if (exact.length !== 1 || exact[0].propertyName !== undefined) {
+  if (factoryImports.length !== 1) {
     fail(
       'COMPATIBILITY_FACTORY_IMPORT',
       `${file} must import defineCompatibilityRule exactly and without an alias`,
@@ -116,7 +205,48 @@ function verifyFactoryImport(source, file) {
   }
 }
 
-function verifyEvidence(root, file, ruleId, evidence) {
+function microsoftEvidenceCatalog(root) {
+  const path = resolve(root, MICROSOFT_EVIDENCE_CATALOG);
+  if (!existsSync(path)) {
+    fail('COMPATIBILITY_MICROSOFT_CATALOG', `${MICROSOFT_EVIDENCE_CATALOG} is missing`);
+  }
+  const catalog = JSON.parse(readFileSync(path, 'utf8'));
+  if (catalog?.version !== 1 || !Array.isArray(catalog.documents)) {
+    fail('COMPATIBILITY_MICROSOFT_CATALOG', MICROSOFT_EVIDENCE_CATALOG);
+  }
+  const documents = new Map();
+  for (const document of catalog.documents) {
+    if (typeof document?.id !== 'string'
+      || typeof document?.revision !== 'string'
+      || typeof document?.published !== 'string'
+      || typeof document?.sourceUrl !== 'string'
+      || !document.sourceUrl.startsWith('https://learn.microsoft.com/')
+      || !Array.isArray(document?.sections)) {
+      fail('COMPATIBILITY_MICROSOFT_CATALOG', `invalid document ${document?.id ?? '<missing>'}`);
+    }
+    if (documents.has(document.id)) {
+      fail('COMPATIBILITY_MICROSOFT_CATALOG', `duplicate document ${document.id}`);
+    }
+    const sections = new Set();
+    for (const section of document.sections) {
+      if (typeof section?.id !== 'string'
+        || typeof section?.title !== 'string'
+        || section.title.trim() === ''
+        || !/^\d+(?:\.\d+)+$/.test(section.id)
+        || sections.has(section.id)) {
+        fail(
+          'COMPATIBILITY_MICROSOFT_CATALOG',
+          `invalid section ${document.id} ${section?.id ?? '<missing>'}`,
+        );
+      }
+      sections.add(section.id);
+    }
+    documents.set(document.id, sections);
+  }
+  return documents;
+}
+
+function verifyEvidence(root, file, ruleId, evidence, microsoftCatalog) {
   const kind = stringValue(evidence, 'kind', file);
   if (kind === 'regression-test') {
     const reference = stringValue(evidence, 'reference', file);
@@ -149,10 +279,22 @@ function verifyEvidence(root, file, ruleId, evidence) {
   }
   if (kind === 'microsoft-note') {
     const reference = stringValue(evidence, 'reference', file);
-    if (!/^\[MS-[A-Z0-9]+\] §§?\d/.test(reference)) {
+    const match = reference.match(/^\[(MS-[A-Z0-9]+)\] §§?(.+)$/);
+    if (!match) {
       fail(
         'COMPATIBILITY_MICROSOFT_REFERENCE',
         `${ruleId} has invalid Microsoft note ${reference}`,
+      );
+    }
+    const sectionIds = [...match[2].matchAll(/\b\d+(?:\.\d+)+\b/g)]
+      .map((entry) => entry[0]);
+    const knownSections = microsoftCatalog.get(match[1]);
+    if (sectionIds.length === 0
+      || !knownSections
+      || sectionIds.some((sectionId) => !knownSections.has(sectionId))) {
+      fail(
+        'COMPATIBILITY_MICROSOFT_EVIDENCE',
+        `${ruleId} references an uncatalogued Microsoft section: ${reference}`,
       );
     }
     return;
@@ -173,7 +315,7 @@ function verifyEvidence(root, file, ruleId, evidence) {
   fail('COMPATIBILITY_EVIDENCE_KIND', `${ruleId} has unknown evidence kind ${kind}`);
 }
 
-function inspectSource(root, absolute, rules) {
+function inspectSource(root, absolute, rules, microsoftCatalog) {
   const file = posixPath(relative(root, absolute));
   const source = ts.createSourceFile(
     absolute,
@@ -191,6 +333,7 @@ function inspectSource(root, absolute, rules) {
     ts.forEachChild(node, visit);
   };
   visit(source);
+  const factoryImports = verifyFactoryAccess(root, source, file, calls);
   if (calls.length === 0) return;
   if (!ALLOWED_DECLARATION_FILES.has(file)) {
     fail(
@@ -198,7 +341,7 @@ function inspectSource(root, absolute, rules) {
       `${file} declares a compatibility rule`,
     );
   }
-  verifyFactoryImport(source, file);
+  verifyFactoryImport(file, factoryImports);
   for (const call of calls) {
     if (call.arguments.length !== 1 || !ts.isObjectLiteralExpression(call.arguments[0])) {
       fail(
@@ -213,7 +356,13 @@ function inspectSource(root, absolute, rules) {
     }
     const id = stringValue(object, 'id', file);
     stringValue(object, 'description', file);
-    verifyEvidence(root, file, id, objectValue(object, 'evidence', file));
+    verifyEvidence(
+      root,
+      file,
+      id,
+      objectValue(object, 'evidence', file),
+      microsoftCatalog,
+    );
     const prior = rules.get(id);
     if (prior) {
       fail('COMPATIBILITY_DUPLICATE_ID', `${id} is declared by ${prior} and ${file}`);
@@ -279,9 +428,10 @@ function verifyObservationBaseline(root, observations) {
 
 export function checkDocxCompatibilityEvidence(root) {
   const rules = new Map();
+  const microsoftCatalog = microsoftEvidenceCatalog(root);
   const sourceRoot = resolve(root, DOCX_SOURCE);
   for (const file of listFiles(sourceRoot).filter(isProductionTypeScript)) {
-    inspectSource(root, file, rules);
+    inspectSource(root, file, rules, microsoftCatalog);
   }
   if (rules.size === 0) fail('COMPATIBILITY_REGISTRY_EMPTY', DOCX_SOURCE);
   const observations = observationKeys(root);
