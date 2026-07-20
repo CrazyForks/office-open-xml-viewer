@@ -112,6 +112,30 @@ describe('retained page-border layout', () => {
     expect(Object.isFrozen(result?.segments)).toBe(true);
   });
 
+  it.each([
+    ['ABCDEF', '#ABCDEF'],
+    ['abcdef', '#abcdef'],
+    [undefined, '#000000'],
+    ['F00', '#000000'],
+    ['red', '#000000'],
+    ['#ff0000', '#000000'],
+    [' ff0000 ', '#000000'],
+  ] as const)('normalizes parser-owned color %s to %s', (color, expected) => {
+    const result = materializePageBorderLayout(
+      {
+        offsetFrom: 'page',
+        display: 'allPages',
+        zOrder: 'front',
+        top: edge({ color }),
+      },
+      horizontalSection,
+      { widthPt: 200, heightPt: 200 },
+      true,
+    );
+
+    expect(result?.segments[0]?.color).toBe(expected);
+  });
+
   it('retains the section logical-to-physical page transform for vertical paint', () => {
     const verticalSection: SectionLayoutContext = {
       ...horizontalSection,

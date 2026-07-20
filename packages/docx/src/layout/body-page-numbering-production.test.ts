@@ -217,6 +217,81 @@ function paginate(
 }
 
 describe('canonical physical-page numbering', () => {
+  it.each([
+    {
+      display: 'firstPage',
+      parity: 'odd' as const,
+      coverBlockCount: 1,
+      blankVisible: true,
+      followingVisible: false,
+    },
+    {
+      display: 'notFirstPage',
+      parity: 'odd' as const,
+      coverBlockCount: 1,
+      blankVisible: false,
+      followingVisible: true,
+    },
+    {
+      display: 'firstPage',
+      parity: 'even' as const,
+      coverBlockCount: 2,
+      blankVisible: true,
+      followingVisible: false,
+    },
+    {
+      display: 'notFirstPage',
+      parity: 'even' as const,
+      coverBlockCount: 2,
+      blankVisible: false,
+      followingVisible: true,
+    },
+  ] as const)(
+    'treats a forced $parity parity blank as the first page owned by a continuous section for $display',
+    ({ display, parity, coverBlockCount, blankVisible, followingVisible }) => {
+      const cover = owner('section:cover');
+      const continued = owner('section:continued', {
+        startType: 'continuous',
+        pageBordersAuthored: true,
+        pageBorders: {
+          offsetFrom: 'page',
+          display,
+          zOrder: 'front',
+          top: { style: 'single', width: 1, space: 4 },
+        },
+      });
+      const coverBlocks = Array.from(
+        { length: coverBlockCount },
+        (_, index) => bodyBlock(index),
+      );
+      const continuedBlockIndex = coverBlockCount;
+      const layout = paginate(cover, [
+        ...coverBlocks,
+        { kind: 'begin-section', source: bodySource(10), section: continued },
+        {
+          kind: 'authored-break',
+          source: bodySource(11),
+          break: 'page',
+          parity,
+        },
+        bodyBlock(continuedBlockIndex),
+      ], new Map([
+        ...coverBlocks.map((_, index) => [index, coverBlockCount === 1 ? 20 : 60] as const),
+        [continuedBlockIndex, 20],
+      ]));
+
+      expect(layout.pages.slice(-2).map((page) => ({
+        owner: page.sectionOccurrenceId,
+        parityBlank: page.parityBlank,
+        border: page.pageBorder !== null,
+      }))).toEqual([
+        { owner: 'section:continued', parityBlank: true, border: blankVisible },
+        { owner: 'section:continued', parityBlank: false, border: followingVisible },
+      ]);
+      expect(layout.pages.at(-3)?.sectionOccurrenceId).toBe('section:cover');
+    },
+  );
+
   it('numbers physical pages monotonically when no section declares pgNumType', () => {
     const layout = paginate(
       owner('section:default'),

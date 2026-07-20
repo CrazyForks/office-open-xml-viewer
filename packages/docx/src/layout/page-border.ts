@@ -26,6 +26,12 @@ function shownOnPage(
   }
 }
 
+function retainedColor(color: string | undefined): string {
+  return color !== undefined && /^[0-9a-fA-F]{6}$/.test(color)
+    ? `#${color}`
+    : '#000000';
+}
+
 function retainedSegment(
   edge: PageBorderEdge,
   edgeName: NonNullable<BorderSegment['edge']>,
@@ -36,7 +42,7 @@ function retainedSegment(
     edge: edgeName,
     from: Object.freeze(from),
     to: Object.freeze(to),
-    color: edge.color ? `#${edge.color}` : '#000000',
+    color: retainedColor(edge.color),
     widthPt: edge.width,
     ...retainedBorderTreatment(edge.style, edge.width),
   });
