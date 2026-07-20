@@ -136,6 +136,11 @@ jobs:
       - name: Build WASM
         run: pnpm build:wasm
 
+      # Redistributable synthetic DOCX bytes exercise the real WASM parser and
+      # retained layout without the gitignored private-sample corpus.
+      - name: DOCX synthetic conformance (deterministic services)
+        run: pnpm vitest run packages/docx/src/conformance/layout.test.ts
+
       # Unit tests. Most cover pure-logic modules, but the packages/node canvas
       # probes dynamically import the WASM parsers (built above) and skia-canvas,
       # so they run AFTER Build WASM. OOXML_REQUIRE_SKIA=1 turns a missing binding
@@ -250,3 +255,10 @@ jobs:
       # Google Chrome the smoke job already relies on.
       - name: Worker-equivalence tests
         run: pnpm vrt:worker
+
+      # Public synthetic fixtures cover semantic retained geometry in every
+      # browser engine and compare the shipped main/worker modes exactly within
+      # each engine. Native-shaped text coordinates are intentionally not
+      # compared between engines.
+      - name: DOCX synthetic conformance (all browser engines)
+        run: pnpm --filter @silurus/ooxml-docx exec playwright test --config playwright.config.ts conformance.spec.ts
