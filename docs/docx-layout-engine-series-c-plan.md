@@ -208,7 +208,7 @@ numeric tolerances, convergence/resource limits, and public API compatibility
 are not compatibility rules. Missing evidence remains unsupported/unresolved
 and belongs to C2b diagnostics; it is never promoted to an Office claim.
 
-- [ ] **C2a-1: Isolate layout-side compatibility decisions**
+- [x] **C2a-1: Isolate layout-side compatibility decisions**
 
 Add one generic immutable factory, module-local rule records, stable unique IDs,
 and pure decision helpers. Mechanically verify that every regression reference
