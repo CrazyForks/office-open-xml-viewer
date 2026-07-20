@@ -122,6 +122,22 @@ describe('float displacement policy', () => {
     expect(result.appliedCompatibilityRuleIds).toEqual([]);
   });
 
+  it('does not report a Word compatibility rule when no blocker is eligible', () => {
+    const moving = participant('moving', 'table', 0, 2, 2);
+    const result = resolveFloatPlacement({
+      moving,
+      blockers: [participant('same-paragraph', 'frame', 0, 2, 4)],
+      avoidance: {
+        kind: 'word-different-paragraph',
+        paragraphId: moving.paragraphId,
+      },
+      rightBoundaryPt: 100,
+    });
+
+    expect(result.displacement).toEqual({ xPt: 0, yPt: 0 });
+    expect(result.appliedCompatibilityRuleIds).toEqual([]);
+  });
+
   it('preserves authored overlap when no avoidance policy applies', () => {
     const moving = participant('moving', 'drawingml', 0, 1, 2);
     const result = resolveFloatPlacement({

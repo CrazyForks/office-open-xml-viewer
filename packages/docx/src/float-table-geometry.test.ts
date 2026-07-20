@@ -673,6 +673,36 @@ describe('retained floating table placement (§17.4.57)', () => {
     });
   });
 
+  it('preserves the established sub-epsilon edge tolerance in retained placement', () => {
+    const first = Object.freeze({
+      ...retainedFloatingPlacement({
+        horzAnchor: 'page', vertAnchor: 'page', xPt: 100, yPt: 100,
+      }),
+      occurrenceId: 'epsilon-first',
+    });
+    const second = Object.freeze({
+      ...retainedFloatingPlacement({
+        horzAnchor: 'page', vertAnchor: 'page', xPt: 179.995, yPt: 100,
+      }),
+      occurrenceId: 'epsilon-second',
+    });
+    const firstResolution = resolveFloatingTablePlacementInTransaction(
+      first,
+      retainedReferenceFrames,
+      beginFloatingTablePlacementTransaction([], 0),
+    );
+    const secondResolution = resolveFloatingTablePlacementInTransaction(
+      second,
+      retainedReferenceFrames,
+      firstResolution.transaction,
+    );
+
+    expect(secondResolution.placement.bounds).toMatchObject({
+      xPt: 179.995,
+      yPt: 100,
+    });
+  });
+
   it('resolves text-relative offsets and exclusion padding entirely in point space', () => {
     const placement = retainedFloatingPlacement();
 

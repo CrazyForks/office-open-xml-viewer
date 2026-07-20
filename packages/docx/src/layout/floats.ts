@@ -44,8 +44,8 @@ export interface ResolveFloatPlacementInput {
   readonly blockers: readonly FloatPlacementParticipant[];
   readonly avoidance: FloatAvoidance;
   readonly rightBoundaryPt: number;
-  /** Legacy display-space callers may temporarily supply their existing
-   * numerical tolerance. Retained point-space callers omit both values. */
+  /** Callers explicitly supply the numerical policy established for their
+   * coordinate path; exact anchor reflow deliberately omits both values. */
   readonly overlapEpsilonPt?: number;
   readonly rightBoundarySlackPt?: number;
 }
