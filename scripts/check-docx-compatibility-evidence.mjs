@@ -170,13 +170,22 @@ function verifyFactoryAccess(root, source, file, calls) {
       const isCommonJsRequire = ts.isIdentifier(node.expression)
         && node.expression.text === 'require';
       if ((isDynamicImport || isCommonJsRequire)
-        && ts.isStringLiteral(argument)
+        && ts.isStringLiteralLike(argument)
         && compatibilityModuleTarget(root, file, argument.text)) {
         fail(
           'COMPATIBILITY_FACTORY_ACCESS',
           `${file} must not dynamically load the compatibility owner`,
         );
       }
+    }
+    if (ts.isElementAccessExpression(node)
+      && node.argumentExpression
+      && ts.isStringLiteralLike(node.argumentExpression)
+      && node.argumentExpression.text === 'defineCompatibilityRule') {
+      fail(
+        'COMPATIBILITY_FACTORY_ACCESS',
+        `${file} accesses defineCompatibilityRule through a string key`,
+      );
     }
     if (ts.isIdentifier(node) && node.text === 'defineCompatibilityRule') {
       const isOwnerDeclaration = file === COMPATIBILITY_OWNER
@@ -398,7 +407,7 @@ function observationKeys(root) {
     .filter(isProductionTypeScript)
     .flatMap((absolute) => {
       const file = posixPath(relative(root, absolute));
-      if (file.endsWith('compatibility.ts')) return [];
+      if (ALLOWED_DECLARATION_FILES.has(file)) return [];
       return readFileSync(absolute, 'utf8').split(/\r?\n/).flatMap((line) =>
         observationMarker.test(line)
           ? [`${file}::${line.trim().replace(/\s+/g, ' ')}`]

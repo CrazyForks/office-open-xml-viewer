@@ -7,7 +7,6 @@ import { firstAuthoredTableBorder } from './table-border-layer.js';
 import { unionLayoutRects } from './rect-union.js';
 import {
   wordAlignedTableOriginPt,
-  wordAuthoredBorderParticipates,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
   wordSpacedCellInsideBorderOverridesTable,
@@ -547,11 +546,6 @@ function visibleBorder(candidate: BorderCandidate | null): TableBorderInput | nu
   return border && border.authoredStyle !== 'nil' && border.authoredStyle !== 'none'
     ? border
     : null;
-}
-
-function authoredBorderParticipatesInConflict(border: TableBorderInput | null): boolean {
-  // Compatibility-owned none/nil distinction.
-  return wordAuthoredBorderParticipates(border?.authoredStyle);
 }
 
 function materializeBorders(

@@ -163,6 +163,20 @@ test('rejects dynamic and CommonJS loading of the compatibility owner', () => {
       'packages/docx/src/layout/commonjs-factory.cjs',
       "module.exports = require('./compatibility.js');\n",
     ],
+    [
+      'packages/docx/src/layout/template-factory.mts',
+      `
+        const compatibility = await import(\`./compatibility.js\`);
+        export const WORD_TEMPLATE = compatibility['defineCompatibilityRule']({
+          id: 'word-template',
+          evidence: {
+            kind: 'regression-test',
+            reference: 'packages/docx/src/layout/coordinate-space.test.ts#maps Transitional text direction %s to %s',
+          },
+          description: 'Template-loaded factory',
+        });
+      `,
+    ],
   ]) {
     const root = fixture();
     write(root, path, source);
@@ -226,6 +240,15 @@ test('rejects a new inline Office observation outside compatibility modules', ()
   const root = fixture();
   write(root, 'packages/docx/src/layout/table.ts',
     '// Word uses an undocumented magic branch here.\nexport const value = 1;\n');
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
+});
+
+test('does not exempt an unreviewed file merely because its name ends in compatibility', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/rogue-compatibility.ts',
+    '// Word uses an unevidenced branch here.\nexport const value = 1;\n');
   const result = run(root);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
