@@ -21,7 +21,7 @@ import type {
  *
  * These tests pin the physical x-origin the renderer resolves for each direction
  * by capturing every `moveTo`/`lineTo` x-coordinate (cell borders are stroked via
- * `strokeCrispSegment` → `moveTo`/`lineTo`) and reading the table's left/right
+ * retained border painter → `moveTo`/`lineTo`) and reading the table's left/right
  * extent from them. A vertical border is nudged ≤0.5 px by the crispness snap
  * (`crispOffset`), so the extent assertions allow a 0.75 px tolerance.
  */

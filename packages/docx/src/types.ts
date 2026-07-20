@@ -180,8 +180,8 @@ export interface PageNumType {
  *  section. Mirrors the Rust `PageBorders`. Each edge is a CT_Border (§17.18.4);
  *  the container carries the placement globals. Absent on {@link SectionProps}
  *  (`pageBorders` undefined) ⇒ no page border (the common case). Art borders
- *  (§17.18.2 decorative-image styles) are unsupported — the renderer draws only
- *  the standard line styles (single/double/dashed/dotted/thick/…). */
+ *  (§17.18.2 decorative-image styles) are unsupported — retained Canvas paint
+ *  draws only the standard line styles (single/double/dashed/dotted/thick/…). */
 export interface PageBorders {
   /** `@w:offsetFrom` (§17.18.63): "page" ⇒ each edge's `space` is from the PAGE
    *  edge; "text" (the default) ⇒ from the text margin. */

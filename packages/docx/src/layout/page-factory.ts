@@ -8,6 +8,7 @@ import {
   type PhysicalPageExtent,
 } from './coordinate-space.js';
 import { columnSeparatorSegments } from './column-separators.js';
+import { materializePageBorderLayout } from './page-border.js';
 import { createPageLayers, type PageLayerNode } from './page-graph.js';
 import type { BodyOccurrenceDestination } from './occurrence-projection.js';
 import type {
@@ -69,6 +70,9 @@ export interface LayoutPageFactoryInput extends LayoutPageAccumulatorInput {
   readonly paint: readonly PageLayerNode[];
   readonly readingOrder: readonly PaintNode[];
   readonly pageNumber: PageNumberMetadata;
+  /** Required whenever page borders are authored; document finalization owns
+   * this occurrence-sensitive fact. */
+  readonly firstSectionOwnedPage?: boolean;
 }
 
 export interface ParityBlankLayoutPageInput {
@@ -78,6 +82,9 @@ export interface ParityBlankLayoutPageInput {
   readonly section: DeepReadonly<SectionLayoutContext>;
   readonly pageNumber: PageNumberMetadata;
   readonly pageBorders?: DeepReadonly<import('../types.js').PageBorders> | null;
+  /** Required whenever page borders are authored; parity blanks participate
+   * in section-owned page identity. */
+  readonly firstSectionOwnedPage?: boolean;
 }
 
 export function bodyFlowDomainId(
@@ -124,6 +131,18 @@ function requireEffectivePageEdges(page: PhysicalPageInput): void {
 
 function requireIdentity(value: string, name: string): void {
   if (value.length === 0) throw new RangeError(`${name} must not be empty`);
+}
+
+function pageBorderFirstPageFlag(
+  pageBorders: DeepReadonly<import('../types.js').PageBorders> | null | undefined,
+  firstSectionOwnedPage: boolean | undefined,
+): boolean {
+  if (pageBorders && firstSectionOwnedPage === undefined) {
+    throw new RangeError(
+      'Page-border finalization requires explicit section-owned page identity',
+    );
+  }
+  return firstSectionOwnedPage ?? false;
 }
 
 function equalColumns(
@@ -424,6 +443,7 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
     input.sectionRegions,
   );
   const firstRegion = input.sectionRegions[0];
+  const pageBorders = firstRegion?.pageBorders ?? input.pageBorders;
   if (firstRegion !== undefined && (
     input.sectionOccurrenceId !== firstRegion.sectionOccurrenceId
     || !sectionLayoutContextsEqual(input.section, firstRegion.section)
@@ -445,7 +465,12 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
     pageNumber: input.pageNumber,
     sectionRegions: regions,
     columnSeparators: columnSeparatorSegments(regions),
-    pageBorders: firstRegion?.pageBorders ?? input.pageBorders ?? null,
+    pageBorder: materializePageBorderLayout(
+      pageBorders,
+      input.section,
+      input.physicalPage,
+      pageBorderFirstPageFlag(pageBorders, input.firstSectionOwnedPage),
+    ),
     layers: createPageLayers(input.paint),
     readingOrder: input.readingOrder.map((node) => node.id),
   };
@@ -492,8 +517,9 @@ export function accumulatePagePaintNode(
 export function finalizeLayoutPage(
   accumulator: LayoutPageAccumulator,
   pageNumber: PageNumberMetadata,
+  firstSectionOwnedPage?: boolean,
 ): LayoutPage {
-  return createLayoutPage({ ...accumulator, pageNumber });
+  return createLayoutPage({ ...accumulator, pageNumber, firstSectionOwnedPage });
 }
 
 export function createParityBlankLayoutPage(
@@ -512,7 +538,12 @@ export function createParityBlankLayoutPage(
     pageNumber: input.pageNumber,
     sectionRegions: [],
     columnSeparators: [],
-    pageBorders: input.pageBorders ?? null,
+    pageBorder: materializePageBorderLayout(
+      input.pageBorders,
+      input.section,
+      input.physicalPage,
+      pageBorderFirstPageFlag(input.pageBorders, input.firstSectionOwnedPage),
+    ),
     layers: createPageLayers([]),
     readingOrder: [],
   };

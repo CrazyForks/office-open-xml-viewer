@@ -67,7 +67,20 @@ describe('DocumentLayout data boundary', () => {
         pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
         columnSeparators: [],
         sectionRegions: [],
-        pageBorders: null,
+        pageBorder: {
+          zOrder: 'front',
+          logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          segments: [{
+            edge: 'top',
+            from: { xPt: 0, yPt: 4 },
+            to: { xPt: 612, yPt: 4 },
+            color: '#123456',
+            widthPt: 1,
+            authoredStyle: 'single',
+            style: 'solid',
+            dashPatternPt: [],
+          }],
+        },
         layers: buildPageLayers([
           { layer: 'front', node: drawing, coordinateSpace: 'section-logical' },
         ]),
@@ -89,7 +102,9 @@ describe('DocumentLayout data boundary', () => {
     expect(Object.isFrozen(frozen)).toBe(true);
     expect(Object.isFrozen(frozen.pages)).toBe(true);
     expect(Object.isFrozen(frozen.pages[0]?.layers.front[0]?.source.path)).toBe(true);
+    expect(Object.isFrozen(frozen.pages[0]?.pageBorder?.segments[0]?.from)).toBe(true);
     expect(Object.getPrototypeOf(clonedNode.transform)).toBe(Object.prototype);
+    expect(cloned.pages[0]?.pageBorder).toEqual(frozen.pages[0]?.pageBorder);
     expect(cloned.pages[0]?.layers.roots[0]?.node).toBe(clonedNode);
     expect(layoutFingerprint(cloned)).toBe(layoutFingerprint(frozen));
     expect(() => (frozen as unknown as { pages: unknown[] }).pages.push({})).toThrow();

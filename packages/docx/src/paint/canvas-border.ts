@@ -1,5 +1,6 @@
 import {
   crispOffset,
+  docxBorderDashArray,
   doubleRailGeometry,
 } from '@silurus/ooxml-core';
 import type { BorderSegment, TextDecorationLayout } from '../layout/types.js';
@@ -13,9 +14,22 @@ import type { CanvasPaintContext } from './types.js';
 
 /** Paint one already-resolved point-space rule; layout owns every conflict and path. */
 export function paintStrokeSegment(
-  segment: BorderSegment | TextDecorationLayout,
+  retainedSegment: BorderSegment | TextDecorationLayout,
   context: CanvasPaintContext,
+  minimumCssWidthPx = 0,
 ): void {
+  const minimumWidthPt = minimumCssWidthPx / context.scale;
+  const segment = minimumWidthPt > retainedSegment.widthPt
+    ? {
+        ...retainedSegment,
+        widthPt: minimumWidthPt,
+        ...(typeof retainedSegment.authoredStyle === 'string' ? {
+          dashPatternPt: Object.freeze(
+            docxBorderDashArray(retainedSegment.authoredStyle, minimumWidthPt),
+          ),
+        } : {}),
+      }
+    : retainedSegment;
   const { ctx } = context;
   ctx.strokeStyle = segment.color;
   ctx.lineWidth = segment.widthPt;

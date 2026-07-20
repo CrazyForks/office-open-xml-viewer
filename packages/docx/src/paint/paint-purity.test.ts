@@ -28,7 +28,7 @@ const canonicalPageMeta = (section: SectionLayoutContext) => ({
     columnFlowDirection: 'ltr' as const, columnIndexes: [0],
     flowDomainIds: ['body'],
   }],
-  pageBorders: null,
+  pageBorder: null,
 });
 
 describe('paintLayoutPage', () => {
@@ -97,6 +97,88 @@ describe('paintLayoutPage', () => {
 
     expect(events).toEqual(['background', 'behindText', 'header', 'separator', 'body']);
   });
+
+  it.each([
+    ['back', ['page-border', 'body']],
+    ['front', ['body', 'page-border']],
+  ] as const)(
+    'paints a retained %s page border at its page-wide z-order boundary',
+    (zOrder, expected) => {
+      const events: string[] = [];
+      let fillStyle = '';
+      const ctx = {
+        save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {},
+        transform() {}, translate() {}, rotate() {}, scale() {},
+        setLineDash() {},
+        stroke() { events.push('page-border'); },
+        fillRect() { events.push(fillStyle); },
+        get fillStyle() { return fillStyle; },
+        set fillStyle(value: string | CanvasGradient | CanvasPattern) { fillStyle = String(value); },
+        strokeStyle: '', lineWidth: 1,
+      } as unknown as CanvasRenderingContext2D;
+      const section: SectionLayoutContext = {
+        geometry: {
+          pageWidth: 100, pageHeight: 200,
+          marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+          headerDistance: 5, footerDistance: 5,
+        },
+        columns: [{ xPt: 10, wPt: 80 }],
+        columnSeparator: false,
+        grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
+        textDirection: 'lrTb', verticalAlignment: 'top',
+      };
+      const body = {
+        kind: 'drawing' as const,
+        id: 'body',
+        source: { story: 'body' as const, storyInstance: 'body', path: [0] },
+        flowDomainId: 'page:0:region:region%3A0:column:0',
+        ordinaryFlow: true,
+        flowBounds: { xPt: 10, yPt: 10, widthPt: 1, heightPt: 1 },
+        inkBounds: { xPt: 10, yPt: 10, widthPt: 1, heightPt: 1 },
+        advancePt: 1,
+        commands: [{
+          kind: 'fill-rect' as const,
+          rect: { xPt: 10, yPt: 10, widthPt: 1, heightPt: 1 },
+          fill: 'body',
+        }],
+      };
+      const page = createLayoutPage({
+        pageIndex: 0,
+        physicalPage: {
+          widthPt: 100, heightPt: 200, contentTopPt: 10, contentBottomPt: 190,
+        },
+        sectionOccurrenceId: 'section:0',
+        section,
+        sectionRegions: [{
+          id: 'region:0',
+          sectionOccurrenceId: 'section:0',
+          section,
+          pageBorders: {
+            offsetFrom: 'page',
+            display: 'allPages',
+            zOrder,
+            top: { style: 'single', width: 1, space: 4 },
+          },
+          writingMode: 'horizontal-tb',
+          blockStartPt: 10,
+          blockEndPt: 190,
+          columns: [{ inlineStartPt: 10, inlineExtentPt: 80 }],
+        }],
+        paint: [{ layer: 'body', node: body }],
+        readingOrder: [body],
+        pageNumber: {
+          displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0',
+        },
+        firstSectionOwnedPage: true,
+      });
+
+      paintLayoutPageContent(page, {
+        ctx, scale: 1, dpr: 1,
+      } as unknown as Parameters<typeof paintLayoutPageContent>[1]);
+
+      expect(events).toEqual(expected);
+    },
+  );
 
   it('paints section separators at the body boundary when the page has no body entry', () => {
     const events: string[] = [];

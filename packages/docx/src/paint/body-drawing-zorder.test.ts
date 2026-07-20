@@ -195,7 +195,7 @@ function page(
       columnFlowDirection: 'ltr', columnIndexes: [0],
       flowDomainIds: ['body'],
     }],
-    pageBorders: null,
+    pageBorder: null,
     layers: buildPageLayers(
       body.map((node) => ({
         layer: 'body' as const, node, coordinateSpace: 'section-logical' as const,

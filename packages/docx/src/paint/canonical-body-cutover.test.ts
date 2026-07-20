@@ -24,7 +24,7 @@ describe('retained canonical body paint', () => {
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
       columnSeparators: [],
       sectionRegions: [],
-      pageBorders: null,
+      pageBorder: null,
       layers: buildPageLayers([]),
       readingOrder: [],
     } satisfies LayoutPage;

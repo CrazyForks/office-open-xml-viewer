@@ -1,8 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, DocParagraph, DocTable, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeText, HeaderFooter,
-  HeadersFooters, BorderSpec, ParagraphBorders, ParaBorderEdge, SectionProps,
-  PageBorders, PageBorderEdge, DocNote,
+  HeadersFooters, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote,
 } from './types';
 import { docxRenderedFontFamilies } from './document-content.js';
 import {
@@ -10,7 +9,6 @@ import {
   preferVectorBlip,
   mathToMathML,
   recolorSvg,
-  crispOffset,
   PT_TO_PX,
   isHTMLCanvas,
   defaultDpr,
@@ -23,8 +21,6 @@ import {
   imageNaturalSize,
   drawImageCropped,
   metafileRasterSize,
-  docxBorderDashArray,
-  fillDoubleBorder,
   renderChart,
 } from '@silurus/ooxml-core';
 import type {
@@ -89,7 +85,6 @@ import type {
   FloatRegistryEntryPt,
   FloatRegistrySnapshotPt,
   FloatingTablePlacementLayout,
-  Matrix2DData,
   DrawingMLCollisionEntryPt,
   NoteLayout,
   ParagraphLayout,
@@ -133,7 +128,6 @@ import {
   wordRubyUniformLineHeightPx,
 } from './layout/line-compatibility.js';
 import { wordDropsTrailingStructuralCellMarker } from './layout/table-compatibility.js';
-import type { CanvasPaintResourcePainter } from './paint/types.js';
 import { createDocumentPaintResourceRegistry } from './layout/production-paint-resources.js';
 import {
   createProductionPaintResourceSession,
@@ -172,7 +166,6 @@ import {
   footnoteIdsInRetainedSlice,
   noteReferenceIdsInDocumentOrder,
 } from './layout/note-reference-ownership.js';
-import { isFirstSectionOwnedPage } from './layout/section-page-identity.js';
 import type {
   BodyAcquisitionLocation,
   BodyLayoutKernel,
@@ -617,8 +610,6 @@ export interface RenderState {
    *  compute the crisp-line offset (see crispOffset) so thin axis-aligned strokes
    *  land on a single device row instead of straddling two. */
   dpr: number;
-  /** Retained point-space to final logical CSS, including the active page frame. */
-  pointToCss?: Matrix2DData;
   contentX: number; // left of content area (px)
   contentW: number; // width of content area (px)
   y: number;        // current Y cursor (px)
@@ -651,8 +642,8 @@ export interface RenderState {
   /** ECMA-376 §17.6.11: the body's TOP/BOTTOM **inset** from the page edge in pt — the
    *  margin's MAGNITUDE (|margin|), NOT the signed pgMar value. A negative top/bottom
    *  margin (ST_SignedTwipsMeasure) measures the body |margin| from the page edge and
-   *  overlaps the header/footer; `bodyMarginInsetPt` derives this at the writers
-   *  (baseState, buildMeasureState). Read as the canonical column-region top
+   *  overlaps the header/footer; `bodyMarginInsetPt` derives this at the
+   *  measurement-state writers. Read as the canonical column-region top
    *  and as the text-margin container for `relativeFrom=
    *  "topMargin"/"bottomMargin"/"margin"` anchors/frames (anchor-geometry, frame-geometry;
    *  §17.18.100 — the text-margin location IS the body edge). Do NOT treat as the signed
@@ -688,8 +679,6 @@ export interface RenderState {
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
   /** Instance-scoped resource snapshot shared by pagination and paint. */
   layoutServices?: LayoutServices;
-  /** Per-render opaque retained resource session adapter. */
-  retainedResourcePainter?: CanvasPaintResourcePainter;
   /** Renderer authorities injected into the pure recursive table acquisition. */
   retainedTableAcquisition?: RetainedTableAcquisitionDependencies<RenderState>;
   /** Session-local bridge from shape geometry to the shared paragraph/table
@@ -1567,18 +1556,7 @@ async function renderDocumentToCanvasLeased(
   // its drawing state, and the ctx.scale/fill below run AFTER canvas.width/height.
   // Header/footer measurement and retained body acquisition share this context.
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-  // ECMA-376 §17.6.20 — for a vertical (tbRl) section the page is laid out in a
-  // SWAPPED logical space (logical width = physical page height) and rotated +90°
-  // into physical space at paint. `layoutDoc` carries the swapped BODY-level
-  // geometry through pagination + per-page section resolution; horizontal docs
-  // get `doc` unchanged (referential identity ⇒ byte-identical). Text direction
-  // is PER-SECTION (issue #1000), so the `vertical` flag is resolved per PAGE
-  // below, after the stamped page frame is merged.
-  const resolvedLocalFonts = layoutServices.text.localMetrics;
   const defaultCurrentDateMs = opts.defaultCurrentDateMs ?? Date.now();
-  const layoutDoc = verticalLayoutDoc(doc);
-  const layoutSettings = resolveDocumentLayoutSettings(layoutDoc);
-  const kinsoku = layoutSettings.kinsoku;
   if (!layoutVariantStoreOf(layoutServices)) {
     attachDocumentLayoutVariants({
       model: doc,
@@ -1591,54 +1569,13 @@ async function renderDocumentToCanvasLeased(
     currentDate: opts.currentDate,
     defaultCurrentDateMs,
   }, pageIndex);
-  const layoutOptions = retainedSelection.options;
   const retainedBodyLayout = retainedSelection.layout;
   const retainedBodyPage = retainedSelection.page;
-  const totalPages = retainedBodyLayout.pages.length;
-  // ECMA-376 §17.6.12 — canonical page construction owns the displayed number
-  // and format; paint only consumes the selected immutable page metadata.
-  const thisPageNumber = {
-    displayNumber: retainedBodyPage.pageNumber.displayNumber,
-    format: retainedBodyPage.pageNumber.format as NumberFormat,
-  };
-
-  // ECMA-376 §17.6.13 / §17.6.11 — page geometry is PER-SECTION. Size THIS page from
-  // the section active at its top (resolvePageSection.geom, stamped by the paginator),
-  // NOT from the single body-level `doc.section`. `sec` merges the resolved geometry
-  // (size + margins + header/footer distances) over the body-level section so the
-  // docGrid / columns / sectionStart / even-odd fields keep their body-level values —
-  // those already flow per-section through canonical region/docGrid state
-  // rails, so only the page-box geometry needs the per-page swap here. For a
-  // single-section document `geom` equals `doc.section`, so `sec === doc.section` in
-  // value — byte-identical output.
-  // `sec` is the LOGICAL section the body/header/footer are laid out in: for a
-  // vertical page that is the swapped geometry (the paginator stamps a vertical
-  // section's SWAPPED logical geom), for horizontal it equals the physical
-  // section. All RenderState geometry below (contentX/W, margins, pageWidth,
-  // docGrid) reads `sec`, so the entire layout is expressed in logical
-  // coordinates and the canonical region transform maps it to physical space.
-  //
-  // Issue #1000 — `textDirection` is retained per page in lockstep with page
-  // geometry, and `vertical` — which keys the
-  // physical canvas box, the +90° body transform, `verticalCJK`, `verticalPhys`
-  // and the horizontal header/footer branch below — is derived from the MERGED
-  // section, so a vertical non-final section and a horizontal final section
-  // each paint in their own orientation.
-  const pageTd = retainedBodyPage.section.textDirection;
-  const sec: SectionProps = {
-    ...layoutDoc.section,
-    ...retainedBodyPage.section.geometry,
-    textDirection: pageTd,
-  };
-  const vertical = isVerticalSection(sec);
-  const sectionLayout = resolveSectionLayoutContext(layoutSettings, sec);
 
   // The CANVAS is sized to the PHYSICAL page (visible landscape page for tbRl):
-  // physical width = logical height, physical height = logical width. `scale`
-  // (px per pt) is isotropic, so the logical layout — whose logical width in px
-  // is `sec.pageWidth * scale = physicalHeight * scale = cssHeight` — maps 1:1
-  // onto the rotated physical box. For horizontal pages physW/H equal sec's and
-  // this is the pre-vertical computation unchanged.
+  // physical width and height are already retained by canonical page layout.
+  // `scale` (px per pt) is isotropic, and the retained paint layer owns each
+  // section's logical-to-physical transform.
   const physPageWidth = retainedBodyPage.geometry.widthPt;
   const physPageHeight = retainedBodyPage.geometry.heightPt;
   const cssWidth = opts.width ?? physPageWidth * PT_TO_PX;
@@ -1724,134 +1661,6 @@ async function renderDocumentToCanvasLeased(
     canonicalCanvasPaintResourceHandlers,
   );
 
-  // ECMA-376 §17.11: map each note id to its 1-based display number so the
-  // reference markers (and the in-note footnoteRef placeholder) show the
-  // sequential number, not the raw @w:id.
-  const footnoteNums = buildNoteNumberMap(
-    doc.footnotes,
-    noteReferenceIdsInDocumentOrder(doc.body, 'footnote'),
-  );
-  const endnoteNums = buildNoteNumberMap(
-    doc.endnotes,
-    noteReferenceIdsInDocumentOrder(doc.body, 'endnote'),
-  );
-  const noteNumbers = new Map<string, number>();
-  for (const [id, n] of footnoteNums) noteNumbers.set(`footnote:${id}`, n);
-  for (const [id, n] of endnoteNums) noteNumbers.set(`endnote:${id}`, n);
-
-  // ECMA-376 §17.6.11: the body is inset from each page edge by the margin's MAGNITUDE
-  // (a negative margin places the body |margin| inside the edge, overlapping the
-  // header/footer — see bodyMarginInsetPt). Identity for the non-negative common case.
-  // The header/footer reserves below still use the SIGNED margin (header/footerOverflowPt
-  // return 0 for a negative one), so a negative margin reserves nothing yet insets |margin|.
-  const bodyTopPt = bodyMarginInsetPt(sec.marginTop);
-  const bodyBottomPt = bodyMarginInsetPt(sec.marginBottom);
-  const baseState: RenderState = {
-    ctx,
-    scale,
-    // The backing store may have been clamped below `cssSize × dpr`; crisp-offset
-    // math must use the SAME effective dpr the ctx was scaled by (see above).
-    dpr: effectiveDpr,
-    pointToCss: vertical
-      ? { a: 0, b: scale, c: -scale, d: 0, e: cssWidth, f: 0 }
-      : { a: scale, b: 0, c: 0, d: scale, e: 0, f: 0 },
-    contentX: sec.marginLeft * scale,
-    contentW: (sec.pageWidth - sec.marginLeft - sec.marginRight) * scale,
-    y: bodyTopPt * scale,
-    // `pageH` is the LOGICAL page height in px (`sec.pageHeight * scale`). For a
-    // horizontal page that equals `cssHeight`; for a vertical page the logical
-    // height is the physical WIDTH, so it equals `cssWidth`. Using the logical
-    // height keeps the body-flow / footnote / bottom-margin math in the same
-    // (logical) coordinate space the page transform maps to physical.
-    pageH: sec.pageHeight * scale,
-    defaultColor: opts.defaultTextColor ?? '#000000',
-    pageIndex,
-    totalPages,
-    // ECMA-376 §17.6.12 — the current page's displayed number + format (per-section
-    // restart / fmt), consumed by a PAGE field in the body, header, or footer.
-    displayPageNumber: thisPageNumber.displayNumber,
-    pageNumberFormat: thisPageNumber.format,
-    images,
-    dryRun: false,
-    marginLeft: sec.marginLeft,
-    marginRight: sec.marginRight,
-    // §17.6.11: store the body inset (|margin|), the value the paint pass re-adds as a
-    // canonical column-region top (state.marginTop); never the raw sign.
-    marginTop: bodyTopPt,
-    marginBottom: bodyBottomPt,
-    pageWidth: sec.pageWidth,
-    floats: [],
-    floatParaSeq: 0,
-    docGrid: toLegacyDocGridContext(sectionLayout),
-    layoutSettings,
-    sectionLayout,
-    storyContext: BODY_STORY_CONTEXT,
-    docEastAsian: layoutSettings.documentHasEastAsianText,
-    fontFamilyClasses: fontClassesWithPitches(doc.fontFamilyClasses, doc.fontFamilyPitches),
-    resolvedLocalFonts,
-    layoutServices,
-    retainedResourcePainter,
-    kinsoku,
-    // §17.15.1.25 — automatic tab interval, resolved once and threaded like
-    // `kinsoku` so the measure and draw passes agree.
-    defaultTabPt: layoutSettings.defaultTabPt,
-    characterSpacingControl: layoutSettings.characterSpacingControl,
-    useFeLayout: layoutSettings.compat.useFeLayout,
-    balanceSingleByteDoubleByteWidth:
-      layoutSettings.compat.balanceSingleByteDoubleByteWidth,
-    mathDefJc: layoutSettings.mathDefJc,
-    showTrackChanges: opts.showTrackChanges ?? true,
-    // §17.16.4.1 — the instant DATE/TIME fields format against (default real time).
-    currentDateMs: layoutOptions.currentDateMs,
-    noteNumbers,
-    // ECMA-376 §17.6.20 — the frame-level vertical flag. On a tbRl-family page
-    // the glyph-draw path counter-rotates upright (CJK) glyphs so they stand up
-    // inside the +90°-rotated body region (see the canonical region matrix and
-    // `drawVerticalRun`); `verticalAllRotated` below suppresses that for btLr.
-    verticalCJK: vertical,
-    // §17.6.20 btLr (#988 re-adjudication): every glyph rides the +90° page
-    // rotation — the glyph-draw sites take the HORIZONTAL branches instead of
-    // the upright-CJK vertical ones (see RenderState.verticalAllRotated).
-    verticalAllRotated: vertical && isAllRotatedVerticalTextDirection(pageTd),
-    // ECMA-376 §20.4.3.x — physical page geometry for resolving DrawingML anchors
-    // against the un-rotated physical page (see `verticalPhys` docs and
-    // `resolveAnchorBox`). `sec` here is the LOGICAL (swapped) section, so un-swap
-    // it back to physical: physical left/top/right/bottom margin = logical
-    // bottom/left/top/right (the inverse of `verticalLayoutSection`). Top/bottom
-    // are stored as body insets (`bodyMarginInsetPt`) to match the horizontal
-    // path's `marginTop`/`marginBottom` (§17.6.11 text-margin = body edge).
-    verticalPhys: vertical
-      ? {
-          pageWidth: physPageWidth,
-          pageHeight: physPageHeight,
-          marginLeft: sec.marginBottom,
-          marginRight: sec.marginTop,
-          marginTop: bodyMarginInsetPt(sec.marginLeft),
-          marginBottom: bodyMarginInsetPt(sec.marginRight),
-          cssWidthPx: cssWidth,
-        }
-      : undefined,
-  };
-  const firstPageOfSection = isFirstSectionOwnedPage(retainedBodyLayout.pages, pageIndex);
-
-  // ECMA-376 §17.6.10 — page borders with zOrder="back" are painted UNDER the body
-  // flow (behind intersecting text/objects). Drawn here, before the body.
-  const pageBorders = retainedBodyPage.pageBorders;
-  if (pageBorders != null) {
-    const activePageBorders = pageBorders as PageBorders;
-    if (activePageBorders.zOrder === 'back' && pageBorderShownOnPage(activePageBorders, firstPageOfSection)) {
-      ctx.save();
-      try {
-        if (vertical) {
-          ctx.translate(cssWidth, 0);
-          ctx.rotate(Math.PI / 2);
-        }
-        drawPageBorders(ctx, activePageBorders, sec, scale);
-      } finally {
-        ctx.restore();
-      }
-    }
-  }
   ctx.save();
   try {
     const pointScale = effectiveDpr * scale;
@@ -1865,30 +1674,13 @@ async function renderDocumentToCanvasLeased(
       scale,
       dpr: effectiveDpr,
       resources: retainedResourcePainter,
-      defaultTextColor: baseState.defaultColor,
-      showTrackChanges: baseState.showTrackChanges,
+      defaultTextColor: opts.defaultTextColor ?? '#000000',
+      showTrackChanges: opts.showTrackChanges ?? true,
     });
   } finally {
     ctx.restore();
   }
 
-  // ECMA-376 §17.6.10 — page borders with zOrder="front" (the default) are painted
-  // OVER intersecting text/objects, so draw them LAST (after the whole page flow).
-  if (pageBorders != null) {
-    const activePageBorders = pageBorders as PageBorders;
-    if (activePageBorders.zOrder !== 'back' && pageBorderShownOnPage(activePageBorders, firstPageOfSection)) {
-      ctx.save();
-      try {
-        if (vertical) {
-          ctx.translate(cssWidth, 0);
-          ctx.rotate(Math.PI / 2);
-        }
-        drawPageBorders(ctx, activePageBorders, sec, scale);
-      } finally {
-        ctx.restore();
-      }
-    }
-  }
   if (opts.onTextRun) {
     for (const run of textRunsForPage(retainedBodyLayout, pageIndex, { scale })) {
       opts.onTextRun(run);
@@ -1947,53 +1739,6 @@ function docDefaultFontSizePt(doc: DocxDocumentModel): number {
     }
   }
   return 10;
-}
-
-/** ECMA-376 §17.6.10 `@w:display` (§17.18.62) — page borders are evaluated only
- * on pages owned by the section, including its first such physical page. */
-function pageBorderShownOnPage(pb: PageBorders, firstSectionPage: boolean): boolean {
-  switch (pb.display) {
-    case 'firstPage':
-      return firstSectionPage;
-    case 'notFirstPage':
-      return !firstSectionPage;
-    default: // "allPages" and any unknown value
-      return true;
-  }
-}
-
-/** ECMA-376 §17.6.10 — draw a section's page borders as a rectangle inset from the
- *  page edge (`offsetFrom="page"`) or the text margin (`offsetFrom="text"`, the
- *  default). Each edge's `space` (pt) is the inset from the reference; `sz`→width
- *  and `val`→style reuse the shared border-line drawing (single/double/dashed/…).
- *  Art borders (§17.18.2 decorative-image styles) are unsupported — such a `val`
- *  yields no drawable dash/line and is skipped. */
-function drawPageBorders(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  pb: PageBorders,
-  sec: SectionProps,
-  scale: number,
-): void {
-  // Reference edges (pt): the page box, or the text-margin box.
-  const fromText = pb.offsetFrom === 'text';
-  const refLeftPt = fromText ? sec.marginLeft : 0;
-  const refRightPt = fromText ? sec.pageWidth - sec.marginRight : sec.pageWidth;
-  const refTopPt = fromText ? bodyMarginInsetPt(sec.marginTop) : 0;
-  const refBottomPt = fromText ? sec.pageHeight - bodyMarginInsetPt(sec.marginBottom) : sec.pageHeight;
-
-  // Each edge is inset from its reference by that edge's `space` (pt), TOWARD the
-  // page interior: the top border moves DOWN, bottom UP, left RIGHT, right LEFT.
-  const asSpec = (e: PageBorderEdge): BorderSpec => ({ width: e.width, color: e.color ?? null, style: e.style });
-  const topY = (refTopPt + (pb.top?.space ?? 0)) * scale;
-  const bottomY = (refBottomPt - (pb.bottom?.space ?? 0)) * scale;
-  const leftX = (refLeftPt + (pb.left?.space ?? 0)) * scale;
-  const rightX = (refRightPt - (pb.right?.space ?? 0)) * scale;
-
-  // The four sides span between the two perpendicular inset lines so corners meet.
-  if (pb.top) drawBorderLine(ctx, leftX, topY, rightX, topY, asSpec(pb.top), scale, 1);
-  if (pb.bottom) drawBorderLine(ctx, leftX, bottomY, rightX, bottomY, asSpec(pb.bottom), scale, 1);
-  if (pb.left) drawBorderLine(ctx, leftX, topY, leftX, bottomY, asSpec(pb.left), scale, 1);
-  if (pb.right) drawBorderLine(ctx, rightX, topY, rightX, bottomY, asSpec(pb.right), scale, 1);
 }
 
 export function layoutDocument(
@@ -5474,78 +5219,6 @@ function trimTrailingStructuralMarker(content: CellElement[]): CellElement[] {
   })
     ? content.slice(0, -1)
     : content;
-}
-
-/** Stroke one crisp axis-aligned segment. `perp` shifts the whole line
- *  perpendicular to its direction (px, pre-crisp-snap) — used to place the two
- *  rails of a `double` border on either side of the nominal edge. */
-function strokeCrispSegment(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  x1: number, y1: number, x2: number, y2: number,
-  lw: number,
-  dpr: number,
-  perp: number,
-): void {
-  ctx.lineWidth = lw;
-  // Crispness nudge (see crispOffset): a thin (odd device-width) axis-aligned
-  // stroke straddles two device rows and blurs; nudging it perpendicular to the
-  // line snaps it onto the nearest crisp device position. Cell / paragraph
-  // borders are always horizontal (y1===y2) or vertical (x1===x2) — never
-  // diagonal — so the orientation is read directly from the endpoints, and the
-  // snap delta is derived from the line's own coordinate (fractional-safe).
-  const horizontal = y1 === y2;
-  const vertical = x1 === x2;
-  // `perp` runs along x for a horizontal line, along y for a vertical line.
-  const ox = (horizontal ? 0 : perp);
-  const oy = (horizontal ? perp : 0);
-  const dpx = vertical ? crispOffset(x1 + ox, lw, dpr) : 0;
-  const dpy = horizontal ? crispOffset(y1 + oy, lw, dpr) : 0;
-  ctx.beginPath();
-  ctx.moveTo(x1 + ox + dpx, y1 + oy + dpy);
-  ctx.lineTo(x2 + ox + dpx, y2 + oy + dpy);
-  ctx.stroke();
-}
-
-/**
- * ECMA-376 §17.18.2 ST_Border dash/dot families → a `setLineDash` pattern,
- * expressed in units of the stroked width `lw` (px). Thin wrapper over core's
- * shared `docxBorderDashArray` (which owns the §17.18.2 relative table); the ctx
- * is already `scale(dpr,dpr)`d, so `lw`-relative lengths render crisply at any
- * dpr (matching the single/double paths). Returns `[]` for solid styles.
- * Re-exported here so the existing `border-dash.test.ts` contract is preserved.
- */
-export function borderDashPattern(style: string, lw: number): number[] {
-  return docxBorderDashArray(style, lw);
-}
-
-function drawBorderLine(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  x1: number, y1: number, x2: number, y2: number,
-  spec: BorderSpec,
-  scale: number,
-  dpr = 1,
-): void {
-  ctx.save();
-  ctx.strokeStyle = spec.color ? `#${spec.color}` : '#000000';
-  const lw = Math.max(0.5, spec.width * scale);
-
-  if (spec.style === 'double') {
-    // ECMA-376 §17.18.2 ST_Border "double": two parallel lines with a gap,
-    // painted as device-pixel-aligned rail/gap/rail fills so a thin double
-    // (e.g. sz6 ≈ 0.75px) never collapses into one line. Shared with the other
-    // renderers via core's `fillDoubleBorder` (see core/draw/double-border.ts).
-    ctx.fillStyle = ctx.strokeStyle;
-    fillDoubleBorder(ctx, x1, y1, x2, y2, lw, dpr);
-    ctx.restore();
-    return;
-  }
-
-  // Dashed/dotted ST_Border families (§17.18.2). setLineDash is reset by the
-  // ctx.restore() below. Solid styles get an empty pattern → continuous line.
-  const dash = borderDashPattern(spec.style, lw);
-  if (dash.length) ctx.setLineDash(dash);
-  strokeCrispSegment(ctx, x1, y1, x2, y2, lw, dpr, 0);
-  ctx.restore();
 }
 
 /**

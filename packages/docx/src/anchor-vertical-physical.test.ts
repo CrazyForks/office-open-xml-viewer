@@ -14,7 +14,7 @@ import type { ImageRun } from './types.js';
 
 // A vertical RenderState carries the LOGICAL (swapped) geometry PLUS `verticalPhys`
 // (the physical page geometry the anchor path resolves against). Mirror what the
-// baseState writer builds for a vertical section. resolveAnchorBox reads only
+// measurement-state writer builds for a vertical section. resolveAnchorBox reads only
 // geometry fields, so a minimal cast stand-in suffices (as in
 // anchor-image-relativefrom).
 const PHYS_W = 842;
