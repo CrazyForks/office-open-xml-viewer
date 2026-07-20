@@ -903,10 +903,15 @@ test('late mutation of retained body sidecars is rejected before paint dispatch'
 test('only the float placement authority may import the displacement kernel', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-float-authority-');
   write(root, 'packages/docx/src/layout/axis-aligned-overlap.ts',
-    'export function resolveAxisAlignedOverlap(value) { return value; }\n');
+    'export interface AxisAlignedRect { left; right; top; bottom }\n'
+      + 'export function axisAlignedRectsOverlap() { return false; }\n'
+      + 'export function resolveAxisAlignedOverlap(value) { return value; }\n');
   write(root, 'packages/docx/src/layout/floats.ts',
-    "import { resolveAxisAlignedOverlap } from './axis-aligned-overlap.js';\n"
-      + 'export const place = resolveAxisAlignedOverlap;\n');
+    "import { axisAlignedRectsOverlap, resolveAxisAlignedOverlap, type AxisAlignedRect } from './axis-aligned-overlap.js';\n"
+      + 'export function place(value: AxisAlignedRect) {\n'
+      + '  axisAlignedRectsOverlap();\n'
+      + '  return resolveAxisAlignedOverlap(value);\n'
+      + '}\n');
   assert.equal(runChecker(root, '--final').status, 0);
 
   write(root, 'packages/docx/src/layout/paragraph.ts',
@@ -916,6 +921,61 @@ test('only the float placement authority may import the displacement kernel', ()
     root,
     'FLOAT_PLACEMENT_AUTHORITY',
     'an aliased direct kernel import must not bypass layout/floats.ts',
+    '--final',
+  );
+});
+
+test('float placement authority rejects every module-edge and property-access bypass', () => {
+  const bypasses = new Map([
+    ['namespace',
+      "import * as overlap from './axis-aligned-overlap.js';\nexport const place = overlap.resolveAxisAlignedOverlap;\n"],
+    ['default',
+      "import overlap from './axis-aligned-overlap.js';\nexport const place = overlap;\n"],
+    ['export-star',
+      "export * from './axis-aligned-overlap.js';\n"],
+    ['named-re-export',
+      "export { resolveAxisAlignedOverlap as place } from './axis-aligned-overlap.js';\n"],
+    ['dynamic-import',
+      "export const place = () => import('./axis-aligned-overlap.js');\n"],
+    ['commonjs-require',
+      "export const place = () => require('./axis-aligned-overlap.js');\n"],
+    ['string-key',
+      "const overlap = { resolveAxisAlignedOverlap() {} };\n"
+        + "export const place = overlap['resolveAxisAlignedOverlap'];\n"],
+  ]);
+  for (const [name, source] of bypasses) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-float-${name}-`);
+    write(root, 'packages/docx/src/layout/axis-aligned-overlap.ts',
+      'export default function overlap(value) { return value; }\n'
+        + 'export function resolveAxisAlignedOverlap(value) { return value; }\n');
+    write(root, 'packages/docx/src/layout/paragraph.ts', source);
+    expectDiagnostic(root, 'FLOAT_PLACEMENT_AUTHORITY', name, '--final');
+  }
+});
+
+test('float compatibility and numeric policies have exact declaration owners', () => {
+  const compatibilityRoot = initializeCanonicalFixture(
+    'docx-layout-boundary-float-compatibility-owner-',
+  );
+  write(compatibilityRoot, 'packages/docx/src/layout/paragraph.ts',
+    "export const WORD_FLOAT_UNTRACKED_HEURISTIC = 'hidden';\n");
+  expectDiagnostic(
+    compatibilityRoot,
+    'FLOAT_COMPATIBILITY_AUTHORITY',
+    'float compatibility declaration outside compatibility.ts',
+    '--final',
+  );
+
+  const numericRoot = initializeCanonicalFixture(
+    'docx-layout-boundary-float-numeric-owner-',
+  );
+  write(numericRoot, 'packages/docx/src/layout/floats.ts',
+    'export const FLOAT_OVERLAP_EPS = 0.02;\n'
+      + 'export const FLOAT_PAGE_RIGHT_SLACK = 0.5;\n');
+  expectDiagnostic(
+    numericRoot,
+    'FLOAT_NUMERIC_POLICY',
+    'float numerical policy value change',
     '--final',
   );
 });

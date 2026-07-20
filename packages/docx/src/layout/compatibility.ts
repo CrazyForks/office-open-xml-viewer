@@ -47,6 +47,15 @@ export const WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT = defineCompatibilityRu
   description: 'Preserve the established Word-compatible policy that an overlap-permitted float is displaced by exclusion geometry from floats anchored in other paragraphs, while same-paragraph floats may overlap.',
 });
 
+export const WORD_PAGE_ANCHORED_TABLE_COLLISION_DEFERRAL = defineCompatibilityRule({
+  id: 'word-page-anchored-table-collision-deferral',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/float-table-page-fit.test.ts#(g) DEFERS a page-anchored floating table when its raw band intersects an existing table float',
+  },
+  description: 'Preserve the established Word-compatible pagination behavior that defers an absolute page- or margin-anchored floating table when its authored object band intersects an existing floating-table text-exclusion band on the page.',
+});
+
 /** Word compatibility width from issue #676, in points. ECMA-376
  * §20.4.2.17 defines square wrapping but no minimum side-gap width. */
 export const WORD_MIN_LINE_START_PT = 72;

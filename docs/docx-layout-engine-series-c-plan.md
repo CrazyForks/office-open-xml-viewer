@@ -34,6 +34,7 @@
 - Modify: `packages/docx/src/layout/compatibility.test.ts`
 - Modify: `packages/docx/src/layout/convergence.ts`
 - Modify: `packages/docx/src/layout/line-wrap-convergence.ts`
+- Modify: `packages/docx/src/layout/body-paginator.ts`
 - Modify: `packages/docx/src/layout/paragraph.ts`
 - Modify: `packages/docx/src/layout/floating-table-transaction.ts`
 - Modify: `packages/docx/src/layout/table-pagination.ts`
@@ -43,6 +44,8 @@
 - Modify: `packages/docx/src/float-line-start-one-inch.test.ts`
 - Modify: `packages/docx/src/float-table-geometry.test.ts`
 - Modify: `scripts/docx-layout-boundary-baseline.json`
+- Modify: `scripts/check-docx-layout-boundaries.mjs`
+- Modify: `scripts/check-docx-layout-boundaries.test.mjs`
 
 **Interfaces:**
 
@@ -70,9 +73,15 @@ generic geometry contains no observation-derived constant.
 ```ts
 export type FloatAvoidance =
   | { readonly kind: 'drawingml-normative' }
-  | { readonly kind: 'floating-table-never' }
   | { readonly kind: 'word-different-paragraph'; readonly paragraphId: number }
   | { readonly kind: 'none' };
+export type FloatPlacementParticipant =
+  | (FloatParticipantCore & {
+      readonly kind: 'table';
+      readonly tableOverlap: 'never' | 'overlap';
+    })
+  | (FloatParticipantCore & { readonly kind: 'drawingml' })
+  | (FloatParticipantCore & { readonly kind: 'frame' });
 export interface FloatPlacement {
   readonly bounds: LayoutRect;
   readonly exclusionBounds: LayoutRect;
@@ -82,7 +91,7 @@ export interface FloatPlacement {
 export function resolveFloatPlacement(input: ResolveFloatPlacementInput): FloatPlacement;
 ```
 
-- [ ] **C1a Step 1: Add failing policy and real-convergence tests**
+- [x] **C1a Step 1: Add failing policy and real-convergence tests**
 
 Do not duplicate the existing `anchor-frame.test.ts` axis/wrap matrix. Cover
 DrawingML-only normative blockers, table-only §17.4.56 blockers using raw table
@@ -92,7 +101,7 @@ padding. Add exact-state tests for adjacent fixed points, non-adjacent cycles,
 and all-distinct resource-budget exhaustion. Pin the actual paragraph-anchor,
 line-wrap, and floating-table final-frame fixed points.
 
-- [ ] **C1a Step 2: Run tests to verify Red**
+- [x] **C1a Step 2: Run tests to verify Red**
 
 Run:
 
@@ -104,7 +113,7 @@ Expected: displacement policy is duplicated, `repeated-state.ts` is a second
 unbounded convergence mechanism, all-distinct line/anchor states can run
 without a typed limit failure, and table collision includes text-only padding.
 
-- [ ] **C1a Step 3: Implement policy extraction and bounded exact convergence**
+- [x] **C1a Step 3: Implement policy extraction and bounded exact convergence**
 
 Keep axis/wrap resolution in `anchor-frame.ts`. Select normative versus
 compatibility blocker geometry in `floats.ts`, delegate only direction/math to
@@ -119,7 +128,7 @@ different-paragraph displacement are compatibility rules. Normative
 `allowOverlap=false`, `tblOverlap=never`, and `layoutInCell` remain typed
 constraints rather than compatibility records.
 
-- [ ] **C1a Step 4: Verify Green and deterministic failure**
+- [x] **C1a Step 4: Verify Green and deterministic failure**
 
 Run the command from Step 2 plus:
 
@@ -132,25 +141,37 @@ Expected: tests pass; identical input produces identical placement and layout
 fingerprints; a cycle and an all-distinct orbit both fail with
 `NON_CONVERGENCE`; no last candidate is returned.
 
-- [ ] **C1a Step 5: Commit, independently review, fix, and merge**
+- [x] **C1a Step 5: Commit, independently review, fix, and merge**
 
 Commit subject: `refactor(docx): centralize float placement policy`.
 Use the roadmap review gate.
 
-- [ ] **C1b Step 1: Consolidate remaining registry callers and pairwise facts**
+- [x] **C1b Step 1: Consolidate remaining registry callers and pairwise facts**
 
 Add the blocker-side `tblOverlap=never` fact required by §17.4.56's pairwise
-"either table" rule. Route renderer/table/frame adapters through the same typed
-policy, extract block-cursor retry math, and migrate remaining float-related
-page-anchor/selection fixed points to the shared convergence primitive.
+"either table" rule as a required discriminated-union field. Route
+renderer/table/frame adapters through the same typed policy and retain the
+established display/point numerical policies explicitly.
 
-- [ ] **C1b Step 2: Delete duplicated policy and ratchet boundaries**
+Extract ordinary-table retry as block-flow admission against §17.4.57 exclusion
+geometry. It is a finite monotone sweep, not float-to-float placement and not a
+non-monotone convergence problem. Migrate the two concrete remaining fixed
+points — page-owned-anchor destination planning and floating-table parent/child
+final-frame reflow — to the shared exact-state convergence primitive. The old
+"selected-page ownership" wording was stale; selected-page ownership is now
+pure and loop-free.
+
+- [x] **C1b Step 2: Delete duplicated policy and ratchet boundaries**
 
 Delete the scalar overlap adapter and inline blocker filters. Keep the mutable
 registry only as a transport bridge tracked for C3; it must no longer choose
-blocker classes, geometry, direction, tolerance, or retries. Add static/mutation
-checks that observation-derived constants are imported only from
-`compatibility.ts` and displacement math is callable only through `floats.ts`.
+blocker classes, geometry, direction, tolerance, or retries. Isolate the
+existing absolute floating-table page-deferral observation behind a named
+compatibility record. Add static/mutation checks that float-specific
+observation-derived rules are declared in `compatibility.ts`, generic numerical
+policies retain their exact audited owners/values, and the displacement kernel
+cannot be reached through named/namespace/default imports, re-exports, dynamic
+imports, CommonJS, or string-key laundering.
 
 - [ ] **C1b Step 3: Review, broad-verify, and merge**
 

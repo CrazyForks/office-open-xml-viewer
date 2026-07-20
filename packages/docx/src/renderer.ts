@@ -163,6 +163,16 @@ import {
   resolveFloatingTablePlacementInTransaction,
   validateFloatingTableRegistryDelta,
 } from './layout/floating-table-transaction.js';
+import {
+  floatRegistryParticipant,
+  resolveBlockFlowAdmission,
+  resolvePageAnchoredTableDeferral,
+} from './layout/floats.js';
+import {
+  ExactConvergenceError,
+  convergeExactState,
+} from './layout/convergence.js';
+import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { LayoutOptions } from './layout/options.js';
 import {
   paginatedFlowHasPaginationDependentFields,
@@ -2408,7 +2418,7 @@ function buildMeasureState(
           drawn: true,
           paraId: state.floatParaSeq++,
           avoidOverlap: true,
-          allowOverlap: request.overlap !== 'never',
+          tableOverlap: request.overlap,
         });
         return Object.freeze({
           xPt: registered.imageX / scale - textFrame.xPt,
@@ -2802,7 +2812,7 @@ function createConcreteBodyLayoutKernel(
           contentW: request.acquired.flowBounds.widthPt * scale,
           y: request.acquired.flowBounds.yPt,
           floats: (request.floatingTableExclusions ?? []).map((bounds, index): FloatRect => ({
-            kind: 'table', mode: 'square',
+            kind: 'table', tableOverlap: 'never', mode: 'square',
             imageKey: `${TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX}${index}`,
             imageX: bounds.xPt * scale, imageY: bounds.yPt * scale,
             imageW: bounds.widthPt * scale, imageH: bounds.heightPt * scale,
@@ -3409,13 +3419,16 @@ function createConcreteBodyLayoutKernel(
             );
             const pageAnchoredCollision = request.cursor?.kind !== 'table'
               && (positioning.vertAnchor === 'page' || positioning.vertAnchor === 'margin')
-              && floatRegistry.entries.some((entry) => entry.kind === 'table'
-                && raw.x + raw.w - entry.exclusionBounds.xPt > FLOAT_OVERLAP_EPS
-                && entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt - raw.x
-                  > FLOAT_OVERLAP_EPS
-                && raw.y + raw.h - entry.exclusionBounds.yPt > FLOAT_OVERLAP_EPS
-                && entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt - raw.y
-                  > FLOAT_OVERLAP_EPS);
+              && resolvePageAnchoredTableDeferral({
+                bounds: {
+                  xPt: raw.x,
+                  yPt: raw.y,
+                  widthPt: raw.w,
+                  heightPt: raw.h,
+                },
+                blockers: floatRegistry.entries.map(floatRegistryParticipant),
+                overlapEpsilonPt: FLOAT_OVERLAP_EPS,
+              }).defer;
             if (pageAnchoredCollision) {
               // Word defers an absolute page/margin table whose authored band is
               // already owned by a table on this page; the fresh page preserves
@@ -3450,110 +3463,176 @@ function createConcreteBodyLayoutKernel(
               : positioning.vertAnchor === 'margin'
                 ? frames.margin.heightPt
                 : request.freshPageBlockExtentPt;
-            let parentFrame = Object.freeze({ xPt: raw.x, yPt: raw.y });
-            let result: ReturnType<typeof takeTableFragment>;
-            let resolved: ReturnType<typeof resolveFloatingTablePlacementInTransaction>;
-            let nestedEntries: readonly FloatRegistryEntryPt[];
-            const visitedTransactions = new Set<string>();
-            while (true) {
-              const availableHeightPt = Math.max(0, admissionBlockEndPt - parentFrame.yPt);
-              result = takeTableFragment(retained, cursor, {
-                availableHeightPt,
-                freshPageHeightPt: freshAdmissionHeightPt,
-                placement: {
-                  container: {
-                    id: `${request.location.flowDomainId}:floating-table`, kind: 'body',
-                    bounds: {
-                      xPt: 0, yPt: 0,
-                      widthPt: request.availableInlineExtentPt, heightPt: availableHeightPt,
+            type FloatingParentTransactionPass =
+              | Readonly<{
+                  kind: 'fresh-flow-region';
+                  result: ReturnType<typeof takeTableFragment>;
+                }>
+              | Readonly<{
+                  kind: 'candidate';
+                  parentFrame: Readonly<{ xPt: number; yPt: number }>;
+                  result: ReturnType<typeof takeTableFragment>;
+                  fragment: NonNullable<ReturnType<typeof takeTableFragment>['fragment']>;
+                  resolved: ReturnType<typeof resolveFloatingTablePlacementInTransaction>;
+                  nestedEntries: readonly FloatRegistryEntryPt[];
+                  fingerprint: string;
+                }>;
+            let transaction: FloatingParentTransactionPass;
+            try {
+              transaction = convergeExactState<FloatingParentTransactionPass>({
+                step: (previous) => {
+                  if (previous?.kind === 'fresh-flow-region') return previous;
+                  if (previous?.kind === 'candidate'
+                    && previous.resolved.placement.xPt === previous.parentFrame.xPt
+                    && previous.resolved.placement.yPt === previous.parentFrame.yPt) {
+                    return previous;
+                  }
+                  const parentFrame = previous?.resolved.placement ?? {
+                    xPt: raw.x,
+                    yPt: raw.y,
+                  };
+                  const availableHeightPt = Math.max(
+                    0,
+                    admissionBlockEndPt - parentFrame.yPt,
+                  );
+                  const result = takeTableFragment(retained, cursor, {
+                    availableHeightPt,
+                    freshPageHeightPt: freshAdmissionHeightPt,
+                    placement: {
+                      container: {
+                        id: `${request.location.flowDomainId}:floating-table`,
+                        kind: 'body',
+                        bounds: {
+                          xPt: 0,
+                          yPt: 0,
+                          widthPt: request.availableInlineExtentPt,
+                          heightPt: availableHeightPt,
+                        },
+                      },
+                      cursor: { xPt: 0, yPt: 0 },
+                      availableBounds: {
+                        xPt: 0,
+                        yPt: 0,
+                        widthPt: request.availableInlineExtentPt,
+                        heightPt: availableHeightPt,
+                      },
                     },
-                  },
-                  cursor: { xPt: 0, yPt: 0 },
-                  availableBounds: {
-                    xPt: 0, yPt: 0,
-                    widthPt: request.availableInlineExtentPt, heightPt: availableHeightPt,
-                  },
+                    services,
+                    compatibility: 'word',
+                    oversizedRowPolicy: 'atomic',
+                    page: {
+                      physicalPageIndex: request.location.pageIndex,
+                      displayPageNumber: state.displayPageNumber
+                        ?? request.location.pageIndex + 1,
+                      occurrenceId: `${retained.input.id}:fitting-outer:${request.location.pageIndex}:${cursor.rowIndex}:${cursor.rowFragmentIndex}`,
+                    },
+                    floatingTableFrames: {
+                      page: frames.page,
+                      margin: frames.margin,
+                      column: frames.text,
+                    },
+                    floatingTableRegistry: floatRegistry,
+                    finalPlacementTranslationPt: parentFrame,
+                    reacquirePageDependentBlock: reacquireTableBlock,
+                  });
+                  if (!result.fragment || result.requiresFreshPage) {
+                    return Object.freeze({
+                      kind: 'fresh-flow-region' as const,
+                      result,
+                    });
+                  }
+                  const sourcePlacement: FloatingTablePlacementLayout = Object.freeze({
+                    kind: 'floating-table-placement',
+                    occurrenceId: `${retained.input.id}:root:${request.location.pageIndex}:${cursor.rowIndex}:${cursor.rowFragmentIndex}`,
+                    ownership: 'source',
+                    physicalPageIndex: request.location.pageIndex,
+                    displayPageNumber: state.displayPageNumber
+                      ?? request.location.pageIndex + 1,
+                    hostCellId: request.location.flowDomainId,
+                    sourceBlockIndex: request.input.source.path[0]!,
+                    anchorBlockIndex: request.input.source.path[0]!,
+                    tableId: result.fragment.id,
+                    overlap: table.overlap === 'never' ? 'never' : 'overlap',
+                    positioning,
+                    anchorBounds: frames.text,
+                    child: result.fragment,
+                  });
+                  const nestedEntries = result.floatingTableRegistryDelta?.entries ?? [];
+                  const nestedNextParagraphId =
+                    result.floatingTableRegistryDelta?.nextParagraphId
+                    ?? floatRegistry.nextParagraphId;
+                  const resolved = resolveFloatingTablePlacementInTransaction(
+                    sourcePlacement,
+                    frames,
+                    beginFloatingTablePlacementTransaction(
+                      floatRegistry.entries,
+                      nestedNextParagraphId,
+                      floatRegistry.coordinateSpace,
+                      floatRegistry.flowDomainId,
+                    ),
+                  );
+                  const fingerprint = JSON.stringify({
+                    parentFrame: {
+                      xPt: resolved.placement.xPt,
+                      yPt: resolved.placement.yPt,
+                    },
+                    fragment: result.fragment,
+                    nestedEntries,
+                    resolvedBounds: resolved.placement.bounds,
+                  });
+                  return Object.freeze({
+                    kind: 'candidate' as const,
+                    parentFrame: Object.freeze({
+                      xPt: parentFrame.xPt,
+                      yPt: parentFrame.yPt,
+                    }),
+                    result,
+                    fragment: result.fragment,
+                    resolved,
+                    nestedEntries,
+                    fingerprint,
+                  });
                 },
-                services,
-                compatibility: 'word',
-                oversizedRowPolicy: 'atomic',
-                page: {
-                  physicalPageIndex: request.location.pageIndex,
-                  displayPageNumber: state.displayPageNumber ?? request.location.pageIndex + 1,
-                  occurrenceId: `${retained.input.id}:fitting-outer:${request.location.pageIndex}:${cursor.rowIndex}:${cursor.rowFragmentIndex}`,
-                },
-                floatingTableFrames: {
-                  page: frames.page,
-                  margin: frames.margin,
-                  column: frames.text,
-                },
-                floatingTableRegistry: floatRegistry,
-                finalPlacementTranslationPt: parentFrame,
-                reacquirePageDependentBlock: reacquireTableBlock,
-              });
-              if (!result.fragment || result.requiresFreshPage) {
-                return Object.freeze({
-                  layout: retained.layout,
-                  blockExtentPt: 0,
-                  nextCursor: Object.freeze({
-                    kind: 'table' as const,
-                    cursor,
-                    floatingContinuationFrame: 'fresh-text' as const,
-                  }),
-                  requiresFreshFlowRegion: true,
-                });
+                stateOf: (value) => value.kind === 'fresh-flow-region'
+                  ? 'fresh-flow-region'
+                  : value.fingerprint,
+                limit: 16,
+              }).value;
+            } catch (error) {
+              if (error instanceof ExactConvergenceError) {
+                throw new LayoutInvariantError(
+                  'NON_CONVERGENCE',
+                  error.reason === 'cycle'
+                    ? 'Floating table parent/child transaction repeated an exact-state cycle'
+                    : 'Floating table parent/child transaction reached the operational pass limit 16',
+                );
               }
-              const sourcePlacement: FloatingTablePlacementLayout = Object.freeze({
-                kind: 'floating-table-placement',
-                occurrenceId: `${retained.input.id}:root:${request.location.pageIndex}:${cursor.rowIndex}:${cursor.rowFragmentIndex}`,
-                ownership: 'source',
-                physicalPageIndex: request.location.pageIndex,
-                displayPageNumber: state.displayPageNumber ?? request.location.pageIndex + 1,
-                hostCellId: request.location.flowDomainId,
-                sourceBlockIndex: request.input.source.path[0]!,
-                anchorBlockIndex: request.input.source.path[0]!,
-                tableId: result.fragment.id,
-                overlap: table.overlap === 'never' ? 'never' : 'overlap',
-                positioning,
-                anchorBounds: frames.text,
-                child: result.fragment,
-              });
-              nestedEntries = result.floatingTableRegistryDelta?.entries ?? [];
-              const nestedNextParagraphId = result.floatingTableRegistryDelta?.nextParagraphId
-                ?? floatRegistry.nextParagraphId;
-              resolved = resolveFloatingTablePlacementInTransaction(
-                sourcePlacement,
-                frames,
-                beginFloatingTablePlacementTransaction(
-                  floatRegistry.entries,
-                  nestedNextParagraphId,
-                  floatRegistry.coordinateSpace,
-                  floatRegistry.flowDomainId,
-                ),
-              );
-              if (resolved.placement.xPt === parentFrame.xPt
-                && resolved.placement.yPt === parentFrame.yPt) break;
-              const fingerprint = JSON.stringify({
-                parentFrame,
-                fragment: result.fragment,
-                nestedEntries,
-                resolvedBounds: resolved.placement.bounds,
-              });
-              if (visitedTransactions.has(fingerprint)) {
-                throw new Error('Floating table parent/child transaction did not converge');
-              }
-              visitedTransactions.add(fingerprint);
-              parentFrame = Object.freeze({
-                xPt: resolved.placement.xPt,
-                yPt: resolved.placement.yPt,
+              throw error;
+            }
+            if (transaction.kind === 'fresh-flow-region') {
+              return Object.freeze({
+                layout: retained.layout,
+                blockExtentPt: 0,
+                nextCursor: Object.freeze({
+                  kind: 'table' as const,
+                  cursor,
+                  floatingContinuationFrame: 'fresh-text' as const,
+                }),
+                requiresFreshFlowRegion: true,
               });
             }
+            const {
+              result,
+              fragment,
+              resolved,
+              nestedEntries,
+            } = transaction;
             const isFloatingContinuation = request.cursor?.kind === 'table'
               && request.cursor.floatingContinuationFrame !== undefined;
             const admittedBlockEndPt = request.location.availableBounds.yPt
               + request.location.availableBounds.heightPt;
             const hostFlowPlacements = [
-              ...result.fragment.resolvedFloatingTables ?? [],
+              ...fragment.resolvedFloatingTables ?? [],
               resolved.placement,
             ].filter((placement) => placement.source.positioning.vertAnchor === 'text');
             if (!isFloatingContinuation && hostFlowPlacements.some((placement) => (
@@ -3561,7 +3640,7 @@ function createConcreteBodyLayoutKernel(
                 > admittedBlockEndPt
             ))) {
               return Object.freeze({
-                layout: result.fragment,
+                layout: fragment,
                 blockExtentPt: 0,
                 nextCursor: Object.freeze({
                   kind: 'table' as const,
@@ -3572,7 +3651,7 @@ function createConcreteBodyLayoutKernel(
               });
             }
             return Object.freeze({
-              layout: result.fragment,
+              layout: fragment,
               blockExtentPt: 0,
               nextCursor: result.nextCursor
                 ? Object.freeze({
@@ -3728,21 +3807,14 @@ function createConcreteBodyLayoutKernel(
             + retained.layout.flowBounds.xPt;
           const tableInlineEndPt = tableInlineStartPt + retained.layout.flowBounds.widthPt;
           const remainingTableExtentPt = result.fragment?.advancePt ?? 0;
-          let retryAtBlockStartPt = request.location.cursorPt.yPt;
-          while (true) {
-            const blockers = floatRegistry.entries.filter((entry) => entry.kind === 'table'
-              && tableInlineEndPt - entry.exclusionBounds.xPt > FLOAT_OVERLAP_EPS
-              && entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt
-                - tableInlineStartPt > FLOAT_OVERLAP_EPS
-              && retryAtBlockStartPt + remainingTableExtentPt
-                - entry.exclusionBounds.yPt > FLOAT_OVERLAP_EPS
-              && entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt
-                - retryAtBlockStartPt > FLOAT_OVERLAP_EPS);
-            if (blockers.length === 0) break;
-            retryAtBlockStartPt = Math.max(...blockers.map((entry) => (
-              entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt
-            )));
-          }
+          const retryAtBlockStartPt = resolveBlockFlowAdmission({
+            inlineStartPt: tableInlineStartPt,
+            inlineEndPt: tableInlineEndPt,
+            blockStartPt: request.location.cursorPt.yPt,
+            blockExtentPt: remainingTableExtentPt,
+            blockers: floatRegistry.entries.map(floatRegistryParticipant),
+            overlapEpsilonPt: FLOAT_OVERLAP_EPS,
+          }).blockStartPt;
           if (retryAtBlockStartPt > request.location.cursorPt.yPt) {
             return Object.freeze({
               layout: retained.layout,
@@ -4175,9 +4247,10 @@ function createConcreteBodyLayoutKernel(
             const bottom = entry.wrapDistances?.bottomPt
               ?? entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt
                 - entry.bounds.yPt - entry.bounds.heightPt;
-            return {
-              kind: entry.kind,
-              mode: entry.wrap === 'topAndBottom' ? 'topAndBottom' : 'square',
+            const core = {
+              mode: (entry.wrap === 'topAndBottom'
+                ? 'topAndBottom'
+                : 'square') as FloatRect['mode'],
               ...(entry.kind === 'shape' ? {
                 anchorOccurrenceId: entry.occurrenceId,
                 acquisitionOccurrenceId: entry.occurrenceId,
@@ -4199,6 +4272,13 @@ function createConcreteBodyLayoutKernel(
               distTop: top * scale, distBottom: bottom * scale,
               paraId: entry.paragraphId, drawn: true,
             };
+            return entry.kind === 'table'
+              ? {
+                  ...core,
+                  kind: 'table',
+                  tableOverlap: entry.overlap,
+                }
+              : { ...core, kind: entry.kind };
           });
           if (delta.floats) {
             state.floats.push(...retainedFloats);
@@ -7210,7 +7290,7 @@ function renderAnchorImages(
     // wrapNone images anchor against the paragraph's pre-spaceBefore top
     // (paragraphTopPx). Shared box resolution with the float path. By design the
     // box-resolution is symmetric but the overlap handling is NOT: wrap floats
-    // (registerAnchorFloats) build an exclusion rect and run resolveFloatOverlap,
+    // (registerAnchorFloats) build an exclusion rect and run the typed placement policy,
     // whereas wrapNone images carry no exclusion rect — they are positioned
     // directly in the paragraph flow (ECMA-376 wrapNone, §20.4.2.x: the object
     // does not displace text and is not displaced by other floats), so dist* is
@@ -7638,8 +7718,7 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
  * `positionV relativeFrom="paragraph"` float is positioned relative to the
  * paragraph that contains the anchor, i.e. its top edge before spaceBefore).
  * Page-level floats pass 0 (resolveAnchorY ignores paraBaseY for them). This is
- * the box origin BEFORE any overlap displacement; resolveFloatOverlap runs on
- * top of it for floats.
+ * the box origin BEFORE the typed float placement policy displaces it.
  *
  * Exported under a `_test` alias for the anchor-image relativeFrom wiring test
  * (the public renderer entry points consume the box internally; pin the
@@ -8006,7 +8085,7 @@ function registerImageFloat(
   // Implementation-defined (HEURISTIC, Word-mimicking, no ECMA-376 basis):
   // displacing the later document-order float, the "other paragraphs only"
   // gate under allowOverlap=true, and the right-then-down re-seat using dist
-  // padding as the float-to-float gap. See resolveFloatOverlap header.
+  // padding as the float-to-float gap. See layout/floats.ts.
   const allowOverlap = img.allowOverlap ?? true;
   const key = imageKey(img.imagePath, img.colorReplaceFrom, img.duotone);
   const rect = pushFloatRect(state, {

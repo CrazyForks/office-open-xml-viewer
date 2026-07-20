@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { computeFrameBox, registerFrameFloat } from './frame-geometry.js';
+import {
+  computeFrameBox,
+  pushFloatRect,
+  registerFrameFloat,
+} from './frame-geometry.js';
 import type { FrameBox } from './frame-geometry.js';
 import type { FramePr } from './types.js';
 import type { FloatRect } from './float-layout.js';
@@ -106,6 +110,78 @@ describe('frame geometry (§17.3.1.11) — drop cap placement', () => {
     expect(f.xRight).toBe(100 + 42 + 8);
     expect(f.yTop).toBe(200);
     expect(f.yBottom).toBe(200 + 42); // h=3×14, vSpace=0
+  });
+});
+
+describe('legacy float transport facts', () => {
+  it('fails closed when a floating-table transport omits tblOverlap', () => {
+    const st = makeState();
+
+    expect(() => pushFloatRect(st as never, {
+      x: 0,
+      y: 0,
+      w: 10,
+      h: 10,
+      dl: 0,
+      dr: 0,
+      dt: 0,
+      db: 0,
+      kind: 'table',
+      mode: 'square',
+      side: 'bothSides',
+      imageKey: '',
+      drawn: true,
+      paraId: 0,
+      avoidOverlap: true,
+    })).toThrow('Floating-table transport omitted tblOverlap');
+  });
+
+  it('keeps a displaced anchor wrap band within the page-right boundary', () => {
+    const st = makeState({
+      pageWidth: 100,
+      floats: [{
+        kind: 'frame',
+        mode: 'square',
+        imageKey: 'blocker',
+        imageX: 0,
+        imageY: 0,
+        imageW: 50,
+        imageH: 50,
+        xLeft: 0,
+        xRight: 50,
+        yTop: 0,
+        yBottom: 50,
+        side: 'bothSides',
+        distLeft: 0,
+        distRight: 0,
+        distTop: 0,
+        distBottom: 0,
+        paraId: 1,
+        drawn: true,
+      }],
+    });
+
+    const placed = pushFloatRect(st as never, {
+      x: 20,
+      y: 10,
+      w: 45,
+      h: 10,
+      dl: 0,
+      dr: 8,
+      dt: 0,
+      db: 0,
+      kind: 'shape',
+      mode: 'square',
+      side: 'bothSides',
+      imageKey: 'moving',
+      drawn: true,
+      paraId: 2,
+      allowOverlap: true,
+      avoidOverlap: true,
+    });
+
+    expect(placed).toMatchObject({ imageX: 20, imageY: 50 });
+    expect(placed.xRight).toBeLessThanOrEqual(100.5);
   });
 });
 

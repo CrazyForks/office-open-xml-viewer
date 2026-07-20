@@ -372,6 +372,7 @@ describe('retained table pagination', () => {
     const occurrenceId = `page-0:${source.input.rows[0]!.cells[0]!.id}:0:${nested.layout.id}`;
     const baseEntry = Object.freeze({
       kind: 'table' as const,
+      overlap: 'never' as const,
       occurrenceId,
       paragraphId: 7,
       bounds: Object.freeze({ xPt: 10, yPt: 10, widthPt: 100, heightPt: 10 }),
@@ -451,6 +452,7 @@ describe('retained table pagination', () => {
       flowDomainId: 'logical-page:0',
       entries: Object.freeze([Object.freeze({
         kind: 'table' as const,
+        overlap: 'never' as const,
         occurrenceId: baseOccurrenceId,
         paragraphId: 7,
         bounds: baseBounds,

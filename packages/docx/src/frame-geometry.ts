@@ -15,7 +15,16 @@
 
 import type { FramePr } from './types.js';
 import type { RenderState } from './renderer.js';
-import { type FloatRect, resolveFloatOverlap } from './float-layout.js';
+import type { FloatRect } from './float-layout.js';
+import {
+  FLOAT_OVERLAP_EPS,
+  FLOAT_PAGE_RIGHT_SLACK,
+  drawingMLAvoidance,
+  floatRectParticipant,
+  floatingTableAvoidance,
+  resolveFloatPlacement,
+  type FloatPlacementParticipant,
+} from './layout/floats.js';
 import type { FrameGeometryState } from './layout/types.js';
 
 /** Resolved geometry (canvas px) of a `<w:framePr>` text frame. Exported for
@@ -314,22 +323,17 @@ export interface PushFloatOpts {
   dr: number;
   dt: number;
   db: number;
-  /** What reserved this float — scopes overlap avoidance (§17.4.56). See
-   *  {@link FloatRect.kind}. */
-  kind: FloatRect['kind'];
   mode: 'square' | 'topAndBottom';
   side: string;
   imageKey: string;
   drawn: boolean;
   paraId: number;
-  /** Run §20.4.2.3 / §17.4.56 overlap avoidance before fixing the rect. When
-   *  false (frame floats) the box is used as-is. */
-  avoidOverlap: boolean;
-  /** allowOverlap arg passed to resolveFloatOverlap when avoidOverlap is true
-   *  (true ⇒ only avoid OTHER paragraphs' floats; false ⇒ spec-mandated
-   *  avoidance, scoped by `kind`: a table avoids only other tables, §17.4.56).
-   *  Ignored when avoidOverlap is false. */
+  kind: FloatRect['kind'];
+  /** Required at runtime for table entries; the resulting FloatRect and typed
+   * placement participant make the fact structurally mandatory. */
+  tableOverlap?: 'never' | 'overlap';
   allowOverlap?: boolean;
+  avoidOverlap: boolean;
 }
 
 /**
@@ -342,18 +346,40 @@ export interface PushFloatOpts {
  * re-seating). The returned ref lets the image path flip `drawn` after painting.
  */
 export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
+  if (o.kind === 'table' && o.tableOverlap === undefined) {
+    throw new Error('Floating-table transport omitted tblOverlap');
+  }
   let px = o.x;
   let py = o.y;
   if (o.avoidOverlap) {
-    const resolved = resolveFloatOverlap(
-      px, py, o.w, o.h, o.dl, o.dr, o.dt, o.db, o.paraId, o.allowOverlap ?? true,
-      o.kind, state.pageWidth * state.scale, state.floats,
-    );
-    px = resolved.x;
-    py = resolved.y;
+    const core = {
+      occurrenceId: 'display-moving-float',
+      paragraphId: o.paraId,
+      bounds: { xPt: px, yPt: py, widthPt: o.w, heightPt: o.h },
+      exclusionBounds: {
+        xPt: px - o.dl,
+        yPt: py - o.dt,
+        widthPt: o.w + o.dl + o.dr,
+        heightPt: o.h + o.dt + o.db,
+      },
+    };
+    const moving: FloatPlacementParticipant = o.kind === 'table'
+      ? { ...core, kind: 'table', tableOverlap: o.tableOverlap! }
+      : { ...core, kind: o.kind === 'frame' ? 'frame' : 'drawingml' };
+    const resolved = resolveFloatPlacement({
+      moving,
+      blockers: state.floats.map(floatRectParticipant),
+      avoidance: o.kind === 'table'
+        ? floatingTableAvoidance(o.tableOverlap!, o.paraId)
+        : drawingMLAvoidance(o.allowOverlap ?? true, o.paraId),
+      rightBoundaryPt: state.pageWidth * state.scale,
+      overlapEpsilonPt: FLOAT_OVERLAP_EPS,
+      rightBoundarySlackPt: FLOAT_PAGE_RIGHT_SLACK,
+    });
+    px = resolved.bounds.xPt;
+    py = resolved.bounds.yPt;
   }
-  const rect: FloatRect = {
-    kind: o.kind,
+  const core = {
     mode: o.mode,
     imageKey: o.imageKey,
     imageX: px,
@@ -372,6 +398,9 @@ export function pushFloatRect(state: RenderState, o: PushFloatOpts): FloatRect {
     paraId: o.paraId,
     drawn: o.drawn,
   };
+  const rect: FloatRect = o.kind === 'table'
+    ? { ...core, kind: 'table', tableOverlap: o.tableOverlap! }
+    : { ...core, kind: o.kind };
   state.floats.push(rect);
   return rect;
 }

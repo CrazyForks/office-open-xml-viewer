@@ -88,11 +88,10 @@ function exactBinary64Midpoint(left: number, right: number): number {
  * xLeft/xRight/yTop/yBottom are its padded acquisition bounds, not a replacement
  * rectangle for polygon line queries.
  */
-export interface FloatRect {
+interface FloatRectCore {
   /** Transitional registry kind projected into the typed displacement policy
    * in floats.ts. `shape` = DrawingML wp:anchor; `table` = floating table;
    * `frame` = <w:framePr> text frame. */
-  kind: 'table' | 'shape' | 'frame';
   mode: 'square' | 'topAndBottom';
   /** Exact retained wrap semantics; `mode` remains the coarse legacy routing key. */
   authoredWrap?: 'square' | 'tight' | 'through' | 'topAndBottom';
@@ -127,6 +126,19 @@ export interface FloatRect {
   /** true once the image itself has been drawn (drawn after its paragraph lays out). */
   drawn: boolean;
 }
+
+export type FloatRect =
+  | (FloatRectCore & {
+      kind: 'table';
+      /** Required §17.4.56 fact retained for tables placed later. */
+      tableOverlap: 'never' | 'overlap';
+    })
+  | (FloatRectCore & {
+      kind: 'shape';
+    })
+  | (FloatRectCore & {
+      kind: 'frame';
+    });
 
 export type WrapSide = 'bothSides' | 'left' | 'right' | 'largest';
 
