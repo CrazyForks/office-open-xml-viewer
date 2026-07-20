@@ -1,4 +1,7 @@
-import { resolveFloatOverlap } from './float-wrap.js';
+import {
+  resolveFloatPlacement,
+  type FloatPlacementParticipant,
+} from './floats.js';
 import { floatingTableAxesFollowHostFlow } from './retained-geometry-translation.js';
 import type {
   FloatRegistryEntryPt,
@@ -123,21 +126,13 @@ export function resolveFloatingTablePlacement(
   );
 }
 
-function registryBlocker(entry: FloatRegistryEntryPt): Readonly<{
-  kind: FloatRegistryEntryPt['kind'];
-  xLeft: number;
-  xRight: number;
-  yTop: number;
-  yBottom: number;
-  paraId: number;
-}> {
+function registryParticipant(entry: FloatRegistryEntryPt): FloatPlacementParticipant {
   return {
-    kind: entry.kind,
-    xLeft: entry.exclusionBounds.xPt,
-    xRight: entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt,
-    yTop: entry.exclusionBounds.yPt,
-    yBottom: entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt,
-    paraId: entry.paragraphId,
+    occurrenceId: entry.occurrenceId,
+    kind: entry.kind === 'shape' ? 'drawingml' : entry.kind,
+    paragraphId: entry.paragraphId,
+    bounds: entry.bounds,
+    exclusionBounds: entry.exclusionBounds,
   };
 }
 
@@ -223,17 +218,31 @@ export function resolveFloatingTablePlacementInTransaction(
     });
   }
   const initial = resolveFloatingTablePlacement(placement, frames);
-  const positioning = placement.positioning;
-  const position = resolveFloatOverlap(
-    initial.xPt, initial.yPt, initial.bounds.widthPt, initial.bounds.heightPt,
-    positioning.leftFromTextPt, positioning.rightFromTextPt,
-    positioning.topFromTextPt, positioning.bottomFromTextPt,
-    transaction.nextParagraphId, placement.overlap !== 'never', 'table',
-    endX(frames.page), registry
+  const participant: FloatPlacementParticipant = {
+    occurrenceId: placement.occurrenceId,
+    kind: 'table',
+    paragraphId: transaction.nextParagraphId,
+    bounds: initial.bounds,
+    exclusionBounds: initial.exclusionBounds,
+  };
+  const position = resolveFloatPlacement({
+    moving: participant,
+    blockers: registry
       .filter((entry) => entry.kind !== 'shape' || entry.wrap !== undefined)
-      .map(registryBlocker),
+      .map(registryParticipant),
+    avoidance: placement.overlap === 'never'
+      ? { kind: 'floating-table-never' }
+      : {
+          kind: 'word-different-paragraph',
+          paragraphId: transaction.nextParagraphId,
+        },
+    rightBoundaryPt: endX(frames.page),
+  });
+  const finalPlacement = resolvedPlacement(
+    placement,
+    position.bounds.xPt,
+    position.bounds.yPt,
   );
-  const finalPlacement = resolvedPlacement(placement, position.x, position.y);
   const entry = Object.freeze({
     kind: 'table' as const,
     occurrenceId: placement.occurrenceId,

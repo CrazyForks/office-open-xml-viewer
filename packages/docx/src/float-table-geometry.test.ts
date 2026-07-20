@@ -306,7 +306,7 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
     expect(st.floats).toHaveLength(0);
   });
 
-  it('overlap="never" (allowOverlap=false) re-seats the new float off another table', () => {
+  it('overlap="never" re-seats table extents without adding text-distance padding', () => {
     // Pre-seat a blocking FLOATING TABLE [0,200]×[300,360] from another paragraph.
     const st = makeState({
       floatParaSeq: 1,
@@ -317,12 +317,17 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
       }],
     });
     // A new floating table at page-left x=0 overlapping the blocker; never ⇒ avoid.
-    const tp = tblp({ horzAnchor: 'page', tblpX: 0, vertAnchor: 'page', tblpY: 320 });
+    const tp = tblp({
+      horzAnchor: 'page', tblpX: 0, vertAnchor: 'page', tblpY: 320,
+      leftFromText: 5, rightFromText: 7,
+    });
     const b = box(tp, st, 0, 100, 20); // box at (0,320), overlaps the blocker
     registerFloat(b, tp, st, 'right', /* allowOverlap */ false);
     const f = st.floats[st.floats.length - 1];
-    // resolveFloatOverlap re-seats it to the right of the blocker's right edge.
-    expect(f.xLeft).toBeGreaterThanOrEqual(200);
+    // §17.4.56 uses table extents: the table box touches x=200 while its
+    // separate §17.4.57 text exclusion still begins at x=195.
+    expect(f.imageX).toBe(200);
+    expect(f.xLeft).toBe(195);
   });
 
   it('appends a pre-resolved parent exactly after its retained child entry', () => {
@@ -619,10 +624,16 @@ describe('retained floating table placement (§17.4.57)', () => {
     expect(secondResolution.transaction.delta.map((entry) => entry.occurrenceId)).toEqual([
       'first', 'second',
     ]);
-    expect(secondResolution.placement.xPt).toBeGreaterThan(
-      firstResolution.placement.exclusionBounds.xPt
-        + firstResolution.placement.exclusionBounds.widthPt,
+    expect(secondResolution.placement.xPt).toBe(
+      firstResolution.placement.bounds.xPt
+        + firstResolution.placement.bounds.widthPt,
     );
+    expect(secondResolution.placement.exclusionBounds).toMatchObject({
+      xPt: secondResolution.placement.xPt - second.positioning.leftFromTextPt,
+      widthPt: secondResolution.placement.bounds.widthPt
+        + second.positioning.leftFromTextPt
+        + second.positioning.rightFromTextPt,
+    });
     expect(duplicateProbe.transaction).toBe(secondResolution.transaction);
     expect(duplicateProbe.placement.bounds).toBe(
       secondResolution.transaction.delta[1]!.bounds,

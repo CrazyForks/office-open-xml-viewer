@@ -207,6 +207,35 @@ function assertNoProductionTestSupportImports(root) {
   }
 }
 
+function assertFloatPlacementAuthority(root) {
+  const sourceRoot = resolve(root, DOCX_SOURCE);
+  const authority = `${LAYOUT_SOURCE}/floats.ts`;
+  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
+    const source = sourceFile(path);
+    const file = posixPath(relative(root, path));
+    for (const statement of source.statements) {
+      if (!ts.isImportDeclaration(statement)
+        || !ts.isStringLiteralLike(statement.moduleSpecifier)
+        || !statement.importClause?.namedBindings
+        || !ts.isNamedImports(statement.importClause.namedBindings)) continue;
+      const importsKernel = statement.importClause.namedBindings.elements.some(
+        (element) => (element.propertyName?.text ?? element.name.text)
+          === 'resolveAxisAlignedOverlap',
+      );
+      if (!importsKernel) continue;
+      const dependency = resolveLocalImport(path, statement.moduleSpecifier.text);
+      const dependencyFile = dependency ? posixPath(relative(root, dependency)) : null;
+      if (file !== authority
+        || dependencyFile !== `${LAYOUT_SOURCE}/axis-aligned-overlap.ts`) {
+        fail(
+          'FLOAT_PLACEMENT_AUTHORITY',
+          `${file} -> ${dependencyFile ?? statement.moduleSpecifier.text}`,
+        );
+      }
+    }
+  }
+}
+
 function listFiles(root) {
   if (!existsSync(root)) return [];
   const files = [];
@@ -3589,6 +3618,7 @@ export function checkDocxLayoutBoundaries(options) {
   const baselineExists = existsSync(baselinePath);
   const allowTransitionalParagraphAnchorAdapter = baselineExists && !options.final;
   assertNoProductionTestSupportImports(root);
+  assertFloatPlacementAuthority(root);
   assertNoDeletedPageProducerIdentifiers(root);
   assertPaintBoundaries(root);
   assertCapabilityBoundaries(root);

@@ -72,12 +72,19 @@ import {
 } from './retained-geometry-translation.js';
 export { translateParagraphLayout } from './retained-geometry-translation.js';
 import { paginationFieldDependency } from './pagination-fields.js';
-import { createExactStateTracker, observeExactState } from './repeated-state.js';
+import {
+  ExactConvergenceError,
+  convergeExactState,
+} from './convergence.js';
+import { LayoutInvariantError } from './diagnostics.js';
 import {
   commitParagraphWrapRegistry,
   createParagraphWrapRegistry,
 } from './paragraph-wrap-registry.js';
-import { resolveAxisAlignedOverlap } from './axis-aligned-overlap.js';
+import {
+  resolveFloatPlacement,
+  type FloatPlacementParticipant,
+} from './floats.js';
 import { unionLayoutRects } from './rect-union.js';
 import {
   measureParagraphIntrinsicWidth,
@@ -2125,24 +2132,28 @@ function acquireAnchorOccurrence(
     // §20.4.2.3 object collision is independent of text wrapping. The
     // allowOverlap=true compatibility path deliberately retains the old
     // wrap-exclusion policy only for ordinary-flow anchors.
-    const movingBounds = normativeCollision ? rect : effectiveWrapBounds!;
-    const blockers = normativeCollision
+    const blockerBounds = normativeCollision
       ? [...externalCollisions, ...sameParagraphCollisions]
           .filter((entry) => entry.occurrenceId !== occurrenceId)
           .map((entry) => ({
-            left: entry.bounds.xPt,
-            right: entry.bounds.xPt + entry.bounds.widthPt,
-            top: entry.bounds.yPt,
-            bottom: entry.bounds.yPt + entry.bounds.heightPt,
+            occurrenceId: entry.occurrenceId,
+            bounds: entry.bounds,
           }))
       : externalExclusions
           .filter((exclusion) => exclusion.anchorOccurrenceId !== occurrenceId)
           .map((exclusion) => ({
-            left: exclusion.bounds.xPt,
-            right: exclusion.bounds.xPt + exclusion.bounds.widthPt,
-            top: exclusion.bounds.yPt,
-            bottom: exclusion.bounds.yPt + exclusion.bounds.heightPt,
+            occurrenceId: exclusion.anchorOccurrenceId ?? exclusion.id,
+            bounds: exclusion.bounds,
           }));
+    const blockers: FloatPlacementParticipant[] = blockerBounds.map((entry) => ({
+      occurrenceId: entry.occurrenceId,
+      kind: 'drawingml',
+      // `externalExclusions` is the already-established other-paragraph
+      // registry; the current paragraph uses a distinct compatibility id.
+      paragraphId: 0,
+      bounds: entry.bounds,
+      exclusionBounds: entry.bounds,
+    }));
     const page = options.anchorFrames?.page;
     const rightBoundary = normativeCollision
       && behavior.layoutInCell
@@ -2151,24 +2162,21 @@ function acquireAnchorOccurrence(
       : page
         ? page.xPt + page.widthPt
         : Number.POSITIVE_INFINITY;
-    const displaced = resolveAxisAlignedOverlap(
-      {
-        left: movingBounds.xPt,
-        right: movingBounds.xPt + movingBounds.widthPt,
-        top: movingBounds.yPt,
-        bottom: movingBounds.yPt + movingBounds.heightPt,
+    const displaced = resolveFloatPlacement({
+      moving: {
+        occurrenceId,
+        kind: 'drawingml',
+        paragraphId: 1,
+        bounds: rect,
+        exclusionBounds: effectiveWrapBounds ?? rect,
       },
       blockers,
-      {
-        overlapEpsilon: 0,
-        rightBoundary,
-        rightBoundarySlack: 0,
-      },
-    );
-    const delta = {
-      xPt: displaced.left - movingBounds.xPt,
-      yPt: displaced.top - movingBounds.yPt,
-    };
+      avoidance: normativeCollision
+        ? { kind: 'drawingml-normative' }
+        : { kind: 'word-different-paragraph', paragraphId: 1 },
+      rightBoundaryPt: rightBoundary,
+    });
+    const delta = displaced.displacement;
     if (delta.xPt !== 0 || delta.yPt !== 0) {
       rect = translateRect(rect, delta);
       const outerTextBox = acquiredShapeTextBoxes.get(outer.runIndex);
@@ -2760,16 +2768,24 @@ export function acquireShapeTextBoxLayout(
 
 /** Single acquisition seam from public/parser paragraph input to retained geometry.
  * Existing `measureParagraph` remains the sole segment and line-break owner. */
-class ParagraphAnchorReflowNonConvergenceError extends Error {
-  readonly code = 'paragraph-anchor-reflow-non-convergence';
+class ParagraphAnchorReflowNonConvergenceError extends LayoutInvariantError {
+  readonly reason: 'cycle' | 'limit';
+  readonly states: readonly string[];
+  readonly occurrenceCapacity: number;
 
   constructor(
-    readonly reason: 'cycle',
-    readonly states: readonly string[],
-    readonly occurrenceCapacity: number,
+    reason: 'cycle' | 'limit',
+    states: readonly string[],
+    occurrenceCapacity: number,
   ) {
-    super(`Parser-owned paragraph anchor reflow did not converge (${reason}; ${occurrenceCapacity} occurrences; ${states.length} states)`);
+    super(
+      'NON_CONVERGENCE',
+      `parser-owned paragraph anchor reflow did not converge (${reason}; ${occurrenceCapacity} occurrences; ${states.length} states)`,
+    );
     this.name = 'ParagraphAnchorReflowNonConvergenceError';
+    this.reason = reason;
+    this.states = Object.freeze([...states]);
+    this.occurrenceCapacity = occurrenceCapacity;
   }
 }
 
@@ -2902,42 +2918,61 @@ export function acquireParagraphResult(
     anchoredPayloadRun(run) ? [run.anchorAcquisitionInput!.occurrenceId] : []));
   for (const occurrenceId of externallyOwnedOccurrenceIds) occurrenceIds.delete(occurrenceId);
   const occurrenceCapacity = occurrenceIds.size;
-  const tracker = createExactStateTracker();
-  let ownedExclusions: readonly WrapExclusion[] = Object.freeze([]);
-  const initialExclusions = mergeParagraphExclusions(options.exclusions, ownedExclusions);
-  observeExactState(tracker, exclusionSetState(initialExclusions));
-  for (;;) {
-    const effectiveExclusions = mergeParagraphExclusions(options.exclusions, ownedExclusions);
-    const measured = measureParagraph(
-      paragraph,
-      options.context,
-      measurementPlacement(options, effectiveExclusions),
-      options.measurer,
-      { ...options.environment, paragraphMarkShapeInput: paragraph.paragraphMarkShapeInput },
-      continuation,
-    );
-    const layout = paragraphLayoutFromMeasurement(paragraph, options, measured);
-    const nextOwnedExclusions = canonicalOwnedExclusions(layout, occurrenceIds);
-    const nextEffectiveExclusions = mergeParagraphExclusions(
-      options.exclusions,
-      nextOwnedExclusions,
-    );
-    const state = exclusionSetState(nextEffectiveExclusions);
-    if (exclusionSetState(layout.exclusions) !== state) {
-      throw new Error('Paragraph retained exclusions differ from the measured exclusion authority');
-    }
-    // Normative geometry is satisfied only when resolving retained host frames
-    // reproduces the same occurrence-keyed wrap exclusion state.
-    const observation = observeExactState(tracker, state);
-    if (observation.kind === 'fixed') {
-      return Object.freeze({ measured, layout });
-    }
-    if (observation.kind === 'cycle') {
+  const initialOwnedExclusions: readonly WrapExclusion[] = Object.freeze([]);
+  const initialExclusions = mergeParagraphExclusions(
+    options.exclusions,
+    initialOwnedExclusions,
+  );
+  type Pass = Readonly<{
+    measured: MeasuredParagraph;
+    layout: ParagraphLayout;
+    ownedExclusions: readonly WrapExclusion[];
+    state: string;
+  }>;
+  try {
+    const result = convergeExactState<Pass>({
+      seedState: exclusionSetState(initialExclusions),
+      step: (previous) => {
+        const effectiveExclusions = mergeParagraphExclusions(
+          options.exclusions,
+          previous?.ownedExclusions ?? initialOwnedExclusions,
+        );
+        const measured = measureParagraph(
+          paragraph,
+          options.context,
+          measurementPlacement(options, effectiveExclusions),
+          options.measurer,
+          { ...options.environment, paragraphMarkShapeInput: paragraph.paragraphMarkShapeInput },
+          continuation,
+        );
+        const layout = paragraphLayoutFromMeasurement(paragraph, options, measured);
+        const ownedExclusions = canonicalOwnedExclusions(layout, occurrenceIds);
+        const nextEffectiveExclusions = mergeParagraphExclusions(
+          options.exclusions,
+          ownedExclusions,
+        );
+        const state = exclusionSetState(nextEffectiveExclusions);
+        if (exclusionSetState(layout.exclusions) !== state) {
+          throw new Error('Paragraph retained exclusions differ from the measured exclusion authority');
+        }
+        return Object.freeze({ measured, layout, ownedExclusions, state });
+      },
+      stateOf: (pass) => pass.state,
+      // Operational fail-closed resource guard. The exact-state/cycle checks
+      // establish correctness; this budget prevents an all-distinct malicious
+      // geometry orbit from consuming unbounded work.
+      limit: 16,
+    }).value;
+    return Object.freeze({ measured: result.measured, layout: result.layout });
+  } catch (error) {
+    if (error instanceof ExactConvergenceError) {
       throw new ParagraphAnchorReflowNonConvergenceError(
-        'cycle', observation.states, occurrenceCapacity,
+        error.reason,
+        error.states,
+        occurrenceCapacity,
       );
     }
-    ownedExclusions = nextOwnedExclusions;
+    throw error;
   }
 }
 

@@ -434,9 +434,20 @@ describe('vertical outer floating tables retain the canonical logical paint doma
       acceptedOccurrenceId(retainedExternal),
     ]);
     expect(following.exclusions[1]?.bounds).toEqual(expectedParentExclusion);
-    expect(retainedExternal.flowBounds.yPt).toBeGreaterThanOrEqual(
-      expectedParentExclusion.yPt + expectedParentExclusion.heightPt,
-    );
+    const parentRawRight = retained.flowBounds.xPt + retained.flowBounds.widthPt;
+    const externalRawRight = retainedExternal.flowBounds.xPt
+      + retainedExternal.flowBounds.widthPt;
+    const rawTablesOverlap = retained.flowBounds.xPt < externalRawRight
+      && parentRawRight > retainedExternal.flowBounds.xPt
+      && retained.flowBounds.yPt
+        < retainedExternal.flowBounds.yPt + retainedExternal.flowBounds.heightPt
+      && retained.flowBounds.yPt + retained.flowBounds.heightPt
+        > retainedExternal.flowBounds.yPt;
+    // §17.4.56 compares the table extents, not §17.4.57 *FromText padding.
+    // These vertical logical boxes overlap only through the parent's text
+    // exclusion, so the following table retains its authored y position.
+    expect(rawTablesOverlap).toBe(false);
+    expect(retainedExternal.flowBounds.yPt).toBe(30);
     expect(following.exclusions[2]?.bounds).toEqual({
       xPt: retainedExternal.flowBounds.xPt,
       yPt: retainedExternal.flowBounds.yPt,

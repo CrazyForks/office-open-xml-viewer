@@ -41,12 +41,18 @@ describe('resolveFloatOverlap convergence', () => {
     ))).toBe(false);
   });
 
-  it('throws instead of returning an overlapping placement when resolution cannot converge', () => {
+  it('snapshots accessor-backed legacy blockers before deterministic placement', () => {
     let left = 0;
+    let leftReads = 0;
+    let rightReads = 0;
     const chasingBlocker = {
       kind: 'table' as const,
-      get xLeft() { return left; },
+      get xLeft() {
+        leftReads += 1;
+        return left;
+      },
       get xRight() {
+        rightReads += 1;
         const right = left + 1.1;
         left = right;
         return right;
@@ -56,11 +62,12 @@ describe('resolveFloatOverlap convergence', () => {
       paraId: 0,
     };
 
-    expect(() => resolveFloatOverlap(
+    expect(resolveFloatOverlap(
       0, 0, 1, 1,
       0, 0, 0, 0,
       100, false, 'table', 100,
       [chasingBlocker],
-    )).toThrow('Float overlap resolution did not converge');
+    )).toEqual({ x: 1.1, y: 0 });
+    expect({ leftReads, rightReads }).toEqual({ leftReads: 1, rightReads: 1 });
   });
 });
