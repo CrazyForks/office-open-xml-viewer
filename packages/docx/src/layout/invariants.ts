@@ -18,35 +18,44 @@ import type {
   DrawingPaintCommand,
   DrawingLayout,
   FlowDomain,
-  LayoutRect,
+  LayoutDiagnosticCode,
   LayoutPage,
+  LayoutRect,
   PageSectionRegion,
   PaintNode,
   PointPt,
+  SourceRef,
   SectionRegionCoordinateSpace,
   WritingMode,
 } from './types.js';
 import { unionLayoutRects } from './rect-union.js';
 
-const LAYOUT_DIAGNOSTIC_CODES = new Set([
-  'FLOW_OVERLAP',
-  'BOTTOM_MARGIN_INVASION',
-  'FLOW_DOMAIN_INVASION',
-  'INVALID_REFERENCE',
-  'INVALID_GEOMETRY',
-  'INVALID_VALUE',
-  'NON_CONVERGENCE',
-  'UNSUPPORTED_FEATURE',
-]);
+const LAYOUT_DIAGNOSTIC_CODE_MEMBERS = {
+  FLOW_OVERLAP: true,
+  BOTTOM_MARGIN_INVASION: true,
+  FLOW_DOMAIN_INVASION: true,
+  INVALID_REFERENCE: true,
+  INVALID_GEOMETRY: true,
+  INVALID_VALUE: true,
+  NON_CONVERGENCE: true,
+  UNSUPPORTED_FEATURE: true,
+} as const satisfies Readonly<Record<LayoutDiagnosticCode, true>>;
 
-const SOURCE_STORIES = new Set([
-  'body',
-  'header',
-  'footer',
-  'footnote',
-  'endnote',
-  'textbox',
-]);
+const SOURCE_STORY_MEMBERS = {
+  body: true,
+  header: true,
+  footer: true,
+  footnote: true,
+  endnote: true,
+  textbox: true,
+} as const satisfies Readonly<Record<SourceRef['story'], true>>;
+
+const LAYOUT_DIAGNOSTIC_CODES = new Set<LayoutDiagnosticCode>(
+  Object.keys(LAYOUT_DIAGNOSTIC_CODE_MEMBERS) as LayoutDiagnosticCode[],
+);
+const SOURCE_STORIES = new Set<SourceRef['story']>(
+  Object.keys(SOURCE_STORY_MEMBERS) as SourceRef['story'][],
+);
 
 function assertPlainData(value: unknown, path: string, ancestors = new WeakSet<object>()): void {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;

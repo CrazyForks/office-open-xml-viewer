@@ -6,6 +6,16 @@ pub const PARSE_DIAGNOSTIC_CODE_INVALID_TEXT_EFFECT_VALUE: &str = "INVALID_TEXT_
 pub const PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT: &str = "MISSING_DRAWING_EXTENT";
 pub const PARSE_DIAGNOSTIC_CODE_INVALID_DRAWING_EXTENT: &str = "INVALID_DRAWING_EXTENT";
 pub const PARSE_DIAGNOSTIC_CODE_DEGENERATE_DRAWING_EXTENT: &str = "DEGENERATE_DRAWING_EXTENT";
+pub const PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_TEXT_EFFECT: DiagnosticSeverity =
+    DiagnosticSeverity::Warning;
+pub const PARSE_DIAGNOSTIC_SEVERITY_INVALID_TEXT_EFFECT_VALUE: DiagnosticSeverity =
+    DiagnosticSeverity::Warning;
+pub const PARSE_DIAGNOSTIC_SEVERITY_MISSING_DRAWING_EXTENT: DiagnosticSeverity =
+    DiagnosticSeverity::Error;
+pub const PARSE_DIAGNOSTIC_SEVERITY_INVALID_DRAWING_EXTENT: DiagnosticSeverity =
+    DiagnosticSeverity::Error;
+pub const PARSE_DIAGNOSTIC_SEVERITY_DEGENERATE_DRAWING_EXTENT: DiagnosticSeverity =
+    DiagnosticSeverity::Warning;
 
 /// Private parser-to-layout diagnostic severity. This wire is intentionally
 /// smaller than the public document model: diagnostics carry stable facts and

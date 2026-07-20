@@ -156,6 +156,16 @@ describe('private parser diagnostic mapping', () => {
     expect(rustCodes).toEqual(
       Object.keys(PARSER_DIAGNOSTIC_CONTRACT).sort(),
     );
+
+    const rustSeverities = Object.fromEntries(
+      [...rustDiagnosticTypes.matchAll(
+        /pub const PARSE_DIAGNOSTIC_SEVERITY_([A-Z_]+):\s*DiagnosticSeverity\s*=\s*DiagnosticSeverity::(Warning|Error);/g,
+      )].map((match) => [match[1]!, match[2]!.toLowerCase()]),
+    );
+    expect(rustSeverities).toEqual(Object.fromEntries(
+      Object.entries(PARSER_DIAGNOSTIC_CONTRACT)
+        .map(([code, contract]) => [code, contract.severity]),
+    ));
   });
 
   it('crosses acquisition once and freezes the final layout diagnostic graph', () => {

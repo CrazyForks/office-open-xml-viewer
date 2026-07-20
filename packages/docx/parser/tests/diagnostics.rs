@@ -23,14 +23,25 @@ fn build_docx(body: &str) -> Vec<u8> {
 }
 
 fn build_docx_with_styles(body: &str, styles: Option<&str>) -> Vec<u8> {
+    build_docx_with_parts(body, styles, None)
+}
+
+fn build_docx_with_parts(body: &str, styles: Option<&str>, footnotes: Option<&str>) -> Vec<u8> {
     let document = format!(
         r#"<w:document xmlns:w="{W_NS}" xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" xmlns:r="{R_NS}">
              <w:body>{body}<w:sectPr/></w:body>
            </w:document>"#
     );
+    let footnotes_relationship = footnotes
+        .is_some()
+        .then_some(format!(
+            r#"<Relationship Id="rIdFootnotes" Type="{R_NS}/footnotes" Target="footnotes.xml"/>"#
+        ))
+        .unwrap_or_default();
     let relationships = format!(
         r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
              <Relationship Id="rIdImage" Type="{R_NS}/image" Target="media/image.png"/>
+             {footnotes_relationship}
            </Relationships>"#
     );
     let mut bytes = Vec::new();
@@ -51,6 +62,11 @@ fn build_docx_with_styles(body: &str, styles: Option<&str>) -> Vec<u8> {
                 .expect("styles entry");
             zip.write_all(styles.as_bytes()).expect("styles XML");
         }
+        if let Some(footnotes) = footnotes {
+            zip.start_file("word/footnotes.xml", SimpleFileOptions::default())
+                .expect("footnotes entry");
+            zip.write_all(footnotes.as_bytes()).expect("footnotes XML");
+        }
         zip.finish().expect("finish zip");
     }
     bytes
@@ -63,6 +79,12 @@ fn parse(body: &str) -> Value {
 
 fn parse_with_styles(body: &str, styles: &str) -> Value {
     let json = parse_docx_native(&build_docx_with_styles(body, Some(styles))).expect("DOCX parses");
+    serde_json::from_str(&json).expect("parser output JSON")
+}
+
+fn parse_with_footnotes(body: &str, footnotes: &str) -> Value {
+    let json = parse_docx_native(&build_docx_with_parts(body, None, Some(footnotes)))
+        .expect("DOCX with footnotes parses");
     serde_json::from_str(&json).expect("parser output JSON")
 }
 
@@ -198,6 +220,62 @@ fn uses_the_emitted_body_cursor_across_wrappers_and_split_paragraphs() {
 }
 
 #[test]
+fn table_and_nested_table_diagnostics_use_the_owning_body_index() {
+    let document = parse(
+        r#"
+        <w:p><w:r><w:t>before</w:t></w:r></w:p>
+        <w:tbl><w:tr><w:tc>
+          <w:p><w:r><w:rPr><w:effect w:val="sparkle"/></w:rPr></w:r></w:p>
+          <w:tbl><w:tr><w:tc>
+            <w:p><w:r><w:rPr><w:effect w:val="invalid-value"/></w:rPr></w:r></w:p>
+          </w:tc></w:tr></w:tbl>
+        </w:tc></w:tr></w:tbl>
+        "#,
+    );
+
+    assert_eq!(
+        document["diagnostics"],
+        json!([
+          {
+            "code": "UNSUPPORTED_TEXT_EFFECT",
+            "severity": "warning",
+            "part": "word/document.xml",
+            "path": [1]
+          },
+          {
+            "code": "INVALID_TEXT_EFFECT_VALUE",
+            "severity": "warning",
+            "part": "word/document.xml",
+            "path": [1]
+          }
+        ])
+    );
+}
+
+#[test]
+fn non_body_story_facts_do_not_claim_the_document_part() {
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W_NS}" xmlns:wp="{WP_NS}" xmlns:a="{A_NS}" xmlns:r="{R_NS}">
+             <w:footnote w:id="1"><w:p><w:r>
+               <w:rPr><w:effect w:val="sparkle"/></w:rPr>
+               {}
+             </w:r></w:p></w:footnote>
+           </w:footnotes>"#,
+        picture_payload(r#"<wp:extent cx="invalid" cy="12700"/>"#),
+    );
+    let document = parse_with_footnotes(
+        r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#,
+        &footnotes,
+    );
+
+    assert_eq!(document["footnotes"].as_array().unwrap().len(), 1);
+    assert!(
+        document.get("diagnostics").is_none(),
+        "facts from word/footnotes.xml must not be mislabeled as word/document.xml"
+    );
+}
+
+#[test]
 fn supported_and_schema_valid_control_values_do_not_report_diagnostics() {
     let document = parse(&format!(
         r#"
@@ -255,7 +333,6 @@ fn extent_diagnostics_match_the_actual_picture_retention_decision() {
     assert_eq!(
         identities,
         vec![
-            ("INVALID_DRAWING_EXTENT", 1),
             ("INVALID_DRAWING_EXTENT", 2),
             ("INVALID_DRAWING_EXTENT", 3),
             ("INVALID_DRAWING_EXTENT", 4),
@@ -266,8 +343,8 @@ fn extent_diagnostics_match_the_actual_picture_retention_decision() {
     );
     assert_eq!(
         image_run_count(&document["body"]),
-        2,
-        "only the maximum-boundary and schema-valid zero-area pictures survive"
+        3,
+        "the maximum, whitespace-collapsed, and schema-valid zero-area pictures survive"
     );
 }
 

@@ -1984,11 +1984,10 @@ fn push_parse_diagnostic(
     severity: DiagnosticSeverity,
     path: &[usize],
 ) {
-    if diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == code && diagnostic.part == DOCUMENT_PART && diagnostic.path == path
-    }) {
-        return;
-    }
+    // The emitted-body cursor increases monotonically across commits, and each
+    // pending set is already deduplicated by code. Therefore `(code, path)` is
+    // unique by construction; a global linear scan here would turn N
+    // diagnostic-bearing body children into O(N²) hostile-input work.
     diagnostics.push(ParseDiagnostic {
         code: code.to_string(),
         severity,
@@ -2023,7 +2022,8 @@ enum DrawingExtent {
 
 /// Parse the exact `wp:extent` contract used by both drawing acquisition and
 /// parser diagnostics. ECMA-376 `CT_PositiveSize2D` requires both attributes;
-/// `ST_PositiveCoordinate` is an untrimmed integer in
+/// `ST_PositiveCoordinate` derives from `xsd:long`, whose whitespace facet
+/// collapses leading/trailing XML whitespace, and is bounded to
 /// `0..=27273042316900`. Keeping one decision function prevents diagnostics
 /// from claiming that a drawing was omitted when the parser actually retained
 /// it (or missing an omission the parser actually made).
@@ -2040,6 +2040,7 @@ fn drawing_extent(container: roxmltree::Node) -> DrawingExtent {
     };
     let parse = |value: &str| {
         value
+            .trim()
             .parse::<i64>()
             .ok()
             .filter(|coordinate| (0..=MAX_POSITIVE_COORDINATE).contains(coordinate))
@@ -2069,12 +2070,12 @@ fn collect_text_effect_diagnostic(
         Some(value) if is_supported_text_effect(value) => push_pending_parse_diagnostic(
             diagnostics,
             PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_TEXT_EFFECT,
-            DiagnosticSeverity::Warning,
+            PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_TEXT_EFFECT,
         ),
         _ => push_pending_parse_diagnostic(
             diagnostics,
             PARSE_DIAGNOSTIC_CODE_INVALID_TEXT_EFFECT_VALUE,
-            DiagnosticSeverity::Warning,
+            PARSE_DIAGNOSTIC_SEVERITY_INVALID_TEXT_EFFECT_VALUE,
         ),
     }
 }
@@ -5834,18 +5835,18 @@ fn collect_drawing_extent_diagnostic(
         DrawingExtent::Missing if !retained_extent_consumer => push_pending_parse_diagnostic(
             diagnostics,
             PARSE_DIAGNOSTIC_CODE_MISSING_DRAWING_EXTENT,
-            DiagnosticSeverity::Error,
+            PARSE_DIAGNOSTIC_SEVERITY_MISSING_DRAWING_EXTENT,
         ),
         DrawingExtent::Invalid if !retained_extent_consumer => push_pending_parse_diagnostic(
             diagnostics,
             PARSE_DIAGNOSTIC_CODE_INVALID_DRAWING_EXTENT,
-            DiagnosticSeverity::Error,
+            PARSE_DIAGNOSTIC_SEVERITY_INVALID_DRAWING_EXTENT,
         ),
         DrawingExtent::Valid { cx, cy } if retained_extent_consumer && (cx == 0 || cy == 0) => {
             push_pending_parse_diagnostic(
                 diagnostics,
                 PARSE_DIAGNOSTIC_CODE_DEGENERATE_DRAWING_EXTENT,
-                DiagnosticSeverity::Warning,
+                PARSE_DIAGNOSTIC_SEVERITY_DEGENERATE_DRAWING_EXTENT,
             );
         }
         DrawingExtent::Missing | DrawingExtent::Invalid | DrawingExtent::Valid { .. } => {}
