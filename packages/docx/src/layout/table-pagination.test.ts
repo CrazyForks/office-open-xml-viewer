@@ -673,7 +673,7 @@ describe('retained table pagination', () => {
         entries: Object.freeze([]), nextParagraphId: 0,
       },
       reacquirePageDependentBlock: () => cycle[pass++ % cycle.length]!,
-    })).toThrow('Floating table final-frame reflow did not converge');
+    })).toThrow(/NON_CONVERGENCE.*floating table final-frame reflow did not converge/i);
     expect(pass).toBe(3);
   });
 

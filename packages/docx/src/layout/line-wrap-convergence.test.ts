@@ -55,10 +55,46 @@ describe('line wrap convergence', () => {
   it('diagnoses an exact non-adjacent line-state cycle without a pass budget', () => {
     let pass = 0;
 
-    expect(() => convergeLineWrap<TestLine>(
-      () => [line(pass++ % 2 === 0 ? 'A' : 'B')],
-      (currentLine) => currentLine.probeHeight,
-    )).toThrow(LineWrapNonConvergenceError);
+    try {
+      convergeLineWrap<TestLine>(
+        () => [line(pass++ % 2 === 0 ? 'A' : 'B')],
+        (currentLine) => currentLine.probeHeight,
+      );
+      throw new Error('Expected line wrap to reject the cycle');
+    } catch (error) {
+      expect(error).toBeInstanceOf(LineWrapNonConvergenceError);
+      expect(error).toMatchObject({
+        code: 'NON_CONVERGENCE',
+        reason: 'cycle',
+      });
+    }
+  });
+
+  it('hard-fails a deterministic all-distinct line-state orbit', () => {
+    let pass = 0;
+
+    try {
+      convergeLineWrap<TestLine>(
+        () => {
+          const state = line('A');
+          pass += 1;
+          return [{
+            ...state,
+            topY: pass,
+            consumedEnd: { segIndex: 0, charOffset: pass },
+          }];
+        },
+        (currentLine) => currentLine.probeHeight,
+      );
+      throw new Error('Expected line wrap to exhaust its resource budget');
+    } catch (error) {
+      expect(error).toBeInstanceOf(LineWrapNonConvergenceError);
+      expect(error).toMatchObject({
+        code: 'NON_CONVERGENCE',
+        reason: 'limit',
+      });
+      expect(pass).toBeGreaterThan(1);
+    }
   });
 
   it('clones mutable pass-local segment records without cloning their authorities', () => {

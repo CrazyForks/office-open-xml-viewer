@@ -900,6 +900,26 @@ test('late mutation of retained body sidecars is rejected before paint dispatch'
   expectDiagnostic(root, 'BODY_PAINT_LAYOUT_CAPABILITY', 'late sidecar mutation', '--final');
 });
 
+test('only the float placement authority may import the displacement kernel', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-float-authority-');
+  write(root, 'packages/docx/src/layout/axis-aligned-overlap.ts',
+    'export function resolveAxisAlignedOverlap(value) { return value; }\n');
+  write(root, 'packages/docx/src/layout/floats.ts',
+    "import { resolveAxisAlignedOverlap } from './axis-aligned-overlap.js';\n"
+      + 'export const place = resolveAxisAlignedOverlap;\n');
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/layout/paragraph.ts',
+    "import { resolveAxisAlignedOverlap as displace } from './axis-aligned-overlap.js';\n"
+      + 'export const placeParagraph = displace;\n');
+  expectDiagnostic(
+    root,
+    'FLOAT_PLACEMENT_AUTHORITY',
+    'an aliased direct kernel import must not bypass layout/floats.ts',
+    '--final',
+  );
+});
+
 test('retained body paint fails closed without an auditable paragraph branch', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-body-fail-closed-');
   write(root, 'packages/docx/src/renderer.ts',

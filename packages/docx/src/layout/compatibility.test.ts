@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   defineCompatibilityRule,
+  LINE_START_GAP_EPS_PT,
+  WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT,
+  WORD_MIN_LINE_START_PT,
+  WORD_SQUARE_LINE_START_ONE_INCH,
   WORD_SECTION_BTLR_TBRL_PAGE_FRAME,
+  wordMinLineStartPx,
 } from './compatibility.js';
 import {
   WORD_PRE_BREAK_ANCHOR_PARAGRAPH,
@@ -89,5 +94,23 @@ describe('defineCompatibilityRule', () => {
       'packages/docx/src/body-layout-input.test.ts#projects mutually exclusive collapsed-mark and drop-previous-after roles',
       'packages/docx/src/layout/paginator.test.ts#advances nextColumn to the next page when the outgoing column has no same-page successor',
     ]);
+  });
+});
+
+describe('float compatibility evidence', () => {
+  it('keeps the measured square line-start threshold behind one named rule', () => {
+    expect(WORD_SQUARE_LINE_START_ONE_INCH.evidence).toMatchObject({
+      kind: 'regression-test',
+    });
+    expect(WORD_MIN_LINE_START_PT).toBe(72);
+    expect(LINE_START_GAP_EPS_PT).toBe(0.05);
+    expect(wordMinLineStartPx(1)).toBeCloseTo(71.95, 10);
+  });
+
+  it('names the established different-paragraph displacement policy', () => {
+    expect(WORD_FLOAT_DIFFERENT_PARAGRAPH_DISPLACEMENT).toMatchObject({
+      id: 'word-float-different-paragraph-displacement',
+      evidence: { kind: 'regression-test' },
+    });
   });
 });

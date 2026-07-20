@@ -4,6 +4,11 @@ import {
   floatingTableRegistryDelta,
   resolveFloatingTablePlacementInTransaction,
 } from './floating-table-transaction.js';
+import {
+  ExactConvergenceError,
+  convergeExactState,
+} from './convergence.js';
+import { LayoutInvariantError } from './diagnostics.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import { layoutTable, measureTableCellBlockFlowHeightPt } from './table.js';
 import type {
@@ -481,32 +486,51 @@ function finalFrameRow(
     placements: resolved,
   });
 
-  let candidate = row;
-  let previousKey: string | null = null;
-  const visitedKeys = new Set<string>();
-  while (true) {
-    const resolution = resolveCandidate(candidate);
-    if (resolution.resolved.length === 0) {
-      return { row, resolved: [], registry, nextParagraphId };
+  const initialResolution = resolveCandidate(row);
+  if (initialResolution.resolved.length === 0) {
+    return { row, resolved: [], registry, nextParagraphId };
+  }
+  type Pass = Readonly<{
+    candidate: TableRowLayoutInput;
+    resolution: ReturnType<typeof resolveCandidate>;
+    state: string;
+  }>;
+  try {
+    const result = convergeExactState<Pass>({
+      seedState: convergenceKey(row, initialResolution.resolved),
+      step: (previous) => {
+        const candidate = reacquireCandidate(
+          previous?.resolution.resolved ?? initialResolution.resolved,
+        );
+        const resolution = resolveCandidate(candidate);
+        return Object.freeze({
+          candidate,
+          resolution,
+          state: convergenceKey(candidate, resolution.resolved),
+        });
+      },
+      stateOf: (pass) => pass.state,
+      // Resource guard only; exact equality/cycle detection determines
+      // correctness and no last candidate is accepted on exhaustion.
+      limit: 16,
+    }).value;
+    return {
+      row: result.candidate,
+      resolved: result.resolution.resolved,
+      registry: Object.freeze([
+        ...result.resolution.transaction.base,
+        ...result.resolution.transaction.delta,
+      ]),
+      nextParagraphId: result.resolution.transaction.nextParagraphId,
+    };
+  } catch (error) {
+    if (error instanceof ExactConvergenceError) {
+      throw new LayoutInvariantError(
+        'NON_CONVERGENCE',
+        `floating table final-frame reflow did not converge (${error.reason}; ${error.states.length} states)`,
+      );
     }
-    const key = convergenceKey(candidate, resolution.resolved);
-    if (previousKey === key) {
-      return {
-        row: candidate,
-        resolved: resolution.resolved,
-        registry: Object.freeze([
-          ...resolution.transaction.base,
-          ...resolution.transaction.delta,
-        ]),
-        nextParagraphId: resolution.transaction.nextParagraphId,
-      };
-    }
-    if (visitedKeys.has(key)) {
-      throw new Error('Floating table final-frame reflow did not converge');
-    }
-    visitedKeys.add(key);
-    previousKey = key;
-    candidate = reacquireCandidate(resolution.resolved);
+    throw error;
   }
 }
 

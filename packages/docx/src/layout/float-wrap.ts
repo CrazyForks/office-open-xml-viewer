@@ -1,14 +1,12 @@
 // Float-wrap geometry for DOCX anchors (ECMA-376 §20.4.2.x).
 //
 // Pure layout math: given the floats active on a page (as FloatRect exclusion
-// records) it answers "where may this line sit?" and "where must this new float
-// be re-seated to avoid a clash?". No canvas/drawing or document-model deps, so
-// it can be unit-reasoned and shared by the renderer and the paginator.
+// records) it answers "where may this line sit?". Object-to-object displacement
+// policy lives in floats.ts. No canvas/drawing or document-model deps, so the
+// geometry can be unit-reasoned and shared by the renderer and the paginator.
 //
-// IMPORTANT: which parts of the behavior here are ECMA-376-mandated and which
-// are documented Office-compatibility observations is recorded inline on
-// resolveFloatOverlap and resolveLineFloatWindow. Compatibility behavior must
-// stay evidence-backed and apply to the whole OOXML construct, never one file.
+// Compatibility behavior is named and evidence-backed in compatibility.ts;
+// this module receives its square-line minimum as an explicit input.
 
 import {
   compilePolygonWrap,
@@ -27,8 +25,8 @@ import {
 } from './exact-geometry.js';
 import {
   axisAlignedRectsOverlap,
-  resolveAxisAlignedOverlap,
 } from './axis-aligned-overlap.js';
+import { FLOAT_OVERLAP_EPS } from './floats.js';
 
 function unreducedExactFromNumber(value: number): ExactRational {
   const decoded = decodeBinary64(value);
@@ -91,12 +89,9 @@ function exactBinary64Midpoint(left: number, right: number): number {
  * rectangle for polygon line queries.
  */
 export interface FloatRect {
-  /** What kind of object reserved this float. Used to scope overlap avoidance:
-   *  ECMA-376 §17.4.56 (tblOverlap="never") only forbids a floating table from
-   *  overlapping OTHER FLOATING TABLES — not DrawingML anchors (§20.4.2.3) or
-   *  text frames. resolveFloatOverlap reads this to limit a never-overlap
-   *  table's blockers to kind==='table'. 'shape' = DrawingML wp:anchor shape,
-   *  'frame' = <w:framePr> text frame; both also cover anchor images. */
+  /** Transitional registry kind projected into the typed displacement policy
+   * in floats.ts. `shape` = DrawingML wp:anchor; `table` = floating table;
+   * `frame` = <w:framePr> text frame. */
   kind: 'table' | 'shape' | 'frame';
   mode: 'square' | 'topAndBottom';
   /** Exact retained wrap semantics; `mode` remains the coarse legacy routing key. */
@@ -127,7 +122,7 @@ export interface FloatRect {
   /** Identifier of the anchoring paragraph. Used only by the observed Office
    *  compatibility rule under allowOverlap=true: floats with the SAME paraId
    *  never displace each other, while different-paragraph floats do. ECMA-376
-   *  does not define this scoping; see resolveFloatOverlap. */
+   *  does not define this scoping; see compatibility.ts and floats.ts. */
   paraId: number;
   /** true once the image itself has been drawn (drawn after its paragraph lays out). */
   drawn: boolean;
@@ -149,79 +144,6 @@ export function normalizeWrapSide(side: string | null | undefined): WrapSide {
 export interface Gap {
   l: number;
   r: number;
-}
-
-// ── Float-layout tolerances (px) ──────────────────────────────────────────────
-// Sub-pixel slack used so floating-point coordinate noise (margin/anchor/dist
-// arithmetic at the current scale) doesn't read as a real overlap or a real gap.
-
-/** Overlap epsilon: two exclusion rects must overlap by MORE than this to count
- *  as intersecting, so coincident/touching edges (and FP noise) are not a clash. */
-export const FLOAT_OVERLAP_EPS = 0.01;
-
-/** Slack added to the page-right edge when testing whether a displaced float
- *  still fits horizontally — a float ending within this many px of the page edge
- *  is treated as fitting (it would otherwise be pushed down by FP rounding).
- *  Looser than FLOAT_OVERLAP_EPS because it guards a half-pixel rounding of a
- *  full-width displacement, not an edge-touch test. */
-export const FLOAT_PAGE_RIGHT_SLACK = 0.5;
-
-/** Minimum horizontal space (pt) a free side-gap must have before Word will
- *  START a CONTENT (text / inline-object) line beside a square float, rather than
- *  flowing it below the float band. Measured — NOT from ECMA-376, which mandates
- *  no side-gap minimum (§20.4.2.17 only says text wraps around the rectangle;
- *  §17.18.3 `<w:br w:clear>` is the sole spec-mandated flow onto a float-free
- *  region). Controlled Office comparisons documented in issue #676 establish
- *  an exact 1-inch (1440-twip) rule: 70pt flows below while 72pt starts beside.
- *  The boundary is independent of text, font size, and line spacing, so it is
- *  an absolute width rather than an em- or line-height-relative quantity. The
- *  evidence covers square wrapping only; tight/through use their
- *  §20.4.2.18/.19 polygon openings without inheriting this compatibility
- *  policy. Callers convert to px with `WORD_MIN_LINE_START_PT * scale`
- *  (renderer scale is px/pt).
- *
- *  SCOPE — content lines only. An EMPTY paragraph-mark line (a literally-empty or
- *  anchor-only paragraph's pilcrow, no width-bearing content) does NOT obey this
- *  1-inch rule: Word keeps such a mark beside a float whenever the gap can hold
- *  the pilcrow itself, dropping it below only when the gap is narrower than that
- *  (effectively a full-width float band). Office comparisons in issue #676 show
- *  that a full-width band moves the mark below, while a sub-inch side gap that
- *  can hold the pilcrow keeps authoring blank-line marks beside the float. The
- *  narrow threshold is therefore the paragraph-mark em; it governs the
- *  literally-empty paths — the paint pass `resolveEmptyMarkTop` and paginator
- *  mirror `flowMarkLine` — plus the anchorHost-only metric line inside
- *  `layoutLines`. */
-export const WORD_MIN_LINE_START_PT = 72;
-
-/** Tolerance (pt) subtracted from the 1-inch requirement when testing a side
- *  gap, to make Word's INCLUSIVE ≥ 1-inch boundary robust to coordinate noise.
- *  Word places a line beside a float at a gap of exactly 1 inch (issue #676).
- *  But a gap
- *  that is nominally 1 inch is computed as content-width − frame-width through
- *  twip→EMU→px conversions and lands slightly under 72: this renderer computes
- *  71.963716pt for the 72.0pt frame (a ~0.036pt deficit — sub-twip conversion
- *  rounding, not pure IEEE-754). Without tolerance the inclusive boundary
- *  flips to below and disagrees with Word. One twip (1/20 pt = 0.05pt) is the
- *  authoring granularity of a frame width, so a gap short of 1 inch by less
- *  than one twip is treated as exactly 1 inch. One twip covers the observed
- *  0.036pt deficit (a half twip, 0.025pt, would NOT) yet is ≪ the 2pt step
- *  that discriminates the fixtures (70pt stays below, 72pt goes beside), so it
- *  never promotes a genuinely sub-inch gap. Applied in the render's px space
- *  as `× scale` (see resolveLineFloatWindow). Same rationale as
- *  FLOAT_PAGE_RIGHT_SLACK: a tolerance sized to the coordinate-rounding
- *  granularity it absorbs. */
-export const LINE_START_GAP_EPS_PT = 0.05; // one twip (1/20 pt)
-
-/** The square-only compatibility width passed separately from polygon geometry:
- *  Word's 1-inch minimum
- *  side-gap, minus the one-twip rounding tolerance, at the render scale (px/pt).
- *  Single source of truth so the paint pass and both paginator mirrors agree
- *  bit-for-bit on the flow/beside decision. Empty paragraph-mark lines use the
- *  narrower `paragraphMarkEmPx` threshold instead (see WORD_MIN_LINE_START_PT's
- *  SCOPE note). See WORD_MIN_LINE_START_PT and LINE_START_GAP_EPS_PT (issue
- *  #676). */
-export function wordMinLineStartPx(scale: number): number {
-  return (WORD_MIN_LINE_START_PT - LINE_START_GAP_EPS_PT) * scale;
 }
 
 /** Minimum width (px) a polygon free gap must have to hold a line start. It also
@@ -1229,102 +1151,6 @@ export function computePreparedLineFloatWindowWithDiagnostics(
     columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, diagnostics,
   );
   return Object.freeze({ window, diagnostics: Object.freeze({ ...diagnostics }) });
-}
-
-/**
- * Multi-float collision resolution for a NEW wrap float, against floats already
- * registered on the page.
- *
- * What ECMA-376 actually mandates here is narrow, and the mandate differs by
- * what kind of object forbids overlap:
- *   - A DrawingML anchor with @allowOverlap="false" (Part 1 §20.4.2.3): an
- *     object that "cannot overlap other DrawingML object … shall be
- *     repositioned when displayed to prevent this overlap" — i.e. it must avoid
- *     OTHER DRAWINGML OBJECTS. (We never pass allowOverlap=false for shapes/
- *     images today; the default is "true", which only *permits* overlap.)
- *   - A floating table with <w:tblOverlap w:val="never"/> (§17.4.56): the table
- *     "cannot overlap with OTHER FLOATING TABLES in the document." It does NOT
- *     mandate avoiding DrawingML anchors (§20.4.2.3) or text frames — those keep
- *     their own §20.4.2.3 behavior. So a never-overlap table must only avoid
- *     blockers with kind==='table'.
- * allowOverlap="true"/omitted (the default, §20.4.2.3 / §17.4.56) only *permits*
- * overlap; the spec is silent on whether a renderer may avoid it. So:
- *   - allowOverlap === false → spec-mandated avoidance. Scoped by `kind`: a
- *     table avoids only other tables (§17.4.56); any other kind would avoid all
- *     (§20.4.2.3) — not currently exercised, see above.
- *   - allowOverlap === true  → implementation-defined avoidance of floats
- *     anchored in OTHER paragraphs only.
- *
- * EVERYTHING ELSE in this function is implementation-defined — ECMA-376 Part 1
- * does NOT specify it. This is a deterministic compatibility policy, informed
- * by observed Office output but not a normative Word or ECMA-376 requirement:
- *   - the move DIRECTION (right first, then down),
- *   - WHICH float moves (the later/document-order float is the "new" one),
- *   - the "same-paragraph floats never displace each other" gate (the paraId
- *     scoping under allowOverlap=true above),
- *   - and the move AMOUNT. Note the dist* padding reused below is, per
- *     §20.4.2.3/§20.4.2.17, the minimum distance between the float and *text*
- *     (wrapSquare geometry) — it is NOT spec-defined as a float-to-float gap.
- *     Using it to seat one float beside another is our own choice.
- *
- * If the §20.4.2.3 "shall be repositioned" requirement is ever satisfiable in
- * more than one way, the particular re-seating below remains an implementation
- * policy; keep it scoped as such until a specification-backed rule is found.
- *
- * We re-seat horizontally to the right of the blocking float(s) first (margins
- * may be used — Word lets a displaced float sit in the page margin), and only
- * fall back to a vertical push when no horizontal room remains.
- *
- * Coordinates are page-absolute in one caller-selected unit (px or pt). `(x,y)`
- * is the image box origin (no dist); every scalar and blocker must use that same
- * unit. `pageRight` is the page edge and `floats` is the active float set.
- */
-export function resolveFloatOverlap(
-  x: number, y: number, w: number, h: number,
-  dl: number, dr: number, dt: number, db: number,
-  paraId: number, allowOverlap: boolean,
-  kind: FloatRect['kind'],
-  pageRight: number, floats: readonly Pick<
-    FloatRect,
-    'kind' | 'xLeft' | 'xRight' | 'yTop' | 'yBottom' | 'paraId'
-  >[],
-): { x: number; y: number } {
-  // Which already-registered floats are eligible blockers remains a caller
-  // policy; only the axis-aligned right-then-down solver is shared.
-  const blockers = floats
-    .filter((f) =>
-      allowOverlap ? f.paraId !== paraId : kind !== 'table' || f.kind === 'table')
-    .map((f) => ({
-      get left() { return f.xLeft; },
-      get right() { return f.xRight; },
-      get top() { return f.yTop; },
-      get bottom() { return f.yBottom; },
-    }));
-  try {
-    const resolved = resolveAxisAlignedOverlap(
-      {
-        left: x - dl,
-        right: x + w + dr,
-        top: y - dt,
-        bottom: y + h + db,
-      },
-      blockers,
-      {
-        overlapEpsilon: FLOAT_OVERLAP_EPS,
-        rightBoundary: pageRight,
-        rightBoundarySlack: FLOAT_PAGE_RIGHT_SLACK,
-      },
-    );
-    return { x: resolved.left + dl, y: resolved.top + dt };
-  } catch (error) {
-    if (
-      error instanceof Error
-      && error.message === 'Axis-aligned overlap resolution did not converge'
-    ) {
-      throw new Error('Float overlap resolution did not converge');
-    }
-    throw error;
-  }
 }
 
 /**

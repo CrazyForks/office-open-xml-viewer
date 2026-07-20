@@ -2,24 +2,30 @@
 // lives under layout/ so canonical layout code never depends on a root legacy
 // module while existing internal import paths remain stable during migration.
 export {
-  FLOAT_OVERLAP_EPS,
-  FLOAT_PAGE_RIGHT_SLACK,
-  LINE_START_GAP_EPS_PT,
   MIN_LINE_GAP,
-  WORD_MIN_LINE_START_PT,
   floatOverlapsColumnX,
   isWrapFloat,
   normalizeWrapSide,
   prepareFloatWrap,
   rectsOverlap,
-  resolveFloatOverlap,
   resolveLineFloatWindow,
   computePreparedLineFloatWindow,
   computePreparedLineFloatWindowWithDiagnostics,
   skipPastTopAndBottom,
   widestFreeGap,
-  wordMinLineStartPx,
 } from './layout/float-wrap.js';
+
+export {
+  FLOAT_OVERLAP_EPS,
+  FLOAT_PAGE_RIGHT_SLACK,
+  resolveFloatOverlap,
+} from './layout/floats.js';
+
+export {
+  LINE_START_GAP_EPS_PT,
+  WORD_MIN_LINE_START_PT,
+  wordMinLineStartPx,
+} from './layout/compatibility.js';
 
 export type {
   FloatRect,

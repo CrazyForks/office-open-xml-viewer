@@ -19,14 +19,26 @@
 
 ### Task C1: Express float placement as explicit constraints with isolated compatibility
 
+> Design correction (2026-07-20): Series A/B already made
+> `layout/anchor-frame.ts` the immutable authority for anchor axes, size, wrap
+> geometry, and required CT_Anchor behavior. C1 must not add a second
+> `AxisConstraint`/`WrapConstraint` dialect or claim page/column admission.
+> C1 is split into C1a/C1b so displacement policy and real fixed points can be
+> reviewed independently from deletion of the remaining legacy adapters.
+
 **Files:**
 
 - Create: `packages/docx/src/layout/floats.ts`
 - Create: `packages/docx/src/layout/floats.test.ts`
 - Modify: `packages/docx/src/layout/compatibility.ts`
 - Modify: `packages/docx/src/layout/compatibility.test.ts`
-- Modify: `packages/docx/src/layout/paginator.ts`
-- Modify: `packages/docx/src/layout/diagnostics.ts`
+- Modify: `packages/docx/src/layout/convergence.ts`
+- Modify: `packages/docx/src/layout/line-wrap-convergence.ts`
+- Modify: `packages/docx/src/layout/paragraph.ts`
+- Modify: `packages/docx/src/layout/floating-table-transaction.ts`
+- Modify: `packages/docx/src/layout/table-pagination.ts`
+- Modify: `packages/docx/src/layout/float-wrap.ts`
+- Delete: `packages/docx/src/layout/repeated-state.ts`
 - Modify: `packages/docx/src/renderer.ts`
 - Modify: `packages/docx/src/float-line-start-one-inch.test.ts`
 - Modify: `packages/docx/src/float-table-geometry.test.ts`
@@ -34,32 +46,53 @@
 
 **Interfaces:**
 
-- Consumes: placed nodes, page/column bounds, wrap geometry, A1 diagnostics/fingerprints, and A2 `convergeLayout`.
-- Produces: `FloatConstraint`, `FloatPlacement`, and `solveFloatPlacement`; it does not introduce another convergence engine.
+- Consumes: `anchor-frame` object/wrap geometry, immutable collision/float
+  registries, containment boundaries, and the A2 convergence module.
+- Produces: a pure displacement-policy result (`bounds`, `exclusionBounds`,
+  `displacement`, and applied compatibility rule IDs). It does not resolve
+  anchor axes, line-wrap windows, page/column admission, or paint.
+- Extends the A2 convergence module with one generic exact-state primitive.
+  Adjacent equality is a fixed point, non-adjacent equality is a cycle, and a
+  hard pass budget is an explicit fail-closed resource guard rather than a
+  geometry heuristic.
 
 **Specification evidence:** ECMA-376 §20.4.2.3 (`wp:anchor`),
 §20.4.2.10/§20.4.2.11 positioning, §20.4.2.15–§20.4.2.20 wrap
 geometry, `allowOverlap`, and `layoutInCell` define constraints.
-[MS-OE376] §2.1.474 defines the Office `shapeLayoutLikeWW8` negative
-line-relative-offset compatibility behavior. Each rule in
-`compatibility.ts` names its Microsoft note or documented synthetic Office
-observation; generic solver code contains no observation-derived constant.
+§17.4.56 defines floating-table overlap against table extents; §17.4.57
+`*FromText` distances remain text-exclusion geometry. `[MS-OE376]` §2.1.474
+defines the narrow Office `shapeLayoutLikeWW8` negative line-relative-offset
+pagination behavior; its parser/internal-wire implementation belongs with C2
+diagnostics and is not generalized into float geometry. Each rule in
+`compatibility.ts` names its Microsoft note or documented regression evidence;
+generic geometry contains no observation-derived constant.
 
 ```ts
-export interface FloatConstraint { readonly anchor: SourceRef; readonly horizontal: AxisConstraint; readonly vertical: AxisConstraint; readonly wrap: WrapConstraint; readonly allowOverlap: boolean; readonly layoutInCell: boolean }
-export interface FloatPlacement { readonly inkBounds: LayoutRect; readonly exclusion: readonly PointPt[]; readonly pageIndex: number; readonly columnIndex: number }
-export function solveFloatPlacement(input: FloatSolveInput): FloatPlacement;
+export type FloatAvoidance =
+  | { readonly kind: 'drawingml-normative' }
+  | { readonly kind: 'floating-table-never' }
+  | { readonly kind: 'word-different-paragraph'; readonly paragraphId: number }
+  | { readonly kind: 'none' };
+export interface FloatPlacement {
+  readonly bounds: LayoutRect;
+  readonly exclusionBounds: LayoutRect;
+  readonly displacement: Readonly<{ xPt: number; yPt: number }>;
+  readonly appliedCompatibilityRuleIds: readonly string[];
+}
+export function resolveFloatPlacement(input: ResolveFloatPlacementInput): FloatPlacement;
 ```
 
-- [ ] **Step 1: Add failing constraint and convergence tests**
+- [ ] **C1a Step 1: Add failing policy and real-convergence tests**
 
-Cover page/margin/column/character anchors, align versus offset precedence,
-square/tight/through/top-bottom wrap, `allowOverlap`, `layoutInCell`, negative
-offsets and multiple interacting floats. Assert stable placement fingerprints,
-then wrap the solver with A2 `convergeLayout` to assert repeated-fingerprint
-cycle detection and `NON_CONVERGENCE` when `limit` is reached.
+Do not duplicate the existing `anchor-frame.test.ts` axis/wrap matrix. Cover
+DrawingML-only normative blockers, table-only §17.4.56 blockers using raw table
+extents, cell/page right boundaries, same- versus different-paragraph
+compatibility, stable blocker-order results, and preservation of text-exclusion
+padding. Add exact-state tests for adjacent fixed points, non-adjacent cycles,
+and all-distinct resource-budget exhaustion. Pin the actual paragraph-anchor,
+line-wrap, and floating-table final-frame fixed points.
 
-- [ ] **Step 2: Run tests to verify Red**
+- [ ] **C1a Step 2: Run tests to verify Red**
 
 Run:
 
@@ -67,21 +100,26 @@ Run:
 pnpm vitest run packages/docx/src/layout/floats.test.ts packages/docx/src/layout/compatibility.test.ts packages/docx/src/float-line-start-one-inch.test.ts packages/docx/src/float-table-geometry.test.ts
 ```
 
-Expected: float placement mutates renderer state and lacks explicit cycle/error
-contracts.
+Expected: displacement policy is duplicated, `repeated-state.ts` is a second
+unbounded convergence mechanism, all-distinct line/anchor states can run
+without a typed limit failure, and table collision includes text-only padding.
 
-- [ ] **Step 3: Implement the pure solver and isolate compatibility**
+- [ ] **C1a Step 3: Implement policy extraction and bounded exact convergence**
 
-Translate OOXML anchor facts to axis/wrap constraints, solve against immutable
-page/container exclusions, and return placement plus exclusion polygon. Feed
-interacting-float iterations through A2 `convergeLayout`; do not duplicate its
-seen-set or safety-limit implementation.
+Keep axis/wrap resolution in `anchor-frame.ts`. Select normative versus
+compatibility blocker geometry in `floats.ts`, delegate only direction/math to
+`axis-aligned-overlap.ts`, and return both object and exclusion translations.
+Extend `convergence.ts` with the generic exact-state driver and migrate paragraph
+anchor reflow, line-wrap measure/resolve, and floating-table final-frame reflow.
+Delete `repeated-state.ts`.
 
 Move only evidenced Office-specific behavior into `compatibility.ts`, with a
-named function, evidence comment, and synthetic test per rule. Delete mutable
-float placement/retry logic from `renderer.ts`.
+named record and test per rule. The issue #676 one-inch square threshold and
+different-paragraph displacement are compatibility rules. Normative
+`allowOverlap=false`, `tblOverlap=never`, and `layoutInCell` remain typed
+constraints rather than compatibility records.
 
-- [ ] **Step 4: Verify Green and deterministic failure**
+- [ ] **C1a Step 4: Verify Green and deterministic failure**
 
 Run the command from Step 2 plus:
 
@@ -90,12 +128,33 @@ pnpm vitest run packages/docx/src/layout/paginator.test.ts packages/docx/src/lay
 pnpm typecheck
 ```
 
-Expected: tests pass; identical input produces identical float fingerprints; an
-oscillating fixture fails with `NON_CONVERGENCE` rather than stale geometry.
+Expected: tests pass; identical input produces identical placement and layout
+fingerprints; a cycle and an all-distinct orbit both fail with
+`NON_CONVERGENCE`; no last candidate is returned.
 
-- [ ] **Step 5: Commit, independently review, fix, and merge PR C1**
+- [ ] **C1a Step 5: Commit, independently review, fix, and merge**
 
-Commit subject: `refactor(docx): solve floating layout as constraints`.
+Commit subject: `refactor(docx): centralize float placement policy`.
+Use the roadmap review gate.
+
+- [ ] **C1b Step 1: Consolidate remaining registry callers and pairwise facts**
+
+Add the blocker-side `tblOverlap=never` fact required by §17.4.56's pairwise
+"either table" rule. Route renderer/table/frame adapters through the same typed
+policy, extract block-cursor retry math, and migrate remaining float-related
+page-anchor/selection fixed points to the shared convergence primitive.
+
+- [ ] **C1b Step 2: Delete duplicated policy and ratchet boundaries**
+
+Delete the scalar overlap adapter and inline blocker filters. Keep the mutable
+registry only as a transport bridge tracked for C3; it must no longer choose
+blocker classes, geometry, direction, tolerance, or retries. Add static/mutation
+checks that observation-derived constants are imported only from
+`compatibility.ts` and displacement math is callable only through `floats.ts`.
+
+- [ ] **C1b Step 3: Review, broad-verify, and merge**
+
+Commit subject: `refactor(docx): unify float placement callers`.
 Use the roadmap review gate.
 
 ### Task C2: Propagate diagnostics and add a synthetic conformance corpus
