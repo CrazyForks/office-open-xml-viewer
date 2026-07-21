@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import wasm from 'vite-plugin-wasm';
-import dts from 'vite-plugin-dts';
+import { dts } from 'rolldown-plugin-dts';
 import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { readFile } from 'fs/promises';
@@ -79,19 +79,18 @@ export default defineConfig({
     wasmAssetUrl(),
     wasm(),
     dts({
-      include: [
-        'src/**/*',
-        'packages/core/src/**/*',
-        'packages/pptx/src/**/*',
-        'packages/xlsx/src/**/*',
-        'packages/docx/src/**/*',
-      ],
-      outDir: 'dist/types',
-      tsconfigPath: './tsconfig.lib.json',
-      rollupTypes: true,
-      skipDiagnostics: true,
+      // TypeScript 7 intentionally has no stable Compiler API yet. Keep the
+      // declaration generator on the TS 6 compatibility package while the
+      // project's normal typecheck uses the native TS 7 CLI.
+      generator: 'tsc',
+      tsconfig: './tsconfig.lib.json',
     }),
   ],
+  // rolldown-plugin-dts emits declarations into the same graph. Oxc should
+  // leave those declaration modules (and normal JavaScript inputs) untouched.
+  oxc: {
+    exclude: [/\.js$/, /\.d\.[cm]?ts$/],
+  },
   build: {
     lib: {
       entry: {
@@ -108,10 +107,19 @@ export default defineConfig({
       // Every modern bundler (Vite / webpack / Rollup / esbuild / Next) and
       // Node ≥ 20 consume ESM, so we ship `.mjs` only.
       formats: ['es'],
-      fileName: (_format, name) => `${name}.mjs`,
+      fileName: (_format, name) =>
+        name.endsWith('.d')
+          ? `.types-work/${name.slice(0, -2)}.d.ts`
+          : `${name}.mjs`,
     },
     rollupOptions: {
-      output: { assetFileNames: '[name][extname]' },
+      output: {
+        assetFileNames: '[name][extname]',
+        chunkFileNames: (chunk) =>
+          chunk.name.endsWith('.d')
+            ? '.types-work/[name]-[hash].d.ts'
+            : '[name]-[hash].js',
+      },
     },
     target: 'esnext',
   },

@@ -150,7 +150,7 @@ jobs:
         run: pnpm typecheck
 
       - name: Build packages
-        run: pnpm build:packages
+        run: pnpm build:packages:ci
 
       - name: DOCX package build ownership
         run: pnpm test:docx-package-build
@@ -158,8 +158,10 @@ jobs:
       - name: Build published package
         run: pnpm build
 
-      - name: DOCX public API compatibility
-        run: node scripts/check-docx-public-api.mjs
+      - name: Public API compatibility
+        run: |
+          pnpm check:public-type-exports
+          node scripts/check-docx-public-api.mjs
 
   # Rendering smoke: boots Storybook, drives the Layouts stories in a real
   # Chrome, and asserts every canvas receives ink. The only CI job that

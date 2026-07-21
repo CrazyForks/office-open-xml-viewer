@@ -21,9 +21,9 @@
   "types": "./dist/types/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/types/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs",
-      "types": "./dist/types/index.d.ts"
+      "require": "./dist/index.cjs"
     },
     "./wasm": "./src/wasm/docx_parser.js",
     "./wasm-binary": "./src/wasm/docx_parser_bg.wasm"
@@ -35,6 +35,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --build && vite build && tsc -p tsconfig.declarations.json",
+    "build:ci": "vite build && tsc -p tsconfig.declarations.json",
     "preview": "vite preview",
     "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/docx_parser.js",
     "typecheck": "tsc --noEmit",
@@ -49,7 +50,7 @@
     "pixelmatch": "^7.1.0",
     "playwright": "^1.59.1",
     "pngjs": "^7.0.0",
-    "typescript": "^6.0.2",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "vite": "^6.3.5",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"
