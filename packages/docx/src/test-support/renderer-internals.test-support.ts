@@ -1,0 +1,58 @@
+import type { DocxDocumentModel } from '../types.js';
+import { productionDocumentInput } from '../layout/resources.js';
+import { createProductionBodyLayoutRuntime } from '../layout/production-body-layout.js';
+import {
+  decodeRaster,
+  preloadPaintImages,
+  type DecodedImage,
+  type DocxFetchImage,
+} from '../paint/browser-images.js';
+import { paintResourceRegistryOf } from '../layout/runtime-state.js';
+import { createDocumentPaintResourceRegistry } from '../layout/production-paint-resources.js';
+import type { LayoutServices } from '../layout/types.js';
+
+const EMPTY_DOCUMENT = {
+  section: {
+    pageWidth: 612,
+    pageHeight: 792,
+    marginTop: 72,
+    marginRight: 72,
+    marginBottom: 72,
+    marginLeft: 72,
+  },
+  body: [],
+  headers: {},
+  footers: {},
+} as unknown as DocxDocumentModel;
+const production = productionDocumentInput(EMPTY_DOCUMENT);
+const bodyInternals = createProductionBodyLayoutRuntime(
+  production.document,
+  null,
+  {},
+  production.bodyModelGateway,
+).internals;
+
+export const {
+  paintedParagraphHeight,
+  physicalLayoutSection: __test_physicalLayoutSection,
+  preRegisterPageFloats: __test_preRegisterPageFloats,
+  resolveAnchorBox: __test_resolveAnchorBox,
+  resolveColumnWidths,
+  resolveShapeBox: __test_resolveShapeBox,
+  sumCellContentHeight,
+  verticalLayoutSection: __test_verticalLayoutSection,
+} = bodyInternals;
+
+export { decodeRaster };
+export type { DecodedImage };
+
+export async function preloadImages(
+  doc: DocxDocumentModel,
+  fetchImage: DocxFetchImage | undefined,
+  services?: LayoutServices,
+): Promise<Map<string, DecodedImage>> {
+  const registry = services
+    ? paintResourceRegistryOf(services)
+    : createDocumentPaintResourceRegistry(doc);
+  return preloadPaintImages(registry.descriptors, fetchImage);
+}

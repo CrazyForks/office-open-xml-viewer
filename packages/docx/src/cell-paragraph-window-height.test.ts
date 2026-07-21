@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { paintedParagraphHeight } from './renderer.js';
+import { paintedParagraphHeight } from './test-support/renderer-internals.test-support.js';
 
 // The live table-cell measurement bridge consumes only the acquired paragraph
 // window. These tests pin its cursor replay until that bridge moves under

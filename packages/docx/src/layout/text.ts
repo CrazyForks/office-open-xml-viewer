@@ -10,6 +10,7 @@ import type {
   FontStyle,
 } from './font-service.js';
 import type { CanvasFontRoute } from '@silurus/ooxml-core';
+export type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
 import type {
   DocParagraph,

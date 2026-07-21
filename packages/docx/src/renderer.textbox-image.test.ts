@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createLayoutServices, preloadImages } from './renderer';
+import { createLayoutServices } from './layout-runtime.js';
+import { preloadImages } from './test-support/renderer-internals.test-support.js';
 import {
   acquireAndPaintShapeTextBox,
   acquireShapeTextBoxForTest,

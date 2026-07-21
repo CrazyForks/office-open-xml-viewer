@@ -6,7 +6,8 @@ import type {
 } from './layout-context.js';
 import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
 import { paintTextBoxLayout } from './paint/canvas-text.js';
-import { createLayoutServices, type DecodedImage } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { type DecodedImage } from './test-support/renderer-internals.test-support.js';
 import type { BodyAcquisitionState } from './layout/acquisition-context.js';
 import { textBoxAcquisitionInput } from './parser-model.js';
 import type { TextBoxLayout } from './layout/types.js';

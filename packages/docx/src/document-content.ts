@@ -2,13 +2,22 @@ import type {
   BodyElement,
   DocParagraph,
   DocRun,
+  DocxTextRun,
+  FieldRun,
   DocTable,
   DocxDocumentModel,
   HeadersFooters,
   ShapeRun,
   ShapeText,
 } from './types.js';
-import { internalFieldRun, internalTextRun } from './parser-model.js';
+
+type InternalRenderedFontAxes = Readonly<{
+  fontFamilyHighAnsi?: string | null;
+  fontFamilyEastAsia?: string | null;
+  fontFamilyCs?: string | null;
+  boldCs?: boolean;
+  italicCs?: boolean;
+}>;
 
 /** One rendered string and every authored font family that can supply it.
  * Empty text records are intentional: paragraph marks and drawing anchors can
@@ -59,7 +68,7 @@ function* shapeBlockUsages(block: ShapeText): Generator<DocxRenderedTextUsage> {
 
 function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
   if (run.type === 'text') {
-    const text = internalTextRun(run);
+    const text = run as DocxTextRun & InternalRenderedFontAxes;
     yield {
       text: run.text,
       fontFamilies: [run.fontFamily, text.fontFamilyHighAnsi, run.fontFamilyEastAsia],
@@ -73,7 +82,7 @@ function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
       italic: run.italicCs ?? false,
     };
   } else if (run.type === 'field') {
-    const field = internalFieldRun(run);
+    const field = run as FieldRun & InternalRenderedFontAxes;
     yield {
       text: field.fallbackText,
       fontFamilies: [field.fontFamily, field.fontFamilyHighAnsi, field.fontFamilyEastAsia],

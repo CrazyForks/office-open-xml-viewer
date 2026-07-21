@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { DocxDocumentModel } from './types.js';
 import {
   attachDocumentLayoutVariants,
@@ -7,6 +7,7 @@ import {
 import { layoutOptionsKey } from './layout/options.js';
 import { layoutVariantStoreOf } from './layout/runtime-state.js';
 import type { DocumentLayout, LayoutServices } from './layout/types.js';
+import { ensureDocumentLayoutVariants } from './layout/document.js';
 
 describe('document canonical layout variants', () => {
   it('keeps default metadata isolated and validates the selected keyed variant', () => {
@@ -57,5 +58,27 @@ describe('document canonical layout variants', () => {
     expect(() => selectDocumentLayoutPage({ ...services }, {
       currentDate: 20, defaultCurrentDateMs: 10,
     }, 0)).toThrow(/variant store.*not attached/i);
+  });
+
+  it('does not resolve the document body again after variants are attached', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const model = {
+      body: [], section: { pageWidth: 100, pageHeight: 200 },
+    } as unknown as DocxDocumentModel;
+    attachDocumentLayoutVariants({
+      model,
+      services,
+      defaultCurrentDateMs: 10,
+      buildLayout: () => ({ pages: [{ pageIndex: 0 } as never], diagnostics: [] }),
+    });
+    const resolveSource = vi.fn(() => {
+      throw new Error('the retained variant must short-circuit document projection');
+    });
+
+    ensureDocumentLayoutVariants(services, 10, resolveSource);
+
+    expect(resolveSource).not.toHaveBeenCalled();
   });
 });

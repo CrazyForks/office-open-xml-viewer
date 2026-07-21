@@ -11,7 +11,8 @@ import type {
   ImageRun,
 } from '../types.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
-import { createLayoutServices, layoutDocument } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
+import { layoutDocument } from '../document-layout.js';
 import { assertDocumentLayout, layoutFingerprint } from '../layout/invariants.js';
 import type {
   DocumentLayout,

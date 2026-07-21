@@ -67,6 +67,23 @@ export function renderDocumentToCanvas(services, input, pageIndex) {
 }
 `;
 
+const canonicalLayoutRuntime = `
+function createConcreteBodyLayoutKernel(doc, context, localMetrics, model) {
+  return { doc, context, localMetrics, model };
+}
+export function createLayoutServices(doc, context, localMetrics) {
+  const productionInput = { bodyModelGateway: {} };
+  const services = {};
+  attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(
+    doc,
+    context,
+    localMetrics,
+    productionInput.bodyModelGateway,
+  ));
+  return services;
+}
+`;
+
 function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') {
   const root = mkdtempSync(join(tmpdir(), prefix));
   write(root, 'packages/docx/src/layout/plain-data.ts',
@@ -195,6 +212,13 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + '}\n'
       + 'export function collectWorkerRuns() { return []; }\n');
   write(root, 'packages/docx/src/renderer.ts', canonicalRenderer);
+  write(root, 'packages/docx/src/layout-runtime.ts', canonicalLayoutRuntime);
+  write(root, 'packages/docx/tests/visual/conformance-fixture.html', `
+<script type="module">
+  import { layoutDocument } from '/src/document-layout.ts';
+  import { createLayoutServices } from '/src/layout-runtime.ts';
+</script>
+`);
   return root;
 }
 
@@ -307,25 +331,31 @@ test('accepts the final canonical producer, retained model, selected variant, an
 
 test('requires one private concrete body-kernel owner with exact loud attachment', () => {
   for (const [name, source] of [
-    ['missing implementation', canonicalRenderer.replace(
+    ['missing implementation', canonicalLayoutRuntime.replace(
       /function createConcreteBodyLayoutKernel[\s\S]*?\n}\n/,
       '',
     )],
-    ['missing attachment', canonicalRenderer.replace(
-      'attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(doc, ctx, localMetrics));',
-      'createConcreteBodyLayoutKernel(doc, ctx, localMetrics);',
+    ['missing attachment', canonicalLayoutRuntime.replace(
+      /attachBodyLayoutKernel\(services, createConcreteBodyLayoutKernel\([\s\S]*?\n  \)\);/,
+      'createConcreteBodyLayoutKernel(doc, context, localMetrics, productionInput.bodyModelGateway);',
     )],
-    ['wrong owner arguments', canonicalRenderer.replace(
-      'attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(doc, ctx, localMetrics));',
-      'attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(doc, ctx));',
+    ['wrong owner arguments', canonicalLayoutRuntime.replace(
+      '    localMetrics,\n    productionInput.bodyModelGateway,',
+      '    productionInput.bodyModelGateway,',
     )],
-    ['duplicate owner', canonicalRenderer.replace(
+    ['wrong model gateway', canonicalLayoutRuntime.replace(
+      '    productionInput.bodyModelGateway,',
+      '    model,',
+    )],
+    ['duplicate owner', canonicalLayoutRuntime.replace(
       'return services;',
-      'attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(doc, ctx, localMetrics));\n  return services;',
+      'attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(\n'
+        + '    doc, context, localMetrics, productionInput.bodyModelGateway,\n'
+        + '  ));\n  return services;',
     )],
   ]) {
     const root = initializeCanonicalFixture(`docx-layout-boundary-owner-${name}-`);
-    write(root, 'packages/docx/src/renderer.ts', source);
+    write(root, 'packages/docx/src/layout-runtime.ts', source);
     expectDiagnostic(root, 'BODY_KERNEL_SERVICE_OWNER', name, '--final');
   }
 });
@@ -769,6 +799,7 @@ test('every reviewed atomic core paint binding remains explicitly allowed', () =
     'autoContrastColor',
     'canvasFontString',
     'crispOffset',
+    'deferBitmapCloseWhileLeased',
     'drawImageCropped',
     'doubleRailGeometry',
     'fillDoubleBorder',
@@ -866,6 +897,9 @@ test('allows only the exact parser normalization gateway and erased contracts', 
     "import { normalizeInternalDocumentModel } from '../parser-model.js';\n"
       + 'export function documentMathOccurrences(doc) {\n'
       + '  return [...normalizeInternalDocumentModel(doc).mathOccurrences];\n'
+      + '}\n'
+      + 'export function productionDocumentInput(doc) {\n'
+      + '  return normalizeInternalDocumentModel(doc);\n'
       + '}\n');
   const allowed = runChecker(root, '--final');
   assert.equal(allowed.status, 0, allowed.output);
@@ -1348,6 +1382,28 @@ test('final renderer import boundary rejects dynamic, bare, and unresolved impor
     write(root, 'packages/docx/src/renderer.ts', `${prefix}${canonicalRenderer}`);
     expectDiagnostic(root, 'FINAL_ADAPTER_IMPORT', name, '--final');
   }
+});
+
+test('browser conformance assets cannot import removed renderer architecture bindings', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-browser-asset-import-');
+  write(root, 'packages/docx/tests/visual/conformance-fixture.html', `
+<script type="module">
+  import { createLayoutServices, layoutDocument } from '/src/renderer.ts';
+</script>
+`);
+  const result = expectDiagnostic(
+    root,
+    'FINAL_RENDERER_ASSET_IMPORT',
+    'removed renderer import in browser asset',
+    '--final',
+  );
+  assert.match(result.output, /conformance-fixture\.html -> createLayoutServices/);
+});
+
+test('the final boundary requires the browser conformance asset', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-browser-asset-missing-');
+  rmSync(join(root, 'packages/docx/tests/visual/conformance-fixture.html'));
+  expectDiagnostic(root, 'FINAL_RENDERER_ASSET_MISSING', 'missing browser asset', '--final');
 });
 
 test('test-only adapters stay excluded from production imports', () => {

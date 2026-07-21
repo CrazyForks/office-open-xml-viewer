@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, layoutDocument, renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import { paragraphMarkBelowBaselinePt, paragraphMarkLineHeight } from './line-layout.js';
 import { paragraphMarkShapeInput } from './parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';

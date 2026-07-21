@@ -6,7 +6,8 @@ import {
   rescaleLayoutLines,
   type LineLayoutEnvironment,
 } from '../line-layout.js';
-import { createLayoutServices, layoutDocument } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
+import { layoutDocument } from '../document-layout.js';
 import type { DocRun, DocxDocumentModel } from '../types.js';
 import type { InternalDocxDocumentModel, InternalFieldRun } from '../parser-model.js';
 import type { TextLayoutService } from './text.js';

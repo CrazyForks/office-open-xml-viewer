@@ -60,8 +60,10 @@ import { normalizeAdjacentTables } from './layout/adjacent-tables.js';
 import { isWrapFloat } from './float-layout.js';
 import type {
   BodyLayoutAcquisitionInput,
+  BodyLayoutInput,
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
+import { projectBodyLayoutInput } from './layout/body-layout-input.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
 import {
@@ -1393,6 +1395,14 @@ export interface InternalShapeRun extends ShapeRun {
 export interface NormalizedDocumentInput {
   readonly document: InternalDocxDocumentModel;
   readonly mathOccurrences: readonly MathOccurrence[];
+  readonly fontFamilyCharsets: Readonly<Record<string, string>>;
+  readonly bodyLayoutInput: BodyLayoutInput;
+  readonly bodyModelGateway: Readonly<{
+    acquisitionInputs: BodyAcquisitionInputProjections;
+    bodySectionIndex: BodySectionIndexInput;
+    effectiveTablePositioning: typeof effectiveTablePositioning;
+    publicAnchorBridge: typeof publicAnchorBridge;
+  }>;
 }
 
 /** Snapshot VML WordArt semantics at the parser/model boundary. The retained
@@ -1770,9 +1780,25 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
   const sectionPlacementInputs = projectSectionPlacementInputs(document);
   sectionPlacementInputsByDocument.set(document, sectionPlacementInputs);
   setBodySectionPlacementInputs(document.body, document.section, sectionPlacementInputs);
+  let bodyLayoutAcquisition: BodyLayoutAcquisitionInput | undefined;
+  const acquiredBodyLayout = (): BodyLayoutAcquisitionInput => (
+    bodyLayoutAcquisition ??= bodyLayoutAcquisitionInput(document)
+  );
   return Object.freeze({
     document,
     mathOccurrences: Object.freeze(occurrences),
+    fontFamilyCharsets: Object.freeze({ ...(internalDocumentModel(document).fontFamilyCharsets ?? {}) }),
+    get bodyLayoutInput() {
+      return projectBodyLayoutInput(acquiredBodyLayout());
+    },
+    bodyModelGateway: Object.freeze({
+      acquisitionInputs: bodyAcquisitionInputProjections,
+      get bodySectionIndex() {
+        return acquiredBodyLayout().sectionIndex;
+      },
+      effectiveTablePositioning,
+      publicAnchorBridge,
+    }),
   });
 }
 

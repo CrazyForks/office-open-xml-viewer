@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import {
-  createLayoutServices,
-  layoutDocument,
-  renderDocumentToCanvas,
-  type DocxTextRunInfo,
-} from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
+import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type {
   DocxDocumentModel,

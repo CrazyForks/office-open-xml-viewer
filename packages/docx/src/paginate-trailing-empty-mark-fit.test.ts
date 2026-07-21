@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, layoutDocument } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type {
   BodyElement,

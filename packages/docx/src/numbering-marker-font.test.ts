@@ -1,9 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import {
-  createLayoutServices,
-  renderDocumentToCanvas,
-  type DocxTextRunInfo,
-} from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
 import {
   acquireAndPaintShapeTextBox,
   shapeAcquisitionState,

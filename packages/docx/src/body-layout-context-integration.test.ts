@@ -4,10 +4,8 @@ import {
   resolveDocumentLayoutSettings,
   resolveSectionLayoutContext,
 } from './layout-context.js';
-import {
-  computeColumns,
-  resolveBodyParagraphLayoutContext,
-} from './renderer.js';
+import { computeSectionColumns as computeColumns } from './layout-context.js';
+import { resolveBodyParagraphLayoutContext } from './layout/acquisition-state.js';
 import { bodyAcquisitionInputProjections } from './parser-model.js';
 import type {
   DocParagraph,

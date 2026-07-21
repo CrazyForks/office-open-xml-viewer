@@ -7,7 +7,8 @@
 <body>
   <script type="module">
     import { DocxDocument } from '/src/index.ts';
-    import { createLayoutServices, layoutDocument } from '/src/renderer.ts';
+    import { layoutDocument } from '/src/document-layout.ts';
+    import { createLayoutServices } from '/src/layout-runtime.ts';
     import {
       assertDocumentLayout,
       layoutFingerprint,

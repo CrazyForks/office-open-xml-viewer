@@ -15,7 +15,8 @@ import type {
   RenderWorkerRequest,
   RenderWorkerResponse,
 } from './worker-protocol.js';
-import { createLayoutServices, layoutDocument } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import { DocxDocument } from './document.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { stableFingerprint } from './layout/fingerprint.js';

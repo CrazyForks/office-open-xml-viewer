@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
-import { createLayoutServices, layoutDocument } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import type { LayoutPage, PaintNode } from './layout/types.js';
 import type {
   BodyElement,

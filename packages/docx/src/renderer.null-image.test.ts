@@ -18,7 +18,8 @@ vi.mock('@silurus/ooxml-core', async (importOriginal) => {
   };
 });
 
-import { preloadImages, renderDocumentToCanvas } from './renderer';
+import { preloadImages } from './test-support/renderer-internals.test-support.js';
+import { renderDocumentToCanvas } from './renderer';
 import { getCachedBitmapByPath } from '@silurus/ooxml-core';
 import type {
   BodyElement,

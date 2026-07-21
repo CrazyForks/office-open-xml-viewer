@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { layoutDocument } from './document-layout.js';
-import { createLayoutServices, resolveColumnWidths } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { resolveColumnWidths } from './test-support/renderer-internals.test-support.js';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { bodyAcquisitionInputProjections } from './parser-model.js';
 import type { ParagraphLayoutContext } from './layout-context.js';

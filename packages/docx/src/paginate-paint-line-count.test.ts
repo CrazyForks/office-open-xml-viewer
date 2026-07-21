@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, layoutDocument, renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 

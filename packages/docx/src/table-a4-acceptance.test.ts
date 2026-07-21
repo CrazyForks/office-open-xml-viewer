@@ -8,7 +8,7 @@ import type {
   CanvasPaintResourcePainter,
   PaintCanvas2D,
 } from './paint/types.js';
-import { createLayoutServices } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
 import { createLayoutServicesRuntimeView } from './layout/runtime-state.js';
 import type {
   BodyElement,

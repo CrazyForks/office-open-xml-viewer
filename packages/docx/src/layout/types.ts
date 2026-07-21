@@ -17,6 +17,9 @@ import type {
 
 export type { TextLayoutService } from './text.js';
 export type { ImageMetadataService, MathMetadataService } from './resources.js';
+export type { HyperlinkTarget } from '@silurus/ooxml-core';
+export type { MathRenderer } from '@silurus/ooxml-core';
+export type { MathLayoutResource, MathOccurrence } from './resources.js';
 
 export type LayoutNodeId = string;
 
@@ -406,6 +409,9 @@ export type PaintResourceDescriptorKind = InlineResourceKind;
 export type ImagePaintResourceDescriptor = Readonly<{
   kind: 'image' | 'picture-bullet';
   resourceKey: string;
+  /** Authored image traversal order, retained across registry key sorting so
+   * path-keyed decode deduplication preserves the first document occurrence. */
+  documentOrder?: number;
   partPath: string;
   mimeType: string;
   intrinsicSize: Readonly<{ widthPt: number; heightPt: number }>;

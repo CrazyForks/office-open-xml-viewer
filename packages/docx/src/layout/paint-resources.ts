@@ -43,6 +43,10 @@ function validateDescriptor(descriptor: PaintResourceDescriptor): void {
   switch (descriptor.kind) {
     case 'image':
     case 'picture-bullet': {
+      if (descriptor.documentOrder !== undefined
+        && (!Number.isSafeInteger(descriptor.documentOrder) || descriptor.documentOrder < 0)) {
+        throw new TypeError('documentOrder must be a non-negative safe integer');
+      }
       assertNonEmptyString(descriptor.partPath, 'partPath');
       assertNonEmptyString(descriptor.mimeType, 'mimeType');
       if (descriptor.svgImagePath !== undefined) {

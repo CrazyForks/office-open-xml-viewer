@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, layoutDocument, renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
+import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
 import type {
   BodyElement, DocParagraph, DocxTextRun, SectionProps, DocxDocumentModel,
   SectionGeom,
@@ -546,7 +548,7 @@ describe('per-section text direction (§17.6.20, issue #1000) — split slices a
   });
 
   it('layoutDocument reports each page own textDirection', async () => {
-    const { layoutDocument } = await import('./renderer.js');
+    const { layoutDocument } = await import('./document-layout.js');
     const layout = layoutDocument(mixedDoc());
     expect(layout.pages.length).toBe(2);
     expect(layout.pages[0].section.textDirection).toBe('btLr');

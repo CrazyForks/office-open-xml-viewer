@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, resolveColumnWidths } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { resolveColumnWidths } from './test-support/renderer-internals.test-support.js';
 import { buildSegments, layoutLines } from './line-layout.js';
 import { bodyAcquisitionInputProjections } from './parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
