@@ -479,15 +479,22 @@ function assertRendererAcquisitionProjectionBoundary(root) {
       || (ts.isElementAccessExpression(expression)
         && expression.argumentExpression
         && staticString(expression.argumentExpression) === 'acquisitionInputs')
-      || (ts.isIdentifier(expression)
-        && expression.text === 'bodyAcquisitionInputProjections')
     )
   );
-  const enclosingFunctionName = (node) => {
+  const buildMeasureStateOwner = source.statements.find((statement) => (
+    ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'buildMeasureState'
+  ));
+  const enclosingFunction = (node) => {
     let current = node.parent;
     while (current) {
-      if (ts.isFunctionDeclaration(current)) return current.name?.text ?? null;
-      if (ts.isFunctionExpression(current) || ts.isArrowFunction(current)) return null;
+      if (ts.isFunctionDeclaration(current)
+        || ts.isFunctionExpression(current)
+        || ts.isArrowFunction(current)
+        || ts.isMethodDeclaration(current)
+        || ts.isGetAccessorDeclaration(current)
+        || ts.isSetAccessorDeclaration(current)
+        || ts.isConstructorDeclaration(current)) return current;
       current = current.parent;
     }
     return null;
@@ -496,7 +503,7 @@ function assertRendererAcquisitionProjectionBoundary(root) {
     if (ts.isIdentifier(node)
       && node.text === 'bodyAcquisitionInputProjections'
       && !ts.isImportSpecifier(node.parent)
-      && enclosingFunctionName(node) !== 'buildMeasureState') {
+      && enclosingFunction(node) !== buildMeasureStateOwner) {
       fail(
         'RENDERER_ACQUISITION_PROJECTION_BYPASS',
         `${DOCX_SOURCE}/renderer.ts uses bodyAcquisitionInputProjections outside buildMeasureState`,

@@ -535,6 +535,18 @@ test('renderer body acquisition cannot bypass its injected parser projections', 
         + canonicalRenderer,
     ],
     [
+      'nested owner impersonation',
+      "import { bodyAcquisitionInputProjections } from './parser-model.js';\n"
+        + canonicalRenderer.replace(
+          'return { doc, ctx, localMetrics };',
+          'function buildMeasureState() {\n'
+            + '    bodyAcquisitionInputProjections.tableFormatInput();\n'
+            + '  }\n'
+            + '  buildMeasureState();\n'
+            + '  return { doc, ctx, localMetrics };',
+        ),
+    ],
+    [
       'computed non-injected projection access',
       canonicalRenderer.replace(
         'return { doc, ctx, localMetrics };',
