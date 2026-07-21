@@ -1546,7 +1546,6 @@ function buildMeasureState(
           mode: 'square',
           side: 'bothSides',
           imageKey: '',
-          drawn: true,
           paraId: state.floatParaSeq++,
           avoidOverlap: true,
           tableOverlap: request.overlap,
@@ -1946,7 +1945,7 @@ function createConcreteBodyLayoutKernel(
             yTop: bounds.yPt * scale,
             yBottom: (bounds.yPt + bounds.heightPt) * scale,
             side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-            paraId: index, drawn: true,
+            paraId: index,
           })),
           floatParaSeq: request.floatingTableExclusions?.length ?? 0,
           pageAnchorPrescanned: new Set<DocParagraph>(),
@@ -3397,7 +3396,7 @@ function createConcreteBodyLayoutKernel(
               side: entry.wrapSide ?? 'bothSides',
               distLeft: left * scale, distRight: right * scale,
               distTop: top * scale, distBottom: bottom * scale,
-              paraId: entry.paragraphId, drawn: true,
+              paraId: entry.paragraphId,
             };
             return entry.kind === 'table'
               ? {
@@ -4294,7 +4293,6 @@ function registerImageFloat(
     mode,
     side: img.wrapSide ?? 'bothSides',
     imageKey: key,
-    drawn: false,
     paraId,
     avoidOverlap: true,
     allowOverlap,
@@ -4326,7 +4324,6 @@ function registerChartFloat(
     avoidOverlap: true,
     paraId,
     imageKey: '',
-    drawn: false,
   });
 }
 
@@ -4377,9 +4374,6 @@ function registerShapeFloat(
     mode,
     side: shape.wrapSide ?? 'bothSides',
     imageKey: '',
-    // Retained drawing paint owns the shape; mark the exclusion as already
-    // represented so the bitmap resource path skips it.
-    drawn: true,
     paraId,
     avoidOverlap: true,
     allowOverlap: true,

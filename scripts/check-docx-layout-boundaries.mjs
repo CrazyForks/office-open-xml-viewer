@@ -23,6 +23,7 @@ const ACQUISITION_CONTEXT = `${LAYOUT_SOURCE}/acquisition-context.ts`;
 const ACQUISITION_STATE = `${LAYOUT_SOURCE}/acquisition-state.ts`;
 const ACQUISITION_INPUT_PROJECTIONS = `${LAYOUT_SOURCE}/acquisition-input-projections.ts`;
 const ANCHOR_CLASSIFICATION = `${LAYOUT_SOURCE}/anchor-classification.ts`;
+const FLOAT_WRAP = `${LAYOUT_SOURCE}/float-wrap.ts`;
 const MEASUREMENT_ENVIRONMENT = `${LAYOUT_SOURCE}/measurement-environment.ts`;
 const MEASUREMENT_CAPABILITIES = `${LAYOUT_SOURCE}/measurement-capabilities.ts`;
 const SECTION_ORIENTATION = `${LAYOUT_SOURCE}/section-orientation.ts`;
@@ -529,6 +530,35 @@ function assertRendererAcquisitionProjectionBoundary(root) {
     ts.forEachChild(node, visit);
   };
   ts.forEachChild(source, visit);
+}
+
+function assertFloatRectTransportBoundary(root) {
+  const path = resolve(root, FLOAT_WRAP);
+  if (!existsSync(path)) return;
+  const source = sourceFile(path);
+  const visit = (node) => {
+    if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node))
+      && node.text === 'drawn') {
+      const parent = node.parent;
+      const isStaticPropertyName = (
+        (ts.isPropertyAccessExpression(parent) && parent.name === node)
+        || (ts.isElementAccessExpression(parent) && parent.argumentExpression === node)
+        || (ts.isPropertyAssignment(parent) && parent.name === node)
+        || (ts.isShorthandPropertyAssignment(parent) && parent.name === node)
+        || (ts.isPropertyDeclaration(parent) && parent.name === node)
+        || (ts.isPropertySignature(parent) && parent.name === node)
+        || (ts.isMethodDeclaration(parent) && parent.name === node)
+        || (ts.isGetAccessorDeclaration(parent) && parent.name === node)
+        || (ts.isSetAccessorDeclaration(parent) && parent.name === node)
+        || (ts.isBindingElement(parent) && (parent.propertyName ?? parent.name) === node)
+      );
+      if (isStaticPropertyName) {
+        fail('FLOAT_RECT_TRANSITIONAL_STATE', `${FLOAT_WRAP}#drawn`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
 }
 
 function assertFloatPlacementAuthority(root) {
@@ -4029,6 +4059,7 @@ export function checkDocxLayoutBoundaries(options) {
   assertNoProductionTestSupportImports(root);
   assertAcquisitionContextBoundary(root);
   assertRendererAcquisitionProjectionBoundary(root);
+  assertFloatRectTransportBoundary(root);
   assertFloatPlacementAuthority(root);
   assertNoDeletedPageProducerIdentifiers(root);
   assertPaintBoundaries(root);

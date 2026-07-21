@@ -322,7 +322,6 @@ export interface PushFloatOpts {
   mode: 'square' | 'topAndBottom';
   side: string;
   imageKey: string;
-  drawn: boolean;
   paraId: number;
   kind: FloatRect['kind'];
   /** Required at runtime for table entries; the resulting FloatRect and typed
@@ -393,7 +392,6 @@ export function pushFloatRect(state: FloatRegistrationState, o: PushFloatOpts): 
     distTop: o.dt,
     distBottom: o.db,
     paraId: o.paraId,
-    drawn: o.drawn,
   };
   const rect: FloatRect = o.kind === 'table'
     ? { ...core, kind: 'table', tableOverlap: o.tableOverlap! }
@@ -447,7 +445,6 @@ export function registerFrameFloat(box: FrameBox, fp: FramePr, state: FloatRegis
     // (resolveLineFloatWindow then takes the widest free gap around it).
     side: fp.dropCap === 'drop' || fp.dropCap === 'margin' ? 'right' : 'bothSides',
     imageKey: box.exclusionId ?? '',
-    drawn: true, // retained frame paint owns it; deferred resource paint must skip it.
     paraId,
     avoidOverlap: false, // frames opt out of overlap re-seating.
   });

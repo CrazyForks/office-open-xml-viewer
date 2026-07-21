@@ -67,7 +67,7 @@ function leftBand(floatRightPx: number, floatBottomPx: number): FloatRect {
     imageX: 0, imageY: 0, imageW: floatRightPx, imageH: floatBottomPx,
     xLeft: 0, xRight: floatRightPx, yTop: 0, yBottom: floatBottomPx,
     side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-    paraId: 1, drawn: false,
+    paraId: 1,
   } as FloatRect;
 }
 

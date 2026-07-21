@@ -63,7 +63,6 @@ function denseStar(vertexCount: number, step: number): FloatRect {
     distTop: 0,
     distBottom: 0,
     paraId: 1,
-    drawn: false,
   };
 }
 
@@ -593,7 +592,6 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-      drawn: false,
     }]);
 
     const { window, diagnostics } = computePreparedLineFloatWindowWithDiagnostics(
@@ -638,7 +636,6 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-      drawn: false,
     }]);
 
     const { window } = computePreparedLineFloatWindowWithDiagnostics(
@@ -672,7 +669,6 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-      drawn: false,
     }]);
     const { window: secondWindow } = computePreparedLineFloatWindowWithDiagnostics(
       0, 5, 0.005, 0, 11, secondPrepared, 0, 11,
@@ -707,7 +703,6 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-      drawn: false,
     }]);
 
     const { window } = computePreparedLineFloatWindowWithDiagnostics(
@@ -744,7 +739,6 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-      drawn: false,
     }]);
 
     const { window } = computePreparedLineFloatWindowWithDiagnostics(
@@ -786,7 +780,6 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-      drawn: false,
     }]);
     const { window: rightGap } = computePreparedLineFloatWindowWithDiagnostics(
       2, 0.1, 0.1, 0, 3, rightGapPrepared, 0, 3,
@@ -819,7 +812,6 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-      drawn: false,
     }]);
     const { window: leftGap } = computePreparedLineFloatWindowWithDiagnostics(
       11, 0.1, 0.1, 0, 5, leftGapPrepared, 0, 5,
@@ -855,7 +847,6 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-      drawn: false,
     });
     const prepared = prepareFloatWrap([
       polygonFloat('left-root-boundary', [

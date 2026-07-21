@@ -5,7 +5,6 @@ import {
 import { EAST_ASIAN_RE } from './layout/text.js';
 import {
   resolveDefaultTabPt,
-  type DocGridCtx,
 } from './line-layout.js';
 import { jcIsFullyJustified, jcStretchesLastLine } from './bidi-line.js';
 import { prepareBodyFrameMetadata } from './layout/frame.js';
@@ -240,17 +239,6 @@ export function resolveSectionLayoutContext(
     sectionBidi: false,
     verticalAlignment: section.vAlign ?? 'top',
     lineNumbering: section.lineNumbering ?? undefined,
-  };
-}
-
-/** Temporary bridge for call sites that still consume the legacy grid shape. */
-export function toLegacyDocGridContext(
-  section: SectionLayoutContext,
-): DocGridCtx {
-  return {
-    type: section.grid.kind === 'none' ? null : section.grid.kind,
-    linePitchPt: section.grid.linePitchPt,
-    charSpacePt: section.grid.charSpacePt,
   };
 }
 

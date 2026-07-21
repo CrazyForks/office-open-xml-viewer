@@ -1492,6 +1492,17 @@ test('every deleted final producer and legacy stamp identifier is rejected exact
   }
 });
 
+test('FloatRect transport cannot regain the deleted drawn state', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-float-drawn-state-');
+  write(root, 'packages/docx/src/layout/float-wrap.ts', `
+interface FloatRectCore {
+  drawn: boolean;
+}
+export type FloatRect = FloatRectCore & { kind: 'shape' };
+`);
+  expectDiagnostic(root, 'FLOAT_RECT_TRANSITIONAL_STATE', 'FloatRect.drawn', '--final');
+});
+
 test('legacy stamp property guards do not ban unrelated local variable names', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-local-column-index-');
   write(root, 'packages/docx/src/layout/local-index.ts',

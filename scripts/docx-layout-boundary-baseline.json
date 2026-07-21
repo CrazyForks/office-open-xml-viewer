@@ -3,9 +3,7 @@
   "legacySymbolCounts": {
     "packages/docx/src/renderer.ts#measureCellContentHeightPx": 2
   },
-  "migrationIdentifierCounts": {
-    "packages/docx/src/layout-context.ts#toLegacyDocGridContext": 1
-  },
+  "migrationIdentifierCounts": {},
   "nonLayoutDeclarationKeys": [
     "packages/docx/src/anchor-geometry.ts#FunctionDeclaration#resolveAnchorX",
     "packages/docx/src/anchor-geometry.ts#FunctionDeclaration#resolveAnchorY",
@@ -132,7 +130,6 @@
     "packages/docx/src/layout-context.ts#FunctionDeclaration#resolveParagraphLayoutContext",
     "packages/docx/src/layout-context.ts#FunctionDeclaration#resolveRunLayoutContext",
     "packages/docx/src/layout-context.ts#FunctionDeclaration#resolveSectionLayoutContext",
-    "packages/docx/src/layout-context.ts#FunctionDeclaration#toLegacyDocGridContext",
     "packages/docx/src/layout-context.ts#InterfaceDeclaration#CharacterGridPolicy",
     "packages/docx/src/layout-context.ts#InterfaceDeclaration#DocumentLayoutSettings",
     "packages/docx/src/layout-context.ts#InterfaceDeclaration#LineGridPolicy",

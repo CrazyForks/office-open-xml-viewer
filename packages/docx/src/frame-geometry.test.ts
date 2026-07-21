@@ -130,7 +130,6 @@ describe('legacy float transport facts', () => {
       mode: 'square',
       side: 'bothSides',
       imageKey: '',
-      drawn: true,
       paraId: 0,
       avoidOverlap: true,
     })).toThrow('Floating-table transport omitted tblOverlap');
@@ -157,7 +156,6 @@ describe('legacy float transport facts', () => {
         distTop: 0,
         distBottom: 0,
         paraId: 1,
-        drawn: true,
       }],
     });
 
@@ -174,7 +172,6 @@ describe('legacy float transport facts', () => {
       mode: 'square',
       side: 'bothSides',
       imageKey: 'moving',
-      drawn: true,
       paraId: 2,
       allowOverlap: true,
       avoidOverlap: true,

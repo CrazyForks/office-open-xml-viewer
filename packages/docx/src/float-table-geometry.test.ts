@@ -290,7 +290,6 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
     expect(f.mode).toBe('square');
     expect(f.side).toBe('right');
     expect(f.imageKey).toBe(''); // non-image float (table painted directly)
-    expect(f.drawn).toBe(true);
     expect(f.xLeft).toBe(0 - 5); // box.x − leftFromText
     expect(f.xRight).toBe(0 + 150 + 9); // box.x + tableW + rightFromText
     expect(f.yTop).toBe(b.y - 3);
@@ -314,7 +313,7 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
         kind: 'table', tableOverlap: 'overlap', mode: 'square',
         imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
         xLeft: 0, xRight: 200, yTop: 300, yBottom: 360, side: 'bothSides',
-        distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0, drawn: true,
+        distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0,
       }],
     });
     // A new floating table at page-left x=0 overlapping the blocker; never ⇒ avoid.
@@ -351,7 +350,6 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
       distTop: 4,
       distBottom: 8,
       paraId: 1,
-      drawn: true,
     };
     const st = makeState({ floatParaSeq: 1, floats: [blocker] });
     const tp = tblp({
@@ -383,7 +381,7 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
       imageX: 20, imageY: 30, imageW: 60, imageH: 20,
       xLeft: 20, xRight: 80, yTop: 30, yBottom: 50, side: 'bothSides',
       distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-      paraId: 7, drawn: true,
+      paraId: 7,
     };
     const st = makeState({ floatParaSeq: 8, floats: [child] });
     const tp = tblp({
@@ -422,7 +420,7 @@ describe('floating table float registration (§17.4.57 / §17.4.56)', () => {
         mode: 'square' as const,
         imageKey: '', imageX: 0, imageY: 300, imageW: 200, imageH: 60,
       xLeft: 0, xRight: 200, yTop: 300, yBottom: 360, side: 'bothSides',
-      distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0, drawn: true,
+      distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 0,
       };
       return kind === 'table'
         ? { ...core, kind: 'table', tableOverlap: 'overlap' }

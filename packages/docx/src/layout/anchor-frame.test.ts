@@ -474,7 +474,7 @@ describe('retained anchor frame geometry', () => {
       xLeft: bounds.xPt, xRight: bounds.xPt + bounds.widthPt,
       yTop: bounds.yPt, yBottom: bounds.yPt + bounds.heightPt,
       side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-      paraId: 0, drawn: false,
+      paraId: 0,
     }]);
 
     expect(oracle.lineWindow({

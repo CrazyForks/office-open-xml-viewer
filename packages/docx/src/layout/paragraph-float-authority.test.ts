@@ -25,7 +25,6 @@ const float = (
   distTop: 4,
   distBottom: 4,
   paraId: 0,
-  drawn: true,
   ...overrides,
 });
 
