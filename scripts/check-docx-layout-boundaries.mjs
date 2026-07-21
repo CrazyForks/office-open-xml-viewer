@@ -200,6 +200,31 @@ const ACQUISITION_INPUT_PROJECTION_DECLARATIONS = new Set([
   'BodyAcquisitionInputProjections',
 ]);
 
+const EXACT_ACQUISITION_SURFACE_MEMBERS = new Map([
+  [ACQUISITION_INPUT_PROJECTIONS, new Map([
+    ['BodyAcquisitionInputProjections', new Set([
+      'numberingMarkerShapeInput',
+      'paragraphMarkShapeInput',
+      'tableFormatInput',
+      'tableColumnLayoutInput',
+      'tableParticipatesInOrdinaryFlow',
+      'paragraphAcquisitionInput',
+    ])],
+  ])],
+  [MEASUREMENT_CAPABILITIES, new Map([
+    ['MeasurementTextContext', new Set([
+      'font',
+      'letterSpacing',
+      'fontKerning',
+      'measureText',
+    ])],
+    ['VerticalGlyphMeasurementService', new Set([
+      'fingerprint',
+      'measureRunInkExtra',
+    ])],
+  ])],
+]);
+
 const ACQUISITION_CONTEXT_CONSUMERS = [
   `${DOCX_SOURCE}/anchor-geometry.ts`,
   `${DOCX_SOURCE}/float-table-geometry.ts`,
@@ -282,6 +307,39 @@ function assertAcquisitionContextBoundary(root) {
         if (name && ACQUISITION_PAINT_PROPERTIES.has(name)) {
           fail('ACQUISITION_PAINT_CAPABILITY', `${file}#${name}`);
         }
+      }
+    }
+    const exactInterfaces = EXACT_ACQUISITION_SURFACE_MEMBERS.get(file);
+    if (!exactInterfaces) continue;
+    const unexpectedDeclarations = [...declarations]
+      .filter((name) => !requiredDeclarations.has(name));
+    if (unexpectedDeclarations.length > 0) {
+      fail(
+        'ACQUISITION_CONTEXT_SURFACE',
+        `${file} extra declarations ${unexpectedDeclarations.sort().join(',')}`,
+      );
+    }
+    for (const [interfaceName, expectedMembers] of exactInterfaces) {
+      const declaration = source.statements.find((statement) => (
+        ts.isInterfaceDeclaration(statement) && statement.name.text === interfaceName
+      ));
+      if (!declaration || declaration.heritageClauses?.length) {
+        fail('ACQUISITION_CONTEXT_SURFACE', `${file}#${interfaceName} heritage`);
+      }
+      const memberNames = declaration.members.map((member) => (
+        member.name && (ts.isIdentifier(member.name) || ts.isStringLiteralLike(member.name))
+          ? member.name.text
+          : null
+      ));
+      const actualMembers = new Set(memberNames.filter((name) => name !== null));
+      const exact = memberNames.length === expectedMembers.size
+        && actualMembers.size === expectedMembers.size
+        && [...expectedMembers].every((name) => actualMembers.has(name));
+      if (!exact) {
+        fail(
+          'ACQUISITION_CONTEXT_SURFACE',
+          `${file}#${interfaceName} members ${[...actualMembers].sort().join(',')}`,
+        );
       }
     }
   }

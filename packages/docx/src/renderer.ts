@@ -447,7 +447,10 @@ export function createLayoutServices(
         ? 'vertical-glyph-measurement:dom-vert-probe-v1'
         : 'vertical-glyph-measurement:no-dom-vert-probe-v1',
     measureRunInkExtra(text: string): number {
-      return canvasContext === null ? 0 : verticalRunInkExtraPx(canvasContext, text);
+      if (canvasContext === null) {
+        throw new Error('Vertical glyph measurement requires a concrete text context');
+      }
+      return verticalRunInkExtraPx(canvasContext, text);
     },
   });
   const routedFontFamilies = [...new Set([

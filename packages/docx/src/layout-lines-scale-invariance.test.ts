@@ -196,6 +196,17 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
     )).toThrow(/vertical glyph measurement capability is required/i);
   });
 
+  it('fails closed when vertical lines are rescaled without the bound capability', () => {
+    const { ctx } = makeLinearCtx();
+    const stamp = layoutVerticalTestLines(
+      ctx,
+      [textSeg('縦書き', 10, { verticalRun: true })],
+    );
+
+    expect(() => rescaleLayoutLines(stamp, 2, ctx, {}, 0))
+      .toThrow(/vertical glyph measurement capability is required/i);
+  });
+
   it('removes horizontal kern compression only for a vertical run', () => {
     const text = '、。「」ー';
     const makeCtx = (): CanvasRenderingContext2D => ({
