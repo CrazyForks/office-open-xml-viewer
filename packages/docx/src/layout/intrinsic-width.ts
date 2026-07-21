@@ -341,6 +341,7 @@ export function measureParagraphIntrinsicWidths(
     context.stretchLastLine,
     undefined,
     'intrinsic',
+    environment.verticalGlyphMeasurement,
   );
   const oppositeIndentPt = context.baseRtl
     ? context.physicalIndentLeftPt

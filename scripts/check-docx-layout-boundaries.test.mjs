@@ -85,6 +85,26 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + 'export interface FloatRegistrationState {}\n'
       + 'export interface PhysicalAnchorFrame {}\n'
       + 'export interface RetainedTableRecord {}\n');
+  write(root, 'packages/docx/src/layout/acquisition-input-projections.ts',
+    'export interface BodyAcquisitionInputProjections {\n'
+      + '  numberingMarkerShapeInput(): unknown;\n'
+      + '  paragraphMarkShapeInput(): unknown;\n'
+      + '  tableFormatInput(): unknown;\n'
+      + '  tableColumnLayoutInput(): unknown;\n'
+      + '  tableParticipatesInOrdinaryFlow(): unknown;\n'
+      + '  paragraphAcquisitionInput(): unknown;\n'
+      + '}\n');
+  write(root, 'packages/docx/src/layout/measurement-capabilities.ts',
+    'export interface MeasurementTextContext {\n'
+      + '  font: string;\n'
+      + '  letterSpacing: string;\n'
+      + '  fontKerning: unknown;\n'
+      + '  measureText(text: string): unknown;\n'
+      + '}\n'
+      + 'export interface VerticalGlyphMeasurementService {\n'
+      + '  fingerprint: string;\n'
+      + '  measureRunInkExtra(text: string): number;\n'
+      + '}\n');
   write(root, 'packages/docx/src/layout/affine.ts',
     "import type { PointPt } from './types.js';\n"
       + 'export const composeAffine = (point: PointPt) => point;\n');
@@ -349,6 +369,51 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     'images',
     '--final',
   );
+
+  const measurementRoot = initializeCanonicalFixture('docx-layout-boundary-measurement-paint-');
+  write(
+    measurementRoot,
+    'packages/docx/src/layout/measurement-capabilities.ts',
+    'export interface MeasurementTextContext { canvas: HTMLCanvasElement }\n'
+      + 'export interface VerticalGlyphMeasurementService { measureRunInkExtra(text: string): number }\n',
+  );
+  expectDiagnostic(
+    measurementRoot,
+    'ACQUISITION_PAINT_CAPABILITY',
+    'canvas',
+    '--final',
+  );
+
+  for (const [label, source, detail] of [
+    [
+      'unlisted member',
+      'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown; fillRect(): void }\n'
+        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number }\n',
+      'fillRect',
+    ],
+    [
+      'heritage clause',
+      'export interface MeasurementTextContext extends CanvasRenderingContext2D { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
+        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number }\n',
+      'heritage',
+    ],
+    [
+      'extra declaration',
+      'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
+        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number }\n'
+        + 'export interface PaintEscape { fillRect(): void }\n',
+      'PaintEscape',
+    ],
+  ]) {
+    const exactRoot = initializeCanonicalFixture(`docx-layout-boundary-measurement-${label.replace(' ', '-')}-`);
+    write(exactRoot, 'packages/docx/src/layout/measurement-capabilities.ts', source);
+    expectDiagnostic(
+      exactRoot,
+      'ACQUISITION_CONTEXT_SURFACE',
+      detail,
+      '--final',
+    );
+  }
 
   const edgeRoot = initializeCanonicalFixture('docx-layout-boundary-acquisition-edge-');
   write(

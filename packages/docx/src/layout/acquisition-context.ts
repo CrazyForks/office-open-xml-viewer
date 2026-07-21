@@ -9,8 +9,12 @@ import type {
   SectionLayoutContext,
   StoryContext,
 } from '../layout-context.js';
-import type { TextMeasurer } from '../paragraph-measure.js';
 import type { DocParagraph } from '../types.js';
+import type {
+  MeasurementTextContext,
+  VerticalGlyphMeasurementService,
+} from './measurement-capabilities.js';
+import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type {
   RetainedTableAcquisition,
@@ -75,8 +79,13 @@ export interface AnchorFloatRegistrationState extends FloatRegistrationState {
  * produced from this cursor; it never reuses or mutates the cursor itself.
  */
 export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
-  /** Canvas is a synchronous text-metric authority only. */
-  ctx: TextMeasurer['context'];
+  /** Synchronous text metrics with no backing-canvas or paint surface. */
+  ctx: MeasurementTextContext;
+  /** Vertical glyph metrics bound to the same concrete measurement context,
+   * without exposing its backing canvas to acquisition consumers. */
+  verticalGlyphMeasurement: VerticalGlyphMeasurementService;
+  /** Required parser-to-layout fact projections. */
+  acquisitionInputs: BodyAcquisitionInputProjections;
   /** Acquisition coordinate scale in pixels per point. */
   scale: number;
   /** Current logical text container, already in acquisition pixels. */
@@ -117,6 +126,8 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
 export type BodyMeasurementContext = Readonly<Pick<
   BodyAcquisitionState,
   | 'ctx'
+  | 'verticalGlyphMeasurement'
+  | 'acquisitionInputs'
   | 'scale'
   | 'pageH'
   | 'pageWidth'

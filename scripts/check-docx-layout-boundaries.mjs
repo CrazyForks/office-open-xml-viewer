@@ -20,6 +20,8 @@ const PARAGRAPH_ANCHOR_FRAME_ADAPTER = `${DOCX_SOURCE}/paragraph-anchor-frame-ad
 const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
 const TEXT_RUN_PROJECTION_ADAPTER = `${DOCX_SOURCE}/text-run-projection.ts`;
 const ACQUISITION_CONTEXT = `${LAYOUT_SOURCE}/acquisition-context.ts`;
+const ACQUISITION_INPUT_PROJECTIONS = `${LAYOUT_SOURCE}/acquisition-input-projections.ts`;
+const MEASUREMENT_CAPABILITIES = `${LAYOUT_SOURCE}/measurement-capabilities.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
 const LAYOUT_AFFINE = `${LAYOUT_SOURCE}/affine.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
@@ -189,6 +191,40 @@ const ACQUISITION_CONTEXT_DECLARATIONS = new Set([
   'RetainedTableRecord',
 ]);
 
+const MEASUREMENT_CAPABILITY_DECLARATIONS = new Set([
+  'MeasurementTextContext',
+  'VerticalGlyphMeasurementService',
+]);
+
+const ACQUISITION_INPUT_PROJECTION_DECLARATIONS = new Set([
+  'BodyAcquisitionInputProjections',
+]);
+
+const EXACT_ACQUISITION_SURFACE_MEMBERS = new Map([
+  [ACQUISITION_INPUT_PROJECTIONS, new Map([
+    ['BodyAcquisitionInputProjections', new Set([
+      'numberingMarkerShapeInput',
+      'paragraphMarkShapeInput',
+      'tableFormatInput',
+      'tableColumnLayoutInput',
+      'tableParticipatesInOrdinaryFlow',
+      'paragraphAcquisitionInput',
+    ])],
+  ])],
+  [MEASUREMENT_CAPABILITIES, new Map([
+    ['MeasurementTextContext', new Set([
+      'font',
+      'letterSpacing',
+      'fontKerning',
+      'measureText',
+    ])],
+    ['VerticalGlyphMeasurementService', new Set([
+      'fingerprint',
+      'measureRunInkExtra',
+    ])],
+  ])],
+]);
+
 const ACQUISITION_CONTEXT_CONSUMERS = [
   `${DOCX_SOURCE}/anchor-geometry.ts`,
   `${DOCX_SOURCE}/float-table-geometry.ts`,
@@ -198,10 +234,15 @@ const ACQUISITION_CONTEXT_CONSUMERS = [
 ];
 
 const ACQUISITION_PAINT_PROPERTIES = new Set([
+  'canvas',
   'defaultColor',
   'dpr',
+  'drawImage',
   'dryRun',
+  'fillText',
   'images',
+  'restore',
+  'save',
   'showTrackChanges',
 ]);
 
@@ -237,30 +278,77 @@ function assertNoProductionTestSupportImports(root) {
 }
 
 function assertAcquisitionContextBoundary(root) {
-  const contextPath = resolve(root, ACQUISITION_CONTEXT);
-  if (!existsSync(contextPath)) {
-    fail('ACQUISITION_CONTEXT_SURFACE', `${ACQUISITION_CONTEXT} missing`);
-  }
-  const source = sourceFile(contextPath);
-  const declarations = new Set(source.statements.flatMap(declarationNames));
-  for (const name of ACQUISITION_CONTEXT_DECLARATIONS) {
-    if (!declarations.has(name)) {
-      fail('ACQUISITION_CONTEXT_SURFACE', `${ACQUISITION_CONTEXT} missing ${name}`);
+  const surfaces = new Map([
+    [ACQUISITION_CONTEXT, ACQUISITION_CONTEXT_DECLARATIONS],
+    [ACQUISITION_INPUT_PROJECTIONS, ACQUISITION_INPUT_PROJECTION_DECLARATIONS],
+    [MEASUREMENT_CAPABILITIES, MEASUREMENT_CAPABILITY_DECLARATIONS],
+  ]);
+  for (const [file, requiredDeclarations] of surfaces) {
+    const path = resolve(root, file);
+    if (!existsSync(path)) {
+      fail('ACQUISITION_CONTEXT_SURFACE', `${file} missing`);
     }
-  }
-  for (const statement of source.statements) {
-    if (!ts.isInterfaceDeclaration(statement)) continue;
-    for (const member of statement.members) {
-      if (!ts.isPropertySignature(member) || !member.name) continue;
-      const name = ts.isIdentifier(member.name) || ts.isStringLiteralLike(member.name)
-        ? member.name.text
-        : null;
-      if (name && ACQUISITION_PAINT_PROPERTIES.has(name)) {
-        fail('ACQUISITION_PAINT_CAPABILITY', `${ACQUISITION_CONTEXT}#${name}`);
+    const source = sourceFile(path);
+    const declarations = new Set(source.statements.flatMap(declarationNames));
+    for (const name of requiredDeclarations) {
+      if (!declarations.has(name)) {
+        fail('ACQUISITION_CONTEXT_SURFACE', `${file} missing ${name}`);
+      }
+    }
+    for (const statement of source.statements) {
+      if (!ts.isInterfaceDeclaration(statement)) continue;
+      for (const member of statement.members) {
+        if ((!ts.isPropertySignature(member) && !ts.isMethodSignature(member)) || !member.name) {
+          continue;
+        }
+        const name = ts.isIdentifier(member.name) || ts.isStringLiteralLike(member.name)
+          ? member.name.text
+          : null;
+        if (name && ACQUISITION_PAINT_PROPERTIES.has(name)) {
+          fail('ACQUISITION_PAINT_CAPABILITY', `${file}#${name}`);
+        }
+      }
+    }
+    const exactInterfaces = EXACT_ACQUISITION_SURFACE_MEMBERS.get(file);
+    if (!exactInterfaces) continue;
+    const unexpectedDeclarations = [...declarations]
+      .filter((name) => !requiredDeclarations.has(name));
+    if (unexpectedDeclarations.length > 0) {
+      fail(
+        'ACQUISITION_CONTEXT_SURFACE',
+        `${file} extra declarations ${unexpectedDeclarations.sort().join(',')}`,
+      );
+    }
+    for (const [interfaceName, expectedMembers] of exactInterfaces) {
+      const declaration = source.statements.find((statement) => (
+        ts.isInterfaceDeclaration(statement) && statement.name.text === interfaceName
+      ));
+      if (!declaration || declaration.heritageClauses?.length) {
+        fail('ACQUISITION_CONTEXT_SURFACE', `${file}#${interfaceName} heritage`);
+      }
+      const memberNames = declaration.members.map((member) => (
+        member.name && (ts.isIdentifier(member.name) || ts.isStringLiteralLike(member.name))
+          ? member.name.text
+          : null
+      ));
+      const actualMembers = new Set(memberNames.filter((name) => name !== null));
+      const exact = memberNames.length === expectedMembers.size
+        && actualMembers.size === expectedMembers.size
+        && [...expectedMembers].every((name) => actualMembers.has(name));
+      if (!exact) {
+        fail(
+          'ACQUISITION_CONTEXT_SURFACE',
+          `${file}#${interfaceName} members ${[...actualMembers].sort().join(',')}`,
+        );
       }
     }
   }
-  const inspected = [ACQUISITION_CONTEXT, ...ACQUISITION_CONTEXT_CONSUMERS];
+  const inspected = [
+    ACQUISITION_CONTEXT,
+    ACQUISITION_INPUT_PROJECTIONS,
+    MEASUREMENT_CAPABILITIES,
+    ...ACQUISITION_CONTEXT_CONSUMERS,
+  ];
   for (const file of inspected) {
     const path = resolve(root, file);
     if (!existsSync(path)) continue;

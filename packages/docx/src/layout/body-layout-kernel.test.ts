@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { LayoutServices } from './types.js';
 import type { BodyLayoutKernel } from './body-layout-kernel.js';
+import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 import {
   attachBodyLayoutKernel,
+  attachVerticalGlyphMeasurementService,
   bodyLayoutKernelOf,
   createFieldAcquisitionServicesView,
+  verticalGlyphMeasurementServiceOf,
 } from './runtime-state.js';
 
 const services = (): LayoutServices => Object.freeze({
@@ -46,5 +49,25 @@ describe('private body layout kernel ownership', () => {
     }))).toThrow(/missing service lineage/i);
     expect(first).not.toHaveProperty('bodyLayoutKernel');
     expect(Object.keys(first)).toEqual(['text', 'images', 'math']);
+  });
+
+  it('keeps vertical measurement on the private document owner and its views', () => {
+    const owned = services();
+    const unowned = services();
+    const vertical = Object.freeze({
+      fingerprint: 'vertical:test',
+      measureRunInkExtra: (_text: string) => 0,
+    }) satisfies VerticalGlyphMeasurementService;
+    const kernel = { openBodyLayoutSession() { throw new Error('unused'); } } as BodyLayoutKernel;
+
+    attachVerticalGlyphMeasurementService(owned, vertical);
+    attachBodyLayoutKernel(owned, kernel);
+    const fieldView = createFieldAcquisitionServicesView(owned, { totalPages: 2 });
+
+    expect(verticalGlyphMeasurementServiceOf(owned)).toBe(vertical);
+    expect(verticalGlyphMeasurementServiceOf(fieldView)).toBe(vertical);
+    expect(() => verticalGlyphMeasurementServiceOf(unowned)).toThrow(/not attached/i);
+    expect(() => attachVerticalGlyphMeasurementService(owned, vertical)).toThrow(/already attached/i);
+    expect(Object.keys(owned)).toEqual(['text', 'images', 'math']);
   });
 });

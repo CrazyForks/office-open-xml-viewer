@@ -9,6 +9,8 @@ import {
   type LayoutTextSeg,
   type WrapLayoutCtx,
 } from './line-layout.js';
+import { verticalRunInkExtraPx } from './vertical-text.js';
+import type { VerticalGlyphMeasurementService } from './layout/measurement-capabilities.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 4-1 B2 Stage 1 — scale-invariance characterization of `layoutLines`.
@@ -33,6 +35,37 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface MeasureCall { font: string; text: string; }
+
+function layoutVerticalTestLines(
+  ctx: CanvasRenderingContext2D,
+  segments: LayoutSeg[],
+  verticalGlyphMeasurement: VerticalGlyphMeasurementService = Object.freeze({
+    fingerprint: 'vertical:test-context',
+    measureRunInkExtra: (text: string) => verticalRunInkExtraPx(ctx, text),
+  }),
+): LayoutLine[] {
+  return layoutLines(
+    ctx,
+    segments,
+    200,
+    0,
+    1,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    verticalGlyphMeasurement,
+  );
+}
 
 /** A recording 2D-context stub whose glyph advance is EXACTLY `perPx · px · n`
  *  (linear in the font px size). Font-metric ascent/descent are the fixed 0.8/0.2
@@ -151,6 +184,29 @@ function assertScaleLinear(a: LayoutLine[], b: LayoutLine[], s: number, tol = 1e
 const SCALES = [1.5, 2, 3];
 
 describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, the algorithm is scale-clean', () => {
+  it('fails closed when vertical text has no glyph measurement capability', () => {
+    const { ctx } = makeLinearCtx();
+
+    expect(() => layoutLines(
+      ctx,
+      [textSeg('縦書き', 10, { verticalRun: true })],
+      200,
+      0,
+      1,
+    )).toThrow(/vertical glyph measurement capability is required/i);
+  });
+
+  it('fails closed when vertical lines are rescaled without the bound capability', () => {
+    const { ctx } = makeLinearCtx();
+    const stamp = layoutVerticalTestLines(
+      ctx,
+      [textSeg('縦書き', 10, { verticalRun: true })],
+    );
+
+    expect(() => rescaleLayoutLines(stamp, 2, ctx, {}, 0))
+      .toThrow(/vertical glyph measurement capability is required/i);
+  });
+
   it('removes horizontal kern compression only for a vertical run', () => {
     const text = '、。「」ー';
     const makeCtx = (): CanvasRenderingContext2D => ({
@@ -168,12 +224,9 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
     }) as unknown as CanvasRenderingContext2D;
 
     const horizontal = layoutLines(makeCtx(), [textSeg(text)], 200, 0, 1);
-    const vertical = layoutLines(
+    const vertical = layoutVerticalTestLines(
       makeCtx(),
       [textSeg(text, 10, { verticalRun: true })],
-      200,
-      0,
-      1,
     );
     expect(horizontal[0].segments[0].measuredWidth).toBe(40);
     expect(vertical[0].segments[0].measuredWidth).toBe(50);
@@ -202,12 +255,9 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
       },
     } as unknown as CanvasRenderingContext2D;
 
-    const lines = layoutLines(
+    const lines = layoutVerticalTestLines(
       ctx,
       [textSeg(text, 10, { verticalRun: true, kerning: 1 })],
-      200,
-      0,
-      1,
     );
 
     expect(lines[0].segments[0].measuredWidth).toBe(50);
@@ -234,16 +284,18 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
         } as TextMetrics;
       },
     } as unknown as CanvasRenderingContext2D;
-    const stamp = layoutLines(
+    const verticalGlyphMeasurement = Object.freeze({
+      fingerprint: 'vertical:test-context',
+      measureRunInkExtra: (value: string) => verticalRunInkExtraPx(ctx, value),
+    }) satisfies VerticalGlyphMeasurementService;
+    const stamp = layoutVerticalTestLines(
       ctx,
       [textSeg(text, 10, { verticalRun: true, kerning: 1 })],
-      200,
-      0,
-      1,
+      verticalGlyphMeasurement,
     );
     measuredStates.length = 0;
 
-    rescaleLayoutLines(stamp, 2, ctx, {}, 0);
+    rescaleLayoutLines(stamp, 2, ctx, {}, 0, false, verticalGlyphMeasurement);
 
     expect(new Set(measuredStates)).toEqual(new Set<CanvasFontKerning>(['normal']));
     expect(ctx.fontKerning).toBe('auto');

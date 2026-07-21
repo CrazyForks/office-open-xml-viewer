@@ -62,6 +62,7 @@ import type {
   BodyLayoutAcquisitionInput,
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
+import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
 import {
   wordTableCellSpacingValuePt,
@@ -1794,3 +1795,15 @@ export function internalParagraph(paragraph: DocParagraph): InternalDocParagraph
 export function internalDocumentModel(doc: DocxDocumentModel): InternalDocxDocumentModel {
   return doc as InternalDocxDocumentModel;
 }
+
+/** One explicit parser-owned projection record composed by the renderer and
+ * consumed by parser-independent retained acquisition. Function identities are
+ * preserved: this record introduces no compatibility wrappers. */
+export const bodyAcquisitionInputProjections = Object.freeze({
+  numberingMarkerShapeInput,
+  paragraphMarkShapeInput,
+  tableFormatInput,
+  tableColumnLayoutInput,
+  tableParticipatesInOrdinaryFlow,
+  paragraphAcquisitionInput,
+}) satisfies BodyAcquisitionInputProjections;
