@@ -123,7 +123,7 @@ describe('measureParagraph', () => {
       imageX: xLeft, imageY: 0, imageW: xRight - xLeft, imageH: 20,
       xLeft, xRight, yTop: 0, yBottom: 20,
       side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-      paraId: 0, drawn: false,
+      paraId: 0,
     });
     const oracle = createFloatWrapOracle([
       float('A', 40, 60),
@@ -149,7 +149,7 @@ describe('measureParagraph', () => {
       imageKey: 'compiled-through', imageX: 10, imageY: 0, imageW: 80, imageH: 80,
       xLeft: 10, xRight: 90, yTop: 0, yBottom: 80,
       side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-      paraId: 0, drawn: false,
+      paraId: 0,
     }]);
     const query = () => oracle.lineWindow({
       topYPt: 30, minimumStartWidthPt: 1, probeHeightPt: 10,
@@ -262,7 +262,7 @@ describe('measureParagraph', () => {
       imageX: 0, imageY: 10, imageW: 80, imageH: 30,
       xLeft: 0, xRight: 80, yTop: 10, yBottom: 40,
       side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-      paraId: 1, drawn: false,
+      paraId: 1,
     };
 
     const result = measureParagraph(

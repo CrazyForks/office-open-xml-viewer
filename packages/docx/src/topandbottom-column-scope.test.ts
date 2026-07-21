@@ -63,7 +63,6 @@ function topAndBottomBand(r: {
     distTop: 0,
     distBottom: 0,
     paraId: 1,
-    drawn: false,
   } as FloatRect;
 }
 

@@ -2819,7 +2819,7 @@ function measurementPlacement(
           yBottom: exclusion.bounds.yPt + exclusion.bounds.heightPt,
           side: exclusion.wrapSide ?? 'bothSides',
           distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
-          paraId: index, drawn: false,
+          paraId: index,
         })), {
           xLeftPt: pageReference?.xPt ?? options.placement.paragraphXPt,
           xRightPt: pageReference

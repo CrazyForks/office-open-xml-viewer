@@ -123,8 +123,6 @@ interface FloatRectCore {
    *  never displace each other, while different-paragraph floats do. ECMA-376
    *  does not define this scoping; see compatibility.ts and floats.ts. */
   paraId: number;
-  /** true once the image itself has been drawn (drawn after its paragraph lays out). */
-  drawn: boolean;
 }
 
 export type FloatRect =

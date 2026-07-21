@@ -11,7 +11,6 @@ import {
   resolveParagraphLayoutContext,
   resolveRunLayoutContext,
   resolveSectionLayoutContext,
-  toLegacyDocGridContext,
   type StoryContext,
 } from './layout-context.js';
 
@@ -183,11 +182,6 @@ describe('layout context resolvers', () => {
     ]);
     expect(context.grid).toEqual({
       kind: 'snapToChars',
-      linePitchPt: 20,
-      charSpacePt: 1,
-    });
-    expect(toLegacyDocGridContext(context)).toEqual({
-      type: 'snapToChars',
       linePitchPt: 20,
       charSpacePt: 1,
     });

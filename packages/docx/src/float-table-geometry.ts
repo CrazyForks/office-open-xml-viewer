@@ -189,7 +189,6 @@ export function registerTableFloat(
     mode: 'square',
     side,
     imageKey: '', // non-image float: retained table paint owns it.
-    drawn: true, // deferred resource paint must skip this retained table.
     paraId,
     avoidOverlap: !preResolved,
   });
