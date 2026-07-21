@@ -5,6 +5,32 @@ export type ParagraphBorderEdges = Readonly<{
   bottom: 'bottom' | 'none';
 }>;
 
+export interface ParagraphBorderMerge {
+  suppressTop?: boolean;
+  suppressBottom?: boolean;
+}
+
+export interface ParagraphBorderSegment {
+  side: 'top' | 'bottom' | 'left' | 'right';
+  edge: ParaBorderEdge;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** Vertical extent reserved below text for a visible bottom paragraph border.
+ * ECMA-376 §17.3.1.7 places the centered stroke after `w:space`. */
+export function bottomBorderExtentPt(
+  borders: ParagraphBorders | null | undefined,
+  merge?: ParagraphBorderMerge,
+): number {
+  if (!borders || merge?.suppressBottom) return 0;
+  const bottom = borders.bottom;
+  if (!bottom || bottom.style === 'none') return 0;
+  return (bottom.space ?? 0) + (bottom.width ?? 0) / 2;
+}
+
 function effectiveEdge(edge: ParaBorderEdge | null): ParaBorderEdge | null {
   return edge == null || edge.style === 'none' ? null : edge;
 }

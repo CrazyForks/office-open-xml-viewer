@@ -20,8 +20,11 @@ const PARAGRAPH_ANCHOR_FRAME_ADAPTER = `${DOCX_SOURCE}/paragraph-anchor-frame-ad
 const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
 const TEXT_RUN_PROJECTION_ADAPTER = `${DOCX_SOURCE}/text-run-projection.ts`;
 const ACQUISITION_CONTEXT = `${LAYOUT_SOURCE}/acquisition-context.ts`;
+const ACQUISITION_STATE = `${LAYOUT_SOURCE}/acquisition-state.ts`;
 const ACQUISITION_INPUT_PROJECTIONS = `${LAYOUT_SOURCE}/acquisition-input-projections.ts`;
+const MEASUREMENT_ENVIRONMENT = `${LAYOUT_SOURCE}/measurement-environment.ts`;
 const MEASUREMENT_CAPABILITIES = `${LAYOUT_SOURCE}/measurement-capabilities.ts`;
+const SECTION_ORIENTATION = `${LAYOUT_SOURCE}/section-orientation.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
 const LAYOUT_AFFINE = `${LAYOUT_SOURCE}/affine.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
@@ -200,6 +203,32 @@ const ACQUISITION_INPUT_PROJECTION_DECLARATIONS = new Set([
   'BodyAcquisitionInputProjections',
 ]);
 
+const ACQUISITION_STATE_DECLARATIONS = new Set([
+  'BODY_STORY_CONTEXT',
+  'resolveBodyParagraphLayoutContext',
+  'resolveStateParagraphLayoutContext',
+  'withTableCellStory',
+  'retainedTableRecord',
+]);
+
+const MEASUREMENT_ENVIRONMENT_DECLARATIONS = new Set([
+  'canonicalParagraphTextScaleEligible',
+  'docDefaultFontSizePt',
+  'paragraphMeasurementEnvironment',
+  'segmentEnvironmentOf',
+  'snapParaLineToGrid',
+  'gridForParagraphContext',
+]);
+
+const SECTION_ORIENTATION_DECLARATIONS = new Set([
+  'isVerticalSection',
+  'isVerticalTextDirection',
+  'isAllRotatedVerticalTextDirection',
+  'verticalLayoutSection',
+  'verticalLayoutDoc',
+  'physicalLayoutSection',
+]);
+
 const EXACT_ACQUISITION_SURFACE_MEMBERS = new Map([
   [ACQUISITION_INPUT_PROJECTIONS, new Map([
     ['BodyAcquisitionInputProjections', new Set([
@@ -280,8 +309,11 @@ function assertNoProductionTestSupportImports(root) {
 function assertAcquisitionContextBoundary(root) {
   const surfaces = new Map([
     [ACQUISITION_CONTEXT, ACQUISITION_CONTEXT_DECLARATIONS],
+    [ACQUISITION_STATE, ACQUISITION_STATE_DECLARATIONS],
     [ACQUISITION_INPUT_PROJECTIONS, ACQUISITION_INPUT_PROJECTION_DECLARATIONS],
+    [MEASUREMENT_ENVIRONMENT, MEASUREMENT_ENVIRONMENT_DECLARATIONS],
     [MEASUREMENT_CAPABILITIES, MEASUREMENT_CAPABILITY_DECLARATIONS],
+    [SECTION_ORIENTATION, SECTION_ORIENTATION_DECLARATIONS],
   ]);
   for (const [file, requiredDeclarations] of surfaces) {
     const path = resolve(root, file);
@@ -344,9 +376,7 @@ function assertAcquisitionContextBoundary(root) {
     }
   }
   const inspected = [
-    ACQUISITION_CONTEXT,
-    ACQUISITION_INPUT_PROJECTIONS,
-    MEASUREMENT_CAPABILITIES,
+    ...surfaces.keys(),
     ...ACQUISITION_CONTEXT_CONSUMERS,
   ];
   for (const file of inspected) {

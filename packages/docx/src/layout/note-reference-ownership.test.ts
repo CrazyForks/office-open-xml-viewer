@@ -1,14 +1,34 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildNoteNumberMap,
   endnoteIdsInRetainedSlice,
   footnoteIdsInRetainedLines,
   footnoteIdsInRetainedSlice,
+  indexNotes,
   noteReferenceIdsInDocumentOrder,
 } from './note-reference-ownership.js';
-import type { BodyElement } from '../types.js';
+import type { BodyElement, DocNote } from '../types.js';
 import type { LineLayout, ParagraphLayout, TableLayout } from './types.js';
 
 describe('retained note reference ownership', () => {
+  it('numbers available notes once in first-reference order and indexes their content', () => {
+    const notes = [
+      { id: 'part-first', content: [] },
+      { id: 'part-second', content: [] },
+      { id: 'unreferenced', content: [] },
+    ] as unknown as DocNote[];
+
+    expect([...buildNoteNumberMap(notes, [
+      'part-second', 'missing', 'part-second', 'part-first',
+    ])]).toEqual([
+      ['part-second', 1],
+      ['part-first', 2],
+    ]);
+    expect(indexNotes(notes)).toEqual(new Map(notes.map((note) => [note.id, note])));
+    expect(buildNoteNumberMap(undefined, ['part-first'])).toEqual(new Map());
+    expect(indexNotes(undefined)).toEqual(new Map());
+  });
+
   it('deduplicates only footnote markers painted by the retained line slice', () => {
     const lines = [{
       range: { start: 0, end: 1 }, baselinePt: 8, advancePt: 10,
