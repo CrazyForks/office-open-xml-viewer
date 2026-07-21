@@ -480,6 +480,94 @@ test('layout acquisition ownership cannot be bypassed by removing a required mod
   }
 });
 
+test('renderer body acquisition cannot bypass its injected parser projections', () => {
+  for (const [label, importSource] of [
+    [
+      'direct paragraph projection',
+      "import { paragraphAcquisitionInput } from './parser-model.js';\n",
+    ],
+    [
+      'aliased table projection',
+      "import { tableFormatInput as formatTable } from './parser-model.js';\n",
+    ],
+    [
+      'namespace projection access',
+      "import * as parserModel from './parser-model.js';\n",
+    ],
+    [
+      'CommonJS projection access',
+      "const parserModel = require('./parser-model.js');\n",
+    ],
+    [
+      'dynamic projection access',
+      "const parserModelPromise = import('./parser-model.js');\n",
+    ],
+  ]) {
+    const root = initializeCanonicalFixture(
+      `docx-layout-boundary-renderer-projection-${label.replaceAll(' ', '-')}-`,
+    );
+    write(
+      root,
+      'packages/docx/src/renderer.ts',
+      importSource + canonicalRenderer,
+    );
+    expectDiagnostic(
+      root,
+      'RENDERER_ACQUISITION_PROJECTION_BYPASS',
+      label,
+      '--final',
+    );
+  }
+
+  for (const [label, rendererSource] of [
+    [
+      'global projection record use',
+      "import { bodyAcquisitionInputProjections } from './parser-model.js';\n"
+        + canonicalRenderer.replace(
+          'return { doc, ctx, localMetrics };',
+          'bodyAcquisitionInputProjections.paragraphAcquisitionInput();\n'
+            + '  return { doc, ctx, localMetrics };',
+        ),
+    ],
+    [
+      'aliased projection record',
+      "import { bodyAcquisitionInputProjections as projections } from './parser-model.js';\n"
+        + canonicalRenderer,
+    ],
+    [
+      'nested owner impersonation',
+      "import { bodyAcquisitionInputProjections } from './parser-model.js';\n"
+        + canonicalRenderer.replace(
+          'return { doc, ctx, localMetrics };',
+          'function buildMeasureState() {\n'
+            + '    bodyAcquisitionInputProjections.tableFormatInput();\n'
+            + '  }\n'
+            + '  buildMeasureState();\n'
+            + '  return { doc, ctx, localMetrics };',
+        ),
+    ],
+    [
+      'computed non-injected projection access',
+      canonicalRenderer.replace(
+        'return { doc, ctx, localMetrics };',
+        "doc['parserFacts']['paragraph' + 'AcquisitionInput']();\n"
+          + '  return { doc, ctx, localMetrics };',
+      ),
+    ],
+  ]) {
+    const root = initializeCanonicalFixture(
+      `docx-layout-boundary-renderer-projection-${label.replaceAll(' ', '-')}-`,
+    );
+    write(root, 'packages/docx/src/renderer.ts', rendererSource);
+    expectDiagnostic(
+      root,
+      'RENDERER_ACQUISITION_PROJECTION_BYPASS',
+      label,
+      '--final',
+    );
+  }
+});
+
 test('coordinate-space and page-factory accept only their explicit dependencies', () => {
   assert.equal(runChecker(initializeCanonicalFixture(), '--final').status, 0);
   for (const [name, path, source] of [

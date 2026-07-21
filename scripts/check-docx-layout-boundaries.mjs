@@ -402,6 +402,135 @@ function assertAcquisitionContextBoundary(root) {
   }
 }
 
+function assertRendererAcquisitionProjectionBoundary(root) {
+  const renderer = resolve(root, DOCX_SOURCE, 'renderer.ts');
+  if (!existsSync(renderer)) return;
+  const parserModel = resolve(root, PARSER_MODEL);
+  const injectedProjectionMembers = new Set([
+    'paragraphAcquisitionInput',
+    'tableFormatInput',
+  ]);
+
+  for (const edge of moduleEdges(renderer)) {
+    if (!edge.literal) continue;
+    const targetsParserModel = resolveLocalImport(renderer, edge.specifier) === parserModel
+      || edge.specifier === './parser-model.js';
+    if (!targetsParserModel) continue;
+    const importsProjectionDirectly = edge.importedNames?.some((name) => (
+      name === '*' || name === 'default' || injectedProjectionMembers.has(name)
+    ));
+    if (edge.kind !== 'import' || importsProjectionDirectly) {
+      fail(
+        'RENDERER_ACQUISITION_PROJECTION_BYPASS',
+        `${DOCX_SOURCE}/renderer.ts ${edge.kind} ${edge.specifier}`,
+      );
+    }
+  }
+
+  const source = sourceFile(renderer);
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    const targetsParserModel = resolveLocalImport(renderer, statement.moduleSpecifier.text)
+      === parserModel || statement.moduleSpecifier.text === './parser-model.js';
+    if (!targetsParserModel) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const element of bindings.elements) {
+      const imported = element.propertyName?.text ?? element.name.text;
+      if (imported === 'bodyAcquisitionInputProjections'
+        && element.name.text !== 'bodyAcquisitionInputProjections') {
+        fail(
+          'RENDERER_ACQUISITION_PROJECTION_BYPASS',
+          `${DOCX_SOURCE}/renderer.ts aliases bodyAcquisitionInputProjections`,
+        );
+      }
+    }
+  }
+  const staticString = (expression) => {
+    if (ts.isParenthesizedExpression(expression)) return staticString(expression.expression);
+    if (ts.isStringLiteralLike(expression)) return expression.text;
+    if (ts.isBinaryExpression(expression)
+      && expression.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const left = staticString(expression.left);
+      const right = staticString(expression.right);
+      return left === null || right === null ? null : left + right;
+    }
+    return null;
+  };
+  const projectionMember = (expression) => {
+    if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+    if (ts.isElementAccessExpression(expression)
+      && expression.argumentExpression) {
+      return staticString(expression.argumentExpression);
+    }
+    return null;
+  };
+  const projectionReceiver = (expression) => (
+    ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)
+      ? expression.expression
+      : null
+  );
+  const isInjectedReceiver = (expression) => (
+    expression !== null
+    && (
+      (ts.isPropertyAccessExpression(expression)
+        && expression.name.text === 'acquisitionInputs')
+      || (ts.isElementAccessExpression(expression)
+        && expression.argumentExpression
+        && staticString(expression.argumentExpression) === 'acquisitionInputs')
+    )
+  );
+  const buildMeasureStateOwner = source.statements.find((statement) => (
+    ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'buildMeasureState'
+  ));
+  const enclosingFunction = (node) => {
+    let current = node.parent;
+    while (current) {
+      if (ts.isFunctionDeclaration(current)
+        || ts.isFunctionExpression(current)
+        || ts.isArrowFunction(current)
+        || ts.isMethodDeclaration(current)
+        || ts.isGetAccessorDeclaration(current)
+        || ts.isSetAccessorDeclaration(current)
+        || ts.isConstructorDeclaration(current)) return current;
+      current = current.parent;
+    }
+    return null;
+  };
+  const visit = (node) => {
+    if (ts.isIdentifier(node)
+      && node.text === 'bodyAcquisitionInputProjections'
+      && !ts.isImportSpecifier(node.parent)
+      && enclosingFunction(node) !== buildMeasureStateOwner) {
+      fail(
+        'RENDERER_ACQUISITION_PROJECTION_BYPASS',
+        `${DOCX_SOURCE}/renderer.ts uses bodyAcquisitionInputProjections outside buildMeasureState`,
+      );
+    }
+    if (ts.isCallExpression(node)) {
+      if (ts.isIdentifier(node.expression)
+        && injectedProjectionMembers.has(node.expression.text)) {
+        fail(
+          'RENDERER_ACQUISITION_PROJECTION_BYPASS',
+          `${DOCX_SOURCE}/renderer.ts calls ${node.expression.text} directly`,
+        );
+      }
+      const member = projectionMember(node.expression);
+      if (member && injectedProjectionMembers.has(member)
+        && !isInjectedReceiver(projectionReceiver(node.expression))) {
+        fail(
+          'RENDERER_ACQUISITION_PROJECTION_BYPASS',
+          `${DOCX_SOURCE}/renderer.ts calls ${member} outside acquisitionInputs`,
+        );
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(source, visit);
+}
+
 function assertFloatPlacementAuthority(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
   const authority = `${LAYOUT_SOURCE}/floats.ts`;
@@ -3899,6 +4028,7 @@ export function checkDocxLayoutBoundaries(options) {
   const allowTransitionalParagraphAnchorAdapter = baselineExists && !options.final;
   assertNoProductionTestSupportImports(root);
   assertAcquisitionContextBoundary(root);
+  assertRendererAcquisitionProjectionBoundary(root);
   assertFloatPlacementAuthority(root);
   assertNoDeletedPageProducerIdentifiers(root);
   assertPaintBoundaries(root);
