@@ -42,17 +42,19 @@ describe('paragraph float authority projection', () => {
   });
 
   it('projects retained wrap semantics without renderer state', () => {
+    const polygon = Object.freeze([
+      Object.freeze({ xPt: 11, yPt: 21 }),
+      Object.freeze({ xPt: 43, yPt: 21 }),
+      Object.freeze({ xPt: 43, yPt: 67 }),
+    ]);
     const input = float({
       anchorOccurrenceId: 'shape:0',
       authoredWrap: 'tight',
-      wrapPolygon: [
-        { xPt: 11, yPt: 21 },
-        { xPt: 43, yPt: 21 },
-        { xPt: 43, yPt: 67 },
-      ],
+      wrapPolygon: polygon,
     });
 
-    expect(paragraphWrapExclusions([input], 'body:0')).toEqual([{
+    const exclusions = paragraphWrapExclusions([input], 'body:0');
+    expect(exclusions).toEqual([{
       id: 'body:0:float:0',
       wrap: 'tight',
       wrapSide: 'left',
@@ -61,5 +63,6 @@ describe('paragraph float authority projection', () => {
       anchorOccurrenceId: 'shape:0',
       verticalOwnership: 'page',
     }]);
+    expect(exclusions[0]!.polygon).toBe(polygon);
   });
 });

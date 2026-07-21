@@ -66,6 +66,14 @@ function denseStar(vertexCount: number, step: number): FloatRect {
   };
 }
 
+function frozenDenseStar(vertexCount: number, step: number): Readonly<FloatRect> {
+  const star = denseStar(vertexCount, step);
+  return Object.freeze({
+    ...star,
+    wrapPolygon: Object.freeze(star.wrapPolygon!.map((point) => Object.freeze({ ...point }))),
+  });
+}
+
 function edgeXAt(
   edge: CompiledPolygonWrap['edges'][number],
   yPt: number,
@@ -930,6 +938,170 @@ describe('polygon line-window active sweep complexity', () => {
     expect(seen.size).toBe(polygon.contourSpans.length);
     expect(maximumIndexDepth)
       .toBeLessThanOrEqual(Math.ceil(Math.log2(polygon.contourSpans.length + 1)) + 1);
+  });
+
+  it('compiles one immutable dense star once across a linear number of acquisitions', () => {
+    const vertexCount = 31;
+    const acquisitionCount = vertexCount;
+    const star = frozenDenseStar(vertexCount, 15);
+    const compiled: CompiledPolygonWrap[] = [];
+    const totals = {
+      polygonCompileCount: 0,
+      polygonCacheHitCount: 0,
+      polygonSnapshotPointCount: 0,
+    };
+
+    for (let index = 0; index < acquisitionCount; index += 1) {
+      const diagnostics = {
+        polygonCompileCount: 0,
+        polygonCacheHitCount: 0,
+        polygonSnapshotPointCount: 0,
+      };
+      compiled.push(prepareFloatWrap([star], diagnostics).floats[0]!.polygon!);
+      totals.polygonCompileCount += diagnostics.polygonCompileCount;
+      totals.polygonCacheHitCount += diagnostics.polygonCacheHitCount;
+      totals.polygonSnapshotPointCount += diagnostics.polygonSnapshotPointCount;
+    }
+
+    expect(new Set(compiled).size).toBe(1);
+    expect(totals).toEqual({
+      polygonCompileCount: 1,
+      polygonCacheHitCount: acquisitionCount - 1,
+      polygonSnapshotPointCount: acquisitionCount * vertexCount,
+    });
+    expect(compiled[0]!.intersectionCount)
+      .toBeGreaterThanOrEqual(vertexCount * (vertexCount - 3) / 4);
+  });
+
+  it('keys an immutable polygon compilation by exact kind and bounds', () => {
+    const star = frozenDenseStar(15, 7);
+    const first = prepareFloatWrap([star]).floats[0]!.polygon!;
+    const changedKind = prepareFloatWrap([{
+      ...star,
+      authoredWrap: 'through',
+    }]).floats[0]!.polygon!;
+    expect(changedKind).not.toBe(first);
+    expect(prepareFloatWrap([star]).floats[0]!.polygon).toBe(first);
+
+    for (const field of ['xLeft', 'xRight', 'yTop', 'yBottom'] as const) {
+      const changedBounds = prepareFloatWrap([{
+        ...star,
+        [field]: star[field] + 1,
+      }]).floats[0]!.polygon!;
+      expect(changedBounds).not.toBe(first);
+    }
+  });
+
+  it('retains alternating immutable kind variants across repeated acquisitions', () => {
+    const vertexCount = 31;
+    const acquisitionCount = vertexCount;
+    const tight = frozenDenseStar(vertexCount, 15);
+    const through = Object.freeze({ ...tight, authoredWrap: 'through' as const });
+    const diagnostics = {
+      polygonCompileCount: 0,
+      polygonCacheHitCount: 0,
+      polygonSnapshotPointCount: 0,
+    };
+    const tightCompilations: CompiledPolygonWrap[] = [];
+    const throughCompilations: CompiledPolygonWrap[] = [];
+
+    for (let index = 0; index < acquisitionCount; index += 1) {
+      const prepared = prepareFloatWrap([tight, through], diagnostics).floats;
+      tightCompilations.push(prepared[0]!.polygon!);
+      throughCompilations.push(prepared[1]!.polygon!);
+    }
+
+    expect(new Set(tightCompilations).size).toBe(1);
+    expect(new Set(throughCompilations).size).toBe(1);
+    expect(tightCompilations[0]).not.toBe(throughCompilations[0]);
+    expect(diagnostics).toEqual({
+      polygonCompileCount: 2,
+      polygonCacheHitCount: 2 * (acquisitionCount - 1),
+      polygonSnapshotPointCount: 2 * acquisitionCount * vertexCount,
+    });
+  });
+
+  it('does not reuse translated, cloned, or mutable polygon geometry', () => {
+    const star = frozenDenseStar(15, 7);
+    const first = prepareFloatWrap([star]).floats[0]!.polygon!;
+    const clonedPoints = Object.freeze(star.wrapPolygon!.map((point) =>
+      Object.freeze({ ...point })));
+    const cloned = prepareFloatWrap([{
+      ...star,
+      wrapPolygon: clonedPoints,
+    }]).floats[0]!.polygon!;
+    expect(cloned).not.toBe(first);
+    expect(cloned.eventYPts).toEqual(first.eventYPts);
+
+    const translatedPoints = Object.freeze(star.wrapPolygon!.map((point) => Object.freeze({
+      xPt: point.xPt + 10,
+      yPt: point.yPt + 20,
+    })));
+    const translated = prepareFloatWrap([{
+      ...star,
+      wrapPolygon: translatedPoints,
+      xLeft: star.xLeft + 10,
+      xRight: star.xRight + 10,
+      yTop: star.yTop + 20,
+      yBottom: star.yBottom + 20,
+    }]).floats[0]!.polygon!;
+    expect(translated).not.toBe(first);
+    expect(translated.polygonLeftPt).toBeCloseTo(first.polygonLeftPt + 10, 12);
+    expect(translated.polygonTopPt).toBeCloseTo(first.polygonTopPt + 20, 12);
+
+    const scaledPoints = Object.freeze(star.wrapPolygon!.map((point) => Object.freeze({
+      xPt: point.xPt * 2,
+      yPt: point.yPt * 3,
+    })));
+    const scaled = prepareFloatWrap([{
+      ...star,
+      wrapPolygon: scaledPoints,
+      xLeft: star.xLeft * 2,
+      xRight: star.xRight * 2,
+      yTop: star.yTop * 3,
+      yBottom: star.yBottom * 3,
+    }]).floats[0]!.polygon!;
+    expect(scaled).not.toBe(first);
+    expect(scaled.polygonRightPt).toBeCloseTo(first.polygonRightPt * 2, 12);
+    expect(scaled.polygonBottomPt).toBeCloseTo(first.polygonBottomPt * 3, 12);
+
+    const mutable = denseStar(15, 7);
+    const mutablePoints = mutable.wrapPolygon!.map((point) => ({ ...point }));
+    const mutableInput = { ...mutable, wrapPolygon: mutablePoints };
+    const beforeMutation = prepareFloatWrap([mutableInput]).floats[0]!.polygon!;
+    mutablePoints[0]!.xPt += 5;
+    const afterMutation = prepareFloatWrap([mutableInput]).floats[0]!.polygon!;
+    expect(afterMutation).not.toBe(beforeMutation);
+    expect(afterMutation.edges[0]!.from.xPt).toBe(beforeMutation.edges[0]!.from.xPt + 5);
+  });
+
+  it('validates current bounds before consulting an immutable polygon memo', () => {
+    const star = frozenDenseStar(15, 7);
+    prepareFloatWrap([star]);
+
+    expect(() => prepareFloatWrap([{
+      ...star,
+      imageKey: 'reversed-after-valid-cache-entry',
+      xLeft: star.xRight + 1,
+    }])).toThrow('Invalid finite wrap bounds for reversed-after-valid-cache-entry');
+  });
+
+  it('distinguishes signed-zero bounds in the immutable polygon memo', () => {
+    const points = Object.freeze([
+      Object.freeze({ xPt: 0, yPt: 0 }),
+      Object.freeze({ xPt: 10, yPt: 0 }),
+      Object.freeze({ xPt: 0, yPt: 10 }),
+    ]);
+    const base: FloatRect = {
+      kind: 'shape', mode: 'square', authoredWrap: 'through', wrapPolygon: points,
+      imageKey: 'signed-zero-bounds', imageX: 0, imageY: 0, imageW: 10, imageH: 10,
+      xLeft: 0, xRight: 10, yTop: 0, yBottom: 10,
+      side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0, paraId: 1,
+    };
+    const positiveZero = prepareFloatWrap([base]).floats[0]!.polygon!;
+    const negativeZero = prepareFloatWrap([{ ...base, xLeft: -0 }]).floats[0]!.polygon!;
+
+    expect(negativeZero).not.toBe(positiveZero);
   });
 
   it('matches a full active sort across exact same-Y and endpoint events', () => {
