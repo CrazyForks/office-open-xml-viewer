@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const require = createRequire(new URL('../packages/docx/package.json', import.meta.url));
@@ -21,6 +19,7 @@ const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
 const TEXT_RUN_PROJECTION_ADAPTER = `${DOCX_SOURCE}/text-run-projection.ts`;
 const LAYOUT_RUNTIME_ADAPTER = `${DOCX_SOURCE}/layout-runtime.ts`;
 const ACQUISITION_CONTEXT = `${LAYOUT_SOURCE}/acquisition-context.ts`;
+const PRODUCTION_BODY_LAYOUT = `${LAYOUT_SOURCE}/production-body-layout.ts`;
 const ACQUISITION_STATE = `${LAYOUT_SOURCE}/acquisition-state.ts`;
 const ACQUISITION_INPUT_PROJECTIONS = `${LAYOUT_SOURCE}/acquisition-input-projections.ts`;
 const ANCHOR_CLASSIFICATION = `${LAYOUT_SOURCE}/anchor-classification.ts`;
@@ -52,14 +51,6 @@ const FINAL_RENDERER_DECLARATIONS = new Set([
   'normalizeRenderOptions',
 ]);
 
-const A5_STATE_OWNER_DECLARATIONS = new Set([
-  'RetainedTableRecord',
-  'commitFloatRegistryDelta',
-  'prepareFittingOuterFragment',
-  'reacquirePageBlock',
-  'retainedTableRecord',
-]);
-
 const BODY_LAYOUT_ADAPTER_DECLARATIONS = new Set(['createBodyLayoutInput']);
 const WORKER_LAYOUT_RETENTION_DECLARATIONS = new Set([
   'RetainedRenderWorkerDocumentLayout',
@@ -81,7 +72,6 @@ const LAYOUT_AFFINE_EXPORTS = new Set([
   'scaleAffine',
   'translationAffine',
 ]);
-const BODY_KERNEL_IMPLEMENTATION_DECLARATIONS = new Set(['createConcreteBodyLayoutKernel']);
 const BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS = new Map([
   [PARSER_MODEL, new Map([['bodyLayoutAcquisitionInput', 'value']])],
   [`${DOCX_SOURCE}/types.ts`, new Map([['DocxDocumentModel', 'type']])],
@@ -89,10 +79,6 @@ const BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS = new Map([
     ['projectBodyLayoutInput', 'value'],
     ['BodyLayoutInput', 'type'],
   ])],
-]);
-
-const PLANNED_NON_LAYOUT_MODULES = new Set([
-  `${DOCX_SOURCE}/parser-model.ts`,
 ]);
 
 const SHARED_PAINT_IMPORTS = new Map([
@@ -179,6 +165,14 @@ const DELETED_PAGE_PRODUCER_IDENTIFIERS = new Set([
   'collapsedSpacer',
   'leadsCollapsedRun',
   'hiddenCollapsed',
+  'computeTableRowHeights',
+  'estimateTableHeight',
+  'measureRetainedCellContentHeightPt',
+  'measureCellParagraphWindow',
+  'measureCellElementHeight',
+  'trimTrailingStructuralMarker',
+  'paragraphSegsStateSensitive',
+  'rescaleLayoutLines',
 ]);
 
 const DELETED_LEGACY_STAMP_PROPERTIES = new Set([
@@ -350,6 +344,22 @@ function assertAcquisitionContextBoundary(root) {
         fail('ACQUISITION_CONTEXT_SURFACE', `${file} missing ${name}`);
       }
     }
+    if (file === ACQUISITION_CONTEXT) {
+      const state = source.statements.find((statement) => (
+        ts.isInterfaceDeclaration(statement) && statement.name.text === 'BodyAcquisitionState'
+      ));
+      for (const required of ['retainedTableAcquisition', 'retainedTablesBySourceIndex']) {
+        const member = state?.members.find((candidate) => (
+          ts.isPropertySignature(candidate)
+          && candidate.name
+          && (ts.isIdentifier(candidate.name) || ts.isStringLiteralLike(candidate.name))
+          && candidate.name.text === required
+        ));
+        if (!member || member.questionToken) {
+          fail('RETAINED_TABLE_AUTHORITY', `${file}#${required}`);
+        }
+      }
+    }
     for (const statement of source.statements) {
       if (file === ACQUISITION_CONTEXT) {
         const rejectScaleMember = (node) => {
@@ -432,6 +442,120 @@ function assertAcquisitionContextBoundary(root) {
         );
       }
     }
+  }
+}
+
+function assertProductionBodyAcquisitionAuthority(root) {
+  const path = resolve(root, PRODUCTION_BODY_LAYOUT);
+  if (!existsSync(path)) {
+    fail('PRODUCTION_ACQUISITION_AUTHORITY', `${PRODUCTION_BODY_LAYOUT} missing`);
+  }
+  const source = sourceFile(path);
+  const forbiddenImportsByTarget = new Map([
+    [`${DOCX_SOURCE}/line-layout.ts`, new Set([
+      'buildSegments',
+      'gridCharDeltaPx',
+      'layoutLines',
+      'lineBoxHeight',
+    ])],
+    [`${DOCX_SOURCE}/table-geometry.ts`, new Set([
+      'applyTableRowBoundaryFootprints',
+      'resolveTableRowContentHeights',
+    ])],
+  ]);
+  for (const edge of moduleEdges(path)) {
+    if (!edge.literal || !edge.specifier.startsWith('.')) continue;
+    const resolvedTarget = resolveLocalImport(path, edge.specifier);
+    const fallbackTarget = resolve(dirname(path), edge.specifier)
+      .replace(/\.(?:[cm]?js)$/u, '.ts');
+    const target = posixPath(relative(root, resolvedTarget ?? fallbackTarget));
+    const forbidden = forbiddenImportsByTarget.get(target);
+    if (!forbidden) continue;
+    const importedNames = edge.importedNames ?? [];
+    if (edge.kind !== 'import'
+      || importedNames.includes('*')
+      || importedNames.includes('default')
+      || importedNames.some((name) => forbidden.has(name))) {
+      fail(
+        'PRODUCTION_ACQUISITION_AUTHORITY',
+        `${PRODUCTION_BODY_LAYOUT} imports fallback measurement from ${target}`,
+      );
+    }
+  }
+  const functions = [];
+  const visitFunctions = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name) functions.push(node);
+    ts.forEachChild(node, visitFunctions);
+  };
+  visitFunctions(source);
+  const uniqueFunction = (name) => {
+    const matches = functions.filter((declaration) => declaration.name?.text === name);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  const columns = uniqueFunction('resolveColumnWidths');
+  const baseContexts = [];
+  const visitBaseContexts = (node) => {
+    if (ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === 'baseContext') baseContexts.push(node);
+    ts.forEachChild(node, visitBaseContexts);
+  };
+  if (columns?.body) visitBaseContexts(columns.body);
+  const paragraphContextCalls = columns?.body
+    ? callsNamed(columns.body, 'resolveParagraphLayoutContext')
+    : [];
+  if (!columns?.body
+    || baseContexts.length !== 1
+    || paragraphContextCalls.length !== 1
+    || callOf(baseContexts[0].initializer, 'resolveParagraphLayoutContext')
+      !== paragraphContextCalls[0]) {
+    fail('PRODUCTION_ACQUISITION_AUTHORITY', `${PRODUCTION_BODY_LAYOUT}#resolveColumnWidths`);
+  }
+
+  const table = uniqueFunction('computeTablePtLayout');
+  const tableSourceIndex = table?.parameters[3];
+  const tableBodyCalls = table?.body ? callsNamed(table.body, 'acquireRetainedTable') : [];
+  const tableCalls = callsNamed(source, 'computeTablePtLayout');
+  const forbiddenTableCalls = [
+    'applyTableRowBoundaryFootprints',
+    'resolveTableRowContentHeights',
+    'measureRetainedCellContentHeightPt',
+  ].flatMap((name) => table?.body ? callsNamed(table.body, name) : []);
+  if (!table?.body
+    || table.parameters.length !== 4
+    || !tableSourceIndex
+    || tableSourceIndex.questionToken
+    || tableSourceIndex.type?.kind !== ts.SyntaxKind.NumberKeyword
+    || tableBodyCalls.length !== 1
+    || tableCalls.length === 0
+    || tableCalls.some((call) => call.arguments.length !== 4)
+    || forbiddenTableCalls.length !== 0) {
+    fail('PRODUCTION_ACQUISITION_AUTHORITY', `${PRODUCTION_BODY_LAYOUT}#computeTablePtLayout`);
+  }
+
+  const frame = uniqueFunction('resolveFrameBox');
+  const frameGroup = frame?.parameters[1];
+  const frameBodyCalls = frame?.body ? callsNamed(frame.body, 'acquireRetainedFrameGroup') : [];
+  const frameCalls = callsNamed(source, 'resolveFrameBox');
+  const frameType = frameGroup?.type;
+  const forbiddenFrameCalls = [
+    'buildSegments',
+    'gridCharDeltaPx',
+    'layoutLines',
+    'lineBoxHeight',
+  ].flatMap((name) => frame?.body ? callsNamed(frame.body, name) : []);
+  if (!frame?.body
+    || !frameGroup
+    || frameGroup.questionToken
+    || !frameType
+    || !ts.isTypeReferenceNode(frameType)
+    || !ts.isIdentifier(frameType.typeName)
+    || frameType.typeName.text !== 'BodyFrameGroup'
+    || frameBodyCalls.length !== 1
+    || frameCalls.length === 0
+    || frameCalls.some((call) => call.arguments.length !== 5)
+    || forbiddenFrameCalls.length !== 0) {
+    fail('PRODUCTION_ACQUISITION_AUTHORITY', `${PRODUCTION_BODY_LAYOUT}#resolveFrameBox`);
   }
 }
 
@@ -2331,1386 +2455,6 @@ function declarationNames(statement) {
   return [];
 }
 
-function declarationKind(statement) {
-  if (ts.isVariableStatement(statement)) return 'variable';
-  return ts.SyntaxKind[statement.kind];
-}
-
-function normalizedNodeHash(node, source) {
-  const normalized = node.getText(source).replace(/\s+/g, ' ').trim();
-  return createHash('sha256').update(normalized).digest('hex');
-}
-
-function normalizedMeasureCellContentHeightHash(node, source) {
-  // C3c changes only the cursor's ownership/type name. Keep the legacy body
-  // byte-pinned until C3d physically moves the measurement chain.
-  const normalized = node.getText(source)
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/\bBodyAcquisitionState\b/g, 'RenderState');
-  return createHash('sha256').update(normalized).digest('hex');
-}
-
-function normalizedSyntaxHash(node, source) {
-  const shape = (current) => {
-    const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
-      ? current.getText(source)
-      : undefined;
-    const children = [];
-    current.forEachChild((child) => children.push(shape(child)));
-    return [ts.SyntaxKind[current.kind], text, ...children];
-  };
-  return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
-}
-
-/** A2 permits one mechanically constrained edit to computePages: append the
- * two dependency parameters, then append those identifiers to its existing
- * buildMeasureState call. A5 additionally replaces the exact floating-slice
- * table stamp fold with one retained-slice size lookup. Everything else remains
- * represented in the hash. */
-function normalizedComputePagesHash(node, source) {
-  const compactText = (current, currentSource) =>
-    current.getText(currentSource).replace(/\s+/g, '');
-  // A6 effective table-flow ([MS-OI29500] §2.1.162): the paginator decides
-  // ordinary-flow participation and floating placement through
-  // `tableParticipatesInOrdinaryFlow` / `effectiveTablePositioning` instead of a
-  // lexical `tblpPr` presence test. Normalize ONLY the exact paired two-site
-  // transformation back onto the frozen lexical base:
-  //   1. `if (!tableParticipatesInOrdinaryFlow(t)) continue;` -> `if (t.tblpPr) continue;`
-  //   2. `const tp = effectiveTablePositioning(tbl); if (tp) { … }` folds back to
-  //      `if (tbl.tblpPr) { const tp = tbl.tblpPr; … }` (the pre-resolution moves
-  //      into the branch as its first statement).
-  // Both sites must be present exactly once; one-site, duplicated, moved,
-  // predicate/callee/argument-altered, or side-effect-adjacent forms fall through
-  // and stay fully represented in the hash. Section-occurrence routing is never
-  // touched here.
-  //
-  // Reconstruction rewrites both sites back to plain `tblpPr` value syntax, which
-  // erases any TypeScript-only syntax the effective form might carry: a variable
-  // type annotation (`const tp: TblpPr = …`), a definite-assignment `!`, an
-  // optional-call `?.(…)`, or call type arguments (`effectiveTablePositioning<…>(tbl)`).
-  // If such syntax were tolerated it would vanish from the resulting hash and go
-  // unaudited, so every matcher below rejects it and lets the declaration stay
-  // fully represented instead.
-  const effectiveFlowSkipSites = [];
-  const findEffectiveFlowSkip = (current) => {
-    if (ts.isIfStatement(current)
-      && !current.elseStatement
-      && ts.isPrefixUnaryExpression(current.expression)
-      && current.expression.operator === ts.SyntaxKind.ExclamationToken
-      && ts.isCallExpression(current.expression.operand)
-      && current.expression.operand.questionDotToken === undefined
-      && current.expression.operand.typeArguments === undefined
-      && ts.isIdentifier(current.expression.operand.expression)
-      && current.expression.operand.expression.text === 'tableParticipatesInOrdinaryFlow'
-      && current.expression.operand.arguments.length === 1
-      && ts.isIdentifier(current.expression.operand.arguments[0])
-      && current.expression.operand.arguments[0].text === 't'
-      && ts.isContinueStatement(current.thenStatement)
-      && !current.thenStatement.label) {
-      effectiveFlowSkipSites.push(current);
-    }
-    ts.forEachChild(current, findEffectiveFlowSkip);
-  };
-  findEffectiveFlowSkip(node);
-  const isEffectiveTpDeclaration = (statement) => {
-    if (!ts.isVariableStatement(statement)
-      || (statement.declarationList.flags & ts.NodeFlags.Const) === 0
-      || statement.declarationList.declarations.length !== 1) return false;
-    const [declaration] = statement.declarationList.declarations;
-    return ts.isIdentifier(declaration.name)
-      && declaration.name.text === 'tp'
-      && declaration.type === undefined
-      && declaration.exclamationToken === undefined
-      && declaration.initializer !== undefined
-      && ts.isCallExpression(declaration.initializer)
-      && declaration.initializer.questionDotToken === undefined
-      && declaration.initializer.typeArguments === undefined
-      && ts.isIdentifier(declaration.initializer.expression)
-      && declaration.initializer.expression.text === 'effectiveTablePositioning'
-      && declaration.initializer.arguments.length === 1
-      && ts.isIdentifier(declaration.initializer.arguments[0])
-      && declaration.initializer.arguments[0].text === 'tbl';
-  };
-  const effectiveFlowAcquireSites = [];
-  const findEffectiveFlowAcquire = (current) => {
-    const statements = ts.isBlock(current) || ts.isSourceFile(current)
-      ? current.statements
-      : undefined;
-    if (statements) {
-      for (let index = 0; index + 1 < statements.length; index += 1) {
-        const declaration = statements[index];
-        const branch = statements[index + 1];
-        if (isEffectiveTpDeclaration(declaration)
-          && ts.isIfStatement(branch)
-          && !branch.elseStatement
-          && ts.isIdentifier(branch.expression)
-          && branch.expression.text === 'tp'
-          && ts.isBlock(branch.thenStatement)) {
-          effectiveFlowAcquireSites.push({ declaration, branch });
-        }
-      }
-    }
-    ts.forEachChild(current, findEffectiveFlowAcquire);
-  };
-  findEffectiveFlowAcquire(node);
-  if (effectiveFlowSkipSites.length === 1 && effectiveFlowAcquireSites.length === 1) {
-    const nodeStart = node.getStart(source);
-    const nodeText = node.getText(source);
-    const skip = effectiveFlowSkipSites[0];
-    const { declaration, branch } = effectiveFlowAcquireSites[0];
-    const blockOpen = branch.thenStatement.getStart(source) + 1;
-    const edits = [
-      [skip.getStart(source), skip.getEnd(), 'if (t.tblpPr) continue;'],
-      [declaration.getStart(source), declaration.getEnd(), ''],
-      [branch.expression.getStart(source), branch.expression.getEnd(), 'tbl.tblpPr'],
-      [blockOpen, blockOpen, '\nconst tp = tbl.tblpPr;'],
-    ].sort((left, right) => right[0] - left[0]);
-    let virtualText = nodeText;
-    for (const [start, end, replacement] of edits) {
-      virtualText = virtualText.slice(0, start - nodeStart)
-        + replacement
-        + virtualText.slice(end - nodeStart);
-    }
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a6-effective-flow-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((statement) => (
-      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const occurrenceOwnerReplacements = [
-    ['computeTableRowHeights(ms, t, colWPt, j)', 'computeTableRowHeights(ms, t, colWPt)'],
-    [
-      'estimateTableHeight(measureState, nxt as unknown as DocTable, colW(), startIdx)',
-      'estimateTableHeight(measureState, nxt as unknown as DocTable, colW())',
-    ],
-    [
-      'measureState, para, i, colW, suppressBefore, colX,',
-      'measureState, para, colW, suppressBefore, colX,',
-    ],
-    [
-      `        const occurrenceEl = { ...el } as PaginatedElementWithLines;
-        attachBodyParagraphFragment(occurrenceEl, para, measureState, i, {
-          paragraphXPt: colX(),
-          availableWidthPt: colW(),
-          suppressSpaceBefore: suppressBefore,
-          columnIndex: colIndex,
-        }, fitMeasured);
-        pushTagged(occurrenceEl);`,
-      `        attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {
-          paragraphXPt: colX(),
-          availableWidthPt: colW(),
-          suppressSpaceBefore: suppressBefore,
-          columnIndex: colIndex,
-        }, fitMeasured);
-        pushTagged(el as PaginatedBodyElement);`,
-    ],
-    [
-      'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, i, {',
-      'attachBodyParagraphFragment(el as PaginatedElementWithLines, para, measureState, {',
-    ],
-    ['computeTableLayout(tbl, cW, measureState, i)', 'computeTableLayout(tbl, cW, measureState)'],
-    ['            const retainedRecord = retainedTableRecord(measureState, i);\n', ''],
-    [
-      `              const prepared = prepareFittingOuterFragment(
-                tbl, i, retainedRecord, finalState, box,
-              );`,
-      `              const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
-                .prepareFittingOuterFragment(tbl, finalState, box);`,
-    ],
-    [
-      `        const occurrenceEl = { ...el } as PaginatedBodyElement;
-        withColumnBand(() => {
-          stampTableLayout(
-            occurrenceEl,
-            first.layout.colWidths,
-            first.layout.rowHeights,
-            first.contentWPt,
-            i,
-            retainedTableRecord(measureState, i),
-            measureState,
-            undefined,
-            acceptedPrepared,
-          );
-          const side = floatTableWrapSide(first.box, measureState);
-          registerTableFloat(
-            first.box, tp, measureState, side, tbl.overlap !== 'never', true,
-          );
-        });
-        pushTagged(occurrenceEl);`,
-      `        withColumnBand(() => {
-          stampTableLayout(
-            el as PaginatedBodyElement,
-            first.layout.colWidths,
-            first.layout.rowHeights,
-            first.contentWPt,
-            i,
-            retainedTableRecord(measureState, i),
-            measureState,
-            undefined,
-            acceptedPrepared,
-          );
-          const side = floatTableWrapSide(first.box, measureState);
-          registerTableFloat(
-            first.box, tp, measureState, side, tbl.overlap !== 'never', true,
-          );
-        });
-        pushTagged(el as PaginatedBodyElement);`,
-    ],
-    [
-      `            first.contentWPt,
-            i,
-            retainedTableRecord(measureState, i),
-            measureState,
-            undefined,
-            acceptedPrepared,`,
-      `            first.contentWPt,
-            undefined,
-            acceptedPrepared,`,
-    ],
-    [
-      '            { sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState },\n',
-      '',
-    ],
-    ['computeTablePtLayout(measureState, tbl, bandPt, i)', 'computeTablePtLayout(measureState, tbl, bandPt)'],
-    [
-      `          bandPt,
-          i,
-          retainedTableRecord(measureState, i),
-          measureState,
-          {`,
-      `          bandPt,
-          {`,
-    ],
-    [
-      'computeTablePtLayout(measureState, tbl, tblContentWPt, i)',
-      'computeTablePtLayout(measureState, tbl, tblContentWPt)',
-    ],
-    [
-      `        tableContentH,
-        measureState,
-        i,
-        true,`,
-      `        tableContentH,
-        measureState,
-        true,`,
-    ],
-    [
-      `              tblContentWPt,
-              measureState,
-              i,
-              {`,
-      `              tblContentWPt,
-              measureState,
-              {`,
-    ],
-    ['                fragment: meta.fragment,\n', ''],
-    [
-      `          () => currentSectionFrame.textDirection,
-          i,
-        );`,
-      `          () => currentSectionFrame.textDirection,
-        );`,
-    ],
-    [
-      `          tblContentWPt,
-          measureState,
-          i,
-          {`,
-      `          tblContentWPt,
-          measureState,
-          {`,
-    ],
-  ];
-  const currentOccurrenceOwnerText = node.getText(source);
-  const priorFittingProbeOccurrenceReplacements = occurrenceOwnerReplacements.filter(
-    (_replacement, index) => ![5, 6, 7, 8, 9].includes(index),
-  );
-  const hasExactPriorFittingProbe = currentOccurrenceOwnerText.includes(
-    'const layout = computeTableLayout(tbl, cW, measureState);',
-  ) && currentOccurrenceOwnerText.includes(
-    'stampTableLayout(\n            el as PaginatedBodyElement,\n            first.layout.colWidths,',
-  );
-  const selectedOccurrenceOwnerReplacements = hasExactPriorFittingProbe
-    ? priorFittingProbeOccurrenceReplacements
-    : occurrenceOwnerReplacements;
-  let occurrenceOwnerText = currentOccurrenceOwnerText;
-  let hasExactOccurrenceOwnerThreading = occurrenceOwnerText.includes(
-    '{ sourceIndex: i, record: retainedTableRecord(measureState, i), state: measureState }',
-  );
-  if (hasExactOccurrenceOwnerThreading) {
-    for (const [current, previous] of selectedOccurrenceOwnerReplacements) {
-      if (occurrenceOwnerText.split(current).length !== 2) {
-        hasExactOccurrenceOwnerThreading = false;
-        break;
-      }
-      occurrenceOwnerText = occurrenceOwnerText.replace(current, previous);
-    }
-  }
-  if (hasExactOccurrenceOwnerThreading) {
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-occurrence-owner-virtual.ts',
-      occurrenceOwnerText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((candidate) => (
-      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const exactFittingOuterProbe = `
-    const measureFloat = () =>
-      withColumnBand(() => {
-        const cW = colW() * measureState.scale;
-        const layout = computeTableLayout(tbl, cW, measureState);
-        const physicalPageIndex = pages.length - 1;
-        const pageContext = measureState.layoutServices
-          ? fieldAcquisitionContextOf(measureState.layoutServices)
-            .resolveDestinationPage?.(physicalPageIndex)
-          : undefined;
-        const finalState: RenderState = {
-          ...measureState,
-          pageIndex: physicalPageIndex,
-          displayPageNumber: pageContext?.displayPageNumber ?? physicalPageIndex + 1,
-          pageNumberFormat: pageContext?.pageNumberFormat ?? measureState.pageNumberFormat,
-        };
-        let finalHeightPt = layout.rowHeights.reduce((sum, height) => sum + height, 0);
-        let box = computeFloatTableBox(
-          tp, finalState, finalState.y, layout.tableW, finalHeightPt, false,
-          { allowOverlap: tbl.overlap !== 'never' },
-        );
-        for (let pass = 0; pass < 4; pass += 1) {
-          const prepared = bodyFlowFragments.sourceIndices.retainedTableMeasureBySource
-            .prepareFittingOuterFragment(tbl, finalState, box);
-          if (!prepared.fragment) {
-            const rawBox = computeFloatTableBox(
-              tp, finalState, finalState.y, layout.tableW, finalHeightPt, true,
-            );
-            return {
-              box,
-              rawBox,
-              layout,
-              requiresCanonicalSplit: true as const,
-              contentWPt: cW / finalState.scale,
-            };
-          }
-          const nextHeightPt = prepared.fragment.advancePt;
-          const nextBox = computeFloatTableBox(
-            tp, finalState, finalState.y, layout.tableW, nextHeightPt, false,
-            { allowOverlap: tbl.overlap !== 'never' },
-          );
-          const rawBox = computeFloatTableBox(
-            tp, finalState, finalState.y, layout.tableW, nextHeightPt, true,
-          );
-          if (nextHeightPt === finalHeightPt
-            && nextBox.x === box.x && nextBox.y === box.y) {
-            return {
-              box: nextBox,
-              rawBox,
-              layout,
-              prepared,
-              requiresCanonicalSplit: false as const,
-              contentWPt: cW / finalState.scale,
-            };
-          }
-          finalHeightPt = nextHeightPt;
-          box = nextBox;
-        }
-        throw new Error('Fitting outer table final-frame probe did not converge');
-      });
-  `.replace(/\s+/g, '');
-  const exactPreviousFittingOuterProbe = exactFittingOuterProbe
-    .replace(
-      "computeFloatTableBox(tp,finalState,finalState.y,layout.tableW,finalHeightPt,false,{allowOverlap:tbl.overlap!=='never'},)",
-      'computeFloatTableBox(tp,finalState,finalState.y,layout.tableW,finalHeightPt,)',
-    )
-    .replace(
-      "computeFloatTableBox(tp,finalState,finalState.y,layout.tableW,nextHeightPt,false,{allowOverlap:tbl.overlap!=='never'},)",
-      'computeFloatTableBox(tp,finalState,finalState.y,layout.tableW,nextHeightPt,)',
-    );
-  const exactFittingOuterSplitCondition =
-    'first.requiresCanonicalSplit||(isTextAnchored&&tableOverflowsHere)||pageAnchoredOverflows';
-  const exactFittingOuterAcceptance = `
-    if (!first.prepared) {
-      throw new Error('Fitting outer table acceptance requires a whole prepared fragment');
-    }
-    const acceptedFragment = first.prepared.fragment;
-    if (!acceptedFragment) {
-      throw new Error('Fitting outer table acceptance requires a whole prepared fragment');
-    }
-    const acceptedPrepared = {
-      ...first.prepared,
-      fragment: acceptedFragment,
-      box: first.box,
-    };
-    withColumnBand(() => {
-      stampTableLayout(
-        el as PaginatedBodyElement,
-        first.layout.colWidths,
-        first.layout.rowHeights,
-        first.contentWPt,
-        undefined,
-        acceptedPrepared,
-      );
-      const side = floatTableWrapSide(first.box, measureState);
-      registerTableFloat(
-        first.box, tp, measureState, side, tbl.overlap !== 'never', true,
-      );
-    });
-  `.replace(/\s+/g, '');
-  const exactPreviousFittingOuterAcceptance = exactFittingOuterAcceptance.replace(
-    "registerTableFloat(first.box,tp,measureState,side,tbl.overlap!=='never',true,);",
-    "registerTableFloat(first.box,tp,measureState,side,tbl.overlap!=='never');",
-  );
-  const fittingOuterProbes = [];
-  const fittingOuterSplitConditions = [];
-  const fittingOuterAcceptances = [];
-  const findFittingOuterProbeTransaction = (current) => {
-    if (ts.isVariableStatement(current)) {
-      const compact = compactText(current, source);
-      if (compact === exactFittingOuterProbe || compact === exactPreviousFittingOuterProbe) {
-        fittingOuterProbes.push({
-          node: current,
-          variant: compact === exactFittingOuterProbe ? 'pre-resolved' : 'previous',
-        });
-      }
-    }
-    if (ts.isIfStatement(current)
-      && compactText(current.expression, source) === exactFittingOuterSplitCondition) {
-      fittingOuterSplitConditions.push(current.expression);
-    }
-    if (ts.isBlock(current)) {
-      for (let index = 0; index + 4 < current.statements.length; index += 1) {
-        const statements = current.statements.slice(index, index + 5);
-        const compact = statements.map((statement) => compactText(statement, source)).join('');
-        if (compact === exactFittingOuterAcceptance
-          || compact === exactPreviousFittingOuterAcceptance) {
-          fittingOuterAcceptances.push({
-            range: [statements[0], statements[4]],
-            variant: compact === exactFittingOuterAcceptance ? 'pre-resolved' : 'previous',
-          });
-        }
-      }
-    }
-    ts.forEachChild(current, findFittingOuterProbeTransaction);
-  };
-  findFittingOuterProbeTransaction(node);
-  if (fittingOuterProbes.length === 1
-    && fittingOuterSplitConditions.length === 1
-    && fittingOuterAcceptances.length === 1
-    && fittingOuterProbes[0].variant === fittingOuterAcceptances[0].variant) {
-    const nodeStart = node.getStart(source);
-    const legacyProbe = `
-      const measureFloat = () =>
-        withColumnBand(() => {
-          const cW = colW() * measureState.scale;
-          const layout = computeTableLayout(tbl, cW, measureState);
-          const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
-          const box = computeFloatTableBox(
-            tp, measureState, measureState.y, layout.tableW, tableH,
-          );
-          const rawBox = computeFloatTableBox(
-            tp, measureState, measureState.y, layout.tableW, tableH, true,
-          );
-          return { box, rawBox, layout, contentWPt: cW / measureState.scale };
-        });
-    `;
-    const legacySplitCondition =
-      '(isTextAnchored && tableOverflowsHere) || pageAnchoredOverflows';
-    const legacyAcceptance = `
-      withColumnBand(() => {
-        stampTableLayout(
-          el as PaginatedBodyElement,
-          first.layout.colWidths,
-          first.layout.rowHeights,
-          first.contentWPt,
-        );
-        const side = floatTableWrapSide(first.box, measureState);
-        registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');
-      });
-    `;
-    const [acceptanceStart, acceptanceEnd] = fittingOuterAcceptances[0].range;
-    const replacements = [
-      [
-        fittingOuterProbes[0].node.getStart(source),
-        fittingOuterProbes[0].node.getEnd(),
-        legacyProbe,
-      ],
-      [
-        fittingOuterSplitConditions[0].getStart(source),
-        fittingOuterSplitConditions[0].getEnd(),
-        legacySplitCondition,
-      ],
-      [acceptanceStart.getStart(source), acceptanceEnd.getEnd(), legacyAcceptance],
-    ].sort((left, right) => right[0] - left[0]);
-    let virtualText = node.getText(source);
-    for (const [start, end, replacement] of replacements) {
-      virtualText = virtualText.slice(0, start - nodeStart)
-        + replacement
-        + virtualText.slice(end - nodeStart);
-    }
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-fitting-probe-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((candidate) => (
-      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const exactConvergedSplitParentResolverSource = `
-    (sliceTp, tableWidthPt, tableHeightPt, externalRegistry) =>
-      withColumnBand(() => {
-        const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
-        const stateAgainstExternalRegistry: RenderState = {
-          ...measureState,
-          floats: [...externalRegistry.floats],
-          floatParaSeq: externalRegistry.nextParagraphId,
-        };
-        return computeFloatTableBox(
-          sliceTp,
-          stateAgainstExternalRegistry,
-          measureState.y,
-          tableWidthPt * measureState.scale,
-          tableHeightPt * measureState.scale,
-          skipVClamp,
-          { allowOverlap: tbl.overlap !== 'never' },
-        );
-      })
-  `;
-  const exactConvergedSplitEmitterSource = '(sliceEl) => pushTagged(sliceEl)';
-  const convergedSplitCallbacksSource = ts.createSourceFile(
-    'compute-pages-a5-converged-split-parent-expected.ts',
-    `const callbacks = [${exactConvergedSplitParentResolverSource}, ${exactConvergedSplitEmitterSource}];`,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const convergedSplitCallbacksDeclaration = convergedSplitCallbacksSource.statements[0]
-    ?.declarationList?.declarations?.[0];
-  const convergedSplitCallbacks = convergedSplitCallbacksDeclaration?.initializer?.elements;
-  const syntaxPrinter = ts.createPrinter({ removeComments: true });
-  const printedSyntax = (current, currentSource) => syntaxPrinter
-    .printNode(ts.EmitHint.Unspecified, current, currentSource)
-    .replace(/\s+/g, '');
-  const expectedConvergedSplitResolver = convergedSplitCallbacks?.[0]
-    ? printedSyntax(convergedSplitCallbacks[0], convergedSplitCallbacksSource)
-    : '';
-  const expectedConvergedSplitEmitter = convergedSplitCallbacks?.[1]
-    ? printedSyntax(convergedSplitCallbacks[1], convergedSplitCallbacksSource)
-    : '';
-  const exactSplitFloatLivePageSource = '() => pages.length - 1';
-  const splitFloatLivePageSource = ts.createSourceFile(
-    'compute-pages-a5-split-float-live-page-expected.ts',
-    `const callback = ${exactSplitFloatLivePageSource};`,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const splitFloatLivePageDeclaration = splitFloatLivePageSource.statements[0]
-    ?.declarationList?.declarations?.[0];
-  const splitFloatLivePageCallback = splitFloatLivePageDeclaration?.initializer;
-  const expectedSplitFloatLivePage = splitFloatLivePageCallback
-    ? printedSyntax(splitFloatLivePageCallback, splitFloatLivePageSource)
-    : '';
-  const splitFloatLivePageCalls = [];
-  const findSplitFloatLivePageCall = (current) => {
-    if (ts.isCallExpression(current)
-      && ts.isIdentifier(current.expression)
-      && current.expression.text === 'splitFloatTableAcrossPages'
-      && current.arguments.length >= 3) {
-      const resolver = current.arguments[current.arguments.length - 3];
-      const emitter = current.arguments[current.arguments.length - 2];
-      const livePage = current.arguments[current.arguments.length - 1];
-      if (printedSyntax(resolver, source) === expectedConvergedSplitResolver
-        && printedSyntax(emitter, source) === expectedConvergedSplitEmitter
-        && printedSyntax(livePage, source) === expectedSplitFloatLivePage) {
-        splitFloatLivePageCalls.push({ emitter, livePage });
-      }
-    }
-    ts.forEachChild(current, findSplitFloatLivePageCall);
-  };
-  findSplitFloatLivePageCall(node);
-  if (splitFloatLivePageCalls.length === 1) {
-    const { emitter, livePage } = splitFloatLivePageCalls[0];
-    const nodeStart = node.getStart(source);
-    const start = emitter.getEnd() - nodeStart;
-    const end = livePage.getEnd() - nodeStart;
-    const nodeText = node.getText(source);
-    const virtualText = nodeText.slice(0, start) + nodeText.slice(end);
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-split-float-live-page-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((candidate) => (
-      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const convergedSplitCalls = [];
-  const findConvergedSplitCall = (current) => {
-    if (ts.isCallExpression(current)
-      && ts.isIdentifier(current.expression)
-      && current.expression.text === 'splitFloatTableAcrossPages'
-      && current.arguments.length >= 2) {
-      const resolver = current.arguments[current.arguments.length - 2];
-      const emitter = current.arguments[current.arguments.length - 1];
-      if (printedSyntax(resolver, source) === expectedConvergedSplitResolver
-        && printedSyntax(emitter, source) === expectedConvergedSplitEmitter) {
-        convergedSplitCalls.push({ resolver, emitter });
-      }
-    }
-    ts.forEachChild(current, findConvergedSplitCall);
-  };
-  findConvergedSplitCall(node);
-  if (convergedSplitCalls.length === 1) {
-    const { resolver, emitter } = convergedSplitCalls[0];
-    const nodeStart = node.getStart(source);
-    const start = resolver.getStart(source) - nodeStart;
-    const end = emitter.getEnd() - nodeStart;
-    const previousCallback = `
-      (sliceEl) => {
-        pushTagged(sliceEl);
-        return withColumnBand(() => {
-          const sp = sliceEl as PaginatedBodyElement;
-          const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
-          const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
-            sp, measureState.scale,
-          );
-          const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
-          return computeFloatTableBox(
-            sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
-            { allowOverlap: tbl.overlap !== 'never' },
-          );
-        });
-      }
-    `;
-    const nodeText = node.getText(source);
-    const virtualText = nodeText.slice(0, start) + previousCallback + nodeText.slice(end);
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-converged-split-parent-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((candidate) => (
-      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const exactSplitParentPreResolutionSource = `
-    (sliceEl) => {
-      pushTagged(sliceEl);
-      return withColumnBand(() => {
-        const sp = sliceEl as PaginatedBodyElement;
-        const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
-        const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
-          sp, measureState.scale,
-        );
-        const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
-        return computeFloatTableBox(
-          sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
-          { allowOverlap: tbl.overlap !== 'never' },
-        );
-      });
-    }
-  `;
-  const expectedSplitCallbackSource = ts.createSourceFile(
-    'compute-pages-a5-split-parent-commit-expected.ts',
-    `const callback = ${exactSplitParentPreResolutionSource};`,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const expectedSplitCallbackDeclaration = expectedSplitCallbackSource.statements[0]
-    ?.declarationList?.declarations?.[0];
-  const expectedSplitCallback = expectedSplitCallbackDeclaration?.initializer;
-  const exactSplitParentPreResolutionSyntax = expectedSplitCallback
-    ? printedSyntax(expectedSplitCallback, expectedSplitCallbackSource)
-    : '';
-  const splitParentPreResolutions = [];
-  const findSplitParentPreResolution = (current) => {
-    if (ts.isArrowFunction(current)
-      && printedSyntax(current, source) === exactSplitParentPreResolutionSyntax) {
-      splitParentPreResolutions.push(current);
-    }
-    ts.forEachChild(current, findSplitParentPreResolution);
-  };
-  findSplitParentPreResolution(node);
-  if (splitParentPreResolutions.length === 1) {
-    const callback = splitParentPreResolutions[0];
-    const nodeStart = node.getStart(source);
-    const start = callback.getStart(source) - nodeStart;
-    const end = callback.getEnd() - nodeStart;
-    const legacyCallback = `
-      (sliceEl) => {
-        withColumnBand(() => {
-          const sp = sliceEl as PaginatedBodyElement;
-          const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
-          const { widthPx: tableW, heightPx: sliceH } = retainedTableSliceSize(
-            sp, measureState.scale,
-          );
-          const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
-          const sliceBox = computeFloatTableBox(
-            sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
-          );
-          const side = floatTableWrapSide(sliceBox, measureState);
-          registerTableFloat(sliceBox, sliceTp, measureState, side, tbl.overlap !== 'never');
-        });
-        pushTagged(sliceEl);
-      }
-    `;
-    const nodeText = node.getText(source);
-    const virtualText = nodeText.slice(0, start) + legacyCallback + nodeText.slice(end);
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-split-parent-commit-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((candidate) => (
-      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const exactFittingOuterFinalization = 'withColumnBand(()=>{stampTableLayout(elasPaginatedBodyElement,first.layout.colWidths,first.layout.rowHeights,first.contentWPt,);constside=floatTableWrapSide(first.box,measureState);registerTableFloat(first.box,tp,measureState,side,tbl.overlap!==\'never\');});';
-  const fittingOuterStatements = [];
-  const findFittingOuterStatement = (current) => {
-    if (ts.isExpressionStatement(current)
-      && compactText(current, source) === exactFittingOuterFinalization) {
-      fittingOuterStatements.push(current);
-    }
-    ts.forEachChild(current, findFittingOuterStatement);
-  };
-  findFittingOuterStatement(node);
-  if (fittingOuterStatements.length === 1) {
-    const statement = fittingOuterStatements[0];
-    const nodeStart = node.getStart(source);
-    const relativeStart = statement.getStart(source) - nodeStart;
-    const relativeEnd = statement.getEnd() - nodeStart;
-    const nodeText = node.getText(source);
-    const legacySequence = [
-      'withColumnBand(() => {',
-      '  const side = floatTableWrapSide(first.box, measureState);',
-      "  registerTableFloat(first.box, tp, measureState, side, tbl.overlap !== 'never');",
-      '});',
-      'stampTableLayout(',
-      '  el as PaginatedBodyElement,',
-      '  first.layout.colWidths,',
-      '  first.layout.rowHeights,',
-      '  first.contentWPt,',
-      ');',
-    ].join('\n');
-    const virtualText = nodeText.slice(0, relativeStart)
-      + legacySequence
-      + nodeText.slice(relativeEnd);
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-fitting-outer-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((candidate) => (
-      ts.isFunctionDeclaration(candidate) && candidate.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const renamedEnvelopeCallees = [];
-  const findRenamedEnvelopeCallees = (current) => {
-    if (ts.isCallExpression(current)
-      && ts.isIdentifier(current.expression)
-      && current.expression.text === 'attachTableFragment') {
-      renamedEnvelopeCallees.push(current.expression);
-    }
-    ts.forEachChild(current, findRenamedEnvelopeCallees);
-  };
-  findRenamedEnvelopeCallees(node);
-  if (renamedEnvelopeCallees.length === 2) {
-    const nodeStart = node.getStart(source);
-    let virtualText = node.getText(source);
-    for (const callee of renamedEnvelopeCallees
-      .slice()
-      .sort((left, right) => right.getStart(source) - left.getStart(source))) {
-      const start = callee.getStart(source) - nodeStart;
-      const end = callee.getEnd() - nodeStart;
-      virtualText = virtualText.slice(0, start)
-        + 'attachRetainedTableEnvelope'
-        + virtualText.slice(end);
-    }
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-envelope-rename-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((statement) => (
-      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const exactIntermediateUpright = `
-    stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);
-    if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);
-    const sourceIndex = bodySourceIndexFor(tbl);
-    const retained = sourceIndex === undefined
-      ? undefined
-      : measureState.retainedTablesBySourceIndex?.get(sourceIndex);
-    if (sourceIndex === undefined || retained === undefined) {
-      throw new Error('Upright vertical table requires retained physical geometry');
-    }
-    attachRetainedTablePlacement(tableEl, retained.layout, sourceIndex, {
-      xPt: colX(),
-      yPt: measureState.y,
-      widthPt: colW(),
-      flowAdvancePt: h,
-      columnIndex: colIndex,
-    });
-  `.replace(/\s+/g, '');
-  const intermediateUprightTransactions = [];
-  const findIntermediateUprightTransaction = (current) => {
-    if (ts.isBlock(current)) {
-      for (let index = 0; index + 5 < current.statements.length; index += 1) {
-        const statements = current.statements.slice(index, index + 6);
-        if (statements.map((statement) => compactText(statement, source)).join('')
-          === exactIntermediateUpright) {
-          intermediateUprightTransactions.push([statements[0], statements[5]]);
-        }
-      }
-    }
-    ts.forEachChild(current, findIntermediateUprightTransaction);
-  };
-  findIntermediateUprightTransaction(node);
-  if (intermediateUprightTransactions.length === 1) {
-    const [startStatement, endStatement] = intermediateUprightTransactions[0];
-    const nodeStart = node.getStart(source);
-    const relativeStart = startStatement.getStart(source) - nodeStart;
-    const relativeEnd = endStatement.getEnd() - nodeStart;
-    const canonicalUpright = [
-      'stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);',
-      'if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);',
-    ].join('\n');
-    const nodeText = node.getText(source);
-    const virtualText = nodeText.slice(0, relativeStart)
-      + canonicalUpright
-      + nodeText.slice(relativeEnd);
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-intermediate-upright-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((statement) => (
-      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const exactUprightRelocation =
-    'if(y+h>effContentH()-tblReservePt&&y>colTopY)nextColumnOrPage(i);';
-  const exactUprightStamp = 'withColumnBand(()=>stampTableLayout(tableEl,colWidthsPt,rowHeightsPt,bandPt,{...measureState,pageIndex:pages.length-1,displayPageNumber:pages.length,},));';
-  let uprightPair = null;
-  const findUprightPair = (current) => {
-    if (uprightPair || !ts.isBlock(current)) {
-      ts.forEachChild(current, findUprightPair);
-      return;
-    }
-    const statements = current.statements;
-    for (let index = 0; index + 1 < statements.length; index += 1) {
-      if (compactText(statements[index], source) === exactUprightRelocation
-        && compactText(statements[index + 1], source) === exactUprightStamp) {
-        uprightPair = [statements[index], statements[index + 1]];
-        return;
-      }
-    }
-    ts.forEachChild(current, findUprightPair);
-  };
-  findUprightPair(node);
-  if (uprightPair) {
-    const [relocation, stamp] = uprightPair;
-    const nodeStart = node.getStart(source);
-    const relativeStart = relocation.getStart(source) - nodeStart;
-    const relativeEnd = stamp.getEnd() - nodeStart;
-    const nodeText = node.getText(source);
-    const legacySequence = [
-      'stampTableLayout(tableEl, colWidthsPt, rowHeightsPt, bandPt);',
-      'if (y + h > effContentH() - tblReservePt && y > colTopY) nextColumnOrPage(i);',
-    ].join('\n');
-    const virtualText = nodeText.slice(0, relativeStart)
-      + legacySequence
-      + nodeText.slice(relativeEnd);
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-upright-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((statement) => (
-      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const exactRetainedSliceSize =
-    'const{widthPx:tableW,heightPx:sliceH}=retainedTableSliceSize(sp,measureState.scale,);';
-  const retainedSliceStatements = [];
-  const findRetainedSliceStatement = (current) => {
-    if (ts.isVariableStatement(current)
-      && compactText(current, source) === exactRetainedSliceSize) {
-      retainedSliceStatements.push(current);
-    }
-    ts.forEachChild(current, findRetainedSliceStatement);
-  };
-  findRetainedSliceStatement(node);
-  if (retainedSliceStatements.length === 1) {
-    const statement = retainedSliceStatements[0];
-    const nodeStart = node.getStart(source);
-    const relativeStart = statement.getStart(source) - nodeStart;
-    const relativeEnd = statement.getEnd() - nodeStart;
-    const nodeText = node.getText(source);
-    const legacyFold = [
-      'const tableW = (sp.tableColWidthsPt ?? []).reduce((s, w) => s + w, 0) * measureState.scale;',
-      'const sliceH = (sp.tableRowHeightsPt ?? []).reduce((s, h) => s + h, 0) * measureState.scale;',
-    ].join('\n');
-    const virtualText = nodeText.slice(0, relativeStart)
-      + legacyFold
-      + nodeText.slice(relativeEnd);
-    const virtualSource = ts.createSourceFile(
-      'compute-pages-a5-virtual.ts',
-      virtualText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const virtualNode = virtualSource.statements.find((statement) => (
-      ts.isFunctionDeclaration(statement) && statement.name?.text === 'computePages'
-    ));
-    if (virtualNode) return normalizedComputePagesHash(virtualNode, virtualSource);
-  }
-  const allowedNames = ['layoutServices', 'layoutOptions'];
-  const allowedParameterSyntax = [
-    'layoutServices?: LayoutServices',
-    'layoutOptions?: LayoutOptions',
-  ];
-  const appendedParameters = node.parameters?.slice(-2) ?? [];
-  const hasAllowedParameters = appendedParameters.length === 2
-    && appendedParameters.every((parameter, index) => (
-      ts.isIdentifier(parameter.name) && parameter.name.text === allowedNames[index]
-      && parameter.getText(source).replace(/\s+/g, ' ').trim() === allowedParameterSyntax[index]
-    ));
-  const omittedParameters = new Set(hasAllowedParameters ? appendedParameters : []);
-  const shape = (current) => {
-    if (omittedParameters.has(current)) return null;
-    if (ts.isCallExpression(current)
-      && ts.isIdentifier(current.expression)
-      && current.expression.text === 'buildMeasureState') {
-      const tail = current.arguments.slice(-2);
-      const hasAllowedArguments = tail.length === 2
-        && tail.every((argument, index) => ts.isIdentifier(argument) && argument.text === allowedNames[index]);
-      const args = hasAllowedArguments ? current.arguments.slice(0, -2) : current.arguments;
-      return [
-        ts.SyntaxKind[current.kind],
-        undefined,
-        shape(current.expression),
-        ...args.map(shape),
-      ];
-    }
-    const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
-      ? current.getText(source)
-      : undefined;
-    const children = [];
-    current.forEachChild((child) => {
-      const childShape = shape(child);
-      if (childShape !== null) children.push(childShape);
-    });
-    return [ts.SyntaxKind[current.kind], text, ...children];
-  };
-  return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
-}
-
-/** A5 removes the body-table stamp/reuse prefix while leaving the B1
- * header/footer fallback byte-identical. Normalize only that complete replacement. */
-function normalizedComputeTableLayoutHash(node, source) {
-  if (!ts.isFunctionDeclaration(node) || !node.body) return normalizedSyntaxHash(node, source);
-  const compact = (value) => value.replace(/\s+/g, '');
-  const statements = node.body.statements;
-  const b1Index = statements.findIndex((statement) => (
-    ts.isVariableStatement(statement)
-    && compact(statement.getText(source)).startsWith(
-      'constcolWidths=resolveColumnWidths(table,contentWPt1,state).map(',
-    )
-  ));
-  if (b1Index < 0) return normalizedSyntaxHash(node, source);
-  const retainedPrefix = compact(statements.slice(0, b1Index)
-    .map((statement) => statement.getText(source)).join(''));
-  const sourceKeyedRetainedPrefix = compact(`
-    const { scale } = state;
-    const contentWPt1 = contentWPx / scale;
-    if (state.retainedTableAcquisition && bodySourceIndexFor(table) !== undefined) {
-      const retained = computeTablePtLayout(state, table, contentWPt1);
-      const colWidths = retained.colWidthsPt.map((width) => width * scale);
-      const rowHeights = retained.rowHeightsPt.map((height) => height * scale);
-      return {
-        colWidths,
-        tableW: colWidths.reduce((sum, width) => sum + width, 0),
-        rowContentHeights: retained.rowContentHeightsPt.map((height) => height * scale),
-        rowHeights,
-      };
-    }
-  `);
-  const occurrenceOwnedRetainedPrefix = compact(`
-    const { scale } = state;
-    const contentWPt1 = contentWPx / scale;
-    if (state.retainedTableAcquisition && sourceIndex !== undefined) {
-      const retained = computeTablePtLayout(state, table, contentWPt1, sourceIndex);
-      const colWidths = retained.colWidthsPt.map((width) => width * scale);
-      const rowHeights = retained.rowHeightsPt.map((height) => height * scale);
-      return {
-        colWidths,
-        tableW: colWidths.reduce((sum, width) => sum + width, 0),
-        rowContentHeights: retained.rowContentHeightsPt.map((height) => height * scale),
-        rowHeights,
-      };
-    }
-  `);
-  const occurrenceOwned = retainedPrefix === occurrenceOwnedRetainedPrefix;
-  if (retainedPrefix !== sourceKeyedRetainedPrefix && !occurrenceOwned) {
-    if (retainedPrefix.includes('computeTablePtLayout')) {
-      return createHash('sha256')
-        .update(`invalid-a5-retained-prefix:${retainedPrefix}`)
-        .digest('hex');
-    }
-    return normalizedSyntaxHash(node, source);
-  }
-  const legacyPrefix = `
-    const { scale } = state;
-    const contentHeightsFromResolved = (rowHeights: number[]): number[] => {
-      const footprints = applyTableRowBoundaryFootprints(
-        table,
-        new Array<number>(table.rows.length).fill(0),
-        scale,
-      );
-      return rowHeights.map((height, index) => height - (footprints[index] ?? 0));
-    };
-    const stamped = table as PaginatedBodyElement;
-    const contentWPt1 = contentWPx / scale;
-    const placedFragment = bodyFlowFragments.get(table as object);
-    const fragmentBandPt = tableFragmentBandPt.get(table as object);
-    if (
-      tableReuseEnabled &&
-      placedFragment !== undefined &&
-      placedFragment.fragment.kind === 'table' &&
-      fragmentBandPt !== undefined &&
-      placedFragment.fragment.rows.length === table.rows.length &&
-      Math.abs(fragmentBandPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1))
-    ) {
-      const fragment = placedFragment.fragment;
-      const colWidths = fragment.columnWidthsPt.map((w) => w * scale);
-      const rowHeights = fragment.rows.map((r) => r.heightPt * scale);
-      return {
-        colWidths,
-        tableW: colWidths.reduce((s, w) => s + w, 0),
-        rowContentHeights: contentHeightsFromResolved(rowHeights),
-        rowHeights,
-      };
-    }
-    const reuseInputs = stamped.tableLayoutInputs;
-    const reuse =
-      tableReuseEnabled &&
-      reuseInputs !== undefined &&
-      stamped.tableColWidthsPt !== undefined &&
-      stamped.tableRowHeightsPt !== undefined &&
-      reuseInputs.scale === 1 &&
-      stamped.tableRowHeightsPt.length === table.rows.length &&
-      Math.abs(reuseInputs.contentWPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1));
-    if (reuse) {
-      const colWidths = (stamped.tableColWidthsPt as number[]).map((w) => w * scale);
-      const rowHeights = (stamped.tableRowHeightsPt as number[]).map((h) => h * scale);
-      return {
-        colWidths,
-        tableW: colWidths.reduce((s, w) => s + w, 0),
-        rowContentHeights: contentHeightsFromResolved(rowHeights),
-        rowHeights,
-      };
-    }
-  `;
-  const first = statements[0];
-  const b1 = statements[b1Index];
-  if (!first || !b1) return normalizedSyntaxHash(node, source);
-  const nodeStart = node.getStart(source);
-  const nodeText = node.getText(source);
-  let virtualText = nodeText.slice(0, first.getStart(source) - nodeStart)
-    + legacyPrefix
-    + nodeText.slice(b1.getStart(source) - nodeStart);
-  if (occurrenceOwned) {
-    const exactParameter = ',\n  sourceIndex?: number,\n): {';
-    if (virtualText.split(exactParameter).length !== 2) return normalizedSyntaxHash(node, source);
-    virtualText = virtualText.replace(exactParameter, '\n): {');
-  }
-  const virtualSource = ts.createSourceFile(
-    'compute-table-layout-a5-virtual.ts',
-    virtualText,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const virtualNode = virtualSource.statements.find((statement) => (
-    ts.isFunctionDeclaration(statement) && statement.name?.text === 'computeTableLayout'
-  ));
-  return virtualNode
-    ? normalizedSyntaxHash(virtualNode, virtualSource)
-    : normalizedSyntaxHash(node, source);
-}
-
-/** A3 deletes the production-wide fragment flag after retained table paint is
- * mandatory. Normalize only its exact first `if` conjunct; all table eligibility
- * predicates remain hash-frozen through A5. */
-function normalizedIsFragmentPaintableTableHash(node, source) {
-  const firstIf = node.body?.statements.find(ts.isIfStatement);
-  const targetCondition = firstIf?.expression;
-  const flattenOr = (current, operands = []) => {
-    if (ts.isBinaryExpression(current)
-      && current.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
-      flattenOr(current.left, operands);
-      flattenOr(current.right, operands);
-    } else {
-      operands.push(current);
-    }
-    return operands;
-  };
-  const exactDeletedGate = (current) => ts.isPrefixUnaryExpression(current)
-    && current.operator === ts.SyntaxKind.ExclamationToken
-    && ts.isIdentifier(current.operand)
-    && current.operand.text === 'fragmentPaintEnabled';
-  let normalized = node.getText(source);
-  if (targetCondition) {
-    const operands = flattenOr(targetCondition);
-    if (operands.length >= 2 && exactDeletedGate(operands[0])) {
-      const start = operands[0].getStart(source) - node.getStart(source);
-      const end = operands[1].getStart(source) - node.getStart(source);
-      const exactPrefix = normalized.slice(start, end).replace(/\s+/g, '');
-      if (exactPrefix === '!fragmentPaintEnabled||') {
-        normalized = normalized.slice(0, start) + normalized.slice(end);
-      }
-    }
-  }
-  return createHash('sha256').update(normalized.replace(/\s+/g, ' ').trim()).digest('hex');
-}
-
-/** A2 routes service-produced shape text through the same immutable Canvas
- * route used by measurement. The text-box implementation remains hash frozen
- * except for exact Canvas-route threading and the spec-required numbering
- * marker snapshot -> shape -> retained-paint sequence below. */
-function normalizedRenderShapeTextHash(node, source) {
-  const omittedRouteParameters = new Set();
-  const findAllowedRouteParameters = (current) => {
-    if (ts.isVariableDeclaration(current)
-      && ts.isIdentifier(current.name)
-      && current.name.text === 'shapeLineMetrics'
-      && current.initializer
-      && ts.isArrowFunction(current.initializer)) {
-      const tail = current.initializer.parameters.slice(-2);
-      const exact = ['familyRoute?: CanvasFontRoute', 'familyEaRoute?: CanvasFontRoute'];
-      if (tail.length === 2 && tail.every((parameter, index) => (
-        parameter.getText(source).replace(/\s+/g, ' ').trim() === exact[index]
-      ))) {
-        tail.forEach((parameter) => omittedRouteParameters.add(parameter));
-      }
-    }
-    ts.forEachChild(current, findAllowedRouteParameters);
-  };
-  findAllowedRouteParameters(node);
-  const compactText = (current, currentSource) =>
-    current.getText(currentSource).replace(/\s+/g, '');
-  const exactMarkerInput =
-    'constmarkerShapeInput=numberingMarkerShapeInput(block.numbering,block.fontSizePt);';
-  const exactMarkerLayout =
-    'constmarkerTextLayout=shapeNumberingMarkerText(markerShapeInput,markerText,scale,effState.layoutServices?.text,);';
-  const exactMarkerWidth =
-    'constmarkerW=markerTextLayout?.shape.advancePt??ctx.measureText(markerText).width;';
-  const exactMarkerPaint = [
-    'if(markerTextLayout){',
-    'paintNumberingMarkerText(ctx,markerTextLayout,markerX,baseline,',
-    'eaVertUpright?(paintCtx,text,drawX,drawBaseline,fontSizePx)=>{',
-    'drawVerticalRun(paintCtx,text,drawX,drawBaseline,fontSizePx,0);',
-    '}:undefined,);',
-    '}elseif(eaVertUpright){',
-    'drawVerticalRun(ctx,markerText,markerX,baseline,block.fontSizePt*scale,0);',
-    '}else{ctx.fillText(markerText,markerX,baseline);}',
-  ].join('');
-  const markerMigrationCounts = [0, 0, 0, 0];
-  const countMarkerMigration = (current) => {
-    const compact = compactText(current, source);
-    if (ts.isVariableStatement(current) && compact === exactMarkerInput) markerMigrationCounts[0] += 1;
-    if (ts.isVariableStatement(current) && compact === exactMarkerLayout) markerMigrationCounts[1] += 1;
-    if (ts.isVariableStatement(current) && compact === exactMarkerWidth) markerMigrationCounts[2] += 1;
-    if (ts.isIfStatement(current) && compact === exactMarkerPaint) markerMigrationCounts[3] += 1;
-    ts.forEachChild(current, countMarkerMigration);
-  };
-  countMarkerMigration(node);
-  const exactMarkerMigration = markerMigrationCounts.every((count) => count === 1);
-  let shape;
-  const replacementShape = (text) => {
-    const replacementSource = ts.createSourceFile(
-      'render-shape-text-a2-replacement.ts',
-      text,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    return shape(replacementSource.statements[0], replacementSource);
-  };
-  shape = (current, currentSource = source) => {
-    if (ts.isVariableStatement(current)) {
-      const compact = compactText(current, currentSource);
-      if (exactMarkerMigration && (compact === exactMarkerInput || compact === exactMarkerLayout)) {
-        return null;
-      }
-      if (exactMarkerMigration && compact === exactMarkerWidth) {
-        return replacementShape('const markerW = ctx.measureText(markerText).width;');
-      }
-    }
-    if (exactMarkerMigration
-      && ts.isIfStatement(current)
-      && compactText(current, currentSource) === exactMarkerPaint) {
-      return replacementShape(
-        'if (eaVertUpright) { drawVerticalRun(ctx, markerText, markerX, baseline, block.fontSizePt * scale, 0); } else { ctx.fillText(markerText, markerX, baseline); }',
-      );
-    }
-    // A partial/duplicated marker migration is intentionally left in the AST
-    // hash. Only the complete four-node contract above can normalize away.
-    if (ts.isVariableStatement(current)
-      && current.declarationList.declarations.length === 1) {
-      const [declaration] = current.declarationList.declarations;
-      if (ts.isIdentifier(declaration.name)
-        && declaration.name.text === 'measureRoute'
-        && current.getText(currentSource).replace(/\s+/g, ' ').trim()
-          === 'const measureRoute = eaIntended > asciiIntended ? familyEaRoute : familyRoute;') {
-        return null;
-      }
-    }
-    if (omittedRouteParameters.has(current)) return null;
-    if (ts.isCallExpression(current)
-      && ts.isIdentifier(current.expression)
-      && current.expression.text === 'buildFont') {
-      const route = current.arguments.at(-1);
-      const hasAllowedRoute = current.arguments.length === 6
-        && route != null
-        && ((ts.isPropertyAccessExpression(route)
-          && ts.isIdentifier(route.expression)
-          && route.expression.text === 's'
-          && route.name.text === 'fontRoute')
-          || (ts.isIdentifier(route) && route.text === 'measureRoute'));
-      const args = hasAllowedRoute ? current.arguments.slice(0, -1) : current.arguments;
-      return [
-        ts.SyntaxKind[current.kind],
-        undefined,
-        shape(current.expression, currentSource),
-        ...args.map((argument) => shape(argument, currentSource)),
-      ];
-    }
-    if (ts.isCallExpression(current)
-      && ts.isIdentifier(current.expression)
-      && current.expression.text === 'shapeLineMetrics') {
-      const [fontRoute, eaFloorRoute] = current.arguments.slice(-2);
-      const fontRouteText = fontRoute?.getText(source);
-      const eaFloorRouteText = eaFloorRoute?.getText(source);
-      const hasAllowedRoutes = current.arguments.length >= 3
-        && (fontRouteText === 's.fontRoute' || fontRouteText === 'tallest?.fontRoute')
-        && (eaFloorRouteText === 's.eaFloorRoute' || eaFloorRouteText === 'tallest?.eaFloorRoute');
-      const args = hasAllowedRoutes ? current.arguments.slice(0, -2) : current.arguments;
-      return [
-        ts.SyntaxKind[current.kind],
-        undefined,
-        shape(current.expression, currentSource),
-        ...args.map((argument) => shape(argument, currentSource)),
-      ];
-    }
-    const text = ts.isIdentifier(current) || ts.isLiteralExpression(current)
-      ? current.getText(currentSource)
-      : undefined;
-    const children = [];
-    current.forEachChild((child) => {
-      const childShape = shape(child, currentSource);
-      if (childShape !== null) children.push(childShape);
-    });
-    return [ts.SyntaxKind[current.kind], text, ...children];
-  };
-  return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
-}
-
-function declarationInventory(root) {
-  const sourceRoot = resolve(root, DOCX_SOURCE);
-  const nonLayoutDeclarationKeys = [];
-  const legacyDeclarationHashes = {};
-  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
-    const file = posixPath(relative(root, path));
-    const migrationOwner = file.startsWith(`${LAYOUT_SOURCE}/`)
-      || file.startsWith(`${PAINT_SOURCE}/`)
-      || file.startsWith(`${DOCX_SOURCE}/conformance/`)
-      || PLANNED_NON_LAYOUT_MODULES.has(file);
-    const source = sourceFile(path);
-    for (const statement of source.statements) {
-      for (const name of declarationNames(statement)) {
-        const key = `${file}#${declarationKind(statement)}#${name}`;
-        // The final renderer surface is fixed up front, so staged PRs may add
-        // those named adapters without opening a route for arbitrary helpers.
-        const plannedRendererAdapter = file === `${DOCX_SOURCE}/renderer.ts`
-          && (FINAL_RENDERER_DECLARATIONS.has(name) || A5_STATE_OWNER_DECLARATIONS.has(name));
-        const plannedBodyLayoutAdapter = file === BODY_LAYOUT_ADAPTER
-          && BODY_LAYOUT_ADAPTER_DECLARATIONS.has(name);
-        const plannedWorkerLayoutRetention = file === WORKER_LAYOUT_RETENTION
-          && WORKER_LAYOUT_RETENTION_DECLARATIONS.has(name);
-        const plannedTextRunProjectionAdapter = file === TEXT_RUN_PROJECTION_ADAPTER
-          && TEXT_RUN_PROJECTION_ADAPTER_DECLARATIONS.has(name);
-        const plannedBodyKernelImplementation = file === `${DOCX_SOURCE}/renderer.ts`
-          && BODY_KERNEL_IMPLEMENTATION_DECLARATIONS.has(name);
-        if (!migrationOwner && !plannedRendererAdapter && !plannedBodyLayoutAdapter
-          && !plannedWorkerLayoutRetention
-          && !plannedTextRunProjectionAdapter && !plannedBodyKernelImplementation) {
-          nonLayoutDeclarationKeys.push(key);
-        }
-        if (LEGACY_SYMBOLS.includes(name)) {
-          legacyDeclarationHashes[key] = name === 'computePages'
-            ? normalizedComputePagesHash(statement, source)
-            : name === 'computeTableLayout'
-              ? normalizedComputeTableLayoutHash(statement, source)
-            : name === 'isFragmentPaintableTable'
-              ? normalizedIsFragmentPaintableTableHash(statement, source)
-            : name === 'renderShapeText'
-              ? normalizedRenderShapeTextHash(statement, source)
-            : name === 'measureCellContentHeightPx'
-              ? normalizedMeasureCellContentHeightHash(statement, source)
-            : normalizedNodeHash(statement, source);
-        }
-      }
-    }
-  }
-  return {
-    nonLayoutDeclarationKeys: [...new Set(nonLayoutDeclarationKeys)].sort(),
-    legacyDeclarationHashes: Object.fromEntries(
-      Object.entries(legacyDeclarationHashes).sort(([left], [right]) => left.localeCompare(right)),
-    ),
-  };
-}
-
 function rendererImportEdges(root) {
   const renderer = resolve(root, DOCX_SOURCE, 'renderer.ts');
   if (!existsSync(renderer)) return [];
@@ -3722,158 +2466,17 @@ function rendererImportEdges(root) {
     .sort();
 }
 
-function currentAllowances(root) {
-  const declarations = declarationInventory(root);
+function currentLegacyInventory(root) {
   return {
-    version: 2,
+    version: 3,
     legacySymbolCounts: identifierCounts(root),
     migrationIdentifierCounts: matchingIdentifierCounts(root, (name) => MIGRATION_IDENTIFIER.test(name)),
-    nonLayoutDeclarationKeys: declarations.nonLayoutDeclarationKeys,
-    legacyDeclarationHashes: declarations.legacyDeclarationHashes,
     rendererImportEdges: rendererImportEdges(root),
   };
 }
 
-function parseBaselineJson(contents, detail) {
-  try {
-    return JSON.parse(contents);
-  } catch {
-    fail('INVALID_BASELINE', detail);
-  }
-}
-
-function assertUniqueJsonObjectKeys(contents, detail) {
-  const source = ts.parseJsonText(detail, contents);
-  const visit = (node) => {
-    if (ts.isObjectLiteralExpression(node)) {
-      const keys = new Set();
-      for (const property of node.properties) {
-        const name = property.name;
-        const key = name && (ts.isStringLiteralLike(name) || ts.isIdentifier(name))
-          ? name.text
-          : null;
-        if (key !== null && keys.has(key)) {
-          fail('INVALID_BASELINE', `${detail}: duplicate key ${key}`);
-        }
-        if (key !== null) keys.add(key);
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-}
-
-function assertValidBaseline(value, detail) {
-  if (value === null
-    || typeof value !== 'object'
-    || value.version !== 2
-    || typeof value.legacySymbolCounts !== 'object'
-    || value.legacySymbolCounts === null
-    || Array.isArray(value.legacySymbolCounts)
-    || typeof value.migrationIdentifierCounts !== 'object'
-    || value.migrationIdentifierCounts === null
-    || Array.isArray(value.migrationIdentifierCounts)
-    || !Array.isArray(value.nonLayoutDeclarationKeys)
-    || typeof value.legacyDeclarationHashes !== 'object'
-    || value.legacyDeclarationHashes === null
-    || Array.isArray(value.legacyDeclarationHashes)
-    || !Array.isArray(value.rendererImportEdges)) {
-    fail('INVALID_BASELINE', detail);
-  }
-  return value;
-}
-
-function readBaseline(path) {
-  const contents = readFileSync(path, 'utf8');
-  assertUniqueJsonObjectKeys(contents, path);
-  return assertValidBaseline(parseBaselineJson(contents, path), path);
-}
-
-function git(root, args, allowFailure = false) {
-  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
-  if (result.status !== 0 && !allowFailure) fail('GIT_ERROR', `${args.join(' ')}: ${result.stderr.trim()}`);
-  return result;
-}
-
-function mergeBaseBaseline(root, baseRef) {
-  const mergeBase = git(root, ['merge-base', baseRef, 'HEAD']).stdout.trim();
-  const shown = git(root, ['show', `${mergeBase}:${BASELINE_PATH}`], true);
-  if (shown.status !== 0) return null;
-  const detail = `${mergeBase}:${BASELINE_PATH}`;
-  const value = assertValidBaseline(parseBaselineJson(shown.stdout, detail), detail);
-  // The stored A1 hashes predate the A2-specific normalization. Recompute only
-  // the two mechanically constrained declarations from the immutable merge-base
-  // source; every other declaration continues to use the committed baseline.
-  const renderer = git(root, ['show', `${mergeBase}:${DOCX_SOURCE}/renderer.ts`], true);
-  if (renderer.status === 0) {
-    const source = ts.createSourceFile('renderer.ts', renderer.stdout, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-    const declaration = (name) => source.statements.find((statement) => (
-      ts.isFunctionDeclaration(statement) && statement.name?.text === name
-    ));
-    const computePages = declaration('computePages');
-    if (computePages) {
-      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`]
-        = normalizedComputePagesHash(computePages, source);
-    }
-    const computeTableLayout = declaration('computeTableLayout');
-    if (computeTableLayout) {
-      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computeTableLayout`]
-        = normalizedComputeTableLayoutHash(computeTableLayout, source);
-    }
-    const renderShapeText = declaration('renderShapeText');
-    if (renderShapeText) {
-      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`]
-        = normalizedRenderShapeTextHash(renderShapeText, source);
-    }
-    const isFragmentPaintableTable = declaration('isFragmentPaintableTable');
-    if (isFragmentPaintableTable) {
-      value.legacyDeclarationHashes[`${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#isFragmentPaintableTable`]
-        = normalizedIsFragmentPaintableTableHash(isFragmentPaintableTable, source);
-    }
-  }
-  return value;
-}
-
-function assertNoExpansion(head, base) {
-  for (const [symbol, count] of Object.entries(head.legacySymbolCounts)) {
-    const baseCount = base.legacySymbolCounts[symbol] ?? 0;
-    if (count > baseCount) fail('BASELINE_EXPANSION', `${symbol}: ${count} > ${baseCount}`);
-  }
-  for (const [identifier, count] of Object.entries(head.migrationIdentifierCounts)) {
-    const baseCount = base.migrationIdentifierCounts[identifier] ?? 0;
-    if (count > baseCount) fail('BASELINE_EXPANSION', `${identifier}: ${count} > ${baseCount}`);
-  }
-  const baseDeclarations = new Set(base.nonLayoutDeclarationKeys);
-  for (const declaration of head.nonLayoutDeclarationKeys) {
-    if (!baseDeclarations.has(declaration)) fail('BASELINE_EXPANSION', declaration);
-  }
-  for (const [declaration, hash] of Object.entries(head.legacyDeclarationHashes)) {
-    const baseHash = base.legacyDeclarationHashes[declaration];
-    if (!baseHash) fail('BASELINE_EXPANSION', declaration);
-    if (hash !== baseHash) fail('LEGACY_DECLARATION_CHANGED', declaration);
-  }
-  const baseEdges = new Set(base.rendererImportEdges);
-  for (const edge of head.rendererImportEdges) {
-    if (!baseEdges.has(edge)) fail('BASELINE_EXPANSION', edge);
-  }
-}
-
 function stableJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
-}
-
-function assertExactBaseline(baseline, actual) {
-  const expected = stableJson(baseline);
-  const received = stableJson(actual);
-  if (expected !== received) {
-    const expectedLines = expected.split('\n');
-    const receivedLines = received.split('\n');
-    const index = expectedLines.findIndex((line, lineIndex) => line !== receivedLines[lineIndex]);
-    fail(
-      'BASELINE_MISMATCH',
-      `baseline must exactly describe current legacy symbols and renderer import edges; first difference at line ${index + 1}: expected ${JSON.stringify(expectedLines[index])}, received ${JSON.stringify(receivedLines[index])}`,
-    );
-  }
 }
 
 function assertPaintBoundaries(root) {
@@ -4050,16 +2653,11 @@ function assertFinalRendererAssetImports(root) {
 function parseArguments(argv) {
   const options = {
     root: process.cwd(),
-    baseRef: 'origin/main',
-    write: false,
-    final: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--root') options.root = resolve(argv[++index]);
-    else if (arg === '--base-ref') options.baseRef = argv[++index];
-    else if (arg === '--write-transitional-baseline') options.write = true;
-    else if (arg === '--final') options.final = true;
+    else if (arg === '--final') continue;
     else fail('UNKNOWN_ARGUMENT', arg);
   }
   return options;
@@ -4071,6 +2669,7 @@ export function checkDocxLayoutBoundaries(options) {
   const baselineExists = existsSync(baselinePath);
   assertNoProductionTestSupportImports(root);
   assertAcquisitionContextBoundary(root);
+  assertProductionBodyAcquisitionAuthority(root);
   assertRendererAcquisitionProjectionBoundary(root);
   assertFloatRectTransportBoundary(root);
   assertFloatPlacementAuthority(root);
@@ -4088,56 +2687,15 @@ export function checkDocxLayoutBoundaries(options) {
   assertBodyKernelServiceOwner(root);
   assertCanonicalCutoverBoundaries(root);
 
-  if (options.write) {
-    const baseBaseline = mergeBaseBaseline(root, options.baseRef);
-    if (baseBaseline) fail('TRANSITIONAL_BASELINE_EXISTS', `${options.baseRef} already contains ${BASELINE_PATH}`);
-    const actual = currentAllowances(root);
-    mkdirSync(dirname(baselinePath), { recursive: true });
-    writeFileSync(baselinePath, stableJson(actual));
-    return;
+  if (baselineExists) fail('FINAL_BASELINE_PRESENT', BASELINE_PATH);
+  assertFinalRendererAdapter(root);
+  assertFinalRendererAssetImports(root);
+  const actual = currentLegacyInventory(root);
+  if (Object.keys(actual.legacySymbolCounts).length > 0
+    || Object.keys(actual.migrationIdentifierCounts).length > 0
+    || actual.rendererImportEdges.length > 0) {
+    fail('FINAL_LEGACY_BOUNDARY', stableJson(actual).trim());
   }
-
-  if (options.final || !baselineExists) {
-    if (options.final && baselineExists) fail('FINAL_BASELINE_PRESENT', BASELINE_PATH);
-    assertFinalRendererAdapter(root);
-    assertFinalRendererAssetImports(root);
-    const actual = currentAllowances(root);
-    if (Object.keys(actual.legacySymbolCounts).length > 0
-      || Object.keys(actual.migrationIdentifierCounts).length > 0
-      || Object.keys(actual.legacyDeclarationHashes).length > 0
-      || actual.rendererImportEdges.length > 0) {
-      fail('FINAL_LEGACY_BOUNDARY', stableJson(actual).trim());
-    }
-    return;
-  }
-
-  const baseBaseline = mergeBaseBaseline(root, options.baseRef);
-  const headBaseline = readBaseline(baselinePath);
-  const normalizedDeclarationKeys = [
-    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computePages`,
-    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#computeTableLayout`,
-    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#isFragmentPaintableTable`,
-    `${DOCX_SOURCE}/renderer.ts#FunctionDeclaration#renderShapeText`,
-  ];
-  for (const key of normalizedDeclarationKeys) {
-    if (headBaseline.legacyDeclarationHashes[key]
-      && baseBaseline?.legacyDeclarationHashes[key]) {
-      // Treat the immutable merge-base declaration as the virtual baseline so
-      // A2 can constrain exact dependency/route threading without rewriting the
-      // committed A1 baseline.
-      headBaseline.legacyDeclarationHashes[key]
-        = baseBaseline.legacyDeclarationHashes[key];
-    }
-  }
-  if (baseBaseline) {
-    headBaseline.legacyDeclarationHashes = Object.fromEntries(
-      Object.entries(headBaseline.legacyDeclarationHashes).sort(([left], [right]) => left.localeCompare(right)),
-    );
-    assertNoExpansion(headBaseline, baseBaseline);
-  }
-  const actual = currentAllowances(root);
-  if (baseBaseline) assertNoExpansion(actual, baseBaseline);
-  assertExactBaseline(headBaseline, actual);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -3,7 +3,6 @@ import {
   buildSegments,
   layoutLines,
   normalizeFontFamilyUncached,
-  rescaleLayoutLines,
   type LineLayoutEnvironment,
 } from '../line-layout.js';
 import { createLayoutServices } from '../layout-runtime.js';
@@ -87,9 +86,7 @@ describe('production layout service integration', () => {
 
     expect(afterSegmentation).toBeGreaterThanOrEqual(2);
     expect(calls).toBeGreaterThan(afterSegmentation);
-    const afterLayout = calls;
-    rescaleLayoutLines(lines, 2, measureContext(), {}, 0);
-    expect(calls).toBeGreaterThan(afterLayout);
+    expect(lines).toHaveLength(1);
   });
 
   it('keeps cross-slot scalar spans in one unbreakable grapheme', () => {

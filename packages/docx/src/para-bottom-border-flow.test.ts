@@ -176,9 +176,8 @@ describe('a bottom paragraph border reserves flow so following content clears it
   });
 
   it('a bordered paragraph inside a table cell measures as tall as it paints (B2 single measurer)', async () => {
-    // measureCellElementHeight must mirror the paint pass's trailing advance
-    // max(spaceAfter, bottom-border extent) — renderCellContent → renderParagraph
-    // advances by the border extent, so a cell measured without it sizes its row
+    // Retained table acquisition must include the paragraph's trailing advance
+    // max(spaceAfter, bottom-border extent). Omitting it sizes the row
     // SHORT and the painted content pokes past the cell band (clipped under an
     // `exact` row rule, bleeding otherwise). A LARGE extent (space=6, sz48 → 6 pt
     // stroke → extent 9 pt) makes the pre-fix shortfall far exceed the line box's

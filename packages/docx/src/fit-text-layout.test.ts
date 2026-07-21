@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   buildSegments,
   layoutLines,
-  rescaleLayoutLines,
   type LayoutSeg,
   type LayoutTextSeg,
 } from './line-layout.js';
@@ -104,26 +103,25 @@ describe('ECMA-376 §17.3.2.14 fitText layout integration', () => {
       .toBeCloseTo(120, 9);
   });
 
-  it('recomputes the scale-relative per-gap for stamp reuse', () => {
-    const stamp = layoutLines(makeLinearCtx(), buildSegments(fitRuns(), ENV), 1000, 0, 1);
-    const painted = rescaleLayoutLines(stamp, 2, makeLinearCtx(), {}, 0);
+  it('computes the scale-relative per-gap at scale 2', () => {
+    const painted = layoutLines(
+      makeLinearCtx(), buildSegments(fitRuns(), ENV), 2000, 0, 2,
+    );
     const segs = textSegments(painted[0].segments);
 
     expect(segs[0].fitTextPerGapPx).toBeCloseTo(19.2, 9);
     expect(segs.reduce((sum, seg) => sum + seg.measuredWidth, 0)).toBeCloseTo(240, 9);
   });
 
-  it('recomputes a single-glyph region cell at paint scale', () => {
-    const stamp = layoutLines(
+  it('computes a single-glyph region cell at scale 2', () => {
+    const measured = layoutLines(
       makeLinearCtx(),
       buildSegments([textRun('氏', { fitTextVal: 2400 })], ENV),
-      1000,
+      2000,
       0,
-      1,
+      2,
     );
-    const painted = rescaleLayoutLines(stamp, 2, makeLinearCtx(), {}, 0);
 
-    expect(textSegments(stamp[0].segments)[0].measuredWidth).toBeCloseTo(120, 9);
-    expect(textSegments(painted[0].segments)[0].measuredWidth).toBeCloseTo(240, 9);
+    expect(textSegments(measured[0].segments)[0].measuredWidth).toBeCloseTo(240, 9);
   });
 });

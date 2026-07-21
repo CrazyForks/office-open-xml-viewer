@@ -39,8 +39,6 @@ function fixture() {
       'utf8',
     ),
   );
-  write(root, 'scripts/docx-compatibility-observation-baseline.json',
-    '{ "version": 1, "observations": [] }\n');
   return root;
 }
 
@@ -50,8 +48,8 @@ function write(root, path, source) {
   writeFileSync(absolute, source);
 }
 
-function run(root) {
-  return spawnSync(process.execPath, [checker, '--root', root], {
+function run(root, ...args) {
+  return spawnSync(process.execPath, [checker, '--root', root, ...args], {
     cwd: repositoryRoot,
     encoding: 'utf8',
   });
@@ -297,32 +295,18 @@ test('does not exempt an unreviewed file merely because its name ends in compati
   assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
 });
 
-test('allows only an exact transitional observation-baseline entry', () => {
-  const root = fixture();
-  const marker = 'packages/docx/src/layout/table.ts::// Word uses an evidenced legacy branch.';
-  write(root, 'packages/docx/src/layout/table.ts',
-    '// Word uses an evidenced legacy branch.\nexport const value = 1;\n');
-  write(root, 'scripts/docx-compatibility-observation-baseline.json',
-    `${JSON.stringify({ version: 1, observations: [marker] }, null, 2)}\n`);
-  assert.equal(run(root).status, 0);
-
-  write(root, 'packages/docx/src/layout/table.ts',
-    '// Word uses a changed legacy branch.\nexport const value = 1;\n');
-  const changed = run(root);
-  assert.equal(changed.status, 1);
-  assert.match(changed.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
-});
-
-test('rejects stale transitional observation-baseline entries', () => {
+test('rejects any transitional observation baseline in the final architecture', () => {
   const root = fixture();
   write(root, 'scripts/docx-compatibility-observation-baseline.json',
-    `${JSON.stringify({
-      version: 1,
-      observations: [
-        'packages/docx/src/layout/table.ts::// Word uses a removed legacy branch.',
-      ],
-    }, null, 2)}\n`);
+    '{ "version": 1, "observations": [] }\n');
   const result = run(root);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /STALE_COMPATIBILITY_OBSERVATION_BASELINE/);
+  assert.match(result.stderr, /FINAL_COMPATIBILITY_OBSERVATION_BASELINE/);
+});
+
+test('rejects the removed transitional observation inventory argument', () => {
+  const root = fixture();
+  const result = run(root, '--print-observations');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /UNKNOWN_ARGUMENT: --print-observations/);
 });

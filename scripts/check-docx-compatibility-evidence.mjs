@@ -385,20 +385,15 @@ function inspectSource(root, absolute, rules, microsoftCatalog) {
 
 function options(argv) {
   let root = process.cwd();
-  let printObservations = false;
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === '--root' && argv[index + 1]) {
       root = resolve(argv[index + 1]);
       index += 1;
       continue;
     }
-    if (argv[index] === '--print-observations') {
-      printObservations = true;
-      continue;
-    }
     fail('UNKNOWN_ARGUMENT', argv[index] ?? '<missing>');
   }
-  return { root, printObservations };
+  return { root };
 }
 
 const observationMarker =
@@ -421,27 +416,13 @@ function observationKeys(root) {
 
 function verifyObservationBaseline(root, observations) {
   const path = resolve(root, OBSERVATION_BASELINE);
-  const baseline = existsSync(path)
-    ? JSON.parse(readFileSync(path, 'utf8'))
-    : { version: 1, observations: [] };
-  if (baseline?.version !== 1 || !Array.isArray(baseline.observations)
-    || baseline.observations.some((entry) => typeof entry !== 'string')) {
-    fail('COMPATIBILITY_OBSERVATION_BASELINE', OBSERVATION_BASELINE);
+  if (existsSync(path)) {
+    fail('FINAL_COMPATIBILITY_OBSERVATION_BASELINE', OBSERVATION_BASELINE);
   }
-  const allowed = new Set(baseline.observations);
-  const added = observations.filter((entry) => !allowed.has(entry));
-  if (added.length > 0) {
+  if (observations.length > 0) {
     fail(
       'INLINE_COMPATIBILITY_OBSERVATION',
-      added.join('\n'),
-    );
-  }
-  const observed = new Set(observations);
-  const stale = baseline.observations.filter((entry) => !observed.has(entry));
-  if (stale.length > 0) {
-    fail(
-      'STALE_COMPATIBILITY_OBSERVATION_BASELINE',
-      stale.join('\n'),
+      observations.join('\n'),
     );
   }
 }
@@ -462,14 +443,7 @@ export function checkDocxCompatibilityEvidence(root) {
 if (process.argv[1]
   && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   try {
-    const { root, printObservations } = options(process.argv.slice(2));
-    if (printObservations) {
-      process.stdout.write(`${JSON.stringify({
-        version: 1,
-        observations: observationKeys(root),
-      }, null, 2)}\n`);
-      process.exit(0);
-    }
+    const { root } = options(process.argv.slice(2));
     const rules = checkDocxCompatibilityEvidence(root);
     process.stdout.write(`DOCX compatibility evidence verified (${rules.length} rules).\n`);
   } catch (error) {
