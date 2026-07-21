@@ -112,7 +112,6 @@ import {
   paintLayoutPage as paintRetainedLayoutPage,
 } from './paint/canvas-page.js';
 import { canonicalCanvasPaintResourceHandlers } from './paint/canonical-resource-handlers.js';
-import { wordPageLevelAnchorY } from './layout/anchor-compatibility.js';
 import {
   wordRubyUniformLineHeightPx,
 } from './layout/line-compatibility.js';
@@ -304,6 +303,10 @@ import {
   validateDrawingMLCollisionRegistryDelta,
 } from './layout/drawingml-collision-registry.js';
 import { resolveAnchorFrame } from './layout/anchor-frame.js';
+import {
+  isPageLevelAnchorY,
+  isPageLevelWrapFloat,
+} from './layout/anchor-classification.js';
 import {
   drawTateChuYokoRun,
   physicalToLogicalAnchorBox,
@@ -4019,14 +4022,6 @@ export const __test_preRegisterPageFloats = (
   state: AnchorFloatRegistrationState,
 ): void => preRegisterPageFloats(body, startIdx, state);
 
-/** Exported for the page-anchor pre-scan test — pins the
- *  {paragraph,line,character} ⇒ paragraph-local vs everything-else ⇒ page-level
- *  classification (ECMA-376 §20.4.3.5 ST_RelFromV). */
-export const __test_isPageLevelAnchorY = (
-  rf: string | null | undefined,
-  fromPara: boolean,
-): boolean => isPageLevelAnchorY(rf, fromPara);
-
 /** ECMA-376 §17.6.20 + §20.4.3.x — an acquisition-state view whose page/margin geometry
  *  is the PHYSICAL (un-rotated) page, used to resolve a DrawingML anchor's
  *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
@@ -4149,31 +4144,6 @@ function resolveAnchorBox(
     img.anchorYRelativeFrom ?? null, null, null,
   );
   return { x, y, w, h, dl, dr, dt, db };
-}
-
-/** `word-page-level-float-prescan` classifies a `<wp:positionV>` reference
- *  that resolves the float's Y INDEPENDENTLY of its anchoring paragraph (vs.
- *  `paragraph` / `line` / `character` which resolve against the paragraph's
- *  top). {@link preRegisterPageFloats} uses this to
- *  hoist such floats to page-start; paragraph-local Y still flows the legacy
- *  per-paragraph path.
- *
- *  An anchor with NO explicit `<wp:positionV>` (anchorYRelativeFrom absent)
- *  still resolves against the page top via the legacy hint
- *  (`anchorYFromPara=false` ⇒ page-absolute offset), so it qualifies as
- *  page-level too. */
-function isPageLevelAnchorY(rf: string | null | undefined, fromPara: boolean): boolean {
-  return wordPageLevelAnchorY(rf, fromPara);
-}
-
-/** True when this run is a wrap float whose vertical placement is page-level
- *  (independent of source-order paragraph position) — see
- *  {@link isPageLevelAnchorY}. `isWrapFloat` already filters inline images
- *  (their `wrapMode` is undefined) and non-wrapping anchors, so an extra
- *  `anchor` check is redundant here. */
-function isPageLevelWrapFloat(run: ImageRun | ChartRun | ShapeRun): boolean {
-  if (!isWrapFloat(run.wrapMode)) return false;
-  return isPageLevelAnchorY(run.anchorYRelativeFrom ?? null, run.anchorYFromPara ?? false);
 }
 
 /** Register float exclusions from a paragraph's anchored images, charts, and
