@@ -87,14 +87,18 @@ function eaTextbox(): ShapeRun {
 /** State carrying the section docGrid (like the production render threads). */
 function stateWithGrid(
   ctx: CanvasRenderingContext2D,
-  grid: { type: string | null; linePitchPt: number | null } | undefined,
+  grid: {
+    type: 'default' | 'lines' | 'linesAndChars' | 'snapToChars' | null;
+    linePitchPt: number | null;
+  } | undefined,
 ): ShapeAcquisitionTestState {
   const base = shapeAcquisitionState(ctx, 1, {});
+  const kind = grid?.type == null || grid.type === 'default' ? 'none' : grid.type;
   return {
     ...base,
     sectionLayout: {
       grid: {
-        kind: grid?.type === 'lines' ? 'lines' : 'none',
+        kind,
         linePitchPt: grid?.linePitchPt ?? null,
         charSpacePt: null,
       },

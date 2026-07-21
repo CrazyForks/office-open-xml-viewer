@@ -238,7 +238,9 @@ function assertNoProductionTestSupportImports(root) {
 
 function assertAcquisitionContextBoundary(root) {
   const contextPath = resolve(root, ACQUISITION_CONTEXT);
-  if (!existsSync(contextPath)) return;
+  if (!existsSync(contextPath)) {
+    fail('ACQUISITION_CONTEXT_SURFACE', `${ACQUISITION_CONTEXT} missing`);
+  }
   const source = sourceFile(contextPath);
   const declarations = new Set(source.statements.flatMap(declarationNames));
   for (const name of ACQUISITION_CONTEXT_DECLARATIONS) {
