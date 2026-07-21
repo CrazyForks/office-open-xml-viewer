@@ -96,6 +96,7 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + '}\n');
   write(root, 'packages/docx/src/layout/acquisition-state.ts',
     'export const BODY_STORY_CONTEXT = {};\n'
+      + 'export function bodyAnchorReferenceFrames() {}\n'
       + 'export function resolveBodyParagraphLayoutContext() {}\n'
       + 'export function resolveStateParagraphLayoutContext() {}\n'
       + 'export function withTableCellStory() {}\n'
@@ -374,6 +375,44 @@ test('rejects renderer-owned acquisition state from the final architecture', () 
 });
 
 test('layout acquisition contexts reject paint capabilities and renderer back-edges', () => {
+  const scaleRoot = initializeCanonicalFixture('docx-layout-boundary-acquisition-scale-');
+  write(
+    scaleRoot,
+    'packages/docx/src/layout/acquisition-context.ts',
+    'export interface AnchorFloatRegistrationState {}\n'
+      + 'export interface AnchorGeometryContext { scale: number }\n'
+      + 'export interface BodyAcquisitionState {}\n'
+      + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
+      + 'export interface FloatRegistrationState {}\n'
+      + 'export interface PhysicalAnchorFrame {}\n'
+      + 'export interface RetainedTableRecord {}\n',
+  );
+  expectDiagnostic(
+    scaleRoot,
+    'ACQUISITION_COORDINATE_SCALE',
+    'direct scale member',
+    '--final',
+  );
+
+  const scalePickRoot = initializeCanonicalFixture('docx-layout-boundary-acquisition-scale-pick-');
+  write(
+    scalePickRoot,
+    'packages/docx/src/layout/acquisition-context.ts',
+    'export interface AnchorFloatRegistrationState {}\n'
+      + 'export interface AnchorGeometryContext {}\n'
+      + 'export interface BodyAcquisitionState {}\n'
+      + "export type BodyMeasurementContext = Readonly<Pick<BodyAcquisitionState, 'scale'>>;\n"
+      + 'export interface FloatRegistrationState {}\n'
+      + 'export interface PhysicalAnchorFrame {}\n'
+      + 'export interface RetainedTableRecord {}\n',
+  );
+  expectDiagnostic(
+    scalePickRoot,
+    'ACQUISITION_COORDINATE_SCALE',
+    'scale pick',
+    '--final',
+  );
+
   const paintRoot = initializeCanonicalFixture('docx-layout-boundary-acquisition-paint-');
   write(
     paintRoot,
@@ -1011,40 +1050,13 @@ test('body-layout input adapter rejects any body other than the exact projection
   expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_BODY', 'non-acquisition body', '--final');
 });
 
-test('paragraph anchor frame adapter is an exact transition-only renderer seam', () => {
+test('paragraph anchor frame adapter cannot return after the point-space cutover', () => {
   const root = initializeTransitionalRepository();
   installParagraphAnchorFrameAdapter(root);
-
-  const result = runChecker(root, '--base-ref', 'main');
-  assert.equal(result.status, 0, result.output);
-});
-
-test('paragraph anchor frame adapter rejects extra declarations, imports, exports, and consumers', () => {
-  for (const [name, mutate, diagnostic] of [
-    ['declaration', (source) => `${source}\nfunction hiddenConversion() {}\n`,
-      'PARAGRAPH_ANCHOR_ADAPTER_DECLARATION'],
-    ['import', (source) => `import type { Extra } from './extra.js';\n${source}`,
-      'PARAGRAPH_ANCHOR_ADAPTER_IMPORT'],
-    ['default export', (source) => `${source}\nexport default paragraphAnchorReferenceFrames;\n`,
-      'PARAGRAPH_ANCHOR_ADAPTER_EXPORT'],
-  ]) {
-    const root = initializeTransitionalRepository();
-    installParagraphAnchorFrameAdapter(root);
-    write(root, 'packages/docx/src/extra.ts', 'export interface Extra {}\n');
-    write(root, 'packages/docx/src/paragraph-anchor-frame-adapter.ts',
-      mutate(canonicalParagraphAnchorFrameAdapter));
-    expectDiagnostic(root, diagnostic, name, '--base-ref', 'main');
-  }
-
-  const root = initializeTransitionalRepository();
-  installParagraphAnchorFrameAdapter(root);
-  write(root, 'packages/docx/src/foreign-consumer.ts',
-    "import { paragraphAnchorReferenceFrames } from './paragraph-anchor-frame-adapter.js';\n"
-      + 'export const frames = paragraphAnchorReferenceFrames({ scale: 1 });\n');
   expectDiagnostic(
     root,
-    'PARAGRAPH_ANCHOR_ADAPTER_CONSUMER',
-    'non-renderer consumer',
+    'FINAL_PARAGRAPH_ANCHOR_ADAPTER',
+    'removed adapter',
     '--base-ref',
     'main',
   );

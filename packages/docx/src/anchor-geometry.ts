@@ -37,10 +37,9 @@ export function xContainer(
   fromMarginHint: boolean,
   state: AnchorGeometryContext,
 ): { start: number; end: number } {
-  const { scale } = state;
-  const pageW = state.pageWidth * scale;
-  const ml = state.marginLeft * scale;
-  const mr = state.marginRight * scale;
+  const pageW = state.pageWidth;
+  const ml = state.marginLeft;
+  const mr = state.marginRight;
   const rf = relativeFrom ?? (fromMarginHint ? 'margin' : 'page');
   switch (rf) {
     case 'page':          return { start: 0, end: pageW };
@@ -53,7 +52,7 @@ export function xContainer(
     // margins. `character` is "relative to the position of the anchor within its
     // run content"; with no run-relative offset data we degrade it to the same
     // containing column (the closest available base). The renderer keeps the
-    // current column band in state.contentX/contentW (ALREADY scaled px): the
+    // current point-space column band in state.contentX/contentW: the
     // section margin band at body level, a specific column band in a multi-column
     // section, or a table CELL's inner text box while rendering cell content
     // (renderCell). This lets a header-logo anchor authored `relativeFrom="column"`
@@ -69,25 +68,25 @@ export function xContainer(
 export function yContainer(
   relativeFrom: string | null | undefined,
   fromParaHint: boolean,
-  paragraphTopPx: number,
+  paragraphTopPt: number,
   state: AnchorGeometryContext,
 ): { start: number; end: number } {
-  const { scale } = state;
-  const mt = state.marginTop * scale;
-  const mb = state.marginBottom * scale;
+  const mt = state.marginTop;
+  const mb = state.marginBottom;
   const rf = relativeFrom ?? (fromParaHint ? 'paragraph' : 'page');
   switch (rf) {
     case 'page':         return { start: 0, end: state.pageH };
     case 'topMargin':    return { start: 0, end: mt };
     case 'bottomMargin': return { start: state.pageH - mb, end: state.pageH };
     case 'paragraph':
-    case 'line':         return { start: paragraphTopPx, end: state.pageH };
+    case 'line':         return { start: paragraphTopPt, end: state.pageH };
     case 'margin':
     default:             return { start: mt, end: state.pageH - mb };
   }
 }
 
-/** Resolve the page X for an anchor or anchor-group child. `offsetPx` carries
+/** Resolve the page X in points for an anchor or anchor-group child. `offsetPt`
+ *  carries
  *  the shape's offset for explicit posOffset anchors, or the within-group child
  *  offset when `alignWidthPt` is set. For standalone `<wp:align>` anchors it is
  *  ignored: ECMA-376 §20.4.3.1 uses `<wp:align>` / `<wp:posOffset>` as a choice,
@@ -99,31 +98,29 @@ export function resolveAnchorX(
   align: string | null | undefined,
   fromMargin: boolean,
   offsetPt: number,
-  widthPx: number,
+  widthPt: number,
   state: AnchorGeometryContext,
   relativeFrom?: string | null,
   pctPos?: number | null,
   alignWidthPt?: number | null,
 ): number {
-  const { scale } = state;
   const c = xContainer(relativeFrom, fromMargin, state);
-  const offsetPx = offsetPt * scale;
   if (pctPos != null) {
-    return c.start + (c.end - c.start) * pctPos + offsetPx;
+    return c.start + (c.end - c.start) * pctPos + offsetPt;
   }
   if (!align) {
-    return c.start + offsetPx;
+    return c.start + offsetPt;
   }
   const containerW = c.end - c.start;
-  const aw = alignWidthPt != null ? alignWidthPt * scale : widthPx;
-  const alignOffsetPx = alignWidthPt != null ? offsetPx : 0;
+  const aw = alignWidthPt ?? widthPt;
+  const alignOffsetPt = alignWidthPt != null ? offsetPt : 0;
   switch (align) {
-    case 'center': return c.start + (containerW - aw) / 2 + alignOffsetPx;
+    case 'center': return c.start + (containerW - aw) / 2 + alignOffsetPt;
     case 'right':
-    case 'outside': return c.end - aw + alignOffsetPx;
+    case 'outside': return c.end - aw + alignOffsetPt;
     case 'inside':
     case 'left':
-    default:        return c.start + alignOffsetPx;
+    default:        return c.start + alignOffsetPt;
   }
 }
 
@@ -131,27 +128,25 @@ export function resolveAnchorY(
   align: string | null | undefined,
   fromPara: boolean,
   offsetPt: number,
-  heightPx: number,
-  paragraphTopPx: number,
+  heightPt: number,
+  paragraphTopPt: number,
   state: AnchorGeometryContext,
   relativeFrom?: string | null,
   pctPos?: number | null,
   alignHeightPt?: number | null,
 ): number {
-  const { scale } = state;
-  const c = yContainer(relativeFrom, fromPara, paragraphTopPx, state);
-  const offsetPx = offsetPt * scale;
+  const c = yContainer(relativeFrom, fromPara, paragraphTopPt, state);
   if (pctPos != null) {
-    return c.start + (c.end - c.start) * pctPos + offsetPx;
+    return c.start + (c.end - c.start) * pctPos + offsetPt;
   }
   if (!align) {
-    return c.start + offsetPx;
+    return c.start + offsetPt;
   }
   const containerH = c.end - c.start;
-  const ah = alignHeightPt != null ? alignHeightPt * scale : heightPx;
-  const alignOffsetPx = alignHeightPt != null ? offsetPx : 0;
+  const ah = alignHeightPt ?? heightPt;
+  const alignOffsetPt = alignHeightPt != null ? offsetPt : 0;
   switch (align) {
-    case 'center': return c.start + (containerH - ah) / 2 + alignOffsetPx;
+    case 'center': return c.start + (containerH - ah) / 2 + alignOffsetPt;
     // ECMA-376 §20.4.3.1 ST_AlignV: "inside"/"outside" are page-binding-
     // relative. Mirroring resolveAnchorX (and the insideMargin/outsideMargin
     // approximation in yContainer/xContainer): on an odd page the binding edge
@@ -160,9 +155,9 @@ export function resolveAnchorY(
     // pages mirror the binding edge) is not implemented. Update this when that
     // approximation is removed.
     case 'bottom':
-    case 'outside': return c.end - ah + alignOffsetPx;
+    case 'outside': return c.end - ah + alignOffsetPt;
     case 'top':
     case 'inside':
-    default:        return c.start + alignOffsetPx;
+    default:        return c.start + alignOffsetPt;
   }
 }

@@ -38,13 +38,12 @@ const MARGIN = 72;
 // column's physical TOP (72 = the top content margin), which is what a
 // paragraph-relative positionV anchors from.
 const verticalState = {
-  scale: 1,
   pageWidth: PHYS_H,
   marginLeft: MARGIN, // logical left = physical top
   marginRight: MARGIN, // logical right = physical bottom
   marginTop: MARGIN, // logical top = physical right
   marginBottom: MARGIN, // logical bottom = physical left
-  pageH: PHYS_W, // logical height (px) = physical width
+  pageH: PHYS_W, // logical height in points = physical width
   contentX: MARGIN, // column band start (logical x) ⇒ physical column top
   contentW: PHYS_H - 2 * MARGIN,
   verticalCJK: true,
@@ -55,7 +54,7 @@ const verticalState = {
     marginRight: MARGIN,
     marginTop: MARGIN,
     marginBottom: MARGIN,
-    cssWidthPx: PHYS_W,
+    physicalPageWidthPt: PHYS_W,
   },
 } as unknown as AnchorFloatRegistrationState;
 

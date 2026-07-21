@@ -673,9 +673,8 @@ describe('preRegisterPageFloats — paragraph-local Y is NOT pre-registered', ()
       ]),
     ];
     // Minimal acquisition-state stub matching what registerImageFloat/registerShapeFloat
-    // touch: scale, marginLeft/Top, pageH, contentX/W, and floats.
+    // touch point-space margins/page/column geometry and the float registry.
     const state = {
-      scale: 1,
       marginLeft: 20, marginRight: 20, marginTop: 20, marginBottom: 20,
       pageWidth: 200, pageH: 200,
       contentX: 20, contentW: 160,
@@ -697,7 +696,6 @@ describe('preRegisterPageFloats — paragraph-local Y is NOT pre-registered', ()
       ]),
     ];
     const state = {
-      scale: 1,
       marginLeft: 20, marginRight: 20, marginTop: 20, marginBottom: 20,
       pageWidth: 200, pageH: 200,
       contentX: 20, contentW: 160,
@@ -718,7 +716,6 @@ describe('preRegisterPageFloats — idempotent on repeated pre-scan', () => {
     ]);
     const body = [para({ text: 'A' }), paraB];
     const state = {
-      scale: 1,
       marginLeft: 20, marginRight: 20, marginTop: 20, marginBottom: 20,
       pageWidth: 200, pageH: 200,
       contentX: 20, contentW: 160,
@@ -743,7 +740,6 @@ describe('preRegisterPageFloats — idempotent on repeated pre-scan', () => {
       paraWith([pageImageRun({ widthPt: 60, heightPt: 40, anchorYRelativeFrom: 'margin', wrapMode: 'square' })]), // must be SKIPPED — belongs to the next page
     ];
     const state = {
-      scale: 1,
       marginLeft: 20, marginRight: 20, marginTop: 20, marginBottom: 20,
       pageWidth: 200, pageH: 200,
       contentX: 20, contentW: 160,

@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { resolveAnchorX, resolveAnchorY } from './anchor-geometry.js';
 
-// resolveAnchorY reads only { scale, marginTop, marginBottom, pageH } of
-// BodyAcquisitionState (via yContainer); cast a minimal stand-in like the other geometry
-// tests. scale=1 so px == pt. pageH=800, top/bottom margins=72 ⇒ the "margin"
+// resolveAnchorY reads only point-space page and margin geometry from the
+// acquisition state. pageH=800, top/bottom margins=72 ⇒ the "margin"
 // container band is [72, 728], the "page" band is [0, 800].
 interface MinState {
-  scale: number;
   pageWidth: number;
   marginLeft: number;
   marginRight: number;
@@ -17,7 +15,6 @@ interface MinState {
   pageH: number;
 }
 const state: MinState = {
-  scale: 1,
   pageWidth: 600,
   marginLeft: 60,
   marginRight: 40,
@@ -28,7 +25,7 @@ const state: MinState = {
   pageH: 800,
 };
 
-// resolveAnchorY(align, fromPara, offsetPt, heightPx, paragraphTopPx, state, relativeFrom)
+// resolveAnchorY(align, fromPara, offsetPt, heightPt, paragraphTopPt, state, relativeFrom)
 const y = (align: string, relativeFrom: string, h = 100): number =>
   resolveAnchorY(align, false, 0, h, 0, state as never, relativeFrom);
 

@@ -6,6 +6,7 @@ import {
 import { getDefaultFontSize } from '../line-layout.js';
 import type { DocParagraph } from '../types.js';
 import type { BodyAcquisitionState, RetainedTableRecord } from './acquisition-context.js';
+import type { AnchorReferenceFramesInput } from './anchor-frame.js';
 import { applyNumberingBodyOffset } from './numbering-marker.js';
 
 export const BODY_STORY_CONTEXT: StoryContext = Object.freeze({
@@ -18,6 +19,55 @@ type ParagraphContextState = Pick<
   BodyAcquisitionState,
   'layoutSettings' | 'sectionLayout' | 'acquisitionInputs'
 > & Partial<Pick<BodyAcquisitionState, 'layoutServices' | 'defaultTabPt'>>;
+
+type BodyAnchorFrameState = Pick<
+  BodyAcquisitionState,
+  | 'pageIndex'
+  | 'pageWidth'
+  | 'pageH'
+  | 'marginLeft'
+  | 'marginRight'
+  | 'marginTop'
+  | 'marginBottom'
+  | 'contentX'
+  | 'contentW'
+>;
+
+/** Projects the body page, margin, and column reference frames without
+ * crossing out of retained layout's canonical point coordinate space. */
+export function bodyAnchorReferenceFrames(
+  state: BodyAnchorFrameState,
+): Readonly<Pick<
+  AnchorReferenceFramesInput,
+  'page' | 'margin' | 'column' | 'pageParity'
+>> {
+  const blockExtentPt = Math.max(
+    0,
+    state.pageH - state.marginTop - state.marginBottom,
+  );
+
+  return {
+    page: {
+      xPt: 0,
+      yPt: 0,
+      widthPt: state.pageWidth,
+      heightPt: state.pageH,
+    },
+    margin: {
+      xPt: state.marginLeft,
+      yPt: state.marginTop,
+      widthPt: Math.max(0, state.pageWidth - state.marginLeft - state.marginRight),
+      heightPt: blockExtentPt,
+    },
+    column: {
+      xPt: state.contentX,
+      yPt: state.marginTop,
+      widthPt: state.contentW,
+      heightPt: blockExtentPt,
+    },
+    pageParity: state.pageIndex % 2 === 0 ? 'odd' : 'even',
+  };
+}
 
 function applyNumberingContext(
   state: ParagraphContextState,

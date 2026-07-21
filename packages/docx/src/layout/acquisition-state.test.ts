@@ -8,6 +8,7 @@ import type { DocParagraph, DocxDocumentModel, SectionProps } from '../types.js'
 import type { BodyAcquisitionState, RetainedTableRecord } from './acquisition-context.js';
 import {
   BODY_STORY_CONTEXT,
+  bodyAnchorReferenceFrames,
   retainedTableRecord,
   resolveBodyParagraphLayoutContext,
   resolveStateParagraphLayoutContext,
@@ -56,6 +57,44 @@ function paragraphState() {
 }
 
 describe('layout acquisition state', () => {
+  it('projects body anchor reference frames directly from point-space state', () => {
+    expect(bodyAnchorReferenceFrames({
+      pageIndex: 1,
+      pageWidth: 600,
+      pageH: 800,
+      marginLeft: 40,
+      marginRight: 50,
+      marginTop: 60,
+      marginBottom: 70,
+      contentX: 50,
+      contentW: 200,
+    })).toEqual({
+      page: { xPt: 0, yPt: 0, widthPt: 600, heightPt: 800 },
+      margin: { xPt: 40, yPt: 60, widthPt: 510, heightPt: 670 },
+      column: { xPt: 50, yPt: 60, widthPt: 200, heightPt: 670 },
+      pageParity: 'even',
+    });
+  });
+
+  it('clamps an inverted point-space margin block extent', () => {
+    expect(bodyAnchorReferenceFrames({
+      pageIndex: 2,
+      pageWidth: 300,
+      pageH: 50,
+      marginLeft: 20,
+      marginRight: 30,
+      marginTop: 40,
+      marginBottom: 20,
+      contentX: 20,
+      contentW: 150,
+    })).toEqual({
+      page: { xPt: 0, yPt: 0, widthPt: 300, heightPt: 50 },
+      margin: { xPt: 20, yPt: 40, widthPt: 250, heightPt: 0 },
+      column: { xPt: 20, yPt: 40, widthPt: 150, heightPt: 0 },
+      pageParity: 'odd',
+    });
+  });
+
   it('owns one immutable body-story root and enters table cells without mutating it', () => {
     expect(Object.isFrozen(BODY_STORY_CONTEXT)).toBe(true);
     expect(Object.isFrozen(BODY_STORY_CONTEXT.containers)).toBe(true);

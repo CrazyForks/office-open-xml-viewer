@@ -40,12 +40,12 @@ export interface PhysicalAnchorFrame {
   readonly marginRight: number;
   readonly marginTop: number;
   readonly marginBottom: number;
-  readonly cssWidthPx: number;
+  readonly physicalPageWidthPt: number;
 }
 
 /** Read-only page/container geometry consumed by DrawingML anchor placement. */
 export interface AnchorGeometryContext {
-  readonly scale: number;
+  /** All geometry is expressed in authored points. */
   readonly contentX: number;
   readonly contentW: number;
   readonly pageH: number;
@@ -86,9 +86,7 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
   verticalGlyphMeasurement: VerticalGlyphMeasurementService;
   /** Required parser-to-layout fact projections. */
   acquisitionInputs: BodyAcquisitionInputProjections;
-  /** Acquisition coordinate scale in pixels per point. */
-  scale: number;
-  /** Current logical text container, already in acquisition pixels. */
+  /** Current logical text container in authored points. */
   contentX: number;
   contentW: number;
   y: number;
@@ -128,7 +126,6 @@ export type BodyMeasurementContext = Readonly<Pick<
   | 'ctx'
   | 'verticalGlyphMeasurement'
   | 'acquisitionInputs'
-  | 'scale'
   | 'pageH'
   | 'pageWidth'
   | 'pageIndex'

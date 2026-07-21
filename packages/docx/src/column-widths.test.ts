@@ -244,7 +244,7 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     const t = autofit([row([contentCell('aa aa'), contentCell('b')])], [0, 100]);
     const state = {
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 100,
-      pageH: 200, scale: 1, pageIndex: 0, totalPages: 1,
+      pageH: 200, pageIndex: 0, totalPages: 1,
       acquisitionInputs: bodyAcquisitionInputProjections,
     } as unknown as ColState;
 

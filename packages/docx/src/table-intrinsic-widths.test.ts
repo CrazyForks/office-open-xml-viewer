@@ -123,7 +123,7 @@ function columnState(
 ): ColumnState {
   return {
     ctx, fontFamilyClasses: {}, layoutServices: services,
-    pageWidth: 200, pageH: 300, scale: 1, pageIndex: 0, totalPages: 1,
+    pageWidth: 200, pageH: 300, pageIndex: 0, totalPages: 1,
     defaultTabPt: 36,
     acquisitionInputs: bodyAcquisitionInputProjections,
   } as unknown as ColumnState;

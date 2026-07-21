@@ -59,10 +59,6 @@ const A5_STATE_OWNER_DECLARATIONS = new Set([
 ]);
 
 const BODY_LAYOUT_ADAPTER_DECLARATIONS = new Set(['createBodyLayoutInput']);
-const PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS = new Set([
-  'ParagraphAnchorReferenceFrameSnapshot',
-  'paragraphAnchorReferenceFrames',
-]);
 const WORKER_LAYOUT_RETENTION_DECLARATIONS = new Set([
   'RetainedRenderWorkerDocumentLayout',
   'retainRenderWorkerDocumentLayout',
@@ -207,6 +203,7 @@ const ACQUISITION_INPUT_PROJECTION_DECLARATIONS = new Set([
 
 const ACQUISITION_STATE_DECLARATIONS = new Set([
   'BODY_STORY_CONTEXT',
+  'bodyAnchorReferenceFrames',
   'resolveBodyParagraphLayoutContext',
   'resolveStateParagraphLayoutContext',
   'withTableCellStory',
@@ -336,6 +333,23 @@ function assertAcquisitionContextBoundary(root) {
       }
     }
     for (const statement of source.statements) {
+      if (file === ACQUISITION_CONTEXT) {
+        const rejectScaleMember = (node) => {
+          if ((ts.isPropertySignature(node) || ts.isMethodSignature(node))
+            && node.name
+            && (ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name))
+            && node.name.text === 'scale') {
+            fail('ACQUISITION_COORDINATE_SCALE', `${file}#scale`);
+          }
+          if (ts.isLiteralTypeNode(node)
+            && ts.isStringLiteralLike(node.literal)
+            && node.literal.text === 'scale') {
+            fail('ACQUISITION_COORDINATE_SCALE', `${file}#'scale'`);
+          }
+          ts.forEachChild(node, rejectScaleMember);
+        };
+        rejectScaleMember(statement);
+      }
       if (!ts.isInterfaceDeclaration(statement)) continue;
       for (const member of statement.members) {
         if ((!ts.isPropertySignature(member) && !ts.isMethodSignature(member)) || !member.name) {
@@ -1743,74 +1757,10 @@ function assertBodyLayoutAdapterBoundary(root) {
   }
 }
 
-function assertParagraphAnchorFrameAdapterBoundary(root, allowTransitionalAdapter) {
+function assertParagraphAnchorFrameAdapterBoundary(root) {
   const adapter = resolve(root, PARAGRAPH_ANCHOR_FRAME_ADAPTER);
   if (!existsSync(adapter)) return;
-  if (!allowTransitionalAdapter) {
-    fail('FINAL_PARAGRAPH_ANCHOR_ADAPTER', PARAGRAPH_ANCHOR_FRAME_ADAPTER);
-  }
-
-  const source = sourceFile(adapter);
-  const imports = source.statements.filter(ts.isImportDeclaration);
-  if (imports.length !== 1) {
-    fail('PARAGRAPH_ANCHOR_ADAPTER_IMPORT', 'exact-import-set-required');
-  }
-  const importStatement = imports[0];
-  const clause = importStatement.importClause;
-  const bindings = clause?.namedBindings;
-  if (!ts.isStringLiteralLike(importStatement.moduleSpecifier)
-    || importStatement.moduleSpecifier.text !== './layout/anchor-frame.js'
-    || !clause?.isTypeOnly
-    || clause.name
-    || !bindings
-    || !ts.isNamedImports(bindings)
-    || bindings.elements.length !== 1
-    || bindings.elements[0]?.name.text !== 'AnchorReferenceFramesInput'
-    || bindings.elements[0]?.propertyName) {
-    fail('PARAGRAPH_ANCHOR_ADAPTER_IMPORT', importStatement.getText(source));
-  }
-
-  const declarations = [];
-  for (const statement of source.statements) {
-    if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)
-      || statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
-      fail('PARAGRAPH_ANCHOR_ADAPTER_EXPORT', statement.getText(source));
-    }
-    for (const name of declarationNames(statement)) {
-      declarations.push(name);
-      if (!PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS.has(name)) {
-        fail('PARAGRAPH_ANCHOR_ADAPTER_DECLARATION', name);
-      }
-    }
-  }
-  const exactDeclarations = [...PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS].sort();
-  if (declarations.length !== exactDeclarations.length
-    || declarations.sort().some((name, index) => name !== exactDeclarations[index])) {
-    fail('PARAGRAPH_ANCHOR_ADAPTER_DECLARATION', declarations.join(','));
-  }
-
-  const runtimeConsumers = [];
-  const sourceRoot = resolve(root, DOCX_SOURCE);
-  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
-    if (path === adapter) continue;
-    for (const edge of moduleEdges(path)) {
-      if (!edge.literal || edge.typeOnly || !edge.specifier.startsWith('.')) continue;
-      if (resolveLocalImport(path, edge.specifier) !== adapter) continue;
-      const consumer = posixPath(relative(root, path));
-      runtimeConsumers.push(consumer);
-      if (consumer !== `${DOCX_SOURCE}/renderer.ts`
-        || edge.kind !== 'import'
-        || edge.aliased
-        || edge.importedNames.length !== 1
-        || edge.importedNames[0] !== 'paragraphAnchorReferenceFrames') {
-        fail('PARAGRAPH_ANCHOR_ADAPTER_CONSUMER', consumer);
-      }
-    }
-  }
-  if (runtimeConsumers.length !== 1
-    || runtimeConsumers[0] !== `${DOCX_SOURCE}/renderer.ts`) {
-    fail('PARAGRAPH_ANCHOR_ADAPTER_CONSUMER', runtimeConsumers.join(','));
-  }
+  fail('FINAL_PARAGRAPH_ANCHOR_ADAPTER', PARAGRAPH_ANCHOR_FRAME_ADAPTER);
 }
 
 function assertBodyKernelServiceOwner(root) {
@@ -3658,7 +3608,7 @@ function normalizedRenderShapeTextHash(node, source) {
   return createHash('sha256').update(JSON.stringify(shape(node))).digest('hex');
 }
 
-function declarationInventory(root, allowTransitionalAdapter = false) {
+function declarationInventory(root) {
   const sourceRoot = resolve(root, DOCX_SOURCE);
   const nonLayoutDeclarationKeys = [];
   const legacyDeclarationHashes = {};
@@ -3678,9 +3628,6 @@ function declarationInventory(root, allowTransitionalAdapter = false) {
           && (FINAL_RENDERER_DECLARATIONS.has(name) || A5_STATE_OWNER_DECLARATIONS.has(name));
         const plannedBodyLayoutAdapter = file === BODY_LAYOUT_ADAPTER
           && BODY_LAYOUT_ADAPTER_DECLARATIONS.has(name);
-        const transitionalParagraphAnchorAdapter = allowTransitionalAdapter
-          && file === PARAGRAPH_ANCHOR_FRAME_ADAPTER
-          && PARAGRAPH_ANCHOR_FRAME_ADAPTER_DECLARATIONS.has(name);
         const plannedWorkerLayoutRetention = file === WORKER_LAYOUT_RETENTION
           && WORKER_LAYOUT_RETENTION_DECLARATIONS.has(name);
         const plannedTextRunProjectionAdapter = file === TEXT_RUN_PROJECTION_ADAPTER
@@ -3688,7 +3635,7 @@ function declarationInventory(root, allowTransitionalAdapter = false) {
         const plannedBodyKernelImplementation = file === `${DOCX_SOURCE}/renderer.ts`
           && BODY_KERNEL_IMPLEMENTATION_DECLARATIONS.has(name);
         if (!migrationOwner && !plannedRendererAdapter && !plannedBodyLayoutAdapter
-          && !transitionalParagraphAnchorAdapter && !plannedWorkerLayoutRetention
+          && !plannedWorkerLayoutRetention
           && !plannedTextRunProjectionAdapter && !plannedBodyKernelImplementation) {
           nonLayoutDeclarationKeys.push(key);
         }
@@ -3727,8 +3674,8 @@ function rendererImportEdges(root) {
     .sort();
 }
 
-function currentAllowances(root, allowTransitionalAdapter = false) {
-  const declarations = declarationInventory(root, allowTransitionalAdapter);
+function currentAllowances(root) {
+  const declarations = declarationInventory(root);
   return {
     version: 2,
     legacySymbolCounts: identifierCounts(root),
@@ -4055,7 +4002,6 @@ export function checkDocxLayoutBoundaries(options) {
   const root = resolve(options.root);
   const baselinePath = resolve(root, BASELINE_PATH);
   const baselineExists = existsSync(baselinePath);
-  const allowTransitionalParagraphAnchorAdapter = baselineExists && !options.final;
   assertNoProductionTestSupportImports(root);
   assertAcquisitionContextBoundary(root);
   assertRendererAcquisitionProjectionBoundary(root);
@@ -4071,7 +4017,7 @@ export function checkDocxLayoutBoundaries(options) {
   assertBodyPaintConsumesRetainedLayout(root);
   assertLayoutParserModelBoundaries(root);
   assertBodyLayoutAdapterBoundary(root);
-  assertParagraphAnchorFrameAdapterBoundary(root, allowTransitionalParagraphAnchorAdapter);
+  assertParagraphAnchorFrameAdapterBoundary(root);
   assertBodyKernelServiceOwner(root);
   assertCanonicalCutoverBoundaries(root);
 
@@ -4121,7 +4067,7 @@ export function checkDocxLayoutBoundaries(options) {
     );
     assertNoExpansion(headBaseline, baseBaseline);
   }
-  const actual = currentAllowances(root, allowTransitionalParagraphAnchorAdapter);
+  const actual = currentAllowances(root);
   if (baseBaseline) assertNoExpansion(actual, baseBaseline);
   assertExactBaseline(headBaseline, actual);
 }

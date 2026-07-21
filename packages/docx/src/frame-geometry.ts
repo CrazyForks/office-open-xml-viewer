@@ -1,7 +1,7 @@
 // Text-frame / drop-cap placement geometry (ECMA-376 §17.3.1.11 `<w:framePr>`).
 //
 // Pure placement math: given a `<w:framePr>` and the section geometry on
-// `AnchorGeometryContext`, resolve the frame box (canvas px) and the wrap-exclusion
+// `AnchorGeometryContext`, resolve the frame box (points) and the wrap-exclusion
 // FloatRect it pushes onto `state.floats`. Extracted from renderer.ts so the
 // resolve logic can be unit-reasoned in isolation (see frame-geometry.test.ts /
 // measure-column-geometry.test.ts).
@@ -28,7 +28,7 @@ import {
   type FloatPlacementParticipant,
 } from './layout/floats.js';
 
-/** Resolved geometry (canvas px) of a `<w:framePr>` text frame. Exported for
+/** Resolved point-space geometry of a `<w:framePr>` text frame. Exported for
  *  unit tests only (the table-driven frame-geometry assertions) — not part of
  *  the package API. */
 export interface FrameBox {
@@ -58,18 +58,17 @@ export interface FrameBox {
  *                inside its own newspaper column (#513 per-section columns).
  *   - "margin" → the page content margin (marginLeft..pageWidth-marginRight).
  *   - "page"   → the physical page edges (0..pageWidth).
- * All values in canvas px.
+ * All values are in points.
  */
 export function frameXContainer(
   hAnchor: string,
   state: AnchorGeometryContext,
 ): { left: number; right: number } {
-  const sc = state.scale;
   switch (hAnchor) {
     case 'margin':
-      return { left: state.marginLeft * sc, right: (state.pageWidth - state.marginRight) * sc };
+      return { left: state.marginLeft, right: state.pageWidth - state.marginRight };
     case 'page':
-      return { left: 0, right: state.pageWidth * sc };
+      return { left: 0, right: state.pageWidth };
     case 'text':
     case 'column':
     default:
@@ -84,9 +83,9 @@ export function frameXContainer(
  * §17.18.100). Symmetric with {@link frameXContainer}: ST_YAlign positions the
  * frame relative to the ANCHOR OBJECT (this band), not the physical page
  * (§22.9.2.20: "this relative position is specified relative to the vertical
- * anchor"). All values in canvas px (state.pageH is already px; margins are pt
- * and scaled here). `paraTop` is the anchor paragraph's text-area top (px) and
- * `contentH` its frame-content height (px), used only for the "text" band end.
+ * anchor"). `paraTop` is the anchor paragraph's point-space text-area top and
+ * `contentH` its point-space frame-content height, used only for the "text"
+ * band end.
  *   - "page"   → [0, pageH]: the physical page edges (§17.18.100 page = "the
  *                location of the edge of the page").
  *   - "margin" → [marginTop, pageH−marginBottom]: the text margins (§17.18.100
@@ -96,6 +95,7 @@ export function frameXContainer(
  *                anchor paragraph"). Relative positioning (yAlign) is not
  *                allowed for "text" (§17.3.1.11 yAlign), so only `start` is ever
  *                consumed (as the base for the absolute y offset).
+ * All values are in points.
  */
 export function frameYContainer(
   vAnchor: string,
@@ -103,10 +103,9 @@ export function frameYContainer(
   contentH: number,
   state: AnchorGeometryContext,
 ): { start: number; end: number } {
-  const sc = state.scale;
   switch (vAnchor) {
     case 'margin':
-      return { start: state.marginTop * sc, end: state.pageH - state.marginBottom * sc };
+      return { start: state.marginTop, end: state.pageH - state.marginBottom };
     case 'page':
       return { start: 0, end: state.pageH };
     case 'text':
@@ -116,7 +115,7 @@ export function frameYContainer(
 }
 
 /**
- * Resolve a horizontal aligned position (canvas px) for a frame (xAlign,
+ * Resolve a horizontal aligned position in points for a frame (xAlign,
  * §17.3.1.11) or a floating table (tblpXSpec, §17.4.57). Both use the same
  * ST_XAlign vocabulary against a container band [containerLeft, containerRight]:
  *   center          → box centred in the band
@@ -145,7 +144,7 @@ export function resolveAlignedPosH(
 }
 
 /**
- * Resolve a vertical aligned position (canvas px) for a frame (yAlign,
+ * Resolve a vertical aligned position in points for a frame (yAlign,
  * §17.3.1.11) or a floating table (tblpYSpec, §17.4.57). Both use the same
  * ST_YAlign vocabulary, measured against the vAnchor BAND `[band.start,
  * band.end]` (the anchor object, §22.9.2.20) — symmetric with
@@ -209,9 +208,9 @@ export function clampAbsBoxIntoContainer(
 }
 
 /**
- * Resolve a frame's box in canvas px. `paraTop` is the in-flow top of the frame
+ * Resolve a frame's box in points. `paraTop` is the in-flow top of the frame
  * paragraph (post-spaceBefore). `contentW`/`contentH` are the frame content's
- * measured natural size (px); `anchorLineHpx` is one line height of the
+ * measured natural size (points); `anchorLineHPt` is one line height of the
  * following non-frame (anchor) paragraph, used to size a drop cap by `lines`.
  *
  * Exported for unit tests only (frame-geometry table) — not package API.
@@ -222,9 +221,8 @@ export function computeFrameBox(
   paraTop: number,
   contentW: number,
   contentH: number,
-  anchorLineHpx: number,
+  anchorLineHPt: number,
 ): FrameBox {
-  const sc = state.scale;
   const isDropCap = fp.dropCap === 'drop' || fp.dropCap === 'margin';
 
   const hx = frameXContainer(fp.hAnchor, state);
@@ -234,7 +232,7 @@ export function computeFrameBox(
   const vBand = frameYContainer(fp.vAnchor, paraTop, contentH, state);
 
   // Frame width: explicit `w` (exact) else natural content width (§17.3.1.11 w).
-  const frameW = fp.w != null ? fp.w * sc : contentW;
+  const frameW = fp.w != null ? fp.w : contentW;
 
   // Frame height. For a drop cap the height is `lines` × the anchor paragraph's
   // line height (§17.3.1.11 lines: "the height of the drop cap is the first N
@@ -242,14 +240,14 @@ export function computeFrameBox(
   // hRule gates h: exact = h, atLeast = max(h, content), auto = content.
   let frameH: number;
   if (isDropCap) {
-    frameH = Math.max(1, fp.lines) * anchorLineHpx;
+    frameH = Math.max(1, fp.lines) * anchorLineHPt;
   } else {
-    const hPx = fp.h != null ? fp.h * sc : 0;
+    const hPt = fp.h ?? 0;
     frameH =
       fp.hRule === 'exact'
-        ? hPx
+        ? hPt
         : fp.hRule === 'atLeast'
-          ? Math.max(hPx, contentH)
+          ? Math.max(hPt, contentH)
           : contentH;
   }
 
@@ -267,7 +265,7 @@ export function computeFrameBox(
     frameX = resolveAlignedPosH(fp.xAlign, hx.left, hx.right, frameW);
   } else {
     // §17.3.1.11 x: absolute signed offset from the hAnchor left edge.
-    frameX = hx.left + (fp.x != null ? fp.x * sc : 0);
+    frameX = hx.left + (fp.x ?? 0);
   }
 
   // Vertical placement. For a drop cap, y/yAlign are ignored: the cap sits at
@@ -281,7 +279,7 @@ export function computeFrameBox(
     frameY = resolveAlignedPosV(fp.yAlign, vBand, frameH);
   } else {
     // §17.3.1.11 y: absolute signed offset from the vAnchor band start.
-    frameY = vBand.start + (fp.y != null ? fp.y * sc : 0);
+    frameY = vBand.start + (fp.y ?? 0);
   }
 
   // Apply the implementation-defined absolute-box overflow policy. A
@@ -293,23 +291,23 @@ export function computeFrameBox(
 
   // Exclusion padding: hSpace L/R applies only with wrap="around" (§17.3.1.11
   // hSpace); vSpace top/bottom always.
-  const hSpacePx = fp.wrap === 'around' || fp.wrap === 'auto' ? fp.hSpace * sc : 0;
-  const vSpacePx = fp.vSpace * sc;
+  const hSpacePt = fp.wrap === 'around' || fp.wrap === 'auto' ? fp.hSpace : 0;
+  const vSpacePt = fp.vSpace;
 
   return {
     x: frameX,
     y: frameY,
     w: frameW,
     h: frameH,
-    exLeft: frameX - hSpacePx,
-    exRight: frameX + frameW + hSpacePx,
-    exTop: frameY - vSpacePx,
-    exBottom: frameY + frameH + vSpacePx,
+    exLeft: frameX - hSpacePt,
+    exRight: frameX + frameW + hSpacePt,
+    exTop: frameY - vSpacePt,
+    exBottom: frameY + frameH + vSpacePt,
   };
 }
 
-/** Options for {@link pushFloatRect}: the resolved image/float box (x,y,w,h),
- *  its dist* padding (dl,dr,dt,db, all px), and the FloatRect descriptors. */
+/** Options for {@link pushFloatRect}: the resolved point-space image/float box
+ *  (x,y,w,h), its dist* padding (dl,dr,dt,db), and the FloatRect descriptors. */
 export interface PushFloatOpts {
   x: number;
   y: number;
@@ -368,7 +366,7 @@ export function pushFloatRect(state: FloatRegistrationState, o: PushFloatOpts): 
       avoidance: o.kind === 'table'
         ? floatingTableAvoidance(o.tableOverlap!, o.paraId)
         : drawingMLAvoidance(o.allowOverlap ?? true, o.paraId),
-      rightBoundaryPt: state.pageWidth * state.scale,
+      rightBoundaryPt: state.pageWidth,
       overlapEpsilonPt: FLOAT_OVERLAP_EPS,
       rightBoundarySlackPt: FLOAT_PAGE_RIGHT_SLACK,
     });

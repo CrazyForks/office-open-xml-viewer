@@ -368,7 +368,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
       localMetrics: testFontSnapshot([{ family: 'Theme ASCII' }, { family: 'Theme EA' }]),
       measureContext: ctx,
     });
-    const state = shapeAcquisitionState(ctx, 1, {});
+    const state = shapeAcquisitionState(ctx, {});
     state.layoutServices = services;
 
     acquireAndPaintShapeTextBox(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);
@@ -409,7 +409,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
       } as FontFace],
       measureContext: ctx,
     });
-    const state = shapeAcquisitionState(ctx, 1, {});
+    const state = shapeAcquisitionState(ctx, {});
     state.layoutServices = services;
 
     acquireAndPaintShapeTextBox(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);

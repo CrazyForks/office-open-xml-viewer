@@ -10,10 +10,9 @@ import type { ImageRun } from './types.js';
 // e.g. `relativeFrom="margin"` + `align="top"` pins the image to the body's
 // top content margin instead of the page top (Y=0, inside the top margin).
 //
-// resolveAnchorBox reads only { scale, marginLeft/Right/Top/Bottom, pageH,
-// pageWidth } from the anchor capability; cast a minimal stand-in like anchor-align.test.
+// resolveAnchorBox reads only point-space page and margin geometry from the
+// anchor capability; cast a minimal stand-in like anchor-align.test.
 const state = {
-  scale: 1,
   marginLeft: 96,
   marginRight: 96,
   marginTop: 72,
