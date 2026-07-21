@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  __test_isPageLevelAnchorY,
   __test_preRegisterPageFloats,
   createLayoutServices,
   layoutDocument,
 } from './renderer.js';
+import { isPageLevelAnchorY } from './layout/anchor-classification.js';
 import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import type { AnchorAcquisitionInput, AnchorEdgesInput } from './layout/anchor-input.js';
 import type { ParagraphLayout } from './layout/types.js';
@@ -297,21 +297,21 @@ function pageShapeRun(opts: {
 
 describe('preRegisterPageFloats — isPageLevelAnchorY classifier (§20.4.3.5)', () => {
   it('paragraph/line/character ⇒ paragraph-local (NOT page-level)', () => {
-    expect(__test_isPageLevelAnchorY('paragraph', false)).toBe(false);
-    expect(__test_isPageLevelAnchorY('line', false)).toBe(false);
-    expect(__test_isPageLevelAnchorY('character', false)).toBe(false);
+    expect(isPageLevelAnchorY('paragraph', false)).toBe(false);
+    expect(isPageLevelAnchorY('line', false)).toBe(false);
+    expect(isPageLevelAnchorY('character', false)).toBe(false);
   });
 
   it('page / margin / *Margin / column ⇒ page-level', () => {
     for (const rf of ['page', 'margin', 'topMargin', 'bottomMargin', 'leftMargin', 'rightMargin', 'insideMargin', 'outsideMargin', 'column']) {
-      expect(__test_isPageLevelAnchorY(rf, false)).toBe(true);
+      expect(isPageLevelAnchorY(rf, false)).toBe(true);
     }
   });
 
   it('absent relativeFrom defers to anchorYFromPara (page-level only when NOT from-para)', () => {
-    expect(__test_isPageLevelAnchorY(null, false)).toBe(true);
-    expect(__test_isPageLevelAnchorY(null, true)).toBe(false);
-    expect(__test_isPageLevelAnchorY(undefined, false)).toBe(true);
+    expect(isPageLevelAnchorY(null, false)).toBe(true);
+    expect(isPageLevelAnchorY(null, true)).toBe(false);
+    expect(isPageLevelAnchorY(undefined, false)).toBe(true);
   });
 });
 

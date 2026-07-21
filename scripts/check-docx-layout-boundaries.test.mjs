@@ -100,6 +100,9 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + 'export function resolveStateParagraphLayoutContext() {}\n'
       + 'export function withTableCellStory() {}\n'
       + 'export function retainedTableRecord() {}\n');
+  write(root, 'packages/docx/src/layout/anchor-classification.ts',
+    'export function isPageLevelAnchorY() {}\n'
+      + 'export function isPageLevelWrapFloat() {}\n');
   write(root, 'packages/docx/src/layout/measurement-environment.ts',
     'export function canonicalParagraphTextScaleEligible() {}\n'
       + 'export function docDefaultFontSizePt() {}\n'
@@ -461,6 +464,7 @@ test('layout acquisition ownership cannot be bypassed by removing a required mod
     'acquisition-context.ts',
     'acquisition-input-projections.ts',
     'acquisition-state.ts',
+    'anchor-classification.ts',
     'measurement-capabilities.ts',
     'measurement-environment.ts',
     'section-orientation.ts',
