@@ -8,8 +8,10 @@
     "copy-samples": "node scripts/copy-samples.mjs",
     "predev": "node scripts/copy-samples.mjs",
     "prebuild": "node scripts/copy-samples.mjs",
+    "prebuild:ci": "node scripts/copy-samples.mjs",
     "dev": "astro dev",
     "build": "astro build",
+    "build:ci": "astro build",
     "preview": "astro preview"
   },
   "dependencies": {
@@ -19,7 +21,7 @@
     "@silurus/ooxml-xlsx": "workspace:*"
   },
   "devDependencies": {
-    "astro": "^5.14.1",
+    "astro": "^6.4.8",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"
   }

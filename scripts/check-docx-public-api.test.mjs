@@ -88,6 +88,76 @@ test('ignores declaration-emitter quote style and redundant type parentheses', (
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('ignores declaration-emitter export style and top-level ordering', () => {
+  const { root, base } = fixture();
+  const detailPath = path.join(root, 'dist/types/detail.d.ts');
+  writeFileSync(
+    detailPath,
+    'export interface First { value: string; }\nexport declare class Detail { first: First; }\n',
+  );
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeFileSync(
+    detailPath,
+    'declare class Detail { first: First; }\ninterface First { value: string; }\nexport { type First, Detail };\n',
+  );
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('ignores declaration-emitter collision alias spelling', () => {
+  const { root, base } = fixture();
+  const detailPath = path.join(root, 'dist/types/detail.d.ts');
+  writeFileSync(
+    detailPath,
+    'interface Detail_2 { value: string; }\nexport interface Detail { nested: Detail_2; }\n',
+  );
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeFileSync(
+    detailPath,
+    'interface Detail$1 { value: string; }\nexport interface Detail { nested: Detail$1; }\n',
+  );
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('keeps distinct declaration-emitter collision aliases bijective', () => {
+  const { root, base } = fixture();
+  const detailPath = path.join(root, 'dist/types/detail.d.ts');
+  writeFileSync(
+    detailPath,
+    'interface Foo_2 { a: string; }\ninterface Foo_3 { b: number; }\nexport interface Detail { x: Foo_2; y: Foo_3; }\n',
+  );
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeFileSync(
+    detailPath,
+    'interface Foo$1 { a: string; }\ninterface Foo$2 { b: number; }\nexport interface Detail { x: Foo$2; y: Foo$1; }\n',
+  );
+
+  const result = run(root, '--base-ref', base);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public API declaration baseline differs/i);
+});
+
+test('ignores equivalent declaration-emitter export aliases', () => {
+  const { root, base } = fixture();
+  const detailPath = path.join(root, 'dist/types/detail.d.ts');
+  writeFileSync(detailPath, 'export interface Detail { value: string; }\n');
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeFileSync(
+    detailPath,
+    'interface Detail_d_exports { value: string; }\nexport { type Detail_d_exports as Detail };\n',
+  );
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('ignores private class member renames and type changes', () => {
   const { root, base } = fixture();
   writeApiClass(root, 'private original: string; visible: boolean;');

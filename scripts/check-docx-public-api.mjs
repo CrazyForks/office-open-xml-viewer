@@ -38,7 +38,7 @@ function normalizeText(source) {
     .trimEnd();
 }
 
-function normalizeDeclaration(source, fileName) {
+export function normalizeDeclaration(source, fileName) {
   const parsed = ts.createSourceFile(
     fileName,
     source,
@@ -46,6 +46,38 @@ function normalizeDeclaration(source, fileName) {
     true,
     ts.ScriptKind.TS,
   );
+  const localExportNames = new Set();
+  const exportAliases = new Map();
+  for (const statement of parsed.statements) {
+    if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier || !statement.exportClause
+        || !ts.isNamedExports(statement.exportClause)) continue;
+    for (const element of statement.exportClause.elements) {
+      const localName = element.propertyName?.text ?? element.name.text;
+      localExportNames.add(element.name.text);
+      if (localName !== element.name.text) exportAliases.set(localName, element.name.text);
+    }
+  }
+  const collisionGroups = new Map();
+  for (const statement of parsed.statements) {
+    if (!('name' in statement) || !statement.name || !ts.isIdentifier(statement.name)) continue;
+    if (localExportNames.has(statement.name.text)) continue;
+    const match = /^(.*?)(?:_|\$)\d+$/.exec(statement.name.text);
+    if (!match) continue;
+    const names = collisionGroups.get(match[1]) ?? [];
+    names.push(statement.name.text);
+    collisionGroups.set(match[1], names);
+  }
+  const collisionAliases = new Map();
+  for (const [base, names] of collisionGroups) {
+    names.sort((left, right) => {
+      const leftOrdinal = Number(/\d+$/.exec(left)?.[0]);
+      const rightOrdinal = Number(/\d+$/.exec(right)?.[0]);
+      return leftOrdinal - rightOrdinal || left.localeCompare(right);
+    });
+    names.forEach((name, index) => {
+      collisionAliases.set(name, `${base}__emitterCollision${index + 1}`);
+    });
+  }
   const transformed = ts.transform(parsed, [(context) => {
     const hasModifier = (member, kind) => ts.getModifiers(member)?.some(
       (modifier) => modifier.kind === kind,
@@ -97,7 +129,84 @@ function normalizeDeclaration(source, fileName) {
       }
       return ts.factory.createNodeArray(visibleMembers);
     };
+    const statementName = (statement) => {
+      if ('name' in statement && statement.name && ts.isIdentifier(statement.name)) {
+        return statement.name.text;
+      }
+      if (ts.isVariableStatement(statement)) {
+        return statement.declarationList.declarations
+          .map((declaration) => ts.isIdentifier(declaration.name) ? declaration.name.text : '')
+          .join(',');
+      }
+      return '';
+    };
+    const normalizeSourceFile = (sourceFile) => {
+      // API Extractor emits `export declare interface Foo`, whereas Rolldown's
+      // declaration bundler emits `interface Foo` plus `export { Foo }`. Treat
+      // those equivalent spellings alike so the guard protects the API rather
+      // than coupling the project to one declaration emitter.
+      const localExports = new Set();
+      for (const statement of sourceFile.statements) {
+        if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier || !statement.exportClause) continue;
+        if (!ts.isNamedExports(statement.exportClause)) continue;
+        for (const element of statement.exportClause.elements) {
+          const localName = element.propertyName?.text ?? element.name.text;
+          if (localName === element.name.text) localExports.add(localName);
+        }
+      }
+
+      const statements = [];
+      for (const statement of sourceFile.statements) {
+        if (ts.isExportDeclaration(statement) && !statement.moduleSpecifier && statement.exportClause
+            && ts.isNamedExports(statement.exportClause)
+            && statement.exportClause.elements.every((element) => {
+              const localName = element.propertyName?.text ?? element.name.text;
+              return localName === element.name.text;
+            })) {
+          continue;
+        }
+        const name = statementName(statement);
+        if (ts.canHaveModifiers(statement)) {
+          // `declare` is optional in an ambient .d.ts module and emitters differ
+          // on whether they spell it explicitly.
+          const modifiers = (ts.getModifiers(statement) ?? [])
+            .filter((modifier) => modifier.kind !== ts.SyntaxKind.DeclareKeyword);
+          if (name && localExports.has(name)
+              && !modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+            statements.push(ts.factory.replaceModifiers(statement, [
+              ts.factory.createModifier(ts.SyntaxKind.ExportKeyword),
+              ...modifiers,
+            ]));
+            continue;
+          }
+          statements.push(ts.factory.replaceModifiers(statement, modifiers));
+          continue;
+        }
+        statements.push(statement);
+      }
+
+      // Declaration order is not part of a module's public surface. Keep
+      // overloads and merged declarations with the same name stable while
+      // canonicalizing the emitter-specific top-level ordering.
+      const indexed = statements.map((statement, index) => ({ statement, index }));
+      indexed.sort((left, right) => {
+        const leftName = statementName(left.statement);
+        const rightName = statementName(right.statement);
+        const byName = leftName.localeCompare(rightName);
+        return byName || left.index - right.index;
+      });
+      return ts.factory.updateSourceFile(
+        sourceFile,
+        ts.factory.createNodeArray(indexed.map(({ statement }) => statement)),
+      );
+    };
     const visit = (node) => {
+      if (ts.isIdentifier(node) && exportAliases.has(node.text)) {
+        return ts.factory.createIdentifier(exportAliases.get(node.text));
+      }
+      if (ts.isIdentifier(node) && collisionAliases.has(node.text)) {
+        return ts.factory.createIdentifier(collisionAliases.get(node.text));
+      }
       if (ts.isParenthesizedTypeNode(node)) return ts.visitNode(node.type, visit);
       if (ts.isStringLiteral(node)) return ts.factory.createStringLiteral(node.text, true);
       const visited = ts.visitEachChild(node, visit, context);
@@ -121,6 +230,7 @@ function normalizeDeclaration(source, fileName) {
           normalizeClassMembers(visited.members),
         );
       }
+      if (ts.isSourceFile(visited)) return normalizeSourceFile(visited);
       return visited;
     };
     return (root) => ts.visitNode(root, visit);
