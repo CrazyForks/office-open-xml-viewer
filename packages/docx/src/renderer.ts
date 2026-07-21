@@ -184,7 +184,6 @@ import {
   bodyAcquisitionInputProjections,
   internalDocumentModel,
   numberingMarkerShapeInput,
-  paragraphAcquisitionInput,
   publicAnchorBridge,
 } from './parser-model.js';
 import {
@@ -222,7 +221,6 @@ import {
   applyNumberingBodyOffset,
   resolveNumberingMarkerGeometry,
 } from './layout/numbering-marker.js';
-import { tableFormatInput } from './parser-model.js';
 import { resolveTableColumnWidths } from './layout/table-columns.js';
 import {
   measureParagraphIntrinsicWidths,
@@ -1688,7 +1686,7 @@ function createConcreteBodyLayoutKernel(
     };
     const context = resolveBodyParagraphLayoutContext(state, paragraph);
     return acquireParagraphResult(
-      paragraphAcquisitionInput(paragraph, source),
+      state.acquisitionInputs.paragraphAcquisitionInput(paragraph, source),
       {
         id: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
         source,
@@ -2148,7 +2146,7 @@ function createConcreteBodyLayoutKernel(
             const borderEdges = resolveParagraphBorderEdges(previous, paragraph, next);
             const result = acquireRegisteredParagraph(
               candidate,
-              paragraphAcquisitionInput(paragraph, block.source),
+              candidate.acquisitionInputs.paragraphAcquisitionInput(paragraph, block.source),
               {
                 id: `${block.source.story}:${block.source.storyInstance}:${block.source.path.join('.')}`,
                 source: block.source,
@@ -2516,7 +2514,7 @@ function createConcreteBodyLayoutKernel(
           }
           const cursor = request.cursor?.cursor ?? startTableFragmentCursor();
           const pageHeightPt = state.pageH / state.scale;
-          const authoredPositioning = tableFormatInput(table).positioning;
+          const authoredPositioning = state.acquisitionInputs.tableFormatInput(table).positioning;
           if (authoredPositioning) {
             const positioning = request.cursor?.kind === 'table'
               && request.cursor.floatingContinuationFrame === 'fresh-text'
@@ -3191,7 +3189,10 @@ function createConcreteBodyLayoutKernel(
             if (paragraph.type !== 'paragraph') {
               throw new Error('Page-anchor prescan source kind mismatch');
             }
-            const acquired = paragraphAcquisitionInput(paragraph, anchor.paragraphSource);
+            const acquired = state.acquisitionInputs.paragraphAcquisitionInput(
+              paragraph,
+              anchor.paragraphSource,
+            );
             const hostMatches = acquired.runs.filter((run) =>
               run.type === 'anchorHost' && run.anchorOccurrenceId === anchor.occurrenceId);
             const payloads = acquired.runs
