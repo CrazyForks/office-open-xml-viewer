@@ -1,13 +1,10 @@
-import type { DocxDocumentModel, BodyElement, DocParagraph, DocTable, DocTableCell, CellElement, DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, HeaderFooter, SectionProps } from '../types';
-import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
+import type { DocxDocumentModel, BodyElement, DocParagraph, DocTable, DocTableCell, CellElement, DocRun, ImageRun, ChartRun, ShapeRun, HeaderFooter, SectionProps } from '../types';
 import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
-import { jcIsFullyJustified, jcStretchesLastLine } from '../bidi-line.js';
 import { type FloatRect, FLOAT_OVERLAP_EPS, isWrapFloat } from '../float-layout.js';
 import { type FrameBox, computeFrameBox, frameXContainer, pushFloatRect } from '../frame-geometry.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
 import { xContainer, yContainer, resolveAnchorX, resolveAnchorY } from '../anchor-geometry.js';
-import { applyTableRowBoundaryFootprints, resolveTableRowContentHeights } from '../table-geometry.js';
-import { resolveDocumentLayoutSettings, resolveParagraphLayoutContext, resolveSectionLayoutContext, type DocumentLayoutSettings, type ParagraphLayoutContext, type SectionLayoutContext } from '../layout-context.js';
+import { resolveDocumentLayoutSettings, resolveParagraphLayoutContext, resolveSectionLayoutContext, type DocumentLayoutSettings, type SectionLayoutContext } from '../layout-context.js';
 import type { BlockLayoutAlgorithms, BodyFlowRegistryDeltaPt, BodyFlowRegistrySnapshotPt, DrawingMLCollisionRegistrySnapshotPt, LayoutServices, FloatRegistryEntryPt, FloatRegistrySnapshotPt, FloatingTablePlacementLayout, DrawingMLCollisionEntryPt, NoteLayout, ParagraphLayout, SourceRef, StoryBlockInput, StoryLayout, TableLayout, TableLayoutInput } from './types.js';
 import type { CompleteTextBoxBlockInput } from './textbox-input.js';
 import { beginFloatingTablePlacementTransaction, floatingTableRegistryDelta, resolveFloatingTablePlacementInTransaction, validateFloatingTableRegistryDelta } from './floating-table-transaction.js';
@@ -16,8 +13,6 @@ import { ExactConvergenceError, convergeExactState } from './convergence.js';
 import { LayoutInvariantError } from './diagnostics.js';
 import type { LayoutOptions } from './options.js';
 import { paginatedFlowHasPaginationDependentFields } from './pagination-fields.js';
-import { wordRubyUniformLineHeightPx } from './line-compatibility.js';
-import { wordDropsTrailingStructuralCellMarker } from './table-compatibility.js';
 import { createLayoutServicesRuntimeView, fieldAcquisitionContextOf, verticalGlyphMeasurementServiceOf } from './runtime-state.js';
 import { attachStoryBlockLayoutAlgorithms, layoutStory as layoutSharedStory } from './stories.js';
 import { buildNoteNumberMap, footnoteIdsInRetainedLines, footnoteIdsInRetainedSlice, indexNotes, noteReferenceIdsInDocumentOrder } from './note-reference-ownership.js';
@@ -25,10 +20,9 @@ import type { BodyAcquisitionLocation, BodyLayoutKernel, BodyLayoutSession, Page
 import { NoteCapacityExceededError } from './body-layout-kernel.js';
 import { FlowCapacityExceededError } from './flow.js';
 import { projectBodyOccurrence } from './occurrence-projection.js';
-import { EAST_ASIAN_RE } from './text.js';
 import { sectionBodyInsetPt as bodyMarginInsetPt, createBodySectionIndex } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalSection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
-import { canonicalParagraphTextScaleEligible, docDefaultFontSizePt, gridForParagraphContext, paragraphMeasurementEnvironment, segmentEnvironmentOf, snapParaLineToGrid } from './measurement-environment.js';
+import { docDefaultFontSizePt, gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
 import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { resolveTableColumnWidths } from './table-columns.js';
@@ -36,8 +30,8 @@ import { measureParagraphIntrinsicWidths, measureTableCellIntrinsicWidths } from
 // ── Line-layout engine (segmentation + line-breaking + measurement) ──────────
 // Body acquisition drives the pure root line-layout kernel through this
 // one-directional dependency, with mutable acquisition state owned under layout/.
-import { DEFAULT_TAB_PT, buildFont, buildSegments, fontClassesWithPitches, getDefaultFontSize, gridCharDeltaPx, layoutLines, lineBoxHeight, paragraphMarkLineHeight, rescaleLayoutLines } from '../line-layout.js';
-import type { DocGridCtx, LayoutLine } from '../line-layout.js';
+import { buildFont, fontClassesWithPitches, getDefaultFontSize, paragraphMarkLineHeight } from '../line-layout.js';
+import type { DocGridCtx } from '../line-layout.js';
 import { measureParagraph } from '../paragraph-measure.js';
 import { acquireRetainedTable, type RetainedTableAcquisition } from './table-acquisition.js';
 import { combineAdjacentTableLayoutInputs } from './adjacent-table-layout-input.js';
@@ -45,7 +39,7 @@ import { layoutTable as layoutRetainedTableInput } from './table.js';
 import { startTableFragmentCursor, takeTableFragment, type PageDependentTableBlockRequest } from './table-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor } from './paragraph.js';
+import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, type BodyFrameGroup } from './paragraph.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, RetainedTableRecord } from './acquisition-context.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
@@ -695,9 +689,6 @@ function buildConcreteBodyLayoutKernel(
         const inheritedAuthority =
           inheritedParagraphAuthorityForReacquisition(request.acquired);
         const tableAcquisition = state.retainedTableAcquisition;
-        if (!tableAcquisition) {
-          throw new Error('Table paragraph re-acquisition requires retained dependencies');
-        }
         return tableAcquisition.acquireParagraph(
           candidate,
           source,
@@ -832,7 +823,6 @@ function buildConcreteBodyLayoutKernel(
             throw new Error(`Unsupported ${request.source.story} story block: ${element.type}`);
           }
           const dependencies = candidate.retainedTableAcquisition;
-          if (!dependencies) throw new Error('Story table acquisition requires retained dependencies');
           const table = element as unknown as DocTable;
           const columns = resolveColumnWidths(
             table,
@@ -990,8 +980,12 @@ function buildConcreteBodyLayoutKernel(
             }
             let acquiredGroup: ReturnType<typeof acquireRetainedFrameGroup> | undefined;
             const frameGroup = bodyFrameGroupFor(paragraph);
+            if (!frameGroup) {
+              throw new Error('Body frame acquisition requires an indexed adjacency group');
+            }
             const box = resolveFrameBox(
               paragraph,
+              frameGroup,
               state,
               frameAnchorLineHeightPx(doc.body, paragraph, state),
               (acquired) => { acquiredGroup = acquired; },
@@ -999,7 +993,6 @@ function buildConcreteBodyLayoutKernel(
             if (!acquiredGroup) throw new Error('Body frame acquisition omitted its retained group');
             const member = acquiredGroup.members.find((candidate) => candidate.paragraph === paragraph);
             if (!member) throw new Error('Body frame acquisition omitted its retained member');
-            if (!frameGroup) throw new Error('Body frame acquisition omitted its adjacency group');
             const absoluteVertical = paragraph.framePr.vAnchor === 'page'
               || paragraph.framePr.vAnchor === 'margin';
             const frameOccurrenceId = box.exclusionId
@@ -2171,73 +2164,44 @@ function paraGrid(para: DocParagraph, state: BodyMeasurementContext): DocGridCtx
   );
 }
 
-function computeTableRowHeights(
-  state: BodyAcquisitionState,
-  table: DocTable,
-  contentWPt: number,
-  sourceIndex?: number,
-): number[] {
-  return computeTablePtLayout(state, table, contentWPt, sourceIndex).rowHeightsPt;
-}
-
-/** The layout bridge's scale-1 table acquisition: resolve column widths once,
- *  acquire the retained table, and return its authoritative row advances. The
- *  fallback remains for reduced test/story states until measurement moves fully
- *  under layout ownership. */
+/** Resolve column widths once, acquire the retained table, and return its
+ * authoritative row advances for one top-level body occurrence. */
 function computeTablePtLayout(
   state: BodyAcquisitionState,
   table: DocTable,
   contentWPt: number,
-  sourceIndex?: number,
+  sourceIndex: number,
 ): { colWidthsPt: number[]; rowContentHeightsPt: number[]; rowHeightsPt: number[] } {
-  const prior = sourceIndex === undefined
-    ? undefined
-    : state.retainedTablesBySourceIndex?.get(sourceIndex);
+  const prior = state.retainedTablesBySourceIndex.get(sourceIndex);
   const colWidthsPt = resolveColumnWidths(table, contentWPt, state);
   const dependencies = state.retainedTableAcquisition;
-  if (dependencies && sourceIndex !== undefined) {
-    const acquired = acquireRetainedTable(
-      table,
-      colWidthsPt,
-      contentWPt,
-      state,
-      [sourceIndex],
-      dependencies,
-    );
-    // Split rows are page-local acquisitions, but an unchanged inline extent
-    // retains one authoritative track vector for the table's full occurrence.
-    const retained = prior?.contentWidthPt === contentWPt
-      ? Object.freeze({
-          ...acquired,
-          layout: Object.freeze({
-            ...acquired.layout,
-            columnWidthsPt: prior.acquisition.layout.columnWidthsPt,
-          }),
-        })
-      : acquired;
-    state.retainedTablesBySourceIndex?.set(sourceIndex, Object.freeze({
-      sourceIndex,
-      acquisition: retained,
-      contentWidthPt: contentWPt,
-      anchorYPt: state.y,
-    }));
-    const rowHeightsPt = retained.layout.rows.map((row) => row.advancePt);
-    return { colWidthsPt, rowContentHeightsPt: rowHeightsPt, rowHeightsPt };
-  }
-  const rowContentHeightsPt = resolveTableRowContentHeights(table, colWidthsPt, 1, (cell, cellW) =>
-    measureRetainedCellContentHeightPt(cell, table, cellW, 1, state),
+  const acquired = acquireRetainedTable(
+    table,
+    colWidthsPt,
+    contentWPt,
+    state,
+    [sourceIndex],
+    dependencies,
   );
-  const rowHeightsPt = applyTableRowBoundaryFootprints(table, rowContentHeightsPt, 1);
-  return { colWidthsPt, rowContentHeightsPt, rowHeightsPt };
-}
-
-function estimateTableHeight(
-  state: BodyAcquisitionState,
-  table: DocTable,
-  contentWPt: number,
-  sourceIndex?: number,
-): number {
-  return computeTableRowHeights(state, table, contentWPt, sourceIndex).reduce((s, x) => s + x, 0);
+  // Split rows are page-local acquisitions, but an unchanged inline extent
+  // retains one authoritative track vector for the table's full occurrence.
+  const retained = prior?.contentWidthPt === contentWPt
+    ? Object.freeze({
+        ...acquired,
+        layout: Object.freeze({
+          ...acquired.layout,
+          columnWidthsPt: prior.acquisition.layout.columnWidthsPt,
+        }),
+      })
+    : acquired;
+  state.retainedTablesBySourceIndex.set(sourceIndex, Object.freeze({
+    sourceIndex,
+    acquisition: retained,
+    contentWidthPt: contentWPt,
+    anchorYPt: state.y,
+  }));
+  const rowHeightsPt = retained.layout.rows.map((row) => row.advancePt);
+  return { colWidthsPt, rowContentHeightsPt: rowHeightsPt, rowHeightsPt };
 }
 
 /**
@@ -2265,38 +2229,12 @@ function resolveColumnWidths(
       const margins = marginsByCell.get(cell as object) ?? effCellMargins(cell as DocTableCell, table);
       return measureTableCellIntrinsicWidths(cell, margins, {
         paragraph: (paragraph) => {
-          // This exported low-level seam historically accepts a reduced state.
-          // Production uses normalized contexts; the fallback preserves only
-          // the stable hand-built test/input contract at this renderer adapter.
-          const baseContext: ParagraphLayoutContext = state.layoutSettings && state.sectionLayout
-            ? resolveParagraphLayoutContext(
-                state.layoutSettings,
-                state.sectionLayout,
-                state.storyContext ?? BODY_STORY_CONTEXT,
-                paragraph,
-              )
-            : {
-                lineGrid: { active: false, pitchPt: null },
-                characterGrid: { active: false, deltaPt: 0 },
-                physicalIndentLeftPt: paragraph.bidi ? paragraph.indentRight : paragraph.indentLeft,
-                physicalIndentRightPt: paragraph.bidi ? paragraph.indentLeft : paragraph.indentRight,
-                firstIndentPt: paragraph.indentFirst,
-                lineSpacing: paragraph.lineSpacing,
-                spaceBeforePt: paragraph.spaceBefore,
-                spaceAfterPt: paragraph.spaceAfter,
-                baseRtl: paragraph.bidi === true,
-                isJustified: jcIsFullyJustified(paragraph.alignment),
-                stretchLastLine: jcStretchesLastLine(paragraph.alignment),
-                tabStops: [...paragraph.tabStops],
-                hasRuby: paragraph.runs.some(
-                  (run) => run.type === 'text' && Boolean((run as DocxTextRun).ruby),
-                ),
-                hasEastAsianText: paragraph.runs.some(
-                  (run) => run.type === 'text' && EAST_ASIAN_RE.test((run as DocxTextRun).text),
-                ),
-                kinsoku: state.kinsoku ?? DEFAULT_KINSOKU_RULES,
-                defaultTabPt: state.defaultTabPt ?? DEFAULT_TAB_PT,
-              };
+          const baseContext = resolveParagraphLayoutContext(
+            state.layoutSettings,
+            state.sectionLayout,
+            state.storyContext ?? BODY_STORY_CONTEXT,
+            paragraph,
+          );
           const markerInput = paragraph.numbering
             ? state.acquisitionInputs.numberingMarkerShapeInput(
                 paragraph.numbering,
@@ -2341,95 +2279,6 @@ function resolveColumnWidths(
       ? contentWPt
       : Math.max(contentWPt, state.pageWidth),
   ))];
-}
-
-/**
- * ECMA-376 §17.3.1.9 `<w:contextualSpacing>` — the registered
- * `word-contextual-spacing-per-side` semantics, identical in body, table cell,
- * and text box.
- *
- * The §17.3.1.33 collapsed inter-paragraph gap decomposes as
- *   gap = prevContrib + currContrib
- *   prevContrib = prev.spaceAfter                          (the collapse base)
- *   currContrib = max(curr.spaceBefore − prev.spaceAfter, 0)   (the excess)
- * summing to max(after, before). A paragraph whose toggle is set AND whose
- * neighbour shares its paragraph style drops ITS OWN contribution only:
- *   - prev toggles → gap = max(before − after, 0)  — matches the spec's worked
- *     example (after=10pt, before=12pt → 2pt);
- *   - curr toggles → gap = after — the previous spaceAfter contribution remains
- *     intact (the spec-literal net-minus-before reading would give 0);
- *   - both toggle  → gap = 0 (each side's contribution dropped; the
- *     decomposition is non-negative so no explicit floor is needed).
- *
- * Every gap site uses the effBefore/overlap form
- *   gap = prevAfter + (suppressBefore ? 0 : spaceBefore) − overlap
- * so this helper returns that pair. Kept structural (not `DocParagraph`) so the
- * SAME rule drives the body paragraph path, the cell paths, and the text-box
- * path ({@link ShapeText}), which carry the identical
- * `contextualSpacing`/`styleId` pair.
- */
-function contextualSpacingAdjust(
-  prev: { contextualSpacing?: boolean; styleId?: string | null } | null,
-  curr: { contextualSpacing?: boolean; styleId?: string | null },
-  prevAfter: number,
-  spaceBefore: number,
-): { suppressBefore: boolean; overlap: number } {
-  return paragraphGapAdjustment(prev, curr, prevAfter, spaceBefore);
-}
-
-/**
- * Sum the heights of a cell's content elements with the same paragraph-spacing
- * collapse used by canonical cell acquisition. Two collapse rules apply:
- *
- *   - ECMA-376 §17.3.1.9 `<w:contextualSpacing>`: a same-style toggling
- *     paragraph drops its OWN contribution to the inter-paragraph gap
- *     (`word-contextual-spacing-per-side`, projected by
- *     {@link contextualSpacingAdjust}).
- *   - Adjacent-paragraph spacing OVERLAP: the gap between two paragraphs is
- *     `max(prevSpaceAfter, currSpaceBefore)`, not their sum. We subtract the
- *     overlap `min(prevSpaceAfter, effBefore)` so a 12pt space-after followed
- *     by a 12pt space-before contributes 12pt of gap, not 24pt.
- *
- * A nested table (CellElement other than paragraph) resets the
- * prev-paragraph context — the next paragraph after a table spaces from a
- * fresh baseline.
- *
- * `perElementHeight(elem)` returns each element's full measured height: for a
- * paragraph it must include its full `spaceBefore` (no contextual or overlap
- * adjustment) so this helper can subtract the collapse correctly; for a nested
- * table it is the table's own total height. `spaceScale` converts spec spacing
- * (pt) into the same units as `perElementHeight` returns (1 for pt; the device
- * scale for px); the subtracted collapse therefore lands in matching units.
- *
- * Exported for unit tests (table-spacing-collapse.test).
- */
-function sumCellContentHeight(
-  content: CellElement[],
-  perElementHeight: (el: CellElement) => number,
-  spaceScale: number,
-): number {
-  let h = 0;
-  let prevPara: DocParagraph | null = null;
-  let prevSpaceAfter = 0;
-  for (const ce of content) {
-    if (ce.type === 'paragraph') {
-      const para = ce as unknown as DocParagraph;
-      // §17.3.1.9 per-side contextualSpacing (contextualSpacingAdjust) over the
-      // §17.3.1.33 max-collapse — a same-style toggle drops the toggling
-      // paragraph's own contribution to the gap.
-      const adjust = contextualSpacingAdjust(prevPara, para, prevSpaceAfter, para.spaceBefore);
-      h += perElementHeight(ce)
-        - (adjust.suppressBefore ? para.spaceBefore : 0) * spaceScale
-        - adjust.overlap * spaceScale;
-      prevPara = para;
-      prevSpaceAfter = para.spaceAfter;
-    } else {
-      h += perElementHeight(ce);
-      prevPara = null;
-      prevSpaceAfter = 0;
-    }
-  }
-  return h;
 }
 
 // ===== Text frames & drop caps (ECMA-376 §17.3.1.11) =====
@@ -2488,139 +2337,91 @@ function frameAnchorLineHeightPx(
 /** Resolve a prepared body frame group and attach its retained member layouts. */
 function resolveFrameBox(
   para: DocParagraph,
+  group: BodyFrameGroup,
   state: BodyAcquisitionState,
   anchorLineHPt: number,
   onAcquired?: (acquired: ReturnType<typeof acquireRetainedFrameGroup>) => void,
 ): FrameBox {
-  const group = bodyFrameGroupFor(para);
-  if (group) {
-    const measurer = { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses };
-    const environment = paragraphMeasurementEnvironment(state);
-    const borderEdges = group.members.map(bodyParagraphBorderEdgesFor);
-    const horizontalBand = frameXContainer(group.framePr.hAnchor, state);
-    const pointPlacement = {
-      contentXPt: state.contentX,
-      contentWidthPt: state.contentW,
-      pageHeightPt: state.pageH,
-      yPt: state.y,
-      anchorLineHeightPt: anchorLineHPt,
-    };
-    const acquired = acquireRetainedFrameGroup(group, {
-      contexts: group.members.map((paragraph) =>
-        resolveBodyParagraphLayoutContext(state, paragraph)),
-      inputs: group.members.map((paragraph, index) =>
-        state.acquisitionInputs.paragraphAcquisitionInput(paragraph, {
-          story: 'body', storyInstance: 'body', path: [group.sourceIndices[index]!],
-        })),
-      borderEdges,
-      borderExtentsPt: group.members.map((paragraph, index) =>
-        borderEdges[index]?.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders)),
-      measurer,
-      environment,
-      containerShading: state.containerShading,
-      maximumWidthPt: Math.max(0, horizontalBand.right - horizontalBand.left),
-      acquisitionSession: state,
-      placementSignature: [
-        pointPlacement.contentXPt,
-        pointPlacement.contentWidthPt,
-        pointPlacement.pageHeightPt,
+  const measurer = { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses };
+  const environment = paragraphMeasurementEnvironment(state);
+  const borderEdges = group.members.map(bodyParagraphBorderEdgesFor);
+  const horizontalBand = frameXContainer(group.framePr.hAnchor, state);
+  const pointPlacement = {
+    contentXPt: state.contentX,
+    contentWidthPt: state.contentW,
+    pageHeightPt: state.pageH,
+    yPt: state.y,
+    anchorLineHeightPt: anchorLineHPt,
+  };
+  const acquired = acquireRetainedFrameGroup(group, {
+    contexts: group.members.map((paragraph) =>
+      resolveBodyParagraphLayoutContext(state, paragraph)),
+    inputs: group.members.map((paragraph, index) =>
+      state.acquisitionInputs.paragraphAcquisitionInput(paragraph, {
+        story: 'body', storyInstance: 'body', path: [group.sourceIndices[index]!],
+      })),
+    borderEdges,
+    borderExtentsPt: group.members.map((paragraph, index) =>
+      borderEdges[index]?.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders)),
+    measurer,
+    environment,
+    containerShading: state.containerShading,
+    maximumWidthPt: Math.max(0, horizontalBand.right - horizontalBand.left),
+    acquisitionSession: state,
+    placementSignature: [
+      pointPlacement.contentXPt,
+      pointPlacement.contentWidthPt,
+      pointPlacement.pageHeightPt,
+      pointPlacement.yPt,
+      pointPlacement.anchorLineHeightPt,
+      state.pageWidth,
+      state.marginLeft,
+      state.marginRight,
+      state.marginTop,
+      state.marginBottom,
+    ].join('|'),
+    place: (contentWidthPt, contentHeightPt) => {
+      const box = computeFrameBox(
+        group.framePr,
+        state,
         pointPlacement.yPt,
+        contentWidthPt,
+        contentHeightPt,
         pointPlacement.anchorLineHeightPt,
-        state.pageWidth,
-        state.marginLeft,
-        state.marginRight,
-        state.marginTop,
-        state.marginBottom,
-      ].join('|'),
-      place: (contentWidthPt, contentHeightPt) => {
-        const box = computeFrameBox(
-          group.framePr,
-          state,
-          pointPlacement.yPt,
-          contentWidthPt,
-          contentHeightPt,
-          pointPlacement.anchorLineHeightPt,
-        );
-        return Object.freeze({
-          bounds: Object.freeze({
-            xPt: box.x,
-            yPt: box.y,
-            widthPt: box.w,
-            heightPt: box.h,
-          }),
-          exclusionBounds: Object.freeze({
-            xPt: box.exLeft,
-            yPt: box.exTop,
-            widthPt: box.exRight - box.exLeft,
-            heightPt: box.exBottom - box.exTop,
-          }),
-        });
-      },
-      anchorFrames: bodyAnchorReferenceFrames(state),
-    });
-    onAcquired?.(acquired);
-    const box: FrameBox = {
-      x: acquired.box.bounds.xPt,
-      y: acquired.box.bounds.yPt,
-      w: acquired.box.bounds.widthPt,
-      h: acquired.box.bounds.heightPt,
-      exLeft: acquired.box.exclusionBounds.xPt,
-      exTop: acquired.box.exclusionBounds.yPt,
-      exRight: acquired.box.exclusionBounds.xPt + acquired.box.exclusionBounds.widthPt,
-      exBottom: acquired.box.exclusionBounds.yPt + acquired.box.exclusionBounds.heightPt,
-      registerExclusion: true,
-      exclusionId: acquired.box.exclusionId,
-    };
-    return para === group.owner
-      ? box
-      : { ...box, registerExclusion: false };
-  }
-  // Transitional story-measurement scope: canonical body pagination prepares a
-  // §17.3.1.11 group for every frame; reduced header/footer acquisition states
-  // use this local measurement fallback.
-  const fp = para.framePr!;
-  const scale = 1;
-  const paraTop = state.y;
-  const grid = paraGrid(para, state);
-  const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
-  const paraHasRuby = paragraphContext.hasRuby;
-  const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
-  const measureW = 100000;
-  const lines = segments.length === 0 ? [] : layoutLines(
-    state.ctx,
-    segments,
-    measureW,
-    0,
-    scale,
-    para.tabStops,
-    undefined,
-    state.fontFamilyClasses,
-    0,
-    state.kinsoku,
-    gridCharDeltaPx(grid, scale),
-    state.defaultTabPt,
-    measureW,
-    paragraphContext.baseRtl,
-    paragraphContext.isJustified,
-    paragraphContext.stretchLastLine,
-    undefined,
-    undefined,
-    state.verticalGlyphMeasurement,
-  );
-  const contentW = lines.length === 0 ? 0 : Math.max(...lines.map((line) =>
-    line.segments.reduce((sum, segment) => sum + segment.measuredWidth, 0)));
-  const contentH = lines.reduce((sum, line) => sum + lineBoxHeight(
-    para.lineSpacing,
-    line.ascent,
-    line.descent,
-    scale,
-    grid,
-    paraHasRuby,
-    line.intendedSingle,
-    paraHasRuby ? paragraphContext.hasEastAsianText : (line.eastAsian ?? false),
-    line.gridCountSingle,
-  ), 0);
-  return computeFrameBox(fp, state, paraTop, contentW, contentH, anchorLineHPt);
+      );
+      return Object.freeze({
+        bounds: Object.freeze({
+          xPt: box.x,
+          yPt: box.y,
+          widthPt: box.w,
+          heightPt: box.h,
+        }),
+        exclusionBounds: Object.freeze({
+          xPt: box.exLeft,
+          yPt: box.exTop,
+          widthPt: box.exRight - box.exLeft,
+          heightPt: box.exBottom - box.exTop,
+        }),
+      });
+    },
+    anchorFrames: bodyAnchorReferenceFrames(state),
+  });
+  onAcquired?.(acquired);
+  const box: FrameBox = {
+    x: acquired.box.bounds.xPt,
+    y: acquired.box.bounds.yPt,
+    w: acquired.box.bounds.widthPt,
+    h: acquired.box.bounds.heightPt,
+    exLeft: acquired.box.exclusionBounds.xPt,
+    exTop: acquired.box.exclusionBounds.yPt,
+    exRight: acquired.box.exclusionBounds.xPt + acquired.box.exclusionBounds.widthPt,
+    exBottom: acquired.box.exclusionBounds.yPt + acquired.box.exclusionBounds.heightPt,
+    registerExclusion: true,
+    exclusionId: acquired.box.exclusionId,
+  };
+  return para === group.owner
+    ? box
+    : { ...box, registerExclusion: false };
 }
 
 /**
@@ -3124,178 +2925,6 @@ function registerShapeFloat(
   });
 }
 
-/** Content height of a table cell laid out at total width `cellW`, in the target
- *  units the caller works in: scaled device units, or pt when `scale === 1`.
- *  Cell top/bottom margins plus each content
- *  element measured at `measureCellElementHeight`. Adjacent paragraphs inside the
- *  cell collapse spacing according to the retained table-flow rule (ECMA-376
- *  §17.3.1.33 contextualSpacing + spaceAfter/spaceBefore overlap = max not sum),
- *  so the measured height matches the acquired height.
- *
- *  This is the remaining legacy measurement bridge used by
- *  {@link computeTableRowHeights}. Canonical table acquisition owns production
- *  row geometry; the bridge remains isolated until its callers move under the
- *  layout subsystem. */
-function measureRetainedCellContentHeightPt(
-  cell: DocTableCell,
-  table: DocTable,
-  cellW: number,
-  scale: number,
-  state: BodyAcquisitionState,
-): number {
-  const cellState = withTableCellStory(state);
-  const cm = effCellMargins(cell, table);
-  const contentW = cellW - (cm.left + cm.right) * scale;
-  // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. Apply the
-  // centralized trailing-structural-marker compatibility policy before row-height
-  // measurement, matching the vAlign block-height path. The empty mark remains in
-  // the retained paint input; only its non-ink sizing contribution is excluded.
-  const measured = trimTrailingStructuralMarker(cell.content);
-  // measureCellElementHeight always includes paragraph spaceBefore plus
-  // max(spaceAfter, bottom-border extent) — the same trailing advance the paint
-  // pass emits (§17.3.1.7); sumCellContentHeight folds in contextualSpacingAdjust
- // (§17.3.1.9) and the prevSpaceAfter/spaceBefore overlap collapse to match the
-  // paint pass's renderCellContent. Spacing is converted from pt to px with `scale`.
-  return (cm.top + cm.bottom) * scale + sumCellContentHeight(
-    measured,
-    (ce) => measureCellElementHeight(cellState, ce, contentW, scale),
-    scale,
-  );
-}
-
-/** Measures only the `[range.start, range.end)` line window (a mid-row split
- *  piece's slice) through the measurement bridge, and reports the paragraph's total
- *  line count so the caller can tell whether the window covers the paragraph
- *  end (trailing-spacing ownership). No range means the full paragraph. The
- *  invariant is that vAlign, row sizing, and retained paint consume the same
- *  acquired line boxes. */
-function measureCellParagraphWindow(
-  state: BodyMeasurementContext,
-  para: DocParagraph,
-  maxWidth: number,
-  scale: number,
-  range?: { start: number; end: number },
-): { heightPx: number; totalLines: number } {
-  {
-    const paragraphContext = resolveStateParagraphLayoutContext(state, para);
-    const grid = gridForParagraphContext(state, paragraphContext);
-    const availableWidthPt = maxWidth / scale;
-    const measured = measureParagraph(
-      para,
-      paragraphContext,
-      {
-        startYPt: 0,
-        paragraphXPt: 0,
-        availableWidthPt,
-        maximumYPt: state.pageH / scale,
-        suppressSpaceBefore: true,
-      },
-      {
-        context: state.ctx,
-        fontFamilyClasses: state.fontFamilyClasses,
-      },
-      paragraphMeasurementEnvironment(state),
-    );
-    // measureParagraph works in scale-1 points. Ordinary body-table text keeps
-    // these canonical line boxes and retained paint maps them through the
-    // viewport; the transitional scale branch below serves reduced contexts.
-    const scale1ContentHeight = measured.contentEndYPt - measured.placement.startYPt;
-    const totalLines = measured.markOnly ? 0 : measured.lines.length;
-    const windowStart = range ? Math.max(0, range.start) : 0;
-    const windowEnd = range ? Math.min(totalLines, range.end) : totalLines;
-    if (scale === 1) {
-      if (!range || measured.markOnly || measured.lines.length === 0) {
-        return { heightPx: scale1ContentHeight, totalLines };
-      }
-      // Windowed scale-1 content height: the same per-line extents the
-      // paginator charges (advance + any non-negative gap to the previous
-      // line's bottom; cells carry no wrap oracle, so gaps are zero).
-      let sum = 0;
-      for (let i = windowStart; i < windowEnd; i++) {
-        const line = measured.lines[i];
-        if (i === windowStart) { sum += line.advancePt; continue; }
-        const previous = measured.lines[i - 1];
-        sum += Math.max(0, line.topYPt - (previous.topYPt + previous.advancePt)) + line.advancePt;
-      }
-      return { heightPx: sum, totalLines };
-    }
-    const paraHasRuby = paragraphContext.hasRuby;
-    const eastAsian = paragraphContext.hasEastAsianText;
-    if (measured.markOnly || measured.lines.length === 0) {
-      // Empty / anchor-only paragraph mark (§17.3.1.29) reserves its mark-line
-      // height at the requested scale.
-      return {
-        heightPx: paragraphMarkLineHeight(
-          para,
-          scale,
-          grid,
-          paraHasRuby,
-          state.docEastAsian,
-          state.ctx,
-          state.fontFamilyClasses,
-          paragraphContext.lineSpacing,
-          state.resolvedLocalFonts,
-          state.layoutServices?.text,
-          state.acquisitionInputs.paragraphMarkShapeInput(para),
-        ),
-        totalLines,
-      };
-    }
-    const segments = buildSegments(para.runs, segmentEnvironmentOf(state));
-    const canonicalTextScale = canonicalParagraphTextScaleEligible(
-      state.storyContext ?? BODY_STORY_CONTEXT,
-      state.verticalCJK,
-      false,
-      false,
-      paragraphContext,
-      para,
-      segments,
-    );
-    // Rehydrate the scale-1 line partition and advance it with the same
-    // ruby/docGrid/line-spacing resolver (§17.3.1.33). A table cell carries no
-    // page-level float wrap oracle, so its content height is the selected
-    // window's accumulated line-box advance.
-    const paintLines = rescaleLayoutLines(
-      measured.lines.map((line) => line.layout),
-      scale,
-      state.ctx,
-      state.fontFamilyClasses,
-      gridCharDeltaPx(grid, scale),
-      canonicalTextScale,
-      state.verticalGlyphMeasurement,
-    );
-    const uniformLineH = paraHasRuby
-      ? snapParaLineToGrid(
-          wordRubyUniformLineHeightPx(
-            true,
-            paintLines.map((l) => lineBoxHeight(
-              para.lineSpacing,
-              l.ascent,
-              l.descent,
-              scale,
-              grid,
-              true,
-              l.intendedSingle,
-              eastAsian,
-            )),
-          ),
-          grid,
-          scale,
-        )
-      : 0;
-    const lineHForLine = (l: LayoutLine): number =>
-      paraHasRuby
-        ? uniformLineH
-        // §17.6.5 cell rounding is gated by the line's script; a Latin-only line
-        // in a CJK paragraph keeps its natural height, matching the text-box path.
-        : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, false, l.intendedSingle, l.eastAsian ?? false, l.gridCountSingle);
-    return {
-      heightPx: paintedParagraphHeight(paintLines, windowStart, windowEnd, 0, lineHForLine),
-      totalLines,
-    };
-  }
-}
-
 /** Effective cell margins (pt). Per-cell `<w:tcMar>` overrides (ECMA-376
  *  §17.4.42) take precedence per edge over the table-level `<w:tblCellMar>`
  *  default (§17.4.41). A résumé template, for example, gives one cell a larger
@@ -3310,78 +2939,6 @@ function effCellMargins(
     left: cell.marginLeft ?? table.cellMarginLeft,
     right: cell.marginRight ?? table.cellMarginRight,
   };
-}
-
-/** Measure a cell-level element (paragraph or nested table) at the rendering
- *  scale. Returns total occupied height including paragraph spacing. */
-function measureCellElementHeight(
-  state: BodyAcquisitionState,
-  ce: CellElement,
-  innerWPx: number,
-  scale: number,
-): number {
-  if (ce.type === 'paragraph') {
-    const para = ce as unknown as DocParagraph;
-    // §17.3.1.7: retain `max(spaceAfter, bottomBorderExtentPt)` below the text
-    // box so following cell content clears the bottom border. Cell acquisition
-    // has no adjacent-paragraph border merge, so no suppression term applies.
-    //
-    // Mid-row split pieces: a sliced cell paragraph (runtime `lineSlice` on the
-    // piece clone) measures ONLY its window — leading spacing belongs to the
-    // slice that starts the paragraph, trailing spacing to the slice that ends
-    // it (the split walk charges them the same way). An unsliced element is
-    // byte-identical to the historical measure.
-    const slice = (ce as CellElement & { lineSlice?: { start: number; end: number } }).lineSlice;
-    const { heightPx, totalLines } = measureCellParagraphWindow(state, para, innerWPx, scale, slice);
-    const leading = !slice || slice.start === 0 ? para.spaceBefore : 0;
-    const trailing = !slice || slice.end >= totalLines
-      ? Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders))
-      : 0;
-    return heightPx + (leading + trailing) * scale;
-  }
-  // Nested table — estimateTableHeight works in pt; convert to px.
-  const tbl = ce as unknown as DocTable;
-  return estimateTableHeight(state, tbl, innerWPx / scale) * scale;
-}
-
-/** Apply `word-trailing-structural-cell-marker`: drop an empty terminal
- *  paragraph after a non-paragraph cell block. Returns the original array when
- *  no such pattern matches. */
-function trimTrailingStructuralMarker(content: CellElement[]): CellElement[] {
-  const last = content[content.length - 1];
-  const prev = content[content.length - 2];
-  const lastParagraphRunCount = last?.type === 'paragraph'
-    ? (last as unknown as DocParagraph).runs.length
-    : undefined;
-  return wordDropsTrailingStructuralCellMarker({
-    contentLength: content.length,
-    previousKind: prev?.type,
-    lastKind: last?.type,
-    lastParagraphRunCount,
-  })
-    ? content.slice(0, -1)
-    : content;
-}
-
-/** Height of a selected acquired line window, including forward clearance
- *  jumps. For each line `li` in `[sliceStart, paintEnd)`:
- *    if (line.topY !== undefined && line.topY > y) y = line.topY;  // float clearance
- *    y += lineHForLine(line);                                       // line box advance
- *  `lineHForLine` is the paragraph-scope ruby/docGrid/line-spacing resolver. */
-function paintedParagraphHeight<L extends { topY?: number }>(
-  lines: readonly L[],
-  sliceStart: number,
-  paintEnd: number,
-  textAreaTopY: number,
-  lineHForLine: (line: L) => number,
-): number {
-  let y = textAreaTopY;
-  for (let li = sliceStart; li < paintEnd; li++) {
-    const line = lines[li];
-    if (line.topY !== undefined && line.topY > y) y = line.topY;
-    y += lineHForLine(line);
-  }
-  return y - textAreaTopY;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -3420,8 +2977,6 @@ function paintedParagraphHeight<L extends { topY?: number }>(
     kernel,
     internals: Object.freeze({
       resolveColumnWidths,
-      sumCellContentHeight,
-      paintedParagraphHeight,
       resolveAnchorBox: __test_resolveAnchorBox,
       resolveShapeBox: __test_resolveShapeBox,
       physicalLayoutSection: __test_physicalLayoutSection,

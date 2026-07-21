@@ -4,6 +4,10 @@ import { resolveColumnWidths } from './test-support/renderer-internals.test-supp
 import { buildSegments, layoutLines } from './line-layout.js';
 import { bodyAcquisitionInputProjections } from './parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
+import {
+  resolveDocumentLayoutSettings,
+  resolveSectionLayoutContext,
+} from './layout-context.js';
 import type {
   DocParagraph,
   DocTable,
@@ -24,7 +28,28 @@ type ColState = Parameters<typeof resolveColumnWidths>[2];
 // capability remains required because table-format facts are acquired before
 // the empty-content fast path.
 
-const EMPTY_STATE = { acquisitionInputs: bodyAcquisitionInputProjections } as unknown as ColState;
+function normalizedColumnState(state: Record<string, unknown>): ColState {
+  const document = {
+    section: {
+      pageWidth: 300, pageHeight: 400,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 10, footerDistance: 10,
+      titlePage: false, evenAndOddHeaders: false,
+      sectionStart: 'nextPage', columns: null,
+    },
+    body: [], headers: {}, footers: {},
+  } as unknown as DocxDocumentModel;
+  const layoutSettings = resolveDocumentLayoutSettings(document);
+  return {
+    ...state,
+    layoutSettings,
+    sectionLayout: resolveSectionLayoutContext(layoutSettings, document.section),
+  } as unknown as ColState;
+}
+
+const EMPTY_STATE = normalizedColumnState({
+  acquisitionInputs: bodyAcquisitionInputProjections,
+});
 
 function cell(colSpan: number, widthPct: number | null, widthPt: number | null = null): DocTableCell {
   return {
@@ -181,10 +206,10 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
       ...cell(1, null, 0), content: [{ type: 'paragraph', ...paragraph }],
     } as unknown as DocTableCell;
     const t = autofit([row([textCell])], [200]);
-    const state = {
+    const state = normalizedColumnState({
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
       acquisitionInputs: bodyAcquisitionInputProjections,
-    } as unknown as ColState;
+    });
 
     resolveColumnWidths(t, 300, state);
     const autoFitFonts = measured
@@ -243,11 +268,11 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
       content: [{ type: 'paragraph', ...paragraph(text) }],
     }) as unknown as DocTableCell;
     const t = autofit([row([contentCell('aa aa'), contentCell('b')])], [0, 100]);
-    const state = {
+    const state = normalizedColumnState({
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 100,
       pageH: 200, pageIndex: 0, totalPages: 1,
       acquisitionInputs: bodyAcquisitionInputProjections,
-    } as unknown as ColState;
+    });
 
     // min-content is [20, 10], but the first cell's no-wrap maximum is 50.
     // Autofit first reclaims the second track's slack toward that maximum.
@@ -309,10 +334,10 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
       ...cell(1, null, 0), content: [{ type: 'paragraph', ...paragraph }],
     } as unknown as DocTableCell;
     const t = autofit([row([textCell])], [200]);
-    const state = {
+    const state = normalizedColumnState({
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
       acquisitionInputs: bodyAcquisitionInputProjections,
-    } as unknown as ColState;
+    });
 
     const segments = buildSegments(paragraph.runs, {
       pageIndex: 0, totalPages: 1, layoutServices: services,
@@ -359,10 +384,10 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
       ...cell(1, null, 0), content: [{ type: 'paragraph', ...paragraph }],
     } as unknown as DocTableCell;
     const t = autofit([row([textCell])], [200]);
-    const state = {
+    const state = normalizedColumnState({
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
       acquisitionInputs: bodyAcquisitionInputProjections,
-    } as unknown as ColState;
+    });
 
     expect(resolveColumnWidths(t, 300, state)[0]).toBe(20);
   });
@@ -397,10 +422,10 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
       ...cell(1, null, 0), content: [{ type: 'paragraph', ...paragraph }],
     } as unknown as DocTableCell;
     const t = autofit([row([textCell])], [200]);
-    const state = {
+    const state = normalizedColumnState({
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
       acquisitionInputs: bodyAcquisitionInputProjections,
-    } as unknown as ColState;
+    });
 
     expect(resolveColumnWidths(t, 300, state)[0]).toBe(20);
   });

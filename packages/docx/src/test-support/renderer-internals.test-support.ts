@@ -33,13 +33,11 @@ const bodyInternals = createProductionBodyLayoutRuntime(
 ).internals;
 
 export const {
-  paintedParagraphHeight,
   physicalLayoutSection: __test_physicalLayoutSection,
   preRegisterPageFloats: __test_preRegisterPageFloats,
   resolveAnchorBox: __test_resolveAnchorBox,
   resolveColumnWidths,
   resolveShapeBox: __test_resolveShapeBox,
-  sumCellContentHeight,
   verticalLayoutSection: __test_verticalLayoutSection,
 } = bodyInternals;
 

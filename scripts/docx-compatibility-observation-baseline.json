@@ -1,6 +1,0 @@
-{
-  "version": 1,
-  "observations": [
-    "packages/docx/src/document.ts::// in place when `opts.password` is supplied ([MS-OFFCRYPTO]); a"
-  ]
-}

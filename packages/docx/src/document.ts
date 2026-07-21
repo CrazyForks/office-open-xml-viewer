@@ -149,12 +149,9 @@ export class DocxDocument {
     } else {
       buffer = source;
     }
-    // Resolve the container on the main thread — before spinning up the worker.
-    // A normal ZIP passes through unchanged; an Agile-encrypted CFB is decrypted
-    // in place when `opts.password` is supplied ([MS-OFFCRYPTO]); a
-    // password-protected file without a password, or a legacy-binary / unknown
-    // CFB, becomes a typed OoxmlError (whose `instanceof` would not survive the
-    // worker boundary, hence the main-thread check).
+    // Resolve the container on the main thread before spinning up the worker.
+    // Container errors remain typed OoxmlError instances here; `instanceof`
+    // would not survive the worker boundary.
     buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
     // The render worker is reachable only through this dynamic import, so
     // main-mode bundles never pull in its (renderer-bearing) chunk.

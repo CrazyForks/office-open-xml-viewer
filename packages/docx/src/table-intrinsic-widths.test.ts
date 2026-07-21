@@ -5,7 +5,11 @@ import { createLayoutServices } from './layout-runtime.js';
 import { resolveColumnWidths } from './test-support/renderer-internals.test-support.js';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { bodyAcquisitionInputProjections } from './parser-model.js';
-import type { ParagraphLayoutContext } from './layout-context.js';
+import {
+  resolveDocumentLayoutSettings,
+  resolveSectionLayoutContext,
+  type ParagraphLayoutContext,
+} from './layout-context.js';
 import type { TextLayoutService } from './layout/text.js';
 import type {
   BodyElement,
@@ -122,11 +126,15 @@ function columnState(
   ctx: CanvasRenderingContext2D,
   services = createLayoutServices(model([]), { measureContext: ctx }),
 ): ColumnState {
+  const document = model([]);
+  const layoutSettings = resolveDocumentLayoutSettings(document);
   return {
     ctx, fontFamilyClasses: {}, layoutServices: services,
     pageWidth: 200, pageH: 300, pageIndex: 0, totalPages: 1,
     defaultTabPt: 36,
     acquisitionInputs: bodyAcquisitionInputProjections,
+    layoutSettings,
+    sectionLayout: resolveSectionLayoutContext(layoutSettings, document.section),
   } as unknown as ColumnState;
 }
 

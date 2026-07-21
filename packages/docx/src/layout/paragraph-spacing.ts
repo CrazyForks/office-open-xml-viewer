@@ -27,7 +27,7 @@ export function paragraphGapPt(
   return Math.max(previousAfterPt, currentBeforePt);
 }
 
-/** Legacy cursor adjustment expressed from the shared total-gap authority. */
+/** Cursor adjustment expressed from the shared total-gap authority. */
 export function paragraphGapAdjustment(
   previous: ParagraphSpacingParticipant | null,
   current: ParagraphSpacingParticipant,

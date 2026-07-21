@@ -107,10 +107,10 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
   fontFamilyClasses: Record<string, string>;
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
   layoutServices?: LayoutServices;
-  retainedTableAcquisition?:
+  retainedTableAcquisition:
     RetainedTableAcquisitionDependencies<BodyAcquisitionState>;
   acquireCompleteTextBoxStory?: CompleteTextBoxStoryAcquirer;
-  retainedTablesBySourceIndex?: Map<number, RetainedTableRecord>;
+  retainedTablesBySourceIndex: Map<number, RetainedTableRecord>;
   kinsoku: KinsokuRules;
   defaultTabPt: number;
   currentDateMs?: number;

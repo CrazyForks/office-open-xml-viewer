@@ -2,20 +2,16 @@
 
 ## Status
 
-Approved architecture direction. Implementation must be delivered as a series of
-reviewable pull requests. The public API remains backward compatible, and no
-release is allowed until every series in this design is complete.
+Implemented. Issue #1037 delivered the redesign as a series of independently
+reviewed pull requests while preserving the public API. The final architecture
+and its CI gates are now the maintained source of truth.
 
 This design completes and supersedes the transitional boundaries in
 `docs/docx-layout-context-fragments-design.md`. The existing fragment work is the
 starting point, not the final architecture.
 
-Implementation is tracked by Issue #1037 and the executable plans in:
-
-- `docs/docx-layout-engine-implementation-roadmap.md`;
-- `docs/docx-layout-engine-series-a-plan.md`;
-- `docs/docx-layout-engine-series-b-plan.md`;
-- `docs/docx-layout-engine-series-c-plan.md`.
+The implementation history is retained in Issue #1037. The migration roadmap
+and per-series execution plans were removed when the final audit completed.
 
 ## Problem
 
@@ -287,12 +283,10 @@ packages/docx/src/paint/
 story-specific calculations. Page transitions are explicit state-machine events,
 not closures over a renderer-wide mutable state.
 
-The current `renderer.ts` ends as a thin internal adapter that prepares resources,
-calls layout, and calls paint. It does not retain a second layout implementation.
-During the A2 transition, its frozen `renderShapeText` boundary permits only the
-exact complete numbering-marker normalization sequence: private-fact snapshot,
-service shape, and retained-span paint. A partial or altered sequence is rejected
-so the temporary allowance cannot conceal unrelated legacy-layout changes.
+`renderer.ts` is a thin internal adapter that prepares resources, calls layout,
+and calls paint. It does not retain a second layout implementation. The final
+boundary checker rejects hidden algorithms, transitional exports, and imports
+outside the reviewed adapter surface.
 
 DrawingML geometry, images, colors, fonts, charts, fills, and effects are shared
 through `packages/core` or `packages/ooxml-common` where the OOXML concept is truly

@@ -32,22 +32,6 @@ function expectDiagnostic(root, diagnostic, message, ...args) {
   return result;
 }
 
-function git(root, ...args) {
-  const result = command(root, 'git', args);
-  assert.equal(result.status, 0, result.output);
-}
-
-function validEmptyBaseline() {
-  return {
-    version: 2,
-    legacySymbolCounts: {},
-    migrationIdentifierCounts: {},
-    nonLayoutDeclarationKeys: [],
-    legacyDeclarationHashes: {},
-    rendererImportEdges: [],
-  };
-}
-
 const canonicalRenderer = `
 import { layoutDocument } from './layout/document.js';
 import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
@@ -97,11 +81,39 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
   write(root, 'packages/docx/src/layout/acquisition-context.ts',
     'export interface AnchorFloatRegistrationState {}\n'
       + 'export interface AnchorGeometryContext {}\n'
-      + 'export interface BodyAcquisitionState {}\n'
+      + 'export interface BodyAcquisitionState {\n'
+      + '  retainedTableAcquisition: unknown;\n'
+      + '  retainedTablesBySourceIndex: Map<number, unknown>;\n'
+      + '}\n'
       + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
       + 'export interface FloatRegistrationState {}\n'
       + 'export interface PhysicalAnchorFrame {}\n'
       + 'export interface RetainedTableRecord {}\n');
+  write(root, 'packages/docx/src/layout/production-body-layout.ts', `
+function acquireRetainedTable() { return { layout: { rows: [] } }; }
+function acquireRetainedFrameGroup() { return {}; }
+function resolveParagraphLayoutContext() { return {}; }
+function computeTablePtLayout(state, table, contentWPt, sourceIndex: number) {
+  return acquireRetainedTable(table, [], contentWPt, state, [sourceIndex], state.retainedTableAcquisition);
+}
+function resolveColumnWidths(state, paragraph) {
+  const baseContext = resolveParagraphLayoutContext(
+    state.layoutSettings,
+    state.sectionLayout,
+    state.storyContext,
+    paragraph,
+  );
+  return baseContext;
+}
+function resolveFrameBox(para, group: BodyFrameGroup, state, anchorLineHPt, onAcquired?) {
+  return acquireRetainedFrameGroup(group, { state, anchorLineHPt, onAcquired });
+}
+function production(state, table, para, group) {
+  computeTablePtLayout(state, table, 100, 0);
+  resolveColumnWidths(state, para);
+  resolveFrameBox(para, group, state, 12, undefined);
+}
+`);
   write(root, 'packages/docx/src/layout/acquisition-input-projections.ts',
     'export interface BodyAcquisitionInputProjections {\n'
       + '  numberingMarkerShapeInput(): unknown;\n'
@@ -222,43 +234,6 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
   return root;
 }
 
-function initializeLegacyStoryPaintFixture() {
-  const root = initializeCanonicalFixture('docx-layout-boundary-legacy-story-');
-  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() {}\n');
-  write(root, 'packages/docx/src/paint/canvas-text.ts',
-    'export function paintPlacedParagraphLayout() {}\n');
-  write(root, 'packages/docx/src/renderer.ts', `
-import { paintPlacedParagraphLayout } from './paint/canvas-text.js';
-import { layoutLines } from './line-layout.js';
-import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
-function createConcreteBodyLayoutKernel(doc, ctx, localMetrics) { return { doc, ctx, localMetrics }; }
-function createLayoutServices(doc, ctx, localMetrics) {
-  const services = {};
-  attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(doc, ctx, localMetrics));
-  return services;
-}
-function renderBodyElements(elements) {
-  for (const element of elements) {
-    if (element.type === 'paragraph') paintPlacedParagraphLayout(element);
-  }
-}
-function renderDocumentToCanvas(services, input, pageIndex) {
-  return selectDocumentLayoutPage(services, input, pageIndex);
-}
-function renderHeaderFooterStory(story) { return layoutLines(story); }
-`);
-  command(root, 'git', ['init', '-b', 'main']);
-  command(root, 'git', ['config', 'user.email', 'boundary-test@example.invalid']);
-  command(root, 'git', ['config', 'user.name', 'Boundary Test']);
-  command(root, 'git', ['add', '.']);
-  command(root, 'git', ['commit', '-m', 'canonical fixture']);
-  const branch = command(root, 'git', ['switch', '-c', 'boundary']);
-  assert.equal(branch.status, 0, branch.output);
-  const baseline = runChecker(root, '--write-transitional-baseline', '--base-ref', 'main');
-  assert.equal(baseline.status, 0, baseline.output);
-  return root;
-}
-
 const canonicalBodyLayoutAdapter =
   "import { bodyLayoutAcquisitionInput } from './parser-model.js';\n"
   + "import type { DocxDocumentModel } from './types.js';\n"
@@ -298,29 +273,6 @@ function installParagraphAnchorFrameAdapter(root) {
       + readFileSync(rendererPath, 'utf8')
         .replace('return { doc, ctx, localMetrics };',
           'paragraphAnchorReferenceFrames({ scale: 1 });\n  return { doc, ctx, localMetrics };'));
-}
-
-function initializeTransitionalRepository() {
-  const root = initializeCanonicalFixture('docx-layout-boundary-transitional-');
-  write(root, 'packages/docx/src/renderer.ts',
-    canonicalRenderer.replace(
-      '\nexport function renderDocumentToCanvas',
-      '\nfunction renderShapeText() { return 1; }\nexport function renderDocumentToCanvas',
-    ));
-  git(root, 'init', '-b', 'main');
-  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
-  git(root, 'config', 'user.name', 'Boundary Test');
-  git(root, 'add', '.');
-  git(root, 'commit', '-m', 'canonical transition base');
-  git(root, 'switch', '-c', 'boundary');
-  const baseline = runChecker(root, '--write-transitional-baseline', '--base-ref', 'main');
-  assert.equal(baseline.status, 0, baseline.output);
-  git(root, 'add', '.');
-  git(root, 'commit', '-m', 'establish transition baseline');
-  git(root, 'switch', 'main');
-  git(root, 'merge', '--ff-only', 'boundary');
-  git(root, 'switch', '-c', 'next');
-  return root;
 }
 
 test('accepts the final canonical producer, retained model, selected variant, and worker route', () => {
@@ -411,7 +363,7 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     'packages/docx/src/layout/acquisition-context.ts',
     'export interface AnchorFloatRegistrationState {}\n'
       + 'export interface AnchorGeometryContext { scale: number }\n'
-      + 'export interface BodyAcquisitionState {}\n'
+      + 'export interface BodyAcquisitionState { retainedTableAcquisition: unknown; retainedTablesBySourceIndex: Map<number, unknown> }\n'
       + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
       + 'export interface FloatRegistrationState {}\n'
       + 'export interface PhysicalAnchorFrame {}\n'
@@ -430,7 +382,7 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     'packages/docx/src/layout/acquisition-context.ts',
     'export interface AnchorFloatRegistrationState {}\n'
       + 'export interface AnchorGeometryContext {}\n'
-      + 'export interface BodyAcquisitionState {}\n'
+      + 'export interface BodyAcquisitionState { retainedTableAcquisition: unknown; retainedTablesBySourceIndex: Map<number, unknown> }\n'
       + "export type BodyMeasurementContext = Readonly<Pick<BodyAcquisitionState, 'scale'>>;\n"
       + 'export interface FloatRegistrationState {}\n'
       + 'export interface PhysicalAnchorFrame {}\n'
@@ -449,7 +401,7 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     'packages/docx/src/layout/acquisition-context.ts',
     'export interface AnchorFloatRegistrationState {}\n'
       + 'export interface AnchorGeometryContext {}\n'
-      + 'export interface BodyAcquisitionState { images: Map<string, unknown> }\n'
+      + 'export interface BodyAcquisitionState { images: Map<string, unknown>; retainedTableAcquisition: unknown; retainedTablesBySourceIndex: Map<number, unknown> }\n'
       + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
       + 'export interface FloatRegistrationState {}\n'
       + 'export interface PhysicalAnchorFrame {}\n'
@@ -514,7 +466,7 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     "import type { Hidden } from '../renderer.js';\n"
       + 'export interface AnchorFloatRegistrationState {}\n'
       + 'export interface AnchorGeometryContext {}\n'
-      + 'export interface BodyAcquisitionState { hidden?: Hidden }\n'
+      + 'export interface BodyAcquisitionState { hidden?: Hidden; retainedTableAcquisition: unknown; retainedTablesBySourceIndex: Map<number, unknown> }\n'
       + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
       + 'export interface FloatRegistrationState {}\n'
       + 'export interface PhysicalAnchorFrame {}\n'
@@ -546,6 +498,63 @@ test('layout acquisition ownership cannot be bypassed by removing a required mod
       `missing ${module} must fail the ownership ratchet`,
       '--final',
     );
+  }
+});
+
+test('table acquisition capabilities are required final-state inputs', () => {
+  for (const property of ['retainedTableAcquisition', 'retainedTablesBySourceIndex']) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-required-${property}-`);
+    const path = join(root, 'packages/docx/src/layout/acquisition-context.ts');
+    write(root, 'packages/docx/src/layout/acquisition-context.ts', readFileSync(path, 'utf8').replace(
+      `${property}:`,
+      `${property}?:`,
+    ));
+    expectDiagnostic(root, 'RETAINED_TABLE_AUTHORITY', property, '--final');
+  }
+});
+
+test('production table and frame acquisition cannot regain local fallback measurement', () => {
+  for (const [name, mutate] of [
+    ['optional source index', (source) => source.replace('sourceIndex: number', 'sourceIndex?: number')],
+    ['omitted source index', (source) => source.replace(
+      'computeTablePtLayout(state, table, 100, 0)',
+      'computeTablePtLayout(state, table, 100)',
+    )],
+    ['table row fallback', (source) => source.replace(
+      'return acquireRetainedTable(table, [], contentWPt, state, [sourceIndex], state.retainedTableAcquisition);',
+      'return resolveTableRowContentHeights(table);',
+    )],
+    ['aliased table row fallback', (source) => (
+      "import { resolveTableRowContentHeights as remeasureRows } from '../table-geometry.js';\n"
+        + source.replace(
+          'return acquireRetainedTable(table, [], contentWPt, state, [sourceIndex], state.retainedTableAcquisition);',
+          'remeasureRows(table);\n  return acquireRetainedTable(table, [], contentWPt, state, [sourceIndex], state.retainedTableAcquisition);',
+        )
+    )],
+    ['optional frame group', (source) => source.replace('group: BodyFrameGroup', 'group?: BodyFrameGroup')],
+    ['local frame measurement', (source) => source.replace(
+      'return acquireRetainedFrameGroup(group, { state, anchorLineHPt, onAcquired });',
+      'return layoutLines(para);',
+    )],
+    ['aliased local frame measurement', (source) => (
+      "import { layoutLines as localMeasure } from '../line-layout.js';\n"
+        + source.replace(
+          'return acquireRetainedFrameGroup(group, { state, anchorLineHPt, onAcquired });',
+          'localMeasure(para);\n  return acquireRetainedFrameGroup(group, { state, anchorLineHPt, onAcquired });',
+        )
+    )],
+    ['reduced column context fallback', (source) => source.replace(
+      'const baseContext = resolveParagraphLayoutContext(',
+      'const baseContext = state.layoutSettings ? resolveParagraphLayoutContext(',
+    ).replace(
+      '    paragraph,\n  );\n  return baseContext;',
+      '    paragraph,\n  ) : {};\n  return baseContext;',
+    )],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-acquisition-fallback-${name.replaceAll(' ', '-')}-`);
+    const path = join(root, 'packages/docx/src/layout/production-body-layout.ts');
+    write(root, 'packages/docx/src/layout/production-body-layout.ts', mutate(readFileSync(path, 'utf8')));
+    expectDiagnostic(root, 'PRODUCTION_ACQUISITION_AUTHORITY', name, '--final');
   }
 });
 
@@ -1084,18 +1093,6 @@ test('body-layout input adapter rejects any body other than the exact projection
   expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_BODY', 'non-acquisition body', '--final');
 });
 
-test('paragraph anchor frame adapter cannot return after the point-space cutover', () => {
-  const root = initializeTransitionalRepository();
-  installParagraphAnchorFrameAdapter(root);
-  expectDiagnostic(
-    root,
-    'FINAL_PARAGRAPH_ANCHOR_ADAPTER',
-    'removed adapter',
-    '--base-ref',
-    'main',
-  );
-});
-
 test('paragraph anchor frame adapter is rejected from the final architecture', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-final-paragraph-anchor-adapter-');
   installParagraphAnchorFrameAdapter(root);
@@ -1103,12 +1100,10 @@ test('paragraph anchor frame adapter is rejected from the final architecture', (
   expectDiagnostic(root, 'FINAL_PARAGRAPH_ANCHOR_ADAPTER', 'final adapter', '--final');
 });
 
-test('retained body paint cannot reacquire layout while legacy story layout stays scoped outside it', () => {
-  const root = initializeLegacyStoryPaintFixture();
-  assert.equal(runChecker(root, '--base-ref', 'main').status, 0);
-
+test('retained body paint cannot reacquire layout', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-body-reacquisition-');
+  write(root, 'packages/docx/src/line-layout.ts', 'export function layoutLines() {}\n');
   write(root, 'packages/docx/src/renderer.ts', `
-import { paintPlacedParagraphLayout } from './paint/canvas-text.js';
 import { layoutLines } from './line-layout.js';
 import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
 function createConcreteBodyLayoutKernel(doc, ctx, localMetrics) { return { doc, ctx, localMetrics }; }
@@ -1125,9 +1120,8 @@ function renderBodyElements(elements) {
 function renderDocumentToCanvas(services, input, pageIndex) {
   return selectDocumentLayoutPage(services, input, pageIndex);
 }
-function renderHeaderFooterStory(story) { return layoutLines(story); }
 `);
-  expectDiagnostic(root, 'BODY_PAINT_LAYOUT_CAPABILITY', 'body reacquisition', '--base-ref', 'main');
+  expectDiagnostic(root, 'BODY_PAINT_LAYOUT_CAPABILITY', 'body reacquisition', '--final');
 });
 
 test('retained body paint rejects aliased, transitive, callback, and unresolved layout calls', () => {
@@ -1475,9 +1469,10 @@ test('worker retains keyed parity and never duplicates selected-page validation'
   }
 });
 
-test('a transitional baseline is forbidden in explicit final mode', () => {
-  const root = initializeLegacyStoryPaintFixture();
-  expectDiagnostic(root, 'FINAL_BASELINE_PRESENT', 'final baseline', '--final');
+test('a transitional baseline is forbidden by the default CI invocation', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-default-final-');
+  write(root, 'scripts/docx-layout-boundary-baseline.json', '{}\n');
+  expectDiagnostic(root, 'FINAL_BASELINE_PRESENT', 'final baseline');
 });
 
 test('reports an unknown CLI argument exactly', () => {
@@ -1537,6 +1532,14 @@ test('every deleted final producer and legacy stamp identifier is rejected exact
     'collapsedSpacer',
     'leadsCollapsedRun',
     'hiddenCollapsed',
+    'computeTableRowHeights',
+    'estimateTableHeight',
+    'measureRetainedCellContentHeightPt',
+    'measureCellParagraphWindow',
+    'measureCellElementHeight',
+    'trimTrailingStructuralMarker',
+    'rescaleLayoutLines',
+    'paragraphSegsStateSensitive',
   ];
   const deletedStampProperties = [
     'colIndex',
@@ -1588,130 +1591,14 @@ test('the concrete body kernel is private even though its declaration is allowed
   expectDiagnostic(root, 'FINAL_ADAPTER_EXPORT', 'exported concrete kernel', '--final');
 });
 
-test('writing a first transitional baseline remains supported', () => {
+test('writing a transitional baseline is rejected after final cutover', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-first-baseline-');
-  git(root, 'init', '-b', 'main');
-  git(root, 'config', 'user.email', 'boundary-test@example.invalid');
-  git(root, 'config', 'user.name', 'Boundary Test');
-  git(root, 'add', '.');
-  git(root, 'commit', '-m', 'base without boundary baseline');
-  git(root, 'switch', '-c', 'boundary');
-  const result = runChecker(root, '--write-transitional-baseline', '--base-ref', 'main');
-  assert.equal(result.status, 0, result.output);
-  assert.equal(JSON.parse(readFileSync(
-    join(root, 'scripts/docx-layout-boundary-baseline.json'),
-    'utf8',
-  )).version, 2);
-});
-
-test('reports an existing merge-base transitional baseline exactly', () => {
-  const root = initializeTransitionalRepository();
   expectDiagnostic(
     root,
-    'TRANSITIONAL_BASELINE_EXISTS',
-    'baseline rewrite',
+    'UNKNOWN_ARGUMENT',
+    'removed baseline writer',
     '--write-transitional-baseline',
-    '--base-ref',
-    'main',
   );
-});
-
-test('reports invalid current baseline structure exactly', () => {
-  const root = initializeTransitionalRepository();
-  write(root, 'scripts/docx-layout-boundary-baseline.json', '{"version":1}\n');
-  expectDiagnostic(root, 'INVALID_BASELINE', 'invalid current baseline', '--base-ref', 'main');
-});
-
-test('reports malformed current baseline JSON as INVALID_BASELINE', () => {
-  const root = initializeTransitionalRepository();
-  write(root, 'scripts/docx-layout-boundary-baseline.json', '{not-json\n');
-  expectDiagnostic(root, 'INVALID_BASELINE', 'malformed current baseline', '--base-ref', 'main');
-});
-
-test('reports duplicate keys in the current baseline as INVALID_BASELINE', () => {
-  const root = initializeTransitionalRepository();
-  const path = join(root, 'scripts/docx-layout-boundary-baseline.json');
-  const baseline = readFileSync(path, 'utf8');
-  write(root, 'scripts/docx-layout-boundary-baseline.json', baseline.replace(
-    '"version": 2,',
-    '"version": 2,\n  "version": 2,',
-  ));
-  expectDiagnostic(root, 'INVALID_BASELINE', 'duplicate current baseline', '--base-ref', 'main');
-});
-
-test('reports invalid merge-base baseline structure exactly', () => {
-  const root = initializeTransitionalRepository();
-  git(root, 'switch', 'main');
-  write(root, 'scripts/docx-layout-boundary-baseline.json', '{"version":1}\n');
-  git(root, 'add', '.');
-  git(root, 'commit', '-m', 'invalid baseline');
-  git(root, 'switch', '-c', 'invalid-base-child');
-  expectDiagnostic(root, 'INVALID_BASELINE', 'invalid merge-base baseline', '--base-ref', 'main');
-});
-
-test('reports Git command failures exactly', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-git-error-');
-  write(root, 'scripts/docx-layout-boundary-baseline.json',
-    `${JSON.stringify(validEmptyBaseline(), null, 2)}\n`);
-  expectDiagnostic(root, 'GIT_ERROR', 'not a Git repository', '--base-ref', 'main');
-});
-
-test('baseline expansion guards each tracked allowance category', () => {
-  const mutations = [
-    ['legacy symbol count', (root) => write(
-      root,
-      'packages/docx/src/legacy-symbol.ts',
-      'export function renderShapeText() {}\n',
-    )],
-    ['migration identifier count', (root) => write(
-      root,
-      'packages/docx/src/migration-flag.ts',
-      'export const useOldLayoutEngine = true;\n',
-    )],
-    ['non-layout declaration', (root) => write(
-      root,
-      'packages/docx/src/new-helper.ts',
-      'export const newHelper = true;\n',
-    )],
-    ['unapproved legacy declaration hash', (root) => {
-      const path = join(root, 'scripts/docx-layout-boundary-baseline.json');
-      const baseline = JSON.parse(readFileSync(path, 'utf8'));
-      baseline.legacyDeclarationHashes['packages/docx/src/ghost.ts#FunctionDeclaration#renderShapeText'] = 'ghost';
-      write(root, 'scripts/docx-layout-boundary-baseline.json',
-        `${JSON.stringify(baseline, null, 2)}\n`);
-    }],
-    ['renderer import edge', (root) => {
-      write(root, 'packages/docx/src/layout-context.ts', 'export const legacyContext = true;\n');
-      const rendererPath = join(root, 'packages/docx/src/renderer.ts');
-      write(root, 'packages/docx/src/renderer.ts',
-        `import { legacyContext } from './layout-context.js';\n${readFileSync(rendererPath, 'utf8')}\nvoid legacyContext;\n`);
-    }],
-  ];
-  for (const [name, mutate] of mutations) {
-    const root = initializeTransitionalRepository();
-    mutate(root);
-    expectDiagnostic(root, 'BASELINE_EXPANSION', name, '--base-ref', 'main');
-  }
-});
-
-test('reports a changed frozen legacy declaration exactly', () => {
-  const root = initializeTransitionalRepository();
-  const rendererPath = join(root, 'packages/docx/src/renderer.ts');
-  write(root, 'packages/docx/src/renderer.ts', readFileSync(rendererPath, 'utf8').replace(
-    'function renderShapeText() { return 1; }',
-    'function renderShapeText() { return 2; }',
-  ));
-  expectDiagnostic(root, 'LEGACY_DECLARATION_CHANGED', 'changed declaration', '--base-ref', 'main');
-});
-
-test('reports an exact-baseline mismatch after permitted shrinkage', () => {
-  const root = initializeTransitionalRepository();
-  const baselinePath = join(root, 'scripts/docx-layout-boundary-baseline.json');
-  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
-  baseline.nonLayoutDeclarationKeys = [];
-  write(root, 'scripts/docx-layout-boundary-baseline.json',
-    `${JSON.stringify(baseline, null, 2)}\n`);
-  expectDiagnostic(root, 'BASELINE_MISMATCH', 'baseline shrink mismatch', '--base-ref', 'main');
 });
 
 test('the canonical body producer file is mandatory', () => {

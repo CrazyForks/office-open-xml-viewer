@@ -107,8 +107,7 @@ function textRun(text: string): DocxTextRun {
   };
 }
 
-/** Build a paragraph wrapped as a CellElement (carries the `type: 'paragraph'`
- *  discriminator that {@link measureCellElementHeight} reads). */
+/** Build a paragraph wrapped as the CellElement consumed by retained acquisition. */
 function paraOf(text: string, opts: Partial<DocParagraph> = {}): CellElement {
   return {
     type: 'paragraph',
@@ -251,8 +250,8 @@ describe('cell vAlign=center — leading spaceBefore must NOT shift the inked bl
 
   it('first element is a nested table — leading spaceBefore is treated as 0 (no firstSpaceBefore pull-up)', async () => {
     // Nested table first + trailing structural empty paragraph (§17.4.7).
-    // trimTrailingStructuralMarker drops the trailing empty paragraph, so the
-    // visibleContent is [nestedTable]. No paragraph anywhere ⇒ firstSpaceBefore
+    // Retained cell acquisition classifies the trailing empty paragraph as the
+    // structural marker, so visible content is [nestedTable]. No paragraph anywhere ⇒ firstSpaceBefore
     // = lastSpaceAfter = 0. The nested table should sit centred in the outer
     // cell without any spurious vertical offset.
     const nestedRow = row(

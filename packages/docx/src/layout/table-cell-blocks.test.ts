@@ -228,3 +228,71 @@ describe('split cell retained edge ownership', () => {
     expect(placement.contentTranslationPt).toBe(80);
   });
 });
+
+describe('retained cell paragraph spacing', () => {
+  it.each([
+    ['ordinary max collapse', false, false, 12],
+    ['previous contextual side', true, false, 2],
+    ['current contextual side', false, true, 10],
+    ['both contextual sides', true, true, 0],
+  ] as const)('%s uses the shared paragraph-gap authority', (
+    _name,
+    previousContextual,
+    currentContextual,
+    expectedGap,
+  ) => {
+    const previous = Object.assign(paragraph('previous'), {
+      styleId: 'shared',
+      contextualSpacing: previousContextual,
+    });
+    const current = Object.assign(paragraph('current'), {
+      styleId: 'shared',
+      contextualSpacing: currentContextual,
+    });
+    const owner = cell([previous, current]);
+    const previousLayout = {
+      ...retainedParagraph([0], 0),
+      advancePt: 30,
+      spacing: { beforePt: 4, afterPt: 10 },
+    };
+    const currentLayout = {
+      ...retainedParagraph([1], 0),
+      advancePt: 32,
+      spacing: { beforePt: 12, afterPt: 0 },
+    };
+
+    const placement = resolveRetainedCellBlockPlacement(
+      owner,
+      table([owner]),
+      [previousLayout, currentLayout],
+      100,
+    );
+
+    expect(placement.blockPlacements).toEqual([
+      { offsetPt: 4, advancePt: 16 },
+      { offsetPt: 20 + expectedGap, advancePt: 20 },
+    ]);
+  });
+
+  it('resets paragraph spacing ownership across a nested table block', () => {
+    const before = paragraph('before');
+    const after = paragraph('after');
+    const owner = cell([
+      before,
+      { type: 'table', ...table([cell([paragraph('nested')])]) } as CellElement,
+      after,
+    ]);
+    const nested = retainedNestedTable([1], 40, 15, []);
+    const placement = resolveRetainedCellBlockPlacement(owner, table([owner]), [
+      { ...retainedParagraph([0], 0), advancePt: 20, spacing: { beforePt: 0, afterPt: 8 } },
+      nested,
+      { ...retainedParagraph([2], 0), advancePt: 22, spacing: { beforePt: 12, afterPt: 0 } },
+    ], 100);
+
+    expect(placement.blockPlacements).toEqual([
+      { offsetPt: 0, advancePt: 12 },
+      { offsetPt: 20, advancePt: 15 },
+      { offsetPt: 47, advancePt: 10 },
+    ]);
+  });
+});

@@ -17,7 +17,6 @@ import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import {
   layoutLines,
   lineBoxHeight,
-  rescaleLayoutLines,
   type LayoutSeg,
   type LayoutTextSeg,
 } from './line-layout.js';
@@ -120,20 +119,17 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
     expect(line.gridCountSingle).toBeCloseTo(26, 8);
   });
 
-  it('keeps the untabled EA grid count scale-linear through paint-side rescaling', () => {
+  it('keeps the untabled EA grid count scale-linear at scale 2.3529', () => {
     const paintScale = 2.3529;
     const run = seg('物理', 'ＭＳ 明朝', 20);
     const ctx = integerRoundedCtx();
-    const measured = layoutLines(
-      ctx, [{ ...run }] as LayoutSeg[], 400, 0, 1,
+    const [painted] = layoutLines(
+      ctx, [{ ...run }] as LayoutSeg[], 400 * paintScale, 0, paintScale,
       undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
       false, false, false,
     );
-    const [painted] = rescaleLayoutLines(measured, paintScale, ctx, {}, 0);
 
-    expect(measured[0].ascent + measured[0].descent).toBe(20);
     expect(painted.ascent + painted.descent).toBe(47);
-    expect(measured[0].gridCountSingle).toBeCloseTo(26, 8);
     expect(painted.gridCountSingle).toBeCloseTo(26 * paintScale, 8);
   });
 
@@ -146,31 +142,35 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
 
     for (const { fontSize, linePitchPt, expectedAdvance } of cases) {
       const ctx = integerRoundedCtx();
-      const measured = layoutLines(
+      const [measuredLine] = layoutLines(
         ctx, [seg('物理', 'ＭＳ 明朝', fontSize)] as LayoutSeg[], 400, 0, 1,
         undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
         false, false, false,
       );
-      const painted = rescaleLayoutLines(measured, paintScale, ctx, {}, 0);
+      const [paintedLine] = layoutLines(
+        integerRoundedCtx(),
+        [seg('物理', 'ＭＳ 明朝', fontSize)] as LayoutSeg[],
+        400 * paintScale,
+        0,
+        paintScale,
+        undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
+        false, false, false,
+      );
       const grid = { type: 'lines' as const, linePitchPt };
 
-      expect(painted).toHaveLength(measured.length);
-      for (const [index, measuredLine] of measured.entries()) {
-        const paintedLine = painted[index];
-        const measureAdvance = lineBoxHeight(
-          null, measuredLine.ascent, measuredLine.descent, 1, grid, false,
-          measuredLine.intendedSingle, measuredLine.eastAsian ?? false,
-          measuredLine.gridCountSingle,
-        );
-        const paintAdvance = lineBoxHeight(
-          null, paintedLine.ascent, paintedLine.descent, paintScale, grid, false,
-          paintedLine.intendedSingle, paintedLine.eastAsian ?? false,
-          paintedLine.gridCountSingle,
-        );
+      const measureAdvance = lineBoxHeight(
+        null, measuredLine.ascent, measuredLine.descent, 1, grid, false,
+        measuredLine.intendedSingle, measuredLine.eastAsian ?? false,
+        measuredLine.gridCountSingle,
+      );
+      const paintAdvance = lineBoxHeight(
+        null, paintedLine.ascent, paintedLine.descent, paintScale, grid, false,
+        paintedLine.intendedSingle, paintedLine.eastAsian ?? false,
+        paintedLine.gridCountSingle,
+      );
 
-        expect(measureAdvance).toBe(expectedAdvance);
-        expect(paintAdvance).toBeCloseTo(measureAdvance * paintScale, 8);
-      }
+      expect(measureAdvance).toBe(expectedAdvance);
+      expect(paintAdvance).toBeCloseTo(measureAdvance * paintScale, 8);
     }
   });
 
