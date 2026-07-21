@@ -74,17 +74,22 @@ function wasmAssetUrl(): Plugin {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [
     wasmAssetUrl(),
     wasm(),
-    dts({
-      // TypeScript 7 intentionally has no stable Compiler API yet. Keep the
-      // declaration generator on the TS 6 compatibility package while the
-      // project's normal typecheck uses the native TS 7 CLI.
-      generator: 'tsc',
-      tsconfig: './tsconfig.lib.json',
-    }),
+    // Storybook loads the root Vite config in serve mode. The declaration
+    // plugins are build-only: their Rolldown buildStart hooks expect library
+    // inputs and fail against Storybook's dev-server graph.
+    ...(command === 'build'
+      ? dts({
+          // TypeScript 7 intentionally has no stable Compiler API yet. Keep the
+          // declaration generator on the TS 6 compatibility package while the
+          // project's normal typecheck uses the native TS 7 CLI.
+          generator: 'tsc',
+          tsconfig: './tsconfig.lib.json',
+        })
+      : []),
   ],
   // rolldown-plugin-dts emits declarations into the same graph. Oxc should
   // leave those declaration modules (and normal JavaScript inputs) untouched.
@@ -127,4 +132,4 @@ export default defineConfig({
     format: 'es',
     plugins: () => [wasm()],
   },
-});
+}));
