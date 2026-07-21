@@ -94,6 +94,19 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + '  tableParticipatesInOrdinaryFlow(): unknown;\n'
       + '  paragraphAcquisitionInput(): unknown;\n'
       + '}\n');
+  write(root, 'packages/docx/src/layout/acquisition-state.ts',
+    'export const BODY_STORY_CONTEXT = {};\n'
+      + 'export function resolveBodyParagraphLayoutContext() {}\n'
+      + 'export function resolveStateParagraphLayoutContext() {}\n'
+      + 'export function withTableCellStory() {}\n'
+      + 'export function retainedTableRecord() {}\n');
+  write(root, 'packages/docx/src/layout/measurement-environment.ts',
+    'export function canonicalParagraphTextScaleEligible() {}\n'
+      + 'export function docDefaultFontSizePt() {}\n'
+      + 'export function paragraphMeasurementEnvironment() {}\n'
+      + 'export function segmentEnvironmentOf() {}\n'
+      + 'export function snapParaLineToGrid() {}\n'
+      + 'export function gridForParagraphContext() {}\n');
   write(root, 'packages/docx/src/layout/measurement-capabilities.ts',
     'export interface MeasurementTextContext {\n'
       + '  font: string;\n'
@@ -105,6 +118,13 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + '  fingerprint: string;\n'
       + '  measureRunInkExtra(text: string): number;\n'
       + '}\n');
+  write(root, 'packages/docx/src/layout/section-orientation.ts',
+    'export function isVerticalSection() {}\n'
+      + 'export function isVerticalTextDirection() {}\n'
+      + 'export function isAllRotatedVerticalTextDirection() {}\n'
+      + 'export function verticalLayoutSection() {}\n'
+      + 'export function verticalLayoutDoc() {}\n'
+      + 'export function physicalLayoutSection() {}\n');
   write(root, 'packages/docx/src/layout/affine.ts',
     "import type { PointPt } from './types.js';\n"
       + 'export const composeAffine = (point: PointPt) => point;\n');
@@ -436,15 +456,24 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
   );
 });
 
-test('layout acquisition context ownership cannot be bypassed by removing its module', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-acquisition-missing-');
-  rmSync(join(root, 'packages/docx/src/layout/acquisition-context.ts'));
-  expectDiagnostic(
-    root,
-    'ACQUISITION_CONTEXT_SURFACE',
-    'missing acquisition context module must fail the ownership ratchet',
-    '--final',
-  );
+test('layout acquisition ownership cannot be bypassed by removing a required module', () => {
+  for (const module of [
+    'acquisition-context.ts',
+    'acquisition-input-projections.ts',
+    'acquisition-state.ts',
+    'measurement-capabilities.ts',
+    'measurement-environment.ts',
+    'section-orientation.ts',
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-${module}-missing-`);
+    rmSync(join(root, 'packages/docx/src/layout', module));
+    expectDiagnostic(
+      root,
+      'ACQUISITION_CONTEXT_SURFACE',
+      `missing ${module} must fail the ownership ratchet`,
+      '--final',
+    );
+  }
 });
 
 test('coordinate-space and page-factory accept only their explicit dependencies', () => {

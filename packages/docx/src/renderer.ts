@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, DocParagraph, DocTable, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeText, HeaderFooter,
-  HeadersFooters, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote,
+  SectionProps,
 } from './types';
 import { docxRenderedFontFamilies } from './document-content.js';
 import {
@@ -28,7 +28,6 @@ import type {
   ResolvedLocalFontMetric,
 } from '@silurus/ooxml-core';
 import {
-  segmentsHaveRtl,
   jcIsFullyJustified,
   jcStretchesLastLine,
 } from './bidi-line.js';
@@ -37,9 +36,6 @@ import {
   FLOAT_OVERLAP_EPS,
   isWrapFloat,
 } from './float-layout.js';
-import {
-  type KashidaLevel,
-} from './kashida-justify.js';
 import {
   type FrameBox,
   computeFrameBox,
@@ -61,14 +57,12 @@ import {
 } from './table-geometry.js';
 import {
   computeSectionColumns as computeColumns,
-  enterTableCellStoryContext,
   resolveDocumentLayoutSettings,
   resolveParagraphLayoutContext,
   resolveSectionLayoutContext,
   type DocumentLayoutSettings,
   type ParagraphLayoutContext,
   type SectionLayoutContext,
-  type StoryContext,
 } from './layout-context.js';
 import { canvasFontString } from '@silurus/ooxml-core';
 import type {
@@ -159,8 +153,10 @@ import {
   selectDocumentLayoutPage,
 } from './layout/document-layout-variants.js';
 import {
+  buildNoteNumberMap,
   footnoteIdsInRetainedLines,
   footnoteIdsInRetainedSlice,
+  indexNotes,
   noteReferenceIdsInDocumentOrder,
 } from './layout/note-reference-ownership.js';
 import type {
@@ -197,11 +193,32 @@ import {
   bodySectionIndexInput,
 } from './parser-model.js';
 import {
-  logicalSectionGeometry as logicalGeomOf,
-  physicalSectionGeometry as physicalGeomOf,
   sectionBodyInsetPt as bodyMarginInsetPt,
   createBodySectionIndex,
 } from './layout/context.js';
+import {
+  isAllRotatedVerticalTextDirection,
+  isVerticalSection,
+  isVerticalTextDirection,
+  physicalLayoutSection,
+  verticalLayoutDoc,
+  verticalLayoutSection,
+} from './layout/section-orientation.js';
+import {
+  canonicalParagraphTextScaleEligible,
+  docDefaultFontSizePt,
+  gridForParagraphContext,
+  paragraphMeasurementEnvironment,
+  segmentEnvironmentOf,
+  snapParaLineToGrid,
+} from './layout/measurement-environment.js';
+import {
+  BODY_STORY_CONTEXT,
+  retainedTableRecord,
+  resolveBodyParagraphLayoutContext,
+  resolveStateParagraphLayoutContext,
+  withTableCellStory,
+} from './layout/acquisition-state.js';
 import {
   applyNumberingBodyOffset,
   resolveNumberingMarkerGeometry,
@@ -215,6 +232,7 @@ import {
 
 
 export { computeColumns };
+export { resolveBodyParagraphLayoutContext };
 
 // ── Line-layout engine (segmentation + line-breaking + measurement) ──────────
 // Lifted into ./line-layout.ts (verbatim, B2 phase boundary). renderer.ts is the
@@ -227,7 +245,6 @@ import {
   fontClassesWithPitches,
   getDefaultFontSize,
   gridCharDeltaPx,
-  isGridLineRule,
   layoutLines,
   lineBoxHeight,
   normalizeFontFamilyUncached,
@@ -237,13 +254,8 @@ import {
 import type {
   DocGridCtx,
   LayoutLine,
-  LayoutSeg,
-  LineLayoutEnvironment,
 } from './line-layout.js';
-import {
-  measureParagraph,
-  type ParagraphMeasurementEnvironment,
-} from './paragraph-measure.js';
+import { measureParagraph } from './paragraph-measure.js';
 import {
   acquireRetainedTable,
   type RetainedTableAcquisition,
@@ -258,6 +270,7 @@ import {
 import { paragraphGapAdjustment } from './layout/paragraph-spacing.js';
 import { imageResourceKey } from './layout/source-key.js';
 import {
+  bottomBorderExtentPt,
   resolveParagraphBorderEdges,
 } from './layout/paragraph-border-adjacency.js';
 import {
@@ -301,13 +314,6 @@ import type {
   VerticalGlyphMeasurementService,
 } from './layout/measurement-capabilities.js';
 import { textRunsForPage } from './text-run-projection.js';
-
-function kashidaLevelOf(alignment: string | null | undefined): KashidaLevel | null {
-  if (alignment === 'lowKashida') return 'low';
-  if (alignment === 'mediumKashida') return 'medium';
-  if (alignment === 'highKashida') return 'high';
-  return null;
-}
 
 function collectMathRuns(
   body: BodyElement[],
@@ -628,115 +634,6 @@ export async function prepareMathRuns(
     }
   }
   return { records, drawables };
-}
-
-const BODY_STORY_CONTEXT: StoryContext = {
-  story: 'body',
-  containers: [],
-  lineNumberingEligible: true,
-};
-
-export function resolveBodyParagraphLayoutContext(
-  state: Pick<BodyAcquisitionState, 'layoutSettings' | 'sectionLayout' | 'acquisitionInputs'>
-    & Partial<Pick<BodyAcquisitionState, 'layoutServices' | 'defaultTabPt'>>,
-  paragraph: DocParagraph,
-): ParagraphLayoutContext {
-  const context = resolveParagraphLayoutContext(
-    state.layoutSettings,
-    state.sectionLayout,
-    BODY_STORY_CONTEXT,
-    paragraph,
-  );
-  return applyNumberingBodyOffset(context, {
-    numbering: paragraph.numbering,
-    ...(paragraph.numbering ? {
-      markerInput: state.acquisitionInputs.numberingMarkerShapeInput(
-        paragraph.numbering,
-        getDefaultFontSize(paragraph),
-      ),
-    } : {}),
-    authoredFirstIndentPt: paragraph.indentFirst,
-    tabStops: paragraph.tabStops,
-    defaultTabPt: state.defaultTabPt,
-    service: state.layoutServices?.text,
-  });
-}
-
-function resolveStateParagraphLayoutContext(
-  state: Pick<
-    BodyAcquisitionState,
-    'layoutSettings' | 'sectionLayout' | 'storyContext' | 'acquisitionInputs'
-  >
-    & Partial<Pick<BodyAcquisitionState, 'layoutServices' | 'defaultTabPt'>>,
-  paragraph: DocParagraph,
-): ParagraphLayoutContext {
-  const context = resolveParagraphLayoutContext(
-    state.layoutSettings,
-    state.sectionLayout,
-    state.storyContext ?? BODY_STORY_CONTEXT,
-    paragraph,
-  );
-  return applyNumberingBodyOffset(context, {
-    numbering: paragraph.numbering,
-    ...(paragraph.numbering ? {
-      markerInput: state.acquisitionInputs.numberingMarkerShapeInput(
-        paragraph.numbering,
-        getDefaultFontSize(paragraph),
-      ),
-    } : {}),
-    authoredFirstIndentPt: paragraph.indentFirst,
-    tabStops: paragraph.tabStops,
-    defaultTabPt: state.defaultTabPt,
-    service: state.layoutServices?.text,
-  });
-}
-
-function withTableCellStory(state: BodyAcquisitionState): BodyAcquisitionState {
-  return {
-    ...state,
-    storyContext: enterTableCellStoryContext(
-      state.storyContext ?? BODY_STORY_CONTEXT,
-    ),
-  };
-}
-
-/** Whether a paragraph may use scale-1 glyph geometry as the single layout
- * authority and map it to the paint viewport with a Canvas transform.
- *
- * Keep this predicate shared by paint and table-cell height measurement: row
- * height / vAlign must reserve the exact line boxes that the glyph path draws.
- * The excluded paths still have scale-aware layout or decoration behavior —
- * including marker/tab-leader paint and math fallback — that has not yet been
- * expressed entirely in canonical document coordinates. */
-function canonicalParagraphTextScaleEligible(
-  storyContext: StoryContext,
-  verticalCJK: boolean | undefined,
-  inFrame: boolean,
-  hasWrapContext: boolean,
-  paragraphContext: Pick<ParagraphLayoutContext, 'hasRuby' | 'baseRtl'>,
-  paragraph: Pick<DocParagraph, 'alignment' | 'numbering'>,
-  segments: readonly LayoutSeg[],
-): boolean {
-  // `containers=[]` is the deliberate top-level body case. Nested body text is
-  // accepted only while every enclosing story container is a table cell; other
-  // stories/containers keep their established paint-space paths.
-  const isSupportedBodyContainerChain =
-    storyContext.story === 'body'
-    && (storyContext.containers.length === 0
-      || storyContext.containers.every((container) => container.kind === 'tableCell'));
-  return !hasWrapContext
-    && !inFrame
-    && isSupportedBodyContainerChain
-    && !verticalCJK
-    && !paragraphContext.hasRuby
-    && !paragraphContext.baseRtl
-    && paragraph.numbering == null
-    && !segmentsHaveRtl(segments)
-    && kashidaLevelOf(paragraph.alignment) === null
-    && segments.every((segment) =>
-      !('isTab' in segment)
-      && !('mathNodes' in segment)
-      && (!('text' in segment) || segment.emphasisMark == null));
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -1235,112 +1132,6 @@ export async function preloadImages(
  */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
-/** True when a section flows VERTICALLY (glyphs stack top→bottom, lines advance
- *  across the page). `<w:sectPr><w:textDirection>` uses the TRANSITIONAL
- *  ST_TextDirection enum (ECMA-376 Part 4 §14.11.7, rather than the Part 1
- *  §17.18.93 Strict `tb|rl|lr|…` set):
- *    - `tbRl`  (≡ Strict `rl`)  — vertical, lines right→left: standard vertical
- *                                 Japanese; the only value in the samples.
- *    - `tbRlV` (≡ Strict `rlV`) — vertical R→L, non-EA glyphs rotated 90° CW.
- *    - `tbLrV` (≡ Strict `lrV`) — vertical L→R, non-EA glyphs rotated 90° CW.
- *  These three share the +90° page rotation + upright-CJK glyph path (stage-1
- *  approximates the `V` variants' non-EA rotation the same as `tbRl`, which the
- *  glyph path already draws Latin sideways for).
- *
- *    - `btLr`  (≡ Strict `lr`)  — its NOMINAL semantics are bottom-to-top /
- *                                 left-to-right, but the registered
- *                                 `word-section-btlr-tbrl-page-frame` behavior
- *                                 makes the section
- *                                 `btLr` uses the horizontal layout rotated +90° CW
- *                                 WHOLESALE: same page frame as `tbRl` (columns
- *                                 right→left, advance top→bottom — neither axis
- *                                 honors the nominal bottom-to-top/left-to-right),
- *                                 but EVERY glyph rides the page rotation — CJK is
- *                                 NOT counter-rotated upright (the dakuten of 「び」
- *                                 lands bottom-right) and vertical punctuation
- *                                 forms are NOT substituted. So `btLr` routes
- *                                 through the same +90° FRAME as `tbRl` while
- *                                 `BodyAcquisitionState.verticalAllRotated` switches the
- *                                 glyph draw to the horizontal branches. (The per-
- *                                 SECTION mixing that fixture also exercises —
- *                                 a `btLr` non-final section beside a horizontal
- *                                 final section — is surfaced per-section: the
- *                                 SectionBreak marker carries `textDirection`,
- *                                 the paginator stamps it in lockstep with the
- *                                 section geometry, and each page rotates by its
- *                                 OWN direction. Issue #1000.)
- *  Two are HORIZONTAL (glyphs upright, lines top→bottom) ⇒ false:
- *    - `lrTb`  (≡ Strict `tb`, the default) — dropped to null by the parser.
- *    - `lrTbV` (≡ Strict `tbV`) — horizontal, EA glyphs rotated 270°; still a
- *                                 horizontal flow, so not this vertical path. */
-function isVerticalSection(s: SectionProps): boolean {
-  return isVerticalTextDirection(s.textDirection);
-}
-
-/** The raw-token predicate behind {@link isVerticalSection}, for section-region
- *  carriers that hold a bare `textDirection` value rather than a
- *  full SectionProps (issue #1000). `null`/`undefined`/unknown ⇒ horizontal. */
-function isVerticalTextDirection(td: string | null | undefined): boolean {
-  return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV' || td === 'btLr';
-}
-
-/** True for a VERTICAL direction whose glyphs ALL ride the +90° page rotation
- *  (no CJK upright counter-rotation, no vertical punctuation forms, no 縦中横):
- *  section-level `btLr` under `word-section-btlr-tbrl-page-frame` (see
- *  {@link BodyAcquisitionState.verticalAllRotated}). The tbRl family keeps
- *  the upright-CJK glyph path. Only meaningful when
- *  {@link isVerticalTextDirection} is already true. */
-function isAllRotatedVerticalTextDirection(td: string | null | undefined): boolean {
-  return td === 'btLr';
-}
-
-/** Map a vertical (tbRl) section's PHYSICAL page geometry to the SWAPPED LOGICAL
- *  geometry the horizontal layout engine lays the page out in: logical width =
- *  physical height, and the four margins rotate one quarter-turn so the logical
- *  layout, once the page paint is rotated +90° back into physical space, lands
- *  the margins on the correct physical edges (§17.6.11). With the page transform
- *  `physical = (pageW_phys − logical.y, logical.x)`:
- *    logical.marginLeft  (flow start / column top)  → physical TOP     margin
- *    logical.marginTop   (before the first line)     → physical RIGHT   margin
- *    logical.marginRight (after the last line)        → physical LEFT    margin
- *    logical.marginBottom (flow end / column bottom)  → physical BOTTOM  margin
- *  Non-geometry fields (docGrid, columns, textDirection, …) are preserved so the
- *  logical layout keeps the section's grid pitch, columns and vertical flag. */
-function verticalLayoutSection(phys: SectionProps): SectionProps {
-  return {
-    ...phys,
-    ...logicalGeomOf(phys),
-  };
-}
-
-/** Return a shallow copy of `doc` with its BODY-LEVEL section swapped to the
- *  vertical LOGICAL geometry, so the pagination + layout engine — which reads
- *  `doc.section` — organises the page as a rotated horizontal page. Per-body
- *  SectionBreak `geom`s are NOT swapped here: the paginator resolves each
- *  mid-body section's own logical frame (swapped iff THAT section is vertical)
- *  through `sectionFrameFrom` (issue #1000 per-section text direction), so a
- *  marker's `geom` stays the PHYSICAL geometry the parser emitted. Only invoked
- *  when the body section is vertical; horizontal docs are returned untouched
- *  (referential identity), keeping the horizontal path byte-identical. */
-function verticalLayoutDoc(doc: DocxDocumentModel): DocxDocumentModel {
-  if (!isVerticalSection(doc.section)) return doc;
-  return { ...doc, section: verticalLayoutSection(doc.section) };
-}
-
-/** Inverse of {@link verticalLayoutSection}: map a vertical section's SWAPPED
- *  LOGICAL geometry back to its PHYSICAL page geometry. Under
- *  `word-vertical-section-physical-header-footer`, its header/footer stay
- *  horizontal at the physical top/bottom margins and do not rotate with the tbRl
- *  body. Applying `verticalLayoutSection` then this returns the original section
- *  (a quarter-turn each way): physical margin{Top,Right,Bottom,Left} =
- *  logical margin{Left,Top,Right,Bottom}; header/footer distances are preserved. */
-function physicalLayoutSection(logical: SectionProps): SectionProps {
-  return {
-    ...logical,
-    ...physicalGeomOf(logical),
-  };
-}
-
 export async function renderDocumentToCanvas(
   doc: DocxDocumentModel,
   canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -1534,55 +1325,12 @@ async function renderDocumentToCanvasLeased(
 /** Retained default separator leading used by the shared note story layout. */
 const FOOTNOTE_SEPARATOR_GAP_PT = 6;
 
-/** ECMA-376 §17.10.1 — an empty header/footer set (no default/first/even). Used
- *  when constructing a measure-only document service. */
-const EMPTY_HEADERS_FOOTERS: HeadersFooters = { default: null, first: null, even: null };
-
-/** Build default sequential numbering from first-reference order. Unreferenced
- *  note-part entries do not consume a displayed number (§17.18.22/.34). */
-function buildNoteNumberMap(
-  notes: DocNote[] | undefined,
-  referenceIds: readonly string[],
-): Map<string, number> {
-  const m = new Map<string, number>();
-  if (!notes) return m;
-  const available = new Set(notes.map((note) => note.id));
-  referenceIds.forEach((id) => {
-    if (available.has(id) && !m.has(id)) m.set(id, m.size + 1);
-  });
-  return m;
-}
-
-/** Index footnotes by id for content lookup. */
-function indexNotes(notes: DocNote[] | undefined): Map<string, DocNote> {
-  const m = new Map<string, DocNote>();
-  if (!notes) return m;
-  for (const n of notes) m.set(n.id, n);
-  return m;
-}
-
 // Preserve the historical renderer re-export without retaining the removed raw
 // page-element carrier.
 export type { ColumnGeom } from './types';
 
 // `computeColumns` is the shared pure implementation imported from
 // layout-context.ts and re-exported above for existing renderer callers.
-/** The document's default body font size in pt, used to size line-number glyphs so
- *  they share the body baseline grid. Resolved from the first body paragraph's
- *  `defaultFontSize` (which the parser folds from docDefaults + the style chain),
- *  falling back to 10pt (the ECMA-376 docDefaults sz absent value). */
-function docDefaultFontSizePt(doc: DocxDocumentModel): number {
-  for (const el of doc.body) {
-    if (el.type === 'paragraph') {
-      const p = el as unknown as DocParagraph;
-      if (typeof p.defaultFontSize === 'number') return p.defaultFontSize;
-      for (const run of p.runs) {
-        if (run.type === 'text') return (run as unknown as DocxTextRun).fontSize;
-      }
-    }
-  }
-  return 10;
-}
 
 export function layoutDocument(
   doc: DocxDocumentModel,
@@ -3672,80 +3420,6 @@ function createConcreteBodyLayoutKernel(
   });
 }
 
-function paragraphMeasurementEnvironment(
-  state: BodyMeasurementContext,
-): ParagraphMeasurementEnvironment {
-  return {
-    pageIndex: state.pageIndex,
-    totalPages: state.totalPages,
-    displayPageNumber: state.displayPageNumber,
-    pageNumberFormat: state.pageNumberFormat,
-    currentDateMs: state.currentDateMs,
-    noteNumbers: state.noteNumbers,
-    noteReferenceNumber: state.noteReferenceNumber,
-    // §17.6.20 btLr (#988 re-adjudication): an all-rotated page lays its lines
-    // out with the HORIZONTAL semantics (no 縦中横 grouping — the whole layout
-    // rotates wholesale), so the environment's vertical flag is the effective
-    // "upright vertical" one. tbRl (no verticalAllRotated) is unchanged.
-    verticalCJK: state.verticalCJK && !state.verticalAllRotated,
-    documentHasEastAsianText: state.docEastAsian,
-    resolvedLocalFonts: state.resolvedLocalFonts,
-    layoutServices: state.layoutServices,
-    verticalGlyphMeasurement: state.verticalGlyphMeasurement,
-  };
-}
-
-/** The `LineLayoutEnvironment` for building a paragraph's segments straight
- *  from an acquisition measurement context. Identity for
- *  horizontal and upright-vertical (tbRl family) states; an all-rotated
- *  (§17.6.20 btLr, #988 re-adjudication) page builds its segments with
- *  `verticalCJK` CLEARED so no 縦中横 grouping (§17.3.2.10) engages — the btLr
- *  page is the horizontal layout rotated wholesale, so its segments are the
- *  horizontal ones (measure == paint: the paginator's measure state never sets
- *  `verticalCJK` either). */
-function segmentEnvironmentOf(state: BodyMeasurementContext): LineLayoutEnvironment {
-  return state.verticalAllRotated ? { ...state, verticalCJK: false } : state;
-}
-
-function retainedTableRecord(state: BodyAcquisitionState, sourceIndex: number): RetainedTableRecord {
-  const record = state.retainedTablesBySourceIndex?.get(sourceIndex);
-  if (!record) throw new Error('Table placement requires retained table acquisition');
-  return record;
-}
-
-/** Snap a paragraph's uniform line height up to an integer multiple of the
- *  docGrid pitch. Mirrors Word's docGrid handling for ruby paragraphs:
- *  the grid pitch widens to accommodate the tallest required line, and
- *  every line in the paragraph then uses that widened pitch. */
-function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: number): number {
-  if (!isGridLineRule(grid)) return h;
-  const pitchPx = grid!.linePitchPt! * scale;
-  if (pitchPx <= 0) return h;
-  if (h <= pitchPx) return pitchPx;
-  return Math.ceil(h / pitchPx) * pitchPx;
-}
-
-/** Return true when any text run in the paragraph carries a `ruby` annotation.
- *  Used to apply paragraph-wide line-height snapping to docGrid pitch — Word
- *  renders the entire ruby paragraph with consistent line spacing so that
- *  ruby-bearing and ruby-free lines line up on the same baseline grid. */
-/** The docGrid that governs a paragraph's line heights. ECMA-376 §17.3.1.32:
- *  a paragraph with `w:snapToGrid` explicitly off ignores the section grid, so
- *  its lines use natural font metrics / the spacing multiplier directly. */
-function gridForParagraphContext(
-  state: Pick<BodyMeasurementContext, 'sectionLayout'>,
-  context: ParagraphLayoutContext,
-): DocGridCtx {
-  return {
-    type: state.sectionLayout.grid.kind === 'none'
-      ? null
-      : state.sectionLayout.grid.kind,
-    linePitchPt: context.lineGrid.active ? context.lineGrid.pitchPt : null,
-    charSpacePt:
-      context.characterGrid.active ? context.characterGrid.deltaPt : null,
-  };
-}
-
 function paraGrid(para: DocParagraph, state: BodyMeasurementContext): DocGridCtx {
   return gridForParagraphContext(
     state,
@@ -4985,26 +4659,6 @@ function trimTrailingStructuralMarker(content: CellElement[]): CellElement[] {
     : content;
 }
 
-/**
- * ECMA-376 §17.3.1.7 — paragraph-border merge context for a run of consecutive
- * identically-bordered paragraphs. The renderer draws one box around the run:
- *   - the `top` edge only on the FIRST paragraph,
- *   - the `bottom` edge only on the LAST paragraph,
- *   - the `<w:between>` edge (if any) at every INNER join,
- *   - `left`/`right` always (they form the box sides).
- * Canonical paragraph acquisition resolves adjacency before paint. This
- * compatibility shape remains for the legacy measurement bridge: `suppressTop`
- * selects the `between` edge at an inner join, while `suppressBottom` omits the
- * final edge when the run continues.
- */
-export interface ParaBorderMerge {
-  /** A same-border paragraph is adjacent above ⇒ don't draw this `top` edge
-   *  (draw `between` at the top join instead, when defined). */
-  suppressTop?: boolean;
-  /** A same-border paragraph is adjacent below ⇒ don't draw this `bottom` edge. */
-  suppressBottom?: boolean;
-}
-
 /** Height of a selected acquired line window, including forward clearance
  *  jumps. For each line `li` in `[sliceStart, paintEnd)`:
  *    if (line.topY !== undefined && line.topY > y) y = line.topY;  // float clearance
@@ -5024,38 +4678,6 @@ export function paintedParagraphHeight<L extends { topY?: number }>(
     y += lineHForLine(line);
   }
   return y - textAreaTopY;
-}
-
-export interface ParaBorderSegment {
-  side: 'top' | 'bottom' | 'left' | 'right';
-  edge: ParaBorderEdge;
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-}
-
-/** ECMA-376 §17.3.1.7 — the vertical extent (in scale-1 points) a paragraph's
- *  BOTTOM border adds BELOW the text box, so following content clears it.
- *
- *  §17.3.1.7 places the bottom border `w:space` points below the text ("the space
- *  after the bottom of the text … before this border is drawn"), and §17.3.4 gives
- *  the border its own width (`w:sz`, eighths of a point). The retained border
- *  stroke is centered on `textBottom + space`, so its outer bottom edge is
- *  at `textBottom + space + width/2`. `word-paragraph-border-flow-reservation`
- *  reserves that complete painted extent before the following content.
- *
- *  Returns 0 when there is no visible bottom edge, or when a same-border paragraph
- *  follows (the bottom edge is suppressed by the §17.3.1.7 merge — the box
- *  continues into the next paragraph, so nothing is drawn here to clear). */
-function bottomBorderExtentPt(
-  borders: ParagraphBorders | null | undefined,
-  merge?: ParaBorderMerge,
-): number {
-  if (!borders || merge?.suppressBottom) return 0;
-  const b = borders.bottom;
-  if (!b || b.style === 'none') return 0;
-  return (b.space ?? 0) + (b.width ?? 0) / 2;
 }
 
 // ───────────────────────────────────────────────────────────────────────────

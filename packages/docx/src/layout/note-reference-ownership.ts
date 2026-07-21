@@ -1,5 +1,28 @@
-import type { BodyElement, CellElement } from '../types.js';
+import type { BodyElement, CellElement, DocNote } from '../types.js';
 import type { LineLayout, ParagraphLayout, TableLayout } from './types.js';
+
+/** Build default sequential numbering from first-reference order. Unreferenced
+ * note-part entries do not consume a displayed number (§17.18.22/.34). */
+export function buildNoteNumberMap(
+  notes: readonly DocNote[] | undefined,
+  referenceIds: readonly string[],
+): Map<string, number> {
+  const numbers = new Map<string, number>();
+  if (!notes) return numbers;
+  const available = new Set(notes.map((note) => note.id));
+  referenceIds.forEach((id) => {
+    if (available.has(id) && !numbers.has(id)) numbers.set(id, numbers.size + 1);
+  });
+  return numbers;
+}
+
+/** Index note-part entries by their OOXML id for story acquisition. */
+export function indexNotes(notes: readonly DocNote[] | undefined): Map<string, DocNote> {
+  const indexed = new Map<string, DocNote>();
+  if (!notes) return indexed;
+  for (const note of notes) indexed.set(note.id, note);
+  return indexed;
+}
 
 /** Collect first reference order from the main document story. */
 export function noteReferenceIdsInDocumentOrder(
