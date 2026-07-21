@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildSegments, layoutLines, type LayoutMathSeg } from './line-layout.js';
-import type { RenderState } from './renderer.js';
+import {
+  buildSegments,
+  layoutLines,
+  type LayoutMathSeg,
+  type LineLayoutEnvironment,
+} from './line-layout.js';
 import type { DocRun } from './types.js';
 
 function makeLinearCtx(): CanvasRenderingContext2D {
@@ -37,7 +41,7 @@ describe('layoutLines math fallback', () => {
         ],
       },
     ];
-    const segs = buildSegments(runs, {} as RenderState);
+    const segs = buildSegments(runs, {} as LineLayoutEnvironment);
     const lines = layoutLines(makeLinearCtx(), segs, 300, 0, 1);
     const math = lines[0].segments[0] as LayoutMathSeg;
 

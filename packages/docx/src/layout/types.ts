@@ -524,20 +524,6 @@ export interface ParagraphFlowEvent {
   readonly offset: number;
 }
 
-/** Plain frame placement geometry consumed by layout and renderer adapters. */
-export interface FrameGeometryState {
-  readonly scale: number;
-  readonly contentX: number;
-  readonly contentW: number;
-  readonly pageWidth: number;
-  readonly pageH: number;
-  readonly marginLeft: number;
-  readonly marginRight: number;
-  readonly marginTop: number;
-  readonly marginBottom: number;
-  readonly y: number;
-}
-
 export interface ParagraphMarkLayout {
   readonly hidden: boolean;
   readonly bounds: LayoutRect;

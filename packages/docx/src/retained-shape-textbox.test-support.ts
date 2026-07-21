@@ -1,11 +1,23 @@
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
-import type { ParagraphLayoutContext } from './layout-context.js';
+import type {
+  DocumentLayoutSettings,
+  ParagraphLayoutContext,
+  SectionLayoutContext,
+} from './layout-context.js';
 import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
 import { paintTextBoxLayout } from './paint/canvas-text.js';
-import { createLayoutServices, type DecodedImage, type RenderState } from './renderer.js';
+import { createLayoutServices, type DecodedImage } from './renderer.js';
+import type { BodyAcquisitionState } from './layout/acquisition-context.js';
 import { textBoxAcquisitionInput } from './parser-model.js';
 import type { TextBoxLayout } from './layout/types.js';
 import type { DocxDocumentModel, ShapeRun } from './types.js';
+
+export type ShapeAcquisitionTestState =
+  Omit<Partial<BodyAcquisitionState>, 'layoutSettings' | 'sectionLayout'>
+  & {
+    layoutSettings?: Pick<DocumentLayoutSettings, 'mathDefJc'>;
+    sectionLayout?: Pick<SectionLayoutContext, 'grid'>;
+  };
 
 function servicesFor(
   ctx: CanvasRenderingContext2D,
@@ -25,6 +37,22 @@ function servicesFor(
   } as DocxDocumentModel, { measureContext: ctx });
 }
 
+/** Minimal acquisition cursor for tests that need to inject document services
+ * into retained text-box acquisition. */
+export function shapeAcquisitionState(
+  ctx: CanvasRenderingContext2D,
+  scale: number,
+  fontFamilyClasses: Record<string, string>,
+): ShapeAcquisitionTestState {
+  return {
+    ctx,
+    scale,
+    fontFamilyClasses,
+    kinsoku: DEFAULT_KINSOKU_RULES,
+    defaultTabPt: 36,
+  };
+}
+
 /** Test-only adapter over the production retained acquisition API. */
 export function acquireShapeTextBoxForTest(
   shape: ShapeRun,
@@ -32,14 +60,14 @@ export function acquireShapeTextBoxForTest(
   ctx: CanvasRenderingContext2D,
   scale: number,
   fontFamilyClasses: Record<string, string> = {},
-  state?: RenderState,
+  state?: ShapeAcquisitionTestState,
 ): TextBoxLayout | undefined {
   const services = state?.layoutServices ?? servicesFor(ctx, fontFamilyClasses);
-  const grid = state?.docGrid;
+  const grid = state?.sectionLayout?.grid;
   const lineGridActive = grid?.linePitchPt != null && grid.linePitchPt > 0
-    && (grid.type === 'lines' || grid.type === 'linesAndChars' || grid.type === 'snapToChars');
+    && (grid.kind === 'lines' || grid.kind === 'linesAndChars' || grid.kind === 'snapToChars');
   const characterGridActive = grid?.charSpacePt != null
-    && (grid.type === 'linesAndChars' || grid.type === 'snapToChars');
+    && (grid.kind === 'linesAndChars' || grid.kind === 'snapToChars');
   const context: ParagraphLayoutContext = {
     lineGrid: { active: lineGridActive, pitchPt: lineGridActive ? grid?.linePitchPt ?? null : null },
     characterGrid: {
@@ -52,7 +80,7 @@ export function acquireShapeTextBoxForTest(
     tabStops: [], hasRuby: false, hasEastAsianText: false,
     kinsoku: state?.kinsoku ?? DEFAULT_KINSOKU_RULES,
     defaultTabPt: state?.defaultTabPt ?? 36,
-    mathDefJc: state?.mathDefJc,
+    mathDefJc: state?.layoutSettings?.mathDefJc,
   };
   const source = { story: 'textbox' as const, storyInstance: 'test-shape', path: [] as number[] };
   return acquireShapeTextBoxLayout(shape, {
@@ -91,7 +119,7 @@ export function acquireAndPaintShapeTextBox(
   scale: number,
   fontFamilyClasses: Record<string, string> = {},
   images: Map<string, DecodedImage> = new Map(),
-  state?: RenderState,
+  state?: ShapeAcquisitionTestState,
 ): void {
   const layout = acquireShapeTextBoxForTest(
     shape, x, y, w, h, ctx, scale, fontFamilyClasses, state,
@@ -140,10 +168,9 @@ export function acquireAndPaintShapeTextBox(
     }
   });
   paintTextBoxLayout(layout, {
-    ctx: viewportContext, scale, dpr: state?.dpr ?? 1,
+    ctx: viewportContext, scale, dpr: 1,
     defaultTextColor: shape.defaultTextColor
-      ? `#${shape.defaultTextColor}` : state?.defaultColor ?? '#000000',
-    showTrackChanges: state?.showTrackChanges,
+      ? `#${shape.defaultTextColor}` : '#000000',
     resources: {
       paint(resourceKey, kind, bounds, paintContext) {
         if (kind !== 'image') return;

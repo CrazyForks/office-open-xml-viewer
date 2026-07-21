@@ -69,7 +69,7 @@ function frame(over: Partial<FramePr> = {}): FramePr {
 }
 
 // Cast helper: computeFrameBox/registerFrameFloat read only the MinState subset
-// of RenderState exercised here.
+// of BodyAcquisitionState exercised here.
 const box = (fp: FramePr, st: MinState, paraTop: number, cW: number, cH: number, anchorH: number): FrameBox =>
   computeFrameBox(fp, st as never, paraTop, cW, cH, anchorH);
 const registerFloat = (b: FrameBox, fp: FramePr, st: MinState): void =>

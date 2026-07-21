@@ -7,12 +7,11 @@
 // Lifted verbatim out of renderer.ts along the domain phase boundary that the B2
 // text-layout unification established (paragraph #684/#689, table #693, textbox
 // #697): everything here MEASURES (it may touch a Canvas 2D context to call
-// measureText / set ctx.font) but never DRAWS, mutates RenderState, paginates, or
+// measureText / set ctx.font) but never DRAWS, mutates body acquisition state,
+// paginates, or
 // registers floats — those stay in renderer.ts, which imports this module. The
-// split is one-directional at runtime: renderer.ts → line-layout.ts. The only
-// back-reference is the RenderState / DecodedImage TYPE (import type, erased at
-// runtime — same idiom frame-geometry.ts / anchor-geometry.ts use), so there is
-// no import cycle. Which behaviours here are ECMA-376-mandated vs Word-mimicking
+// split is one-directional at runtime: renderer.ts → line-layout.ts. Which
+// behaviours here are ECMA-376-mandated vs Word-mimicking
 // is documented inline (as before the move) — see packages/docx/CLAUDE.md.
 
 import type {
@@ -20,7 +19,6 @@ import type {
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
 import type { CanvasFontRoute, MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
-import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
   cjkFallbackChain,
@@ -681,7 +679,7 @@ export function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
 /**
  * Per-document memo for {@link normalizeFontFamily}. The regex/classifier work
  * inside is a pure function of `(family, fontFamilyClasses)`, and
- * `fontFamilyClasses` is a stable per-document object (RenderState threads
+ * `fontFamilyClasses` is a stable per-document object (body acquisition threads
  * `doc.fontFamilyClasses` — one identity per render). Keying the outer WeakMap on
  * that object identity gives per-doc caching with zero call-site churn (both
  * callers already pass `fontFamilyClasses`) and no leak: the inner
@@ -4583,29 +4581,4 @@ export function rescaleLayoutLines(
       topY: l.topY === undefined ? undefined : l.topY * scale,
     };
   });
-}
-
-/** Synthesize the `RenderState` fields {@link buildSegments} / {@link layoutLines}
- *  need for text-box layout when the caller does not thread the document state
- *  (unit tests acquire retained text-box geometry with minimal services). Only the
- *  fields those two functions actually read for PLAIN TEXT runs are populated —
- *  buildSegments touches `state` solely on `field`/`noteRef` runs (which shape
- *  runs never produce), so an empty note map + spec-default kinsoku / tab
- *  interval is exact here. The production call site passes the real state, so
- *  document-level kinsoku (§17.3.1.16) / defaultTabStop (§17.15.1.25) flow
- *  through unchanged. */
-export function shapeRenderState(
-  ctx: CanvasRenderingContext2D,
-  scale: number,
-  fontFamilyClasses: Record<string, string>,
-  images: Map<string, DecodedImage>,
-): RenderState {
-  return {
-    ctx,
-    scale,
-    fontFamilyClasses,
-    images,
-    kinsoku: DEFAULT_KINSOKU_RULES,
-    defaultTabPt: DEFAULT_TAB_PT,
-  } as unknown as RenderState;
 }

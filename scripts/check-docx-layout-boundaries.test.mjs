@@ -77,6 +77,14 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
     "import { snapshotPlainData } from './plain-data.js';\nexport const project = snapshotPlainData;\n");
   write(root, 'packages/docx/src/layout/types.ts',
     'export interface PointPt { xPt: number; yPt: number }\n');
+  write(root, 'packages/docx/src/layout/acquisition-context.ts',
+    'export interface AnchorFloatRegistrationState {}\n'
+      + 'export interface AnchorGeometryContext {}\n'
+      + 'export interface BodyAcquisitionState {}\n'
+      + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
+      + 'export interface FloatRegistrationState {}\n'
+      + 'export interface PhysicalAnchorFrame {}\n'
+      + 'export interface RetainedTableRecord {}\n');
   write(root, 'packages/docx/src/layout/affine.ts',
     "import type { PointPt } from './types.js';\n"
       + 'export const composeAffine = (point: PointPt) => point;\n');
@@ -310,6 +318,68 @@ test('rejects migration flags and silent alternate layout fallbacks', () => {
     write(root, 'packages/docx/src/layout/path.ts', `export const ${name} = true;\n`);
     expectDiagnostic(root, diagnostic, name, '--final');
   }
+});
+
+test('rejects renderer-owned acquisition state from the final architecture', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-render-state-');
+  write(
+    root,
+    'packages/docx/src/layout/obsolete-state.ts',
+    'export interface RenderState { readonly dryRun: boolean }\n',
+  );
+  expectDiagnostic(root, 'FINAL_LEGACY_BOUNDARY', 'RenderState', '--final');
+});
+
+test('layout acquisition contexts reject paint capabilities and renderer back-edges', () => {
+  const paintRoot = initializeCanonicalFixture('docx-layout-boundary-acquisition-paint-');
+  write(
+    paintRoot,
+    'packages/docx/src/layout/acquisition-context.ts',
+    'export interface AnchorFloatRegistrationState {}\n'
+      + 'export interface AnchorGeometryContext {}\n'
+      + 'export interface BodyAcquisitionState { images: Map<string, unknown> }\n'
+      + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
+      + 'export interface FloatRegistrationState {}\n'
+      + 'export interface PhysicalAnchorFrame {}\n'
+      + 'export interface RetainedTableRecord {}\n',
+  );
+  expectDiagnostic(
+    paintRoot,
+    'ACQUISITION_PAINT_CAPABILITY',
+    'images',
+    '--final',
+  );
+
+  const edgeRoot = initializeCanonicalFixture('docx-layout-boundary-acquisition-edge-');
+  write(
+    edgeRoot,
+    'packages/docx/src/layout/acquisition-context.ts',
+    "import type { Hidden } from '../renderer.js';\n"
+      + 'export interface AnchorFloatRegistrationState {}\n'
+      + 'export interface AnchorGeometryContext {}\n'
+      + 'export interface BodyAcquisitionState { hidden?: Hidden }\n'
+      + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
+      + 'export interface FloatRegistrationState {}\n'
+      + 'export interface PhysicalAnchorFrame {}\n'
+      + 'export interface RetainedTableRecord {}\n',
+  );
+  expectDiagnostic(
+    edgeRoot,
+    'ACQUISITION_RENDERER_DEPENDENCY',
+    'renderer.ts',
+    '--final',
+  );
+});
+
+test('layout acquisition context ownership cannot be bypassed by removing its module', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-acquisition-missing-');
+  rmSync(join(root, 'packages/docx/src/layout/acquisition-context.ts'));
+  expectDiagnostic(
+    root,
+    'ACQUISITION_CONTEXT_SURFACE',
+    'missing acquisition context module must fail the ownership ratchet',
+    '--final',
+  );
 });
 
 test('coordinate-space and page-factory accept only their explicit dependencies', () => {

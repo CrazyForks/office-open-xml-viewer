@@ -4,8 +4,10 @@ import {
   renderDocumentToCanvas,
   type DocxTextRunInfo,
 } from './renderer.js';
-import { acquireAndPaintShapeTextBox } from './retained-shape-textbox.test-support.js';
-import { shapeRenderState } from './line-layout.js';
+import {
+  acquireAndPaintShapeTextBox,
+  shapeAcquisitionState,
+} from './retained-shape-textbox.test-support.js';
 import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type {
   BodyElement,
@@ -366,7 +368,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
       localMetrics: testFontSnapshot([{ family: 'Theme ASCII' }, { family: 'Theme EA' }]),
       measureContext: ctx,
     });
-    const state = shapeRenderState(ctx, 1, {}, new Map());
+    const state = shapeAcquisitionState(ctx, 1, {});
     state.layoutServices = services;
 
     acquireAndPaintShapeTextBox(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);
@@ -407,7 +409,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
       } as FontFace],
       measureContext: ctx,
     });
-    const state = shapeRenderState(ctx, 1, {}, new Map());
+    const state = shapeAcquisitionState(ctx, 1, {});
     state.layoutServices = services;
 
     acquireAndPaintShapeTextBox(textBoxShape(num), 0, 0, 200, 100, ctx, 1, {}, new Map(), state);

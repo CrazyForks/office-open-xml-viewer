@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   acquireAndPaintShapeTextBox,
   acquireShapeTextBoxForTest,
+  shapeAcquisitionState,
+  type ShapeAcquisitionTestState,
 } from './retained-shape-textbox.test-support.js';
-import { shapeRenderState } from './line-layout.js';
-import type { RenderState } from './renderer.js';
 import type { ShapeRun, ShapeText } from './types';
 
 // ECMA-376 §17.6.5 `<w:docGrid w:type="lines" w:linePitch>` — a document with a
@@ -87,10 +87,23 @@ function eaTextbox(): ShapeRun {
 /** State carrying the section docGrid (like the production render threads). */
 function stateWithGrid(
   ctx: CanvasRenderingContext2D,
-  grid: { type: string | null; linePitchPt: number | null } | undefined,
-): RenderState {
-  const base = shapeRenderState(ctx, 1, {}, new Map());
-  return { ...base, docGrid: grid } as unknown as RenderState;
+  grid: {
+    type: 'default' | 'lines' | 'linesAndChars' | 'snapToChars' | null;
+    linePitchPt: number | null;
+  } | undefined,
+): ShapeAcquisitionTestState {
+  const base = shapeAcquisitionState(ctx, 1, {});
+  const kind = grid?.type == null || grid.type === 'default' ? 'none' : grid.type;
+  return {
+    ...base,
+    sectionLayout: {
+      grid: {
+        kind,
+        linePitchPt: grid?.linePitchPt ?? null,
+        charSpacePt: null,
+      },
+    },
+  };
 }
 
 /** Vertical delta between the first two DISTINCT baseline y values = the first

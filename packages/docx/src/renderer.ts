@@ -19,15 +19,11 @@ import {
   deferBitmapCloseWhileLeased,
   applyDuotone,
   imageNaturalSize,
-  drawImageCropped,
   metafileRasterSize,
-  renderChart,
 } from '@silurus/ooxml-core';
 import type {
   MathRenderer,
-  KinsokuRules,
   HyperlinkTarget,
-  NumberFormat,
   Duotone,
   ResolvedLocalFontMetric,
 } from '@silurus/ooxml-core';
@@ -69,7 +65,6 @@ import {
   resolveDocumentLayoutSettings,
   resolveParagraphLayoutContext,
   resolveSectionLayoutContext,
-  toLegacyDocGridContext,
   type DocumentLayoutSettings,
   type ParagraphLayoutContext,
   type SectionLayoutContext,
@@ -223,8 +218,7 @@ export { computeColumns };
 // ── Line-layout engine (segmentation + line-breaking + measurement) ──────────
 // Lifted into ./line-layout.ts (verbatim, B2 phase boundary). renderer.ts is the
 // paint/paginate side; it drives the pure kernel below. One-directional import
-// (renderer → line-layout); line-layout imports RenderState/DecodedImage back as
-// a TYPE only (erased), so there is no runtime cycle.
+// (renderer → line-layout), with acquisition state owned under layout/.
 import {
   DEFAULT_TAB_PT,
   buildFont,
@@ -243,6 +237,7 @@ import type {
   DocGridCtx,
   LayoutLine,
   LayoutSeg,
+  LineLayoutEnvironment,
 } from './line-layout.js';
 import {
   measureParagraph,
@@ -251,7 +246,6 @@ import {
 import {
   acquireRetainedTable,
   type RetainedTableAcquisition,
-  type RetainedTableAcquisitionDependencies,
 } from './layout/table-acquisition.js';
 import { combineAdjacentTableLayoutInputs } from './layout/adjacent-table-layout-input.js';
 import { layoutTable as layoutRetainedTableInput } from './layout/table.js';
@@ -270,8 +264,14 @@ import {
   acquireRetainedFrameGroup,
   bodyFrameGroupFor,
   bodyParagraphBorderEdgesFor,
-  type CompleteTextBoxStoryAcquirer,
 } from './layout/paragraph.js';
+import type { CompleteTextBoxStoryAcquirer } from './layout/paragraph.js';
+import type {
+  AnchorFloatRegistrationState,
+  BodyAcquisitionState,
+  BodyMeasurementContext,
+  RetainedTableRecord,
+} from './layout/acquisition-context.js';
 import {
   ownedParagraphAnchorCollisions,
   inheritedParagraphAuthorityForReacquisition,
@@ -292,7 +292,6 @@ import {
 import { resolveAnchorFrame } from './layout/anchor-frame.js';
 import {
   drawTateChuYokoRun,
-  drawUprightBox,
   physicalToLogicalAnchorBox,
 } from './vertical-text.js';
 import { textRunsForPage } from './text-run-projection.js';
@@ -596,206 +595,6 @@ export async function prepareMathRuns(
   return { records, drawables };
 }
 
-interface RetainedTableRecord {
-  readonly sourceIndex: number;
-  readonly acquisition: RetainedTableAcquisition;
-  readonly contentWidthPt: number;
-  readonly anchorYPt: number;
-}
-
-export interface RenderState {
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-  scale: number;    // px per pt
-  /** Device-pixel ratio the canvas was scaled by (`ctx.scale(dpr, dpr)`). Used to
-   *  compute the crisp-line offset (see crispOffset) so thin axis-aligned strokes
-   *  land on a single device row instead of straddling two. */
-  dpr: number;
-  contentX: number; // left of content area (px)
-  contentW: number; // width of content area (px)
-  y: number;        // current Y cursor (px)
-  pageH: number;    // full page height (px)
-  defaultColor: string;
-  /** 0-based page index currently being rendered */
-  pageIndex: number;
-  /** total page count in the document */
-  totalPages: number;
-  /** ECMA-376 §17.6.12 — the DISPLAYED page number for the current page (after
-   *  per-section `w:start` restart). A PAGE field renders this instead of the raw
-   *  `pageIndex + 1`. Absent ⇒ `pageIndex + 1` (single-section fallback). */
-  displayPageNumber?: number;
-  /** ECMA-376 §17.6.12 / §17.18.59 — the ST_NumberFormat governing the current
-   *  page's number (from the page's section `w:fmt`). A PAGE field formats its
-   *  result with this unless it carries its own `\*` switch (§17.16.4.3.1). Absent
-   *  ⇒ decimal. */
-  pageNumberFormat?: NumberFormat;
-  /** preloaded drawable images keyed by `imageKey(imagePath, colorReplaceFrom)`
-   *  (raster ImageBitmap or, for an `asvg:svgBlip` vector original, an
-   *  HTMLImageElement) */
-  images: Map<string, DecodedImage>;
-  /** when true, layout is performed but nothing is drawn (used for header/footer height measurement) */
-  dryRun: boolean;
-  /** section left margin in pt — used to convert margin-relative anchor X to page-absolute */
-  marginLeft: number;
-  /** section right margin in pt — used by anchor positioning to resolve
-   *  `<wp:positionH relativeFrom="margin">` and the `*Margin` family containers. */
-  marginRight: number;
-  /** ECMA-376 §17.6.11: the body's TOP/BOTTOM **inset** from the page edge in pt — the
-   *  margin's MAGNITUDE (|margin|), NOT the signed pgMar value. A negative top/bottom
-   *  margin (ST_SignedTwipsMeasure) measures the body |margin| from the page edge and
-   *  overlaps the header/footer; `bodyMarginInsetPt` derives this at the
-   *  measurement-state writers. Read as the canonical column-region top
-   *  and as the text-margin container for `relativeFrom=
-   *  "topMargin"/"bottomMargin"/"margin"` anchors/frames (anchor-geometry, frame-geometry;
-   *  §17.18.100 — the text-margin location IS the body edge). Do NOT treat as the signed
-   *  margin: the overflow decision keeps the sign separately (header/footerOverflowPt). */
-  marginTop: number;
-  marginBottom: number;
-  /** Section page width in pt. */
-  pageWidth: number;
-  /** Active anchor-image floats that constrain text layout on the current page. */
-  floats: FloatRect[];
-  /** Monotonic counter assigning a unique id to each registerAnchorFloats call,
-   *  i.e. one id per paragraph per page. Used only to scope the implementation-
-   *  defined (HEURISTIC) overlap avoidance to DIFFERENT paragraphs. Reset to 0
-   *  on every page flip so measure and render assign matching paraIds. */
-  floatParaSeq: number;
-  /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
-  docGrid: DocGridCtx;
-  /** Document-wide OOXML layout policy normalized once at renderer entry. */
-  layoutSettings: DocumentLayoutSettings;
-  /** Active section geometry and grid policy normalized for this state. */
-  sectionLayout: SectionLayoutContext;
-  /** Active WordprocessingML story and nested text-container stack. */
-  storyContext: StoryContext;
-  /** True when the document body contains East Asian text. Gates docGrid line-
-   *  cell rounding of empty / anchor-only paragraph marks (see
-   *  paragraphMarkLineHeight), which carry no text to classify themselves. */
-  docEastAsian: boolean;
-  /** ECMA-376 §17.8.3.10 — font→family map from word/fontTable.xml. Used by
-   *  resolveFontFamily as the authoritative source of serif/sans-serif classification. */
-  fontFamilyClasses: Record<string, string>;
-  /** Exact local faces and version-adaptive Word line metrics resolved before
-   * pagination. Keyed by normalized authored family. */
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>;
-  /** Instance-scoped resource snapshot shared by pagination and paint. */
-  layoutServices?: LayoutServices;
-  /** Renderer authorities injected into the pure recursive table acquisition. */
-  retainedTableAcquisition?: RetainedTableAcquisitionDependencies<RenderState>;
-  /** Session-local bridge from shape geometry to the shared paragraph/table
-   * story algorithms. Kept renderer-private so retained layouts stay plain. */
-  acquireCompleteTextBoxStory?: CompleteTextBoxStoryAcquirer;
-  /** Each body occurrence owns its acquisition and pagination context for this
-   * render session. Parser objects may legally occur more than once. */
-  retainedTablesBySourceIndex?: Map<number, RetainedTableRecord>;
-  /** ECMA-376 §17.15.1.58–.60 — resolved Japanese line-breaking rules
-   *  (kinsoku enabled flag + line-start/line-end forbidden character sets).
-   *  Default is the application's Japanese kinsoku table with kinsoku ON. */
-  kinsoku: KinsokuRules;
-  /** ECMA-376 §17.15.1.25 `w:defaultTabStop` — the interval (points) at which
-   *  automatic tab stops are generated after all custom stops. Threaded from
-   *  `doc.settings.defaultTabStop` like `kinsoku` so the MEASURE pass matches
-   *  the DRAW pass; falls back to {@link DEFAULT_TAB_PT} (720 twips = 36pt) when
-   *  the document omits the element. */
-  defaultTabPt: number;
-  /** ECMA-376 §17.15.1.18 — East Asian punctuation / character-spacing mode. */
-  characterSpacingControl?: string;
-  /** ECMA-376 §17.15.3.1 `w:compat/w:useFELayout`. */
-  useFeLayout?: boolean;
-  /** ECMA-376 §17.15.3.1 `w:compat/w:balanceSingleByteDoubleByteWidth`. */
-  balanceSingleByteDoubleByteWidth?: boolean;
-  /** ECMA-376 §22.1.2.30 `m:mathPr/m:defJc` — document-wide default math
-   *  justification (ST_Jc math). `undefined` ⇒ spec default `centerGroup`.
-   *  Threaded from `doc.settings.mathDefJc` like `kinsoku`; consumed by the
-   *  per-line alignment step for single display-math lines. */
-  mathDefJc?: string;
-  /** When false, runs tagged with a `revision` render without the
-   *  track-changes overlay (no author colour, no underline/strikethrough). */
-  showTrackChanges: boolean;
-  /** ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — the "current" instant (epoch
-   *  ms) a DATE/TIME field formats through its `\@` picture (§17.16.4.1). Injected
-   *  from the render option `currentDate` so field output is deterministic under
-   *  test; absent ⇒ `Date.now()` (real time). */
-  currentDateMs?: number;
-  /** ECMA-376 §17.11 — footnote/endnote reference markers (`noteRef` runs)
-   *  display the note's 1-based sequential number, not the raw `@w:id`. Keyed by
-   *  `"footnote:<id>"` / `"endnote:<id>"`. The in-note `<w:footnoteRef>`
-   *  placeholder (empty id) is substituted with the number provided via
-   *  {@link noteReferenceNumber} while laying out that note's content. */
-  noteNumbers?: Map<string, number>;
-  /** Set while laying out a footnote/endnote's own content, so the leading
-   *  `<w:footnoteRef>` placeholder (which carries no id) renders the note's
-   *  number. Undefined for body text. */
-  noteReferenceNumber?: number;
-  /** ECMA-376 §20.4.3.2/§20.4.3.5: a DrawingML anchor whose `<wp:positionV>`
-   *  uses a page-level `relativeFrom` (page / margin / topMargin / bottomMargin
-   *  / leftMargin / rightMargin / insideMargin / outsideMargin / column) is
-   *  positioned independently of its source-order anchoring paragraph — Word
-   *  lays it out as soon as the page is opened, so paragraphs that come BEFORE
-   *  the anchor's paragraph in source order still wrap around it. To match,
-   *  we pre-scan upcoming body paragraphs at every page-start and register
-   *  these floats up front. This set records which paragraphs have had their
-   *  page-level floats pre-registered on the current page, so
-   *  {@link registerAnchorFloats} skips re-registering them when the main
-   *  flow reaches that paragraph. Reset whenever floats are reset (page flip
-   *  or column relocation that rolls back this paragraph's own floats). */
-  pageAnchorPrescanned?: Set<DocParagraph>;
-  /** ECMA-376 §17.6.20 vertical writing — the FRAME-level vertical flag. When
-   *  true the page is laid out in a SWAPPED logical coordinate space (logical
-   *  width = physical page height) and the canonical section-region matrix rotates
-   *  body paint +90° into physical space. On a tbRl-family
-   *  page (no {@link verticalAllRotated}) the glyph-draw path then counter-
-   *  rotates each upright (CJK) glyph −90° about its own centre so ideographs
-   *  stand upright while Latin/digits stay sideways (correct for vertical
-   *  Japanese); a `btLr` page sets {@link verticalAllRotated} too, which
-   *  SUPPRESSES that counter-rotation (all glyphs ride the region transform).
-   *  Absent / false ⇒ horizontal (lrTb) — the whole layout + paint path is
-   *  byte-identical to the pre-vertical renderer. */
-  verticalCJK?: boolean;
-  /** ECMA-376 §17.6.20 + Part 4 §14.11.7 — set (always together with
-   *  {@link verticalCJK}) on a section-level `btLr` page. Under
-   *  `word-section-btlr-tbrl-page-frame`, `btLr` shares the `tbRl` PAGE FRAME (swapped logical
-   *  layout, +90° page paint, columns right→left) but rotates EVERY glyph with
-   *  the page — CJK is NOT counter-rotated upright, vertical punctuation forms
-   *  (、。（） → U+FE1x/FE3x) are NOT substituted, and 縦中横 (§17.3.2.10) is
-   *  NOT grouped. When set, the glyph-draw sites take the ordinary HORIZONTAL
-   *  branches inside the rotated frame, so the page raster equals the
-   *  horizontal rendering of the swapped frame rotated +90° CW wholesale.
-   *  Frame-level consumers (region transform, text-layer transform, `verticalPhys`
-   *  anchors, upright images/tables — GT-less for btLr, kept at tbRl parity)
-   *  keep reading {@link verticalCJK}. Absent ⇒ upright-vertical (tbRl family)
-   *  or horizontal. */
-  verticalAllRotated?: boolean;
-  /** ECMA-376 §17.6.20 + §20.4.3.x — the PHYSICAL page geometry for a vertical
-   *  (tbRl) page, in the SAME units the rest of RenderState uses (margins/page
-   *  size in pt; `cssWidthPx` in px). Present only when `verticalCJK` is set.
-   *  A DrawingML anchor's `<wp:positionH/V>` is resolved against the PHYSICAL page
-   *  (the drawing layer is placed independently of the text-flow rotation), so the
-   *  anchor path builds a PHYSICAL-geometry proxy RenderState from this and maps
-   *  the resolved physical box into the swapped logical frame via
-   *  {@link physicalToLogicalAnchorBox}. The four margins are the physical
-   *  pgMar values (already the body inset for the top/bottom, matching
-   *  `bodyMarginInsetPt`). `cssWidthPx` = physical page width in px = the page
-   *  transform's `translate(cssWidth, 0)` term. Absent ⇒ horizontal. */
-  verticalPhys?: {
-    pageWidth: number;
-    pageHeight: number;
-    marginLeft: number;
-    marginRight: number;
-    marginTop: number;
-    marginBottom: number;
-    cssWidthPx: number;
-  };
-  /** ECMA-376 §17.3.2.6 — the effective background (hex 6, no `#`) behind the text
-   *  from the ENCLOSING containers, most-specific first: a table cell's `<w:tcPr>
-   *  <w:shd w:fill>` (§17.4.33), overridden by a paragraph's `<w:pPr><w:shd w:fill>`
-   *  (§17.3.1.31). An automatic run color (`<w:color w:val="auto"/>`, no explicit
-   *  color) contrasts against this when the run has no closer background of its own
-   *  (its run-level `<w:shd>`). The layout acquisition state carries the cell
-   *  fill and paragraph override; absent means the page background. Only the
-   *  auto-contrast decision reads it; retained paint owns the shading geometry. */
-  containerShading?: string | null;
-}
-
 const BODY_STORY_CONTEXT: StoryContext = {
   story: 'body',
   containers: [],
@@ -803,8 +602,8 @@ const BODY_STORY_CONTEXT: StoryContext = {
 };
 
 export function resolveBodyParagraphLayoutContext(
-  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout'>
-    & Partial<Pick<RenderState, 'layoutServices' | 'defaultTabPt'>>,
+  state: Pick<BodyAcquisitionState, 'layoutSettings' | 'sectionLayout'>
+    & Partial<Pick<BodyAcquisitionState, 'layoutServices' | 'defaultTabPt'>>,
   paragraph: DocParagraph,
 ): ParagraphLayoutContext {
   const context = resolveParagraphLayoutContext(
@@ -826,8 +625,8 @@ export function resolveBodyParagraphLayoutContext(
 }
 
 function resolveStateParagraphLayoutContext(
-  state: Pick<RenderState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>
-    & Partial<Pick<RenderState, 'layoutServices' | 'defaultTabPt'>>,
+  state: Pick<BodyAcquisitionState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>
+    & Partial<Pick<BodyAcquisitionState, 'layoutServices' | 'defaultTabPt'>>,
   paragraph: DocParagraph,
 ): ParagraphLayoutContext {
   const context = resolveParagraphLayoutContext(
@@ -848,7 +647,7 @@ function resolveStateParagraphLayoutContext(
   });
 }
 
-function withTableCellStory(state: RenderState): RenderState {
+function withTableCellStory(state: BodyAcquisitionState): BodyAcquisitionState {
   return {
     ...state,
     storyContext: enterTableCellStoryContext(
@@ -1417,7 +1216,7 @@ const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
  *                                 lands bottom-right) and vertical punctuation
  *                                 forms are NOT substituted. So `btLr` routes
  *                                 through the same +90° FRAME as `tbRl` while
- *                                 `RenderState.verticalAllRotated` switches the
+ *                                 `BodyAcquisitionState.verticalAllRotated` switches the
  *                                 glyph draw to the horizontal branches. (The per-
  *                                 SECTION mixing that fixture also exercises —
  *                                 a `btLr` non-final section beside a horizontal
@@ -1444,7 +1243,7 @@ function isVerticalTextDirection(td: string | null | undefined): boolean {
 /** True for a VERTICAL direction whose glyphs ALL ride the +90° page rotation
  *  (no CJK upright counter-rotation, no vertical punctuation forms, no 縦中横):
  *  section-level `btLr` under `word-section-btlr-tbrl-page-frame` (see
- *  {@link RenderState.verticalAllRotated}). The tbRl family keeps
+ *  {@link BodyAcquisitionState.verticalAllRotated}). The tbRl family keeps
  *  the upright-CJK glyph path. Only meaningful when
  *  {@link isVerticalTextDirection} is already true. */
 function isAllRotatedVerticalTextDirection(td: string | null | undefined): boolean {
@@ -1758,7 +1557,7 @@ function buildMeasureState(
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
   layoutServices?: LayoutServices,
   layoutOptions?: LayoutOptions,
-): RenderState {
+): BodyAcquisitionState {
   const sectionLayout = resolveSectionLayoutContext(layoutSettings, section);
   // Story acquisition may omit services. Acquisition itself no longer
   // has an optional text authority: construct the same A2 service at this stable
@@ -1779,7 +1578,6 @@ function buildMeasureState(
   return {
     ctx,
     scale: 1,
-    dpr: 1,
     // Mirror the PAINT pass seed (renderDocumentToCanvas: `contentX =
     // sec.marginLeft × scale`; scale is 1 here). contentX/contentW carry the
     // current text column, and §20.4.3.4 `relativeFrom="column"` anchors
@@ -1792,11 +1590,8 @@ function buildMeasureState(
     contentW: section.pageWidth - section.marginLeft - section.marginRight,
     y: 0,
     pageH: section.pageHeight,
-    defaultColor: '#000000',
     pageIndex: 0,
     totalPages: fieldAcquisitionContextOf(effectiveLayoutServices).totalPages,
-    images: new Map(),
-    dryRun: true,
     marginLeft: section.marginLeft,
     marginRight: section.marginRight,
     // §17.6.11: the measure state's marginTop is the BODY-LEVEL body inset (|margin|).
@@ -1811,7 +1606,6 @@ function buildMeasureState(
     pageWidth: section.pageWidth,
     floats: [],
     floatParaSeq: 0,
-    docGrid: toLegacyDocGridContext(sectionLayout),
     layoutSettings,
     sectionLayout,
     storyContext: BODY_STORY_CONTEXT,
@@ -1987,11 +1781,6 @@ function buildMeasureState(
     currentDateMs: layoutOptions?.currentDateMs,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
-    characterSpacingControl: layoutSettings.characterSpacingControl,
-    useFeLayout: layoutSettings.compat.useFeLayout,
-    balanceSingleByteDoubleByteWidth:
-      layoutSettings.compat.balanceSingleByteDoubleByteWidth,
-    showTrackChanges: false,
     // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②, Codex review F1): for a
     // vertical (tbRl) section — `section` is the SWAPPED logical geometry — the
     // measure pass must resolve DrawingML anchors against the same PHYSICAL
@@ -2097,7 +1886,7 @@ function createConcreteBodyLayoutKernel(
    * renderer state into retained paragraph inputs; layout-owned projections
    * below it receive only immutable structural values. */
   const acquireBodyParagraphAtLocation = (
-    state: RenderState,
+    state: BodyAcquisitionState,
     paragraph: DocParagraph,
     source: SourceRef,
     location: BodyAcquisitionLocation,
@@ -2220,10 +2009,9 @@ function createConcreteBodyLayoutKernel(
           pageRegistryFlowDomainId(location.pageIndex),
           'logical-page-points',
         );
-      const applyLocationTo = (target: RenderState, next: BodyAcquisitionLocation) => {
+      const applyLocationTo = (target: BodyAcquisitionState, next: BodyAcquisitionLocation) => {
         const geometry = next.section.geometry;
         target.sectionLayout = next.section as SectionLayoutContext;
-        target.docGrid = toLegacyDocGridContext(next.section as SectionLayoutContext);
         target.pageIndex = next.pageIndex;
         const page = fieldAcquisitionContextOf(services).resolveDestinationPage?.(next.pageIndex);
         target.displayPageNumber = page?.displayPageNumber ?? next.pageIndex + 1;
@@ -2246,7 +2034,7 @@ function createConcreteBodyLayoutKernel(
       const publicParagraphFloatAcquisition = (
         paragraph: DocParagraph,
         source: SourceRef,
-        candidate: RenderState,
+        candidate: BodyAcquisitionState,
         onlyOccurrenceIds?: ReadonlySet<string>,
         paragraphId = floatRegistry.nextParagraphId,
       ): readonly FloatRegistryEntryPt[] => {
@@ -2360,7 +2148,7 @@ function createConcreteBodyLayoutKernel(
           throw new Error('Table paragraph re-acquisition source kind mismatch');
         }
         const scale = state.scale;
-        const candidate: RenderState = {
+        const candidate: BodyAcquisitionState = {
           ...withTableCellStory(state),
           contentX: 0,
           contentW: request.acquired.flowBounds.widthPt * scale,
@@ -2466,10 +2254,9 @@ function createConcreteBodyLayoutKernel(
         const fieldContext = fieldAcquisitionContextOf(services);
         const pageFieldContext = fieldContext.resolveDestinationPage?.(request.pageIndex);
         const storyVertical = isVerticalTextDirection(request.section.textDirection);
-        const candidate: RenderState = {
+        const candidate: BodyAcquisitionState = {
           ...state,
           sectionLayout: request.section as SectionLayoutContext,
-          docGrid: toLegacyDocGridContext(request.section as SectionLayoutContext),
           pageIndex: request.pageIndex,
           totalPages: fieldContext.totalPages,
           displayPageNumber: pageFieldContext?.displayPageNumber ?? request.pageIndex + 1,
@@ -2746,7 +2533,7 @@ function createConcreteBodyLayoutKernel(
               }),
             });
           }
-          const candidate: RenderState = {
+          const candidate: BodyAcquisitionState = {
             ...state,
             floats: [...state.floats],
             pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
@@ -3499,7 +3286,7 @@ function createConcreteBodyLayoutKernel(
           return Object.freeze(notes);
         },
         measureFollowingBlock(request) {
-          const candidate: RenderState = {
+          const candidate: BodyAcquisitionState = {
             ...state,
             floats: [...state.floats],
             retainedTablesBySourceIndex: new Map(state.retainedTablesBySourceIndex),
@@ -3652,7 +3439,7 @@ function createConcreteBodyLayoutKernel(
                     || publicRun.type === 'shape')
                   && publicRun.wrapMode === 'none'
                 ) return [];
-                const candidate: RenderState = {
+                const candidate: BodyAcquisitionState = {
                   ...state,
                   floats: [...state.floats],
                   pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
@@ -3852,21 +3639,7 @@ function createConcreteBodyLayoutKernel(
 }
 
 function paragraphMeasurementEnvironment(
-  state: Pick<
-    RenderState,
-    | 'pageIndex'
-    | 'totalPages'
-    | 'displayPageNumber'
-    | 'pageNumberFormat'
-    | 'currentDateMs'
-    | 'noteNumbers'
-    | 'noteReferenceNumber'
-    | 'verticalCJK'
-    | 'verticalAllRotated'
-    | 'docEastAsian'
-    | 'resolvedLocalFonts'
-    | 'layoutServices'
-  >,
+  state: BodyMeasurementContext,
 ): ParagraphMeasurementEnvironment {
   return {
     pageIndex: state.pageIndex,
@@ -3888,18 +3661,18 @@ function paragraphMeasurementEnvironment(
 }
 
 /** The `LineLayoutEnvironment` for building a paragraph's segments straight
- *  from a paint state. Identity (the state itself — byte-identical) for
+ *  from an acquisition measurement context. Identity for
  *  horizontal and upright-vertical (tbRl family) states; an all-rotated
  *  (§17.6.20 btLr, #988 re-adjudication) page builds its segments with
  *  `verticalCJK` CLEARED so no 縦中横 grouping (§17.3.2.10) engages — the btLr
  *  page is the horizontal layout rotated wholesale, so its segments are the
  *  horizontal ones (measure == paint: the paginator's measure state never sets
  *  `verticalCJK` either). */
-function segmentEnvironmentOf(state: RenderState): RenderState {
+function segmentEnvironmentOf(state: BodyMeasurementContext): LineLayoutEnvironment {
   return state.verticalAllRotated ? { ...state, verticalCJK: false } : state;
 }
 
-function retainedTableRecord(state: RenderState, sourceIndex: number): RetainedTableRecord {
+function retainedTableRecord(state: BodyAcquisitionState, sourceIndex: number): RetainedTableRecord {
   const record = state.retainedTablesBySourceIndex?.get(sourceIndex);
   if (!record) throw new Error('Table placement requires retained table acquisition');
   return record;
@@ -3925,18 +3698,20 @@ function snapParaLineToGrid(h: number, grid: DocGridCtx | undefined, scale: numb
  *  a paragraph with `w:snapToGrid` explicitly off ignores the section grid, so
  *  its lines use natural font metrics / the spacing multiplier directly. */
 function gridForParagraphContext(
-  state: Pick<RenderState, 'docGrid'>,
+  state: Pick<BodyMeasurementContext, 'sectionLayout'>,
   context: ParagraphLayoutContext,
 ): DocGridCtx {
   return {
-    type: state.docGrid.type,
+    type: state.sectionLayout.grid.kind === 'none'
+      ? null
+      : state.sectionLayout.grid.kind,
     linePitchPt: context.lineGrid.active ? context.lineGrid.pitchPt : null,
     charSpacePt:
       context.characterGrid.active ? context.characterGrid.deltaPt : null,
   };
 }
 
-function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
+function paraGrid(para: DocParagraph, state: BodyMeasurementContext): DocGridCtx {
   return gridForParagraphContext(
     state,
     resolveStateParagraphLayoutContext(state, para),
@@ -3944,7 +3719,7 @@ function paraGrid(para: DocParagraph, state: RenderState): DocGridCtx {
 }
 
 function computeTableRowHeights(
-  state: RenderState,
+  state: BodyAcquisitionState,
   table: DocTable,
   contentWPt: number,
   sourceIndex?: number,
@@ -3957,7 +3732,7 @@ function computeTableRowHeights(
  *  fallback remains for reduced test/story states until measurement moves fully
  *  under layout ownership. */
 function computeTablePtLayout(
-  state: RenderState,
+  state: BodyAcquisitionState,
   table: DocTable,
   contentWPt: number,
   sourceIndex?: number,
@@ -4004,7 +3779,7 @@ function computeTablePtLayout(
 }
 
 function estimateTableHeight(
-  state: RenderState,
+  state: BodyAcquisitionState,
   table: DocTable,
   contentWPt: number,
   sourceIndex?: number,
@@ -4019,7 +3794,11 @@ function estimateTableHeight(
  * authored `tblW`, `tcW`, `wBefore`, and `wAfter` remain active constraints.
  * Exported for the table-layout integration tests.
  */
-export function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderState): number[] {
+export function resolveColumnWidths(
+  table: DocTable,
+  contentWPt: number,
+  state: BodyMeasurementContext,
+): number[] {
   const format = tableFormatInput(table);
   const marginsByCell = new WeakMap<object, Readonly<{ left: number; right: number }>>();
   table.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
@@ -4209,7 +3988,7 @@ export function sumCellContentHeight(
 function frameAnchorLineHeightPx(
   elements: BodyElement[],
   frameEl: BodyElement,
-  state: RenderState,
+  state: BodyMeasurementContext,
 ): number {
   const start = elements.indexOf(frameEl);
   for (let j = start + 1; j < elements.length; j++) {
@@ -4250,12 +4029,12 @@ function frameAnchorLineHeightPx(
 /** Resolve a prepared body frame group and attach its retained member layouts. */
 function resolveFrameBox(
   para: DocParagraph,
-  state: RenderState,
+  state: BodyAcquisitionState,
   anchorLineHpx: number,
   onAcquired?: (acquired: ReturnType<typeof acquireRetainedFrameGroup>) => void,
 ): FrameBox {
   const group = bodyFrameGroupFor(para);
-  if (group && state.dryRun) {
+  if (group) {
     const measurer = { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses };
     const environment = paragraphMeasurementEnvironment(state);
     const borderEdges = group.members.map(bodyParagraphBorderEdgesFor);
@@ -4383,30 +4162,6 @@ function resolveFrameBox(
   return computeFrameBox(fp, state, paraTop, contentW, contentH, anchorLineHpx);
 }
 
-/** Paint a picture with the effective DrawingML rotation/reflection composed
- * by the parser according to Annex L §L.4.7.4–§L.4.7.6. */
-function drawImageRunBitmap(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  bmp: DecodedImage,
-  image: Pick<ImageRun, 'srcRect' | 'rotation' | 'flipH' | 'flipV'>,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): void {
-  const rotation = image.rotation ?? 0;
-  if (rotation === 0 && !image.flipH && !image.flipV) {
-    drawImageCropped(ctx, bmp, image.srcRect ?? undefined, x, y, w, h);
-    return;
-  }
-  ctx.save();
-  ctx.translate(x + w / 2, y + h / 2);
-  ctx.rotate((rotation * Math.PI) / 180);
-  ctx.scale(image.flipH ? -1 : 1, image.flipV ? -1 : 1);
-  drawImageCropped(ctx, bmp, image.srcRect ?? undefined, -w / 2, -h / 2, w, h);
-  ctx.restore();
-}
-
 /**
  * Resolve an anchored shape's page-space bounding box {x,y,w,h} (px). Retained
  * drawing acquisition and float registration share this geometry so the
@@ -4420,7 +4175,7 @@ function drawImageRunBitmap(
  */
 function resolveShapeBox(
   shape: ShapeRun,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
   paragraphTopPx: number,
 ): { x: number; y: number; w: number; h: number } {
   // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 batch-3 adjudication ②): on a
@@ -4516,7 +4271,7 @@ function resolveShapeBox(
  */
 export const __test_resolveAnchorBox = (
   img: ImageRun,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
   paraBaseY: number,
 ): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } =>
   resolveAnchorBox(img, state, paraBaseY);
@@ -4526,7 +4281,7 @@ export const __test_resolveAnchorBox = (
  *  an anchored SHAPE's positionH/V on a vertical (tbRl) page. */
 export const __test_resolveShapeBox = (
   shape: ShapeRun,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
   paragraphTopPx: number,
 ): { x: number; y: number; w: number; h: number } =>
   resolveShapeBox(shape, state, paragraphTopPx);
@@ -4541,12 +4296,12 @@ export const __test_verticalLayoutSection = (phys: SectionProps): SectionProps =
 
 /** Exported for the page-anchor pre-scan test (ECMA-376 §20.4.3.2/§20.4.3.5):
  *  drives {@link preRegisterPageFloats} from a unit test against a stub
- *  RenderState so we can pin which paragraphs get pre-registered and that
+ *  AnchorFloatRegistrationState so we can pin which paragraphs get pre-registered and that
  *  duplicate calls are idempotent. */
 export const __test_preRegisterPageFloats = (
   body: readonly BodyElement[],
   startIdx: number,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
 ): void => preRegisterPageFloats(body, startIdx, state);
 
 /** Exported for the page-anchor pre-scan test — pins the
@@ -4557,7 +4312,7 @@ export const __test_isPageLevelAnchorY = (
   fromPara: boolean,
 ): boolean => isPageLevelAnchorY(rf, fromPara);
 
-/** ECMA-376 §17.6.20 + §20.4.3.x — a RenderState view whose page/margin geometry
+/** ECMA-376 §17.6.20 + §20.4.3.x — an acquisition-state view whose page/margin geometry
  *  is the PHYSICAL (un-rotated) page, used to resolve a DrawingML anchor's
  *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
  *  under `word-vertical-section-physical-drawing-layer`. Only
@@ -4565,7 +4320,9 @@ export const __test_isPageLevelAnchorY = (
  *  read are overridden (scale, page size, margins, `pageH`); everything else is
  *  the live logical state. Callers map the resolved physical box back into the
  *  logical layout frame with {@link physicalToLogicalAnchorBox}. */
-function physicalAnchorState(state: RenderState): RenderState {
+function physicalAnchorState(
+  state: AnchorFloatRegistrationState,
+): AnchorFloatRegistrationState {
   const p = state.verticalPhys;
   if (!p) return state;
   return {
@@ -4581,20 +4338,20 @@ function physicalAnchorState(state: RenderState): RenderState {
   };
 }
 
-/** ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②/④) — a RenderState view whose
+/** ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②/④) — an acquisition-state view whose
  *  geometry AND text flags are PHYSICAL, for content that stays UPRIGHT inside a
  *  vertical (tbRl) section: anchored shapes and block tables. Under
- *  `word-vertical-section-physical-drawing-layer`, these resolve and paint
- *  against the un-rotated physical page — cell/label text is
+ *  `word-vertical-section-physical-drawing-layer`, these acquire against the
+ *  un-rotated physical page — cell/label text is
  *  horizontal — so on top of {@link physicalAnchorState}'s page/margin un-swap
  *  this view also re-points the content band at the physical margins and clears
  *  the vertical flags (no per-glyph counter-rotation, no +90° text-layer
  *  transform, `resolveShapeBox`/`resolveAnchorBox` take their horizontal path).
  *  `floats` is fresh: the live float set is in LOGICAL flow coordinates and must
- *  not leak into a physical-frame layout (and vice-versa). The front-paint
- *  session is cleared so a nested front float paints in place, inside the
- *  counter-rotated physical frame its geometry was resolved in. */
-function verticalPhysicalContentState(state: RenderState): RenderState {
+ *  not leak into a physical-frame layout (and vice-versa). */
+function verticalPhysicalContentState(
+  state: AnchorFloatRegistrationState,
+): AnchorFloatRegistrationState {
   const p = state.verticalPhys;
   if (!p) return state;
   return {
@@ -4619,7 +4376,7 @@ type AnchorBoxSource = Pick<ImageRun,
 
 function resolveAnchorBox(
   img: AnchorBoxSource,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
   paraBaseY: number,
 ): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } {
   const scale = state.scale;
@@ -4646,7 +4403,7 @@ function resolveAnchorBox(
     // `word-vertical-section-physical-drawing-layer`: resolve positionH/V in
     // the physical page frame independently of rotated text flow, resolve the
     // box there, then project it into the swapped logical layout frame. The
-    // float-exclusion band and the drawUprightBox-un-swapped painted image
+    // float-exclusion band and the retained upright painted image
     // therefore share one geometry. A `paragraph`/`line`-relative positionV
     // anchors from the physical top of the anchor paragraph's column. That y is
     // the column band's logical x start (`state.contentX`; physical y =
@@ -4711,10 +4468,14 @@ function isPageLevelWrapFloat(run: ImageRun | ChartRun | ShapeRun): boolean {
  *  Page-level floats (positionV relativeFrom ∈ {page, margin, *Margin, column},
  *  ECMA-376 §20.4.3.2/§20.4.3.5) are skipped when this paragraph was already
  *  pre-registered at the current page's start by {@link preRegisterPageFloats}
- *  — re-registering would double-stamp the FloatRect (and re-draw the image).
+ *  — re-registering would double-stamp the FloatRect.
  *  Paragraph-local floats (`paragraph`/`line`/`character`) keep the per-
  *  paragraph path so their Y stays anchored at this paragraph's top. */
-function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphAnchorY: number): void {
+function registerAnchorFloats(
+  para: DocParagraph,
+  state: AnchorFloatRegistrationState,
+  paragraphAnchorY: number,
+): void {
   // One id per registerAnchorFloats call ⇒ one id per paragraph. Floats sharing
   // a paraId (e.g. two side-by-side photos in one paragraph) never displace each
   // other; floats from different paragraphs do (de-facto overlap avoidance).
@@ -4745,7 +4506,7 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
  *  (ECMA-376 §20.4.3.2/§20.4.3.5 + §20.4.2.16/.17). Each pre-registered
  *  paragraph is recorded in `state.pageAnchorPrescanned` so the main flow's
  *  {@link registerAnchorFloats} skips its page-level runs (avoiding a
- *  duplicate FloatRect / re-drawn image) while still registering its
+ *  duplicate FloatRect) while still registering its
  *  paragraph-local floats normally.
  *
  *  Bounds: the scan stops at the next forced page boundary that the
@@ -4759,7 +4520,7 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
 function preRegisterPageFloats(
   body: readonly BodyElement[],
   startIdx: number,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
 ): void {
   if (!state.pageAnchorPrescanned) state.pageAnchorPrescanned = new Set();
   for (let j = startIdx; j < body.length; j++) {
@@ -4811,11 +4572,11 @@ function preRegisterPageFloats(
   }
 }
 
-/** Reserve the float-exclusion rect for one anchored wrap-image and draw the
- *  bitmap immediately (the image is the float). */
+/** Reserve the float-exclusion rect for one anchored wrap-image. Retained paint
+ * owns the bitmap drawing. */
 function registerImageFloat(
   img: ImageRun,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
   paragraphAnchorY: number,
   paraId: number,
 ): void {
@@ -4839,7 +4600,7 @@ function registerImageFloat(
   // padding as the float-to-float gap. See layout/floats.ts.
   const allowOverlap = img.allowOverlap ?? true;
   const key = imageKey(img.imagePath, img.colorReplaceFrom, img.duotone);
-  const rect = pushFloatRect(state, {
+  pushFloatRect(state, {
     x: box.x,
     y: box.y,
     w, h, dl, dr, dt, db,
@@ -4852,35 +4613,13 @@ function registerImageFloat(
     avoidOverlap: true,
     allowOverlap,
   });
-
-  if (!state.dryRun) {
-    const bmp = state.images.get(key);
-    if (bmp) {
-      // §20.1.8.6 alphaModFix — multiply the picture's opacity.
-      const hasAlpha = img.alpha != null && img.alpha < 1;
-      if (hasAlpha) {
-        state.ctx.save();
-        state.ctx.globalAlpha *= img.alpha as number;
-      }
-      if (state.verticalCJK) {
-        // §17.6.20 (tbRl) — keep the floated image UPRIGHT inside the rotated page.
-        drawUprightBox(state.ctx, rect.imageX, rect.imageY, rect.imageW, rect.imageH, (dx, dy, dw, dh) =>
-          drawImageRunBitmap(state.ctx, bmp, img, dx, dy, dw, dh),
-        );
-      } else {
-        drawImageRunBitmap(state.ctx, bmp, img, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
-      }
-      if (hasAlpha) state.ctx.restore();
-    }
-    rect.drawn = true;
-  }
 }
 
-/** Reserve the float-exclusion rect for one anchored wrap-chart and paint the
- *  chart at the overlap-resolved box (ECMA-376 §20.4.2.3/.16/.17). */
+/** Reserve the float-exclusion rect for one anchored wrap-chart
+ *  (ECMA-376 §20.4.2.3/.16/.17). Retained paint owns chart drawing. */
 function registerChartFloat(
   chart: ChartRun,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
   paragraphAnchorY: number,
   paraId: number,
 ): void {
@@ -4890,7 +4629,7 @@ function registerChartFloat(
   const { w, h, dl, dr, dt, db } = box;
   if (w <= 0 || h <= 0) return;
 
-  const rect = pushFloatRect(state, {
+  pushFloatRect(state, {
     x: box.x,
     y: box.y,
     w, h, dl, dr, dt, db,
@@ -4903,30 +4642,13 @@ function registerChartFloat(
     imageKey: '',
     drawn: false,
   });
-
-  if (!state.dryRun) {
-    const paint = (x: number, y: number, width: number, height: number): void =>
-      renderChart(
-        state.ctx as CanvasRenderingContext2D,
-        chart.chart,
-        { x, y, w: width, h: height },
-        state.scale,
-      );
-    if (state.verticalCJK) {
-      // ECMA-376 §17.6.20 (tbRl) — a chart is a graphic, so keep it upright.
-      drawUprightBox(state.ctx, rect.imageX, rect.imageY, rect.imageW, rect.imageH, paint);
-    } else {
-      paint(rect.imageX, rect.imageY, rect.imageW, rect.imageH);
-    }
-    rect.drawn = true;
-  }
 }
 
 /** Reserve the float-exclusion rect for one anchored wrap shape. Retained paint
  *  owns the drawing, so this only pushes an already-represented FloatRect. */
 function registerShapeFloat(
   shape: ShapeRun,
-  state: RenderState,
+  state: AnchorFloatRegistrationState,
   paragraphAnchorY: number,
   paraId: number,
 ): void {
@@ -4995,7 +4717,7 @@ function measureCellContentHeightPx(
   table: DocTable,
   cellW: number,
   scale: number,
-  state: RenderState,
+  state: BodyAcquisitionState,
 ): number {
   const cellState = withTableCellStory(state);
   const cm = effCellMargins(cell, table);
@@ -5029,7 +4751,7 @@ function measureCellContentHeightPx(
  *  invariant is that vAlign, row sizing, and retained paint consume the same
  *  acquired line boxes. */
 function measureCellParagraphWindow(
-  state: RenderState,
+  state: BodyMeasurementContext,
   para: DocParagraph,
   maxWidth: number,
   scale: number,
@@ -5173,7 +4895,7 @@ function effCellMargins(
 /** Measure a cell-level element (paragraph or nested table) at the rendering
  *  scale. Returns total occupied height including paragraph spacing. */
 function measureCellElementHeight(
-  state: RenderState,
+  state: BodyAcquisitionState,
   ce: CellElement,
   innerWPx: number,
   scale: number,

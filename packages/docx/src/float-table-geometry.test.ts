@@ -82,7 +82,7 @@ function tblp(over: Partial<TblpPr> = {}): TblpPr {
   };
 }
 
-// Cast helpers: the geometry fns read only the MinState subset of RenderState.
+// Cast helpers: the geometry fns read only the MinState subset of BodyAcquisitionState.
 const box = (tp: TblpPr, st: MinState, paraTop: number, w: number, h: number): FloatTableBox =>
   computeFloatTableBox(tp, st as never, paraTop, w, h);
 const registerFloat = (

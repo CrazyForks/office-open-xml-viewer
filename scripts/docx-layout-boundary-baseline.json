@@ -4,9 +4,7 @@
     "packages/docx/src/renderer.ts#measureCellContentHeightPx": 2
   },
   "migrationIdentifierCounts": {
-    "packages/docx/src/layout-context.ts#toLegacyDocGridContext": 1,
-    "packages/docx/src/renderer.ts#dryRun": 5,
-    "packages/docx/src/renderer.ts#toLegacyDocGridContext": 4
+    "packages/docx/src/layout-context.ts#toLegacyDocGridContext": 1
   },
   "nonLayoutDeclarationKeys": [
     "packages/docx/src/anchor-geometry.ts#FunctionDeclaration#resolveAnchorX",
@@ -197,7 +195,6 @@
     "packages/docx/src/line-layout.ts#FunctionDeclaration#segmentEastAsiaFloorSingleLinePx",
     "packages/docx/src/line-layout.ts#FunctionDeclaration#segmentIntendedSingleLinePx",
     "packages/docx/src/line-layout.ts#FunctionDeclaration#serifTail",
-    "packages/docx/src/line-layout.ts#FunctionDeclaration#shapeRenderState",
     "packages/docx/src/line-layout.ts#FunctionDeclaration#splitByComplexScript",
     "packages/docx/src/line-layout.ts#FunctionDeclaration#splitByEastAsia",
     "packages/docx/src/line-layout.ts#FunctionDeclaration#splitDigitGroups",
@@ -258,7 +255,6 @@
     "packages/docx/src/renderer.ts#FunctionDeclaration#contextualSpacingAdjust",
     "packages/docx/src/renderer.ts#FunctionDeclaration#decodeRaster",
     "packages/docx/src/renderer.ts#FunctionDeclaration#docDefaultFontSizePt",
-    "packages/docx/src/renderer.ts#FunctionDeclaration#drawImageRunBitmap",
     "packages/docx/src/renderer.ts#FunctionDeclaration#effCellMargins",
     "packages/docx/src/renderer.ts#FunctionDeclaration#estimateTableHeight",
     "packages/docx/src/renderer.ts#FunctionDeclaration#frameAnchorLineHeightPx",
@@ -305,7 +301,6 @@
     "packages/docx/src/renderer.ts#InterfaceDeclaration#ImagePair",
     "packages/docx/src/renderer.ts#InterfaceDeclaration#ParaBorderMerge",
     "packages/docx/src/renderer.ts#InterfaceDeclaration#ParaBorderSegment",
-    "packages/docx/src/renderer.ts#InterfaceDeclaration#RenderState",
     "packages/docx/src/renderer.ts#TypeAliasDeclaration#AnchorBoxSource",
     "packages/docx/src/renderer.ts#TypeAliasDeclaration#DecodedImage",
     "packages/docx/src/renderer.ts#TypeAliasDeclaration#DocxFetchImage",

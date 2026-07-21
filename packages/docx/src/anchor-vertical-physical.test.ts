@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { __test_resolveAnchorBox, type RenderState } from './renderer.js';
+import { __test_resolveAnchorBox } from './renderer.js';
+import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import { physicalToLogicalAnchorBox } from './vertical-text.js';
 import type { ImageRun } from './types.js';
 
@@ -12,7 +13,7 @@ import type { ImageRun } from './types.js';
 // fixture below contains only the minimal redistributable geometry needed to
 // preserve that behavior.
 
-// A vertical RenderState carries the LOGICAL (swapped) geometry PLUS `verticalPhys`
+// A vertical anchor capability carries the LOGICAL (swapped) geometry PLUS `verticalPhys`
 // (the physical page geometry the anchor path resolves against). Mirror what the
 // measurement-state writer builds for a vertical section. resolveAnchorBox reads only
 // geometry fields, so a minimal cast stand-in suffices (as in
@@ -43,7 +44,7 @@ const verticalState = {
     marginBottom: PHYS_MB,
     cssWidthPx: PHYS_W,
   },
-} as unknown as RenderState;
+} as unknown as AnchorFloatRegistrationState;
 
 const recordedAnchor: ImageRun = {
   imagePath: 'word/media/image1.png',

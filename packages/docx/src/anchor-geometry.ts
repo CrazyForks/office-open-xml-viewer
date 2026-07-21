@@ -2,13 +2,11 @@
 //
 // Pure placement math for `<wp:positionH>` / `<wp:positionV>` (relativeFrom +
 // posOffset / align / pctPos): given the container indicated by `relativeFrom`
-// and the section margins on `RenderState`, it answers "where does this anchor /
+// and the explicit `AnchorGeometryContext`, it answers "where does this anchor /
 // anchor-group child sit?". Extracted from renderer.ts so the resolve logic can
-// be unit-reasoned in isolation (see anchor-align.test.ts). Only `RenderState`
-// is imported as a type (erased at runtime), so there is no import cycle with
-// renderer.ts.
+// be unit-reasoned in isolation (see anchor-align.test.ts).
 
-import type { RenderState } from './renderer.js';
+import type { AnchorGeometryContext } from './layout/acquisition-context.js';
 
 /** Resolve a shape's page X by combining the explicit `anchorXPt` offset with
  *  any `anchorXAlign` (ECMA-376 §20.4.3.1 wp:align). When align is set we
@@ -37,7 +35,7 @@ import type { RenderState } from './renderer.js';
 export function xContainer(
   relativeFrom: string | null | undefined,
   fromMarginHint: boolean,
-  state: RenderState,
+  state: AnchorGeometryContext,
 ): { start: number; end: number } {
   const { scale } = state;
   const pageW = state.pageWidth * scale;
@@ -72,7 +70,7 @@ export function yContainer(
   relativeFrom: string | null | undefined,
   fromParaHint: boolean,
   paragraphTopPx: number,
-  state: RenderState,
+  state: AnchorGeometryContext,
 ): { start: number; end: number } {
   const { scale } = state;
   const mt = state.marginTop * scale;
@@ -102,7 +100,7 @@ export function resolveAnchorX(
   fromMargin: boolean,
   offsetPt: number,
   widthPx: number,
-  state: RenderState,
+  state: AnchorGeometryContext,
   relativeFrom?: string | null,
   pctPos?: number | null,
   alignWidthPt?: number | null,
@@ -135,7 +133,7 @@ export function resolveAnchorY(
   offsetPt: number,
   heightPx: number,
   paragraphTopPx: number,
-  state: RenderState,
+  state: AnchorGeometryContext,
   relativeFrom?: string | null,
   pctPos?: number | null,
   alignHeightPt?: number | null,
