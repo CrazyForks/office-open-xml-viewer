@@ -3,6 +3,7 @@ import type { PaintResourceRegistry } from './types.js';
 import type { NumberFormat } from '@silurus/ooxml-core';
 import type { BodyLayoutKernel } from './body-layout-kernel.js';
 import type { LayoutVariantStore } from './variant-store.js';
+import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 
 export interface DocumentLayoutRuntimeState {
   services: LayoutServices | null;
@@ -57,6 +58,10 @@ type LayoutServicesRuntimeOwner = object;
 
 const layoutServicesRuntimeOwners = new WeakMap<object, LayoutServicesRuntimeOwner>();
 const bodyLayoutKernels = new WeakMap<LayoutServicesRuntimeOwner, BodyLayoutKernel>();
+const verticalGlyphMeasurementServices = new WeakMap<
+  LayoutServicesRuntimeOwner,
+  VerticalGlyphMeasurementService
+>();
 const layoutVariantStores = new WeakMap<LayoutServices, LayoutVariantStore>();
 
 /** Service views may replace one component, but mixing components already owned
@@ -102,6 +107,29 @@ export function attachBodyLayoutKernel(
 export function bodyLayoutKernelOf(services: LayoutServices): BodyLayoutKernel | undefined {
   const owner = layoutServicesRuntimeOwner(services, false);
   return owner ? bodyLayoutKernels.get(owner) : undefined;
+}
+
+/** Attach the synchronous vertical-glyph metric authority to the same private
+ * document owner as the public layout service components. Runtime service views
+ * therefore inherit it without widening the stable LayoutServices contract. */
+export function attachVerticalGlyphMeasurementService(
+  services: LayoutServices,
+  service: VerticalGlyphMeasurementService,
+): void {
+  const owner = layoutServicesRuntimeOwner(services, true)!;
+  if (verticalGlyphMeasurementServices.has(owner)) {
+    throw new Error('Vertical glyph measurement service is already attached');
+  }
+  verticalGlyphMeasurementServices.set(owner, service);
+}
+
+export function verticalGlyphMeasurementServiceOf(
+  services: LayoutServices,
+): VerticalGlyphMeasurementService {
+  const owner = layoutServicesRuntimeOwner(services, false);
+  const service = owner ? verticalGlyphMeasurementServices.get(owner) : undefined;
+  if (!service) throw new Error('Vertical glyph measurement service is not attached');
+  return service;
 }
 
 export function attachLayoutVariantStore(

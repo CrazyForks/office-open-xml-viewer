@@ -3,6 +3,7 @@ import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { layoutDocument } from './document-layout.js';
 import { createLayoutServices, resolveColumnWidths } from './renderer.js';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
+import { bodyAcquisitionInputProjections } from './parser-model.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
 import type { TextLayoutService } from './layout/text.js';
 import type {
@@ -124,6 +125,7 @@ function columnState(
     ctx, fontFamilyClasses: {}, layoutServices: services,
     pageWidth: 200, pageH: 300, scale: 1, pageIndex: 0, totalPages: 1,
     defaultTabPt: 36,
+    acquisitionInputs: bodyAcquisitionInputProjections,
   } as unknown as ColumnState;
 }
 

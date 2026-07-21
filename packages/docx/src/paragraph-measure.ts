@@ -18,6 +18,7 @@ import type { DocParagraph } from './types.js';
 import type { WrapOracle } from './layout/float-wrap-oracle.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
 import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
+import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
 
 export type { LineLayoutEnvironment } from './line-layout.js';
 export { createFloatWrapOracle } from './layout/float-wrap-oracle.js';
@@ -29,9 +30,7 @@ export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
 }
 
 export interface TextMeasurer {
-  readonly context:
-    | CanvasRenderingContext2D
-    | OffscreenCanvasRenderingContext2D;
+  readonly context: MeasurementTextContext;
   readonly fontFamilyClasses: Readonly<Record<string, string>>;
 }
 
@@ -240,6 +239,8 @@ export function measureParagraph(
     context.isJustified,
     context.stretchLastLine,
     continuation?.boundary,
+    undefined,
+    environment.verticalGlyphMeasurement,
   );
   if (lines.length === 0) return measureMarkOnly();
 

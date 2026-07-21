@@ -61,8 +61,11 @@ import {
   cloneSegmentsForLinePass,
   convergeLineWrap,
 } from './layout/line-wrap-convergence.js';
-import { verticalRunInkExtraPx } from './vertical-text.js';
 import type { LayoutServices, NumberingMarkerShapeInput } from './layout/types.js';
+import type {
+  MeasurementTextContext,
+  VerticalGlyphMeasurementService,
+} from './layout/measurement-capabilities.js';
 import type {
   ParagraphMathRun,
   ParagraphTextBearingRun,
@@ -274,7 +277,7 @@ export function rubyAscentReservePx(
   hpsRaisePt: number | undefined,
   scale: number,
   segment?: LayoutTextSeg,
-  ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ctx?: MeasurementTextContext,
   fontFamilyClasses: Record<string, string> = {},
 ): number {
   if (hpsRaisePt != null) return hpsRaisePt * scale;
@@ -560,6 +563,7 @@ export interface LineLayoutEnvironment {
   readonly verticalCJK?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
   readonly layoutServices?: LayoutServices;
+  readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
@@ -1300,7 +1304,7 @@ export function paragraphMarkLineMetrics(
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
   eastAsian = false,
-  ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ctx?: MeasurementTextContext,
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
@@ -1410,7 +1414,7 @@ export function paragraphMarkLineHeight(
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
   eastAsian = false,
-  ctx?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ctx?: MeasurementTextContext,
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
@@ -1452,7 +1456,7 @@ export function paragraphMarkBelowBaselinePt(
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
   eastAsian: boolean,
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | undefined,
+  ctx: MeasurementTextContext | undefined,
   fontFamilyClasses: Record<string, string>,
   effectiveLineSpacing: LineSpacing | null,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
@@ -1661,7 +1665,7 @@ function extendThroughTrailingIdeographicSpaces(chars: string[], split: number):
 }
 
 export function fitCJKPrefix(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ctx: MeasurementTextContext,
   text: string,
   maxWidth: number,
   // ECMA-376 §17.6.5 character-grid delta (px per EA glyph, 0 when inactive).
@@ -1680,6 +1684,7 @@ export function fitCJKPrefix(
   // fits — not one that only fits by the under-reported raw width. 0 for horizontal
   // / non-under-reporting runs, so the split is byte-identical there.
   verticalRun = false,
+  verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
 ): string {
   const chars = [...text]; // spread handles surrogate pairs
   // Trailing IDEOGRAPHIC SPACE (U+3000) line-end allowance: a candidate that
@@ -1699,8 +1704,15 @@ export function fitCJKPrefix(
     while (visibleEnd > 0 && chars[visibleEnd - 1] === '\u3000') visibleEnd--;
     const prefix = chars.slice(0, visibleEnd).join('');
     if (prefix.length === 0) return true;
+    let verticalExtraPx = 0;
+    if (verticalRun) {
+      if (!verticalGlyphMeasurement) {
+        throw new Error('Vertical glyph measurement capability is required for vertical text');
+      }
+      verticalExtraPx = verticalGlyphMeasurement.measureRunInkExtra(prefix);
+    }
     const advance = textAdvanceWidth(
-      ctx.measureText(prefix).width + (verticalRun ? verticalRunInkExtraPx(ctx, prefix) : 0),
+      ctx.measureText(prefix).width + verticalExtraPx,
       prefix,
       gridDeltaPx,
       charScale,
@@ -2798,7 +2810,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
 }
 
 export function layoutLines(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ctx: MeasurementTextContext,
   segs: LayoutSeg[],
   maxWidth: number,
   firstIndent: number,
@@ -2816,9 +2828,10 @@ export function layoutLines(
   stretchLastLine?: boolean,
   startBoundary?: LineBoundary,
   widthPolicy?: 'bounded' | 'intrinsic',
+  verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
 ): LayoutLine[];
 export function layoutLines(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ctx: MeasurementTextContext,
   segs: LayoutSeg[],
   maxWidth: number,
   firstIndent: number,
@@ -2862,6 +2875,7 @@ export function layoutLines(
   stretchLastLine = false,
   startBoundary?: LineBoundary,
   widthPolicy: 'bounded' | 'intrinsic' = 'bounded',
+  verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
     preparedFloatWrap?: PreparedFloatWrap;
@@ -2896,6 +2910,7 @@ export function layoutLines(
       stretchLastLine,
       startBoundary,
       widthPolicy,
+      verticalGlyphMeasurement,
       { probeHeights, preparedFloatWrap },
     );
     if (!wrapCtx || widthPolicy === 'intrinsic') return runPass(null);
@@ -3318,13 +3333,16 @@ export function layoutLines(
   // select it via measureText / setMeasureFont immediately before).
   const verticalInkExtra = (s: LayoutTextSeg, text: string): number => {
     if (!s.verticalRun) return 0;
+    if (!verticalGlyphMeasurement) {
+      throw new Error('Vertical glyph measurement capability is required for vertical text');
+    }
     // The format-neutral text service may measure on a different adapter and
     // restores its Canvas state. The vertical-feature probe is intentionally
     // paint-context-local, so select the same resolved face explicitly here.
     setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
     const prevKern = setSegKerning(s);
     try {
-      return verticalRunInkExtraPx(ctx, text);
+      return verticalGlyphMeasurement.measureRunInkExtra(text);
     } finally {
       restoreKerning(prevKern);
     }
@@ -3984,7 +4002,7 @@ export function layoutLines(
       const prevKern = setSegKerning(s);
       let rawPrefix = '';
       try {
-        rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true) : '';
+        rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true, verticalGlyphMeasurement) : '';
       } finally {
         restoreKerning(prevKern);
       }
@@ -4208,6 +4226,7 @@ export function layoutLines(
               charScaleFactor(s),
               charSpacingDeltaPx(s, scale),
               s.verticalRun === true,
+              verticalGlyphMeasurement,
             ).length
           : 0;
       } finally {
@@ -4323,10 +4342,11 @@ export function layoutLines(
 export function rescaleLayoutLines(
   lines: LayoutLine[],
   scale: number,
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ctx: MeasurementTextContext,
   fontFamilyClasses: Record<string, string>,
   gridDeltaPx: number,
   canonicalGeometry = false,
+  verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
 ): LayoutLine[] {
   if (scale === 1) return lines;
 
@@ -4408,11 +4428,17 @@ export function rescaleLayoutLines(
 
   const verticalInkExtra = (s: LayoutTextSeg, text: string, fontPx: number): number => {
     if (!s.verticalRun) return 0;
+    if (!verticalGlyphMeasurement) {
+      throw new Error('Vertical glyph measurement capability is required for vertical text');
+    }
     // Vertical feature capability belongs to the paint context, not the
     // format-neutral text service. Select the exact resolved paint face before
     // applying this narrow glyph-cell correction.
     ctx.font = buildFont(s.bold, s.italic, fontPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
-    return withSegKerning(s, () => verticalRunInkExtraPx(ctx, text));
+    return withSegKerning(
+      s,
+      () => verticalGlyphMeasurement.measureRunInkExtra(text),
+    );
   };
 
   // Per-text-segment measurement at the PAINT scale — the SAME model layoutLines

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createLayoutServices, resolveColumnWidths } from './renderer.js';
 import { buildSegments, layoutLines } from './line-layout.js';
+import { bodyAcquisitionInputProjections } from './parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
 import type {
   DocParagraph,
@@ -18,10 +19,11 @@ type ColState = Parameters<typeof resolveColumnWidths>[2];
 // §17.18.87 then applies tblW, wBefore/wAfter and tcW preferences. A saved
 // grid is not evidence that a producer already applied those constraints.
 //
-// Empty cells carry no content, so the min-content floor is 0 and `state` is
-// never dereferenced (mirrors table-row-height.test's EMPTY_STATE).
+// Empty cells carry no content, so the min-content floor is 0. The projection
+// capability remains required because table-format facts are acquired before
+// the empty-content fast path.
 
-const EMPTY_STATE = {} as unknown as ColState;
+const EMPTY_STATE = { acquisitionInputs: bodyAcquisitionInputProjections } as unknown as ColState;
 
 function cell(colSpan: number, widthPct: number | null, widthPt: number | null = null): DocTableCell {
   return {
@@ -180,6 +182,7 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     const t = autofit([row([textCell])], [200]);
     const state = {
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
+      acquisitionInputs: bodyAcquisitionInputProjections,
     } as unknown as ColState;
 
     resolveColumnWidths(t, 300, state);
@@ -242,6 +245,7 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     const state = {
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 100,
       pageH: 200, scale: 1, pageIndex: 0, totalPages: 1,
+      acquisitionInputs: bodyAcquisitionInputProjections,
     } as unknown as ColState;
 
     // min-content is [20, 10], but the first cell's no-wrap maximum is 50.
@@ -306,6 +310,7 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     const t = autofit([row([textCell])], [200]);
     const state = {
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
+      acquisitionInputs: bodyAcquisitionInputProjections,
     } as unknown as ColState;
 
     const segments = buildSegments(paragraph.runs, {
@@ -355,6 +360,7 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     const t = autofit([row([textCell])], [200]);
     const state = {
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
+      acquisitionInputs: bodyAcquisitionInputProjections,
     } as unknown as ColState;
 
     expect(resolveColumnWidths(t, 300, state)[0]).toBe(20);
@@ -392,6 +398,7 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     const t = autofit([row([textCell])], [200]);
     const state = {
       ctx, fontFamilyClasses: {}, layoutServices: services, pageWidth: 300,
+      acquisitionInputs: bodyAcquisitionInputProjections,
     } as unknown as ColState;
 
     expect(resolveColumnWidths(t, 300, state)[0]).toBe(20);

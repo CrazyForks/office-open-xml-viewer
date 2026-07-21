@@ -85,6 +85,11 @@ function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') 
       + 'export interface FloatRegistrationState {}\n'
       + 'export interface PhysicalAnchorFrame {}\n'
       + 'export interface RetainedTableRecord {}\n');
+  write(root, 'packages/docx/src/layout/acquisition-input-projections.ts',
+    'export interface BodyAcquisitionInputProjections {}\n');
+  write(root, 'packages/docx/src/layout/measurement-capabilities.ts',
+    'export interface MeasurementTextContext { measureText(text: string): unknown }\n'
+      + 'export interface VerticalGlyphMeasurementService { measureRunInkExtra(text: string): number }\n');
   write(root, 'packages/docx/src/layout/affine.ts',
     "import type { PointPt } from './types.js';\n"
       + 'export const composeAffine = (point: PointPt) => point;\n');
@@ -347,6 +352,20 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     paintRoot,
     'ACQUISITION_PAINT_CAPABILITY',
     'images',
+    '--final',
+  );
+
+  const measurementRoot = initializeCanonicalFixture('docx-layout-boundary-measurement-paint-');
+  write(
+    measurementRoot,
+    'packages/docx/src/layout/measurement-capabilities.ts',
+    'export interface MeasurementTextContext { canvas: HTMLCanvasElement }\n'
+      + 'export interface VerticalGlyphMeasurementService { measureRunInkExtra(text: string): number }\n',
+  );
+  expectDiagnostic(
+    measurementRoot,
+    'ACQUISITION_PAINT_CAPABILITY',
+    'canvas',
     '--final',
   );
 

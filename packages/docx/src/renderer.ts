@@ -142,11 +142,13 @@ import {
   attachBodyLayoutKernel,
   attachPrivateResourceLookup,
   attachPaintResourceRegistry,
+  attachVerticalGlyphMeasurementService,
   createLayoutServicesRuntimeView,
   fieldAcquisitionContextOf,
   layoutVariantStoreOf,
   paintResourceRegistryOf,
   privateResourceLookupOf,
+  verticalGlyphMeasurementServiceOf,
 } from './layout/runtime-state.js';
 import {
   attachStoryBlockLayoutAlgorithms,
@@ -184,12 +186,11 @@ import {
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
 import {
   effectiveTablePositioning,
+  bodyAcquisitionInputProjections,
   internalDocumentModel,
   numberingMarkerShapeInput,
   paragraphAcquisitionInput,
-  paragraphMarkShapeInput,
   publicAnchorBridge,
-  tableParticipatesInOrdinaryFlow,
 } from './parser-model.js';
 import {
   normalizeInternalDocumentModel,
@@ -205,7 +206,7 @@ import {
   applyNumberingBodyOffset,
   resolveNumberingMarkerGeometry,
 } from './layout/numbering-marker.js';
-import { tableColumnLayoutInput, tableFormatInput } from './parser-model.js';
+import { tableFormatInput } from './parser-model.js';
 import { resolveTableColumnWidths } from './layout/table-columns.js';
 import {
   measureParagraphIntrinsicWidths,
@@ -293,7 +294,12 @@ import { resolveAnchorFrame } from './layout/anchor-frame.js';
 import {
   drawTateChuYokoRun,
   physicalToLogicalAnchorBox,
+  verticalRunInkExtraPx,
 } from './vertical-text.js';
+import type {
+  MeasurementTextContext,
+  VerticalGlyphMeasurementService,
+} from './layout/measurement-capabilities.js';
 import { textRunsForPage } from './text-run-projection.js';
 
 function kashidaLevelOf(alignment: string | null | undefined): KashidaLevel | null {
@@ -414,11 +420,36 @@ export function createLayoutServices(
       }
     }
   }
-  const ctx = options.measureContext ?? (typeof OffscreenCanvas !== 'undefined'
+  const canvasContext = options.measureContext ?? (typeof OffscreenCanvas !== 'undefined'
     ? new OffscreenCanvas(1, 1).getContext('2d')
     : typeof document !== 'undefined'
       ? document.createElement('canvas').getContext('2d')
       : null);
+  const ctx: MeasurementTextContext | null = canvasContext === null
+    ? null
+    : Object.freeze({
+        get font() { return canvasContext.font; },
+        set font(value: string) { canvasContext.font = value; },
+        get letterSpacing() { return canvasContext.letterSpacing; },
+        set letterSpacing(value: string) { canvasContext.letterSpacing = value; },
+        get fontKerning() { return canvasContext.fontKerning; },
+        set fontKerning(value: CanvasFontKerning) { canvasContext.fontKerning = value; },
+        measureText(text: string) { return canvasContext.measureText(text); },
+      });
+  const hasDomVertProbe = canvasContext !== null
+    && typeof HTMLCanvasElement !== 'undefined'
+    && canvasContext.canvas instanceof HTMLCanvasElement
+    && typeof document !== 'undefined';
+  const verticalGlyphMeasurement: VerticalGlyphMeasurementService = Object.freeze({
+    fingerprint: canvasContext === null
+      ? 'vertical-glyph-measurement:deterministic-v1'
+      : hasDomVertProbe
+        ? 'vertical-glyph-measurement:dom-vert-probe-v1'
+        : 'vertical-glyph-measurement:no-dom-vert-probe-v1',
+    measureRunInkExtra(text: string): number {
+      return canvasContext === null ? 0 : verticalRunInkExtraPx(canvasContext, text);
+    },
+  });
   const routedFontFamilies = [...new Set([
     ...Object.keys(doc.fontFamilyClasses ?? {}),
     ...Object.keys(doc.fontFamilyPitches ?? {}),
@@ -448,21 +479,21 @@ export function createLayoutServices(
       ]),
     ),
     measurer: {
-      fingerprint: ctx ? 'canvas-text-metrics-v1' : 'deterministic-text-metrics-v1',
+      fingerprint: `${canvasContext ? 'canvas-text-metrics-v1' : 'deterministic-text-metrics-v1'}:${verticalGlyphMeasurement.fingerprint}`,
       measure(request: Readonly<GlyphMeasureRequest>) {
-        if (!ctx) return {
+        if (!canvasContext) return {
           advancePt: [...request.text].length * request.fontSizePt * 0.5,
           ascentPt: request.fontSizePt * 0.8,
           descentPt: request.fontSizePt * 0.2,
         };
-        const previousFont = ctx.font;
-        const previousLetterSpacing = ctx.letterSpacing;
-        const previousKerning = ctx.fontKerning;
+        const previousFont = canvasContext.font;
+        const previousLetterSpacing = canvasContext.letterSpacing;
+        const previousKerning = canvasContext.fontKerning;
         try {
-          ctx.font = canvasFontString(request.fontRoute, request.fontSizePt, request.weight, request.style);
-          ctx.letterSpacing = `${request.letterSpacingPt}px`;
-          if (request.kerning != null) ctx.fontKerning = request.kerning ? 'normal' : 'none';
-          const metrics = ctx.measureText(request.text);
+          canvasContext.font = canvasFontString(request.fontRoute, request.fontSizePt, request.weight, request.style);
+          canvasContext.letterSpacing = `${request.letterSpacingPt}px`;
+          if (request.kerning != null) canvasContext.fontKerning = request.kerning ? 'normal' : 'none';
+          const metrics = canvasContext.measureText(request.text);
           const inkBounds = {
             xMinPt: Number.isFinite(metrics.actualBoundingBoxLeft)
               ? -metrics.actualBoundingBoxLeft : 0,
@@ -479,9 +510,9 @@ export function createLayoutServices(
             ...(hasFiniteInkBounds ? { inkBounds } : {}),
           };
         } finally {
-          ctx.font = previousFont;
-          ctx.letterSpacing = previousLetterSpacing;
-          if (request.kerning != null) ctx.fontKerning = previousKerning;
+          canvasContext.font = previousFont;
+          canvasContext.letterSpacing = previousLetterSpacing;
+          if (request.kerning != null) canvasContext.fontKerning = previousKerning;
         }
       },
     },
@@ -532,6 +563,7 @@ export function createLayoutServices(
     availableMathKeys,
   );
   attachPaintResourceRegistry(services, createDocumentPaintResourceRegistry(doc, imageMetadata));
+  attachVerticalGlyphMeasurementService(services, verticalGlyphMeasurement);
   attachBodyLayoutKernel(services, createConcreteBodyLayoutKernel(doc, ctx, localMetrics));
   return services;
 }
@@ -602,7 +634,7 @@ const BODY_STORY_CONTEXT: StoryContext = {
 };
 
 export function resolveBodyParagraphLayoutContext(
-  state: Pick<BodyAcquisitionState, 'layoutSettings' | 'sectionLayout'>
+  state: Pick<BodyAcquisitionState, 'layoutSettings' | 'sectionLayout' | 'acquisitionInputs'>
     & Partial<Pick<BodyAcquisitionState, 'layoutServices' | 'defaultTabPt'>>,
   paragraph: DocParagraph,
 ): ParagraphLayoutContext {
@@ -615,7 +647,10 @@ export function resolveBodyParagraphLayoutContext(
   return applyNumberingBodyOffset(context, {
     numbering: paragraph.numbering,
     ...(paragraph.numbering ? {
-      markerInput: numberingMarkerShapeInput(paragraph.numbering, getDefaultFontSize(paragraph)),
+      markerInput: state.acquisitionInputs.numberingMarkerShapeInput(
+        paragraph.numbering,
+        getDefaultFontSize(paragraph),
+      ),
     } : {}),
     authoredFirstIndentPt: paragraph.indentFirst,
     tabStops: paragraph.tabStops,
@@ -625,7 +660,10 @@ export function resolveBodyParagraphLayoutContext(
 }
 
 function resolveStateParagraphLayoutContext(
-  state: Pick<BodyAcquisitionState, 'layoutSettings' | 'sectionLayout' | 'storyContext'>
+  state: Pick<
+    BodyAcquisitionState,
+    'layoutSettings' | 'sectionLayout' | 'storyContext' | 'acquisitionInputs'
+  >
     & Partial<Pick<BodyAcquisitionState, 'layoutServices' | 'defaultTabPt'>>,
   paragraph: DocParagraph,
 ): ParagraphLayoutContext {
@@ -638,7 +676,10 @@ function resolveStateParagraphLayoutContext(
   return applyNumberingBodyOffset(context, {
     numbering: paragraph.numbering,
     ...(paragraph.numbering ? {
-      markerInput: numberingMarkerShapeInput(paragraph.numbering, getDefaultFontSize(paragraph)),
+      markerInput: state.acquisitionInputs.numberingMarkerShapeInput(
+        paragraph.numbering,
+        getDefaultFontSize(paragraph),
+      ),
     } : {}),
     authoredFirstIndentPt: paragraph.indentFirst,
     tabStops: paragraph.tabStops,
@@ -1550,33 +1591,23 @@ export function layoutDocument(
 }
 
 function buildMeasureState(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ctx: MeasurementTextContext,
   section: SectionProps,
   fontFamilyClasses: Record<string, string> = {},
   layoutSettings: DocumentLayoutSettings,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
-  layoutServices?: LayoutServices,
+  layoutServices: LayoutServices,
   layoutOptions?: LayoutOptions,
 ): BodyAcquisitionState {
   const sectionLayout = resolveSectionLayoutContext(layoutSettings, section);
-  // Story acquisition may omit services. Acquisition itself no longer
-  // has an optional text authority: construct the same A2 service at this stable
-  // state boundary so every downstream buildSegments/layoutLines call records
-  // authoritative grapheme geometry. Production document entry points already
-  // pass their document-scoped service and therefore keep their exact font
-  // inventory/resource session.
-  const effectiveLayoutServices = layoutServices ?? createLayoutServices({
-    section,
-    body: [],
-    headers: EMPTY_HEADERS_FOOTERS,
-    footers: EMPTY_HEADERS_FOOTERS,
-    fontFamilyClasses,
-  }, {
-    measureContext: ctx,
-    localMetrics: resolvedLocalFonts,
-  });
+  // Acquisition always uses the document-scoped service owner supplied by the
+  // private body kernel, so its text and vertical measurement capabilities have
+  // one auditable lineage and fingerprint.
+  const effectiveLayoutServices = layoutServices;
   return {
     ctx,
+    verticalGlyphMeasurement: verticalGlyphMeasurementServiceOf(effectiveLayoutServices),
+    acquisitionInputs: bodyAcquisitionInputProjections,
     scale: 1,
     // Mirror the PAINT pass seed (renderDocumentToCanvas: `contentX =
     // sec.marginLeft × scale`; scale is 1 here). contentX/contentW carry the
@@ -1615,7 +1646,7 @@ function buildMeasureState(
     layoutServices: effectiveLayoutServices,
     retainedTableAcquisition: {
       layoutServices: (state) => state.layoutServices,
-      tableFormat: tableFormatInput,
+      tableFormat: bodyAcquisitionInputProjections.tableFormatInput,
       resolveColumns: resolveColumnWidths,
       createCellState: (state, contentWidthPt, cell) => ({
         ...withTableCellStory(state),
@@ -1657,7 +1688,7 @@ function buildMeasureState(
         const context = resolveStateParagraphLayoutContext(cellState, paragraph);
         const layout = acquireRegisteredParagraph(
           cellState,
-          paragraphAcquisitionInput(paragraph, source),
+          cellState.acquisitionInputs.paragraphAcquisitionInput(paragraph, source),
           {
             id: `${source.story}:${source.storyInstance}:${source.path.join('.')}`,
             source,
@@ -1822,7 +1853,7 @@ function buildMeasureState(
 
 function createConcreteBodyLayoutKernel(
   doc: DocxDocumentModel,
-  measureContext: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
+  measureContext: MeasurementTextContext | null,
   resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
 ): BodyLayoutKernel {
   const ordinaryAcquisitionInputForAdjacentGroup = (
@@ -3657,6 +3688,7 @@ function paragraphMeasurementEnvironment(
     documentHasEastAsianText: state.docEastAsian,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
+    verticalGlyphMeasurement: state.verticalGlyphMeasurement,
   };
 }
 
@@ -3799,13 +3831,13 @@ export function resolveColumnWidths(
   contentWPt: number,
   state: BodyMeasurementContext,
 ): number[] {
-  const format = tableFormatInput(table);
+  const format = state.acquisitionInputs.tableFormatInput(table);
   const marginsByCell = new WeakMap<object, Readonly<{ left: number; right: number }>>();
   table.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
     const acquired = format.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
     marginsByCell.set(cell, acquired ?? effCellMargins(cell, table));
   }));
-  return [...resolveTableColumnWidths(tableColumnLayoutInput(
+  return [...resolveTableColumnWidths(state.acquisitionInputs.tableColumnLayoutInput(
     table,
     contentWPt,
     (cell) => {
@@ -3845,7 +3877,10 @@ export function resolveColumnWidths(
                 defaultTabPt: state.defaultTabPt ?? DEFAULT_TAB_PT,
               };
           const markerInput = paragraph.numbering
-            ? numberingMarkerShapeInput(paragraph.numbering, getDefaultFontSize(paragraph))
+            ? state.acquisitionInputs.numberingMarkerShapeInput(
+                paragraph.numbering,
+                getDefaultFontSize(paragraph),
+              )
             : undefined;
           const context = applyNumberingBodyOffset(baseContext, {
             numbering: paragraph.numbering,
@@ -3881,7 +3916,7 @@ export function resolveColumnWidths(
         },
       });
     },
-    tableParticipatesInOrdinaryFlow(table)
+    state.acquisitionInputs.tableParticipatesInOrdinaryFlow(table)
       ? contentWPt
       : Math.max(contentWPt, state.pageWidth),
   ))];
@@ -4007,7 +4042,7 @@ function frameAnchorLineHeightPx(
       p.lineSpacing,
       state.resolvedLocalFonts,
       state.layoutServices?.text,
-      paragraphMarkShapeInput(p),
+      state.acquisitionInputs.paragraphMarkShapeInput(p),
     );
   }
   const fp = frameEl as unknown as DocParagraph;
@@ -4022,7 +4057,7 @@ function frameAnchorLineHeightPx(
     fp.lineSpacing,
     state.resolvedLocalFonts,
     state.layoutServices?.text,
-    paragraphMarkShapeInput(fp),
+    state.acquisitionInputs.paragraphMarkShapeInput(fp),
   );
 }
 
@@ -4051,7 +4086,7 @@ function resolveFrameBox(
       contexts: group.members.map((paragraph) =>
         resolveBodyParagraphLayoutContext(state, paragraph)),
       inputs: group.members.map((paragraph, index) =>
-        paragraphAcquisitionInput(paragraph, {
+        state.acquisitionInputs.paragraphAcquisitionInput(paragraph, {
           story: 'body', storyInstance: 'body', path: [group.sourceIndices[index]!],
         })),
       borderEdges,
@@ -4145,6 +4180,9 @@ function resolveFrameBox(
     paragraphContext.baseRtl,
     paragraphContext.isJustified,
     paragraphContext.stretchLastLine,
+    undefined,
+    undefined,
+    state.verticalGlyphMeasurement,
   );
   const contentW = lines.length === 0 ? 0 : Math.max(...lines.map((line) =>
     line.segments.reduce((sum, segment) => sum + segment.measuredWidth, 0)));
@@ -4817,7 +4855,7 @@ function measureCellParagraphWindow(
           paragraphContext.lineSpacing,
           state.resolvedLocalFonts,
           state.layoutServices?.text,
-          paragraphMarkShapeInput(para),
+          state.acquisitionInputs.paragraphMarkShapeInput(para),
         ),
         totalLines,
       };
@@ -4843,6 +4881,7 @@ function measureCellParagraphWindow(
       state.fontFamilyClasses,
       gridCharDeltaPx(grid, scale),
       canonicalTextScale,
+      state.verticalGlyphMeasurement,
     );
     const uniformLineH = paraHasRuby
       ? snapParaLineToGrid(
