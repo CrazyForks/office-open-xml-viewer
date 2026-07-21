@@ -92,7 +92,7 @@ function stateWithGrid(
     linePitchPt: number | null;
   } | undefined,
 ): ShapeAcquisitionTestState {
-  const base = shapeAcquisitionState(ctx, 1, {});
+  const base = shapeAcquisitionState(ctx, {});
   const kind = grid?.type == null || grid.type === 'default' ? 'none' : grid.type;
   return {
     ...base,

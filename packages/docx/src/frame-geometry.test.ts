@@ -16,14 +16,13 @@ import type { FloatRect } from './float-layout.js';
 // (xLeft/xRight/yTop/yBottom/mode/side), which is what resolveLineFloatWindow
 // consumes to wrap the following body text.
 //
-// Geometry is exercised at scale=1 so px == pt. A representative page:
+// Geometry is exercised directly in canonical points. A representative page:
 //   pageWidth=600, margins L/R/T/B = 100/100/72/72  ⇒ content band [100,500].
 //   A multi-column run would set a narrower contentX/contentW; we model a single
 //   column here as contentX=100, contentW=400 and assert hAnchor="text" snaps to
 //   it (the #513 column-relative contract).
 
 interface MinState {
-  scale: number;
   contentX: number;
   contentW: number;
   marginLeft: number;
@@ -38,7 +37,6 @@ interface MinState {
 
 function makeState(over: Partial<MinState> = {}): MinState {
   return {
-    scale: 1,
     contentX: 100,
     contentW: 400,
     marginLeft: 100,

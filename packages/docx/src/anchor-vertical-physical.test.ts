@@ -26,14 +26,13 @@ const PHYS_MR = 56.7;
 const PHYS_MB = 70.9;
 
 const verticalState = {
-  scale: 1,
   // Logical (swapped) geometry produced by verticalLayoutSection:
   pageWidth: PHYS_H, // logical width = physical height
   marginLeft: PHYS_MT, // logical left = physical top
   marginRight: PHYS_MB, // logical right = physical bottom
   marginTop: PHYS_MR, // logical top = physical right
   marginBottom: PHYS_ML, // logical bottom = physical left
-  pageH: PHYS_W, // logical height (px) = physical width
+  pageH: PHYS_W, // logical height in points = physical width
   verticalCJK: true,
   verticalPhys: {
     pageWidth: PHYS_W,
@@ -42,7 +41,7 @@ const verticalState = {
     marginRight: PHYS_MR,
     marginTop: PHYS_MT,
     marginBottom: PHYS_MB,
-    cssWidthPx: PHYS_W,
+    physicalPageWidthPt: PHYS_W,
   },
 } as unknown as AnchorFloatRegistrationState;
 

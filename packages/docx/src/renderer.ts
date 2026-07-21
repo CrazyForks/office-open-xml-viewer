@@ -212,6 +212,7 @@ import {
 } from './layout/measurement-environment.js';
 import {
   BODY_STORY_CONTEXT,
+  bodyAnchorReferenceFrames,
   retainedTableRecord,
   resolveBodyParagraphLayoutContext,
   resolveStateParagraphLayoutContext,
@@ -293,7 +294,6 @@ import {
   paragraphAnchorCollisions,
   paragraphWrapExclusions,
 } from './layout/paragraph-float-authority.js';
-import { paragraphAnchorReferenceFrames } from './paragraph-anchor-frame-adapter.js';
 import {
   applyDrawingMLCollisionRegistryDelta,
   createDrawingMLCollisionRegistry,
@@ -1360,15 +1360,12 @@ function buildMeasureState(
     ctx,
     verticalGlyphMeasurement: verticalGlyphMeasurementServiceOf(effectiveLayoutServices),
     acquisitionInputs: bodyAcquisitionInputProjections,
-    scale: 1,
-    // Mirror the PAINT pass seed (renderDocumentToCanvas: `contentX =
-    // sec.marginLeft × scale`; scale is 1 here). contentX/contentW carry the
+    // contentX/contentW carry the canonical point-space
     // current text column, and §20.4.3.4 `relativeFrom="column"` anchors
-    // resolve against them (xContainer). Seeding 0 made the MEASURE pass place
-    // body-level column anchors a full marginLeft LEFT of where the paint pass
-    // draws them, so floats entered/left the wrap band only during pagination
-    // and paragraphs split differently from the painted layout (PR #844 review
-    // F1; pinned by paginate-column-anchor.test.ts).
+    // resolve against them (xContainer). Seeding 0 previously placed body-level
+    // column anchors a full marginLeft left of their retained point-space
+    // placement, so floats entered or left the wrap band during pagination
+    // (PR #844 review F1; pinned by paginate-column-anchor.test.ts).
     contentX: section.marginLeft,
     contentW: section.pageWidth - section.marginLeft - section.marginRight,
     y: 0,
@@ -1465,7 +1462,7 @@ function buildMeasureState(
               xPt: 0,
               yPt: 0,
               widthPt: paragraphWidthPt,
-              heightPt: cellState.pageH / cellState.scale,
+              heightPt: cellState.pageH,
             },
             containerShading: cellState.containerShading,
             ...(paragraphBorderEdges ? { paragraphBorderEdges } : {}),
@@ -1476,7 +1473,7 @@ function buildMeasureState(
                 : bottomBorderExtentPt(paragraph.borders),
             ),
             continuesFromPrevious: false,
-            anchorFrames: paragraphAnchorReferenceFrames(cellState),
+            anchorFrames: bodyAnchorReferenceFrames(cellState),
             acquireCompleteStory: cellState.acquireCompleteTextBoxStory,
           },
           inheritedAuthority,
@@ -1496,7 +1493,6 @@ function buildMeasureState(
         });
       },
       registerFloatingTable: (state, request) => {
-        const scale = state.scale;
         const usesTextX = !request.positioning.horzSpecified
           || (request.positioning.horzAnchor !== 'page'
             && request.positioning.horzAnchor !== 'margin');
@@ -1506,11 +1502,11 @@ function buildMeasureState(
         // paginated. Registering them in this cell-local acquisition state would
         // reserve a different rectangle from the later page-local paint box.
         if (!usesTextX || !usesTextY) return null;
-        const pageHeightPt = state.pageH / scale;
+        const pageHeightPt = state.pageH;
         const textFrame = {
-          xPt: state.contentX / scale,
-          yPt: state.y / scale,
-          widthPt: state.contentW / scale,
+          xPt: state.contentX,
+          yPt: state.y,
+          widthPt: state.contentW,
           heightPt: request.child.advancePt,
         };
         const box = resolveFloatingTableBoxPt(
@@ -1534,14 +1530,14 @@ function buildMeasureState(
           request.child.advancePt,
         );
         const registered = pushFloatRect(state, {
-          x: box.x * scale,
-          y: box.y * scale,
-          w: box.w * scale,
-          h: box.h * scale,
-          dl: request.positioning.leftFromTextPt * scale,
-          dr: request.positioning.rightFromTextPt * scale,
-          dt: request.positioning.topFromTextPt * scale,
-          db: request.positioning.bottomFromTextPt * scale,
+          x: box.x,
+          y: box.y,
+          w: box.w,
+          h: box.h,
+          dl: request.positioning.leftFromTextPt,
+          dr: request.positioning.rightFromTextPt,
+          dt: request.positioning.topFromTextPt,
+          db: request.positioning.bottomFromTextPt,
           kind: 'table',
           mode: 'square',
           side: 'bothSides',
@@ -1551,8 +1547,8 @@ function buildMeasureState(
           tableOverlap: request.overlap,
         });
         return Object.freeze({
-          xPt: registered.imageX / scale - textFrame.xPt,
-          yPt: registered.imageY / scale - textFrame.yPt,
+          xPt: registered.imageX - textFrame.xPt,
+          yPt: registered.imageY - textFrame.yPt,
         });
       },
       advanceState: (state, advancePt) => {
@@ -1565,14 +1561,14 @@ function buildMeasureState(
     defaultTabPt: layoutSettings.defaultTabPt,
     // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②, Codex review F1): for a
     // vertical (tbRl) section — `section` is the SWAPPED logical geometry — the
-    // measure pass must resolve DrawingML anchors against the same PHYSICAL
-    // page the paint pass uses (`resolveAnchorBox`/`resolveShapeBox` key their
+    // acquisition must resolve DrawingML anchors against the same physical page
+    // retained paint uses (`resolveAnchorBox`/`resolveShapeBox` key their
     // physical branch on `verticalPhys`), otherwise a wrapped shape's exclusion
     // band is reserved at the raw logical rectangle during pagination while the
-    // paint wraps around the physical projection — diverging page assignment.
-    // Mirrors the paint-state seed (renderDocumentToCanvas), un-swapping via
-    // physicalLayoutSection; `cssWidthPx` at the paginator's scale 1 is the
-    // physical page width in pt. `verticalCJK` stays UNSET: the measure pass
+    // retained paint uses the physical projection — diverging page assignment.
+    // Un-swap via
+    // physicalLayoutSection; `physicalPageWidthPt` is the physical page width
+    // in canonical points. `verticalCJK` stays unset: acquisition
     // keeps its horizontal glyph metrics (only anchor geometry re-frames).
     // Seeded from the section this measure state is BUILT from (the body-level
     // body-level one); a direction-mixed document then re-seeds it per
@@ -1595,7 +1591,7 @@ function buildMeasureState(
             marginRight: phys.marginRight,
             marginTop: bodyMarginInsetPt(phys.marginTop),
             marginBottom: bodyMarginInsetPt(phys.marginBottom),
-            cssWidthPx: phys.pageWidth,
+            physicalPageWidthPt: phys.pageWidth,
           };
         })()
       : undefined,
@@ -1714,7 +1710,7 @@ function createConcreteBodyLayoutKernel(
         ...(continuation.sourceRangeStart === undefined ? {} : {
           sourceRangeStart: continuation.sourceRangeStart,
         }),
-        anchorFrames: paragraphAnchorReferenceFrames(state),
+        anchorFrames: bodyAnchorReferenceFrames(state),
         acquireCompleteStory: state.acquireCompleteTextBoxStory,
       },
       continuation.boundary === null ? undefined : {
@@ -1844,7 +1840,6 @@ function createConcreteBodyLayoutKernel(
         if (registered.length !== publicRuns.length) {
           throw new Error('Public paragraph anchor acquisition did not retain every wrap float');
         }
-        const scale = candidate.scale;
         return Object.freeze(registered.map((float, index): FloatRegistryEntryPt => {
           const occurrenceId = publicRuns[index]!.occurrenceId;
           return Object.freeze({
@@ -1853,24 +1848,24 @@ function createConcreteBodyLayoutKernel(
             exclusionId: occurrenceId,
             paragraphId,
             bounds: Object.freeze({
-              xPt: float.imageX / scale,
-              yPt: float.imageY / scale,
-              widthPt: float.imageW / scale,
-              heightPt: float.imageH / scale,
+              xPt: float.imageX,
+              yPt: float.imageY,
+              widthPt: float.imageW,
+              heightPt: float.imageH,
             }),
             exclusionBounds: Object.freeze({
-              xPt: float.xLeft / scale,
-              yPt: float.yTop / scale,
-              widthPt: (float.xRight - float.xLeft) / scale,
-              heightPt: (float.yBottom - float.yTop) / scale,
+              xPt: float.xLeft,
+              yPt: float.yTop,
+              widthPt: float.xRight - float.xLeft,
+              heightPt: float.yBottom - float.yTop,
             }),
             wrap: publicRuns[index]!.run.wrapMode as NonNullable<FloatRegistryEntryPt['wrap']>,
             wrapSide: float.side,
             wrapDistances: Object.freeze({
-              topPt: float.distTop / scale,
-              rightPt: float.distRight / scale,
-              bottomPt: float.distBottom / scale,
-              leftPt: float.distLeft / scale,
+              topPt: float.distTop,
+              rightPt: float.distRight,
+              bottomPt: float.distBottom,
+              leftPt: float.distLeft,
             }),
             ...(float.wrapPolygon ? { wrapPolygon: Object.freeze([...float.wrapPolygon]) } : {}),
           });
@@ -1929,21 +1924,20 @@ function createConcreteBodyLayoutKernel(
         if (source.type !== 'paragraph') {
           throw new Error('Table paragraph re-acquisition source kind mismatch');
         }
-        const scale = state.scale;
         const candidate: BodyAcquisitionState = {
           ...withTableCellStory(state),
           contentX: 0,
-          contentW: request.acquired.flowBounds.widthPt * scale,
+          contentW: request.acquired.flowBounds.widthPt,
           y: request.acquired.flowBounds.yPt,
           floats: (request.floatingTableExclusions ?? []).map((bounds, index): FloatRect => ({
             kind: 'table', tableOverlap: 'never', mode: 'square',
             imageKey: `${TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX}${index}`,
-            imageX: bounds.xPt * scale, imageY: bounds.yPt * scale,
-            imageW: bounds.widthPt * scale, imageH: bounds.heightPt * scale,
-            xLeft: bounds.xPt * scale,
-            xRight: (bounds.xPt + bounds.widthPt) * scale,
-            yTop: bounds.yPt * scale,
-            yBottom: (bounds.yPt + bounds.heightPt) * scale,
+            imageX: bounds.xPt, imageY: bounds.yPt,
+            imageW: bounds.widthPt, imageH: bounds.heightPt,
+            xLeft: bounds.xPt,
+            xRight: bounds.xPt + bounds.widthPt,
+            yTop: bounds.yPt,
+            yBottom: bounds.yPt + bounds.heightPt,
             side: 'bothSides', distLeft: 0, distRight: 0, distTop: 0, distBottom: 0,
             paraId: index,
           })),
@@ -2173,7 +2167,7 @@ function createConcreteBodyLayoutKernel(
                   borderEdges.bottom === 'none' ? 0 : bottomBorderExtentPt(paragraph.borders),
                 ),
                 continuesFromPrevious: false,
-                anchorFrames: paragraphAnchorReferenceFrames(candidate),
+                anchorFrames: bodyAnchorReferenceFrames(candidate),
                 acquireCompleteStory: candidate.acquireCompleteTextBoxStory,
               },
             );
@@ -2268,16 +2262,16 @@ function createConcreteBodyLayoutKernel(
               exclusionId: frameOccurrenceId,
               paragraphId: floatRegistry.nextParagraphId,
               bounds: Object.freeze({
-                xPt: box.x / state.scale,
-                yPt: box.y / state.scale,
-                widthPt: box.w / state.scale,
-                heightPt: box.h / state.scale,
+                xPt: box.x,
+                yPt: box.y,
+                widthPt: box.w,
+                heightPt: box.h,
               }),
               exclusionBounds: Object.freeze({
-                xPt: box.exLeft / state.scale,
-                yPt: box.exTop / state.scale,
-                widthPt: (box.exRight - box.exLeft) / state.scale,
-                heightPt: (box.exBottom - box.exTop) / state.scale,
+                xPt: box.exLeft,
+                yPt: box.exTop,
+                widthPt: box.exRight - box.exLeft,
+                heightPt: box.exBottom - box.exTop,
               }),
             });
             return Object.freeze({
@@ -2301,7 +2295,7 @@ function createConcreteBodyLayoutKernel(
               ...(!absoluteVertical ? {
                 relocationBlockExtentPt: Math.max(
                   0,
-                  (box.y + box.h) / state.scale - request.location.cursorPt.yPt,
+                  box.y + box.h - request.location.cursorPt.yPt,
                 ),
               } : {}),
               ...(box.registerExclusion === false ? {} : {
@@ -2512,7 +2506,7 @@ function createConcreteBodyLayoutKernel(
             throw new Error('Ordinary table acquisition received an adjacent-group cursor');
           }
           const cursor = request.cursor?.cursor ?? startTableFragmentCursor();
-          const pageHeightPt = state.pageH / state.scale;
+          const pageHeightPt = state.pageH;
           const authoredPositioning = state.acquisitionInputs.tableFormatInput(table).positioning;
           if (authoredPositioning) {
             const positioning = request.cursor?.kind === 'table'
@@ -2816,7 +2810,7 @@ function createConcreteBodyLayoutKernel(
                 requiresFreshFlowRegion: true,
               });
             }
-            const physicalLeftPt = physical.cssWidthPx / state.scale
+            const physicalLeftPt = physical.physicalPageWidthPt
               - request.location.cursorPt.yPt - tableWidthPt;
             const physicalTopPt = request.location.cursorPt.xPt;
             const physicalBandHeightPt = Math.max(
@@ -3361,7 +3355,6 @@ function createConcreteBodyLayoutKernel(
                 delta.drawingCollisions,
               )
             : drawingCollisionRegistry;
-          const scale = state.scale;
           const retainedFloats = (delta.floats?.entries ?? []).map((entry): FloatRect => {
             const left = entry.wrapDistances?.leftPt
               ?? entry.bounds.xPt - entry.exclusionBounds.xPt;
@@ -3387,15 +3380,15 @@ function createConcreteBodyLayoutKernel(
               } : {}),
               imageKey: entry.exclusionId
                 ?? (entry.kind === 'table' ? `body:float:${entry.paragraphId}` : ''),
-              imageX: entry.bounds.xPt * scale, imageY: entry.bounds.yPt * scale,
-              imageW: entry.bounds.widthPt * scale, imageH: entry.bounds.heightPt * scale,
-              xLeft: entry.exclusionBounds.xPt * scale,
-              xRight: (entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt) * scale,
-              yTop: entry.exclusionBounds.yPt * scale,
-              yBottom: (entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt) * scale,
+              imageX: entry.bounds.xPt, imageY: entry.bounds.yPt,
+              imageW: entry.bounds.widthPt, imageH: entry.bounds.heightPt,
+              xLeft: entry.exclusionBounds.xPt,
+              xRight: entry.exclusionBounds.xPt + entry.exclusionBounds.widthPt,
+              yTop: entry.exclusionBounds.yPt,
+              yBottom: entry.exclusionBounds.yPt + entry.exclusionBounds.heightPt,
               side: entry.wrapSide ?? 'bothSides',
-              distLeft: left * scale, distRight: right * scale,
-              distTop: top * scale, distBottom: bottom * scale,
+              distLeft: left, distRight: right,
+              distTop: top, distBottom: bottom,
               paraId: entry.paragraphId,
             };
             return entry.kind === 'table'
@@ -3694,12 +3687,15 @@ export function sumCellContentHeight(
 // ===== Text frames & drop caps (ECMA-376 §17.3.1.11) =====
 
 /**
- * One line height (px) of the anchor (following non-frame) paragraph, used to
+ * One point-space line height of the anchor (following non-frame) paragraph,
+ * used to
  * size a drop cap by `lines` (§17.3.1.11). The drop cap height equals
  * `lines` × this. Scans `elements` after the frame element for the first
  * non-frame paragraph; falls back to the frame paragraph's own single-line
  * height when none follows (a degenerate trailing frame).
  */
+// Historical name retained while this renderer helper remains on the C3
+// migration inventory; the returned value is now canonical points.
 function frameAnchorLineHeightPx(
   elements: BodyElement[],
   frameEl: BodyElement,
@@ -3713,7 +3709,7 @@ function frameAnchorLineHeightPx(
     if (p.framePr) continue; // adjacent frame paragraphs are part of the frame
     return paragraphMarkLineHeight(
       p,
-      state.scale,
+      1,
       paraGrid(p, state),
       resolveBodyParagraphLayoutContext(state, p).hasRuby,
       state.docEastAsian,
@@ -3728,7 +3724,7 @@ function frameAnchorLineHeightPx(
   const fp = frameEl as unknown as DocParagraph;
   return paragraphMarkLineHeight(
     fp,
-    state.scale,
+    1,
     paraGrid(fp, state),
     resolveBodyParagraphLayoutContext(state, fp).hasRuby,
     state.docEastAsian,
@@ -3745,7 +3741,7 @@ function frameAnchorLineHeightPx(
 function resolveFrameBox(
   para: DocParagraph,
   state: BodyAcquisitionState,
-  anchorLineHpx: number,
+  anchorLineHPt: number,
   onAcquired?: (acquired: ReturnType<typeof acquireRetainedFrameGroup>) => void,
 ): FrameBox {
   const group = bodyFrameGroupFor(para);
@@ -3753,14 +3749,13 @@ function resolveFrameBox(
     const measurer = { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses };
     const environment = paragraphMeasurementEnvironment(state);
     const borderEdges = group.members.map(bodyParagraphBorderEdgesFor);
-    const scale = state.scale;
     const horizontalBand = frameXContainer(group.framePr.hAnchor, state);
     const pointPlacement = {
-      contentXPt: state.contentX / scale,
-      contentWidthPt: state.contentW / scale,
-      pageHeightPt: state.pageH / scale,
-      yPt: state.y / scale,
-      anchorLineHeightPt: anchorLineHpx / scale,
+      contentXPt: state.contentX,
+      contentWidthPt: state.contentW,
+      pageHeightPt: state.pageH,
+      yPt: state.y,
+      anchorLineHeightPt: anchorLineHPt,
     };
     const acquired = acquireRetainedFrameGroup(group, {
       contexts: group.members.map((paragraph) =>
@@ -3775,7 +3770,7 @@ function resolveFrameBox(
       measurer,
       environment,
       containerShading: state.containerShading,
-      maximumWidthPt: Math.max(0, horizontalBand.right - horizontalBand.left) / scale,
+      maximumWidthPt: Math.max(0, horizontalBand.right - horizontalBand.left),
       acquisitionSession: state,
       placementSignature: [
         pointPlacement.contentXPt,
@@ -3793,38 +3788,38 @@ function resolveFrameBox(
         const box = computeFrameBox(
           group.framePr,
           state,
-          pointPlacement.yPt * scale,
-          contentWidthPt * scale,
-          contentHeightPt * scale,
-          pointPlacement.anchorLineHeightPt * scale,
+          pointPlacement.yPt,
+          contentWidthPt,
+          contentHeightPt,
+          pointPlacement.anchorLineHeightPt,
         );
         return Object.freeze({
           bounds: Object.freeze({
-            xPt: box.x / scale,
-            yPt: box.y / scale,
-            widthPt: box.w / scale,
-            heightPt: box.h / scale,
+            xPt: box.x,
+            yPt: box.y,
+            widthPt: box.w,
+            heightPt: box.h,
           }),
           exclusionBounds: Object.freeze({
-            xPt: box.exLeft / scale,
-            yPt: box.exTop / scale,
-            widthPt: (box.exRight - box.exLeft) / scale,
-            heightPt: (box.exBottom - box.exTop) / scale,
+            xPt: box.exLeft,
+            yPt: box.exTop,
+            widthPt: box.exRight - box.exLeft,
+            heightPt: box.exBottom - box.exTop,
           }),
         });
       },
-      anchorFrames: paragraphAnchorReferenceFrames(state),
+      anchorFrames: bodyAnchorReferenceFrames(state),
     });
     onAcquired?.(acquired);
     const box: FrameBox = {
-      x: acquired.box.bounds.xPt * scale,
-      y: acquired.box.bounds.yPt * scale,
-      w: acquired.box.bounds.widthPt * scale,
-      h: acquired.box.bounds.heightPt * scale,
-      exLeft: acquired.box.exclusionBounds.xPt * scale,
-      exTop: acquired.box.exclusionBounds.yPt * scale,
-      exRight: (acquired.box.exclusionBounds.xPt + acquired.box.exclusionBounds.widthPt) * scale,
-      exBottom: (acquired.box.exclusionBounds.yPt + acquired.box.exclusionBounds.heightPt) * scale,
+      x: acquired.box.bounds.xPt,
+      y: acquired.box.bounds.yPt,
+      w: acquired.box.bounds.widthPt,
+      h: acquired.box.bounds.heightPt,
+      exLeft: acquired.box.exclusionBounds.xPt,
+      exTop: acquired.box.exclusionBounds.yPt,
+      exRight: acquired.box.exclusionBounds.xPt + acquired.box.exclusionBounds.widthPt,
+      exBottom: acquired.box.exclusionBounds.yPt + acquired.box.exclusionBounds.heightPt,
       registerExclusion: true,
       exclusionId: acquired.box.exclusionId,
     };
@@ -3836,7 +3831,7 @@ function resolveFrameBox(
   // §17.3.1.11 group for every frame; reduced header/footer acquisition states
   // use this local measurement fallback.
   const fp = para.framePr!;
-  const { scale } = state;
+  const scale = 1;
   const paraTop = state.y;
   const grid = paraGrid(para, state);
   const paragraphContext = resolveBodyParagraphLayoutContext(state, para);
@@ -3877,11 +3872,11 @@ function resolveFrameBox(
     paraHasRuby ? paragraphContext.hasEastAsianText : (line.eastAsian ?? false),
     line.gridCountSingle,
   ), 0);
-  return computeFrameBox(fp, state, paraTop, contentW, contentH, anchorLineHpx);
+  return computeFrameBox(fp, state, paraTop, contentW, contentH, anchorLineHPt);
 }
 
 /**
- * Resolve an anchored shape's page-space bounding box {x,y,w,h} (px). Retained
+ * Resolve an anchored shape's point-space bounding box {x,y,w,h}. Retained
  * drawing acquisition and float registration share this geometry so the
  * exclusion band matches the painted box.
  *
@@ -3894,7 +3889,7 @@ function resolveFrameBox(
 function resolveShapeBox(
   shape: ShapeRun,
   state: AnchorFloatRegistrationState,
-  paragraphTopPx: number,
+  paragraphTopPt: number,
 ): { x: number; y: number; w: number; h: number } {
   // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 batch-3 adjudication ②): on a
   // vertical (tbRl) page an anchored shape's positionH/V resolve against the
@@ -3907,7 +3902,7 @@ function resolveShapeBox(
   // the anchor paragraph's COLUMN. That physical y is the column
   // band's logical x start (`state.contentX`, since physical y = logical x
   // under the +90° page paint), NOT the paragraph's logical flow
-  // `paragraphTopPx`, which lies on the column-progression axis.
+  // `paragraphTopPt`, which lies on the column-progression axis.
   if (state.verticalPhys) {
     const phys = resolveShapeBox(
       shape,
@@ -3915,10 +3910,9 @@ function resolveShapeBox(
       state.contentX,
     );
     return physicalToLogicalAnchorBox(
-      phys.x, phys.y, phys.w, phys.h, state.verticalPhys.cssWidthPx,
+      phys.x, phys.y, phys.w, phys.h, state.verticalPhys.physicalPageWidthPt,
     );
   }
-  const { scale } = state;
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
   // the static wp:extent for that axis. The size is `relativeFrom` container
   // size × pct.
@@ -3928,33 +3922,33 @@ function resolveShapeBox(
   // `original_width × (new_group_w / old_group_w)`, and its within-group
   // offset (carried by anchorXPt) scales by the same ratio. Standalone
   // shapes simply take `container × pct` as their width.
-  let w = shape.widthPt * scale;
-  let h = shape.heightPt * scale;
+  let w = shape.widthPt;
+  let h = shape.heightPt;
   let offsetXPt = shape.anchorXPt;
   let offsetYPt = shape.anchorYPt;
   let alignWidthPt = shape.groupWidthPt ?? null;
   let alignHeightPt = shape.groupHeightPt ?? null;
   if (shape.widthPct != null) {
     const c = xContainer(shape.widthRelativeFrom, false, state);
-    const newSizePt = ((c.end - c.start) * shape.widthPct) / scale;
+    const newSizePt = (c.end - c.start) * shape.widthPct;
     if (shape.groupWidthPt != null && shape.groupWidthPt > 0) {
       const ratio = newSizePt / shape.groupWidthPt;
-      w = shape.widthPt * scale * ratio;
+      w = shape.widthPt * ratio;
       offsetXPt = shape.anchorXPt * ratio;
     } else {
-      w = newSizePt * scale;
+      w = newSizePt;
     }
     alignWidthPt = newSizePt;
   }
   if (shape.heightPct != null) {
-    const c = yContainer(shape.heightRelativeFrom, false, paragraphTopPx, state);
-    const newSizePt = ((c.end - c.start) * shape.heightPct) / scale;
+    const c = yContainer(shape.heightRelativeFrom, false, paragraphTopPt, state);
+    const newSizePt = (c.end - c.start) * shape.heightPct;
     if (shape.groupHeightPt != null && shape.groupHeightPt > 0) {
       const ratio = newSizePt / shape.groupHeightPt;
-      h = shape.heightPt * scale * ratio;
+      h = shape.heightPt * ratio;
       offsetYPt = shape.anchorYPt * ratio;
     } else {
-      h = newSizePt * scale;
+      h = newSizePt;
     }
     alignHeightPt = newSizePt;
   }
@@ -3963,14 +3957,14 @@ function resolveShapeBox(
     shape.anchorXRelativeFrom, shape.pctPosH, alignWidthPt,
   );
   const y = resolveAnchorY(
-    shape.anchorYAlign, shape.anchorYFromPara, offsetYPt, h, paragraphTopPx, state,
+    shape.anchorYAlign, shape.anchorYFromPara, offsetYPt, h, paragraphTopPt, state,
     shape.anchorYRelativeFrom, shape.pctPosV, alignHeightPt,
   );
   return { x, y, w, h };
 }
 
 /**
- * Resolve an anchor image's page-space box origin and dist* padding (px), shared
+ * Resolve an anchor image's point-space box origin and dist* padding, shared
  * by legacy float registration and the canonical anchor acquisition bridge.
  *
  * X: margin-relative offsets add section.marginLeft (ECMA-376 §20.4.3.4
@@ -4000,9 +3994,9 @@ export const __test_resolveAnchorBox = (
 export const __test_resolveShapeBox = (
   shape: ShapeRun,
   state: AnchorFloatRegistrationState,
-  paragraphTopPx: number,
+  paragraphTopPt: number,
 ): { x: number; y: number; w: number; h: number } =>
-  resolveShapeBox(shape, state, paragraphTopPx);
+  resolveShapeBox(shape, state, paragraphTopPt);
 
 /** Exported for the vertical header/footer test (ECMA-376 §17.6.20 + §17.10.1,
  *  issue #988): pins the inverse-of-`verticalLayoutSection` page/margin mapping a
@@ -4027,7 +4021,7 @@ export const __test_preRegisterPageFloats = (
  *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
  *  under `word-vertical-section-physical-drawing-layer`. Only
  *  the geometry fields `xContainer`/`yContainer`/`resolveAnchorX`/`resolveAnchorY`
- *  read are overridden (scale, page size, margins, `pageH`); everything else is
+ *  read are overridden (page size, margins, and `pageH`); everything else is
  *  the live logical state. Callers map the resolved physical box back into the
  *  logical layout frame with {@link physicalToLogicalAnchorBox}. */
 function physicalAnchorState(
@@ -4042,9 +4036,7 @@ function physicalAnchorState(
     marginRight: p.marginRight,
     marginTop: p.marginTop,
     marginBottom: p.marginBottom,
-    // yContainer reads `pageH` (px) for the page-relative bands; the physical
-    // page height in px is `pageHeight(pt) * scale`.
-    pageH: p.pageHeight * state.scale,
+    pageH: p.pageHeight,
   };
 }
 
@@ -4066,8 +4058,8 @@ function verticalPhysicalContentState(
   if (!p) return state;
   return {
     ...physicalAnchorState(state),
-    contentX: p.marginLeft * state.scale,
-    contentW: (p.pageWidth - p.marginLeft - p.marginRight) * state.scale,
+    contentX: p.marginLeft,
+    contentW: p.pageWidth - p.marginLeft - p.marginRight,
     verticalCJK: false,
     verticalAllRotated: false,
     verticalPhys: undefined,
@@ -4089,13 +4081,12 @@ function resolveAnchorBox(
   state: AnchorFloatRegistrationState,
   paraBaseY: number,
 ): { x: number; y: number; w: number; h: number; dl: number; dr: number; dt: number; db: number } {
-  const scale = state.scale;
-  const w = img.widthPt * scale;
-  const h = img.heightPt * scale;
-  const dl = (img.distLeft   ?? 0) * scale;
-  const dr = (img.distRight  ?? 0) * scale;
-  const dt = (img.distTop    ?? 0) * scale;
-  const db = (img.distBottom ?? 0) * scale;
+  const w = img.widthPt;
+  const h = img.heightPt;
+  const dl = img.distLeft ?? 0;
+  const dr = img.distRight ?? 0;
+  const dt = img.distTop ?? 0;
+  const db = img.distBottom ?? 0;
   // ECMA-376 §20.4.3.1 wp:align — when positionH/V carry <wp:align>, the
   // renderer aligns the image within its relativeFrom container instead of
   // using the (discarded) posOffset. Mirrors resolveShapeBox (the ShapeRun
@@ -4128,7 +4119,13 @@ function resolveAnchorBox(
       img.anchorYAlign, img.anchorYFromPara ?? false, img.anchorYPt ?? 0, h, state.contentX, phys,
       img.anchorYRelativeFrom ?? null, null, null,
     );
-    const box = physicalToLogicalAnchorBox(px, py, w, h, state.verticalPhys.cssWidthPx);
+    const box = physicalToLogicalAnchorBox(
+      px,
+      py,
+      w,
+      h,
+      state.verticalPhys.physicalPageWidthPt,
+    );
     // Rotate the dist* padding one quarter-turn with the box: physical top/bottom
     // become logical left/right; physical right/left become logical top/bottom
     // (logical y runs opposite physical x). Symmetric wrapSquare dist is common,
@@ -4337,8 +4334,8 @@ function registerShapeFloat(
 ): void {
   if (!isWrapFloat(shape.wrapMode)) return;
 
-  // Match resolveShapeBox's paragraphTopPx convention. resolveAnchorY reads
-  // paragraphTopPx only for relativeFrom="paragraph"/"line" (anchorYFromPara);
+  // Match resolveShapeBox's paragraphTopPt convention. resolveAnchorY reads
+  // paragraphTopPt only for relativeFrom="paragraph"/"line" (anchorYFromPara);
   // wrap floats anchor at the pre-spaceBefore paragraph top (§20.4.3.5),
   // identical to the image path (resolveAnchorBox uses paragraphAnchorY there).
   const { x, y, w, h } = resolveShapeBox(shape, state, paragraphAnchorY);
@@ -4348,11 +4345,10 @@ function registerShapeFloat(
   const mode: 'square' | 'topAndBottom' =
     shape.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
 
-  const scale = state.scale;
-  const pdl = (shape.distLeft   ?? 0) * scale;
-  const pdr = (shape.distRight  ?? 0) * scale;
-  const pdt = (shape.distTop    ?? 0) * scale;
-  const pdb = (shape.distBottom ?? 0) * scale;
+  const pdl = shape.distLeft ?? 0;
+  const pdr = shape.distRight ?? 0;
+  const pdt = shape.distTop ?? 0;
+  const pdb = shape.distBottom ?? 0;
   // §17.6.20 — on a vertical page the box above is the LOGICAL projection of the
   // physically-resolved shape (resolveShapeBox), so rotate the dist* labels one
   // quarter-turn with it, exactly like the image path (resolveAnchorBox):

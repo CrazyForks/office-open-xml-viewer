@@ -3,7 +3,7 @@ import { resolveAnchorX, xContainer } from './anchor-geometry.js';
 
 // ECMA-376 §20.4.3.4 ST_RelFromH: `column` = "relative to the extents of the
 // COLUMN which contains its anchor" (NOT the page margins). The renderer tracks
-// the current text column as `state.contentX` / `state.contentW` (already in px):
+// the current text column as point-space `state.contentX` / `state.contentW`:
 //   - body level, single column  → the section margin band
 //   - a multi-column section      → the specific column band the anchor sits in
 //   - inside a table cell         → the CELL's inner text box (renderCell sets
@@ -16,11 +16,9 @@ import { resolveAnchorX, xContainer } from './anchor-geometry.js';
 // content position; with no run-relative data we degrade it to the containing
 // column, the closest available base — see anchor-geometry.ts).
 //
-// xContainer reads { scale, pageWidth, marginLeft, marginRight, contentX,
-// contentW } of BodyAcquisitionState; a minimal stand-in is cast like the other geometry
-// tests. contentX/contentW are ALREADY scaled (px), unlike marginLeft etc.
+// xContainer reads only point-space page, margin, and column geometry from the
+// acquisition state; a minimal stand-in is cast like the other geometry tests.
 interface MinState {
-  scale: number;
   pageWidth: number;
   marginLeft: number;
   marginRight: number;
@@ -32,7 +30,6 @@ interface MinState {
 // column (contentX/contentW) is a NARROW cell box [400, 550] — deliberately
 // different from the margin band so a wrong degrade-to-margin is observable.
 const cellState: MinState = {
-  scale: 1,
   pageWidth: 600,
   marginLeft: 60,
   marginRight: 40,
@@ -63,7 +60,7 @@ describe('xContainer — column / character resolve to the text column (ECMA-376
       undefined, // no align
       false,
       100, // anchorXPt
-      30, // widthPx (unused without align)
+      30, // widthPt (unused without align)
       cellState as never,
       'column',
       null,
@@ -76,7 +73,6 @@ describe('xContainer — column / character resolve to the text column (ECMA-376
     // At body level contentX/contentW are the section margin band, so column and
     // margin coincide — no regression for single-column body anchors.
     const bodyState: MinState = {
-      scale: 1,
       pageWidth: 600,
       marginLeft: 60,
       marginRight: 40,

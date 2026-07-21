@@ -787,7 +787,7 @@ export function drawUprightBox(
   ctx.restore();
 }
 
-/** A rectangle `{ x, y, w, h }` in some coordinate frame (px). */
+/** A rectangle `{ x, y, w, h }` in one coordinate frame and linear unit. */
 export interface Box {
   x: number;
   y: number;
@@ -803,14 +803,16 @@ export interface Box {
  * Under `word-vertical-section-physical-drawing-layer`, a
  * `<wp:positionH>` / `<wp:positionV>` anchor resolves against the physical page
  * independently of text-flow rotation, so the image stays upright at
- * physical `(px, py, w, h)` exactly as in
+ * physical `(physicalX, physicalY, width, height)` exactly as in
  * a horizontal document. The body text, however, is laid out in the logical frame
- * that the page paint transform `physical = (cssWidth − logical.y, logical.x)`
+ * that the page transform `physical = (physicalPageWidth − logical.y, logical.x)`
  * maps to physical. Inverting that transform (`logical.x = physical.y`,
- * `logical.y = cssWidth − physical.x`) projects the physical image rectangle onto
+ * `logical.y = physicalPageWidth − physical.x`) projects the physical rectangle onto
  * the logical frame:
- *   - logical x-range = `[py, py + h]`         (physical y ↦ logical x, downward)
- *   - logical y-range = `[cssWidth − (px + w), cssWidth − px]`
+ *   - logical x-range = `[physicalY, physicalY + height]`
+ *                                               (physical y ↦ logical x, downward)
+ *   - logical y-range = `[physicalPageWidth − (physicalX + width),
+ *                         physicalPageWidth − physicalX]`
  *                                               (physical x ↦ logical y, reversed)
  * so the logical box has `w ↔ h` swapped: logical width = physical height and
  * logical height = physical width.
@@ -821,24 +823,20 @@ export interface Box {
  * from one box, the wrap band and the painted image stay locked together
  * (packages/docx/CLAUDE.md — no duplicated geometry).
  *
- * @param px         Physical left of the image box (px).
- * @param py         Physical top of the image box (px).
- * @param w          Physical image width (px).
- * @param h          Physical image height (px).
- * @param cssWidthPx The canvas CSS width in px (= physical page width) — the
- *                   `translate(cssWidth, 0)` term of the page transform.
+ * Acquisition passes canonical points; the algebra remains valid for any
+ * consistent linear unit.
  */
 export function physicalToLogicalAnchorBox(
-  px: number,
-  py: number,
-  w: number,
-  h: number,
-  cssWidthPx: number,
+  physicalX: number,
+  physicalY: number,
+  width: number,
+  height: number,
+  physicalPageWidth: number,
 ): Box {
   return {
-    x: py,
-    y: cssWidthPx - (px + w),
-    w: h,
-    h: w,
+    x: physicalY,
+    y: physicalPageWidth - (physicalX + width),
+    w: height,
+    h: width,
   };
 }

@@ -41,12 +41,10 @@ function servicesFor(
  * into retained text-box acquisition. */
 export function shapeAcquisitionState(
   ctx: CanvasRenderingContext2D,
-  scale: number,
   fontFamilyClasses: Record<string, string>,
 ): ShapeAcquisitionTestState {
   return {
     ctx,
-    scale,
     fontFamilyClasses,
     kinsoku: DEFAULT_KINSOKU_RULES,
     defaultTabPt: 36,

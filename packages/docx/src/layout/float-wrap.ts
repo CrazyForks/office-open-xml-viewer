@@ -100,7 +100,9 @@ interface FloatRectCore {
   wrapPolygon?: readonly Readonly<{ xPt: number; yPt: number }>[];
   /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
   imageKey: string;
-  /** Absolute canvas X of the image box (without dist padding). */
+  /** Absolute X of the object box in the consuming wrap context's linear unit
+   * (canonical acquisition uses points; the legacy line-layout bridge may use
+   * scaled units). */
   imageX: number;
   imageY: number;
   imageW: number;
@@ -112,8 +114,9 @@ interface FloatRectCore {
   yBottom: number;
   /** ST_WrapText: "bothSides" | "left" | "right" | "largest". */
   side: string;
-  /** dist* padding (px) — needed when displacing a float to keep its exclusion
-   *  padding when re-seating next to a blocking float (ECMA-376 §20.4.2.x). */
+  /** dist* padding in the same unit as the box — needed when displacing a float
+   * to keep its exclusion padding when re-seating next to a blocking float
+   * (ECMA-376 §20.4.2.x). */
   distLeft: number;
   distRight: number;
   distTop: number;
@@ -150,14 +153,14 @@ export function normalizeWrapSide(side: string | null | undefined): WrapSide {
   }
 }
 
-/** A horizontal interval [l, r] in absolute canvas px. */
+/** A horizontal interval [l, r] in the consuming wrap context's linear unit. */
 export interface Gap {
   l: number;
   r: number;
 }
 
-/** Minimum width (px) a polygon free gap must have to hold a line start. It also
- *  floors a zero-width direct probe so
+/** Minimum width, in the active wrap context's unit, that a polygon free gap
+ * must have to hold a line start. It also floors a zero-width direct probe so
  *  a `requiredWidth === 0` call still rejects sub-pixel slivers between
  *  full-width floats. Square queries additionally apply the independently
  *  supplied compatibility width; tight/through deliberately do not. */

@@ -2,7 +2,7 @@
 // §17.4.56 `<w:tblOverlap>`).
 //
 // Pure placement math: given a `<w:tblpPr>` and the section geometry on
-// `FloatRegistrationState`, resolve the table box (canvas px), decide which side body text
+// `FloatRegistrationState`, resolve the table box in points, decide which side body text
 // wraps on, and push the wrap-exclusion FloatRect onto `state.floats`. The
 // anchor / alignment semantics line up 1:1 with a `<w:framePr>` text frame, so
 // this module reuses frame-geometry's frameXContainer / frameYContainer /
@@ -30,7 +30,7 @@ import {
   pushFloatRect,
 } from './frame-geometry.js';
 
-/** Resolved top-left placement (canvas px) of a floating table (`<w:tblpPr>`,
+/** Resolved point-space placement of a floating table (`<w:tblpPr>`,
  *  ECMA-376 §17.4.57). `w`/`h` are the rendered table extent (sum of column
  *  widths × row heights). Exported for unit tests only — not package API. */
 export interface FloatTableBox {
@@ -41,9 +41,9 @@ export interface FloatTableBox {
 }
 
 /**
- * Resolve a floating table's top-left placement (canvas px) from its
+ * Resolve a floating table's top-left placement in points from its
  * `<w:tblpPr>` (ECMA-376 §17.4.57). `tableW`/`tableH` are the already-laid-out
- * table extent in px. The anchor / alignment semantics line up 1:1 with a
+ * table extent in points. The anchor / alignment semantics line up 1:1 with a
  * `<w:framePr>` text frame (horzAnchor↔hAnchor, vertAnchor↔vAnchor,
  * tblpXSpec↔xAlign, tblpYSpec↔yAlign, tblpX/tblpY↔x/y), so this mirrors
  * {@link computeFrameBox}'s placement math exactly — `frameXContainer` /
@@ -72,32 +72,31 @@ export function computeFloatTableBox(
    *  are committed. The returned box may later be registered pre-resolved. */
   overlapResolution?: Readonly<{ allowOverlap: boolean }>,
 ): FloatTableBox {
-  const sc = state.scale;
   const textBand = frameXContainer('text', state);
   const box = resolvePointSpaceFloatingTableBoxPt({
-    leftFromTextPt: tp.leftFromText * sc,
-    rightFromTextPt: tp.rightFromText * sc,
-    topFromTextPt: tp.topFromText * sc,
-    bottomFromTextPt: tp.bottomFromText * sc,
+    leftFromTextPt: tp.leftFromText,
+    rightFromTextPt: tp.rightFromText,
+    topFromTextPt: tp.topFromText,
+    bottomFromTextPt: tp.bottomFromText,
     horzAnchor: tp.horzAnchor,
     horzSpecified: tp.horzSpecified,
     vertAnchor: tp.vertAnchor,
-    xPt: tp.tblpX * sc,
-    yPt: tp.tblpY * sc,
+    xPt: tp.tblpX,
+    yPt: tp.tblpY,
     ...(tp.tblpXSpec == null ? {} : { xAlign: tp.tblpXSpec }),
     ...(tp.tblpYSpec == null ? {} : { yAlign: tp.tblpYSpec }),
   }, {
     page: {
       xPt: 0,
       yPt: 0,
-      widthPt: state.pageWidth * sc,
+      widthPt: state.pageWidth,
       heightPt: state.pageH,
     },
     margin: {
-      xPt: state.marginLeft * sc,
-      yPt: state.marginTop * sc,
-      widthPt: Math.max(0, (state.pageWidth - state.marginLeft - state.marginRight) * sc),
-      heightPt: Math.max(0, state.pageH - (state.marginTop + state.marginBottom) * sc),
+      xPt: state.marginLeft,
+      yPt: state.marginTop,
+      widthPt: Math.max(0, state.pageWidth - state.marginLeft - state.marginRight),
+      heightPt: Math.max(0, state.pageH - state.marginTop - state.marginBottom),
     },
     text: {
       xPt: textBand.left,
@@ -120,17 +119,17 @@ export function computeFloatTableBox(
       heightPt: box.h,
     },
     exclusionBounds: {
-      xPt: box.x - tp.leftFromText * sc,
-      yPt: box.y - tp.topFromText * sc,
-      widthPt: box.w + (tp.leftFromText + tp.rightFromText) * sc,
-      heightPt: box.h + (tp.topFromText + tp.bottomFromText) * sc,
+      xPt: box.x - tp.leftFromText,
+      yPt: box.y - tp.topFromText,
+      widthPt: box.w + tp.leftFromText + tp.rightFromText,
+      heightPt: box.h + tp.topFromText + tp.bottomFromText,
     },
   };
   const resolved = resolveFloatPlacement({
     moving,
     blockers: state.floats.map(floatRectParticipant),
     avoidance: floatingTableAvoidance(tableOverlap, state.floatParaSeq),
-    rightBoundaryPt: state.pageWidth * sc,
+    rightBoundaryPt: state.pageWidth,
     overlapEpsilonPt: FLOAT_OVERLAP_EPS,
     rightBoundarySlackPt: FLOAT_PAGE_RIGHT_SLACK,
   });
@@ -163,11 +162,10 @@ export function registerTableFloat(
   preResolved = false,
 ): void {
   if (box.w <= 0 || box.h <= 0) return;
-  const sc = state.scale;
-  const dl = tp.leftFromText * sc;
-  const dr = tp.rightFromText * sc;
-  const dt = tp.topFromText * sc;
-  const db = tp.bottomFromText * sc;
+  const dl = tp.leftFromText;
+  const dr = tp.rightFromText;
+  const dt = tp.topFromText;
+  const db = tp.bottomFromText;
   const paraId = state.floatParaSeq++;
 
   // §17.4.56: resolve overlap against already-registered page floats before

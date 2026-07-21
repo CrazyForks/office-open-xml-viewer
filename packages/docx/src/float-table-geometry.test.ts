@@ -27,13 +27,12 @@ import {
 // (xLeft/xRight/yTop/yBottom/mode/side), which resolveLineFloatWindow consumes
 // to wrap the surrounding body text.
 //
-// Geometry is exercised at scale=1 so px == pt. A representative page:
+// Geometry is exercised directly in canonical points. A representative page:
 //   pageWidth=600, margins L/R/T/B = 100/100/72/72 ⇒ content band [100,500].
 //   A single column is modeled as contentX=100, contentW=400; hAnchor="text"
 //   snaps to it (the #513 column-relative contract).
 
 interface MinState {
-  scale: number;
   contentX: number;
   contentW: number;
   marginLeft: number;
@@ -48,7 +47,6 @@ interface MinState {
 
 function makeState(over: Partial<MinState> = {}): MinState {
   return {
-    scale: 1,
     contentX: 100,
     contentW: 400,
     marginLeft: 100,
