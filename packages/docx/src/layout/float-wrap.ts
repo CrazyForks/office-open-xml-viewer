@@ -9,6 +9,7 @@
 // this module receives its square-line minimum as an explicit input.
 
 import {
+  assertValidPolygonCompileInput,
   compilePolygonWrap,
   polygonBandExactIntervalFunctions,
   polygonLineTopEventYPts,
@@ -238,7 +239,111 @@ export interface PreparedFloatWrap {
   readonly floats: readonly PreparedFloatRect[];
 }
 
+export interface FloatWrapPreparationDiagnostics {
+  polygonCompileCount: number;
+  polygonCacheHitCount: number;
+  polygonSnapshotPointCount: number;
+}
+
 const sweepEventCache = new WeakMap<PreparedFloatWrap, Map<number, readonly number[]>>();
+
+interface CompiledPolygonMemo {
+  readonly kind: 'tight' | 'through';
+  readonly xLeftPt: number;
+  readonly xRightPt: number;
+  readonly yTopPt: number;
+  readonly yBottomPt: number;
+  readonly compiled: CompiledPolygonWrap;
+}
+
+/**
+ * Realm-local derived geometry keyed by the authoritative retained point-array
+ * identity. A small variant bound avoids alternating kind/bounds thrash while
+ * keeping memory bounded by live immutable polygons; translated/scaled clones
+ * intentionally compile under their own identities.
+ */
+const MAX_COMPILED_POLYGON_VARIANTS = 4;
+const compiledPolygonMemo = new WeakMap<
+  readonly Readonly<{ xPt: number; yPt: number }>[],
+  readonly CompiledPolygonMemo[]
+>();
+
+function polygonIsDeepFrozen(
+  points: readonly Readonly<{ xPt: number; yPt: number }>[],
+): boolean {
+  return Object.isFrozen(points) && points.every((point) => Object.isFrozen(point));
+}
+
+function memoMatches(
+  memo: CompiledPolygonMemo,
+  kind: 'tight' | 'through',
+  xLeftPt: number,
+  xRightPt: number,
+  yTopPt: number,
+  yBottomPt: number,
+): boolean {
+  return memo.kind === kind
+    && Object.is(memo.xLeftPt, xLeftPt)
+    && Object.is(memo.xRightPt, xRightPt)
+    && Object.is(memo.yTopPt, yTopPt)
+    && Object.is(memo.yBottomPt, yBottomPt);
+}
+
+function compiledPolygonFor(
+  rect: Readonly<FloatRect>,
+  sourcePoints: readonly Readonly<{ xPt: number; yPt: number }>[],
+  diagnostics?: FloatWrapPreparationDiagnostics,
+): CompiledPolygonWrap {
+  const kind = rect.authoredWrap;
+  if (kind !== 'tight' && kind !== 'through') {
+    throw new Error('Polygon compilation requires tight or through wrap');
+  }
+  const compileInput = {
+    kind,
+    imageKey: rect.imageKey,
+    points: rect.wrapPolygon,
+    xLeftPt: rect.xLeft,
+    xRightPt: rect.xRight,
+    yTopPt: rect.yTop,
+    yBottomPt: rect.yBottom,
+  };
+  // Validate the current FloatRect before lookup so a prior valid entry cannot
+  // mask malformed geometry or replace its current imageKey in the error.
+  assertValidPolygonCompileInput(compileInput);
+  const cacheable = polygonIsDeepFrozen(sourcePoints);
+  if (cacheable) {
+    const memo = compiledPolygonMemo.get(sourcePoints)?.find((candidate) => memoMatches(
+      candidate,
+      kind,
+      rect.xLeft,
+      rect.xRight,
+      rect.yTop,
+      rect.yBottom,
+    ));
+    if (memo) {
+      if (diagnostics) diagnostics.polygonCacheHitCount += 1;
+      return memo.compiled;
+    }
+  }
+  if (diagnostics) diagnostics.polygonCompileCount += 1;
+  const compiled = compilePolygonWrap(compileInput);
+  if (cacheable) {
+    const memo = Object.freeze({
+      kind,
+      xLeftPt: rect.xLeft,
+      xRightPt: rect.xRight,
+      yTopPt: rect.yTop,
+      yBottomPt: rect.yBottom,
+      compiled,
+    });
+    compiledPolygonMemo.set(sourcePoints, Object.freeze([
+      memo,
+      ...(compiledPolygonMemo.get(sourcePoints) ?? [])
+        .slice(0, MAX_COMPILED_POLYGON_VARIANTS - 1),
+    ]));
+  }
+  return compiled;
+}
 
 interface ExactAttributedGap {
   readonly l: ExactRational;
@@ -248,24 +353,23 @@ interface ExactAttributedGap {
 }
 
 /** Snapshot and compile geometry once at the line-wrap oracle boundary. */
-export function prepareFloatWrap(floats: readonly FloatRect[]): PreparedFloatWrap {
+export function prepareFloatWrap(
+  floats: readonly FloatRect[],
+  diagnostics?: FloatWrapPreparationDiagnostics,
+): PreparedFloatWrap {
   const prepared = floats.map((float): PreparedFloatRect => {
+    const sourcePoints = float.wrapPolygon;
+    if (diagnostics && sourcePoints) {
+      diagnostics.polygonSnapshotPointCount += sourcePoints.length;
+    }
     const rect = Object.freeze({
       ...float,
-      ...(float.wrapPolygon
-        ? { wrapPolygon: Object.freeze(float.wrapPolygon.map((point) => Object.freeze({ ...point }))) }
+      ...(sourcePoints
+        ? { wrapPolygon: Object.freeze(sourcePoints.map((point) => Object.freeze({ ...point }))) }
         : {}),
     });
     const polygon = rect.authoredWrap === 'tight' || rect.authoredWrap === 'through'
-      ? compilePolygonWrap({
-          kind: rect.authoredWrap,
-          imageKey: rect.imageKey,
-          points: rect.wrapPolygon,
-          xLeftPt: rect.xLeft,
-          xRightPt: rect.xRight,
-          yTopPt: rect.yTop,
-          yBottomPt: rect.yBottom,
-        })
+      ? compiledPolygonFor(rect, sourcePoints ?? [], diagnostics)
       : null;
     return Object.freeze({
       rect,

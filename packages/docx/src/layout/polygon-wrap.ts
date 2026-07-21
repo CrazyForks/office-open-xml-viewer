@@ -65,7 +65,7 @@ export interface CompiledPolygonWrap {
   readonly padBottomPt: number;
 }
 
-interface PolygonCompileInput {
+export interface PolygonCompileInput {
   readonly kind: 'tight' | 'through';
   readonly imageKey: string;
   readonly points: readonly PolygonPoint[] | undefined;
@@ -73,6 +73,20 @@ interface PolygonCompileInput {
   readonly xRightPt: number;
   readonly yTopPt: number;
   readonly yBottomPt: number;
+}
+
+export function assertValidPolygonCompileInput(
+  input: PolygonCompileInput,
+): asserts input is PolygonCompileInput & { readonly points: readonly PolygonPoint[] } {
+  if (!input.points || input.points.length < 3
+    || input.points.some((point) =>
+      !Number.isFinite(point.xPt) || !Number.isFinite(point.yPt))) {
+    throw new Error(`Invalid ${input.kind} wrapPolygon for ${input.imageKey}`);
+  }
+  if (![input.xLeftPt, input.xRightPt, input.yTopPt, input.yBottomPt].every(Number.isFinite)
+    || input.xRightPt < input.xLeftPt || input.yBottomPt < input.yTopPt) {
+    throw new Error(`Invalid finite wrap bounds for ${input.imageKey}`);
+  }
 }
 
 export interface PolygonInterval {
@@ -639,15 +653,8 @@ function compileContourSpans(
  * participant-adjacent slots, hence O(K) pair-membership work.
  */
 export function compilePolygonWrap(input: PolygonCompileInput): CompiledPolygonWrap {
+  assertValidPolygonCompileInput(input);
   const points = input.points;
-  if (!points || points.length < 3
-    || points.some((point) => !Number.isFinite(point.xPt) || !Number.isFinite(point.yPt))) {
-    throw new Error(`Invalid ${input.kind} wrapPolygon for ${input.imageKey}`);
-  }
-  if (![input.xLeftPt, input.xRightPt, input.yTopPt, input.yBottomPt].every(Number.isFinite)
-    || input.xRightPt < input.xLeftPt || input.yBottomPt < input.yTopPt) {
-    throw new Error(`Invalid finite wrap bounds for ${input.imageKey}`);
-  }
   const retainedPoints = Object.freeze(points.map((point) => Object.freeze({ ...point })));
   const latticeValues = [
     ...retainedPoints.flatMap((point) => [point.xPt, point.yPt]),
