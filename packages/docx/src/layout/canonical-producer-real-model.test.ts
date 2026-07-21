@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildBookmarkPageMap } from '../bookmark-nav.js';
-import { createLayoutServices, layoutDocument } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
+import { layoutDocument } from '../document-layout.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from '../types.js';
 
 function measureContext(): CanvasRenderingContext2D {

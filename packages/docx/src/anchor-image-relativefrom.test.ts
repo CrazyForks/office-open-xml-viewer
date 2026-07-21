@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { __test_resolveAnchorBox } from './renderer.js';
+import { __test_resolveAnchorBox } from './test-support/renderer-internals.test-support.js';
 import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import type { ImageRun } from './types.js';
 

@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { layoutDocument } from '../document-layout.js';
-import { createLayoutServices } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
 import type {
   BodyElement,
   CellElement,

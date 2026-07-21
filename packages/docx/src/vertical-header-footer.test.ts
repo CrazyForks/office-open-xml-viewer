@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  __test_physicalLayoutSection as physicalLayoutSection,
-  __test_verticalLayoutSection as verticalLayoutSection,
-} from './renderer.js';
+import { __test_physicalLayoutSection as physicalLayoutSection, __test_verticalLayoutSection as verticalLayoutSection } from './test-support/renderer-internals.test-support.js';
 import type { SectionProps } from './types.js';
 
 // ECMA-376 §17.6.20 + §17.10.1 — a vertical (tbRl) section's header/footer stay

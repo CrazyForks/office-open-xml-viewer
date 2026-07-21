@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { layoutDocument, renderDocumentToCanvas } from './renderer.js';
+import { layoutDocument } from './document-layout.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
 // ECMA-376 §17.3.1.9 contextualSpacing — BODY paginator + paint integration pin

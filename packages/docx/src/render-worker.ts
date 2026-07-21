@@ -17,7 +17,8 @@ import {
   dropSvgImageCache,
 } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types';
-import { renderDocumentToCanvas, createLayoutServices, dropColorReplacedCache } from './renderer';
+import { renderDocumentToCanvas, dropColorReplacedCache } from './renderer';
+import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';

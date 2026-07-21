@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { createLayoutServices, layoutDocument, renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import { paintLayoutPage } from './paint/canvas-page.js';
 import type {
   BodyElement,

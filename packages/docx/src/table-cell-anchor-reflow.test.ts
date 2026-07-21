@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { AnchorAcquisitionInput, AnchorEdgesInput } from './layout/anchor-input.js';
 import type { ParagraphLayout } from './layout/types.js';
-import { createLayoutServices, layoutDocument } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import type {
   BodyElement,
   DocParagraph,

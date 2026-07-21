@@ -6,7 +6,8 @@ import type {
   DocxDocumentModel,
   SectionProps,
 } from '../types.js';
-import { createLayoutServices, layoutDocument } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
+import { layoutDocument } from '../document-layout.js';
 
 const EMPTY_STORY = Object.freeze({ default: null, first: null, even: null });
 

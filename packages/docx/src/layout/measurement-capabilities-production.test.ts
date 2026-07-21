@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createLayoutServices } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
 import { layoutLines, type LayoutSeg } from '../line-layout.js';
 import type { DocxDocumentModel } from '../types.js';
 import { verticalGlyphMeasurementServiceOf } from './runtime-state.js';

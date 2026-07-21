@@ -1,9 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import {
-  __test_preRegisterPageFloats,
-  createLayoutServices,
-  layoutDocument,
-} from './renderer.js';
+import { __test_preRegisterPageFloats } from './test-support/renderer-internals.test-support.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import { isPageLevelAnchorY } from './layout/anchor-classification.js';
 import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import type { AnchorAcquisitionInput, AnchorEdgesInput } from './layout/anchor-input.js';

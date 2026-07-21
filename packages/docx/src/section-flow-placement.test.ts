@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { layoutDocument } from './renderer.js';
+import { layoutDocument } from './document-layout.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, LineNumbering, SectionProps } from './types.js';
 import type { ParagraphLayout, TableLayout } from './layout/types.js';
 

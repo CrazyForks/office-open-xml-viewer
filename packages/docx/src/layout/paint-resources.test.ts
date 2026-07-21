@@ -177,6 +177,10 @@ describe('paint resource registry', () => {
       intrinsicSize: { widthPt: -1, heightPt: 1 },
     }, /widthPt.*finite and non-negative/i],
     [{
+      kind: 'image', resourceKey: 'image:order', documentOrder: 1.5,
+      partPath: 'image.png', mimeType: 'image/png', intrinsicSize: { widthPt: 1, heightPt: 1 },
+    }, /documentOrder.*non-negative safe integer/i],
+    [{
       kind: 'chart', resourceKey: 'chart:nan', intrinsicSize: { widthPt: 1, heightPt: Number.NaN },
       model: chartModel('NaN'),
     }, /heightPt.*finite and non-negative/i],

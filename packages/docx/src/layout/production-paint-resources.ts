@@ -162,11 +162,12 @@ function collectDescriptorCandidates(
     || candidateKeys.some((key, index) => key !== metadataKeys[index])) {
     throw new Error('Paint image descriptor membership differs from layout image metadata');
   }
-  for (const candidate of imageCandidates) {
+  for (const [documentOrder, candidate] of imageCandidates.entries()) {
     const record = metadataByKey.get(candidate.resourceKey);
     if (!record) throw new Error(`Missing layout image metadata: ${candidate.resourceKey}`);
     descriptors.push({
       ...candidate,
+      documentOrder,
       mimeType: record.mimeType,
       intrinsicSize: { widthPt: record.widthPt, heightPt: record.heightPt },
     });

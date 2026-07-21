@@ -1,6 +1,8 @@
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { BodyElement, DocParagraph, DocRun, DocTable, DocxDocumentModel, ShapeRun } from '../types.js';
+import type { BodyLayoutInput } from './body-layout-input.js';
+import type { ProductionBodyModelGateway } from './production-body-layout.js';
 import type { MathNode } from '@silurus/ooxml-core';
 import { rasterExceedsBudget, sniffRasterDimensions } from '@silurus/ooxml-core';
 import { imageResourceKey, mathResourceKey } from './source-key.js';
@@ -32,6 +34,19 @@ export interface MathOccurrence {
   readonly display: boolean;
   readonly source: SourceRef;
   readonly resourceKey: string;
+}
+
+export interface ProductionDocumentInput {
+  readonly document: DocxDocumentModel;
+  readonly mathOccurrences: readonly MathOccurrence[];
+  readonly fontFamilyCharsets: Readonly<Record<string, string>>;
+  readonly bodyLayoutInput: BodyLayoutInput;
+  readonly bodyModelGateway: ProductionBodyModelGateway;
+}
+
+/** The sole runtime parser/model gateway used by the final renderer adapter. */
+export function productionDocumentInput(doc: DocxDocumentModel): ProductionDocumentInput {
+  return normalizeInternalDocumentModel(doc);
 }
 
 export interface ImageMetadataService {

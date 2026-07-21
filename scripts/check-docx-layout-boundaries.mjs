@@ -19,6 +19,7 @@ const BODY_LAYOUT_ADAPTER = `${DOCX_SOURCE}/body-layout-input.ts`;
 const PARAGRAPH_ANCHOR_FRAME_ADAPTER = `${DOCX_SOURCE}/paragraph-anchor-frame-adapter.ts`;
 const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
 const TEXT_RUN_PROJECTION_ADAPTER = `${DOCX_SOURCE}/text-run-projection.ts`;
+const LAYOUT_RUNTIME_ADAPTER = `${DOCX_SOURCE}/layout-runtime.ts`;
 const ACQUISITION_CONTEXT = `${LAYOUT_SOURCE}/acquisition-context.ts`;
 const ACQUISITION_STATE = `${LAYOUT_SOURCE}/acquisition-state.ts`;
 const ACQUISITION_INPUT_PROJECTIONS = `${LAYOUT_SOURCE}/acquisition-input-projections.ts`;
@@ -29,6 +30,7 @@ const MEASUREMENT_CAPABILITIES = `${LAYOUT_SOURCE}/measurement-capabilities.ts`;
 const SECTION_ORIENTATION = `${LAYOUT_SOURCE}/section-orientation.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
 const LAYOUT_AFFINE = `${LAYOUT_SOURCE}/affine.ts`;
+const CONFORMANCE_FIXTURE = 'packages/docx/tests/visual/conformance-fixture.html';
 const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
 const LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL = 'normalizeInternalDocumentModel';
 
@@ -95,19 +97,35 @@ const PLANNED_NON_LAYOUT_MODULES = new Set([
 
 const SHARED_PAINT_IMPORTS = new Map([
   ['@silurus/ooxml-core', new Map([
+    ['acquireBitmapCacheLease', 'value'],
+    ['applyDuotone', 'value'],
     ['autoContrastColor', 'value'],
     ['canvasFontString', 'value'],
+    ['clampCanvasSize', 'value'],
     ['crispOffset', 'value'],
+    ['defaultDpr', 'value'],
+    ['deferBitmapCloseWhileLeased', 'value'],
     ['docxBorderDashArray', 'value'],
     ['drawImageCropped', 'value'],
     ['doubleRailGeometry', 'value'],
     ['fillDoubleBorder', 'value'],
+    ['getCachedBitmapByPath', 'value'],
+    ['getCachedSvgImageByPath', 'value'],
     ['HyperlinkTarget', 'type'],
+    ['imageNaturalSize', 'value'],
+    ['isHTMLCanvas', 'value'],
+    ['mathToMathML', 'value'],
+    ['metafileRasterSize', 'value'],
     ['paintDrawingMLShape', 'value'],
+    ['preferVectorBlip', 'value'],
+    ['PT_TO_PX', 'value'],
     // Shared fill resolution keeps gradient/no-fill semantics identical across
     // DOCX, PPTX, and XLSX painters; paint may consume it but not layout APIs.
     ['resolveFill', 'value'],
+    ['recolorSvg', 'value'],
     ['renderChart', 'value'],
+    ['Duotone', 'type'],
+    ['MathRenderer', 'type'],
   ])],
 ]);
 
@@ -1572,7 +1590,7 @@ function hasExactLayoutParserModelGatewayProjection(path) {
     ts.forEachChild(node, countBindingReferences);
   };
   countBindingReferences(source);
-  if (bindingReferences !== 2) return false;
+  if (bindingReferences !== 3) return false;
 
   const projections = source.statements.filter((statement) => (
     ts.isFunctionDeclaration(statement)
@@ -1596,12 +1614,36 @@ function hasExactLayoutParserModelGatewayProjection(path) {
     || !ts.isPropertyAccessExpression(spread.expression)
     || spread.expression.name.text !== 'mathOccurrences') return false;
   const call = spread.expression.expression;
-  return ts.isCallExpression(call)
+  const exactMathProjection = ts.isCallExpression(call)
     && ts.isIdentifier(call.expression)
     && call.expression.text === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL
     && call.arguments.length === 1
     && ts.isIdentifier(call.arguments[0])
     && call.arguments[0].text === parameter.name.text;
+  if (!exactMathProjection) return false;
+
+  const productionInputs = source.statements.filter((statement) => (
+    ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'productionDocumentInput'
+  ));
+  if (productionInputs.length !== 1) return false;
+  const productionInput = productionInputs[0];
+  const productionExported = productionInput.modifiers?.some((modifier) => (
+    modifier.kind === ts.SyntaxKind.ExportKeyword
+  ));
+  if (!productionExported || !productionInput.body || productionInput.parameters.length !== 1
+    || productionInput.body.statements.length !== 1) return false;
+  const productionParameter = productionInput.parameters[0];
+  const productionReturn = productionInput.body.statements[0];
+  if (!ts.isIdentifier(productionParameter.name)
+    || !ts.isReturnStatement(productionReturn)
+    || !productionReturn.expression
+    || !ts.isCallExpression(productionReturn.expression)
+    || !ts.isIdentifier(productionReturn.expression.expression)
+    || productionReturn.expression.expression.text !== LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL
+    || productionReturn.expression.arguments.length !== 1
+    || !ts.isIdentifier(productionReturn.expression.arguments[0])) return false;
+  return productionReturn.expression.arguments[0].text === productionParameter.name.text;
 }
 
 function layoutParserModelBoundaryViolations(root) {
@@ -1764,9 +1806,11 @@ function assertParagraphAnchorFrameAdapterBoundary(root) {
 }
 
 function assertBodyKernelServiceOwner(root) {
-  const renderer = resolve(root, DOCX_SOURCE, 'renderer.ts');
-  if (!existsSync(renderer)) return;
-  const source = sourceFile(renderer);
+  const runtime = resolve(root, LAYOUT_RUNTIME_ADAPTER);
+  if (!existsSync(runtime)) {
+    fail('BODY_KERNEL_SERVICE_OWNER', `${LAYOUT_RUNTIME_ADAPTER} missing`);
+  }
+  const source = sourceFile(runtime);
   const owner = source.statements.find((statement) => (
     ts.isFunctionDeclaration(statement) && statement.name?.text === 'createLayoutServices'
   ));
@@ -1797,10 +1841,14 @@ function assertBodyKernelServiceOwner(root) {
     && ts.isIdentifier(parentCall.arguments[0])
     && parentCall.arguments[0].text === 'services'
     && parentCall.arguments[1] === call
-    && call.arguments.length === 3
-    && call.arguments.every((argument, index) => (
-      ts.isIdentifier(argument) && argument.text === ['doc', 'ctx', 'localMetrics'][index]
-    ));
+    && call.arguments.length === 4
+    && call.arguments.slice(0, 3).every((argument, index) => (
+      ts.isIdentifier(argument) && argument.text === ['doc', 'context', 'localMetrics'][index]
+    ))
+    && ts.isPropertyAccessExpression(call.arguments[3])
+    && ts.isIdentifier(call.arguments[3].expression)
+    && call.arguments[3].expression.text === 'productionInput'
+    && call.arguments[3].name.text === 'bodyModelGateway';
   let insideOwner = false;
   for (let node = parentCall; node; node = node.parent) {
     if (node === owner) insideOwner = true;
@@ -3974,9 +4022,28 @@ function assertFinalRendererAdapter(root) {
     const rel = posixPath(relative(root, target));
     const allowed = rel.startsWith(`${LAYOUT_SOURCE}/`)
       || rel.startsWith(`${PAINT_SOURCE}/`)
+      || rel === LAYOUT_RUNTIME_ADAPTER
       || rel === TEXT_RUN_PROJECTION_ADAPTER
       || (edge.typeOnly && rel === `${DOCX_SOURCE}/types.ts`);
     if (!allowed) fail('FINAL_ADAPTER_IMPORT', `${DOCX_SOURCE}/renderer.ts -> ${rel}`);
+  }
+}
+
+function assertFinalRendererAssetImports(root) {
+  const fixture = resolve(root, CONFORMANCE_FIXTURE);
+  if (!existsSync(fixture)) fail('FINAL_RENDERER_ASSET_MISSING', CONFORMANCE_FIXTURE);
+  const html = readFileSync(fixture, 'utf8');
+  const rendererImports = /import\s*\{([\s\S]*?)\}\s*from\s*['"]\/src\/renderer\.ts['"]/g;
+  for (const match of html.matchAll(rendererImports)) {
+    const importedNames = match[1].split(',').map((binding) => (
+      binding.trim().split(/\s+as\s+/u, 1)[0]
+    ));
+    const removedBinding = importedNames.find((name) => (
+      name === 'createLayoutServices' || name === 'layoutDocument'
+    ));
+    if (removedBinding) {
+      fail('FINAL_RENDERER_ASSET_IMPORT', `${CONFORMANCE_FIXTURE} -> ${removedBinding}`);
+    }
   }
 }
 
@@ -4033,6 +4100,7 @@ export function checkDocxLayoutBoundaries(options) {
   if (options.final || !baselineExists) {
     if (options.final && baselineExists) fail('FINAL_BASELINE_PRESENT', BASELINE_PATH);
     assertFinalRendererAdapter(root);
+    assertFinalRendererAssetImports(root);
     const actual = currentAllowances(root);
     if (Object.keys(actual.legacySymbolCounts).length > 0
       || Object.keys(actual.migrationIdentifierCounts).length > 0

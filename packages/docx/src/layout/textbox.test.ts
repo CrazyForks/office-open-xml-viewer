@@ -7,7 +7,8 @@ import type {
   DocxDocumentModel,
   ShapeRun,
 } from '../types.js';
-import { createLayoutServices, layoutDocument } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
+import { layoutDocument } from '../document-layout.js';
 import { acquireShapeTextBoxLayout } from './paragraph.js';
 import type { CompleteTextBoxBlockInput } from './textbox-input.js';
 import type {

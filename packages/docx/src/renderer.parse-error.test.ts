@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import type { DocxDocumentModel, SectionProps } from './types';
 
 /**

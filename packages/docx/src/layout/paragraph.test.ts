@@ -13,7 +13,7 @@ import type { ParagraphLayoutContext } from '../layout-context.js';
 import type { LayoutImageSeg, LayoutMathSeg, LayoutTabSeg, LayoutTextSeg } from '../line-layout.js';
 import type { MeasuredParagraph } from '../paragraph-measure.js';
 import { measureParagraph } from '../paragraph-measure.js';
-import { createLayoutServices } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
 import type { DocParagraph } from '../types.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
 

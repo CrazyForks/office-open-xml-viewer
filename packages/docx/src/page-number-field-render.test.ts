@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { layoutDocument, renderDocumentToCanvas } from './renderer.js';
+import { layoutDocument } from './document-layout.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement, DocParagraph, DocxTextRun, FieldRun, SectionProps, DocxDocumentModel,
   SectionGeom, PageNumType, HeaderFooter,

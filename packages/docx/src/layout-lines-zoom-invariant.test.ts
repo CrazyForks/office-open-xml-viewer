@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { createLayoutServices, layoutDocument, renderDocumentToCanvas } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
+import { renderDocumentToCanvas } from './renderer.js';
 import type { DocumentLayout, LayoutServices } from './layout/types.js';
 import { layoutLines, type LayoutSeg } from './line-layout.js';
 import { stableFingerprint } from './layout/fingerprint.js';

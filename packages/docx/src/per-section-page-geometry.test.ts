@@ -7,7 +7,8 @@ import type {
 } from './types';
 import { attachDocumentLayoutRuntime, documentLayoutRuntimeOf } from './layout/runtime-state.js';
 import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
-import { createLayoutServices, layoutDocument } from './renderer.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 
 // ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — page geometry is
 // PER-SECTION. A mid-body SectionBreak carries its ending section's `geom`; the

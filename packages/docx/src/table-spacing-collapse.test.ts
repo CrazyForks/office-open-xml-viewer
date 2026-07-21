@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sumCellContentHeight } from './renderer.js';
+import { sumCellContentHeight } from './test-support/renderer-internals.test-support.js';
 import type { CellElement, DocParagraph } from './types.js';
 
 // `sumCellContentHeight` is the shared measure-side spacing-collapse helper

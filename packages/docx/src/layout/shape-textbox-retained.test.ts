@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ParagraphLayoutContext } from '../layout-context.js';
 import type { ShapeRun } from '../types.js';
 import type { DocxDocumentModel } from '../types.js';
-import { createLayoutServices } from '../renderer.js';
+import { createLayoutServices } from '../layout-runtime.js';
 import { paintPlacedTextBoxLayout } from '../paint/canvas-text.js';
 import type { CanvasPaintResourcePainter } from '../paint/types.js';
 import { acquireShapeTextBoxLayout } from './paragraph.js';

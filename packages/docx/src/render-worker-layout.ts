@@ -2,7 +2,7 @@ import type { DocxDocumentModel } from './types.js';
 import type { LayoutServices } from './layout/types.js';
 import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
 import type { LayoutVariantStore } from './layout/variant-store.js';
-import { layoutDocument } from './renderer.js';
+import { layoutDocument } from './document-layout.js';
 
 export interface RetainedRenderWorkerDocumentLayout {
   readonly model: DocxDocumentModel;

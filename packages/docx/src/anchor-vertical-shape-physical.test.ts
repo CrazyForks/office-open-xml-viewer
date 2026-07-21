@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  __test_resolveAnchorBox,
-  __test_resolveShapeBox,
-} from './renderer.js';
+import { __test_resolveAnchorBox, __test_resolveShapeBox } from './test-support/renderer-internals.test-support.js';
 import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { BodyElement, DocParagraph, ImageRun, SectionProps, ShapeRun } from './types.js';
