@@ -40,6 +40,7 @@
     "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/docx_parser.js",
     "typecheck": "tsc --noEmit",
     "vrt": "playwright test --config playwright.config.ts --project=chrome",
+    "vrt:pdf": "LOCAL_PDF_ACCEPTANCE=1 playwright test --config playwright.config.ts --project=chrome pdf-acceptance.spec.ts",
     "vrt:worker": "playwright test --config playwright.config.ts worker-equivalence",
     "conformance": "playwright test --config playwright.config.ts conformance.spec.ts"
   },

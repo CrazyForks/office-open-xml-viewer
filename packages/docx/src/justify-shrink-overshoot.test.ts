@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { createCanvasFontRoute, type CanvasFontRoute } from '@silurus/ooxml-core';
+import { layoutLines, type LayoutSeg, type LayoutTextSeg } from './line-layout.js';
 import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
 import type {
   BodyElement,
@@ -142,6 +144,67 @@ async function renderLines(el: BodyElement, pageWidth: number): Promise<string[]
 
 const tokens = (line: string): number => (line.match(/AAAA/g) ?? []).length;
 
+const route = (
+  familyList: string,
+  scope: CanvasFontRoute['scope'] = 'native',
+): CanvasFontRoute => createCanvasFontRoute(familyList, scope);
+
+function fitSegment(
+  text: string,
+  fontRoute: CanvasFontRoute,
+  joinPrev = false,
+): LayoutTextSeg {
+  return {
+    text,
+    bold: false,
+    italic: false,
+    underline: false,
+    strikethrough: false,
+    fontSize: FONT_PX,
+    color: null,
+    fontFamily: 'Georgia',
+    fontRoute,
+    vertAlign: null,
+    measuredWidth: 0,
+    ...(joinPrev ? { joinPrev: true } : {}),
+  };
+}
+
+function gluedFitLines(
+  leadRoute: CanvasFontRoute,
+  followerRoute: CanvasFontRoute,
+): string[] {
+  const georgiaRoute = route('Georgia');
+  const segments: LayoutSeg[] = [
+    fitSegment('X ', georgiaRoute),
+    fitSegment('AA', leadRoute),
+    fitSegment('B', followerRoute, true),
+    fitSegment('TAIL', georgiaRoute),
+  ];
+  const ctx = makeLinearCanvas().getContext('2d') as CanvasRenderingContext2D;
+  return layoutLines(
+    ctx,
+    segments,
+    59.9,
+    0,
+    1,
+    [],
+    undefined,
+    {},
+    0,
+    undefined,
+    0,
+    36,
+    59.9,
+    false,
+    true,
+    false,
+  ).map((line) => line.segments
+    .filter((segment): segment is LayoutTextSeg => 'text' in segment)
+    .map((segment) => segment.text)
+    .join(''));
+}
+
 // Fit arithmetic (linear stub): each "AAAA " token advances 5·12 = 60px, the
 // bare word 48px, its trailing space 12px. Testing the 4th word on a line
 // already holding three tokens: currentWidth = 180, wForFit = 48 ⇒ natural end
@@ -152,6 +215,16 @@ const TEXT5 = 'AAAA AAAA AAAA AAAA AAAA'; // marginal word is followed by more c
 const COLUMN = 225;
 
 describe('§17.18.44 — per-font advance bias and drawable space shrink', () => {
+  it('counts a candidate trailing space when the prospective line will justify', async () => {
+    const lines = await renderLines(textPara('AAAA AAAA BBBB', 'both'), 108);
+
+    // Public Word/PDF evidence: a separator following the last admitted word
+    // still participates in the wrap decision for a line that will justify.
+    // The first word plus the second visible word is exactly 108px; counting
+    // the second token's 12px separator therefore moves it to the next line.
+    expect(tokens(lines[0])).toBe(1);
+  });
+
   it('wraps the marginal word on a line that will justify', async () => {
     // Word PDF ground truth for #698's narrow justified column still shows a
     // natural-fit break (3 tokens). Generic `serif` has no per-font bias, and
@@ -215,7 +288,7 @@ describe('§17.18.44 — per-font advance bias and drawable space shrink', () =>
     expect(lines.length).toBe(1);
   });
 
-  it('scales the justified Georgia bias budget by authored w:w', async () => {
+  it('applies the Georgia bias budget after scaling it by authored w:w', async () => {
     const el = para(
       [{
         type: 'text',
@@ -224,9 +297,35 @@ describe('§17.18.44 — per-font advance bias and drawable space shrink', () =>
       'both',
     );
 
-    // Natural end = 84px. Correct scaled bias = 0.882px (83 + 0.882 < 84)
-    // so the third token wraps; the old unscaled 1.764px budget over-admitted it.
-    const lines = await renderLines(el, 83);
-    expect(tokens(lines[0])).toBe(2);
+    // At this threshold the scaled Georgia allowance admits the third token;
+    // the otherwise-identical zero-profile generic route still wraps it.
+    const generic = para(
+      [{
+        type: 'text',
+        ...textRun('AAAA AAAA AAAA AAAA', { fontFamily: 'serif', charScale: 0.5 }),
+      } as DocRun],
+      'both',
+    );
+    expect(tokens((await renderLines(el, 89.2))[0])).toBe(3);
+    expect(tokens((await renderLines(generic, 89.2))[0])).toBe(2);
+  });
+
+  it('keeps a marginal glued group on one justified line for one Georgia route', () => {
+    const georgiaRoute = route('Georgia');
+
+    // Natural end = 60px against 59.9px. The one-route Georgia allowance is
+    // intentionally enough to retain the atomic group before TAIL wraps.
+    expect(gluedFitLines(georgiaRoute, georgiaRoute)[0]).toBe('X AAB');
+  });
+
+  it('suppresses the Georgia allowance for mixed-route glued groups in either order', () => {
+    const georgiaRoute = route('Georgia');
+    const otherResolvedRoute = route('Registered Georgia Alias', 'registered');
+
+    // Both segments retain the same resolved-family profile to prove that face
+    // profile booleans are insufficient. Route identity makes the judgment
+    // order-independent and moves the whole atomic group after the first line.
+    expect(gluedFitLines(georgiaRoute, otherResolvedRoute)[0]).toBe('X ');
+    expect(gluedFitLines(otherResolvedRoute, georgiaRoute)[0]).toBe('X ');
   });
 });

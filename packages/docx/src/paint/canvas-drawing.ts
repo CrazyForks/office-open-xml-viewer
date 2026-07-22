@@ -1,6 +1,7 @@
 import type { DrawingLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { canvasFontString, paintDrawingMLShape, resolveFill } from '@silurus/ooxml-core';
+import { paintRetainedResource } from './canvas-resource.js';
 
 export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintContext): void {
   for (const command of node.commands) {
@@ -17,7 +18,13 @@ export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintCont
     }
     if (command.kind === 'resource') {
       if (!context.resources) throw new Error(`Missing retained resource painter for ${command.resourceKey}`);
-      context.resources.paint(command.resourceKey, command.resourceKind, command.rect, context.ctx);
+      paintRetainedResource(
+        command.resourceKey,
+        command.resourceKind,
+        command.rect,
+        command.orientation,
+        context,
+      );
       continue;
     }
     if (command.kind === 'fill-rect') {

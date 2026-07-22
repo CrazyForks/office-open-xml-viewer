@@ -54,6 +54,18 @@ export const WORD_FRAME_AUTO_WRAP_AROUND = defineCompatibilityRule({
   description: 'Resolve an authored frame wrap value of auto through the same square side-wrap path as around.',
 });
 
+export const WORD_LOWER_LAYER_SAME_PARAGRAPH_ANCHOR_COMPOSITION = defineCompatibilityRule({
+  id: 'word-lower-layer-same-paragraph-anchor-composition',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'lower-layer-same-paragraph-anchor-composition',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'Word preserves a source-later, lower-z, page-owned drawing at its authored position when it belongs to the same anchor paragraph as already composed higher layers. This is a Word-observed compatibility override to ECMA-376 §20.4.2.3, not a normative OOXML rule.',
+});
+
 export function wordZeroRelativeSizeUsesExtent(fraction: number): boolean {
   return fraction === 0;
 }
@@ -66,4 +78,15 @@ export function wordPageLevelAnchorY(
   return relativeFrom !== 'paragraph'
     && relativeFrom !== 'line'
     && relativeFrom !== 'character';
+}
+
+export function wordPreservesLowerLayerSameParagraphComposition(
+  movingOwnership: 'page' | 'host',
+  movingRelativeHeight: number | null,
+  blockerRelativeHeight: number | undefined,
+): boolean {
+  return movingOwnership === 'page'
+    && movingRelativeHeight !== null
+    && blockerRelativeHeight !== undefined
+    && movingRelativeHeight < blockerRelativeHeight;
 }

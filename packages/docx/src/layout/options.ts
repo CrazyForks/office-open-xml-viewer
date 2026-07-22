@@ -31,5 +31,6 @@ export function layoutOptionsKey(options: LayoutOptions, services: LayoutService
     text: services.text.fingerprint,
     images: services.images.fingerprint,
     math: services.math.fingerprint,
+    verticalGlyphs: services.verticalGlyphFingerprint ?? null,
   });
 }

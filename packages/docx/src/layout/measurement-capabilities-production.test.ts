@@ -109,7 +109,8 @@ describe('production measurement capability composition', () => {
         .toBe('vertical-glyph-measurement:dom-vert-probe-v1');
       expect(verticalGlyphMeasurementServiceOf(worker).fingerprint)
         .toBe('vertical-glyph-measurement:no-dom-vert-probe-v1');
-      expect(dom.text.fingerprint).not.toBe(worker.text.fingerprint);
+      expect(dom.text.fingerprint).toBe(worker.text.fingerprint);
+      expect(dom.verticalGlyphFingerprint).not.toBe(worker.verticalGlyphFingerprint);
     } finally {
       if (canvasDescriptor) {
         Object.defineProperty(globalThis, 'HTMLCanvasElement', canvasDescriptor);
@@ -121,6 +122,58 @@ describe('production measurement capability composition', () => {
       } else {
         Reflect.deleteProperty(globalThis, 'document');
       }
+    }
+  });
+
+  it('prefers a DOM canvas for main-thread layout when OffscreenCanvas also exists', () => {
+    const canvasDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'HTMLCanvasElement');
+    const offscreenDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'OffscreenCanvas');
+    const documentDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    let domContexts = 0;
+    let offscreenContexts = 0;
+
+    class TestHtmlCanvasElement {
+      getContext() {
+        domContexts += 1;
+        return measurementContext(this);
+      }
+    }
+    class TestOffscreenCanvas {
+      constructor(_width: number, _height: number) {}
+      getContext() {
+        offscreenContexts += 1;
+        return measurementContext(this);
+      }
+    }
+
+    try {
+      Object.defineProperty(globalThis, 'HTMLCanvasElement', {
+        configurable: true,
+        value: TestHtmlCanvasElement,
+      });
+      Object.defineProperty(globalThis, 'OffscreenCanvas', {
+        configurable: true,
+        value: TestOffscreenCanvas,
+      });
+      Object.defineProperty(globalThis, 'document', {
+        configurable: true,
+        value: { createElement: () => new TestHtmlCanvasElement() },
+      });
+
+      const services = createLayoutServices(model);
+
+      expect(verticalGlyphMeasurementServiceOf(services).fingerprint)
+        .toBe('vertical-glyph-measurement:dom-vert-probe-v1');
+      expect(domContexts).toBe(1);
+      expect(offscreenContexts).toBe(0);
+    } finally {
+      const restore = (name: 'HTMLCanvasElement' | 'OffscreenCanvas' | 'document', descriptor?: PropertyDescriptor) => {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else Reflect.deleteProperty(globalThis, name);
+      };
+      restore('HTMLCanvasElement', canvasDescriptor);
+      restore('OffscreenCanvas', offscreenDescriptor);
+      restore('document', documentDescriptor);
     }
   });
 });

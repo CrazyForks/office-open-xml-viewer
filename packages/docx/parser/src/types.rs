@@ -608,6 +608,15 @@ pub enum BodyElement {
     PageBreak {
         #[serde(skip_serializing_if = "Option::is_none")]
         parity: Option<String>,
+        /// True only when the hard break was authored after visible content in
+        /// the same source paragraph. Retained pagination uses this structural
+        /// ownership fact instead of inferring it from the preceding drawing.
+        // Enum-level rename_all renames variant tags, not struct-variant fields.
+        #[serde(
+            rename = "sameParagraphAsPrevious",
+            skip_serializing_if = "Option::is_none"
+        )]
+        same_paragraph_as_previous: Option<bool>,
     },
     /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following
     /// content into the next newspaper column of the current section (or the
@@ -740,6 +749,17 @@ pub struct DocParagraph {
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
+    /// Parser-private structural events for a complex field's cached result.
+    /// ECMA-376 §17.16 defines the result as the content between the `separate`
+    /// and `end` fldChars. Keeping the half-open run interval here preserves
+    /// that identity without inserting synthetic flow runs into the stable
+    /// public `DocRun` union.
+    #[serde(
+        rename = "__complexFieldBoundaries",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub(crate) complex_field_boundaries: Vec<ComplexFieldBoundaryWire>,
     /// ECMA-376 §17.13.6.2 `<w:bookmarkStart w:name>` — the names of every
     /// bookmark that STARTS within (or at the head of) this paragraph, in
     /// document order. A `<w:hyperlink w:anchor="X">` (§17.16.23) jumps to the
@@ -847,6 +867,24 @@ pub struct DocParagraph {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) paragraph_typography_acquisition: Option<ParagraphTypographyWire>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ComplexFieldBoundaryWire {
+    pub occurrence_id: u32,
+    /// `start` is the boundary immediately after `separate`; `end` is the
+    /// boundary immediately before the matching `end` fldChar.
+    pub boundary: String,
+    /// Index in `DocParagraph::runs`; together the two events describe a
+    /// half-open result interval and work for text, graphics, and nested fields.
+    pub run_index: usize,
+    /// `ref` | `pageRef` | `other`. This is acquisition metadata, not the stable
+    /// public FieldRun classifier (complex cached results stay ordinary runs).
+    pub field_type: String,
+    pub instruction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hyperlink_anchor: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

@@ -1068,6 +1068,7 @@ describe('layoutPages — mid-page split of rows with vMerge restart cells (§17
     // lines; the 2-paragraph label (40pt) fits page 1 entirely.
     const pages = layoutPages([para(), para(), restartSpanTable(2)], section(), makeCtx());
 
+    expect(pages).toHaveLength(2);
     const first = retainedTableOn(pages[0]);
     const continuations = pages.slice(1).map(retainedTableOn)
       .filter((table) => table !== undefined);
@@ -1102,7 +1103,12 @@ describe('layoutPages — mid-page split of rows with vMerge restart cells (§17
       lineStart: 3, lineEnd: 4, continuesFromPrevious: true, continuesOnNext: false,
     });
     const firstSemanticContinuation = continuationRows.find((row) => row.logicalRowIndex === 1);
-    expect(firstSemanticContinuation?.cells[0]?.visualMergeOwnership).toBe('continuation');
+    // The completed restart fragment and its following logical rows now share
+    // this page fragment. The authored `continue` role stays immutable, while
+    // page-local continuation paint ownership is unnecessary because the
+    // restart cell is already present earlier in the same fragment.
+    expect(firstSemanticContinuation?.cells[0]?.verticalMerge).toBe('continue');
+    expect(firstSemanticContinuation?.cells[0]?.visualMergeOwnership).toBeUndefined();
   });
 
   it('splits the restart cell content itself when it exceeds the page-1 band', () => {
@@ -1481,6 +1487,34 @@ describe('layoutPages — paragraph anchor before explicit page break (§20.4.3.
       (anchorPara as unknown as DocParagraph).runs[0]!,
     )).toBeDefined();
     expect(textOf(pages[2].layers.body[0])).toBe('after');
+  });
+
+  it('does not group a preceding image across an anchor paragraph own trailing hard break', () => {
+    const imagePara = paraWith([inlineImageRun(80, 40)]);
+    const anchorPara = paraWith([
+      shapeRun({ widthPt: 80, heightPt: 50, wrapMode: 'none', anchorYFromPara: true }),
+    ]);
+    const body: BodyElement[] = [
+      ...Array.from({ length: 3 }, () => para()),
+      imagePara,
+      anchorPara,
+      { type: 'pageBreak', sameParagraphAsPrevious: true },
+      para({ text: 'after', fontSize: 20 }),
+    ];
+
+    const pages = layoutPages(body, section(), makeCtx());
+    expect(pages).toHaveLength(2);
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (imagePara as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
+    expect(paragraphOccurrenceWithRun(
+      pages[0],
+      body,
+      (anchorPara as unknown as DocParagraph).runs[0]!,
+    )).toBeDefined();
+    expect(textOf(pages[1].layers.body[0])).toBe('after');
   });
 
   it('does not group a preceding image with a page-owned pre-break drawing', () => {

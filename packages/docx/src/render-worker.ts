@@ -30,6 +30,7 @@ import {
   type RetainedRenderWorkerDocumentLayout,
 } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse (or an in-worker image /
 // embedded-font read) recycles the instance so the next document renders on
@@ -110,6 +111,15 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
         return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
       });
       const model = normalizeInternalDocumentModel(parsedModel).document;
+      if (documentRequiresDomVerticalGlyphLayout(model)) {
+        const encoded = new TextEncoder().encode(JSON.stringify(model));
+        const documentJson = encoded.buffer.slice(
+          encoded.byteOffset,
+          encoded.byteOffset + encoded.byteLength,
+        ) as ArrayBuffer;
+        post({ type: 'mainThreadVerticalFallback', id, documentJson }, [documentJson]);
+        return;
+      }
       let googleFaces: FontFace[] = [];
       if (req.useGoogleFonts) {
         // Pagination measures text, so fonts must land before canonical layout —

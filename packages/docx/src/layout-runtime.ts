@@ -14,7 +14,11 @@ import {
   type ProductionBodyModelGateway,
 } from './layout/production-body-layout.js';
 import { createProductionLayoutServices } from './layout/production-services.js';
-import { verticalRunInkExtraPx } from './vertical-text.js';
+import {
+  planVerticalRunWithCapability,
+  verticalRunInkExtraPx,
+  verticalVertGlyphReachable,
+} from './vertical-text.js';
 import { attachBodyLayoutKernel } from './layout/runtime-state.js';
 
 function createConcreteBodyLayoutKernel(
@@ -45,11 +49,19 @@ export function createLayoutServices(
 ): LayoutServices {
   const productionInput = productionDocumentInput(doc);
   doc = productionInput.document;
-  const canvasContext = options.measureContext ?? (typeof OffscreenCanvas !== 'undefined'
-    ? new OffscreenCanvas(1, 1).getContext('2d')
-    : typeof document !== 'undefined'
-      ? document.createElement('canvas').getContext('2d')
-      : null);
+  // Main-thread layout must use an element-backed canvas when one is available:
+  // OpenType `vert` is selected through the canvas element's CSS feature state,
+  // and an OffscreenCanvas cannot prove or paint that feature route. Workers
+  // have no `document`, so they retain the deterministic Offscreen fallback.
+  const canvasContext = options.measureContext ?? (() => {
+    if (typeof document !== 'undefined') {
+      const mainThreadContext = document.createElement('canvas').getContext('2d');
+      if (mainThreadContext !== null) return mainThreadContext;
+    }
+    return typeof OffscreenCanvas !== 'undefined'
+      ? new OffscreenCanvas(1, 1).getContext('2d')
+      : null;
+  })();
   const context: MeasurementTextContext | null = canvasContext === null
     ? null
     : Object.freeze({
@@ -76,6 +88,29 @@ export function createLayoutServices(
         throw new Error('Vertical glyph measurement requires a concrete text context');
       }
       return verticalRunInkExtraPx(canvasContext, text);
+    },
+    planRun(input: Parameters<VerticalGlyphMeasurementService['planRun']>[0]) {
+      if (canvasContext === null) {
+        throw new Error('Vertical glyph planning requires a concrete text context');
+      }
+      const previousFont = canvasContext.font;
+      const previousKerning = canvasContext.fontKerning;
+      canvasContext.font = input.font;
+      canvasContext.fontKerning = input.fontKerning;
+      try {
+        return planVerticalRunWithCapability(
+          canvasContext,
+          input.text,
+          input.fontSizePt,
+          input.letterSpacingPt,
+          input.charScale,
+          input.growTrRotateInk,
+          (cp) => verticalVertGlyphReachable(canvasContext, cp),
+        );
+      } finally {
+        canvasContext.font = previousFont;
+        canvasContext.fontKerning = previousKerning;
+      }
     },
   });
   const localMetrics = snapshotLocalMetrics(options.localMetrics);

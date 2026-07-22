@@ -86,8 +86,15 @@ import {
   wordEastAsianGridLineCells,
   wordFarEastSingleLinePx,
   wordGridAtLeastLineHeightPx,
+  wordUseFeLayoutInheritedGridHeightPx,
+  wordCandidateFitWidthPx,
+  wordJustifiedCandidateFitAllowancePx,
 } from './layout/line-compatibility.js';
 import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
+import {
+  applyCharacterSpacingControlToClusters,
+  characterSpacingControlCompressionPt,
+} from './layout/character-spacing-control.js';
 
 export interface LineBoundary {
   segIndex: number;
@@ -107,8 +114,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Zero-advance anchor-character placeholder: contributes run metrics to the
    * line box but paints no glyph. */
   metricOnly?: true;
-  /** The anchor character uses the run's East Asian font axis, so §17.6.5 grid
-   * allocation must use Far East design metrics despite `text` being empty. */
+  /** The run participates in Far East line-grid metrics despite containing no
+   * East Asian code point. This covers an East-Asian anchor host and the
+   * w:useFELayout + rFonts@hint=eastAsia compatibility path. */
   metricEastAsian?: true;
   bold: boolean;
   italic: boolean;
@@ -140,7 +148,11 @@ export interface LayoutTextSeg extends LayoutSegSource {
     range: Readonly<{ start: number; end: number }>;
     offsetPt: number;
     advancePt: number;
+    compressionPt?: number;
+    paintOffsetPt?: number;
   }>[];
+  /** ECMA-376 §17.15.1.18 document-wide full-width whitespace compression. */
+  characterSpacingControl?: string;
   /** False when this segment starts inside the preceding grapheme cluster. */
   breakBefore?: boolean;
   smallCaps?: boolean;
@@ -561,6 +573,10 @@ export interface LineLayoutEnvironment {
   readonly noteNumbers?: ReadonlyMap<string, number>;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
+  /** §17.15.3.1 w:useFELayout document compatibility switch. */
+  readonly useFeLayout?: boolean;
+  /** §17.15.1.18 full-width punctuation/kana whitespace compression policy. */
+  readonly characterSpacingControl?: string;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
   readonly layoutServices?: LayoutServices;
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
@@ -1046,10 +1062,18 @@ export function segAdvanceWidth(
   gridDeltaPx: number,
   scale: number,
 ): number {
+  const controlledNaturalWidthPx = Math.max(
+    0,
+    naturalWidthPx - characterSpacingControlCompressionPt(
+      seg.text,
+      calcEffectiveFontPx(seg, scale),
+      seg.characterSpacingControl,
+    ),
+  );
   if (seg.fitTextPerGapPx !== undefined) {
     const charCount = [...seg.text].length;
     const gapCount = seg.fitTextRegionEnd ? Math.max(0, charCount - 1) : charCount;
-    return naturalWidthPx * charScaleFactor(seg)
+    return controlledNaturalWidthPx * charScaleFactor(seg)
       + gapCount * seg.fitTextPerGapPx
       + (seg.fitTextTrailingPadPx ?? 0);
   }
@@ -1065,7 +1089,7 @@ export function segAdvanceWidth(
   if (seg.tateChuYoko) return seg.fontSize * scale;
   const segmentDelta = segmentCharacterGridDeltaPx(seg, gridDeltaPx);
   return textAdvanceWidth(
-    naturalWidthPx,
+    controlledNaturalWidthPx,
     seg.text,
     segmentDelta,
     charScaleFactor(seg),
@@ -1227,7 +1251,12 @@ export function lineBoxHeight(
   }
   if (ls.rule === 'auto') {
     if (hasGrid) {
-      if (inheritedOnly) return gridSingleCell();
+      if (inheritedOnly) {
+        const allocated = gridSingleCell();
+        return eastAsian
+          ? wordUseFeLayoutInheritedGridHeightPx(allocated, pitchPx, ls.value)
+          : allocated;
+      }
       return Math.max(glyphNatural, pitchPx * ls.value);
     }
     return natural * ls.value;
@@ -1312,9 +1341,15 @@ export function paragraphMarkLineMetrics(
   markShapeInput?: NumberingMarkerShapeInput,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
+  // ECMA-376 §17.3.2.26 `w:rFonts@w:hint`: an empty paragraph has no code
+  // point from which to infer a script slot, so the paragraph-mark hint selects
+  // the face used to measure the mark. It does NOT make an otherwise Latin-only
+  // paragraph occupy East-Asian docGrid cells: grid-cell classification remains
+  // content/document based, independently of font routing.
+  const markUsesEastAsianFace = eastAsian || effectiveMarkShapeInput?.fontHint === 'eastAsia';
   const forceCs = effectiveMarkShapeInput?.complexScript === true;
   const fs = effectiveMarkShapeInput?.fontSizePt ?? getDefaultFontSize(para);
-  const authoredFamily = getDefaultFontFamily(para, eastAsian);
+  const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);
   const resolvedLocalFont = authoredFamily
     ? resolvedLocalFonts[normalizeLocalFontMetricFamily(authoredFamily)]
     : undefined;
@@ -1326,7 +1361,7 @@ export function paragraphMarkLineMetrics(
     const italic = effectiveMarkShapeInput?.style === 'italic';
     const ascii = effectiveMarkShapeInput?.fonts.ascii ?? para.defaultFontFamily ?? authoredFamily;
     const shaped = textLayoutService.shape({
-      text: eastAsian ? 'あ' : 'x',
+      text: markUsesEastAsianFace ? 'あ' : 'x',
       fontSizePt: fs * scale,
       fonts: effectiveMarkShapeInput?.fonts ?? {
         ascii,
@@ -1356,7 +1391,7 @@ export function paragraphMarkLineMetrics(
       face,
       fs * scale,
       fs * scale,
-      eastAsian,
+      markUsesEastAsianFace,
     ));
   } else if (ctx) {
     // ECMA-376 §17.3.1.29 / §17.3.1.33: an empty paragraph's mark line reserves
@@ -1379,18 +1414,18 @@ export function paragraphMarkLineMetrics(
     // fonts — Latin included — to Word's line height.
     const prevFont = ctx.font;
     ctx.font = buildFont(false, false, fs * scale, measuredFamily, fontFamilyClasses);
-    const m = ctx.measureText(eastAsian ? 'あ' : 'x');
+    const m = ctx.measureText(markUsesEastAsianFace ? 'あ' : 'x');
     ctx.font = prevFont;
     // A mark line carries no smallCaps/vertAlign, so fallback == correction size.
     ({ ascent: asc, descent: desc } = correctedLineMetrics(
-      m, measuredFamily, fs * scale, fs * scale, eastAsian,
+      m, measuredFamily, fs * scale, fs * scale, markUsesEastAsianFace,
     ));
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
   const intendedSingle = resolvedLocalFont?.lineHeightRatio != null
     ? fs * scale * resolvedLocalFont.lineHeightRatio
-    : emptyIntendedSingleForScriptPx(para, scale, eastAsian);
+    : emptyIntendedSingleForScriptPx(para, scale, markUsesEastAsianFace);
   const gridCountSingle = eastAsian
     ? eastAsianGridCountSinglePx(intendedSingle, fs * scale)
     : undefined;
@@ -1685,8 +1720,29 @@ export function fitCJKPrefix(
   // / non-under-reporting runs, so the split is byte-identical there.
   verticalRun = false,
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
+  /** Optional caller-owned advance authority. Production layout supplies the
+   * same substring measurement used by whole-segment fit, so compatibility
+   * transforms such as characterSpacingControl cannot disappear only at the
+   * overflow-prefix search seam. */
+  measureAdvance?: (text: string) => number,
 ): string {
   const chars = [...text]; // spread handles surrogate pairs
+  const advanceOf = (prefix: string): number => measureAdvance?.(prefix) ?? (() => {
+    let verticalExtraPx = 0;
+    if (verticalRun) {
+      if (!verticalGlyphMeasurement) {
+        throw new Error('Vertical glyph measurement capability is required for vertical text');
+      }
+      verticalExtraPx = verticalGlyphMeasurement.measureRunInkExtra(prefix);
+    }
+    return textAdvanceWidth(
+      ctx.measureText(prefix).width + verticalExtraPx,
+      prefix,
+      gridDeltaPx,
+      charScale,
+      charSpacingPx,
+    );
+  })();
   // Trailing IDEOGRAPHIC SPACE (U+3000) line-end allowance: a candidate that
   // overflows ONLY because it ends in fullwidth spaces still fits — the spaces
   // hang past the line end (JLReq line-end ideographic-space handling; Word
@@ -1704,21 +1760,7 @@ export function fitCJKPrefix(
     while (visibleEnd > 0 && chars[visibleEnd - 1] === '\u3000') visibleEnd--;
     const prefix = chars.slice(0, visibleEnd).join('');
     if (prefix.length === 0) return true;
-    let verticalExtraPx = 0;
-    if (verticalRun) {
-      if (!verticalGlyphMeasurement) {
-        throw new Error('Vertical glyph measurement capability is required for vertical text');
-      }
-      verticalExtraPx = verticalGlyphMeasurement.measureRunInkExtra(prefix);
-    }
-    const advance = textAdvanceWidth(
-      ctx.measureText(prefix).width + verticalExtraPx,
-      prefix,
-      gridDeltaPx,
-      charScale,
-      charSpacingPx,
-    );
-    return advance <= maxWidth;
+    return advanceOf(prefix) <= maxWidth;
   };
   let lo = 0, hi = chars.length;
   while (lo < hi) {
@@ -2371,6 +2413,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         : undefined);
       segs.push({
         text,
+        ...(environment.useFeLayout && r.fontHint === 'eastAsia'
+          ? { metricEastAsian: true as const }
+          : {}),
         bold,
         italic,
         underline: base.underline,
@@ -2387,6 +2432,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
         vertAlign,
         measuredWidth: 0,
+        characterSpacingControl: environment.characterSpacingControl,
         textLayoutService: environment.layoutServices?.text,
         textShapeRequest,
         breakBefore: resolvedSpan?.breakBefore ?? authoritativeSpan?.breakBefore ?? true,
@@ -2912,6 +2958,7 @@ export function layoutLines(
   // Incremental Canvas-vs-Word bias of the text already committed to this line.
   // Candidate checks add only the prospective text, avoiding a hot-loop rescan.
   let lineBiasBudget = 0;
+  const lineMeasurementRoutes = new Set<string>();
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
@@ -2964,6 +3011,7 @@ export function layoutLines(
   // through opening explicitly permitted by §20.4.2.18.
   const startLine = (minWidth: number = 0): void => {
     lineBiasBudget = 0;
+    lineMeasurementRoutes.clear();
     lineXOffset = 0;
     lineMaxWidth = maxWidth;
     if (!wrapCtx) return;
@@ -3132,6 +3180,7 @@ export function layoutLines(
     currentWidth = 0;
     lineTotalTrailingW = 0;
     lineBiasBudget = 0;
+    lineMeasurementRoutes.clear();
     lineHeight = 0;
     lineAscent = 0;
     lineDescent = 0;
@@ -3154,6 +3203,34 @@ export function layoutLines(
       * charScaleFactor(s)
       * [...text].length;
 
+  // A face allowance is calibrated for one resolved measurement route. Keep
+  // route identity separate from whether that route currently has a non-zero
+  // profile: two differently resolved Georgia routes are still mixed and must
+  // not share one calibrated allowance. Font size is deliberately excluded;
+  // small-caps pieces use the same face route at different sizes.
+  const measurementRouteIdentity = (s: LayoutTextSeg): string => {
+    const weight = s.bold ? 700 : 400;
+    const style = s.italic ? 'italic' : 'normal';
+    if (s.fontRoute) return `${s.fontRoute.fingerprint}|${weight}|${style}`;
+    return `implicit|${buildFont(s.bold, s.italic, 1, s.fontFamily, fontFamilyClasses)}`;
+  };
+
+  const noteMeasurementRoute = (
+    routes: Set<string>,
+    s: LayoutTextSeg,
+    text: string = s.text,
+  ): void => {
+    if (/\S/.test(text)) routes.add(measurementRouteIdentity(s));
+  };
+
+  const measurementRouteCountWith = (candidateRoutes: ReadonlySet<string>): number => {
+    let count = lineMeasurementRoutes.size;
+    for (const route of candidateRoutes) {
+      if (!lineMeasurementRoutes.has(route)) count += 1;
+    }
+    return count;
+  };
+
   const addToLine = (
     s: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg,
     w: number,
@@ -3167,6 +3244,7 @@ export function layoutLines(
     lineTotalTrailingW += trailingSpaceW;
     if ('text' in s) {
       lineBiasBudget += biasBudgetContribution(s);
+      noteMeasurementRoute(lineMeasurementRoutes, s);
     }
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
@@ -3273,7 +3351,16 @@ export function layoutLines(
         measure: true,
         clusterGeometry,
       });
-      if (clusterGeometry) s.shapedClusters = shaped.clusters;
+      if (clusterGeometry) {
+        s.shapedClusters = shaped.clusters
+          ? applyCharacterSpacingControlToClusters(
+              s.text,
+              shaped.clusters,
+              effectiveFontPx(s),
+              s.characterSpacingControl,
+            )
+          : undefined;
+      }
       return {
         width: shaped.advancePt,
         actualBoundingBoxAscent: shaped.ascentPt,
@@ -3373,7 +3460,16 @@ export function layoutLines(
   resolveFitTextSegments(
     queue.filter((seg): seg is LayoutTextSeg => 'text' in seg),
     scale,
-    (segment) => measureText(segment).width + verticalInkExtra(segment, segment.text),
+    (segment) => Math.max(
+      0,
+      measureText(segment).width
+        + verticalInkExtra(segment, segment.text)
+        - characterSpacingControlCompressionPt(
+          segment.text,
+          effectiveFontPx(segment),
+          segment.characterSpacingControl,
+        ),
+    ),
   );
 
   // The segment's laid-out ADVANCE (= its measuredWidth): natural width plus the
@@ -3785,7 +3881,25 @@ export function layoutLines(
     // cancel and trailingSpaceW is the bare trailing-space advance — keeping `w`
     // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
     const trailingSpaceW = s.text.endsWith(' ') ? w - strAdvance(s, trimmed) : 0;
-    const wForFit = w - trailingSpaceW;
+    const prospectiveLineWillJustify = (next: LayoutSeg | undefined): boolean => {
+      const closesLogicalLine = next === undefined || 'lineBreak' in next;
+      return isJustified && (!closesLogicalLine || stretchLastLine);
+    };
+    const fitWidthFor = (
+      widthPx: number,
+      trailingSpacePx: number,
+      next: LayoutSeg | undefined,
+    ): number => wordCandidateFitWidthPx({
+      widthPx,
+      trailingSpacePx,
+      lineWillJustify: prospectiveLineWillJustify(next),
+      wrapNarrowed: lineMaxWidth !== maxWidth || lineXOffset !== 0,
+    });
+    const wForFit = fitWidthFor(
+      w,
+      trailingSpaceW,
+      queue[0],
+    );
     // The two fit-tolerance roles are EXCLUSIVE per line, mirroring paint's
     // per-line predicate `isJustified && (!endsLogicalLine || stretchLastLine)`
     // (`next` is the first segment after the prospective closing candidate):
@@ -3802,20 +3916,24 @@ export function layoutLines(
     // it keeps the pre-#991 greedy path instead of moving a grapheme-fill span
     // inside an atomic chunk.
     const sDictSea = s.seaBreaks !== undefined && isDictionarySeaText(s.text);
-    const shrinkBudgetFor = (next: LayoutSeg | undefined, biasBudget: number): number => {
-      const closesLogicalLine = next === undefined || 'lineBreak' in next;
-      const lineWillJustify = isJustified && (!closesLogicalLine || stretchLastLine);
-      if (lineWillJustify) return biasBudget;
+    const candidateMeasurementRoutes = new Set<string>();
+    noteMeasurementRoute(candidateMeasurementRoutes, s, trimmed);
+    const shrinkBudgetFor = (
+      next: LayoutSeg | undefined,
+      biasBudget: number,
+      measurementRoutes: ReadonlySet<string>,
+    ): number => {
+      const lineWillJustify = prospectiveLineWillJustify(next);
+      if (lineWillJustify) return wordJustifiedCandidateFitAllowancePx({
+        biasBudgetPx: biasBudget,
+        resolvedMeasurementRouteCount: measurementRouteCountWith(measurementRoutes),
+      });
       // `word-dictionary-sea-natural-fit`: a dictionary-SEA line does not
       // compress inter-word spaces. The candidate counts too because admitting
       // it would make the line SEA. Other scripts retain the drawable 25%
       // trailing-space budget.
       return lineHasSea || sDictSea ? 0 : lineTotalTrailingW * SPACE_SHRINK_RATIO;
     };
-    const shrinkBudget = shrinkBudgetFor(
-      queue[0],
-      lineBiasBudget + biasBudgetContribution(s, trimmed),
-    );
 
     // Atomic glued group: when THIS segment starts a glued group (its followers
     // in the queue are `joinPrev` pieces — small-caps case-pieces of the SAME
@@ -3847,6 +3965,7 @@ export function layoutLines(
       let groupTrail = trailingSpaceW;
       let groupEnd = 0;
       let groupBiasBudget = lineBiasBudget;
+      const groupMeasurementRoutes = new Set(candidateMeasurementRoutes);
       // Keep one pending member so only the final member is trimmed. Committing
       // each previous member left-to-right preserves the former prospective-array
       // summation order exactly, without cloning or rescanning the current line.
@@ -3878,8 +3997,12 @@ export function layoutLines(
             // prefix (it may be empty — then "Roman" is effectively unglued and
             // wraps on its own) and end the atomic group here.
             const prefix = chars.slice(0, p).join('');
-            groupW += strAdvance(f, prefix);
-            if (prefix.length > 0) advanceGroupBias(f, prefix);
+            const prefixWidth = strAdvance(f, prefix);
+            groupW += prefixWidth;
+            if (prefix.length > 0) {
+              advanceGroupBias(f, prefix);
+              noteMeasurementRoute(groupMeasurementRoutes, f, prefix);
+            }
             groupTrail = 0;
             break;
           }
@@ -3888,6 +4011,7 @@ export function layoutLines(
         const fw = segAdvance(f);
         groupW += fw;
         advanceGroupBias(f);
+        noteMeasurementRoute(groupMeasurementRoutes, f);
         const ft = f.text.replace(/ +$/, '');
         groupTrail = f.text.endsWith(' ') ? fw - strAdvance(f, ft) : 0;
       }
@@ -3896,8 +4020,12 @@ export function layoutLines(
         pendingGroupBiasText.replace(/ +$/, ''),
       );
       if (
-        currentWidth + (groupW - groupTrail)
-        > availW() + shrinkBudgetFor(queue[groupEnd], groupBiasBudget)
+        currentWidth + fitWidthFor(groupW, groupTrail, queue[groupEnd])
+        > availW() + shrinkBudgetFor(
+          queue[groupEnd],
+          groupBiasBudget,
+          groupMeasurementRoutes,
+        )
       ) {
         flush(undefined, false, s.src);
       }
@@ -3928,6 +4056,7 @@ export function layoutLines(
       let chunkTrail = trailingSpaceW;
       let chunkEnd = 0;
       let chunkBias = lineBiasBudget + biasBudgetContribution(s, trimmed);
+      const chunkMeasurementRoutes = new Set(candidateMeasurementRoutes);
       if (!s.text.endsWith(' ')) {
         for (; chunkEnd < queue.length; chunkEnd++) {
           const f = queue[chunkEnd];
@@ -3939,17 +4068,28 @@ export function layoutLines(
           chunkW += fw;
           chunkTrail = ft.text.endsWith(' ') ? fw - strAdvance(ft, fTrim) : 0;
           chunkBias += biasBudgetContribution(ft, fTrim);
+          noteMeasurementRoute(chunkMeasurementRoutes, ft, fTrim);
           if (ft.text.endsWith(' ')) { chunkEnd++; break; } // a space ends the chunk
         }
       }
-      const chunkWForFit = chunkW - chunkTrail;
+      const chunkWForFit = fitWidthFor(chunkW, chunkTrail, queue[chunkEnd]);
       if (
-        currentWidth + chunkWForFit > availW() + shrinkBudgetFor(queue[chunkEnd], chunkBias) &&
+        currentWidth + chunkWForFit > availW() + shrinkBudgetFor(
+          queue[chunkEnd],
+          chunkBias,
+          chunkMeasurementRoutes,
+        ) &&
         chunkWForFit <= lineMaxWidth
       ) {
         flush(undefined, false, s.src);
       }
     }
+
+    const shrinkBudget = shrinkBudgetFor(
+      queue[0],
+      lineBiasBudget + biasBudgetContribution(s, trimmed),
+      candidateMeasurementRoutes,
+    );
 
     if (currentWidth + wForFit <= availW() + shrinkBudget) {
       // Fits on current line as-is
@@ -3969,7 +4109,17 @@ export function layoutLines(
       const prevKern = setSegKerning(s);
       let rawPrefix = '';
       try {
-        rawPrefix = available > 0 ? fitCJKPrefix(ctx, s.text, available, segmentCharacterGridDeltaPx(s, gridDeltaPx), charScaleFactor(s), charSpacingDeltaPx(s, scale), s.verticalRun === true, verticalGlyphMeasurement) : '';
+        rawPrefix = available > 0 ? fitCJKPrefix(
+          ctx,
+          s.text,
+          available,
+          segmentCharacterGridDeltaPx(s, gridDeltaPx),
+          charScaleFactor(s),
+          charSpacingDeltaPx(s, scale),
+          s.verticalRun === true,
+          verticalGlyphMeasurement,
+          (prefix) => strAdvance(s, prefix),
+        ) : '';
       } finally {
         restoreKerning(prevKern);
       }
@@ -4194,6 +4344,7 @@ export function layoutLines(
               charSpacingDeltaPx(s, scale),
               s.verticalRun === true,
               verticalGlyphMeasurement,
+              (prefix) => strAdvance(s, prefix),
             ).length
           : 0;
       } finally {

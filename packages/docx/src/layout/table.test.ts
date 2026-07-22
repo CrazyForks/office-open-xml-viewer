@@ -381,6 +381,42 @@ describe('retained table layout', () => {
     expect(continuation.blocks).toEqual([]);
   });
 
+  it('keeps collapsed boundary footprints out of row-track allocation', async () => {
+    const single = { widthPt: 1, color: '#000000', authoredStyle: 'single' };
+    const input = tableInput([
+      {
+        id: 'row-0', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+        heightPt: 8, heightRule: 'atLeast',
+        cells: [cellInput('cell-0', 0, [])],
+      },
+      {
+        id: 'row-1', source: { story: 'body', storyInstance: 'body', path: [0, 1] },
+        heightPt: 8, heightRule: 'atLeast',
+        cells: [cellInput('cell-1', 0, [])],
+      },
+      {
+        id: 'row-2', source: { story: 'body', storyInstance: 'body', path: [0, 2] },
+        heightPt: 8, heightRule: 'exact',
+        cells: [cellInput('cell-2', 0, [])],
+      },
+    ], [40], {
+      ...noBorderInputs,
+      top: single,
+      insideH: single,
+      bottom: single,
+    });
+    const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const { layout } = layoutTable(input, placement(), services);
+
+    // Collapsed rules are centred on row boundaries and contribute only to
+    // inkBounds. Authored atLeast and exact tracks both retain their 8pt flow
+    // allocation; border overhang must not change fit or pagination.
+    expect(layout.rows.map((row) => row.advancePt)).toEqual([8, 8, 8]);
+    expect(layout.advancePt).toBe(24);
+  });
+
   it('keeps explicit auto content-sized and adds Word bottom padding to exact heights', async () => {
     const content = retainedParagraph('content', [0, 0, 0], 8);
     const input = tableInput([
@@ -415,6 +451,31 @@ describe('retained table layout', () => {
       heightPt: layout.rows[1]?.cells[0]?.flowBounds.heightPt,
     });
   });
+
+  it.each(['center', 'bottom'] as const)(
+    'top-aligns overflowing exact-row content instead of moving its first line above the %s cell',
+    async (vAlign) => {
+      const overflow = retainedParagraph('overflow', [0, 0, 0], 30);
+      const input = tableInput([{
+        id: 'row-exact', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+        heightPt: 10, heightRule: 'exact',
+        cells: [cellInput('cell-0', 0, [overflow], { vAlign })],
+      }], [40]);
+      const services = createLayoutServices(document([]), { measureContext: measuringContext() });
+      const { layoutTable } = await import('./table.js');
+
+      const { layout } = layoutTable(input, placement(), services);
+      const cell = layout.rows[0]!.cells[0]!;
+
+      // Word keeps the beginning of an over-height story at the top inset and
+      // lets the exact-row clip discard its tail. A negative center/bottom
+      // offset would instead discard the first line, reversing source order.
+      expect(cell.blocks[0]?.offsetPt).toBe(0);
+      expect(cell.clipBounds).toEqual({
+        xPt: 10, yPt: 20, widthPt: 100, heightPt: 10,
+      });
+    },
+  );
 
   it('satisfies a merged interval only through the latest growable row', async () => {
     const input = tableInput([

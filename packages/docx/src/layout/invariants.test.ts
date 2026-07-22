@@ -863,6 +863,81 @@ describe('assertDocumentLayout', () => {
     }
   });
 
+  it('accepts a canonical fractional block extent and rejects a mutated retained height', () => {
+    const valid = regionLayout();
+    const page = valid.pages[0]!;
+    const region = page.sectionRegions![0]!;
+    const domain = page.flowDomains[0]!;
+    const blockStartPt = 70.9;
+    const blockEndPt = 477.5100298351378;
+    const canonicalHeightPt = blockEndPt - blockStartPt;
+    const layoutWithHeight = (heightPt: number): DocumentLayout => ({
+      ...valid,
+      pages: [{
+        ...page,
+        flowDomains: [{
+          ...domain,
+          logicalBounds: { ...domain.logicalBounds, yPt: blockStartPt, heightPt },
+          physicalBounds: { ...domain.physicalBounds, yPt: blockStartPt, heightPt },
+        }],
+        sectionRegions: [{ ...region, blockStartPt, blockEndPt }],
+      }],
+    });
+
+    expect(blockStartPt + canonicalHeightPt).not.toBe(blockEndPt);
+    expect(() => assertDocumentLayout(layoutWithHeight(canonicalHeightPt))).not.toThrow();
+    expectInvalidGeometry(() => assertDocumentLayout(layoutWithHeight(canonicalHeightPt + 0.001)));
+  });
+
+  it('accepts ordinary flow that ends at a canonical fractional region boundary', () => {
+    const valid = regionLayout();
+    const page = valid.pages[0]!;
+    const region = page.sectionRegions![0]!;
+    const domain = page.flowDomains[0]!;
+    const blockStartPt = 70.9;
+    const blockEndPt = 477.5100298351378;
+    const nodeStartPt = 415.4153032726378;
+    const nodeHeightPt = blockEndPt - nodeStartPt;
+    const flowBounds = rect(
+      domain.logicalBounds.xPt,
+      nodeStartPt,
+      domain.logicalBounds.widthPt,
+      nodeHeightPt,
+    );
+    const node: ParagraphLayout = {
+      ...paragraphWithCollisions([]),
+      id: 'fractional-region-end',
+      flowBounds,
+      inkBounds: flowBounds,
+      advancePt: nodeHeightPt,
+    };
+
+    expect(blockStartPt + (blockEndPt - blockStartPt)).not.toBe(blockEndPt);
+    expect(nodeStartPt + nodeHeightPt).toBe(blockEndPt);
+    expect(() => assertDocumentLayout({
+      ...valid,
+      pages: [{
+        ...page,
+        flowDomains: [{
+          ...domain,
+          logicalBounds: {
+            ...domain.logicalBounds,
+            yPt: blockStartPt,
+            heightPt: blockEndPt - blockStartPt,
+          },
+          physicalBounds: {
+            ...domain.physicalBounds,
+            yPt: blockStartPt,
+            heightPt: blockEndPt - blockStartPt,
+          },
+        }],
+        sectionRegions: [{ ...region, blockStartPt, blockEndPt }],
+        layers: buildPageLayers([{ layer: 'body', node, coordinateSpace: 'section-logical' }]),
+        readingOrder: [node.id],
+      }],
+    })).not.toThrow();
+  });
+
   it('rejects invalid region intervals and owned logical domain geometry', () => {
     const valid = regionLayout();
     const region = valid.pages[0]!.sectionRegions![0]!;

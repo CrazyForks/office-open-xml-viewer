@@ -34,6 +34,7 @@ describe('layout measurement capabilities', () => {
     const vertical = {
       fingerprint: 'vertical:test',
       measureRunInkExtra: (_text: string) => 0,
+      planRun: () => [],
     } satisfies VerticalGlyphMeasurementService;
 
     assertMeasurementSurface(context);

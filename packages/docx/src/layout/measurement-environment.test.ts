@@ -91,6 +91,10 @@ describe('layout measurement environment', () => {
       verticalCJK: true,
       verticalAllRotated: true,
       docEastAsian: true,
+      layoutSettings: {
+        characterSpacingControl: 'compressPunctuation',
+        compat: { useFeLayout: true },
+      },
       resolvedLocalFonts: {},
       layoutServices: { text: {}, images: {}, math: {} },
       verticalGlyphMeasurement: {
@@ -104,6 +108,8 @@ describe('layout measurement environment', () => {
       totalPages: 4,
       verticalCJK: false,
       documentHasEastAsianText: true,
+      useFeLayout: true,
+      characterSpacingControl: 'compressPunctuation',
     });
     const segments = segmentEnvironmentOf(state);
     expect(segments).not.toBe(state);

@@ -166,6 +166,9 @@ export type DrawingPaintCommand =
       resourceKey: string;
       resourceKind: PaintResourceKind;
       rect: LayoutRect;
+      /** Keep a non-text graphic upright after the enclosing section-logical
+       * frame is rotated into a vertical physical page. */
+      orientation?: 'upright-physical';
     }>;
 
 export interface DrawingLayout extends LayoutNodeBase {
@@ -276,10 +279,18 @@ export interface TextPaintOp {
   readonly offset: PointPt;
   readonly letterSpacingPt: number;
   readonly scaleX: number;
+  /** Acquisition-retained glyph-local block-axis scale. Used by
+   * `eastAsianLayout@vertCompress` so paint never remeasures font metrics. */
+  readonly scaleY?: number;
   readonly direction: TextDirection;
   readonly kerning: 'auto' | 'normal' | 'none';
   readonly writingMode: WritingMode;
-  readonly glyphOrientation?: 'sideways' | 'upright';
+  readonly glyphOrientation?: 'sideways' | 'upright' | 'rotate';
+  /** Acquisition proved that the selected face exposes this code point through
+   * OpenType `vert`; paint applies the feature without probing or measuring. */
+  readonly verticalFeature?: boolean;
+  /** Glyph-local offset retained from vertical-form ink/corner geometry. */
+  readonly glyphOffsetPt?: PointPt;
   /** `kashida` permits acquisition-inserted U+0640 glyphs over one source range. */
   readonly sourceMapping?: 'identity' | 'kashida';
 }
@@ -456,6 +467,9 @@ export interface ResourcePlacement {
   readonly range: TextRange;
   readonly resourceKey: string;
   readonly resourceKind: InlineResourceKind;
+  /** Keep a non-text graphic upright after the enclosing section-logical frame
+   * is rotated into a vertical physical page. Absent means flow-relative. */
+  readonly orientation?: 'upright-physical';
   readonly bounds: LayoutRect;
   readonly advancePt: number;
 }
@@ -522,6 +536,9 @@ export interface DrawingMLCollisionEntryPt {
   readonly bounds: LayoutRect;
   readonly horizontalOwnership: 'page' | 'host';
   readonly verticalOwnership: 'page' | 'host';
+  /** Authored wp:anchor z-order, when the collision came from a retained
+   * DrawingML anchor rather than a legacy compatibility float. */
+  readonly relativeHeight?: number;
 }
 
 export interface ParagraphFlowEvent {
@@ -997,6 +1014,9 @@ export interface LayoutServices {
   readonly text: TextLayoutService;
   readonly images: ImageMetadataService;
   readonly math: MathMetadataService;
+  /** Geometry-affecting vertical glyph acquisition capability. Kept separate
+   * from horizontal text shaping so each service fingerprint stays truthful. */
+  readonly verticalGlyphFingerprint?: string;
 }
 
 /** Plain, parser-independent input for shaping a numbering marker. The renderer

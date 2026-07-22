@@ -127,6 +127,38 @@ describe('paintTableLayout', () => {
     expect(operations.at(-1)).toBe('restore');
   });
 
+  it('projects an exact-cell clip without scale-dependent geometry expansion', async () => {
+    const operations: unknown[] = [];
+    const ctx = {
+      globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+      font: '', textAlign: 'left' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      save() {}, restore() {}, beginPath() {},
+      rect(x: number, y: number, width: number, height: number) {
+        operations.push(['rect', x, y, width, height]);
+      },
+      clip() {}, translate() {}, rotate() {}, scale() {}, fillRect() {}, strokeRect() {},
+      setLineDash() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, drawImage() {},
+      fillText() {},
+    } as unknown as PaintCanvas2D;
+    const node = tableLayout();
+    const clippedCell = {
+      ...node.rows[0]!.cells[0]!,
+      clipBounds: { xPt: 10, yPt: 20, widthPt: 40, heightPt: 16 },
+    };
+    const clipped = {
+      ...node,
+      rows: [{ ...node.rows[0]!, cells: [clippedCell, node.rows[0]!.cells[1]!] }],
+    } as TableLayout;
+    const { paintTableLayout } = await import('./canvas-table.js');
+
+    paintTableLayout(clipped, { ctx, scale: 2, dpr: 1, resources });
+
+    expect(operations).toContainEqual(['rect', 10, 20, 40, 16]);
+  });
+
   it('paints only retained backgrounds, child layouts, and resolved borders without measuring', async () => {
     const operations: unknown[] = [];
     const target = {

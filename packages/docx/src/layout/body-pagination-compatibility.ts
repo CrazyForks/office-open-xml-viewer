@@ -3,7 +3,12 @@ import type {
   BodyParagraphSourceInput,
 } from './body-layout-input.js';
 import { defineCompatibilityRule } from './compatibility.js';
-import type { ParagraphLayout } from './types.js';
+import type {
+  ParagraphLayout,
+  ParagraphPlacement,
+  RetainedGlyphPaintOperation,
+  WritingMode,
+} from './types.js';
 
 export const WORD_TERMINAL_COLUMN_BREAK = defineCompatibilityRule({
   id: 'word-terminal-column-break',
@@ -49,6 +54,127 @@ export const WORD_CONTEXTUAL_SPACING_PER_SIDE = defineCompatibilityRule({
   },
   description: 'For same-style adjacent paragraphs, contextualSpacing removes only the contribution owned by each toggling side; a current-only toggle preserves the previous paragraph spaceAfter contribution.',
 });
+
+export const WORD_EMPTY_KEEP_NEXT_BRIDGE = defineCompatibilityRule({
+  id: 'word-empty-keep-next-bridge',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/body-paginator-production.test.ts#bridges an undecorated empty keepNext mark through the following paragraph',
+  },
+  description: 'Word print pagination treats an undecorated empty keep-with-next paragraph as a bridge: the following paragraph is admitted completely with the first indivisible content of its successor.',
+});
+
+export const WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION = defineCompatibilityRule({
+  id: 'word-trailing-space-after-fit-admission',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/paragraph-pagination.test.ts#admits final visible content when only authored spaceAfter crosses the region edge',
+  },
+  description: 'Admit the final visible paragraph content at a flow-region edge when only its authored trailing space crosses the edge, while retaining that space for placement and paint.',
+});
+
+export const WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION = defineCompatibilityRule({
+  id: 'word-vertical-rl-final-line-baseline-admission',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-rl-final-line-baseline-admission',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'In a vertical-rl section, Word admits the final visible text column when its transformed baseline and retained visible ink remain inside the block-end edge even if the complete logical line box crosses that edge. The complete retained advance remains authoritative after admission.',
+});
+
+/** Compatibility projection governed by {@link WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION}. */
+export function wordFinalParagraphAdmissionExtentPt(input: Readonly<{
+  advancePt: number;
+  retainedSpaceAfterPt: number;
+  authoredSpaceAfterPt: number;
+}>): number {
+  return Math.max(
+    0,
+    input.advancePt - Math.min(input.authoredSpaceAfterPt, input.retainedSpaceAfterPt),
+  );
+}
+
+function glyphBlockEndPt(operation: RetainedGlyphPaintOperation): number {
+  return operation.origin.yPt + (operation.inkBounds?.descentPt ?? 0);
+}
+
+function placementVisibleBlockEndPt(placement: ParagraphPlacement): number | null {
+  if (placement.kind === 'resource' || placement.kind === 'drawing') {
+    return placement.bounds.yPt + placement.bounds.heightPt;
+  }
+  if (placement.kind === 'anchor-host') return null;
+  if (placement.kind === 'tab') {
+    const glyphs = placement.leaderGlyphs ?? [];
+    return glyphs.length > 0 ? Math.max(...glyphs.map(glyphBlockEndPt)) : null;
+  }
+  const paintOps = placement.paintOps ?? [];
+  const visibleEnds = paintOps.length > 0
+    ? paintOps.map((operation) => placement.origin.yPt + operation.offset.yPt)
+    : [placement.origin.yPt];
+  for (const decoration of placement.decorations) {
+    visibleEnds.push(decoration.from.yPt, decoration.to.yPt);
+    for (const point of decoration.path ?? []) visibleEnds.push(point.yPt);
+  }
+  for (const fragment of placement.highlightFragments ?? []) {
+    visibleEnds.push(fragment.rect.yPt + fragment.rect.heightPt);
+  }
+  for (const border of placement.runBorderFragments ?? []) {
+    visibleEnds.push(border.from.yPt, border.to.yPt);
+  }
+  for (const glyph of placement.emphasis?.glyphs ?? []) {
+    visibleEnds.push(glyphBlockEndPt(glyph));
+  }
+  for (const glyph of placement.ruby?.paintOps ?? []) {
+    visibleEnds.push(glyphBlockEndPt(glyph));
+  }
+  return Math.max(...visibleEnds);
+}
+
+/** Compatibility projection governed by
+ * {@link WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION}.
+ *
+ * The vertical-rl page transform is `physicalX = pageWidth - logicalY`.
+ * Therefore the retained final line's largest visible logical y-coordinate is
+ * its transformed physical trailing edge. The transform is isometric, so its
+ * origin-relative logical extent can be compared directly with the block
+ * extent without a scale-dependent tolerance. */
+export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
+  paragraph: ParagraphLayout;
+  writingMode: WritingMode;
+  logicalLineBoxExtentPt: number;
+}>): number {
+  if (input.writingMode !== 'vertical-rl') return input.logicalLineBoxExtentPt;
+  const finalLine = input.paragraph.lines.at(-1);
+  if (!finalLine) return input.logicalLineBoxExtentPt;
+  const visibleEnds = finalLine.placements.flatMap((placement) => {
+    const endPt = placementVisibleBlockEndPt(placement);
+    return endPt === null ? [] : [endPt];
+  });
+  if (visibleEnds.length === 0) return input.logicalLineBoxExtentPt;
+  if (input.paragraph.shading) return input.logicalLineBoxExtentPt;
+  for (const border of input.paragraph.borders) {
+    visibleEnds.push(border.from.yPt, border.to.yPt);
+  }
+  if (input.paragraph.paragraphMark && !input.paragraph.paragraphMark.hidden) {
+    const mark = input.paragraph.paragraphMark.bounds;
+    visibleEnds.push(mark.yPt + mark.heightPt);
+  }
+  const visibleExtentPt = Math.max(0,
+    Math.max(...visibleEnds) - input.paragraph.flowBounds.yPt);
+  return Math.min(input.logicalLineBoxExtentPt, visibleExtentPt);
+}
+
+/** Compatibility projection governed by {@link WORD_EMPTY_KEEP_NEXT_BRIDGE}. */
+export function wordEmptyKeepNextBridgesSuccessor(input: Readonly<{
+  keepNext: boolean;
+  inkless: boolean;
+  undecoratedMark: boolean;
+}>): boolean {
+  return input.keepNext && input.inkless && input.undecoratedMark;
+}
 
 /** Compatibility projection governed by {@link WORD_CONTINUOUS_SECTION_MARK_SPACING}. */
 export function wordContinuousSectionRole(

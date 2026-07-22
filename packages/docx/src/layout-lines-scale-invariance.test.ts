@@ -41,6 +41,7 @@ function layoutVerticalTestLines(
   verticalGlyphMeasurement: VerticalGlyphMeasurementService = Object.freeze({
     fingerprint: 'vertical:test-context',
     measureRunInkExtra: (text: string) => verticalRunInkExtraPx(ctx, text),
+    planRun: () => [],
   }),
 ): LayoutLine[] {
   return layoutLines(
@@ -275,6 +276,7 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
     const verticalGlyphMeasurement = Object.freeze({
       fingerprint: 'vertical:test-context',
       measureRunInkExtra: (value: string) => verticalRunInkExtraPx(ctx, value),
+      planRun: () => [],
     }) satisfies VerticalGlyphMeasurementService;
     layoutVerticalTestLines(
       ctx,

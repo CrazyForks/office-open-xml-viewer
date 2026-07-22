@@ -13,9 +13,9 @@
  * reverted because per-family metric tables cannot scale across the open set
  * of document fonts.
  *
- * Values in this module describe fonts, not samples. A family belongs here only
- * when its bias has a documented provenance; unknown families remain a strict
- * zero no-op so existing layout is byte-stable.
+ * The profile keys the selected Canvas family route. A family belongs here only
+ * when its bias has documented Word/PDF provenance; unknown families remain a
+ * strict zero no-op so existing layout is byte-stable.
  */
 
 interface FontBiasProfile {
@@ -26,21 +26,12 @@ interface FontBiasProfile {
 /**
  * Canvas-vs-Word horizontal advance bias in em per glyph. This is a line-fit
  * allowance for the gap between Canvas `measureText` advances and Word's own
- * layout advances for the SAME face, not a glyph transform. The allowance is
- * backend-agnostic by design; the committed Georgia value below is calibrated
- * on the Chromium VRT.
- *
- * Georgia: the tracked public demo's justified body face (issue #794). The
- * The Chromium VRT's Canvas-vs-Word accumulated excess measures at roughly
- * 0.1–0.3 px per glyph
- * at the demo's 10–11 px body em — an em-fraction band of ~0.009–0.028. The
- * committed value is fixed INSIDE that measured band by the public demo's
- * Word-reference wrap positions (demo/sample-1 fidelity ratchet, scanned at
- * 0.009/0.0105/0.0115/0.012/0.013/0.02): 0.009 under-admits words Word keeps
- * (pages 4–5 regress) and 0.012+ over-admits words Word wraps (pages 3/5);
- * 0.0105 reproduces every Word-verified wrap. Times New Roman (measures
- * ~0.03 px/glyph, effectively zero), CSS generics, and unknown families
- * intentionally fall through to zero.
+ * layout advances for the selected family route, not a glyph transform. The
+ * allowance is backend-agnostic by design. The Georgia profile is applied only
+ * to segments routed through Georgia; per-character OOXML font-slot routing
+ * splits East Asian punctuation into its actual family before this lookup.
+ * The value remains the public Word/PDF-calibrated Chromium allowance from the
+ * pre-refactor renderer.
  */
 const FONT_BIAS_PROFILES: ReadonlyArray<FontBiasProfile> = [
   {

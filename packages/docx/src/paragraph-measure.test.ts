@@ -334,6 +334,28 @@ describe('measureParagraph', () => {
     expect(paragraphOnlyMetrics.contentEndYPt).toBe(22);
   });
 
+  it('applies useFELayout grid-cell allocation to an empty paragraph mark', () => {
+    const tallMeasurer: TextMeasurer = {
+      context: makeContext(0.9, 0.2),
+      fontFamilyClasses: {},
+    };
+    const result = measureParagraph(
+      paragraph({ defaultFontSize: 20 }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt: 20 },
+        spaceBeforePt: 0,
+      }),
+      placement({ startYPt: 0 }),
+      tallMeasurer,
+      environment({ documentHasEastAsianText: false, useFeLayout: true }),
+    );
+
+    // Office compatibility evidence: useFELayout makes the content-less mark
+    // participate in the same Far East whole-cell allocation as a CJK mark.
+    expect(result.markOnly).toBe(true);
+    expect(result.contentEndYPt).toBe(40);
+  });
+
   it('matches observed Word spacing for an explicit atLeast line on a body grid', () => {
     const designRatio = 3269 / 2048;
     const designMeasurer: TextMeasurer = {

@@ -1,4 +1,4 @@
-import type { BodyElement, NumberingInfo, ShapeRun } from '../types.js';
+import type { BodyElement, NumberingInfo, ShapeRun, TabStop } from '../types.js';
 import type {
   DeepReadonly,
   NumberingMarkerShapeInput,
@@ -50,11 +50,7 @@ export interface NormalizedTextBoxParagraphInput {
   readonly indentRightPt: number;
   readonly indentFirstPt: number;
   readonly lineSpacing: Readonly<{ value: number; rule: 'auto' | 'exact' | 'atLeast'; explicit?: boolean }> | null;
-  readonly tabStops: readonly Readonly<{
-    pos: number;
-    alignment: 'left' | 'center' | 'right' | 'decimal' | 'bar' | 'clear';
-    leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
-  }>[];
+  readonly tabStops: readonly Readonly<TabStop>[];
   readonly bidi?: boolean;
   readonly contextualSpacing: boolean;
   readonly styleId?: string | null;

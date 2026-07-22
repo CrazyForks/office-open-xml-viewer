@@ -61,6 +61,36 @@ function recordingContext(): { context: CanvasPaintContext; operations: string[]
 }
 
 describe('retained DrawingML shape painting', () => {
+  it('counter-rotates an upright physical image inside a vertical section frame', () => {
+    const { context, operations } = recordingContext();
+    const bounds = { xPt: 10, yPt: 20, widthPt: 100, heightPt: 40 };
+    let paintedBounds: typeof bounds | undefined;
+    const resourceContext: CanvasPaintContext = {
+      ...context,
+      resources: {
+        paint(_resourceKey, _kind, retainedBounds) {
+          operations.push('paintResource');
+          paintedBounds = retainedBounds;
+        },
+      },
+    };
+    const drawing = {
+      kind: 'drawing', id: 'upright-image',
+      source: { story: 'body', storyInstance: 'body', path: [0] },
+      flowDomainId: 'body', flowBounds: bounds, inkBounds: bounds,
+      advancePt: 0, ordinaryFlow: false,
+      commands: [{
+        kind: 'resource', resourceKind: 'image', resourceKey: 'image:body:0',
+        rect: bounds, orientation: 'upright-physical',
+      }],
+    } as DrawingLayout;
+
+    paintDrawingLayout(drawing, resourceContext);
+
+    expect(operations).toEqual(['save', 'translate', 'rotate', 'paintResource', 'restore']);
+    expect(paintedBounds).toEqual({ xPt: -20, yPt: -50, widthPt: 40, heightPt: 100 });
+  });
+
   it('dispatches explicit shape plans to the shared point-space painter', () => {
     const { context, operations } = recordingContext();
 

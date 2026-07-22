@@ -326,3 +326,91 @@ describe('table retained marker acquisition', () => {
     expect(markerShapes).toBe(1);
   });
 });
+
+describe('page-owned story table width', () => {
+  it.each([
+    ['header', 'headers'],
+    ['footer', 'footers'],
+  ] as const)('keeps a negatively indented fixed %s table at its authored page-relative width', (
+    story,
+    collection,
+  ) => {
+    const storyTable = {
+      ...table([
+        row([
+          cell([paragraph([textRun('L')]) as CellElement]),
+          cell([paragraph([textRun('R')], { alignment: 'center' }) as CellElement]),
+        ]),
+      ], [150, 60], 'fixed'),
+      tblInd: -10,
+      widthPt: 210,
+    } as DocTable;
+    const base = model([paragraph([textRun('body')]) as BodyElement]);
+    const document = {
+      ...base,
+      [collection]: {
+        default: { body: [storyTable as BodyElement] },
+        first: null,
+        even: null,
+      },
+    } as DocxDocumentModel;
+
+    const layout = layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: measuringContext() }),
+      { currentDateMs: 0 },
+    );
+    const retained = layout.pages[0]?.layers[story].find((node) => node.kind === 'table');
+
+    expect(retained).toBeDefined();
+    if (retained?.kind !== 'table') return;
+    expect(retained.flowBounds).toMatchObject({ xPt: 0, widthPt: 210 });
+    expect(retained.columnWidthsPt).toEqual([150, 60]);
+    expect(retained.rows[0]?.cells[1]?.flowBounds).toMatchObject({ xPt: 150, widthPt: 60 });
+  });
+
+  it('keeps a bidi fixed header table right-aligned while its negative leading indent reaches the page edge', () => {
+    const storyTable = {
+      ...table([
+        row([
+          cell([paragraph([]) as CellElement]),
+          cell([paragraph([textRun('R')], { alignment: 'center' }) as CellElement]),
+        ]),
+      ], [150, 60], 'fixed'),
+      borders: {
+        ...borders,
+        bottom: { width: 1, color: '#000000', style: 'single' },
+      },
+      tblInd: -10,
+      widthPt: 210,
+      bidiVisual: true,
+    } as DocTable;
+    const base = model([paragraph([textRun('body')]) as BodyElement]);
+    const document = {
+      ...base,
+      headers: {
+        default: { body: [storyTable as BodyElement] },
+        first: null,
+        even: null,
+      },
+    } as DocxDocumentModel;
+
+    const layout = layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: measuringContext() }),
+      { currentDateMs: 0 },
+    );
+    const retained = layout.pages[0]?.layers.header.find((node) => node.kind === 'table');
+
+    expect(retained).toBeDefined();
+    if (retained?.kind !== 'table') return;
+    expect(retained.flowBounds).toMatchObject({ xPt: 10, widthPt: 210 });
+    expect(retained.columnWidthsPt).toEqual([150, 60]);
+    expect(retained.borders.filter((border) => border.edge === 'bottom')).toEqual([
+      expect.objectContaining({
+        from: { xPt: 10, yPt: expect.any(Number) },
+        to: { xPt: 220, yPt: expect.any(Number) },
+      }),
+    ]);
+  });
+});

@@ -54,7 +54,7 @@ describe('ECMA-376 §17.18.87 table column solver', () => {
     }))).toEqual([35, 15]);
   });
 
-  it('proportionally fits fixed tracks to the physical container boundary', () => {
+  it('proportionally fits fixed tracks to the caller-projected physical boundary', () => {
     expect(resolveTableColumnWidths(input({
       availableWidthPt: 75,
       gridWidthsPt: [70, 30],

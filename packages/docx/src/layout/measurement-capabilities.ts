@@ -17,4 +17,21 @@ export interface MeasurementTextContext {
 export interface VerticalGlyphMeasurementService {
   readonly fingerprint: string;
   measureRunInkExtra(text: string): number;
+  planRun(input: Readonly<{
+    text: string;
+    font: string;
+    fontKerning: CanvasFontKerning;
+    fontSizePt: number;
+    letterSpacingPt: number;
+    charScale: number;
+    growTrRotateInk: boolean;
+  }>): readonly Readonly<{
+    range: Readonly<{ start: number; end: number }>;
+    text: string;
+    orientation: 'upright' | 'rotate' | 'sideways';
+    originPt: number;
+    advancePt: number;
+    drawOffsetPt: Readonly<{ xPt: number; yPt: number }>;
+    verticalFeature: boolean;
+  }>[];
 }

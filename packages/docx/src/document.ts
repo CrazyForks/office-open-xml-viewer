@@ -51,8 +51,10 @@ export interface LoadOptions extends CoreLoadOptions {
    * 'main' (default): parse in a worker, render on the main thread (current
    * behaviour). 'worker': parse, paginate AND render inside the worker; use
    * {@link DocxDocument.renderPageToBitmap} and paint the returned ImageBitmap
-   * via an `ImageBitmapRenderingContext`. Requires OffscreenCanvas. The math
-   * engine is unavailable in this mode (equations are skipped).
+   * via an `ImageBitmapRenderingContext`. Requires OffscreenCanvas. Documents
+   * needing DOM-only OpenType vertical glyph selection transparently continue
+   * in main mode; {@link DocxDocument.mode} reports the effective mode. The math
+   * engine is unavailable only when the effective mode remains worker.
    */
   mode?: 'main' | 'worker';
 }
@@ -161,11 +163,6 @@ export class DocxDocument {
         : new InlineWorker();
     const doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
     try {
-      if (opts.math && mode === 'worker') {
-        console.warn(
-          "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
-        );
-      }
       // In worker mode the worker preloads fonts before paginating (pagination
       // measures text), so the flag is forwarded; in main mode fonts are loaded
       // here after parse, before the lazy first pagination.
@@ -175,7 +172,17 @@ export class DocxDocument {
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
       );
-      if (mode === 'main' && opts.useGoogleFonts && doc._document) {
+      if (mode === 'worker' && doc._mode === 'main') {
+        console.warn(
+          "[ooxml] mode: 'worker' fell back to main-thread rendering because this document requires DOM OpenType vertical glyph selection.",
+        );
+      }
+      if (opts.math && doc._mode === 'worker') {
+        console.warn(
+          "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+        );
+      }
+      if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
         doc._googleFontFaces = await preloadGoogleFonts(
           docxFontPreloadNames(doc._document),
           DOCX_GOOGLE_FONTS,
@@ -185,11 +192,11 @@ export class DocxDocument {
       // the worker's zip-entry extraction) before the lazy first pagination, so
       // text measures/draws with the authored typeface. Worker mode does this
       // inside the worker (before it paginates); here it runs on the main thread.
-      if (mode === 'main' && doc._document?.embeddedFonts?.length) {
+      if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
         doc._embeddedFontFaces = await loadEmbeddedFonts(doc._document, (p) => doc.getFontBytes(p));
       }
       let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
-      if (mode === 'main' && doc._document) {
+      if (doc._mode === 'main' && doc._document) {
         localMetrics = await loadDocxLocalFontMetrics(doc._document);
         doc._localMetricFontFaces = localMetrics.faces;
       }
@@ -198,10 +205,10 @@ export class DocxDocument {
       // equations are skipped (and the engine asset is never bundled). Math is
       // main-mode only (the engine needs a DOM, absent in workers).
       let preparedMath;
-      if (mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
+      if (doc._mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
         preparedMath = await prepareMathRuns(doc._document, opts.math);
       }
-      if (mode === 'main' && doc._document) {
+      if (doc._mode === 'main' && doc._document) {
         const runtime = documentLayoutRuntimeOf(doc);
         runtime.services = createLayoutServices(doc._document, {
           localMetrics: localMetrics?.metrics,
@@ -243,7 +250,16 @@ export class DocxDocument {
       { timeoutMs },
     );
     if (this._mode === 'worker') {
-      this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
+      if (res.type === 'mainThreadVerticalFallback') {
+        const parsed = JSON.parse(
+          new TextDecoder().decode(new Uint8Array(res.documentJson)),
+        ) as DocxDocumentModel;
+        this._document = normalizeInternalDocumentModel(parsed).document;
+        this._meta = null;
+        this._mode = 'main';
+      } else {
+        this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
+      }
     } else {
       // The model arrives as transferred UTF-8 JSON bytes; decode + parse once
       // here (the only serialization on the parse-mode path).

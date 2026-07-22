@@ -1,5 +1,6 @@
 import { symbolFontToUnicode } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
+import { wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
 import type { NumberingMarkerShapeInput } from './types.js';
 
@@ -116,6 +117,21 @@ export function shapeNumberingMarkerText(
   return { shape, fontSizePx: input.fontSizePt * scale };
 }
 
+/** Resolve the tab synthesized by w:suff="tab". ST_TabJc `num` identifies the
+ * list tab between the marker and paragraph contents. The coincident-stop branch
+ * is governed by WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB; ordinary tab
+ * characters retain the strictly-forward {@link nextTabStop} rule. */
+function numberingSuffixTabStop(
+  currentMarginPt: number,
+  tabStops: readonly TabStop[],
+  defaultTabPt: number,
+): Readonly<{ pos: number }> | null {
+  const coincidentListStop = tabStops.find((stop) =>
+    wordNumberingSuffixAcceptsCoincidentListTab(currentMarginPt, stop));
+  return coincidentListStop
+    ?? nextTabStop(currentMarginPt, [...tabStops], defaultTabPt);
+}
+
 /** Resolve the marker and suffix once in document points. The body offset is a
  * measurement input, not paint-time decoration: line breaking and retained
  * placement must consume this same value or a hanging list acquires a different
@@ -164,9 +180,9 @@ export function resolveNumberingMarkerGeometry(
   } else if (suffix === 'tab') {
     bodyOffsetPt = 0;
     if (markerEndPt > 0) {
-      const stop = nextTabStop(
+      const stop = numberingSuffixTabStop(
         input.physicalIndentLeftPt + markerEndPt,
-        [...input.tabStops],
+        input.tabStops,
         input.defaultTabPt,
       );
       bodyOffsetPt = stop ? stop.pos - input.physicalIndentLeftPt : markerEndPt;

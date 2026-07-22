@@ -171,6 +171,39 @@ function metadataForDefaultLayout(
 }
 
 describe('render worker canonical layout parity', () => {
+  it('switches the effective mode to main when the worker returns a vertical model', async () => {
+    const model = realModel();
+    model.section.textDirection = 'tbRl';
+    const bytes = new TextEncoder().encode(JSON.stringify(model));
+    const documentJson = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    const requests: RenderWorkerRequest[] = [];
+    const document = Object.create(DocxDocument.prototype) as DocxDocument;
+    Object.assign(document, {
+      _mode: 'worker',
+      _document: null,
+      _meta: null,
+      _bridge: {
+        request: async (factory: (id: number) => RenderWorkerRequest) => {
+          requests.push(factory(7));
+          return { type: 'mainThreadVerticalFallback', id: 7, documentJson };
+        },
+      },
+    });
+    attachDocumentLayoutRuntime(document, 10);
+
+    await (document as unknown as {
+      _parse(buffer: ArrayBuffer, max?: number, google?: boolean): Promise<void>;
+    })._parse(new ArrayBuffer(1), undefined, false);
+
+    expect(requests[0]?.type).toBe('parse');
+    expect(document.mode).toBe('main');
+    expect((document as unknown as { _meta: unknown })._meta).toBeNull();
+    expect(document.document.section.textDirection).toBe('tbRl');
+  });
+
   it('dispatches variant page validation to the worker for render and collect', async () => {
     const requests: RenderWorkerRequest[] = [];
     const bitmap = {} as ImageBitmap;
@@ -442,6 +475,9 @@ describe('render worker canonical layout parity', () => {
       type: 'parsedMeta', id: 1,
       meta: { pageCount: 1, comments: [], footnotes: [], endnotes: [], pageSizes: [], bookmarkPages: [] },
     } satisfies RenderWorkerResponse;
+    const verticalFallback = {
+      type: 'mainThreadVerticalFallback', id: 1, documentJson: new ArrayBuffer(0),
+    } satisfies RenderWorkerResponse;
     const pageRendered = {
       type: 'pageRendered', id: 2, bitmap: {} as ImageBitmap, runs: [],
     } satisfies RenderWorkerResponse;
@@ -464,6 +500,7 @@ describe('render worker canonical layout parity', () => {
     expect(Object.keys(render).sort()).toEqual(['id', 'opts', 'pageIndex', 'type']);
     expect(Object.keys(collect).sort()).toEqual(['id', 'opts', 'pageIndex', 'type']);
     expect(Object.keys(parsed).sort()).toEqual(['id', 'meta', 'type']);
+    expect(Object.keys(verticalFallback).sort()).toEqual(['documentJson', 'id', 'type']);
     expect(Object.keys(pageRendered).sort()).toEqual(['bitmap', 'id', 'runs', 'type']);
     expect(Object.keys(runsCollected).sort()).toEqual(['id', 'runs', 'type']);
     expect(Object.keys(error).sort()).toEqual([

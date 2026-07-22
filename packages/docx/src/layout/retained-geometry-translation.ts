@@ -153,7 +153,9 @@ export function translateLine(
   drawingTranslations?: ReadonlyMap<LayoutNodeId, LayoutTranslation>,
 ): LineLayout {
   return {
-    ...line, bounds: translateRect(line.bounds, delta), baselinePt: line.baselinePt + delta.yPt,
+    ...line,
+    bounds: translateRect(line.bounds, delta),
+    baselinePt: line.baselinePt + delta.yPt,
     placements: line.placements.map((placement) => translatePlacement(placement, delta, drawingTranslations)),
   };
 }

@@ -171,8 +171,22 @@ export type ParagraphAcquisitionRun =
   | ParagraphShapeRun
   | ParagraphMathRun;
 
+/** Immutable parser-boundary event describing one edge of a complex field's
+ * cached result interval (ECMA-376 §17.16). The interval is structural only:
+ * it does not add a flow segment or affect measurement until a dedicated field
+ * compatibility rule explicitly consumes it. */
+export interface ComplexFieldBoundaryInput {
+  readonly occurrenceKey: string;
+  readonly boundary: 'start' | 'end';
+  readonly runIndex: number;
+  readonly fieldType: 'ref' | 'pageRef' | 'other';
+  readonly instruction: string;
+  readonly hyperlinkAnchor?: string;
+}
+
 export type ParagraphAcquisitionInput = Omit<DocParagraph, 'runs'> & Readonly<{
   runs: ParagraphAcquisitionRun[];
+  complexFieldBoundaries?: readonly ComplexFieldBoundaryInput[];
   numberingMarkerShapeInput?: NumberingMarkerShapeInput;
   paragraphMarkShapeInput?: NumberingMarkerShapeInput;
 }>;
@@ -241,6 +255,7 @@ export interface GlyphMeasureRequest {
 }
 
 export interface GlyphMeasurement {
+  /** May be negative when authored character spacing intentionally overlaps glyphs. */
   readonly advancePt: number;
   readonly ascentPt: number;
   readonly descentPt: number;

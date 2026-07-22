@@ -3,7 +3,7 @@
  *
  * Layer 1 — ACCEPTANCE, font-present ground-truth parity: on a host that has a
  * document's fonts, wrap positions must match Word. This layer is enforced by
- * the demo/sample-1 fidelity ratchet (Playwright VRT; Georgia bias) and the
+ * the demo/sample-1 fidelity ratchet (Playwright VRT) and the
  * synthetic Word-verified §17.18.44 gates in
  * packages/docx/src/justify-shrink-overshoot.test.ts. It also covers behavior
  * that survives substitution, such as the non-justified drawable trailing-space
@@ -187,9 +187,14 @@ describe.skipIf(!gate)('issue #794 — per-font advance-bias probes', () => {
   // draw, so it cannot be line-counted here; the synthetic gate +
   // demo/sample-1 VRT ratchet are its acceptance.
 
-  it.skipIf(!have(10))('ACCEPTANCE: sample-10 p1 centred title stays on one line', async () => {
+  it.skipIf(!have(10))('ACCEPTANCE: sample-10 p1 centred title stays on one line', async (context) => {
     const lines = await pageLines(10, 0, 595);
     const norm = (l: string) => l.replace(/\s+/g, '');
+    const title = '横幹連合コンファレンスサンプル原稿';
+    if (!norm(lines.join('')).includes(title)) {
+      context.skip('the installed local fixture is not the centred-title corpus');
+      return;
+    }
     // Word truth (sample-10.pdf p1): the centred main title is one line:
     //   「第 11 回横幹連合コンファレンスサンプル原稿」
     // A substituted MS Mincho over-measures the CJK title by ~+5.96px; Word keeps
@@ -197,7 +202,7 @@ describe.skipIf(!gate)('issue #794 — per-font advance-bias probes', () => {
     // trailing-space shrink budget, which absorbs the overflow — this pin guards
     // that retained path. Historical failure mode: the tail 「サンプル原稿」
     // wraps to a second line.
-    const titleLine = lines.find((l) => norm(l).includes('横幹連合コンファレンスサンプル原稿'));
+    const titleLine = lines.find((l) => norm(l).includes(title));
     // eslint-disable-next-line no-console
     console.log(`[#794 C3] sample-10 title one-line? ${!!titleLine}\n` +
       lines.slice(0, 8).map((l, i) => `  ${i}: ${JSON.stringify(l)}`).join('\n'));

@@ -126,6 +126,7 @@ export type BodyMeasurementContext = Readonly<Pick<
   | 'ctx'
   | 'verticalGlyphMeasurement'
   | 'acquisitionInputs'
+  | 'contentX'
   | 'pageH'
   | 'pageWidth'
   | 'pageIndex'

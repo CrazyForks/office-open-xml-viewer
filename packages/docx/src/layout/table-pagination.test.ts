@@ -826,6 +826,70 @@ describe('retained table pagination', () => {
     expect(second.nextCursor).toBeNull();
   });
 
+  it('advances past zero-line cell paragraphs and keeps the following row after a short continuation', () => {
+    const template = row(0, 60);
+    const makeCell = (
+      id: string,
+      columnStart: number,
+      blocks: TableRowLayoutInput['cells'][number]['blocks'],
+    ) => ({
+      ...template.cells[0]!,
+      id,
+      columnStart,
+      blocks,
+    });
+    const source = acquisition([{
+      ...template,
+      cells: [
+        makeCell('deferred-cell-a', 0, [
+          { layout: paragraph('zero-line-a', []), sourceBlockIndex: 0 },
+          { layout: paragraph('deferred-a', [60]), sourceBlockIndex: 1 },
+        ]),
+        makeCell('deferred-cell-b', 1, [
+          { layout: paragraph('zero-line-b', []), sourceBlockIndex: 0 },
+          { layout: paragraph('deferred-b', [60]), sourceBlockIndex: 1 },
+        ]),
+        makeCell('completed-sibling', 2, Array.from({ length: 5 }, (_, index) => ({
+          layout: paragraph(`sibling-${index}`, [10]),
+          sourceBlockIndex: index,
+        }))),
+      ],
+    }, row(1, 20)]);
+
+    const first = take(source, 50);
+    const second = take(source, 100, first.nextCursor!);
+
+    expect(first.fragment?.advancePt).toBe(50);
+    expect(first.nextCursor).toMatchObject({
+      rowIndex: 0,
+      rowFragmentIndex: 1,
+      cells: [
+        { blockIndex: 1 },
+        { blockIndex: 1 },
+        { blockIndex: 5 },
+      ],
+    });
+    expect(second.fragment?.advancePt).toBe(80);
+    expect(second.fragment?.rows.map((item) => item.logicalRowIndex)).toEqual([0, 1]);
+    expect(second.nextCursor).toBeNull();
+    expect(second.requiresFreshPage).toBe(false);
+  });
+
+  it('fails fast when no block boundary can advance on a fresh page', () => {
+    const retained = paragraph('unplaceable-zero-line', []);
+    const unplaceable = {
+      ...retained,
+      flowBounds: { ...retained.flowBounds, heightPt: 120 },
+      inkBounds: { ...retained.inkBounds, heightPt: 120 },
+      advancePt: 120,
+    };
+    const source = acquisition([row(0, 120, { paragraph: unplaceable })]);
+
+    expect(() => take(source, 100, startTableFragmentCursor(), {
+      freshPageHeightPt: 100,
+    })).toThrow('Table pagination cannot advance from a fresh page');
+  });
+
   it('requests a fresh page for an unbreakable row that fits the fresh band', () => {
     const source = acquisition([row(0, 70, { cantSplit: true })]);
     const cursor = startTableFragmentCursor();

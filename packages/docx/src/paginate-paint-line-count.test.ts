@@ -129,12 +129,15 @@ describe('paginate/paint line-count divergence — paint never indexes a phantom
   it('preserves page count, painted line counts, and continuation top positions', async () => {
     const geometry = await paintedParagraphGeometry();
 
+    // Word admits the final visible line at a region edge without requiring the
+    // paragraph's authored trailing spaceAfter to fit. The retained line split
+    // therefore completes on page 2 while paint still consumes every one of the
+    // 180 canonical line placements exactly once.
     expect(geometry).toEqual({
-      pageCount: 3,
+      pageCount: 2,
       paintedPages: [
         { lineCount: 84, topYPx: 24.74951171875 },
-        { lineCount: 84, topYPx: 18.74951171875 },
-        { lineCount: 12, topYPx: 18.74951171875 },
+        { lineCount: 96, topYPx: 18.74951171875 },
       ],
     });
   });

@@ -29,7 +29,11 @@ import type {
 } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
 import { anchorOccurrenceKey, mathResourceKey } from './layout/source-key.js';
-import type { TextFontSlotPresence, TextFontSlots } from './layout/text.js';
+import type {
+  ComplexFieldBoundaryInput,
+  TextFontSlotPresence,
+  TextFontSlots,
+} from './layout/text.js';
 import type { ParagraphAcquisitionInput, ParagraphAcquisitionRun } from './layout/text.js';
 import type { AnchorAcquisitionInput, InternalAnchorRunWire } from './layout/anchor-input.js';
 import {
@@ -116,6 +120,16 @@ export interface InternalNumberingInfo extends NumberingInfo {
 export interface InternalDocParagraph extends DocParagraph {
   numbering: InternalNumberingInfo | null;
   paragraphMarkFontFacts?: InternalRunFontFacts;
+  readonly __complexFieldBoundaries?: readonly InternalComplexFieldBoundaryWire[];
+}
+
+export interface InternalComplexFieldBoundaryWire {
+  readonly occurrenceId: number;
+  readonly boundary: 'start' | 'end';
+  readonly runIndex: number;
+  readonly fieldType: 'ref' | 'pageRef' | 'other';
+  readonly instruction: string;
+  readonly hyperlinkAnchor?: string;
 }
 
 type TextOnlyMetadata = Pick<
@@ -826,6 +840,9 @@ function bodyLayoutSequenceInput(
         break: element.type === 'pageBreak' ? 'page' as const : 'column' as const,
         ...(element.type === 'pageBreak' && element.parity !== undefined
           ? { parity: element.parity }
+          : {}),
+        ...(element.type === 'pageBreak' && element.sameParagraphAsPrevious === true
+          ? { sameSourceParagraphAsPrevious: true }
           : {}),
       });
     }
@@ -1562,11 +1579,31 @@ export function paragraphAcquisitionInput(
     layoutLines: _layoutLines,
     lineSlice: _lineSlice,
     __paragraphTypographyAcquisition: _privateParagraphTypography,
+    __complexFieldBoundaries: _privateComplexFieldBoundaries,
     ...semanticParagraph
   } = paragraph as DocParagraph & Record<string, unknown> & {
     __paragraphTypographyAcquisition?: InternalParagraphTypographyWire;
+    __complexFieldBoundaries?: readonly InternalComplexFieldBoundaryWire[];
   };
   const typographyInput = paragraphTypographyAcquisitionInput(paragraph);
+  const complexFieldBoundaries = (
+    paragraph as InternalDocParagraph
+  ).__complexFieldBoundaries?.map((boundary): ComplexFieldBoundaryInput => ({
+    occurrenceKey: [
+      'complex-field',
+      source.story,
+      source.storyInstance,
+      source.path.slice(0, -1).join('.'),
+      String(boundary.occurrenceId),
+    ].join(':'),
+    boundary: boundary.boundary,
+    runIndex: boundary.runIndex,
+    fieldType: boundary.fieldType,
+    instruction: boundary.instruction,
+    ...(boundary.hyperlinkAnchor === undefined
+      ? {}
+      : { hyperlinkAnchor: boundary.hyperlinkAnchor }),
+  }));
   const snapshot = structuredClone(semanticParagraph) as DocParagraph;
   const runs = snapshot.runs.map((run, runIndex): ParagraphAcquisitionRun => {
     if (run.type === 'math') {
@@ -1641,6 +1678,9 @@ export function paragraphAcquisitionInput(
   return deepFreezePlainData({
     ...snapshot,
     runs: runs as ParagraphAcquisitionRun[],
+    ...(complexFieldBoundaries?.length
+      ? { complexFieldBoundaries }
+      : {}),
     numberingMarkerShapeInput: paragraph.numbering
       ? numberingMarkerShapeInput(
           paragraph.numbering,
@@ -1659,19 +1699,16 @@ export function paragraphAcquisitionInput(
  * contains a math run is shallow-cloned; the caller's parser model is untouched. */
 export function normalizeInternalDocumentModel(doc: DocxDocumentModel): NormalizedDocumentInput {
   const occurrences: MathOccurrence[] = [];
-  const normalizeBody = (
-    body: BodyElement[],
+  const normalizeElement = (
+    element: BodyElement,
     story: SourceRef['story'],
     storyInstance: string,
-    prefix: number[] = [],
-  ): BodyElement[] => {
-    let changed = false;
-    const normalized = body.map((element, elementIndex): BodyElement => {
-      const path = [...prefix, elementIndex];
-      if (element.type === 'paragraph') {
-        let runsChanged = false;
-        const runs = element.runs.map((run, runIndex): DocRun => {
-          if (run.type !== 'math') return run;
+    path: number[],
+  ): BodyElement => {
+    if (element.type === 'paragraph') {
+      let runsChanged = false;
+      const runs = element.runs.map((run, runIndex): DocRun => {
+        if (run.type === 'math') {
           runsChanged = true;
           const source: SourceRef = Object.freeze({
             story,
@@ -1686,55 +1723,94 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
             resourceKey,
           }));
           return Object.freeze({ ...run, source, resourceKey }) as InternalMathRun;
-        });
-        if (!runsChanged) return element;
-        changed = true;
-        return { ...element, runs };
-      }
-      if (element.type === 'table') {
-        let tableChanged = false;
-        const rows = element.rows.map((row, rowIndex) => {
-          let rowChanged = false;
-          const cells = row.cells.map((cell, cellIndex) => {
-            const content = normalizeBody(
-              cell.content as BodyElement[], story, storyInstance, [...path, rowIndex, cellIndex],
-            );
-            if (content === cell.content) return cell;
-            rowChanged = true;
-            return { ...cell, content: content as typeof cell.content };
-          });
-          if (!rowChanged) return row;
-          tableChanged = true;
-          return { ...row, cells };
-        });
-        if (!tableChanged) return element;
-        changed = true;
-        return { ...element, rows } as BodyElement;
-      }
-      if (element.type !== 'sectionBreak') return element;
-      let sectionChanged = false;
-      const normalizeParts = (
-        parts: HeadersFooters | undefined,
-        partStory: 'header' | 'footer',
-      ): HeadersFooters | undefined => {
-        if (!parts) return parts;
-        let result = parts;
-        for (const kind of ['default', 'first', 'even'] as const) {
-          const part = parts[kind];
-          if (!part) continue;
-          const nextBody = normalizeBody(part.body, partStory, `section:${elementIndex}:${kind}`);
-          if (nextBody === part.body) continue;
-          if (result === parts) result = { ...parts };
-          result[kind] = { ...part, body: nextBody };
-          sectionChanged = true;
         }
-        return result;
-      };
-      const headers = normalizeParts(element.headers, 'header');
-      const footers = normalizeParts(element.footers, 'footer');
-      if (!sectionChanged) return element;
-      changed = true;
-      return { ...element, headers, footers };
+        if (run.type !== 'shape') return run;
+        const shape = run as InternalShapeRun;
+        const content = shape.textBoxContent;
+        if (content === undefined) return run;
+        const shapeSource: SourceRef = {
+          story,
+          storyInstance,
+          path: [...path, runIndex],
+        };
+        const textBoxStoryInstance = `${shapeSource.story}:${shapeSource.storyInstance}:${shapeSource.path.join('.')}`;
+        let contentChanged = false;
+        const textBoxContent = content.map((block, blockIndex): InternalTextBoxBlock => {
+          if (block.type === 'unsupportedTextBoxBlock') return block;
+          const normalized = normalizeElement(
+            block,
+            'textbox',
+            textBoxStoryInstance,
+            [blockIndex],
+          ) as Extract<BodyElement, { type: 'paragraph' | 'table' }>;
+          if (normalized !== block) contentChanged = true;
+          return normalized;
+        });
+        if (!contentChanged) return run;
+        runsChanged = true;
+        return { ...run, textBoxContent } as DocRun;
+      });
+      return runsChanged ? { ...element, runs } : element;
+    }
+    if (element.type === 'table') {
+      let tableChanged = false;
+      const rows = element.rows.map((row, rowIndex) => {
+        let rowChanged = false;
+        const cells = row.cells.map((cell, cellIndex) => {
+          const content = normalizeBody(
+            cell.content as BodyElement[], story, storyInstance, [...path, rowIndex, cellIndex],
+          );
+          if (content === cell.content) return cell;
+          rowChanged = true;
+          return { ...cell, content: content as typeof cell.content };
+        });
+        if (!rowChanged) return row;
+        tableChanged = true;
+        return { ...row, cells };
+      });
+      return tableChanged ? { ...element, rows } as BodyElement : element;
+    }
+    if (element.type !== 'sectionBreak') return element;
+    const elementIndex = path.at(-1) ?? 0;
+    let sectionChanged = false;
+    const normalizeParts = (
+      parts: HeadersFooters | undefined,
+      partStory: 'header' | 'footer',
+    ): HeadersFooters | undefined => {
+      if (!parts) return parts;
+      let result = parts;
+      for (const kind of ['default', 'first', 'even'] as const) {
+        const part = parts[kind];
+        if (!part) continue;
+        const nextBody = normalizeBody(part.body, partStory, `section:${elementIndex}:${kind}`);
+        if (nextBody === part.body) continue;
+        if (result === parts) result = { ...parts };
+        result[kind] = { ...part, body: nextBody };
+        sectionChanged = true;
+      }
+      return result;
+    };
+    const headers = normalizeParts(element.headers, 'header');
+    const footers = normalizeParts(element.footers, 'footer');
+    if (!sectionChanged) return element;
+    return { ...element, headers, footers };
+  };
+  const normalizeBody = (
+    body: BodyElement[],
+    story: SourceRef['story'],
+    storyInstance: string,
+    prefix: number[] = [],
+  ): BodyElement[] => {
+    let changed = false;
+    const normalized = body.map((element, elementIndex): BodyElement => {
+      const next = normalizeElement(
+        element,
+        story,
+        storyInstance,
+        [...prefix, elementIndex],
+      );
+      if (next !== element) changed = true;
+      return next;
     });
     return changed ? normalized : body;
   };

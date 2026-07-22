@@ -106,6 +106,18 @@ describe('computeLineVisualOrder', () => {
     expect(rtl).toEqual([true, true]);
   });
 
+  it('keeps leading neutral punctuation with its RTL word under an LTR paragraph base', () => {
+    const { order, rtl } = computeLineVisualOrder(
+      [{ text: ':مرحبا ' }, { text: 'في ' }, { text: 'العالم' }],
+      false,
+    );
+    // The colon resolves to the LTR paragraph level, but Canvas paints the
+    // whole first slice RTL. Its ordering level must therefore come from the
+    // same odd-level content rather than stranding the slice at the left edge.
+    expect(order).toEqual([2, 1, 0]);
+    expect(rtl).toEqual([true, true, true]);
+  });
+
   it('orders an embedded LTR run inside an RTL line', () => {
     // logical: Hebrew, Latin, Hebrew (base RTL) -> visual L→R: [2,1,0]
     const { order, rtl } = computeLineVisualOrder(

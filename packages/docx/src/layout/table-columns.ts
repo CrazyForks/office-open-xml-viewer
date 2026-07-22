@@ -430,8 +430,9 @@ function solveTableColumnWidths(input: TableColumnLayoutInput): readonly number[
     if (totalPt <= maximumPt + EPSILON_PT || totalPt <= EPSILON_PT) {
       return Object.freeze(widths);
     }
-    // §17.18.87 fixed layout reduces every grid track proportionally when the
-    // resolved grid exceeds the containing physical boundary.
+    // The caller supplies the physical width ceiling for this table occurrence.
+    // §17.18.87 itself reduces fixed tracks to the preferred table width; the
+    // containing page/story projection owns any additional physical ceiling.
     const scale = maximumPt / totalPt;
     return Object.freeze(cleanWidths(widths.map((width) => width * scale)));
   }

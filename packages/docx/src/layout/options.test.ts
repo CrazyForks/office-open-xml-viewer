@@ -3,7 +3,12 @@ import { layoutOptionsKey, normalizeLayoutOptions } from './options.js';
 import type { LayoutServices } from './types.js';
 import { createCanvasFontRoute } from '@silurus/ooxml-core';
 
-function services(text: string, images: string, math: string): LayoutServices {
+function services(
+  text: string,
+  images: string,
+  math: string,
+  verticalGlyphs = 'vertical:a',
+): LayoutServices {
   return {
     text: {
       fingerprint: text,
@@ -17,6 +22,7 @@ function services(text: string, images: string, math: string): LayoutServices {
     },
     images: { fingerprint: images, resolve: () => ({ widthPt: 1, heightPt: 1, mimeType: 'image/png' }) },
     math: { fingerprint: math, resolve: () => ({ resourceKey: 'm', widthEm: 1, ascentEm: 1, descentEm: 0, diagnostics: [] }) },
+    verticalGlyphFingerprint: verticalGlyphs,
   };
 }
 
@@ -40,6 +46,9 @@ describe('layout options', () => {
     expect(layoutOptionsKey({ currentDateMs: 100 }, services('text:b', 'images:a', 'math:a'))).not.toBe(key);
     expect(layoutOptionsKey({ currentDateMs: 100 }, services('text:a', 'images:b', 'math:a'))).not.toBe(key);
     expect(layoutOptionsKey({ currentDateMs: 100 }, services('text:a', 'images:a', 'math:b'))).not.toBe(key);
+    expect(layoutOptionsKey({ currentDateMs: 100 }, services(
+      'text:a', 'images:a', 'math:a', 'vertical:b',
+    ))).not.toBe(key);
 
     if (false) {
       // @ts-expect-error paint width, DPR, and color cannot enter the layout key

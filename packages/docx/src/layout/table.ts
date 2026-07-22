@@ -899,9 +899,9 @@ function alignedTableOriginX(
 ): number {
   const bounds = placement.availableBounds;
   const aligned = alignment === 'center'
-    ? bounds.xPt + Math.max(0, (bounds.widthPt - widthPt) / 2)
+    ? bounds.xPt + (bounds.widthPt - widthPt) / 2
     : alignment === 'right'
-      ? bounds.xPt + Math.max(0, bounds.widthPt - widthPt)
+      ? bounds.xPt + bounds.widthPt - widthPt
       : bounds.xPt;
   if (indentPt === 0) return aligned;
   // Compatibility-owned signed leading-edge translation; bidi reverses the axis.
@@ -964,8 +964,8 @@ export function layoutTable(
   input.rows.forEach((row) => row.cells.forEach((cell) => {
     flows.set(cell.id, resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks));
   }));
-  const resolvedRows = resolveRowHeights(input.rows, flows);
   const boundaries = resolvedBoundaries(input);
+  const resolvedRows = resolveRowHeights(input.rows, flows);
   // ECMA-376 §17.4.80 owns row-track height. Collapsed rules are centred on
   // those tracks, so their overhang contributes to inkBounds, never flow fit or
   // advance; each page-local fragment still resolves its own winning segments.
@@ -1036,11 +1036,14 @@ export function layoutTable(
         0,
         cellHeightPt - cell.margins.topPt - cell.margins.bottomPt,
       );
-      const inkOffsetPt = cell.vAlign === 'center'
-        ? cell.margins.topPt + (availableContentHeightPt - flow.inkHeightPt) / 2 - flow.inkTopPt
-        : cell.vAlign === 'bottom'
-          ? cellHeightPt - cell.margins.bottomPt - flow.inkHeightPt - flow.inkTopPt
-          : cell.margins.topPt - Math.min(0, flow.inkTopPt);
+      const topInkOffsetPt = cell.margins.topPt - Math.min(0, flow.inkTopPt);
+      const inkOffsetPt = flow.inkHeightPt >= availableContentHeightPt
+        ? topInkOffsetPt
+        : cell.vAlign === 'center'
+          ? cell.margins.topPt + (availableContentHeightPt - flow.inkHeightPt) / 2 - flow.inkTopPt
+          : cell.vAlign === 'bottom'
+            ? cellHeightPt - cell.margins.bottomPt - flow.inkHeightPt - flow.inkTopPt
+            : topInkOffsetPt;
       const contentBounds = {
         xPt: cellXPt + cell.margins.leftPt,
         yPt: cellTopPt + inkOffsetPt,

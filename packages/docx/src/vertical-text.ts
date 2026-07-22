@@ -320,6 +320,16 @@ interface RoutedVerticalGlyphCell {
   rotateInkShiftPx: number;
 }
 
+export interface PlannedVerticalGlyphCell {
+  readonly range: Readonly<{ start: number; end: number }>;
+  readonly text: string;
+  readonly orientation: 'upright' | 'rotate' | 'sideways';
+  readonly originPt: number;
+  readonly advancePt: number;
+  readonly drawOffsetPt: Readonly<{ xPt: number; yPt: number }>;
+  readonly verticalFeature: boolean;
+}
+
 /** The single cell router shared by layout measurement and paint. */
 function routedVerticalGlyphCell(
   ctx: Ctx2D,
@@ -344,6 +354,99 @@ function routedVerticalGlyphCell(
     }
   }
   return { naturalPx: plainAdvance, vert: null, rotateInkShiftPx: 0 };
+}
+
+/** Resolve the legacy UAX #50/`vert` routing into immutable glyph cells for the
+ * retained layout pipeline. The returned plan contains every paint decision and
+ * metric; retained paint never probes fonts or remeasures text. */
+export function planVerticalRunWithCapability(
+  ctx: Ctx2D,
+  text: string,
+  fontPt: number,
+  letterSpacingPt: number,
+  charScale = 1,
+  growTrRotateInk = false,
+  vertCapability: VertCapability = NO_VERT_CAPABILITY,
+): readonly PlannedVerticalGlyphCell[] {
+  const cells: PlannedVerticalGlyphCell[] = [];
+  const emBoxCenterPt = emBoxCenterAboveBaselinePx(ctx, text, fontPt);
+  let ax = 0;
+  let sourceOffset = 0;
+  for (const piece of splitVerticalOrientationRuns(text)) {
+    if (piece.mode === 'sideways') {
+      const glyphCount = [...piece.text].length;
+      const advancePt = ctx.measureText(piece.text).width * charScale
+        + letterSpacingPt * glyphCount;
+      cells.push({
+        range: { start: sourceOffset, end: sourceOffset + piece.text.length },
+        text: piece.text,
+        orientation: 'sideways',
+        originPt: ax,
+        advancePt,
+        drawOffsetPt: { xPt: 0, yPt: emBoxCenterPt },
+        verticalFeature: false,
+      });
+      ax += advancePt;
+      sourceOffset += piece.text.length;
+      continue;
+    }
+    for (const ch of piece.text) {
+      const cp = ch.codePointAt(0) ?? 0;
+      const mode = verticalDrawMode(cp);
+      const bracketCp = mode === 'rotate' ? verticalBracketFormSubstitute(cp) : null;
+      const uprightFallback = mode === 'rotate'
+        && bracketCp === null
+        && verticalTrUprightFallback(cp);
+      const routed = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, growTrRotateInk);
+      const advancePt = routed.naturalPx * charScale + letterSpacingPt;
+      const range = { start: sourceOffset, end: sourceOffset + ch.length };
+      if (routed.vert !== null) {
+        cells.push({
+          range,
+          text: ch,
+          orientation: 'upright',
+          originPt: ax + routed.vert.originInCellPx * charScale,
+          advancePt,
+          drawOffsetPt: { xPt: 0, yPt: 0 },
+          verticalFeature: true,
+        });
+      } else if (mode === 'upright' || bracketCp !== null || uprightFallback) {
+        const puncCp = bracketCp !== null ? null : verticalFormSubstitute(cp);
+        const drawCp = bracketCp ?? puncCp;
+        const drawText = drawCp === null ? ch : String.fromCodePoint(drawCp);
+        const offset = drawCp === null ? verticalGlyphOffset(cp) : { dx: 0, dy: 0 };
+        const preserveCorner = wordPreservesVerticalTuCorner(puncCp);
+        const alongEm = offset.dy === 0 && !preserveCorner
+          ? inkCenterAboveMiddlePx(ctx, drawText) / fontPt
+          : 0;
+        cells.push({
+          range,
+          text: drawText,
+          orientation: 'upright',
+          originPt: ax + advancePt / 2,
+          advancePt,
+          drawOffsetPt: {
+            xPt: offset.dx * fontPt,
+            yPt: (alongEm + offset.dy) * fontPt,
+          },
+          verticalFeature: false,
+        });
+      } else {
+        cells.push({
+          range,
+          text: ch,
+          orientation: 'rotate',
+          originPt: ax + advancePt / 2 + charScale * routed.rotateInkShiftPx,
+          advancePt,
+          drawOffsetPt: { xPt: 0, yPt: 0 },
+          verticalFeature: false,
+        });
+      }
+      ax += advancePt;
+      sourceOffset += ch.length;
+    }
+  }
+  return cells;
 }
 
 /**

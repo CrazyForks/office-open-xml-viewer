@@ -2222,6 +2222,32 @@ function resolveColumnWidths(
     const acquired = format.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
     marginsByCell.set(cell, acquired ?? effCellMargins(cell, table));
   }));
+  const baseIndentPt = Number.isFinite(table.tblInd) ? (table.tblInd ?? 0) : 0;
+  const rowIndentPts = format.rows.map((row) => {
+    const exception = row.exception;
+    return exception?.indentAuthored
+      ? (exception.indentPt ?? 0)
+      : baseIndentPt;
+  });
+  // §17.18.87 lets AutoFit override its preferred width up to the page width.
+  // Keep the ordinary text-band ceiling unless §17.4.50 placement moves a
+  // top-level page-owned story table into its semantic leading margin. Test
+  // the authored indent before bidiVisual reverses its physical translation;
+  // table justification reverses under bidiVisual as well. Body tables must
+  // also remain in a single-column page band; headers and footers are
+  // page-owned stories and do not inherit the body's newspaper columns.
+  const story = state.storyContext?.story;
+  const isTopLevelPageOwnedStory = state.storyContext?.containers.length === 0
+    && (story === 'header'
+      || story === 'footer'
+      || (story === 'body' && state.sectionLayout?.columns.length === 1));
+  const isLeadingMarginPageStoryTable = format.ordinaryFlow
+    && isTopLevelPageOwnedStory
+    && !isVerticalTextDirection(state.sectionLayout.textDirection)
+    && [baseIndentPt, ...rowIndentPts].some((indentPt) => indentPt < 0);
+  const maximumTableWidthPt = isLeadingMarginPageStoryTable
+    ? Math.max(contentWPt, state.pageWidth)
+    : contentWPt;
   return [...resolveTableColumnWidths(state.acquisitionInputs.tableColumnLayoutInput(
     table,
     contentWPt,
@@ -2276,7 +2302,7 @@ function resolveColumnWidths(
       });
     },
     state.acquisitionInputs.tableParticipatesInOrdinaryFlow(table)
-      ? contentWPt
+      ? maximumTableWidthPt
       : Math.max(contentWPt, state.pageWidth),
   ))];
 }

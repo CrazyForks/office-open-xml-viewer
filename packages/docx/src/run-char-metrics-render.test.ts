@@ -171,6 +171,32 @@ describe('WD4 run character metrics reach the glyph draw (measure==paint)', () =
     expect(drawOf(lowered.fills, 'X').y - drawOf(plain.fills, 'X').y).toBeCloseTo(6, 5);
   });
 
+  it('w:vertAlign raises superscript, lowers subscript, and leaves ordinary baselines unchanged', async () => {
+    const { fills } = await render([
+      textRun('N'),
+      textRun('S', { vertAlign: 'super' }),
+      textRun('B', { vertAlign: 'sub' }),
+      textRun('Z'),
+    ]);
+    const normal = drawOf(fills, 'N');
+    const superscript = drawOf(fills, 'S');
+    const subscript = drawOf(fills, 'B');
+    const trailingNormal = drawOf(fills, 'Z');
+
+    expect(normal.y - superscript.y).toBeCloseTo(FONT_PX * 0.35, 5);
+    expect(subscript.y - normal.y).toBeCloseTo(FONT_PX * 0.15, 5);
+    expect(trailingNormal.y).toBeCloseTo(normal.y, 5);
+  });
+
+  it('w:vertAlign baseline shift composes with an authored w:position', async () => {
+    const plainSuper = await render([textRun('S', { vertAlign: 'super' })]);
+    const raisedSuper = await render([textRun('S', { vertAlign: 'super', position: 4 })]);
+
+    expect(
+      drawOf(plainSuper.fills, 'S').y - drawOf(raisedSuper.fills, 'S').y,
+    ).toBeCloseTo(4, 5);
+  });
+
   it('w:kern (§17.3.2.19) enables ctx.fontKerning when the run size ≥ the threshold', async () => {
     // fontSize FONT_PX=20pt, threshold 14pt ⇒ 20 ≥ 14 ⇒ kerning normal.
     const { fills } = await render([textRun('WORD', { kerning: 14 })]);

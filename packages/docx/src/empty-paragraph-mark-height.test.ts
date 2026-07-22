@@ -244,6 +244,51 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     )).toBe(40);
   });
 
+  it('uses an eastAsia paragraph-mark hint for face selection without forcing Latin text into two grid cells', () => {
+    const p = {
+      ...para(''),
+      defaultFontSize: 16,
+      defaultFontFamily: 'Georgia',
+      defaultFontFamilyEastAsia: 'ＭＳ 明朝',
+    } as DocParagraph;
+    const ctx = {
+      font: '',
+      measureText: () => ({
+        width: 0,
+        fontBoundingBoxAscent: 14,
+        fontBoundingBoxDescent: 2,
+        actualBoundingBoxAscent: 14,
+        actualBoundingBoxDescent: 2,
+      } as TextMetrics),
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(paragraphMarkLineHeight(
+      p,
+      1,
+      { type: 'lines', linePitchPt: 18 },
+      false,
+      false,
+      ctx,
+      {},
+      null,
+      {},
+      undefined,
+      {
+        fontSizePt: 16,
+        fonts: {
+          ascii: 'Georgia',
+          highAnsi: 'Georgia',
+          eastAsia: 'ＭＳ 明朝',
+          complexScript: 'Georgia',
+        },
+        weight: 400,
+        style: 'normal',
+        complexScript: false,
+        fontHint: 'eastAsia',
+      },
+    )).toBe(18);
+  });
+
   it('uses the resolved local alias and line ratio for the mark advance and baseline split', () => {
     const p = {
       ...para(''),

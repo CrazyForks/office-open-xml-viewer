@@ -1,10 +1,12 @@
 import {
   autoContrastColor,
   canvasFontString,
+  withVertFeature,
 } from '@silurus/ooxml-core';
 import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
+import { paintRetainedResource } from './canvas-resource.js';
 import { paintTableLayout } from './canvas-table.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import {
@@ -19,30 +21,39 @@ function validateTextSlices(placement: import('../layout/types.js').TextPlacemen
     throw new Error('UTF-16 text range is inconsistent');
   }
   if (placement.clusters.length === 0) {
-    throw new Error('Retained glyph slices are incomplete');
+    throw new Error('Retained glyph slices are incomplete (clusters)');
   }
   let cursor = placement.range.start;
   for (const cluster of placement.clusters) {
     const { advancePt, offset, range } = cluster;
     if (
-      !Number.isFinite(advancePt) || advancePt < 0
+      !Number.isFinite(advancePt)
       || !Number.isFinite(offset.xPt) || !Number.isFinite(offset.yPt)
       || range.start !== cursor || range.end <= range.start
       || range.end > placement.range.end
     ) {
-      throw new Error('Retained glyph slices are incomplete');
+      throw new Error(
+        `Retained glyph slices are incomplete (cluster range ${cursor}:${range.start}-${range.end}/${placement.range.end}; advance ${advancePt}; offset ${offset.xPt},${offset.yPt})`,
+      );
     }
     cursor = range.end;
   }
-  if (cursor !== placement.range.end) throw new Error('Retained glyph slices are incomplete');
-  if (placement.paintOps.length === 0) throw new Error('Retained glyph slices are incomplete');
+  if (cursor !== placement.range.end) {
+    throw new Error(`Retained glyph slices are incomplete (cluster end ${cursor}/${placement.range.end})`);
+  }
+  if (placement.paintOps.length === 0) {
+    throw new Error('Retained glyph slices are incomplete (paint ops)');
+  }
   let previousEnd = placement.range.start;
   for (const op of placement.paintOps) {
     const invalidTextMapping = op.sourceMapping !== 'kashida'
       && op.text.length !== op.range.end - op.range.start;
     const invalidGeometry = !Number.isFinite(op.offset.xPt) || !Number.isFinite(op.offset.yPt)
+      || (op.glyphOffsetPt !== undefined
+        && (!Number.isFinite(op.glyphOffsetPt.xPt) || !Number.isFinite(op.glyphOffsetPt.yPt)))
       || !Number.isFinite(op.letterSpacingPt)
-      || !Number.isFinite(op.scaleX) || op.scaleX <= 0;
+      || !Number.isFinite(op.scaleX) || op.scaleX <= 0
+      || (op.scaleY !== undefined && (!Number.isFinite(op.scaleY) || op.scaleY <= 0));
     const invalidRange = op.range.start !== previousEnd || op.range.end <= op.range.start
       || op.range.end > placement.range.end;
     if (invalidTextMapping || invalidGeometry || invalidRange) {
@@ -54,7 +65,7 @@ function validateTextSlices(placement: import('../layout/types.js').TextPlacemen
   }
   const trailing = placement.text.slice(previousEnd - placement.range.start);
   if (trailing !== '' && !/^\s+$/u.test(trailing)) {
-    throw new Error('Retained glyph slices are incomplete');
+    throw new Error(`Retained glyph slices are incomplete (paint end ${previousEnd}/${placement.range.end})`);
   }
 }
 
@@ -207,7 +218,7 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
             placement.bounds.yPt + placement.bounds.heightPt / 2,
           );
           ctx.rotate(rotation);
-          context.resources.paint(
+          paintRetainedResource(
             placement.resourceKey,
             placement.resourceKind,
             {
@@ -216,15 +227,17 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
               widthPt: placement.bounds.heightPt,
               heightPt: placement.bounds.widthPt,
             },
-            ctx,
+            placement.orientation,
+            context,
           );
           ctx.restore();
         } else {
-          context.resources.paint(
+          paintRetainedResource(
             placement.resourceKey,
             placement.resourceKind,
             placement.bounds,
-            ctx,
+            placement.orientation,
+            context,
           );
         }
         continue;
@@ -270,26 +283,47 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
         ctx.fontKerning = op.kerning;
         const originXPt = placement.origin.xPt + op.offset.xPt;
         const originYPt = placement.origin.yPt + op.offset.yPt;
+        const glyphOffsetXPt = op.glyphOffsetPt?.xPt ?? 0;
+        const glyphOffsetYPt = op.glyphOffsetPt?.yPt ?? 0;
         if (op.glyphOrientation === 'upright') {
           ctx.save();
           ctx.translate(originXPt, originYPt);
           ctx.rotate(-Math.PI / 2);
-          if (op.scaleX !== 1) ctx.scale(op.scaleX, 1);
+          // The enclosing vertical page transform maps the run's advance axis
+          // onto physical Y. After counter-rotation, w:w therefore scales the
+          // glyph-local Y axis, matching the acquisition-time cell advance.
+          if (op.scaleX !== 1 || op.scaleY !== undefined) {
+            if (op.writingMode === 'vertical-rl') ctx.scale(1, op.scaleX);
+            else ctx.scale(op.scaleX, op.scaleY ?? 1);
+          }
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.letterSpacing = `${op.letterSpacingPt}px`;
-          ctx.fillText(op.text, 0, 0);
+          const draw = (): void => ctx.fillText(op.text, glyphOffsetXPt, glyphOffsetYPt);
+          if (op.verticalFeature) {
+            withVertFeature(ctx as CanvasRenderingContext2D, draw);
+          }
+          else draw();
+          ctx.restore();
+        } else if (op.glyphOrientation === 'rotate') {
+          ctx.save();
+          ctx.translate(originXPt, originYPt);
+          if (op.scaleX !== 1) ctx.scale(op.scaleX, 1);
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
+          ctx.fillText(op.text, glyphOffsetXPt, glyphOffsetYPt);
           ctx.restore();
         } else if (op.scaleX !== 1) {
           ctx.save();
-          ctx.translate(originXPt, originYPt);
+          ctx.translate(originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
           ctx.scale(op.scaleX, 1);
           ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
           ctx.fillText(op.text, 0, 0);
           ctx.restore();
         } else {
           ctx.letterSpacing = `${op.letterSpacingPt}px`;
-          ctx.fillText(op.text, originXPt, originYPt);
+          ctx.fillText(op.text, originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
         }
       }
       ctx.letterSpacing = previousLetterSpacing;

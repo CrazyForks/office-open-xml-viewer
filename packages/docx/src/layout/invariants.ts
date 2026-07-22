@@ -228,6 +228,20 @@ function contains(outer: LayoutRect, inner: LayoutRect): boolean {
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
 }
 
+function containsInlineExtent(outer: LayoutRect, inner: LayoutRect): boolean {
+  return inner.xPt >= outer.xPt
+    && inner.xPt + inner.widthPt <= outer.xPt + outer.widthPt;
+}
+
+function containsBlockInterval(
+  blockStartPt: number,
+  blockEndPt: number,
+  inner: LayoutRect,
+): boolean {
+  return inner.yPt >= blockStartPt
+    && inner.yPt + inner.heightPt <= blockEndPt;
+}
+
 function containsBlockExtent(outer: LayoutRect, inner: LayoutRect): boolean {
   return inner.yPt >= outer.yPt
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
@@ -670,7 +684,7 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
           const sectionColumn = region.section.columns[columnIndexes[columnPosition]!];
           if (bounds.widthPt <= 0 || bounds.heightPt < 0
             || bounds.yPt !== region.blockStartPt
-            || bounds.yPt + bounds.heightPt !== region.blockEndPt
+            || bounds.heightPt !== region.blockEndPt - region.blockStartPt
             || bounds.xPt < 0
             || bounds.xPt < priorInlineEndPt
             || bounds.xPt + bounds.widthPt > logicalExtent.widthPt
@@ -838,19 +852,27 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
         );
       }
       if (!node.ordinaryFlow) return;
+      const bodyRegion = domain.kind === 'body' ? regionByDomain.get(domain.id) : undefined;
       if (domain.kind === 'body') {
-        const region = regionByDomain.get(domain.id);
-        const blockEndPt = region?.blockEndPt ?? page.geometry.contentBottomPt;
-        if (node.flowBounds.yPt + node.flowBounds.heightPt > blockEndPt) {
+        if (!bodyRegion) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${node.id} references a body flow domain without a section region`,
+          );
+        }
+        if (node.flowBounds.yPt + node.flowBounds.heightPt > bodyRegion.blockEndPt) {
           throw new LayoutInvariantError('BOTTOM_MARGIN_INVASION', `${node.id} crosses logical block end`);
         }
       }
       // Signed w:tblInd and table justification may intentionally put an
       // ordinary table outside the inline text band. It still belongs to this
       // flow domain and must remain contained on the logical block axis.
-      const insideFlowDomain = node.kind === 'table'
-        ? containsBlockExtent(domain.logicalBounds, node.flowBounds)
-        : contains(domain.logicalBounds, node.flowBounds);
+      const insideFlowDomain = bodyRegion
+        ? containsBlockInterval(bodyRegion.blockStartPt, bodyRegion.blockEndPt, node.flowBounds)
+          && (node.kind === 'table' || containsInlineExtent(domain.logicalBounds, node.flowBounds))
+        : node.kind === 'table'
+          ? containsBlockExtent(domain.logicalBounds, node.flowBounds)
+          : contains(domain.logicalBounds, node.flowBounds);
       if (!insideFlowDomain) {
         throw new LayoutInvariantError('FLOW_DOMAIN_INVASION', `${node.id} crosses flow domain ${domain.id}`);
       }

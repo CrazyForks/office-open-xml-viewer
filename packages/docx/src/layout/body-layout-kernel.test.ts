@@ -57,6 +57,7 @@ describe('private body layout kernel ownership', () => {
     const vertical = Object.freeze({
       fingerprint: 'vertical:test',
       measureRunInkExtra: (_text: string) => 0,
+      planRun: () => [],
     }) satisfies VerticalGlyphMeasurementService;
     const kernel = { openBodyLayoutSession() { throw new Error('unused'); } } as BodyLayoutKernel;
 
