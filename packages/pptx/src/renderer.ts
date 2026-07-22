@@ -136,6 +136,11 @@ export interface RenderContext {
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
 export interface PptxTextRunInfo {
+  /**
+   * Source shape's DrawingML `cNvPr@id`. The identifier is stable and unique
+   * within its slide. Absent for parser-synthesized shapes that have no cNvPr.
+   */
+  shapeId?: string;
   text: string;
   /** X position in CSS px, relative to the shape's top-left corner. */
   inShapeX: number;
@@ -2294,6 +2299,9 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const y = emuToPx(el.y, scale);
   const w = emuToPx(el.width, scale);
   const h = emuToPx(el.height, scale);
+  const shapeTextRunCallback: TextRunCallback | undefined = onTextRun && el.id !== undefined
+    ? (run) => onTextRun({ ...run, shapeId: el.id })
+    : onTextRun;
 
   // anchor="b" + h=0: shape grows upward from y; render stroke as bottom border,
   // then let renderTextBody handle positioning.
@@ -2309,7 +2317,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     }
     if (el.textBody) {
       const defaultTextColor = shapeDefaultTextColor(el, rc);
-      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber, rc, onTextRun, false, fetchImage);
+      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber, rc, shapeTextRunCallback, false, fetchImage);
     }
     return;
   }
@@ -2714,7 +2722,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       if (tr) { tx = tr.tx; ty = tr.ty; tw = tr.tw; th = tr.th; }
     }
     // Pass el.rotation so the text-layer overlay can CSS-rotate the shape div to match.
-    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, onTextRun, false, fetchImage);
+    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, shapeTextRunCallback, false, fetchImage);
     ctx.restore();
   }
 
