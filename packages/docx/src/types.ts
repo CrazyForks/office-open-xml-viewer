@@ -409,9 +409,8 @@ export type BodyElement =
 
 export interface DocParagraph {
   /**
-   * [MS-DOCX] §2.6.2.3 `w14:paraId` — source paragraph identifier, unique
-   * within its document part. This is the stable `@paraId` used by Office CLI;
-   * absent when the source paragraph does not author the Word 2010 extension.
+   * Authored `w14:paraId` for the source paragraph, preserved verbatim and
+   * absent when the source paragraph does not carry that identifier.
    */
   paragraphId?: string;
   /**
