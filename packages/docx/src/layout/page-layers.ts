@@ -304,7 +304,7 @@ function retainedNodeRequiresElementBackedVerticalGlyphPaint(
   if (node.kind === 'paragraph') {
     const hasVerticalGlyph = node.lines.some((line) => line.placements.some((placement) => (
       placement.kind === 'text'
-      && placement.paintOps.some((operation) => operation.verticalFeature === true)
+      && placement.paintOps?.some((operation) => operation.verticalFeature === true) === true
     )));
     return hasVerticalGlyph || node.textBoxes.some((textBox) => (
       retainedNodeRequiresElementBackedVerticalGlyphPaint(textBox, seen)

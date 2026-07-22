@@ -218,10 +218,16 @@ describe('paragraph run resource projection', () => {
     const vertical = acquireSameParagraph(anchor, { verticalPageFrame: true });
     const horizontal = acquireSameParagraph(anchor);
 
-    expect(vertical.drawings[0]?.commands[0]).toMatchObject({
-      kind: 'resource', resourceKind: 'image', orientation: 'upright-physical',
-      rect: { xPt: 10, yPt: 178, widthPt: 20, heightPt: 30 },
+    expect(vertical.drawings[0]).toMatchObject({
+      orientation: 'upright-physical',
+      flowBounds: { xPt: 10, yPt: 178, widthPt: 20, heightPt: 30 },
+      transform: { a: 0, b: -1, c: 1, d: 0, e: 20, f: 193 },
     });
+    expect(vertical.drawings[0]?.commands[0]).toMatchObject({
+      kind: 'resource', resourceKind: 'image',
+      rect: { xPt: -15, yPt: -10, widthPt: 30, heightPt: 20 },
+    });
+    expect(vertical.drawings[0]?.commands[0]).not.toHaveProperty('orientation');
     expect(vertical.drawings[0]?.anchorLayer).toMatchObject({
       horizontalOwnership: 'host',
       verticalOwnership: 'page',
