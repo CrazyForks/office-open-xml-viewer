@@ -31,6 +31,11 @@ export async function prepareMathRuns(
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
 export interface DocxTextRunInfo {
+  /**
+   * Authored `w14:paraId` of the source paragraph. Absent when the paragraph
+   * does not carry that identifier.
+   */
+  paragraphId?: string;
   text: string;
   /** Left edge in canvas CSS px. */
   x: number;

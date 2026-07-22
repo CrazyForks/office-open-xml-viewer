@@ -916,6 +916,10 @@ export interface ViewportRange {
 
 /** Emitted once per cell that has text, with the cell's canvas-pixel bounds. */
 export interface XlsxTextRunInfo {
+  /** Worksheet name used by Office CLI's `/Sheet/A1` addressing. */
+  sheetName: string;
+  /** Stable A1 cell reference within {@link sheetName}. */
+  cellRef: string;
   text: string;
   /** Canvas CSS-pixel x of the cell's top-left corner. */
   x: number;

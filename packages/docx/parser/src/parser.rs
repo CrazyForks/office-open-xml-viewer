@@ -3742,6 +3742,10 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         .collect();
 
     DocParagraph {
+        // [MS-DOCX] §2.6.2.3 — preserve the authored identifier exactly. It is
+        // part-local identity, not formatting, so style resolution does not
+        // participate and an absent attribute remains absent.
+        paragraph_id: attr_w14(node, "paraId"),
         alignment,
         indent_left,
         indent_right,
@@ -13790,6 +13794,44 @@ mod anchor_acquisition_wire_tests {
         assert_eq!(group.resolved_child_frame.height_pt, 4.0);
         assert_eq!(group.resolved_child_frame.rotation_deg, 12.0);
         assert!(group.resolved_child_frame.flip_h);
+    }
+}
+
+#[cfg(test)]
+mod paragraph_identity_tests {
+    use super::*;
+    use crate::xml_util::{W14_NS, W_NS};
+
+    fn parse_p(attributes: &str) -> DocParagraph {
+        let xml = format!(
+            r#"<w:p xmlns:w="{w}" xmlns:w14="{w14}" {attributes}><w:r><w:t>text</w:t></w:r></w:p>"#,
+            w = W_NS,
+            w14 = W14_NS,
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let mut field = FieldState::default();
+        parse_paragraph(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            None,
+            &mut field,
+        )
+    }
+
+    #[test]
+    fn paragraph_preserves_w14_para_id_for_stable_source_addressing() {
+        assert_eq!(
+            parse_p(r#"w14:paraId="1A2b3C4d""#).paragraph_id.as_deref(),
+            Some("1A2b3C4d")
+        );
+        assert_eq!(parse_p("").paragraph_id, None);
     }
 }
 

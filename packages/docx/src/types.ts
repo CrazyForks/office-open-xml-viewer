@@ -414,6 +414,11 @@ export type BodyElement =
 
 export interface DocParagraph {
   /**
+   * Authored `w14:paraId` for the source paragraph, preserved verbatim and
+   * absent when the source paragraph does not carry that identifier.
+   */
+  paragraphId?: string;
+  /**
    * ECMA-376 §17.18.44 ST_Jc. Renderer honors left, start, center, right, end,
    * both, distribute. Other values (kashida variants, numTab, thaiDistribute)
    * are treated as start-aligned.

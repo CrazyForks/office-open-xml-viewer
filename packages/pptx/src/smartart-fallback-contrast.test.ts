@@ -4,7 +4,7 @@ import {
   isSmartArtFallbackShape,
   smartArtFallbackTextColor,
 } from './smartart-fallback-contrast';
-import { renderSlide } from './renderer';
+import { renderSlide, type PptxTextRunInfo } from './renderer';
 import type { Fill } from '@silurus/ooxml-core';
 import type { Paragraph, ShapeElement, Slide, TextBody } from './types';
 
@@ -308,6 +308,38 @@ async function renderAndCollect(slide: Slide): Promise<FillTextCall[]> {
   });
   return fillTexts;
 }
+
+async function renderAndCollectTextRuns(slide: Slide): Promise<PptxTextRunInfo[]> {
+  const { ctx } = recordingCtx();
+  const canvas = stubCanvas(ctx);
+  const runs: PptxTextRunInfo[] = [];
+  await renderSlide(canvas, slide, 9_144_000, 6_858_000, {
+    width: 960,
+    dpr: 1,
+    defaultTextColor: '383838',
+  }, (run) => runs.push(run));
+  return runs;
+}
+
+describe('renderSlide text-run shape identity', () => {
+  it('surfaces the source cNvPr id on every run of a file-authored shape', async () => {
+    const runs = await renderAndCollectTextRuns(
+      slideWith(null, [fallbackShape('Editable title', { id: '42', name: 'Title 1' })]),
+    );
+
+    expect(runs).not.toHaveLength(0);
+    expect(runs.every((run) => run.shapeId === '42')).toBe(true);
+  });
+
+  it('leaves identity absent for parser-synthesized SmartArt fallback shapes', async () => {
+    const runs = await renderAndCollectTextRuns(
+      slideWith(null, [fallbackShape('Synthetic item')]),
+    );
+
+    expect(runs).not.toHaveLength(0);
+    expect(runs.every((run) => run.shapeId === undefined)).toBe(true);
+  });
+});
 
 describe('renderSlide SmartArt fallback contrast (issue #805)', () => {
   it('renders null-colour fallback runs white on a dark background', async () => {

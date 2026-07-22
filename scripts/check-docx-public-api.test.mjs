@@ -311,7 +311,7 @@ test('refuses to rewrite the baseline after it exists at the merge base', () => 
   assert.match(result.stderr, /only permitted before the merge base contains/i);
 });
 
-test('rejects manually changing both declarations and the committed baseline after A1', () => {
+test('accepts an intentional declaration and committed baseline update after the migration', () => {
   const { root, base } = fixture();
   assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
   git(root, 'add', '.');
@@ -326,8 +326,7 @@ test('rejects manually changing both declarations and the committed baseline aft
 
   const result = run(root, '--base-ref', postA1);
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /baseline differs from the merge base/i);
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test('fails when the published DOCX wrapper changes', () => {

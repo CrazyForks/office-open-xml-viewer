@@ -576,6 +576,8 @@ export interface ParagraphSpacingLayout {
 
 export interface ParagraphLayout extends LayoutNodeBase {
   readonly kind: 'paragraph';
+  /** Source `w14:paraId`; identity only, never interpreted by layout or paint. */
+  readonly paragraphId?: string;
   readonly styleId?: string | null;
   /**
    * ECMA-376 §17.13.6.2 bookmark starts owned by this retained paragraph
@@ -1044,6 +1046,8 @@ export interface AcquiredParagraphLayoutInput {
   readonly kind: 'paragraph';
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
+  /** Source `w14:paraId`; retained for text-run projection. */
+  readonly paragraphId?: string;
   readonly flowDomainId: string;
   readonly ordinaryFlow: boolean;
   readonly styleId?: string | null;

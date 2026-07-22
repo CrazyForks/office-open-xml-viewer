@@ -32,6 +32,9 @@ function projectTextRun(
   const transform = cssTransformFor(pointToCss);
   const letterSpacingPt = placement.paintOps[0]?.letterSpacingPt ?? 0;
   return {
+    ...(geometry.paragraphId !== undefined
+      ? { paragraphId: geometry.paragraphId }
+      : {}),
     text: placement.text,
     x: origin.xPt,
     y: origin.yPt,

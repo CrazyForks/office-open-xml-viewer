@@ -892,6 +892,7 @@ export function layoutParagraph(input: AcquiredParagraphLayoutInput): ParagraphL
     kind: 'paragraph',
     id: input.id,
     source: input.source,
+    ...(input.paragraphId !== undefined ? { paragraphId: input.paragraphId } : {}),
     flowDomainId: input.flowDomainId,
     ordinaryFlow: input.ordinaryFlow,
     ...(input.styleId !== undefined ? { styleId: input.styleId } : {}),
@@ -3876,6 +3877,7 @@ export function paragraphLayoutFromMeasurement(
   const cellContainmentBounds = unionLayoutRects(cellContainmentRects);
   return layoutParagraph({
     kind: 'paragraph', id: options.id, source: options.source,
+    ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
     flowDomainId: options.flowDomainId, ordinaryFlow: options.ordinaryFlow,
     ...(paragraph.styleId !== undefined ? { styleId: paragraph.styleId } : {}),
     ...(!options.continuesFromPrevious && paragraph.bookmarks?.length

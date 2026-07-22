@@ -727,6 +727,11 @@ pub(crate) enum TextBoxBlockWire {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DocParagraph {
+    /// [MS-DOCX] §2.6.2.3 `w14:paraId` — source paragraph identifier, unique
+    /// within its document part. Preserved verbatim for stable external
+    /// addressing; absent for documents that do not author the extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_id: Option<String>,
     /// "left" | "center" | "right" | "both"
     pub alignment: String,
     /// pt
