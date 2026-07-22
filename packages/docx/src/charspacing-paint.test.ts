@@ -149,6 +149,25 @@ function glyphCenters(fills: FillCall[], chars: string[]): number[] {
 }
 
 describe('run charSpacing/charScale reach the painted glyphs on every branch', () => {
+  it('does not collapse middle-punctuation advance into the following glyph', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([textRun('甲乙・丙丁')])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const textFills = fills.filter((fill) => /[甲乙・丙丁]/u.test(fill.text));
+    // `characterSpacingControl` is not a license to remove half an em from
+    // every punctuation cell. Word keeps this left-aligned contextual run at
+    // its natural advance; splitting after U+30FB and shifting the next slice
+    // left makes the middle dot and following glyph overlap.
+    expect(textFills).toEqual([
+      expect.objectContaining({ text: '甲乙・丙丁', letterSpacing: '0px' }),
+    ]);
+  });
+
   it('horizontal common path: following run starts at the expanded right edge', async () => {
     // run1 4 cps × (20 natural + 2 spacing) = 88; run2 must start +88 from run1.
     const fills = await render([para([
