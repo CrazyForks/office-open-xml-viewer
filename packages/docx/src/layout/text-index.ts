@@ -20,6 +20,8 @@ import type {
 export interface TextRunGeometry {
   readonly placement: TextPlacement;
   readonly pointToPage: Matrix2DData;
+  /** Source `w14:paraId` of the owning paragraph, when authored. */
+  readonly paragraphId?: string;
 }
 
 interface ProjectionContext {
@@ -189,6 +191,9 @@ function visitParagraph(
         context.runs.push(Object.freeze({
           placement,
           pointToPage: projection.pointToPage,
+          ...(paragraph.paragraphId !== undefined
+            ? { paragraphId: paragraph.paragraphId }
+            : {}),
         }));
       }
     }

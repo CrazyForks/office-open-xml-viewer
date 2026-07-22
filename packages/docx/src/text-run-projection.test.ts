@@ -99,6 +99,7 @@ function paragraph(
     drawings?: readonly DrawingLayout[];
     textBoxes?: readonly TextBoxLayout[];
     flowDomainId?: string;
+    paragraphId?: string;
   }> = {},
 ): ParagraphLayout {
   const bounds = rect();
@@ -107,6 +108,7 @@ function paragraph(
     id,
     source: source(story, [0]),
     flowDomainId: options.flowDomainId ?? `${story}:domain`,
+    ...(options.paragraphId ? { paragraphId: options.paragraphId } : {}),
     flowBounds: bounds,
     inkBounds: bounds,
     advancePt: 20,
@@ -370,6 +372,30 @@ function documentLayout(layoutPage: LayoutPage): DocumentLayout {
 }
 
 describe('textRunsForPage', () => {
+  it('projects the source w14:paraId onto every run owned by that paragraph', () => {
+    const identified = paragraph('identified', 'body', [
+      placement('first', 0, 0),
+      placement('second', 25, 0),
+    ], { paragraphId: '1A2B3C4D' });
+    const positionalOnly = paragraph('positional', 'body', [placement('third', 0, 20)]);
+    const layers = buildPageLayers([
+      { layer: 'body', node: identified, coordinateSpace: 'section-logical' },
+      { layer: 'body', node: positionalOnly, coordinateSpace: 'section-logical' },
+    ]);
+
+    const runs = textRunsForPage(
+      documentLayout(page(layers, [identified.id, positionalOnly.id])),
+      0,
+      { scale: 1 },
+    );
+
+    expect(runs.map(({ text, paragraphId }) => ({ text, paragraphId }))).toEqual([
+      { text: 'first', paragraphId: '1A2B3C4D' },
+      { text: 'second', paragraphId: '1A2B3C4D' },
+      { text: 'third', paragraphId: undefined },
+    ]);
+  });
+
   it('projects retained visual placements in semantic story order without reshaping', () => {
     const header = paragraph('header', 'header', [placement('H', 1, 1)], {
       flowDomainId: 'header:domain',

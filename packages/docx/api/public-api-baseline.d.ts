@@ -323,6 +323,7 @@ export declare interface DocNote {
     content: BodyElement[];
 }
 export declare interface DocParagraph {
+    paragraphId?: string;
     alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'justify' | 'both' | 'distribute' | 'lowKashida' | 'mediumKashida' | 'highKashida' | 'thaiDistribute' | string;
     indentLeft: number;
     indentRight: number;
@@ -650,6 +651,7 @@ export declare interface DocxTextRun {
     noteRef?: NoteRef;
 }
 export declare interface DocxTextRunInfo {
+    paragraphId?: string;
     text: string;
     x: number;
     y: number;
