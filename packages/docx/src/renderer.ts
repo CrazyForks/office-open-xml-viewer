@@ -31,6 +31,11 @@ export async function prepareMathRuns(
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
 export interface DocxTextRunInfo {
+  /**
+   * Source paragraph's [MS-DOCX] `w14:paraId`, used by Office CLI as the
+   * stable `@paraId` selector. Absent when the paragraph has no authored ID.
+   */
+  paragraphId?: string;
   text: string;
   /** Left edge in canvas CSS px. */
   x: number;

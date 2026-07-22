@@ -11,7 +11,7 @@ import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
-import { parseA1 } from './a1.js';
+import { formatA1, parseA1 } from './a1.js';
 import { drawStackedVerticalChar } from './vertical-text.js';
 
 /** Cache key for a decoded image in the shared `loadedImages` map. A plain
@@ -2872,7 +2872,17 @@ function renderQuadrant(
       ctx.restore();
 
       if (text && rc.onTextRun) {
-        rc.onTextRun({ text, x: cx, y: cy, width: cellW, height: cellH, row: rowIndex, col: colIndex });
+        rc.onTextRun({
+          sheetName: rc.worksheet.name,
+          cellRef: formatA1(rowIndex, colIndex),
+          text,
+          x: cx,
+          y: cy,
+          width: cellW,
+          height: cellH,
+          row: rowIndex,
+          col: colIndex,
+        });
       }
       });
     }
