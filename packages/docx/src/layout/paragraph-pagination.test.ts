@@ -37,6 +37,7 @@ const verticalEdgeParagraph = (
   writingMode: 'horizontal-tb' | 'vertical-rl',
   baselinePt: number,
   visibleResourceEndPt?: number,
+  visibleInkDescentPt?: number,
 ): ParagraphLayout => ({
   ...paragraph(),
   flowBounds: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 25 },
@@ -52,7 +53,14 @@ const verticalEdgeParagraph = (
         kind: 'text', text: 'A', range: { start: 0, end: 1 },
         origin: { xPt: 0, yPt: baselinePt },
         bounds: { xPt: 0, yPt: 0, widthPt: 10, heightPt: 25 },
-        advancePt: 10, clusters: [], paintOps: [],
+        advancePt: 10, clusters: [], paintOps: visibleInkDescentPt === undefined ? [] : [{
+          text: 'A', range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 },
+          letterSpacingPt: 0, scaleX: 1, direction: 'ltr', kerning: 'auto',
+          writingMode,
+          inkBounds: {
+            xMinPt: 0, xMaxPt: 7, ascentPt: 7, descentPt: visibleInkDescentPt,
+          },
+        }],
         color: { kind: 'default' },
         fontRoute: { familyList: 'serif', scope: 'native', fingerprint: 'serif' },
         fontSizePt: 10, fontWeight: 400, fontStyle: 'normal',
@@ -97,6 +105,21 @@ describe('paragraph page-local reserve selection', () => {
       { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
       20, 40, true,
       { keepLines: false, widowControl: false, writingMode },
+    );
+
+    expect(selected).toMatchObject({
+      fragment: null,
+      nextCursor: { boundary: null },
+      requiresFreshFlowRegion: true,
+    });
+  });
+
+  it('relocates a vertical final line whose selected-face ink crosses the edge', () => {
+    const selected = selectParagraphFragment(
+      verticalEdgeParagraph('vertical-rl', 17.5, undefined, 3),
+      { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
+      20, 40, true,
+      { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },
     );
 
     expect(selected).toMatchObject({

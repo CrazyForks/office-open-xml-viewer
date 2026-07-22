@@ -112,7 +112,8 @@ function placementVisibleBlockEndPt(placement: ParagraphPlacement): number | nul
   }
   const paintOps = placement.paintOps ?? [];
   const visibleEnds = paintOps.length > 0
-    ? paintOps.map((operation) => placement.origin.yPt + operation.offset.yPt)
+    ? paintOps.map((operation) => placement.origin.yPt + operation.offset.yPt
+      + (operation.inkBounds?.descentPt ?? 0))
     : [placement.origin.yPt];
   for (const decoration of placement.decorations) {
     visibleEnds.push(decoration.from.yPt, decoration.to.yPt);

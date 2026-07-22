@@ -750,9 +750,10 @@ function paginateBodyPass(
   };
   state = setBodyBalanceTarget(state, balanceTargetFor(state));
   const factory = transitionFactory(owners, reserves);
-  // Source entry whose leading paragraph was moved to a new physical page by
-  // automatic overflow. Word suppresses that paragraph's space-before at the
-  // automatic page top; authored page/section breaks retain their own rules.
+  // Source entry whose keep-with-next set was relocated to a new physical page
+  // by automatic overflow. The observed Word compatibility rule suppresses
+  // that leading paragraph's space-before only for this grouped relocation;
+  // ordinary overflow and authored page/section breaks retain their own rules.
   let automaticPageStartEntryIndex: number | null = null;
   const session = kernel.openBodyLayoutSession({
     source: input.source,

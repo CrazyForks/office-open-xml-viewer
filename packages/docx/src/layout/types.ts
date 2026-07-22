@@ -1,5 +1,6 @@
 import type { SectionLayoutContext } from '../layout-context.js';
 import type {
+  GlyphInkBounds,
   TextFontSlotPresence,
   TextFontSlots,
   TextLayoutService,
@@ -173,6 +174,10 @@ export type DrawingPaintCommand =
 
 export interface DrawingLayout extends LayoutNodeBase {
   readonly kind: 'drawing';
+  /** The commands and owned text boxes are authored in an upright, drawing-
+   * local physical frame. `transform` maps that frame into section-logical
+   * points, where the page's quarter turn cancels it during paint. */
+  readonly orientation?: 'upright-physical';
   readonly transform?: Matrix2DData;
   readonly clip?: ClipPathData;
   readonly commands: readonly DrawingPaintCommand[];
@@ -293,6 +298,9 @@ export interface TextPaintOp {
   readonly glyphOffsetPt?: PointPt;
   /** `kashida` permits acquisition-inserted U+0640 glyphs over one source range. */
   readonly sourceMapping?: 'identity' | 'kashida';
+  /** Selected-face ink relative to this operation's alphabetic baseline.
+   * Pagination may consume it, but paint must never reconstruct it. */
+  readonly inkBounds?: GlyphInkBounds;
 }
 
 export type TextColorPolicy =
@@ -893,6 +901,13 @@ export interface PagePaintDrawingEntry extends PagePaintEntryBase {
 
 export type PagePaintEntry = PagePaintNodeEntry | PagePaintDrawingEntry;
 
+export interface PagePaintCapabilities {
+  /** At least one retained text operation proved an OpenType `vert` form.
+   * Canvas paint must therefore use an element-backed context when available,
+   * because OffscreenCanvas cannot apply the proven feature. */
+  readonly requiresElementBackedVerticalGlyphPaint: boolean;
+}
+
 export interface PageLayers {
   /** Top-level retained story roots in composition order. This is graph and
    * reading-order authority, not paint-order authority. */
@@ -900,6 +915,8 @@ export interface PageLayers {
   /** Completed layout-owned order. Paint consumes it without graph discovery,
    * sorting, callback collection, or callback re-entry. */
   readonly paintOrder: readonly PagePaintEntry[];
+  /** Target requirements derived once from the immutable retained paint plan. */
+  readonly capabilities: PagePaintCapabilities;
   readonly background: readonly PaintNode[];
   readonly behindText: readonly PaintNode[];
   readonly header: readonly PaintNode[];

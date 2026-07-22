@@ -1637,6 +1637,9 @@ function textPlanSegment(
       // into one authoritative per-scalar pitch. Paint retains that same value;
       // it must never reconstruct pitch from parser source or remeasure glyphs.
       letterSpacingPt: pitchPt,
+      ...(segment.selectedFaceInkBounds
+        ? { inkBounds: segment.selectedFaceInkBounds }
+        : {}),
     })),
     breakBefore: segment.breakBefore !== false && !segment.joinPrev,
     rtl: segment.rtl,
@@ -2174,6 +2177,46 @@ function projectPhysicalAnchorRect(rect: LayoutRect, physicalPageWidthPt: number
   };
 }
 
+/** A vertical page paints section-logical points with a +90° quarter turn.
+ * Keep DrawingML commands in an upright physical, drawing-local frame and map
+ * them into the logical page with the exact inverse turn around the anchor's
+ * retained centre. Shape geometry and owned text then share one orientation. */
+function uprightPhysicalDrawingTransform(rect: LayoutRect): import('./types.js').Matrix2DData {
+  return {
+    a: 0, b: -1, c: 1, d: 0,
+    e: rect.xPt + rect.widthPt / 2,
+    f: rect.yPt + rect.heightPt / 2,
+  };
+}
+
+function logicalRectToUprightDrawingLocal(
+  rect: LayoutRect,
+  transform: import('./types.js').Matrix2DData,
+): LayoutRect {
+  const centerXPt = rect.xPt + rect.widthPt / 2;
+  const centerYPt = rect.yPt + rect.heightPt / 2;
+  const widthPt = rect.heightPt;
+  const heightPt = rect.widthPt;
+  return {
+    xPt: transform.f - centerYPt - widthPt / 2,
+    yPt: centerXPt - transform.e - heightPt / 2,
+    widthPt,
+    heightPt,
+  };
+}
+
+function uprightDrawingLocalRectToLogical(
+  rect: LayoutRect,
+  transform: import('./types.js').Matrix2DData,
+): LayoutRect {
+  return {
+    xPt: transform.e + rect.yPt,
+    yPt: transform.f - rect.xPt - rect.widthPt,
+    widthPt: rect.heightPt,
+    heightPt: rect.widthPt,
+  };
+}
+
 function projectPhysicalAnchorResult(
   result: Extract<AnchorFrameResult, { status: 'resolved' }>,
   physicalPageWidthPt: number,
@@ -2424,6 +2467,16 @@ function acquireAnchorOccurrence(
     throw new Error('resolved anchor frame must retain required CT_Anchor behavior');
   }
   const authoredRect = result.geometry.objectFrame;
+  let uprightTransform = physicalPageWidthPt === undefined
+    ? undefined
+    : uprightPhysicalDrawingTransform(authoredRect);
+  const uprightEnvironment = uprightTransform ? {
+    ...options.environment,
+    // The section quarter turn is cancelled by the drawing frame. Text-box
+    // direction now belongs only to a:bodyPr@vert, not w:sectPr@textDirection.
+    verticalCJK: false,
+    verticalPageFrame: false,
+  } : options.environment;
   const commands: DrawingPaintCommand[] = [];
   const textBoxes: TextBoxLayout[] = [];
   const textBoxIds: string[] = [];
@@ -2431,19 +2484,25 @@ function acquireAnchorOccurrence(
   let rect = authoredRect;
   if (outer.run.type === 'shape' && outer.run.anchorAcquisitionInput.group === null) {
     const source = runSource(options.source, outer.runIndex);
-    const textBox = acquireShapeTextBoxLayout(outer.run, authoredRect, {
+    const textBoxRect = uprightTransform
+      ? logicalRectToUprightDrawingLocal(authoredRect, uprightTransform)
+      : authoredRect;
+    const textBox = acquireShapeTextBoxLayout(outer.run, textBoxRect, {
       id: `${options.id}:anchor-textbox:${occurrenceId}:${outer.runIndex}`,
       source,
       flowDomainId: options.flowDomainId,
       context: options.context,
       measurer: options.measurer,
-      environment: options.environment,
+      environment: uprightEnvironment,
       input: outer.run.textBoxInput,
       acquireCompleteStory: options.acquireCompleteStory,
+      ...(uprightTransform ? { coordinateSpace: 'upright-physical' as const } : {}),
     });
     if (textBox) {
       acquiredShapeTextBoxes.set(outer.runIndex, textBox);
-      rect = textBox.flowBounds;
+      rect = uprightTransform
+        ? uprightDrawingLocalRectToLogical(textBox.flowBounds, uprightTransform)
+        : textBox.flowBounds;
     }
   }
   let effectiveResult = resizeResolvedAnchorGeometry(result, rect);
@@ -2527,12 +2586,19 @@ function acquireAnchorOccurrence(
     const delta = displaced.displacement;
     if (delta.xPt !== 0 || delta.yPt !== 0) {
       rect = translateRect(rect, delta);
-      const outerTextBox = acquiredShapeTextBoxes.get(outer.runIndex);
-      if (outerTextBox) {
-        acquiredShapeTextBoxes.set(
-          outer.runIndex,
-          translateTextBox(outerTextBox, delta),
-        );
+      if (uprightTransform) uprightTransform = {
+        ...uprightTransform,
+        e: uprightTransform.e + delta.xPt,
+        f: uprightTransform.f + delta.yPt,
+      };
+      else {
+        const outerTextBox = acquiredShapeTextBoxes.get(outer.runIndex);
+        if (outerTextBox) {
+          acquiredShapeTextBoxes.set(
+            outer.runIndex,
+            translateTextBox(outerTextBox, delta),
+          );
+        }
       }
       effectiveResult = resizeResolvedAnchorGeometry(result, rect);
     }
@@ -2541,21 +2607,18 @@ function acquireAnchorOccurrence(
     const source = runSource(options.source, runIndex);
     const acquisition = run.anchorAcquisitionInput as NonNullable<typeof run.anchorAcquisitionInput>;
     const commandRect = retainedAnchorChildFrame(acquisition, rect, physicalPageWidthPt);
+    const paintRect = uprightTransform
+      ? logicalRectToUprightDrawingLocal(commandRect, uprightTransform)
+      : commandRect;
     if (run.type === 'image') {
       commands.push({
         kind: 'resource', resourceKind: 'image',
-        resourceKey: imageResourceKey(source, run.imagePath), rect: commandRect,
-        ...(options.environment.verticalPageFrame
-          ? { orientation: 'upright-physical' as const }
-          : {}),
+        resourceKey: imageResourceKey(source, run.imagePath), rect: paintRect,
       });
     } else if (run.type === 'chart') {
       commands.push({
         kind: 'resource', resourceKind: 'chart',
-        resourceKey: chartResourceKey(source), rect: commandRect,
-        ...(options.environment.verticalPageFrame
-          ? { orientation: 'upright-physical' as const }
-          : {}),
+        resourceKey: chartResourceKey(source), rect: paintRect,
       });
     } else {
       const childTransform = acquisition.group?.resolvedChildFrame;
@@ -2567,20 +2630,21 @@ function acquireAnchorOccurrence(
       } : run;
       commands.push(planShapeDrawing(
         plannedRun,
-        commandRect,
+        paintRect,
         options.environment.layoutServices?.text,
         run.vmlTextPathInput,
       ).command);
       const textBoxId = `${options.id}:anchor-textbox:${occurrenceId}:${runIndex}`;
-      const textBox = acquiredShapeTextBoxes.get(runIndex) ?? acquireShapeTextBoxLayout(run, commandRect, {
+      const textBox = acquiredShapeTextBoxes.get(runIndex) ?? acquireShapeTextBoxLayout(run, paintRect, {
         id: textBoxId,
         source,
         flowDomainId: options.flowDomainId,
         context: options.context,
         measurer: options.measurer,
-        environment: options.environment,
+        environment: uprightEnvironment,
         input: run.textBoxInput,
         acquireCompleteStory: options.acquireCompleteStory,
+        ...(uprightTransform ? { coordinateSpace: 'upright-physical' as const } : {}),
       });
       if (textBox) {
         textBoxes.push(textBox);
@@ -2597,6 +2661,10 @@ function acquireAnchorOccurrence(
     inkBounds: effectiveResult.geometry.inkBounds,
     advancePt: 0,
     ordinaryFlow: false,
+    ...(uprightTransform ? {
+      orientation: 'upright-physical' as const,
+      transform: uprightTransform,
+    } : {}),
     commands,
     anchorLayer: {
       occurrenceId,
@@ -2666,6 +2734,9 @@ export type CompleteTextBoxStoryAcquirer = (
     source: SourceRef;
     container: FlowContainer;
     blocks: readonly CompleteTextBoxBlockInput[];
+    /** Parser-owned vertical-page drawings acquire their shape content in the
+     * same upright local frame as the surrounding DrawingML geometry. */
+    coordinateSpace?: 'section-logical' | 'upright-physical';
   }>,
 ) => StoryLayout;
 
@@ -2678,6 +2749,7 @@ export interface ShapeTextBoxAcquisitionOptions {
   readonly environment: ParagraphMeasurementEnvironment;
   readonly input?: TextBoxAcquisitionInput;
   readonly acquireCompleteStory?: CompleteTextBoxStoryAcquirer;
+  readonly coordinateSpace?: 'section-logical' | 'upright-physical';
 }
 
 function textBoxParagraphContext(
@@ -3003,6 +3075,7 @@ export function acquireShapeTextBoxLayout(
         capacity: 'unbounded',
       },
       blocks: acquisition.blocks,
+      coordinateSpace: options.coordinateSpace ?? 'section-logical',
     });
   }
   let yPt = contentBounds.yPt + insets.topPt;
@@ -4073,8 +4146,9 @@ export function sliceParagraphLayout(
     drawing.id.replace(':drawing:', ':textbox:'),
     ...(drawing.textBoxIds ?? []),
   ]));
-  const pageOwnedTextBoxIds = new Set(drawings
-    .filter((drawing) => drawing.anchorLayer?.verticalOwnership === 'page')
+  const stationaryTextBoxIds = new Set(drawings
+    .filter((drawing) => drawing.anchorLayer?.verticalOwnership === 'page'
+      || drawing.orientation === 'upright-physical')
     .flatMap((drawing) => drawing.textBoxIds ?? []));
   const drawingSourceKeys = new Set(drawings.map((drawing) =>
     stableFingerprint('source-occurrence', drawing.source)));
@@ -4116,7 +4190,7 @@ export function sliceParagraphLayout(
       .filter((textBox) =>
         textBoxIds.has(textBox.id)
         || drawingSourceKeys.has(stableFingerprint('source-occurrence', textBox.source)))
-      .map((textBox) => pageOwnedTextBoxIds.has(textBox.id)
+      .map((textBox) => stationaryTextBoxIds.has(textBox.id)
         ? textBox : translateTextBoxY(textBox, deltaYPt)),
     events: lineRangeStart === undefined || lineRangeEnd === undefined
       ? []

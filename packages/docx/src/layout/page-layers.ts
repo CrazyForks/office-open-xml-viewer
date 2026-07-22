@@ -294,6 +294,34 @@ function materializeStackingContext(roots: readonly PageLayerRoot[]): readonly P
   return Object.freeze([...behind, ...nodes, ...front]);
 }
 
+function retainedNodeRequiresElementBackedVerticalGlyphPaint(
+  node: PaintNode,
+  seen: Set<PaintNode>,
+): boolean {
+  if (seen.has(node)) return false;
+  seen.add(node);
+  if (node.kind === 'drawing') return false;
+  if (node.kind === 'paragraph') {
+    const hasVerticalGlyph = node.lines.some((line) => line.placements.some((placement) => (
+      placement.kind === 'text'
+      && placement.paintOps.some((operation) => operation.verticalFeature === true)
+    )));
+    return hasVerticalGlyph || node.textBoxes.some((textBox) => (
+      retainedNodeRequiresElementBackedVerticalGlyphPaint(textBox, seen)
+    ));
+  }
+  if (node.kind === 'textbox' || node.kind === 'note') {
+    return node.story.blocks.some((block) => (
+      retainedNodeRequiresElementBackedVerticalGlyphPaint(block, seen)
+    ));
+  }
+  return node.rows.some((row) => row.cells.some((cell) => cell.blocks.some((block) => (
+    retainedNodeRequiresElementBackedVerticalGlyphPaint(block.layout, seen)
+  )))) || (node.resolvedFloatingTables ?? []).some((placement) => (
+    retainedNodeRequiresElementBackedVerticalGlyphPaint(placement.child, seen)
+  ));
+}
+
 /** Build the final immutable page paint plan. ECMA-376 §20.4.2.3 ordering is
  * applied only within an equivalent story stacking context; cross-story order
  * remains the explicit root order unless a separately registered compatibility
@@ -324,9 +352,15 @@ export function buildPageLayers(entries: readonly PageLayerNode[]): PageLayers {
     }
     index = end;
   }
+  const seen = new Set<PaintNode>();
   return Object.freeze({
     roots,
     paintOrder: Object.freeze(paintOrder),
+    capabilities: Object.freeze({
+      requiresElementBackedVerticalGlyphPaint: roots.some(({ node }) => (
+        retainedNodeRequiresElementBackedVerticalGlyphPaint(node, seen)
+      )),
+    }),
     background: Object.freeze(nodes.get('background')!),
     behindText: Object.freeze(nodes.get('behindText')!),
     header: Object.freeze(nodes.get('header')!),

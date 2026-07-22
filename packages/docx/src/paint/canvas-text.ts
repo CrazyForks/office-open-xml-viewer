@@ -15,6 +15,7 @@ import {
   translationAffine,
 } from './affine.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
+import { applyCanvasTransform } from './canvas-transform.js';
 
 function validateTextSlices(placement: import('../layout/types.js').TextPlacement): void {
   if (placement.text.length !== placement.range.end - placement.range.start) {
@@ -156,10 +157,27 @@ export function paintDrawingWithOwnedTextBoxes(
     context.ctx.save();
     context.ctx.translate(undoX, undoY);
   }
-  try {
-    paintDrawingLayout(drawing, context);
+  const paintOwnedContents = (paintContext: CanvasPaintContext): void => {
+    paintDrawingLayout(drawing, paintContext);
     for (const textBox of textBoxes) {
-      paintTextBoxLayout(textBox, { ...context, omitAnchoredDrawings: false });
+      paintTextBoxLayout(textBox, { ...paintContext, omitAnchoredDrawings: false });
+    }
+  };
+  try {
+    if (drawing.orientation === 'upright-physical') {
+      if (!drawing.transform) {
+        throw new Error('Upright physical drawing requires its retained logical transform');
+      }
+      const pointToCss = composeAffine(
+        context.pointToCss ?? scaleAffine(context.scale),
+        drawing.transform,
+      );
+      const frame = canvasPaintFrame(context.ctx, () => {
+        applyCanvasTransform(context.ctx, drawing.transform!);
+      });
+      frame(() => paintOwnedContents({ ...context, pointToCss }))();
+    } else {
+      paintOwnedContents(context);
     }
   } finally {
     if (undoX !== 0 || undoY !== 0) context.ctx.restore();

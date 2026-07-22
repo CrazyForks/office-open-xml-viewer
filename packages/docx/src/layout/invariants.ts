@@ -416,6 +416,12 @@ function requireRetainedCollisionGeometry(node: PaintNode, path: string): void {
 }
 
 function requireDrawingGeometry(node: DrawingLayout, path: string): void {
+  if (node.orientation === 'upright-physical' && !node.transform) {
+    throw new LayoutInvariantError(
+      'INVALID_GEOMETRY',
+      `${path} upright physical drawing is missing its logical transform`,
+    );
+  }
   if (node.transform) {
     for (const key of ['a', 'b', 'c', 'd', 'e', 'f'] as const) {
       requireFinite(node.transform[key], `${path}.transform.${key}`);

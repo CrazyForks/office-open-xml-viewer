@@ -20,7 +20,11 @@ import type { BodyAcquisitionLocation, BodyLayoutKernel, BodyLayoutSession, Page
 import { NoteCapacityExceededError } from './body-layout-kernel.js';
 import { FlowCapacityExceededError } from './flow.js';
 import { projectBodyOccurrence } from './occurrence-projection.js';
-import { sectionBodyInsetPt as bodyMarginInsetPt, createBodySectionIndex } from './context.js';
+import {
+  sectionBodyInsetPt as bodyMarginInsetPt,
+  createBodySectionIndex,
+  physicalSectionGeometry,
+} from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalSection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
 import { docDefaultFontSizePt, gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
 import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
@@ -953,13 +957,21 @@ function buildConcreteBodyLayoutKernel(
         storyLayoutCache.set(cacheKey, retained);
         return retained;
       };
-      const acquireCompleteTextBoxStory: CompleteTextBoxStoryAcquirer = (request) =>
-        acquireStoryLayout({
+      const acquireCompleteTextBoxStory: CompleteTextBoxStoryAcquirer = (request) => {
+        const section = request.coordinateSpace === 'upright-physical'
+          ? {
+              ...state.sectionLayout,
+              geometry: physicalSectionGeometry(state.sectionLayout.geometry),
+              textDirection: 'lrTb',
+            }
+          : state.sectionLayout;
+        return acquireStoryLayout({
           source: request.source,
           pageIndex: state.pageIndex,
-          section: state.sectionLayout,
+          section,
           container: request.container,
         }, request.blocks);
+      };
       state.acquireCompleteTextBoxStory = acquireCompleteTextBoxStory;
       const session: BodyLayoutSession = {
         hasPaginationFields: paginatedFlowHasPaginationDependentFields(

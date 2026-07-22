@@ -282,4 +282,22 @@ describe('buildPageLayers', () => {
       { kind: 'drawing', id: 'footer-front', sourceLayer: 'footer', layer: 'front' },
     ]);
   });
+
+  it('retains the element-backed target requirement from a proven vertical glyph operation', () => {
+    const ordinary = paragraph('p1', 'body');
+    const vertical = Object.freeze({
+      ...ordinary,
+      lines: Object.freeze([Object.freeze({
+        placements: Object.freeze([Object.freeze({
+          kind: 'text',
+          paintOps: Object.freeze([Object.freeze({ verticalFeature: true })]),
+        })]),
+      })]) as unknown as ParagraphLayout['lines'],
+    });
+
+    expect(buildPageLayers([{ layer: 'body', node: ordinary }]).capabilities)
+      .toEqual({ requiresElementBackedVerticalGlyphPaint: false });
+    expect(buildPageLayers([{ layer: 'body', node: vertical }]).capabilities)
+      .toEqual({ requiresElementBackedVerticalGlyphPaint: true });
+  });
 });

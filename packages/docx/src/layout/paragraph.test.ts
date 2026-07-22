@@ -43,6 +43,7 @@ function projectMeasuredSegment(
   anchorFrames?: Parameters<typeof paragraphLayoutFromMeasurement>[1]['anchorFrames'],
   paragraphBorderEdges?: Parameters<typeof paragraphLayoutFromMeasurement>[1]['paragraphBorderEdges'],
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
+  verticalPageFrame = false,
 ) {
   const measured = {
     lines: [{
@@ -68,6 +69,7 @@ function projectMeasuredSegment(
     measurer: {} as never,
     environment: {
       documentHasEastAsianText: false, layoutServices, verticalGlyphMeasurement,
+      verticalPageFrame,
     } as never,
     exclusions: [],
     ...(anchorFrames ? { anchorFrames } : {}),
@@ -767,6 +769,31 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     });
   });
 
+  it('retains selected-face ink on text paint operations for page admission', () => {
+    const textParagraph = {
+      ...paragraph,
+      runs: [{ ...(paragraph.runs[0] as object), text: 'A' }],
+    } as unknown as DocParagraph;
+    const segment = {
+      text: 'A', sourceRunIndex: 0, measuredWidth: 7,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+      shapedClusters: [{
+        range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 7,
+      }],
+      selectedFaceInkBounds: {
+        xMinPt: 0, xMaxPt: 7, ascentPt: 7, descentPt: 3,
+      },
+    } as unknown as LayoutTextSeg;
+
+    expect(projectMeasuredSegment(textParagraph, segment)
+      .lines[0]?.placements[0]).toMatchObject({
+      kind: 'text',
+      paintOps: [{
+        inkBounds: { xMinPt: 0, xMaxPt: 7, ascentPt: 7, descentPt: 3 },
+      }],
+    });
+  });
+
   it('matches one scoped host to one anchored payload and retains one drawing and exclusion', () => {
     const occurrenceId = 'anchor:body:body:3:wp-anchor-1';
     const anchored = retainedAnchor(occurrenceId);
@@ -928,6 +955,76 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     expect(node.exclusions).toHaveLength(1);
     expect(node.exclusions[0]).toMatchObject({
       bounds: { xPt: 12, yPt: 13, widthPt: 40, heightPt: 30 },
+    });
+  });
+
+  it('plans a directional vertical-page anchor in an upright physical paint frame', () => {
+    const occurrenceId = 'anchor:body:body:3:vertical-right-arrow';
+    const anchored = retainedAnchor(occurrenceId, {
+      horizontal: {
+        relativeFrom: 'page', relativeFromStatus: 'valid',
+        choice: { kind: 'offset', valuePt: 40 },
+      },
+      vertical: {
+        relativeFrom: 'page', relativeFromStatus: 'valid',
+        choice: { kind: 'offset', valuePt: 50 },
+      },
+      extent: {
+        widthPt: 80, widthStatus: 'valid', heightPt: 30, heightStatus: 'valid',
+      },
+      wrap: {
+        kind: 'none', authoredKinds: [], side: null,
+        distances: retainedAnchor(occurrenceId).wrap.distances,
+        effectExtent: null, polygon: null,
+      },
+    });
+    const anchorParagraph = {
+      ...paragraph,
+      runs: [
+        { type: 'anchorHost', fontSize: 10, anchorOccurrenceId: occurrenceId },
+        {
+          type: 'shape', widthPt: 80, heightPt: 30,
+          anchorXPt: 40, anchorYPt: 50,
+          anchorXFromMargin: false, anchorYFromPara: false,
+          anchorAcquisitionInput: anchored,
+          presetGeometry: 'rightArrow', subpaths: [], fill: null, stroke: null,
+        },
+      ],
+    } as unknown as DocParagraph;
+    const host = {
+      text: '', metricOnly: true, sourceRunIndex: 0, measuredWidth: 0,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+    } as unknown as LayoutTextSeg;
+
+    const node = projectMeasuredSegment(
+      anchorParagraph,
+      host,
+      acquisitionContext,
+      undefined,
+      {
+        // Vertical layout retains the physical 300 x 200 page as a 300 x 200
+        // anchor-reference frame; page.height is the physical paint width.
+        page: { xPt: 0, yPt: 0, widthPt: 300, heightPt: 200 },
+        margin: { xPt: 10, yPt: 20, widthPt: 280, heightPt: 160 },
+        column: { xPt: 10, yPt: 20, widthPt: 140, heightPt: 160 },
+        pageParity: 'odd',
+      },
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(node.drawings[0]).toMatchObject({
+      orientation: 'upright-physical',
+      flowBounds: { xPt: 50, yPt: 80, widthPt: 30, heightPt: 80 },
+      transform: { a: 0, b: -1, c: 1, d: 0, e: 65, f: 120 },
+      commands: [{
+        kind: 'drawingml-shape',
+        plan: {
+          geometry: { kind: 'preset', name: 'rightArrow' },
+          rect: { x: -40, y: -15, w: 80, h: 30 },
+        },
+      }],
     });
   });
 

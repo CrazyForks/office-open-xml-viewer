@@ -69,6 +69,7 @@ import type {
 import type {
   ParagraphMathRun,
   ParagraphTextBearingRun,
+  GlyphInkBounds,
   TextLayoutService,
   TextShapeRequest,
   TextShapeSpan,
@@ -145,6 +146,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
     offsetPt: number;
     advancePt: number;
   }>[];
+  /** Tight selected-face ink retained by the authoritative shape call that
+   * also produced `shapedClusters`. */
+  selectedFaceInkBounds?: GlyphInkBounds;
   /** False when this segment starts inside the preceding grapheme cluster. */
   breakBefore?: boolean;
   smallCaps?: boolean;
@@ -3349,6 +3353,12 @@ export function layoutLines(
       });
       if (clusterGeometry) {
         s.shapedClusters = shaped.clusters;
+        s.selectedFaceInkBounds = shaped.inkBounds ?? {
+          xMinPt: 0,
+          xMaxPt: shaped.advancePt,
+          ascentPt: shaped.ascentPt,
+          descentPt: shaped.descentPt,
+        };
       }
       return {
         width: shaped.advancePt,

@@ -64,7 +64,13 @@ export async function renderSelectedDocumentPage<TTextRun>(
     renderTokens.set(canvas, token);
     const superseded = (): boolean => renderTokens.get(canvas) !== token;
     const dpr = options.dpr ?? defaultDpr();
-    const context = canvas.getContext('2d') as PaintCanvas2D | null;
+    const paintCanvas: HTMLCanvasElement | OffscreenCanvas =
+      page.layers.capabilities.requiresElementBackedVerticalGlyphPaint
+      && !isHTMLCanvas(canvas)
+      && typeof document !== 'undefined'
+        ? document.createElement('canvas')
+        : canvas;
+    const context = paintCanvas.getContext('2d') as PaintCanvas2D | null;
     if (!context) throw new Error('2D canvas is unavailable for DOCX paint');
     const scale = canvasPageScale(page, options.width);
     const cssWidth = page.geometry.widthPt * scale;
@@ -73,10 +79,18 @@ export async function renderSelectedDocumentPage<TTextRun>(
     const effectiveDpr = clamped.clamped ? dpr * clamped.scale : dpr;
     canvas.width = clamped.width;
     canvas.height = clamped.height;
+    if (paintCanvas !== canvas) {
+      paintCanvas.width = clamped.width;
+      paintCanvas.height = clamped.height;
+    }
     if (isHTMLCanvas(canvas)) {
       canvas.style.width = `${cssWidth}px`;
       canvas.style.height = `${cssHeight}px`;
       if (!canvas.style.display) canvas.style.display = 'block';
+    }
+    if (isHTMLCanvas(paintCanvas) && paintCanvas !== canvas) {
+      paintCanvas.style.width = `${cssWidth}px`;
+      paintCanvas.style.height = `${cssHeight}px`;
     }
     context.scale(effectiveDpr, effectiveDpr);
     context.fillStyle = '#ffffff';
@@ -132,6 +146,12 @@ export async function renderSelectedDocumentPage<TTextRun>(
       });
     } finally {
       context.restore();
+    }
+    if (paintCanvas !== canvas) {
+      if (superseded()) return;
+      const destination = canvas.getContext('2d') as PaintCanvas2D | null;
+      if (!destination) throw new Error('2D canvas is unavailable for DOCX paint projection');
+      destination.drawImage(paintCanvas, 0, 0);
     }
     if (options.onTextRun) {
       for (const run of options.textRuns) options.onTextRun(run);
