@@ -78,7 +78,6 @@ export function paragraphMeasurementEnvironment(
     verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
     useFeLayout: state.layoutSettings.compat.useFeLayout,
-    characterSpacingControl: state.layoutSettings.characterSpacingControl,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
     verticalGlyphMeasurement: state.verticalGlyphMeasurement,

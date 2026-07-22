@@ -173,6 +173,31 @@ describe('§17.4.50 tblInd — table indent from the leading margin', () => {
     expect(retained.flowBounds.xPt + retained.flowBounds.widthPt).toBeCloseTo(190, 6);
   });
 
+  it.each([
+    ['LTR', false, { xPt: 10, widthPt: 190 }],
+    ['RTL', true, { xPt: 0, widthPt: 190 }],
+  ] as const)(
+    '%s: caps AutoFit at the physical page edge after resolving a partial negative leading indent',
+    (_direction, bidiVisual, expected) => {
+      // The text band is [20, 180]. A -10pt leading indent moves the resolved
+      // leading edge halfway into its 20pt page margin. AutoFit may therefore
+      // use 190pt, but not the full 200pt page width: the latter would cross the
+      // opposite physical page edge by 10pt in either visual direction.
+      const recording = makeRecordingCanvas();
+      const doc = tableDoc(220, -10, bidiVisual);
+      const services = createLayoutServices(doc, {
+        measureContext: recording.canvas.getContext('2d') as CanvasRenderingContext2D,
+      });
+      const retained = layoutDocument(doc, services, { currentDateMs: 0 }).pages[0]?.layers.body[0];
+      if (retained?.kind !== 'table') throw new Error('expected retained table geometry');
+
+      expect(retained.flowBounds.xPt).toBeCloseTo(expected.xPt, 6);
+      expect(retained.flowBounds.widthPt).toBeCloseTo(expected.widthPt, 6);
+      expect(retained.flowBounds.xPt).toBeGreaterThanOrEqual(0);
+      expect(retained.flowBounds.xPt + retained.flowBounds.widthPt).toBeLessThanOrEqual(200);
+    },
+  );
+
   it('RTL (bidiVisual): negative tblInd pushes the RIGHT leading edge into the right margin', async () => {
     // No indent, bidiVisual, colW=160=content: table fills [20,180]; right edge 180.
     const noInd = makeRecordingCanvas();

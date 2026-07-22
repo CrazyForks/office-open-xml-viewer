@@ -91,10 +91,6 @@ import {
   wordJustifiedCandidateFitAllowancePx,
 } from './layout/line-compatibility.js';
 import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
-import {
-  applyCharacterSpacingControlToClusters,
-  characterSpacingControlCompressionPt,
-} from './layout/character-spacing-control.js';
 
 export interface LineBoundary {
   segIndex: number;
@@ -148,11 +144,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
     range: Readonly<{ start: number; end: number }>;
     offsetPt: number;
     advancePt: number;
-    compressionPt?: number;
-    paintOffsetPt?: number;
   }>[];
-  /** ECMA-376 §17.15.1.18 document-wide full-width whitespace compression. */
-  characterSpacingControl?: string;
   /** False when this segment starts inside the preceding grapheme cluster. */
   breakBefore?: boolean;
   smallCaps?: boolean;
@@ -575,8 +567,6 @@ export interface LineLayoutEnvironment {
   readonly verticalCJK?: boolean;
   /** §17.15.3.1 w:useFELayout document compatibility switch. */
   readonly useFeLayout?: boolean;
-  /** §17.15.1.18 full-width punctuation/kana whitespace compression policy. */
-  readonly characterSpacingControl?: string;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
   readonly layoutServices?: LayoutServices;
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
@@ -1062,18 +1052,10 @@ export function segAdvanceWidth(
   gridDeltaPx: number,
   scale: number,
 ): number {
-  const controlledNaturalWidthPx = Math.max(
-    0,
-    naturalWidthPx - characterSpacingControlCompressionPt(
-      seg.text,
-      calcEffectiveFontPx(seg, scale),
-      seg.characterSpacingControl,
-    ),
-  );
   if (seg.fitTextPerGapPx !== undefined) {
     const charCount = [...seg.text].length;
     const gapCount = seg.fitTextRegionEnd ? Math.max(0, charCount - 1) : charCount;
-    return controlledNaturalWidthPx * charScaleFactor(seg)
+    return naturalWidthPx * charScaleFactor(seg)
       + gapCount * seg.fitTextPerGapPx
       + (seg.fitTextTrailingPadPx ?? 0);
   }
@@ -1089,7 +1071,7 @@ export function segAdvanceWidth(
   if (seg.tateChuYoko) return seg.fontSize * scale;
   const segmentDelta = segmentCharacterGridDeltaPx(seg, gridDeltaPx);
   return textAdvanceWidth(
-    controlledNaturalWidthPx,
+    naturalWidthPx,
     seg.text,
     segmentDelta,
     charScaleFactor(seg),
@@ -1721,9 +1703,8 @@ export function fitCJKPrefix(
   verticalRun = false,
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   /** Optional caller-owned advance authority. Production layout supplies the
-   * same substring measurement used by whole-segment fit, so compatibility
-   * transforms such as characterSpacingControl cannot disappear only at the
-   * overflow-prefix search seam. */
+   * same substring measurement used by whole-segment fit so every prefix uses
+   * the canonical selected-face and OOXML pitch model. */
   measureAdvance?: (text: string) => number,
 ): string {
   const chars = [...text]; // spread handles surrogate pairs
@@ -2008,6 +1989,21 @@ export interface BidiTabResult {
   leader?: TabStop['leader'];
 }
 
+/** Resolve ST_TabJc aliases to the physical role used by the paragraph's
+ * reading frame. `start`/`end` are the strict logical aliases of
+ * `left`/`right`; `num` is the leading tab between a list marker and its text.
+ * Both the LTR and mirrored bidi algorithms operate in reading-frame
+ * coordinates, so the role mapping itself is direction-independent. */
+function tabAlignmentRole(
+  alignment: TabStop['alignment'],
+): 'leading' | 'center' | 'trailing' {
+  if (alignment === 'center') return 'center';
+  if (alignment === 'right' || alignment === 'end' || alignment === 'decimal') {
+    return 'trailing';
+  }
+  return 'leading';
+}
+
 /**
  * ECMA-376 §17.3.1.37 / §17.15.1.25 / §17.18.84 — lay out ONE line of a BIDI
  * (RTL-base) paragraph's tab-aligned cells, returning each tab's width and
@@ -2094,11 +2090,12 @@ export function layoutBidiTabStops(
     // is the stop-aligned target, giving the gap it fills.
     const fw = followW(i + 1);
     let target: number; // pen value after the tab (its trailing/left edge)
-    if (stop.alignment === 'right') {
+    const role = tabAlignmentRole(stop.alignment);
+    if (role === 'trailing') {
       // end/trailing: following content's TRAILING (left) edge on the stop, i.e.
       // its right edge sits fw to the RIGHT (smaller margin) of the stop.
       target = stop.pos - fw;
-    } else if (stop.alignment === 'center') {
+    } else if (role === 'center') {
       target = stop.pos - fw / 2;
     } else {
       // start/leading (or bar/clear/left): following content's LEADING (right)
@@ -2432,7 +2429,6 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
         vertAlign,
         measuredWidth: 0,
-        characterSpacingControl: environment.characterSpacingControl,
         textLayoutService: environment.layoutServices?.text,
         textShapeRequest,
         breakBefore: resolvedSpan?.breakBefore ?? authoritativeSpan?.breakBefore ?? true,
@@ -3352,14 +3348,7 @@ export function layoutLines(
         clusterGeometry,
       });
       if (clusterGeometry) {
-        s.shapedClusters = shaped.clusters
-          ? applyCharacterSpacingControlToClusters(
-              s.text,
-              shaped.clusters,
-              effectiveFontPx(s),
-              s.characterSpacingControl,
-            )
-          : undefined;
+        s.shapedClusters = shaped.clusters;
       }
       return {
         width: shaped.advancePt,
@@ -3460,16 +3449,7 @@ export function layoutLines(
   resolveFitTextSegments(
     queue.filter((seg): seg is LayoutTextSeg => 'text' in seg),
     scale,
-    (segment) => Math.max(
-      0,
-      measureText(segment).width
-        + verticalInkExtra(segment, segment.text)
-        - characterSpacingControlCompressionPt(
-          segment.text,
-          effectiveFontPx(segment),
-          segment.characterSpacingControl,
-        ),
-    ),
+    (segment) => measureText(segment).width + verticalInkExtra(segment, segment.text),
   );
 
   // The segment's laid-out ADVANCE (= its measuredWidth): natural width plus the
@@ -3656,7 +3636,8 @@ export function layoutLines(
       // (ECMA-376 §17.3.1.37). This is what makes TOC "heading …… page" lines work.
       // Automatic stops returned by nextTabStop are left-aligned, so they fall
       // through to the left-tab path below.
-      if (stop && stop.alignment !== 'left' && stop.alignment !== 'bar' && stop.alignment !== 'clear') {
+      const alignmentRole = stop ? tabAlignmentRole(stop.alignment) : 'leading';
+      if (stop && alignmentRole !== 'leading') {
         const stopX = stopParaX;
         seg.leader = stop.leader;
         let followW = 0;
@@ -3664,7 +3645,7 @@ export function layoutLines(
           if ('isTab' in q || 'lineBreak' in q) break;
           followW += tabFollowWidth(q);
         }
-        const frac = stop.alignment === 'center' ? 0.5 : 1;
+        const frac = alignmentRole === 'center' ? 0.5 : 1;
         let tabW = stopX - absFromParaX - followW * frac;
         if (tabW <= 0) tabW = seg.fontSize * scale * 0.25;
         seg.measuredWidth = tabW;

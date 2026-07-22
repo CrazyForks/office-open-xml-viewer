@@ -2231,8 +2231,11 @@ function resolveColumnWidths(
   });
   // §17.18.87 lets AutoFit override its preferred width up to the page width.
   // Keep the ordinary text-band ceiling unless §17.4.50 placement moves a
-  // top-level page-owned story table into its semantic leading margin. Test
-  // the authored indent before bidiVisual reverses its physical translation;
+  // top-level page-owned story table into its semantic leading margin. The
+  // promoted ceiling is the physical page distance left after resolving jc +
+  // tblInd, rather than the page width in isolation: a partial negative indent
+  // does not move the table origin all the way to the page edge. Test the
+  // authored indent before bidiVisual reverses its physical translation;
   // table justification reverses under bidiVisual as well. Body tables must
   // also remain in a single-column page band; headers and footers are
   // page-owned stories and do not inherit the body's newspaper columns.
@@ -2245,8 +2248,35 @@ function resolveColumnWidths(
     && isTopLevelPageOwnedStory
     && !isVerticalTextDirection(state.sectionLayout.textDirection)
     && [baseIndentPt, ...rowIndentPts].some((indentPt) => indentPt < 0);
+  const rowPlacements = format.rows.length === 0
+    ? [{ justification: table.jc, indentPt: baseIndentPt }]
+    : format.rows.map((row, rowIndex) => ({
+        justification: row.justification ?? table.jc,
+        indentPt: rowIndentPts[rowIndex] ?? baseIndentPt,
+      }));
+  const bidiVisual = table.bidiVisual === true;
+  const pageFitCeilingPt = Math.min(
+    state.pageWidth,
+    ...rowPlacements.map(({ justification, indentPt }) => {
+      const trailing = justification === 'right' || justification === 'end';
+      const alignment = justification === 'center'
+        ? 'center'
+        : (bidiVisual ? !trailing : trailing) ? 'right' : 'left';
+      const signedIndentPt = bidiVisual ? -indentPt : indentPt;
+      if (alignment === 'left') {
+        const resolvedOriginPt = state.contentX + signedIndentPt;
+        return state.pageWidth - resolvedOriginPt;
+      }
+      if (alignment === 'right') {
+        const resolvedTrailingEdgePt = state.contentX + contentWPt + signedIndentPt;
+        return resolvedTrailingEdgePt;
+      }
+      const resolvedCenterPt = state.contentX + contentWPt / 2 + signedIndentPt;
+      return 2 * Math.min(resolvedCenterPt, state.pageWidth - resolvedCenterPt);
+    }),
+  );
   const maximumTableWidthPt = isLeadingMarginPageStoryTable
-    ? Math.max(contentWPt, state.pageWidth)
+    ? Math.max(contentWPt, pageFitCeilingPt)
     : contentWPt;
   return [...resolveTableColumnWidths(state.acquisitionInputs.tableColumnLayoutInput(
     table,

@@ -1626,78 +1626,11 @@ function textPlanSegment(
           ...(tateChuYokoScaleY !== 1 ? { scaleY: tateChuYokoScaleY } : {}),
         }))
       : paintOps;
-  const controlledPaintOps = segment.characterSpacingControl === 'compressPunctuation'
-    && !segment.tateChuYoko
-    ? (() => {
-        if (segment.verticalRun) {
-          return basePaintOps.map((operation) => {
-            const relativeStart = operation.range.start - sourceOffset;
-            const index = candidateClusters?.findIndex((cluster) =>
-              cluster.range.start === relativeStart) ?? -1;
-            const cluster = index >= 0 ? clusters[index] : undefined;
-            const shapedCluster = index >= 0 ? candidateClusters?.[index] : undefined;
-            return !cluster ? operation : {
-              ...operation,
-              offset: {
-                ...operation.offset,
-                xPt: cluster.offset.xPt + (shapedCluster?.paintOffsetPt ?? 0) * scaleX,
-              },
-            };
-          });
-        }
-        const template = basePaintOps[0];
-        if (!template || basePaintOps.length !== 1) {
-          throw new Error('Character spacing control requires one contextual horizontal paint operation');
-        }
-        const operations: Array<(typeof basePaintOps)[number]> = [];
-        const appendSlice = (start: number, end: number): void => {
-          if (start >= end) return;
-          const first = clusters[start];
-          const last = clusters[end - 1];
-          if (!first || !last) {
-            throw new Error('Character spacing control lost retained cluster geometry');
-          }
-          operations.push({
-            ...template,
-            text: segment.text.slice(
-              first.range.start - sourceOffset,
-              last.range.end - sourceOffset,
-            ),
-            range: { start: first.range.start, end: last.range.end },
-            offset: {
-              xPt: first.offset.xPt
-                + (candidateClusters?.[start]?.paintOffsetPt ?? 0) * scaleX,
-              yPt: template.offset.yPt,
-            },
-          });
-        };
-        let sliceStart = 0;
-        candidateClusters?.forEach((cluster, index) => {
-          if (cluster.paintOffsetPt !== undefined) {
-            // Opening punctuation trims its leading side bearing, so it needs
-            // its own shifted paint origin. Keep every other contextual span
-            // intact instead of degrading the whole run to glyph-at-a-time
-            // paint operations.
-            appendSlice(sliceStart, index);
-            appendSlice(index, index + 1);
-            sliceStart = index + 1;
-          } else if (cluster.compressionPt !== undefined) {
-            // Closing/middle punctuation keeps its natural glyph origin and
-            // trims the trailing side bearing. End the contextual slice after
-            // it so the following slice starts at the retained compressed x.
-            appendSlice(sliceStart, index + 1);
-            sliceStart = index + 1;
-          }
-        });
-        appendSlice(sliceStart, clusters.length);
-        return operations;
-      })()
-    : basePaintOps;
   return {
     ...style,
     kind: 'text', measuredWidthPt: segment.measuredWidth,
     clusters,
-    basePaintOps: controlledPaintOps.map((operation) => ({
+    basePaintOps: basePaintOps.map((operation) => ({
       ...operation,
       // Measurement resolves w:spacing, docGrid character pitch, and w:fitText
       // into one authoritative per-scalar pitch. Paint retains that same value;

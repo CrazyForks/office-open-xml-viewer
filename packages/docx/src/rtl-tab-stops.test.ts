@@ -97,6 +97,30 @@ describe('layoutBidiTabStops (§17.3.1.37 mirror — margin-anchored reading fra
     expect(res[3].width).toBeGreaterThan(0);
   });
 
+  it('honors strict logical start/end aliases and the num leading role', () => {
+    const items: BidiTabItem[] = [
+      { isTab: false, width: 40 },
+      { isTab: true, width: 0 },
+      { isTab: false, width: 30 },
+    ];
+    const edgeAfterTab = (alignment: 'left' | 'start' | 'right' | 'end' | 'num') => {
+      const result = layoutBidiTabStops(
+        items,
+        [{ pos: 150, alignment, leader: 'none' }],
+        0,
+        avail,
+        1000,
+      );
+      return readingEdges(items, result, 0)[1];
+    };
+
+    expect(edgeAfterTab('start')).toBeCloseTo(edgeAfterTab('left'), 6);
+    expect(edgeAfterTab('num')).toBeCloseTo(edgeAfterTab('left'), 6);
+    expect(edgeAfterTab('end')).toBeCloseTo(edgeAfterTab('right'), 6);
+    expect(edgeAfterTab('start')).toBeCloseTo(150, 6);
+    expect(edgeAfterTab('end')).toBeCloseTo(120, 6);
+  });
+
   it('pins a page number to the left text margin when the stop is past it', () => {
     // A right/leader stop at pos 420 (past the 400px left margin) would place
     // the page number past the margin; it pins so its far (left) edge is ON the

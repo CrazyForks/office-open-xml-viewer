@@ -284,6 +284,53 @@ mod private_typography_wire_tests {
     }
 
     #[test]
+    fn complex_field_start_moves_to_visible_chunk_after_leading_page_break() {
+        let paragraph = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF DestinationBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:br w:type="page"/></w:r>
+              <w:r><w:t>cached result</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+
+        let pieces = split_para_on_page_breaks(paragraph);
+        assert!(matches!(pieces.first(), Some(ParaPiece::PageBreak { .. })));
+        let visible = pieces
+            .iter()
+            .find_map(|piece| match piece {
+                ParaPiece::Para(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .expect("visible paragraph after the leading page break");
+        assert_eq!(
+            visible.complex_field_boundaries,
+            vec![
+                ComplexFieldBoundaryWire {
+                    occurrence_id: 0,
+                    boundary: "start".to_string(),
+                    run_index: 0,
+                    field_type: "ref".to_string(),
+                    instruction: "REF DestinationBookmark \\h".to_string(),
+                    hyperlink_anchor: Some("DestinationBookmark".to_string()),
+                },
+                ComplexFieldBoundaryWire {
+                    occurrence_id: 0,
+                    boundary: "end".to_string(),
+                    run_index: 1,
+                    field_type: "ref".to_string(),
+                    instruction: "REF DestinationBookmark \\h".to_string(),
+                    hyperlink_anchor: Some("DestinationBookmark".to_string()),
+                },
+            ],
+            "dropping the empty leading chunk must not orphan its complex-field start",
+        );
+    }
+
+    #[test]
     fn private_run_typography_inherits_complete_underline_and_border_facts() {
         let styles = StyleMap::parse(&format!(
             r#"<w:styles xmlns:w="{W_NS}">
@@ -2462,7 +2509,7 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // (Word's anchored shapes paragraph at the cover commonly does this
     // to force the cover onto its own page; the trailing empty chunk
     // would otherwise emit an extra blank paragraph + page break).
-    let (chunks, boundary_chunks, seps, trailing_seps): (
+    let (chunks, mut boundary_chunks, seps, trailing_seps): (
         Vec<Vec<DocRun>>,
         Vec<Vec<ComplexFieldBoundaryWire>>,
         Vec<ParaPiece>,
@@ -2493,6 +2540,27 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         }
         (c, b, s, trailing)
     };
+
+    // A complex-field result may start immediately before a hard break. In
+    // that case the first chunk has no visible runs and is intentionally
+    // omitted below, but its start event still owns the cached result in the
+    // following chunk (ECMA-376 §17.16). Move every structural event from that
+    // discarded chunk to the first retained run boundary, preserving event
+    // order ahead of boundaries authored in the following chunk itself.
+    if chunks
+        .first()
+        .map(|runs| !has_visible(runs))
+        .unwrap_or(false)
+        && boundary_chunks.len() > 1
+    {
+        let mut migrated = std::mem::take(&mut boundary_chunks[0]);
+        for boundary in &mut migrated {
+            boundary.run_index = 0;
+        }
+        let following = std::mem::take(&mut boundary_chunks[1]);
+        migrated.extend(following);
+        boundary_chunks[1] = migrated;
+    }
 
     let chunk_visibility: Vec<bool> = chunks.iter().map(has_visible).collect();
     let mut out: Vec<ParaPiece> = Vec::new();
