@@ -102,6 +102,12 @@ import {
   measureParagraphIntrinsicWidth,
   type BodyFrameGroup,
 } from './frame.js';
+import {
+  physicalToLogicalMatrix,
+  transformPoint,
+  transformRect,
+  transformRectEdges,
+} from './coordinate-space.js';
 export {
   bodyFrameGroupFor,
   bodyParagraphBorderEdgesFor,
@@ -119,6 +125,7 @@ import type {
   InlineResourceLayout,
   LineLayout,
   LayoutRect,
+  Matrix2DData,
   ParagraphLayout,
   ParagraphPlacement,
   PointPt,
@@ -2274,18 +2281,28 @@ function uprightDrawingLocalRectToLogical(
   };
 }
 
+/** Project a complete upright DrawingML anchor result into section-logical
+ * coordinates through the section writing mode's canonical affine inverse. */
 export function projectPhysicalAnchorResult(
   result: Extract<AnchorFrameResult, { status: 'resolved' }>,
-  physicalPageWidthPt: number,
+  physicalToLogical: Matrix2DData,
 ): Extract<AnchorFrameResult, { status: 'resolved' }> {
-  const rotateEdges = (edges: Readonly<{
+  const projectEdges = (edges: Readonly<{
     topPt: number; rightPt: number; bottomPt: number; leftPt: number;
-  }>) => ({
-    topPt: edges.rightPt,
-    rightPt: edges.bottomPt,
-    bottomPt: edges.leftPt,
-    leftPt: edges.topPt,
-  });
+  }>) => {
+    const projected = transformRectEdges(physicalToLogical, {
+      top: edges.topPt,
+      right: edges.rightPt,
+      bottom: edges.bottomPt,
+      left: edges.leftPt,
+    });
+    return {
+      topPt: projected.top,
+      rightPt: projected.right,
+      bottomPt: projected.bottom,
+      leftPt: projected.left,
+    };
+  };
   return {
     ...result,
     // `resolveAnchorFrame` reports diagnostics in the physical wp:positionH/V
@@ -2297,33 +2314,29 @@ export function projectPhysicalAnchorResult(
     },
     geometry: {
       ...result.geometry,
-      objectFrame: projectPhysicalAnchorRect(result.geometry.objectFrame, physicalPageWidthPt),
-      inkBounds: projectPhysicalAnchorRect(result.geometry.inkBounds, physicalPageWidthPt),
+      objectFrame: transformRect(physicalToLogical, result.geometry.objectFrame),
+      inkBounds: transformRect(physicalToLogical, result.geometry.inkBounds),
       wrapBounds: result.geometry.wrapBounds
-        ? projectPhysicalAnchorRect(result.geometry.wrapBounds, physicalPageWidthPt)
+        ? transformRect(physicalToLogical, result.geometry.wrapBounds)
         : null,
       size: {
         horizontal: result.geometry.size.vertical,
         vertical: result.geometry.size.horizontal,
       },
-      parentEffectExtent: rotateEdges(result.geometry.parentEffectExtent),
+      parentEffectExtent: projectEdges(result.geometry.parentEffectExtent),
       wrap: {
         ...result.geometry.wrap,
-        distances: rotateEdges(result.geometry.wrap.distances),
-        distanceSources: {
-          top: result.geometry.wrap.distanceSources.right,
-          right: result.geometry.wrap.distanceSources.bottom,
-          bottom: result.geometry.wrap.distanceSources.left,
-          left: result.geometry.wrap.distanceSources.top,
-        },
-        effectExtent: rotateEdges(result.geometry.wrap.effectExtent),
+        distances: projectEdges(result.geometry.wrap.distances),
+        distanceSources: transformRectEdges(
+          physicalToLogical,
+          result.geometry.wrap.distanceSources,
+        ),
+        effectExtent: projectEdges(result.geometry.wrap.effectExtent),
         ...(result.geometry.wrap.polygon ? {
           polygon: {
             ...result.geometry.wrap.polygon,
-            points: result.geometry.wrap.polygon.points.map((point) => ({
-              xPt: point.yPt,
-              yPt: physicalPageWidthPt - point.xPt,
-            })),
+            points: result.geometry.wrap.polygon.points.map((point) =>
+              transformPoint(physicalToLogical, point)),
           },
         } : {}),
       },
@@ -2509,12 +2522,19 @@ function acquireAnchorOccurrence(
   // ECMA-376 §17.6.20 + §20.4.3.x: anchor positionH/V and extent describe the
   // upright physical drawing layer. Retained body flow is section-logical, so
   // project the complete resolved geometry once before wrap/collision/paint use.
-  const physicalPageWidthPt = options.environment.verticalPageFrame
-    ? baseFrames?.page?.heightPt
+  const physicalPage = options.environment.verticalPageFrame && baseFrames?.page
+    ? {
+        widthPt: baseFrames.page.heightPt,
+        heightPt: baseFrames.page.widthPt,
+      }
     : undefined;
-  const result = physicalPageWidthPt === undefined
+  const physicalPageWidthPt = physicalPage?.widthPt;
+  const result = physicalPage === undefined
     ? acquiredResult
-    : projectPhysicalAnchorResult(acquiredResult, physicalPageWidthPt);
+    : projectPhysicalAnchorResult(
+        acquiredResult,
+        physicalToLogicalMatrix('vertical-rl', physicalPage),
+      );
   if (
     behavior.behindDocStatus !== 'valid'
     || behavior.relativeHeightStatus !== 'valid'
@@ -2524,7 +2544,7 @@ function acquireAnchorOccurrence(
     throw new Error('resolved anchor frame must retain required CT_Anchor behavior');
   }
   const authoredRect = result.geometry.objectFrame;
-  let uprightTransform = physicalPageWidthPt === undefined
+  let uprightTransform = physicalPage === undefined
     ? undefined
     : uprightPhysicalDrawingTransform(authoredRect);
   const uprightEnvironment = uprightTransform ? {

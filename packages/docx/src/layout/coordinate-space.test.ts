@@ -8,6 +8,7 @@ import {
   writingModeFromTextDirection,
   transformPoint,
   transformRect,
+  transformRectEdges,
 } from './coordinate-space.js';
 import type { LayoutRect, PointPt, WritingMode } from './types.js';
 
@@ -40,6 +41,17 @@ describe('coordinate-space', () => {
         physicalToLogical: inverse,
       });
     });
+
+  it.each([
+    ['horizontal-tb', { top: 'top', right: 'right', bottom: 'bottom', left: 'left' }],
+    ['vertical-rl', { top: 'right', right: 'bottom', bottom: 'left', left: 'top' }],
+    ['vertical-lr', { top: 'left', right: 'bottom', bottom: 'right', left: 'top' }],
+  ] as const)('projects physical edge ownership through %s', (mode, expected) => {
+    expect(transformRectEdges(
+      physicalToLogicalMatrix(mode, page),
+      { top: 'top', right: 'right', bottom: 'bottom', left: 'left' },
+    )).toEqual(expected);
+  });
 
   it('derives vertical-rl translation from each physical page width', () => {
     expect(logicalToPhysicalMatrix('vertical-rl', { widthPt: 500, heightPt: 700 }).e).toBe(500);

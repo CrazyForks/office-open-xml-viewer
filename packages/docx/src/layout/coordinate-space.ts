@@ -11,6 +11,13 @@ export type PhysicalPageExtent = Readonly<{
   heightPt: number;
 }>;
 
+export type RectEdgeRecord<T> = Readonly<{
+  top: T;
+  right: T;
+  bottom: T;
+  left: T;
+}>;
+
 export function writingModeFromTextDirection(textDirection: string): WritingMode {
   switch (textDirection) {
     case 'tb':
@@ -165,6 +172,49 @@ export function transformRect(matrix: Matrix2DData, rect: LayoutRect): LayoutRec
     widthPt: Math.max(...xs) - xPt,
     heightPt: Math.max(...ys) - yPt,
   };
+}
+
+/**
+ * Reassign physical edge-owned facts to their transformed logical edges.
+ *
+ * The matrix supplies the only writing-mode authority: transforming each
+ * physical outward unit normal identifies the logical edge that owns the same
+ * fact. Values remain opaque, so the same operation projects numeric extents
+ * and their provenance labels without duplicating direction-specific formulas.
+ */
+export function transformRectEdges<T>(
+  matrix: Matrix2DData,
+  edges: RectEdgeRecord<T>,
+): RectEdgeRecord<T> {
+  requireMatrix(matrix);
+  const origin = transformPoint(matrix, { xPt: 0, yPt: 0 });
+  const normals = {
+    top: { xPt: 0, yPt: -1 },
+    right: { xPt: 1, yPt: 0 },
+    bottom: { xPt: 0, yPt: 1 },
+    left: { xPt: -1, yPt: 0 },
+  } as const;
+  const projected: Partial<Record<keyof RectEdgeRecord<T>, T>> = {};
+  const assigned = new Set<keyof RectEdgeRecord<T>>();
+  for (const source of ['top', 'right', 'bottom', 'left'] as const) {
+    const endpoint = transformPoint(matrix, normals[source]);
+    const dx = endpoint.xPt - origin.xPt;
+    const dy = endpoint.yPt - origin.yPt;
+    const target = dy === 0 && dx !== 0
+      ? dx > 0 ? 'right' : 'left'
+      : dx === 0 && dy !== 0
+        ? dy > 0 ? 'bottom' : 'top'
+        : null;
+    if (target === null || assigned.has(target)) {
+      throw new RangeError('Edge transforms require a non-degenerate axis-aligned matrix');
+    }
+    projected[target] = edges[source];
+    assigned.add(target);
+  }
+  if (assigned.size !== 4) {
+    throw new RangeError('Edge transform must map every physical edge exactly once');
+  }
+  return projected as RectEdgeRecord<T>;
 }
 
 export function createSectionRegionCoordinateSpace(

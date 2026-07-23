@@ -104,6 +104,18 @@ const missingAnchorEdges = (): AnchorEdgesInput => ({
   leftPt: null, leftStatus: 'missing',
 });
 
+const validAnchorEdges = (
+  topPt: number,
+  rightPt: number,
+  bottomPt: number,
+  leftPt: number,
+): AnchorEdgesInput => ({
+  topPt, topStatus: 'valid',
+  rightPt, rightStatus: 'valid',
+  bottomPt, bottomStatus: 'valid',
+  leftPt, leftStatus: 'valid',
+});
+
 function parserAnchor(
   occurrenceId: string,
   overrides: Readonly<{
@@ -392,7 +404,7 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
     expect(localParagraphs[0]!.exclusions).toHaveLength(0);
   });
 
-  it('projects a vertical page-owned anchor into the section-logical wrap frame', () => {
+  it('projects a tbRl page-owned anchor into the section-logical wrap frame', () => {
     const physicalAnchor = parserAnchor('vertical-page-owned', {
       xPt: 220,
       yPt: 50,
@@ -441,6 +453,97 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
       }),
     ]);
     expect(earlier.lines.length).toBeGreaterThan(controlEarlier.lines.length);
+  });
+
+  it('projects a tbLrV page-owned anchor with the vertical-lr inverse', () => {
+    const physicalAnchor = parserAnchor('vertical-lr-page-owned', {
+      xPt: 220,
+      yPt: 50,
+      widthPt: 80,
+      heightPt: 30,
+      horizontalRelativeFrom: 'page',
+      verticalRelativeFrom: 'margin',
+      wrap: 'square',
+    });
+    const layout = canonicalLayout([
+      para({ text: 'あ'.repeat(20), fontSize: 20 }),
+      paraWith(parserAnchoredImage(physicalAnchor)),
+    ], {
+      pageWidth: 300,
+      pageHeight: 200,
+      marginTop: 0,
+      marginRight: 0,
+      marginBottom: 0,
+      marginLeft: 0,
+      textDirection: 'tbLrV',
+    });
+    const earlier = sourceParagraphs(layout, 0)[0]!;
+
+    // ECMA-376 Part 4 §14.11.7 makes tbLrV semantically equivalent to lrV.
+    // Its physical-to-logical mapping is (x, y) -> (y, x), so the physical
+    // {220,50,80×30} box becomes logical {50,220,30×80}.
+    expect(earlier.exclusions).toEqual([
+      expect.objectContaining({
+        wrap: 'square',
+        bounds: { xPt: 50, yPt: 220, widthPt: 30, heightPt: 80 },
+      }),
+    ]);
+  });
+
+  it('projects tbLrV prescan edges and polygons through the same affine transform', () => {
+    const base = parserAnchor('vertical-lr-polygon', {
+      xPt: 220,
+      yPt: 50,
+      widthPt: 80,
+      heightPt: 30,
+      horizontalRelativeFrom: 'page',
+      verticalRelativeFrom: 'margin',
+      wrap: 'square',
+    });
+    const physicalAnchor: AnchorAcquisitionInput = {
+      ...base,
+      anchorDistances: validAnchorEdges(1, 2, 3, 4),
+      wrap: {
+        ...base.wrap,
+        kind: 'through',
+        authoredKinds: ['wrapThrough'],
+        polygon: {
+          edited: false,
+          coordinateSpace: { width: 21600, height: 21600 },
+          points: [
+            { x: 0, y: 0, rawX: '0', rawY: '0' },
+            { x: 21600, y: 0, rawX: '21600', rawY: '0' },
+            { x: 0, y: 21600, rawX: '0', rawY: '21600' },
+          ],
+          invalidPointCount: 0,
+        },
+      },
+    };
+    const layout = canonicalLayout([
+      para({ text: 'あ'.repeat(20), fontSize: 20 }),
+      paraWith(parserAnchoredImage(physicalAnchor)),
+    ], {
+      pageWidth: 300,
+      pageHeight: 200,
+      marginTop: 0,
+      marginRight: 0,
+      marginBottom: 0,
+      marginLeft: 0,
+      textDirection: 'tbLrV',
+    });
+    const exclusion = sourceParagraphs(layout, 0)[0]!.exclusions[0]!;
+
+    expect(exclusion.bounds).toEqual({
+      xPt: 49,
+      yPt: 216,
+      widthPt: 34,
+      heightPt: 86,
+    });
+    expect(exclusion.polygon).toEqual([
+      { xPt: 50, yPt: 220 },
+      { xPt: 50, yPt: 300 },
+      { xPt: 80, yPt: 220 },
+    ]);
   });
 
   it('keeps two occurrences in one paragraph distinct and preserves authored wrap kinds', () => {

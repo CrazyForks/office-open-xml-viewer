@@ -57,6 +57,11 @@ import type { MeasurementTextContext } from './measurement-capabilities.js';
 import type { TblpPr } from '../types.js';
 import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import type { BodySectionIndexInput } from './context.js';
+import {
+  physicalToLogicalMatrix,
+  uprightPhysicalExtent,
+  writingModeFromTextDirection,
+} from './coordinate-space.js';
 
 export interface ProductionBodyModelGateway {
   readonly acquisitionInputs: BodyAcquisitionInputProjections;
@@ -2006,12 +2011,24 @@ function buildConcreteBodyLayoutKernel(
             // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
             // extent resolve in the upright physical drawing frame. The page
             // registry is section-logical, so page-start prescan must apply the
-            // same inverse quarter-turn as ordinary paragraph acquisition
-            // before the exclusion can affect earlier body content.
+            // section writing mode's canonical physical-to-logical affine
+            // inverse before the exclusion can affect earlier body content.
             const retainedResult = isVerticalTextDirection(
               request.location.section.textDirection,
             )
-              ? projectPhysicalAnchorResult(result, frames.page.heightPt)
+              ? (() => {
+                  const writingMode = writingModeFromTextDirection(
+                    request.location.section.textDirection as string,
+                  );
+                  const physicalPage = uprightPhysicalExtent({
+                    widthPt: frames.page.widthPt,
+                    heightPt: frames.page.heightPt,
+                  }, writingMode);
+                  return projectPhysicalAnchorResult(
+                    result,
+                    physicalToLogicalMatrix(writingMode, physicalPage),
+                  );
+                })()
               : result;
             const wrapBounds = retainedResult.geometry.wrapBounds;
             if (wrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
