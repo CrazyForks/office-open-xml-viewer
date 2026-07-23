@@ -111,6 +111,7 @@ function parserAnchor(
     yPt?: number;
     widthPt?: number;
     heightPt?: number;
+    horizontalRelativeFrom?: 'margin' | 'page';
     verticalRelativeFrom?: 'margin' | 'paragraph';
     wrap?: 'square' | 'topAndBottom' | 'none';
     allowOverlap?: boolean;
@@ -125,7 +126,8 @@ function parserAnchor(
       xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid',
     },
     horizontal: {
-      relativeFrom: 'margin', relativeFromStatus: 'valid',
+      relativeFrom: overrides.horizontalRelativeFrom ?? 'margin',
+      relativeFromStatus: 'valid',
       choice: { kind: 'offset', valuePt: overrides.xPt ?? 80 },
     },
     vertical: {
@@ -388,6 +390,57 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
     expect(pageParagraphs[0]!.exclusions).toHaveLength(1);
     expect(pageParagraphs[0]!.exclusions[0]!.wrap).toBe('square');
     expect(localParagraphs[0]!.exclusions).toHaveLength(0);
+  });
+
+  it('projects a vertical page-owned anchor into the section-logical wrap frame', () => {
+    const physicalAnchor = parserAnchor('vertical-page-owned', {
+      xPt: 220,
+      yPt: 50,
+      widthPt: 80,
+      heightPt: 30,
+      horizontalRelativeFrom: 'page',
+      verticalRelativeFrom: 'margin',
+      wrap: 'square',
+    });
+    const layout = canonicalLayout([
+      para({ text: 'あ'.repeat(20), fontSize: 20 }),
+      paraWith(parserAnchoredImage(physicalAnchor)),
+    ], {
+      pageWidth: 300,
+      pageHeight: 200,
+      marginTop: 0,
+      marginRight: 0,
+      marginBottom: 0,
+      marginLeft: 0,
+      textDirection: 'tbRl',
+    });
+    const control = canonicalLayout([
+      para({ text: 'あ'.repeat(20), fontSize: 20 }),
+      para(),
+    ], {
+      pageWidth: 300,
+      pageHeight: 200,
+      marginTop: 0,
+      marginRight: 0,
+      marginBottom: 0,
+      marginLeft: 0,
+      textDirection: 'tbRl',
+    });
+    const earlier = sourceParagraphs(layout, 0)[0]!;
+    const controlEarlier = sourceParagraphs(control, 0)[0]!;
+
+    // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: wp:positionH/V and
+    // wp:extent resolve in the upright physical 300×200 page. Retained vertical
+    // body flow uses the inverse quarter-turn:
+    //   physical = (pageWidth - logical.y, logical.x)
+    // so physical {220,50,80×30} becomes logical {50,0,30×80}.
+    expect(earlier.exclusions).toEqual([
+      expect.objectContaining({
+        wrap: 'square',
+        bounds: { xPt: 50, yPt: 0, widthPt: 30, heightPt: 80 },
+      }),
+    ]);
+    expect(earlier.lines.length).toBeGreaterThan(controlEarlier.lines.length);
   });
 
   it('keeps two occurrences in one paragraph distinct and preserves authored wrap kinds', () => {

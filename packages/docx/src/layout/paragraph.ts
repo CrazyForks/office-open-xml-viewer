@@ -2272,7 +2272,7 @@ function uprightDrawingLocalRectToLogical(
   };
 }
 
-function projectPhysicalAnchorResult(
+export function projectPhysicalAnchorResult(
   result: Extract<AnchorFrameResult, { status: 'resolved' }>,
   physicalPageWidthPt: number,
 ): Extract<AnchorFrameResult, { status: 'resolved' }> {
