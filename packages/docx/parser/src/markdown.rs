@@ -129,7 +129,11 @@ fn render_runs(runs: &[DocRun]) -> String {
                     BreakType::Page | BreakType::Column => out.push_str("\n\n"),
                 }
             }
-            DocRun::AnchorHost(_) | DocRun::Image(_) | DocRun::Shape(_) | DocRun::Chart(_) => {
+            DocRun::AnchorHost(_)
+            | DocRun::Image(_)
+            | DocRun::UnavailableDrawing(_)
+            | DocRun::Shape(_)
+            | DocRun::Chart(_) => {
                 // No readable text; intentionally dropped. Use docx_get_images
                 // / docx_get_shapes when you need metadata.
             }

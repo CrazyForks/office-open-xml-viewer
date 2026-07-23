@@ -33,6 +33,7 @@ import type {
   ComplexFieldBoundaryInput,
   TextFontSlotPresence,
   TextFontSlots,
+  UnavailableDrawingAcquisitionRun,
 } from './layout/text.js';
 import type { ParagraphAcquisitionInput, ParagraphAcquisitionRun } from './layout/text.js';
 import type { AnchorAcquisitionInput, InternalAnchorRunWire } from './layout/anchor-input.js';
@@ -761,8 +762,17 @@ export function publicAnchorBridge(
 function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
   const hostRelative = new Set(['paragraph', 'line', 'character']);
   const pageOwnedAnchorOccurrenceIds = Object.freeze([...new Set(paragraph.runs.flatMap((run, runIndex) => {
-    if (run.type !== 'shape' && run.type !== 'image' && run.type !== 'chart') return [];
-    const acquisition = anchorAcquisitionInput(run);
+    const internalRun = run as unknown as Readonly<{
+      type: string;
+      __anchorAcquisition?: AnchorAcquisitionInput;
+    }>;
+    if (
+      run.type !== 'shape'
+      && run.type !== 'image'
+      && run.type !== 'chart'
+      && internalRun.type !== 'unavailableDrawing'
+    ) return [];
+    const acquisition = anchorAcquisitionInput(internalRun);
     if (!acquisition) {
       const bridge = publicAnchorBridge(run, source, runIndex);
       return bridge?.pageOwned ? [bridge.occurrenceId] : [];
@@ -1464,9 +1474,9 @@ export function textBoxContentAcquisitionInput(
  * Parser-produced malformed input remains distinguishable from a hand-built
  * public run because required-but-missing values are explicit nulls. */
 export function anchorAcquisitionInput(
-  run: Readonly<DocRun | ShapeRun | ImageRun | ChartRun>,
+  run: Readonly<object>,
 ): Readonly<AnchorAcquisitionInput> | undefined {
-  const wire = (run as Readonly<DocRun & InternalAnchorRunWire>).__anchorAcquisition;
+  const wire = (run as Readonly<InternalAnchorRunWire>).__anchorAcquisition;
   if (wire === undefined) return undefined;
   return snapshotPlainData(wire, 'DOCX anchor acquisition input');
 }
@@ -1606,6 +1616,23 @@ export function paragraphAcquisitionInput(
   }));
   const snapshot = structuredClone(semanticParagraph) as DocParagraph;
   const runs = snapshot.runs.map((run, runIndex): ParagraphAcquisitionRun => {
+    const internalRun = run as unknown as UnavailableDrawingAcquisitionRun & InternalAnchorRunWire;
+    if (internalRun.type === 'unavailableDrawing') {
+      const originalRun = paragraph.runs[runIndex] as unknown as
+        UnavailableDrawingAcquisitionRun & InternalAnchorRunWire;
+      const localAnchorInput = anchorAcquisitionInput(originalRun);
+      const anchorInput = localAnchorInput === undefined
+        ? undefined
+        : snapshotPlainData({
+            ...localAnchorInput,
+            occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
+          }, 'DOCX scoped unavailable drawing anchor acquisition input');
+      const { __anchorAcquisition: _privateAnchor, ...retainedRun } = internalRun;
+      return Object.freeze({
+        ...retainedRun,
+        ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
+      });
+    }
     if (run.type === 'math') {
       const runRef: SourceRef = Object.freeze({ ...source, path: Object.freeze([...source.path, runIndex]) });
       const internal = run as Partial<InternalMathRun>;

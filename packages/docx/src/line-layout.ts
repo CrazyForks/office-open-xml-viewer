@@ -68,6 +68,8 @@ import type {
 } from './layout/measurement-capabilities.js';
 import type {
   ParagraphMathRun,
+  ParagraphAcquisitionRun,
+  ParagraphAcquisitionInput,
   ParagraphTextBearingRun,
   GlyphInkBounds,
   TextLayoutService,
@@ -416,6 +418,10 @@ export interface LayoutImageSeg extends LayoutSegSource {
    *  empty sentinels for a chart seg — no blip is fetched (the bitmap-prefetch
    *  walk keys off `run.type === 'image'` and never sees a chart run). */
   chart?: ChartModel;
+  /** Parser-private retained placeholder for a recognized payload whose
+   * package part is unavailable. It participates in line/anchor geometry but
+   * never enters the paint resource registry. */
+  unavailableResourceKind?: 'image' | 'chart';
   measuredWidth: number;
 }
 
@@ -920,7 +926,7 @@ export function segmentEastAsiaFloorSingleLinePx(
   );
 }
 
-export function getDefaultFontSize(para: DocParagraph): number {
+export function getDefaultFontSize(para: DocParagraph | ParagraphAcquisitionInput): number {
   for (const run of para.runs) {
     if (run.type === 'text') {
       return (run as unknown as DocxTextRun).fontSize;
@@ -938,7 +944,10 @@ export function getDefaultFontSize(para: DocParagraph): number {
  *  Empty paragraphs (no runs) fall back to the paragraph's style-resolved
  *  default font so e.g. an empty Meiryo cell that forms a résumé "bar" reserves
  *  Meiryo's tall line box rather than the generic fallback's. */
-export function getDefaultFontFamily(para: DocParagraph, eastAsian = false): string | null {
+export function getDefaultFontFamily(
+  para: DocParagraph | ParagraphAcquisitionInput,
+  eastAsian = false,
+): string | null {
   for (const run of para.runs) {
     if (run.type === 'text') return (run as unknown as DocxTextRun).fontFamily;
     if (run.type === 'field') return (run as unknown as FieldRun).fontFamily;
@@ -949,13 +958,20 @@ export function getDefaultFontFamily(para: DocParagraph, eastAsian = false): str
 
 /** Intended single-line height (px) for an empty paragraph, from its default
  *  font's win line-height ratio. 0 when the font is not in the metrics table. */
-export function emptyIntendedSinglePx(para: DocParagraph, scale: number): number {
+export function emptyIntendedSinglePx(
+  para: DocParagraph | ParagraphAcquisitionInput,
+  scale: number,
+): number {
   return intendedSingleLinePx(getDefaultFontFamily(para), getDefaultFontSize(para) * scale);
 }
 
 /** Intended single-line height (px) for an empty paragraph in the script axis
  *  used to draw its paragraph mark. */
-function emptyIntendedSingleForScriptPx(para: DocParagraph, scale: number, eastAsian: boolean): number {
+function emptyIntendedSingleForScriptPx(
+  para: DocParagraph | ParagraphAcquisitionInput,
+  scale: number,
+  eastAsian: boolean,
+): number {
   return intendedSingleLinePx(getDefaultFontFamily(para, eastAsian), getDefaultFontSize(para) * scale, eastAsian);
 }
 
@@ -1333,7 +1349,7 @@ export interface MarkLineMetrics {
 }
 
 export function paragraphMarkLineMetrics(
-  para: DocParagraph,
+  para: DocParagraph | ParagraphAcquisitionInput,
   scale: number,
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
@@ -1457,7 +1473,7 @@ export function paragraphMarkLineMetrics(
 }
 
 export function paragraphMarkLineHeight(
-  para: DocParagraph,
+  para: DocParagraph | ParagraphAcquisitionInput,
   scale: number,
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
@@ -1500,7 +1516,7 @@ export function lineBelowBaselinePx(advancePx: number, ascentPx: number, descent
 }
 
 export function paragraphMarkBelowBaselinePt(
-  para: DocParagraph,
+  para: DocParagraph | ParagraphAcquisitionInput,
   grid: DocGridCtx | undefined,
   paraHasRuby: boolean,
   eastAsian: boolean,
@@ -1562,7 +1578,10 @@ export function splitSmallCapsCase(text: string): { text: string; reduced: boole
   return out.length ? out : [{ text, reduced: false }];
 }
 
-export function findNearbyFontSize(runs: DocRun[], idx: number): number {
+export function findNearbyFontSize(
+  runs: readonly (DocRun | ParagraphAcquisitionRun)[],
+  idx: number,
+): number {
   // Look backwards then forwards for a text or field run to get font size
   for (let i = idx - 1; i >= 0; i--) {
     const r = runs[i];
@@ -2260,7 +2279,10 @@ function resolveFitTextSegments(
   }
 }
 
-export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment): LayoutSeg[] {
+export function buildSegments(
+  runs: readonly (DocRun | ParagraphAcquisitionRun)[],
+  environment: LineLayoutEnvironment,
+): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
   const resolvedFont = (
     family: string | null | undefined,
@@ -2834,6 +2856,20 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         anchorXFromMargin: chartRun.anchorXFromMargin ?? false,
         anchorYFromPara: chartRun.anchorYFromPara ?? false,
         chart: chartRun.chart,
+        measuredWidth: 0,
+      });
+    } else if (run.type === 'unavailableDrawing') {
+      segs.push({
+        imagePath: '',
+        mimeType: '',
+        widthPt: run.widthPt,
+        heightPt: run.heightPt,
+        anchor: run.anchorAcquisitionInput !== undefined,
+        anchorXPt: 0,
+        anchorYPt: 0,
+        anchorXFromMargin: false,
+        anchorYFromPara: false,
+        unavailableResourceKind: run.resourceKind,
         measuredWidth: 0,
       });
     } else if (run.type === 'break') {

@@ -4794,6 +4794,7 @@ fn prepend_anchor_host_metrics(
     let has_floating_drawing = drawing_runs.iter().any(|run| match run {
         DocRun::Image(image) => image.anchor,
         DocRun::Chart(chart) => chart.anchor,
+        DocRun::UnavailableDrawing(drawing) => drawing.anchor_acquisition.is_some(),
         DocRun::Shape(_) => true,
         _ => false,
     });
@@ -4803,6 +4804,7 @@ fn prepend_anchor_host_metrics(
             .find_map(|run| match run {
                 DocRun::Image(image) => image.anchor_acquisition.as_ref(),
                 DocRun::Chart(chart) => chart.anchor_acquisition.as_ref(),
+                DocRun::UnavailableDrawing(drawing) => drawing.anchor_acquisition.as_ref(),
                 DocRun::Shape(shape) => shape.anchor_acquisition.as_ref(),
                 _ => None,
             })
@@ -5817,6 +5819,55 @@ fn parse_inline_drawing(
     runs
 }
 
+fn unresolved_drawing_resource_kind(
+    container: roxmltree::Node,
+) -> Option<UnavailableDrawingResourceKind> {
+    // A group or WordprocessingShape owns child transforms and may mix several
+    // payloads. This first slice retains only one picture/chart whose wp:extent
+    // is the complete outer geometry.
+    if container
+        .descendants()
+        .any(|node| matches!(node.tag_name().name(), "wgp" | "wsp"))
+    {
+        return None;
+    }
+    let chart = container
+        .descendants()
+        .find(|node| node.tag_name().name() == "graphicData")
+        .is_some_and(|graphic_data| {
+            graphic_data.attribute("uri").is_some_and(|uri| {
+                uri.contains("drawingml/2006/chart")
+                    || uri.contains("chartex")
+                    || uri.contains("chartEx")
+            }) && graphic_data
+                .descendants()
+                .any(|node| node.tag_name().name() == "chart")
+        });
+    if chart {
+        return Some(UnavailableDrawingResourceKind::Chart);
+    }
+    container
+        .descendants()
+        .any(|node| node.tag_name().name() == "blip")
+        .then_some(UnavailableDrawingResourceKind::Image)
+}
+
+fn unavailable_drawing_run(
+    container: roxmltree::Node,
+    anchor_acquisition: Option<AnchorAcquisitionWire>,
+) -> Option<DocRun> {
+    let resource_kind = unresolved_drawing_resource_kind(container)?;
+    let (width_pt, height_pt) = drawing_extent_points(container)?;
+    Some(DocRun::UnavailableDrawing(Box::new(
+        UnavailableDrawingRun {
+            resource_kind,
+            width_pt,
+            height_pt,
+            anchor_acquisition,
+        },
+    )))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_inline_drawing_impl(
     style_map: &StyleMap,
@@ -5928,7 +5979,11 @@ fn parse_inline_drawing_impl(
             height_pt,
         } = match resolve_inline_blip(container, media_map, theme) {
             Some(b) => b,
-            None => return vec![],
+            None => {
+                return unavailable_drawing_run(container, None)
+                    .into_iter()
+                    .collect()
+            }
         };
         return vec![DocRun::Image(Box::new(ImageRun {
             image_path,
@@ -6187,7 +6242,11 @@ fn parse_inline_drawing_impl(
         height_pt,
     } = match resolve_inline_blip(container, media_map, theme) {
         Some(b) => b,
-        None => return vec![],
+        None => {
+            return unavailable_drawing_run(container, Some(anchor_acquisition))
+                .into_iter()
+                .collect()
+        }
     };
     vec![DocRun::Image(Box::new(ImageRun {
         image_path,
@@ -6259,9 +6318,12 @@ fn collect_drawing_extent_diagnostic(
         return;
     }
 
-    let retained_extent_consumer = runs
-        .iter()
-        .any(|run| matches!(run, DocRun::Image(_) | DocRun::Chart(_)));
+    let retained_extent_consumer = runs.iter().any(|run| {
+        matches!(
+            run,
+            DocRun::Image(_) | DocRun::Chart(_) | DocRun::UnavailableDrawing(_)
+        )
+    });
     if !retained_extent_consumer {
         // The implemented group/shape branches size from `a:xfrm` and never
         // consult `wp:extent`; do not blame extent if such a payload is present.
@@ -13276,7 +13338,7 @@ mod tests {
     /// `DocRun` discriminant union (packages/docx/src/types.ts). If this test
     /// fails after adding/renaming a variant, update BOTH sides together.
     #[test]
-    fn doc_run_wire_tags_match_ts_discriminant_union() {
+    fn doc_run_wire_tags_match_ts_acquisition_discriminants() {
         let image = ImageRun {
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
@@ -13323,6 +13385,15 @@ mod tests {
             ),
             (DocRun::Image(Box::new(image)), "image"),
             (
+                DocRun::UnavailableDrawing(Box::new(UnavailableDrawingRun {
+                    resource_kind: UnavailableDrawingResourceKind::Image,
+                    width_pt: 24.0,
+                    height_pt: 24.0,
+                    anchor_acquisition: None,
+                })),
+                "unavailableDrawing",
+            ),
+            (
                 DocRun::Break {
                     break_type: BreakType::Line,
                 },
@@ -13357,8 +13428,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing \"type\" field: {value}"));
             assert_eq!(
                 actual_tag, expected_tag,
-                "DocRun wire tag mismatch — TS DocRun union (types.ts) expects \
-                 {expected_tag:?} but serde produced {actual_tag:?}; full JSON: {value}"
+                "DocRun wire tag mismatch — the TS public/internal acquisition \
+                 boundary expects {expected_tag:?} but serde produced \
+                 {actual_tag:?}; full JSON: {value}"
             );
         }
     }
@@ -16361,16 +16433,12 @@ mod svg_blip_tests {
         assert!((img.width_pt - 24.0).abs() < 1e-6);
     }
 
-    /// `load_media_map` must drop an rId whose target part is declared in the
-    /// rels but ABSENT from the package (a path in the map is only ever emitted
-    /// when the entry truly resolves). This is the invariant the existence check
-    /// enforces — the check now uses `index_for_name` (central-directory lookup,
-    /// no inflate) in place of the former read-and-discard `read_zip_bytes`, so
-    /// this pins that the swap preserved the "missing part ⇒ dropped" behaviour.
-    /// With no resolvable blip the whole picture resolution returns `None`, so no
-    /// `DocRun::Image` is produced.
+    /// A dangling image relationship is unavailable paint, not absent layout.
+    /// The authored `wp:extent` still owns inline advance and line height, so the
+    /// parser retains a private unavailable-drawing record rather than deleting
+    /// the run and collapsing surrounding flow.
     #[test]
-    fn missing_media_part_drops_the_image() {
+    fn missing_media_part_retains_inline_drawing_geometry() {
         use zip::write::SimpleFileOptions;
         let document_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
   <w:p><w:r><w:drawing>
@@ -16408,14 +16476,41 @@ mod svg_blip_tests {
         }
         let doc =
             parse_from_bytes(&buf).expect("parse must succeed even with a dangling image rId");
-        let has_image = doc.body.iter().any(|el| match el {
-            BodyElement::Paragraph(p) => p.runs.iter().any(|r| matches!(r, DocRun::Image(_))),
-            _ => false,
-        });
-        assert!(
-            !has_image,
-            "an rId whose media part is absent must be dropped, yielding no ImageRun"
+        let unavailable = doc
+            .body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|run| match run {
+                    DocRun::UnavailableDrawing(run) => Some(run),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("a dangling image relationship must retain its authored geometry");
+        assert_eq!(
+            unavailable.resource_kind,
+            UnavailableDrawingResourceKind::Image
         );
+        assert!((unavailable.width_pt - 24.0).abs() < 1e-6);
+        assert!((unavailable.height_pt - 24.0).abs() < 1e-6);
+        assert!(unavailable.anchor_acquisition.is_none());
+        let json = doc
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => paragraph.runs.iter().find_map(|run| {
+                    matches!(run, DocRun::UnavailableDrawing(_))
+                        .then(|| serde_json::to_value(run).expect("run serializes"))
+                }),
+                _ => None,
+            })
+            .expect("unavailable run JSON");
+        assert_eq!(json["type"], "unavailableDrawing");
+        assert_eq!(json["resourceKind"], "image");
+        assert_eq!(json["widthPt"], 24.0);
+        assert_eq!(json["heightPt"], 24.0);
+        assert!(json.get("imagePath").is_none());
+        assert!(json.get("__anchorAcquisition").is_none());
     }
 
     /// `load_media_map` must normalize `..` segments in a relationship Target
@@ -16869,6 +16964,31 @@ mod anchor_image_relative_from_tests {
         buf
     }
 
+    fn build_docx_without_media(body_inner: &str) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let document_xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body_inner}</w:body></w:document>"#
+        );
+        let rels_xml = r#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdPng" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/missing.png"/>
+</Relationships>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default();
+            let mut put = |name: &str, bytes: &[u8]| {
+                use std::io::Write;
+                zw.start_file(name, opts).unwrap();
+                zw.write_all(bytes).unwrap();
+            };
+            put("word/document.xml", document_xml.as_bytes());
+            put("word/_rels/document.xml.rels", rels_xml.as_bytes());
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
     fn first_image(doc: &Document) -> &ImageRun {
         doc.body
             .iter()
@@ -16906,6 +17026,19 @@ mod anchor_image_relative_from_tests {
                 _ => None,
             })
             .expect("expected one anchor host")
+    }
+
+    fn first_unavailable_drawing(doc: &Document) -> &UnavailableDrawingRun {
+        doc.body
+            .iter()
+            .find_map(|el| match el {
+                BodyElement::Paragraph(p) => p.runs.iter().find_map(|run| match run {
+                    DocRun::UnavailableDrawing(drawing) => Some(drawing.as_ref()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("expected one unavailable drawing")
     }
 
     /// Body XML for an anchor image with the given `<wp:positionH>` and
@@ -17098,6 +17231,40 @@ mod anchor_image_relative_from_tests {
                 .filter(|r| matches!(r, DocRun::Image(_)))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn unavailable_anchored_picture_keeps_anchor_host_and_acquisition_geometry() {
+        let body = anchor_body(
+            r#"<wp:positionH relativeFrom="page"><wp:posOffset>12700</wp:posOffset></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>25400</wp:posOffset></wp:positionV>"#,
+        );
+        let doc = parse_from_bytes(&build_docx_without_media(&body))
+            .expect("a dangling anchored image relationship must not abort parsing");
+        let drawing = first_unavailable_drawing(&doc);
+        let acquisition = drawing
+            .anchor_acquisition
+            .as_ref()
+            .expect("anchored unavailable drawing must retain acquisition facts");
+        let host = first_anchor_host(&doc);
+
+        assert_eq!(drawing.resource_kind, UnavailableDrawingResourceKind::Image);
+        assert!((drawing.width_pt - 24.0).abs() < 1e-6);
+        assert!((drawing.height_pt - 24.0).abs() < 1e-6);
+        assert_eq!(
+            acquisition.horizontal.relative_from.as_deref(),
+            Some("page")
+        );
+        assert_eq!(
+            acquisition.vertical.relative_from.as_deref(),
+            Some("paragraph")
+        );
+        assert_eq!(acquisition.extent.width_pt, Some(24.0));
+        assert_eq!(acquisition.extent.height_pt, Some(24.0));
+        assert_eq!(
+            host.anchor_occurrence_id.as_deref(),
+            Some(acquisition.occurrence_id.as_str())
         );
     }
 
@@ -17387,8 +17554,8 @@ mod anchor_image_relative_from_tests {
     /// ECMA-376 §21.2 — an inline `<w:drawing>` whose `<a:graphicData uri>` is the
     /// chart namespace and whose `<c:chart r:id>` resolves in the pre-built
     /// `chart_map` emits a `DocRun::Chart`, sized from `<wp:extent>` (EMU → pt),
-    /// instead of an image. A `<c:chart>` whose rId is absent from the map yields
-    /// nothing (the graphicData carries no blip to fall back to).
+    /// instead of an image. A `<c:chart>` whose rId is absent from the map keeps
+    /// its authored extent as an unavailable chart placeholder.
     #[test]
     fn inline_chart_drawing_emits_chart_run() {
         let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -17449,10 +17616,20 @@ mod anchor_image_relative_from_tests {
             other => panic!("expected DocRun::Chart, got {other:?}"),
         }
 
-        // Unresolvable rId (empty map) → no run (no blip fallback).
+        // Unresolvable rId (empty map) retains layout without inventing a chart
+        // model or image fallback.
         let empty: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
-        let none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
-        assert!(none.is_empty(), "unresolvable chart rId must emit nothing");
+        let unavailable = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
+        assert_eq!(unavailable.len(), 1);
+        match &unavailable[0] {
+            DocRun::UnavailableDrawing(run) => {
+                assert_eq!(run.resource_kind, UnavailableDrawingResourceKind::Chart);
+                assert!((run.width_pt - 396.0).abs() < 1e-6);
+                assert!((run.height_pt - 216.0).abs() < 1e-6);
+                assert!(run.anchor_acquisition.is_none());
+            }
+            other => panic!("expected unavailable chart geometry, got {other:?}"),
+        }
     }
 
     /// CH14 — `parse_docx_chart` dispatches on the chart part's root
@@ -17674,11 +17851,12 @@ mod anchor_image_relative_from_tests {
             other => panic!("expected DocRun::Chart, got {other:?}"),
         }
 
-        // Unresolvable rId (empty map) → no run (chart fell through, no blip).
+        // Unresolvable rId keeps one host and the authored anchor geometry
+        // without inventing a chart model or image fallback.
         let empty: HashMap<String, ooxml_common::chart::ChartModel> = HashMap::new();
-        let mut none = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
+        let mut unavailable = parse_inline_drawing(&style_map, drawing, &media, &empty, &theme);
         prepend_anchor_host_metrics(
-            &mut none,
+            &mut unavailable,
             &AnchorHostMetrics {
                 font_size: 11.0,
                 font_family: None,
@@ -17688,10 +17866,17 @@ mod anchor_image_relative_from_tests {
                 anchor_occurrence_id: None,
             },
         );
-        assert!(
-            none.is_empty(),
-            "unresolvable anchored chart rId must emit nothing"
-        );
+        assert_eq!(unavailable.len(), 2);
+        assert!(matches!(&unavailable[0], DocRun::AnchorHost(_)));
+        match &unavailable[1] {
+            DocRun::UnavailableDrawing(run) => {
+                assert_eq!(run.resource_kind, UnavailableDrawingResourceKind::Chart);
+                assert!((run.width_pt - 396.0).abs() < 1e-6);
+                assert!((run.height_pt - 216.0).abs() < 1e-6);
+                assert!(run.anchor_acquisition.is_some());
+            }
+            other => panic!("expected unavailable anchored chart geometry, got {other:?}"),
+        }
     }
 
     /// ECMA-376 §20.4.2.3 and §20.4.2.16: anchored charts carry the same

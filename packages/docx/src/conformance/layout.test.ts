@@ -26,7 +26,11 @@ import {
   coveredPairKeys,
   feasiblePairKeys,
 } from './cases.js';
-import { generateConformanceDocx, generateConformanceParts } from './generate.js';
+import {
+  generateConformanceDocx,
+  generateConformanceParts,
+  storeZip,
+} from './generate.js';
 
 function measureContext(): CanvasRenderingContext2D {
   return {
@@ -345,5 +349,48 @@ describe.each(CONFORMANCE_CASES)('$id', (testCase) => {
       ].every(Number.isFinite)).toBe(true);
     }
     assertBottomClearance(first);
+  });
+});
+
+describe('recoverable missing drawing resources', () => {
+  it('retains inline geometry and visible content through the real WASM-to-layout pipeline', () => {
+    const testCase = CONFORMANCE_CASES.find(({ axes }) =>
+      axes.story === 'body'
+      && axes.container === 'paragraph'
+      && axes.object === 'inline');
+    if (!testCase) throw new Error('conformance corpus lacks a body inline-drawing case');
+    const parts = new Map(generateConformanceParts(testCase));
+    parts.delete('word/media/pixel.png');
+
+    const model = parse(storeZip(parts));
+    const unavailable = records(model).find((record) =>
+      record.type === 'unavailableDrawing');
+    expect(unavailable).toMatchObject({
+      type: 'unavailableDrawing',
+      resourceKind: 'image',
+      widthPt: 36,
+      heightPt: 21.6,
+    });
+    expect(unavailable).not.toHaveProperty('imagePath');
+
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+    assertDocumentLayout(layout);
+    expect(targetTextPlacements(layout, testCase.expected.targetText).length)
+      .toBeGreaterThan(0);
+    expect(layout.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'MISSING_RESOURCE',
+        severity: 'warning',
+      }),
+    ]));
+    expect(rootRecords(layout)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'drawing',
+        commands: [{ kind: 'noop' }],
+        flowBounds: expect.objectContaining({ widthPt: 36, heightPt: 21.6 }),
+      }),
+    ]));
   });
 });

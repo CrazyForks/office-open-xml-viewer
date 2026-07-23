@@ -1109,6 +1109,11 @@ pub enum DocRun {
     // Boxed with Field because these rich payloads otherwise make every run
     // reserve image/field-sized storage; Serde keeps the wire unchanged.
     Image(Box<ImageRun>),
+    /// Parser-private placeholder for a recognized picture/chart whose payload
+    /// relationship cannot be resolved while its authored DrawingML geometry
+    /// remains valid. Layout preserves that geometry and emits diagnostic no-op
+    /// paint; no fake image path or public resource model is synthesized.
+    UnavailableDrawing(Box<UnavailableDrawingRun>),
     /// ECMA-376 §21.2 DrawingML chart embedded in a `<w:drawing>` whose
     /// `<a:graphicData uri=".../chart">` carries a `<c:chart r:id>`. The chart
     /// model is the shared [`ooxml_common::chart::ChartModel`] (the same
@@ -2585,6 +2590,26 @@ pub struct ImageRun {
     pub anchor_x_relative_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_y_relative_from: Option<String>,
+    #[serde(
+        rename = "__anchorAcquisition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) anchor_acquisition: Option<AnchorAcquisitionWire>,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum UnavailableDrawingResourceKind {
+    Image,
+    Chart,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UnavailableDrawingRun {
+    pub resource_kind: UnavailableDrawingResourceKind,
+    pub width_pt: f64,
+    pub height_pt: f64,
     #[serde(
         rename = "__anchorAcquisition",
         skip_serializing_if = "Option::is_none"

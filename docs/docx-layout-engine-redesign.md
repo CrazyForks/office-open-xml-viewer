@@ -318,6 +318,11 @@ Failure containment follows the retained-layout ownership boundary:
   and pagination collects that diagnostic into `DocumentLayout`;
 - valid content before and after the recoverable node continues through the same
   acquisition, pagination, and paint pipeline;
+- a recognized image or chart with a missing package resource is recoverable
+  only when its authored DrawingML extent is valid; inline flow retains that
+  exact advance and line height, floating content retains its anchor and wrap
+  geometry, paint receives a diagnostic no-op, and no synthetic resource key or
+  public image/chart model is created;
 - corrupt required package parts, non-finite or negative geometry, invalid
   ownership, non-convergence, and invariant violations remain fatal;
 - a recoverable failure never invokes a legacy renderer, retries with guessed

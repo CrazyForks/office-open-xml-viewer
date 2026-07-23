@@ -120,7 +120,7 @@ export {
   prepareBodyFrameMetadata,
 } from './frame.js';
 export type { BodyFrameGroup } from './frame.js';
-import type { ParagraphAcquisitionInput } from './text.js';
+import type { ParagraphAcquisitionInput, ParagraphAcquisitionRun } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 import type {
   DrawingLayout,
@@ -196,7 +196,9 @@ interface RetainedTextGeometryPlan {
   }>;
 }
 
-function retainedTypographyInput(run: DocRun | undefined): RunTypographyAcquisitionInput | undefined {
+function retainedTypographyInput(
+  run: DocRun | ParagraphAcquisitionRun | undefined,
+): RunTypographyAcquisitionInput | undefined {
   if (!run || (run.type !== 'text' && run.type !== 'field')) return undefined;
   return (run as typeof run & Readonly<{
     typographyInput?: RunTypographyAcquisitionInput;
@@ -234,6 +236,17 @@ export interface MeasuredResourcePlanSegment {
   readonly orientation?: 'upright-physical';
 }
 
+export interface MeasuredUnavailableResourcePlanSegment {
+  readonly kind: 'unavailable-resource';
+  readonly range: import('./types.js').TextRange;
+  readonly measuredWidthPt: number;
+  readonly resourceKind: 'image' | 'chart';
+  readonly widthPt: number;
+  readonly heightPt: number;
+  readonly topOffsetPt: number;
+  readonly drawingId: string;
+}
+
 export interface MeasuredAnchorHostPlanSegment {
   readonly kind: 'anchor-host';
   readonly measuredWidthPt: 0;
@@ -246,6 +259,7 @@ export type MeasuredLinePlanSegment =
   | MeasuredTextPlanSegment
   | MeasuredTabPlanSegment
   | MeasuredResourcePlanSegment
+  | MeasuredUnavailableResourcePlanSegment
   | MeasuredAnchorHostPlanSegment;
 
 export interface MeasuredLinePlanInput {
@@ -764,6 +778,19 @@ export function planLine(input: PlanLineInput): LineLayout {
         },
         advancePt: segment.measuredWidthPt,
       });
+    } else if (segment.kind === 'unavailable-resource') {
+      placements.push({
+        kind: 'drawing',
+        range: segment.range,
+        drawingId: segment.drawingId,
+        bounds: {
+          xPt,
+          yPt: line.baselinePt + segment.topOffsetPt,
+          widthPt: segment.widthPt,
+          heightPt: segment.heightPt,
+        },
+        advancePt: segment.measuredWidthPt,
+      });
     } else if (segment.kind === 'anchor-host') {
       placements.push({
         kind: 'anchor-host', range: segment.range,
@@ -1036,6 +1063,25 @@ function chartResourceKey(source: SourceRef): string {
   return stableFingerprint('chart-resource', source);
 }
 
+function unavailableDrawingId(source: SourceRef, runIndex: number): string {
+  return stableFingerprint('unavailable-drawing', runSource(source, runIndex));
+}
+
+function unavailableDrawingDiagnostic(
+  resourceKind: 'image' | 'chart',
+  source: SourceRef,
+): LayoutDiagnostic {
+  return Object.freeze({
+    code: 'MISSING_RESOURCE',
+    severity: 'warning',
+    source: Object.freeze({
+      ...source,
+      path: Object.freeze([...source.path]),
+    }),
+    message: `Drawing ${resourceKind} resource is unavailable`,
+  });
+}
+
 function fieldDependency(run: Extract<DocRun, { type: 'field' }>): TextPlacement['dependency'] {
   const paginationDependency = paginationFieldDependency(run);
   if (paginationDependency) return paginationDependency;
@@ -1087,7 +1133,7 @@ function retainedBaselineOffsetPt(segment: LayoutTextSeg): number {
 
 function textPlacement(
   segment: LayoutTextSeg,
-  paragraph: DocParagraph,
+  paragraph: DocParagraph | ParagraphAcquisitionInput,
   sourceOffset: number,
   xPt: number,
   baselinePt: number,
@@ -1566,10 +1612,12 @@ function retainedGeometryPlan(
 
 function textPlanSegment(
   segment: LayoutTextSeg,
-  paragraph: DocParagraph,
+  paragraph: DocParagraph | ParagraphAcquisitionInput,
   sourceOffset: number,
   characterGridDeltaPt: number,
-  sourceRun?: DocRun & Readonly<{ anchorOccurrenceId?: string }>,
+  sourceRun?: (DocRun | ParagraphAcquisitionRun) & Readonly<{
+    anchorOccurrenceId?: string;
+  }>,
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
 ): MeasuredTextPlanSegment | MeasuredAnchorHostPlanSegment {
   if (segment.metricOnly) {
@@ -1796,7 +1844,7 @@ function segmentOccurrenceLength(segment: LayoutTextSeg | LayoutTabSeg | LayoutI
 
 function planMeasuredLines(
   measured: MeasuredParagraph,
-  paragraph: DocParagraph,
+  paragraph: ParagraphAcquisitionInput,
   paragraphXPt: number,
   availableWidthPt: number,
   source: SourceRef,
@@ -1900,6 +1948,20 @@ function planMeasuredLines(
         if (image.anchor) continue;
         const runIndex = sourceRunIndex(segment);
         const occurrence = runSource(source, runIndex ?? 0);
+        if (image.unavailableResourceKind) {
+          segments.push({
+            kind: 'unavailable-resource',
+            range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
+            resourceKind: image.unavailableResourceKind,
+            measuredWidthPt: image.measuredWidth,
+            widthPt: image.widthPt,
+            heightPt: image.heightPt,
+            topOffsetPt: -image.heightPt,
+            drawingId: unavailableDrawingId(source, runIndex ?? 0),
+          });
+          sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
+          continue;
+        }
         const resourceKind = image.chart ? 'chart' : 'image';
         const resourceKey = image.chart ? chartResourceKey(occurrence) : imageResourceKey(occurrence, image.imagePath);
         segments.push({
@@ -2005,7 +2067,7 @@ function rebaseMeasuredLineRanges(
  * the same retained geometry path as a marker followed by body text. */
 function numberingMarkerHostLine(
   measured: MeasuredParagraph,
-  paragraph: DocParagraph,
+  paragraph: ParagraphAcquisitionInput,
   paragraphXPt: number,
   availableWidthPt: number,
   context: ParagraphLayoutContext,
@@ -2222,13 +2284,18 @@ function publicAnchoredResourceDrawing(
 
 type AnchoredPayloadRun = Extract<
   ParagraphAcquisitionInput['runs'][number],
-  { type: 'image' | 'chart' | 'shape' }
+  { type: 'image' | 'chart' | 'shape' | 'unavailableDrawing' }
 > & Readonly<{ anchorAcquisitionInput?: import('./anchor-input.js').AnchorAcquisitionInput }>;
 
 function anchoredPayloadRun(
   run: ParagraphAcquisitionInput['runs'][number],
 ): run is AnchoredPayloadRun {
-  return (run.type === 'image' || run.type === 'chart' || run.type === 'shape')
+  return (
+    run.type === 'image'
+    || run.type === 'chart'
+    || run.type === 'shape'
+    || run.type === 'unavailableDrawing'
+  )
     && run.anchorAcquisitionInput !== undefined;
 }
 
@@ -2735,6 +2802,9 @@ function acquireAnchorOccurrence(
         kind: 'resource', resourceKind: 'chart',
         resourceKey: chartResourceKey(source), rect: paintRect,
       });
+    } else if (run.type === 'unavailableDrawing') {
+      commands.push({ kind: 'noop' });
+      diagnostics.push(unavailableDrawingDiagnostic(run.resourceKind, source));
     } else {
       const childTransform = acquisition.group?.resolvedChildFrame;
       const plannedRun = childTransform ? {
@@ -4135,6 +4205,28 @@ export function paragraphLayoutFromMeasurement(
   }
   paragraph.runs.forEach((run, runIndex) => {
     const source = runSource(options.source, runIndex);
+    if (run.type === 'unavailableDrawing' && run.anchorAcquisitionInput === undefined) {
+      const drawingId = unavailableDrawingId(options.source, runIndex);
+      const placement = lines
+        .flatMap((line) => line.placements)
+        .find((candidate) => candidate.kind === 'drawing' && candidate.drawingId === drawingId);
+      if (placement?.kind === 'drawing') {
+        drawings.push({
+          kind: 'drawing',
+          id: drawingId,
+          source,
+          flowDomainId: options.flowDomainId,
+          flowBounds: placement.bounds,
+          inkBounds: placement.bounds,
+          advancePt: 0,
+          ordinaryFlow: false,
+          commands: Object.freeze([{ kind: 'noop' }]),
+          diagnostics: Object.freeze([
+            unavailableDrawingDiagnostic(run.resourceKind, source),
+          ]),
+        });
+      }
+    }
     if (run.type === 'image') resources.push({
       kind: 'image', resourceKey: imageResourceKey(source, run.imagePath),
       intrinsicSize: { widthPt: run.widthPt, heightPt: run.heightPt },

@@ -126,4 +126,41 @@ describe('private anchor acquisition projection', () => {
     });
     expect(Object.isFrozen(acquired.anchorAcquisitionInput)).toBe(true);
   });
+
+  it('keeps unavailable drawing geometry internal while scoping its anchor facts', () => {
+    const host = {
+      type: 'anchorHost', fontSize: 11,
+      __anchorOccurrenceId: privateWire.occurrenceId,
+    };
+    const unavailable = {
+      type: 'unavailableDrawing',
+      resourceKind: 'image',
+      widthPt: 20,
+      heightPt: 10,
+      __anchorAcquisition: privateWire,
+    };
+    const paragraph = {
+      alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
+      tabStops: [], runs: [host, unavailable],
+    } as unknown as DocParagraph;
+
+    const snapshot = paragraphAcquisitionInput(paragraph, {
+      story: 'body', storyInstance: 'body', path: [3],
+    });
+    const acquired = snapshot.runs[1] as unknown as Record<string, unknown> & {
+      anchorAcquisitionInput?: typeof privateWire;
+    };
+
+    expect(acquired).toMatchObject({
+      type: 'unavailableDrawing',
+      resourceKind: 'image',
+      widthPt: 20,
+      heightPt: 10,
+    });
+    expect(acquired).not.toHaveProperty('__anchorAcquisition');
+    expect(acquired.anchorAcquisitionInput?.occurrenceId)
+      .toBe('anchor:body:body:3:wp-anchor-120');
+    expect(Object.isFrozen(acquired.anchorAcquisitionInput)).toBe(true);
+  });
 });
