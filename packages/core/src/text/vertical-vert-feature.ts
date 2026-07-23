@@ -25,8 +25,17 @@ export interface VerticalGlyphCellMetrics {
 }
 
 function canvasElementFor(ctx: Ctx2D): HTMLCanvasElement | null {
-  if (typeof HTMLCanvasElement === 'undefined') return null;
-  return ctx.canvas instanceof HTMLCanvasElement ? ctx.canvas : null;
+  const candidate = ctx.canvas as HTMLCanvasElement;
+  const ownerConstructor = candidate?.ownerDocument?.defaultView?.HTMLCanvasElement;
+  if (
+    typeof ownerConstructor === 'function'
+    && candidate instanceof ownerConstructor
+  ) return candidate;
+  if (
+    typeof HTMLCanvasElement !== 'undefined'
+    && candidate instanceof HTMLCanvasElement
+  ) return candidate;
+  return null;
 }
 
 function replaceFontSize(font: string, replacement: string): string {
@@ -99,16 +108,52 @@ function withConnectedCanvas<T>(
     pointerEvents: 'none',
   });
   connectedParent.appendChild(canvas);
+  let operationThrew = false;
   try {
     return operation();
+  } catch (error) {
+    operationThrew = true;
+    throw error;
   } finally {
-    if (originalParent) {
-      originalParent.insertBefore(canvas, originalNextSibling);
-    } else {
-      canvas.remove();
+    let treeRestoreError: unknown;
+    try {
+      if (originalParent) {
+        const liveAnchor = originalNextSibling?.parentNode === originalParent
+          ? originalNextSibling
+          : null;
+        originalParent.insertBefore(canvas, liveAnchor);
+      } else {
+        canvas.remove();
+      }
+    } catch (error) {
+      treeRestoreError = error;
+      // If the caller changed the original tree beyond repair, do not leave a
+      // hidden caller-owned canvas attached to the acquisition document.
+      try {
+        canvas.remove();
+      } catch {
+        // Presentation restoration below remains mandatory.
+      }
+    } finally {
+      Object.assign(style, previousPresentation);
     }
-    Object.assign(style, previousPresentation);
+    // Preserve the callback's primary failure. A restoration error is surfaced
+    // only when the callback itself completed successfully.
+    if (treeRestoreError !== undefined && !operationThrew) throw treeRestoreError;
   }
+}
+
+/**
+ * Keep an element-backed context connected for one synchronous vertical-glyph
+ * acquisition unit. Inner feature toggles then use their already-connected
+ * fast path, while detached and Offscreen callers retain their ownership.
+ */
+export function withVertFeatureCanvasScope<T>(
+  ctx: Ctx2D,
+  operation: () => T,
+): T {
+  const canvas = canvasElementFor(ctx);
+  return canvas === null ? operation() : withConnectedCanvas(canvas, operation);
 }
 
 function probeState(doc: Document): ProbeState {
@@ -301,9 +346,7 @@ export function withVertFeature<T>(ctx: Ctx2D, draw: () => T): T {
       ctx.font = ctx.font;
     }
   };
-  return canvasElementFor(ctx) === null
-    ? applyFeature()
-    : withConnectedCanvas(canvas, applyFeature);
+  return withVertFeatureCanvasScope(ctx, applyFeature);
 }
 
 /**

@@ -168,7 +168,11 @@ test('layer A: the document font keeps Word-adjudicated vertical relationships',
     await document.fonts.ready;
     if (!document.fonts.check(`${fontPx}px "${family}"`)) return null;
 
-    const { drawVerticalRun } = await import('/src/vertical-text.ts');
+    const {
+      drawVerticalRun,
+      planVerticalRunWithCapability,
+      verticalVertGlyphReachable,
+    } = await import('/src/vertical-text.ts');
     const canvas = document.querySelector('#subject') as HTMLCanvasElement;
     const prepare = (): CanvasRenderingContext2D => {
       canvas.width = 900;
@@ -299,8 +303,47 @@ test('layer A: the document font keeps Word-adjudicated vertical relationships',
     // preserves the full designed ink rather than clipping at either cell edge.
     const [comma, period] = pairedComponents(punctuationCtx, 'punctuation pair');
 
+    const retainedCentroidX = (ch: string) => {
+      const ctx = prepare();
+      const [planned] = planVerticalRunWithCapability(
+        ctx,
+        ch,
+        fontPx,
+        0,
+        1,
+        true,
+        (cp) => verticalVertGlyphReachable(ctx, cp),
+      );
+      if (!planned) throw new Error(`no retained glyph for ${ch}`);
+      ctx.translate(columnX, startY);
+      ctx.rotate(Math.PI / 2);
+      ctx.translate(planned.originPt, 0);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      withVert(ctx, () => ctx.fillText(
+        planned.text,
+        planned.drawOffsetPt.xPt,
+        planned.drawOffsetPt.yPt,
+      ));
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      return rangeInk(ctx, 0, canvas.height).centroidX;
+    };
+    const retainedAcross = {
+      open: retainedCentroidX('（'),
+      close: retainedCentroidX('）'),
+      comma: retainedCentroidX('、'),
+      period: retainedCentroidX('。'),
+    };
+
     return {
       fontPx,
+      columnX,
+      retainedAcross,
+      punctuationCentroids: {
+        comma: comma.centroidX,
+        period: period.centroidX,
+      },
       gapPx: latin.minY - prolonged.maxY - 1,
       prolongedAspect: (prolonged.maxY - prolonged.minY + 1) / (prolonged.maxX - prolonged.minX + 1),
       bracketBandSeparationPx:
@@ -348,6 +391,21 @@ test('layer A: the document font keeps Word-adjudicated vertical relationships',
     expect(punctuation.rightOfColumn).toBe(true);
     expect(punctuation.positionInCell, 'corner punctuation stays in the leading cell third').toBeLessThan(1 / 3);
   }
+  for (const retained of [result.retainedAcross.open, result.retainedAcross.close]) {
+    expect(
+      Math.abs(retained - result.columnX),
+      'retained vertical parentheses stay on the central column baseline',
+    ).toBeLessThan(result.fontPx * 0.05);
+  }
+  for (const [retained, direct] of [
+    [result.retainedAcross.comma, result.punctuationCentroids.comma],
+    [result.retainedAcross.period, result.punctuationCentroids.period],
+  ]) {
+    expect(
+      Math.abs(retained - direct),
+      'retained corner punctuation preserves the font vertical baseline',
+    ).toBeLessThan(result.fontPx * 0.05);
+  }
 });
 
 const VERT_REPERTOIRE = 'ー〜～、。「」（）：；！';
@@ -393,6 +451,8 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
       verticalVertGlyphReachable,
     } = await import('/src/vertical-text.ts');
     const { createLayoutServices } = await import('/src/layout-runtime.ts');
+    const { verticalGlyphMeasurementServiceOf } =
+      await import('/src/layout/runtime-state.ts');
     const { renderDocumentToCanvas } = await import('/src/renderer.ts');
     const { selectDocumentLayoutPage } = await import('/src/layout/document-layout-variants.ts');
     const subject = document.querySelector('#subject') as HTMLCanvasElement;
@@ -445,6 +505,26 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
     const attachedPlan = plan(attachedMeasure);
     attachedMeasureCanvas.remove();
 
+    // The viewer can be hosted across realms (for example Storybook previews
+    // or an iframe integration). A canvas created by that realm is not an
+    // instanceof the parent window's HTMLCanvasElement, but it must acquire the
+    // same feature-backed plan while remaining caller-owned and detached.
+    const foreignFrame = document.createElement('iframe');
+    document.body.appendChild(foreignFrame);
+    const foreignDocument = foreignFrame.contentDocument;
+    if (!foreignDocument?.body) throw new Error('foreign document unavailable');
+    const foreignDetachedCanvas = foreignDocument.createElement('canvas');
+    const foreignDetachedMeasure = foreignDetachedCanvas.getContext('2d');
+    if (!foreignDetachedMeasure) throw new Error('foreign detached context unavailable');
+    const foreignDetachedPlan = plan(foreignDetachedMeasure);
+    const foreignDetachedConnectedAfter = foreignDetachedCanvas.isConnected;
+    const foreignAttachedCanvas = foreignDocument.createElement('canvas');
+    foreignDocument.body.appendChild(foreignAttachedCanvas);
+    const foreignAttachedMeasure = foreignAttachedCanvas.getContext('2d');
+    if (!foreignAttachedMeasure) throw new Error('foreign attached context unavailable');
+    const foreignAttachedPlan = plan(foreignAttachedMeasure);
+    foreignFrame.remove();
+
     const textRun = {
       type: 'text', text: 'ー（）日',
       bold: false, italic: false, underline: false, strikethrough: false,
@@ -471,6 +551,39 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
       footers: { default: null, first: null, even: null },
       fontFamilyClasses: {},
     } as never;
+
+    const batchCanvas = document.createElement('canvas');
+    const batchContext = batchCanvas.getContext('2d');
+    if (!batchContext) throw new Error('batch measurement context unavailable');
+    batchContext.font = `48px "${selectedFamily}"`;
+    const batchServices = createLayoutServices(model, { measureContext: batchContext });
+    const batchMeasurement = verticalGlyphMeasurementServiceOf(batchServices);
+    const batchInput = {
+      text: '（'.repeat(20),
+      font: batchContext.font,
+      fontKerning: batchContext.fontKerning,
+      fontSizePt: 48,
+      letterSpacingPt: 0,
+      charScale: 1,
+      growTrRotateInk: true,
+      writingMode: 'vertical-rl' as const,
+    };
+    // Warm the shared feature probe before observing the caller-owned canvas.
+    batchMeasurement.planRun(batchInput);
+    let acquisitionMutationNodes = 0;
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        acquisitionMutationNodes += [...record.addedNodes, ...record.removedNodes]
+          .filter((node) => node === batchCanvas).length;
+      }
+    });
+    observer.observe(document.body, { childList: true });
+    batchContext.font = batchInput.font;
+    batchMeasurement.measureRunInkExtra(batchInput.text);
+    batchMeasurement.planRun(batchInput);
+    await Promise.resolve();
+    observer.disconnect();
+
     const services = createLayoutServices(model);
     const defaultCurrentDateMs = 1;
     await renderDocumentToCanvas(model, subject, 0, {
@@ -545,7 +658,12 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
       family: selectedFamily,
       detachedPlan,
       attachedPlan,
+      foreignDetachedPlan,
+      foreignAttachedPlan,
+      foreignDetachedConnectedAfter,
       detachedMeasureConnectedAfter,
+      acquisitionMutationNodes,
+      batchCanvasConnectedAfter: batchCanvas.isConnected,
       retainedGlyphs,
       detachedConnectedBefore,
       detachedConnectedAfter,
@@ -562,7 +680,12 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
   test.skip(result === null, 'a host font with a reachable OpenType vert glyph is required');
   if (result === null) return;
   expect(result.detachedPlan).toEqual(result.attachedPlan);
+  expect(result.foreignDetachedPlan).toEqual(result.foreignAttachedPlan);
+  expect(result.foreignDetachedConnectedAfter).toBe(false);
   expect(result.detachedMeasureConnectedAfter).toBe(false);
+  // One attach/remove scope for run-width acquisition and one for run planning.
+  expect(result.acquisitionMutationNodes).toBe(4);
+  expect(result.batchCanvasConnectedAfter).toBe(false);
   expect(result.retainedGlyphs).toEqual({
     'ー': { upright: true, verticalFeature: true },
     '（': { upright: true, verticalFeature: true },
@@ -625,4 +748,50 @@ test('forced unreachable keeps FE/upright fallbacks and plain-rotates long marks
   expect(result.rotations.every((angle) => angle === -Math.PI / 2)).toBe(true);
   expect(result.scales.some(([, y]) => y === -1)).toBe(false);
   expect(result.transforms).toEqual([]);
+});
+
+test('feature acquisition restores a detached caller canvas after failure', async ({ page }) => {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  const result = await page.evaluate(async () => {
+    const { withVertFeature } = await import('/src/vertical-text.ts');
+    const fragment = document.createDocumentFragment();
+    const before = document.createElement('span');
+    const canvas = document.createElement('canvas');
+    const after = document.createElement('span');
+    canvas.style.cssText =
+      'position:relative;left:7px;top:3px;opacity:0.75;pointer-events:auto;font-feature-settings:"kern" 1';
+    fragment.append(before, canvas, after);
+    const originalCssText = canvas.style.cssText;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('2D context unavailable');
+    let message = '';
+    try {
+      withVertFeature(ctx, () => {
+        if (!canvas.isConnected) throw new Error('canvas was not connected');
+        after.remove();
+        throw new Error('expected acquisition failure');
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    return {
+      message,
+      isConnected: canvas.isConnected,
+      parentRestored: canvas.parentNode === fragment,
+      orderRestored: [...fragment.childNodes].map((node) => (
+        node === before ? 'before' : node === canvas ? 'canvas' : 'after'
+      )),
+      cssRestored: canvas.style.cssText === originalCssText,
+      featureRestored: canvas.style.fontFeatureSettings,
+    };
+  });
+
+  expect(result).toEqual({
+    message: 'expected acquisition failure',
+    isConnected: false,
+    parentRestored: true,
+    orderRestored: ['before', 'canvas'],
+    cssRestored: true,
+    featureRestored: '"kern"',
+  });
 });
