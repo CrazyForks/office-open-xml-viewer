@@ -86,7 +86,10 @@ import {
   paragraphAcquisitionCacheOf,
   type ParagraphAcquisitionRuntimeCache,
 } from './runtime-state.js';
-import { wordPreservesLowerLayerSameParagraphComposition } from './anchor-compatibility.js';
+import {
+  wordPreservesLowerLayerSameParagraphComposition,
+  wordTextBoxVisibleAnchorExtentPt,
+} from './anchor-compatibility.js';
 import { wordRunVerticalAlignRaisePt } from './line-compatibility.js';
 import {
   resolveFloatPlacement,
@@ -2835,58 +2838,6 @@ function retainedTextBoxVerticalMode(value: string | null | undefined): Retained
     ? value : undefined;
 }
 
-function paragraphContributesTextBoxAnchorExtent(paragraph: ParagraphLayout): boolean {
-  if (
-    paragraph.shading
-    || paragraph.borders.length > 0
-    || paragraph.resources.length > 0
-    || paragraph.drawings.length > 0
-    || paragraph.textBoxes.length > 0
-    || paragraph.lineNumbers?.some((line) => line.paintOps.length > 0)
-  ) {
-    return true;
-  }
-  return paragraph.lines.some((line) => line.placements.some((placement) => {
-    if (placement.kind === 'text' || placement.kind === 'resource' || placement.kind === 'drawing') {
-      return true;
-    }
-    return placement.kind === 'tab' && (placement.leaderGlyphs?.length ?? 0) > 0;
-  }));
-}
-
-/**
- * ECMA-376 §21.1.2.1.1 `anchor` positions the text body at the middle or bottom
- * of its shape. The standard does not say that a final structural empty
- * paragraph enlarges that positioned text extent; Word and the pre-retained
- * renderer exclude it. Keep the complete CT_TxbxContent story for
- * paint/selection while deriving the compatible anchoring extent separately.
- *
- * The last visible retained block remains authoritative: inter-block gaps,
- * non-empty paragraphs, paragraph decoration/resource ink, and terminal tables
- * are therefore preserved. A visible paragraph's trailing `spaceAfter` remains
- * on the retained story but lies outside its smallest text bounds, matching the
- * legacy Word-compatible anchor calculation.
- */
-function textBoxAnchorStoryExtentPt(story: StoryLayout): number {
-  const startPt = story.flowBounds.yPt;
-  let visibleEndPt: number | undefined;
-  for (const block of story.blocks) {
-    if (block.kind === 'table') {
-      visibleEndPt = Math.max(
-        visibleEndPt ?? startPt,
-        block.flowBounds.yPt + block.advancePt,
-      );
-      continue;
-    }
-    if (block.kind !== 'paragraph' || !paragraphContributesTextBoxAnchorExtent(block)) continue;
-    visibleEndPt = Math.max(
-      visibleEndPt ?? startPt,
-      block.flowBounds.yPt + Math.max(0, block.advancePt - block.spacing.afterPt),
-    );
-  }
-  return visibleEndPt === undefined ? 0 : Math.max(0, visibleEndPt - startPt);
-}
-
 /** ECMA-376 §21.1.2.1.1 `CT_TextBodyProperties@anchor`: resolve the text
  * story's block-axis position inside the inset content rectangle. The offset is
  * retained in point-space story geometry so paint does not inspect the model or
@@ -3310,7 +3261,7 @@ export function acquireShapeTextBoxLayout(
   // orientation may mirror glyph/line geometry, but `anchor` is defined against
   // this pre-orientation text-body extent. Retain the scalar now so the later
   // physical projection cannot change vertical anchoring semantics.
-  const anchorStoryExtentPt = textBoxAnchorStoryExtentPt(story);
+  const anchorStoryExtentPt = wordTextBoxVisibleAnchorExtentPt(story);
   if (completeStory && verticalMode) {
     story = orientVerticalTextBoxStory(
       translateTextBoxStory(
