@@ -146,11 +146,17 @@ function nestedStoryDiagnostics(
 ): readonly LayoutDiagnostic[] {
   if (visited.has(node)) return [];
   visited.add(node);
+  const own = node.diagnostics ?? [];
   if (node.kind === 'paragraph') {
-    return node.textBoxes.flatMap((textBox) => nestedStoryDiagnostics(textBox, visited));
+    return [
+      ...own,
+      ...node.drawings.flatMap((drawing) => nestedStoryDiagnostics(drawing, visited)),
+      ...node.textBoxes.flatMap((textBox) => nestedStoryDiagnostics(textBox, visited)),
+    ];
   }
   if (node.kind === 'table') {
     return [
+      ...own,
       ...node.rows.flatMap((row) => row.cells.flatMap((cell) =>
         cell.blocks.flatMap((block) => nestedStoryDiagnostics(block.layout, visited)))),
       ...(node.floatingTables ?? []).flatMap((placement) =>
@@ -161,11 +167,12 @@ function nestedStoryDiagnostics(
   }
   if (node.kind === 'textbox' || node.kind === 'note') {
     return [
+      ...own,
       ...node.story.diagnostics,
       ...node.story.blocks.flatMap((block) => nestedStoryDiagnostics(block, visited)),
     ];
   }
-  return [];
+  return own;
 }
 
 function assertFreshPageFootnoteAdmission(

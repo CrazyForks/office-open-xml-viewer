@@ -88,6 +88,38 @@ function pageOwnedWrappingParagraph(): BodyElement {
   return result as unknown as BodyElement;
 }
 
+function unsupportedTextPathParagraph(): BodyElement {
+  const result = ordinaryParagraph('');
+  result.runs = [{
+    type: 'shape',
+    widthPt: 30,
+    heightPt: 20,
+    anchorXPt: 0,
+    anchorYPt: 0,
+    anchorXFromMargin: false,
+    anchorYFromPara: true,
+    zOrder: 0,
+    subpaths: [],
+    presetGeometry: 'rect',
+    fill: { fillType: 'solid', color: 'D9D9D9' },
+    stroke: null,
+    textPath: {
+      string: 'DRAFT',
+      fontFamily: 'Arial',
+      bold: false,
+      italic: false,
+      textPathOk: true,
+      on: true,
+      fitShape: true,
+      fitPath: true,
+      trim: false,
+      xScale: false,
+      fontSizePt: 12,
+    },
+  }] as unknown as DocParagraph['runs'];
+  return result as unknown as BodyElement;
+}
+
 function sectionBreak(): BodyElement {
   return {
     type: 'sectionBreak', kind: 'continuous', columns: null,
@@ -158,6 +190,46 @@ function fragmentLineAdvancesPt(fragment: Extract<ReturnType<typeof layoutDocume
 }
 
 describe('canonical producer with a real document model', () => {
+  it('keeps valid surrounding body blocks when an optional drawing feature is unsupported', () => {
+    const section = {
+      pageWidth: 200, pageHeight: 100,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const model = {
+      section,
+      body: [
+        ordinaryBodyParagraph('before'),
+        unsupportedTextPathParagraph(),
+        ordinaryBodyParagraph('after'),
+      ],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+    const paragraphs = layout.pages.flatMap((page) => page.layers.body)
+      .filter((node) => node.kind === 'paragraph');
+    const text = paragraphs.flatMap((paragraph) => paragraph.lines)
+      .flatMap((line) => line.placements)
+      .filter((placement) => placement.kind === 'text')
+      .map((placement) => placement.text);
+    const unsupported = paragraphs.find((paragraph) => paragraph.source.path[0] === 1);
+
+    expect(text).toEqual(expect.arrayContaining(['before', 'after']));
+    expect(unsupported?.drawings[0]?.commands).toEqual([{ kind: 'noop' }]);
+    expect(layout.diagnostics).toContainEqual({
+      code: 'UNSUPPORTED_FEATURE',
+      severity: 'error',
+      source: { story: 'body', storyInstance: 'body', path: [1, 0] },
+      message: 'VML textPath fitPath=true is not rendered',
+    });
+    expect(Object.isFrozen(layout.diagnostics[0])).toBe(true);
+  });
+
   it('lays out document-end notes through the retained story engine', () => {
     const section = {
       pageWidth: 200, pageHeight: 100,

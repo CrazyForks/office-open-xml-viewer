@@ -309,6 +309,24 @@ diagnostic. NaN geometry, invalid ownership, non-convergence, or broken layout
 invariants use the existing render error path. Public error callback signatures do
 not change.
 
+Failure containment follows the retained-layout ownership boundary:
+
+- unsupported or malformed optional content is recoverable only when its layout
+  node can be replaced by a deterministic retained no-op without inventing
+  geometry or changing surrounding flow;
+- the retained node owns an immutable diagnostic with a stable source reference,
+  and pagination collects that diagnostic into `DocumentLayout`;
+- valid content before and after the recoverable node continues through the same
+  acquisition, pagination, and paint pipeline;
+- corrupt required package parts, non-finite or negative geometry, invalid
+  ownership, non-convergence, and invariant violations remain fatal;
+- a recoverable failure never invokes a legacy renderer, retries with guessed
+  defaults, or weakens the validation of fatal state.
+
+This classification is made at the narrowest layer that understands whether the
+feature is optional. Catching arbitrary exceptions at the viewer boundary would
+erase that distinction and could paint a structurally invalid layout.
+
 ## Worker Mode
 
 Main-thread and worker rendering call the same layout and paint modules. Worker

@@ -250,6 +250,12 @@ describe('projectBodyOccurrence', () => {
     const drawing = {
       kind: 'drawing' as const, id: 'drawing/a', source: source([0, 0]), flowDomainId: 'body', ordinaryFlow: false,
       flowBounds: rect(3, 4), inkBounds: rect(3, 4), advancePt: 0, commands: [],
+      diagnostics: [{
+        code: 'UNSUPPORTED_FEATURE' as const,
+        severity: 'error' as const,
+        source: source([0, 0]),
+        message: 'Unsupported optional drawing omitted',
+      }],
       anchorLayer: {
         occurrenceId: 'anchor/a', behindDoc: false, relativeHeight: 1, sourceOrder: 0,
         horizontalOwnership: 'host' as const, verticalOwnership: 'host' as const,
@@ -276,6 +282,9 @@ describe('projectBodyOccurrence', () => {
     expect(first.id).toBe('page 2/header/node/paragraph');
     expect(first.drawings[0]!.id).toBe('page 2/header/node/drawing%2Fa');
     expect(first.lines[0]!.placements[0]).toMatchObject({ drawingId: first.drawings[0]!.id });
+    expect(first.drawings[0]!.diagnostics).toEqual(drawing.diagnostics);
+    expect(Object.isFrozen(first.drawings[0]!.diagnostics)).toBe(true);
+    expect(Object.isFrozen(first.drawings[0]!.diagnostics![0])).toBe(true);
     expect(anchor).toMatchObject({
       occurrenceId: 'page 2/header/anchor/anchor%2Fa', acquisitionOccurrenceId: 'anchor/a',
     });

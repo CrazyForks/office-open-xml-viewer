@@ -228,15 +228,38 @@ describe('ShapeRun drawing command planner', () => {
     expect(result.command).toEqual({ kind: 'noop' });
   });
 
-  it.each(['fitPath', 'xScale'] as const)('rejects unsupported active %s semantics deterministically', (control) => {
+  it.each(['fitPath', 'xScale'] as const)('isolates unsupported active %s semantics as a diagnostic noop', (control) => {
     const text = { shape: () => { throw new Error('unsupported mode must be rejected before shaping'); } } as unknown as TextLayoutService;
-    expect(() => textPathPlan(shape({
+    const result = textPathPlan(shape({
       textPath: {
         string: 'DRAFT', textPathOk: true, on: true, fitShape: false,
         fitPath: false, trim: false, xScale: false, [control]: true,
       } as NonNullable<InternalShapeRun['textPath']>,
-    }), { xPt: 0, yPt: 0, widthPt: 20, heightPt: 20 }, text))
-      .toThrow(`Unsupported VML textPath ${control}=true`);
+    }), { xPt: 0, yPt: 0, widthPt: 20, heightPt: 20 }, text);
+
+    expect(result).toEqual({
+      status: 'unsupported',
+      command: { kind: 'noop' },
+      diagnostics: [{
+        code: 'UNSUPPORTED_FEATURE',
+        severity: 'error',
+        message: `VML textPath ${control}=true is not rendered`,
+      }],
+    });
+  });
+
+  it.each([
+    [Number.NaN, /must contain finite numbers/],
+    [-1, /must be finite and non-negative/],
+  ] as const)('keeps invalid textPath font size %s fatal', (fontSizePt, expected) => {
+    const text = { shape: () => { throw new Error('invalid input must fail before shaping'); } } as unknown as TextLayoutService;
+    expect(() => textPathPlan(shape({
+      textPath: {
+        string: 'DRAFT', textPathOk: true, on: true, fitShape: true,
+        fitPath: false, trim: false, xScale: false, fontSizePt,
+      },
+    } as InternalShapeRun), { xPt: 0, yPt: 0, widthPt: 20, heightPt: 20 }, text))
+      .toThrow(expected);
   });
 
   it('rejects trim when the measurement adapter cannot provide ink bounds', () => {

@@ -2,21 +2,47 @@ import type { ArrowEnd, DrawingMLShapePaintPlan, Stroke } from '@silurus/ooxml-c
 import type { ShapeRun } from '../types.js';
 import type {
   DrawingPaintCommand,
+  LayoutDiagnostic,
   LayoutRect,
   VmlTextPathAcquisitionInput,
 } from './types.js';
 import { snapshotPlainData } from './plain-data.js';
 import type { TextLayoutService } from './text.js';
 
-export type ShapeDrawingPlanResult = Readonly<{
-  status: 'planned';
-  command: Extract<DrawingPaintCommand, { kind: 'noop' | 'drawingml-shape' | 'watermark-text' }>;
-}>;
+type ShapeDrawingCommand = Extract<
+  DrawingPaintCommand,
+  { kind: 'noop' | 'drawingml-shape' | 'watermark-text' }
+>;
+
+export type ShapeDrawingPlanResult =
+  | Readonly<{
+      status: 'planned';
+      command: ShapeDrawingCommand;
+    }>
+  | Readonly<{
+      status: 'unsupported';
+      command: Extract<DrawingPaintCommand, { kind: 'noop' }>;
+      diagnostics: readonly Readonly<Omit<LayoutDiagnostic, 'source'>>[];
+    }>;
 
 // When fitshape is active, every shaped dimension is multiplied by the same
 // target/source ratio, so a 1pt internal reference cancels out exactly. This is
 // used only when VML omitted font-size; an authored size is never replaced.
 const SCALE_NEUTRAL_REFERENCE_FONT_SIZE_PT = 1;
+
+function unsupportedTextPathPlan(
+  control: 'fitPath' | 'xScale',
+): Extract<ShapeDrawingPlanResult, { status: 'unsupported' }> {
+  return Object.freeze({
+    status: 'unsupported',
+    command: Object.freeze({ kind: 'noop' }),
+    diagnostics: Object.freeze([Object.freeze({
+      code: 'UNSUPPORTED_FEATURE',
+      severity: 'error',
+      message: `VML textPath ${control}=true is not rendered`,
+    })]),
+  });
+}
 
 function arrowEnd(end: ShapeRun['headEnd']): ArrowEnd | undefined {
   return end ? { type: end.type, w: end.w, len: end.len } : undefined;
@@ -58,10 +84,10 @@ export function planShapeDrawing(
   );
   if (textPathEnabled) {
     if (textPath.fitPath === true) {
-      throw new Error('Unsupported VML textPath fitPath=true');
+      return unsupportedTextPathPlan('fitPath');
     }
     if (textPath.xScale === true) {
-      throw new Error('Unsupported VML textPath xScale=true');
+      return unsupportedTextPathPlan('xScale');
     }
     if (textPath.string.trim().length === 0) {
       return Object.freeze({ status: 'planned', command: Object.freeze({ kind: 'noop' }) });

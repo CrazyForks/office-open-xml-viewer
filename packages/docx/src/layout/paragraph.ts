@@ -35,7 +35,10 @@ import {
 import { computeKashidaDistribution, type KashidaLevel } from '../kashida-justify.js';
 import { imageResourceKey } from './source-key.js';
 import { stableFingerprint } from './fingerprint.js';
-import { planShapeDrawing } from './shape-drawing-plan.js';
+import {
+  planShapeDrawing,
+  type ShapeDrawingPlanResult,
+} from './shape-drawing-plan.js';
 import {
   normalizeTextBoxInput,
   type CompleteTextBoxBlockInput,
@@ -126,6 +129,7 @@ import type {
   AcquiredParagraphLayoutInput,
   InlineResourceLayout,
   LineLayout,
+  LayoutDiagnostic,
   LayoutRect,
   Matrix2DData,
   ParagraphLayout,
@@ -1011,6 +1015,21 @@ export interface ParagraphAcquisitionOptions {
 
 function runSource(source: SourceRef, runIndex: number): SourceRef {
   return { ...source, path: [...source.path, runIndex] };
+}
+
+function shapePlanDiagnostics(
+  plan: ShapeDrawingPlanResult,
+  source: SourceRef,
+): readonly LayoutDiagnostic[] {
+  if (plan.status === 'planned') return Object.freeze([]);
+  const retainedSource = Object.freeze({
+    ...source,
+    path: Object.freeze([...source.path]),
+  });
+  return Object.freeze(plan.diagnostics.map((diagnostic) => Object.freeze({
+    ...diagnostic,
+    source: retainedSource,
+  })));
 }
 
 function chartResourceKey(source: SourceRef): string {
@@ -2144,11 +2163,13 @@ function drawingForShape(
     shape.vmlTextPathInput,
   );
   const commands = [plan.command];
+  const diagnostics = shapePlanDiagnostics(plan, runSource(options.source, runIndex));
   return {
     kind: 'drawing', id: `${options.id}:drawing:${runIndex}`, source: runSource(options.source, runIndex),
     flowDomainId: options.flowDomainId, flowBounds: rect, inkBounds: rect, advancePt: 0,
     ordinaryFlow: false,
     commands,
+    ...(diagnostics.length === 0 ? {} : { diagnostics }),
     anchorLayer: {
       occurrenceId: `public-shape:${options.id}:${runIndex}`,
       behindDoc: shape.behindDoc === true,
@@ -2571,6 +2592,7 @@ function acquireAnchorOccurrence(
     verticalPageFrame: false,
   } : options.environment;
   const commands: DrawingPaintCommand[] = [];
+  const diagnostics: LayoutDiagnostic[] = [];
   const textBoxes: TextBoxLayout[] = [];
   const textBoxIds: string[] = [];
   const acquiredShapeTextBoxes = new Map<number, TextBoxLayout>();
@@ -2721,12 +2743,14 @@ function acquireAnchorOccurrence(
         flipH: childTransform.flipH,
         flipV: childTransform.flipV,
       } : run;
-      commands.push(planShapeDrawing(
+      const plan = planShapeDrawing(
         plannedRun,
         paintRect,
         options.environment.layoutServices?.text,
         run.vmlTextPathInput,
-      ).command);
+      );
+      commands.push(plan.command);
+      diagnostics.push(...shapePlanDiagnostics(plan, source));
       const textBoxId = `${options.id}:anchor-textbox:${occurrenceId}:${runIndex}`;
       const textBox = acquiredShapeTextBoxes.get(runIndex) ?? acquireShapeTextBoxLayout(run, paintRect, {
         id: textBoxId,
@@ -2759,6 +2783,7 @@ function acquireAnchorOccurrence(
       transform: uprightTransform,
     } : {}),
     commands,
+    ...(diagnostics.length === 0 ? {} : { diagnostics: Object.freeze(diagnostics) }),
     anchorLayer: {
       occurrenceId,
       behindDoc: behavior.behindDoc,
