@@ -70,8 +70,11 @@ export const WORD_LOWER_LAYER_SAME_PARAGRAPH_ANCHOR_COMPOSITION = defineCompatib
 export const WORD_TEXTBOX_VISIBLE_ANCHOR_EXTENT = defineCompatibilityRule({
   id: 'word-textbox-visible-anchor-extent',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/layout/textbox.test.ts#centers the smallest visible text bounds without deleting a trailing empty paragraph',
+    kind: 'office-observation',
+    syntheticFixtureId: 'textbox-visible-anchor-extent',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
   },
   description: 'For DrawingML middle and bottom text anchoring, derive the positioned extent through the last visible retained block while preserving structural trailing empty paragraphs and terminal paragraph spacing in the complete story.',
 });
