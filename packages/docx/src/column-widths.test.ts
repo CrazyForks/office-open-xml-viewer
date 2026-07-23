@@ -233,8 +233,10 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
     });
     expect(segments[0]).toMatchObject({ fontRoute: expectedShape.spans[0]!.fontRoute });
     expect(autoFitFonts).toContain(expectedFont);
-    expect(measured.filter((entry) => entry.text === 'é').map((entry) => entry.font))
-      .toContain(expectedFont);
+    // Ordinary line layout reuses the immutable shape acquired by auto-fit.
+    // The retained segment route, rather than another native measurement call,
+    // proves that both consumers use the same registered substitute.
+    expect(measured.filter((entry) => entry.text === 'é')).toEqual([]);
   });
 
   it('feeds the unwrapped paragraph width into the autofit maximum-content step', () => {

@@ -96,6 +96,40 @@ function tableLayout(): TableLayout {
 }
 
 describe('paintTableLayout', () => {
+  it.each([
+    { dpr: 1, expectedWidthPt: 1 },
+    { dpr: 2, expectedWidthPt: 0.5 },
+  ])(
+    'rasterizes a retained table hairline to one device pixel at DPR $dpr',
+    async ({ dpr, expectedWidthPt }) => {
+      const operations: unknown[] = [];
+      const target = {
+        globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+        font: '', textAlign: 'left' as CanvasTextAlign,
+        textBaseline: 'alphabetic' as CanvasTextBaseline,
+        direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+        fontKerning: 'auto' as CanvasFontKerning,
+        save() {}, restore() {}, beginPath() {}, rect() {}, clip() {},
+        translate() {}, rotate() {}, scale() {}, transform() {}, fillRect() {}, strokeRect() {},
+        setLineDash() {}, moveTo() {}, lineTo() {},
+        stroke() { operations.push(['stroke', this.lineWidth]); },
+        fill() {}, drawImage() {}, fillText() {},
+      };
+      const source = tableLayout();
+      const hairline = {
+        ...source,
+        borders: source.borders.map((border) => ({ ...border, widthPt: 0.5 })),
+      } as TableLayout;
+      const { paintTableLayout } = await import('./canvas-table.js');
+
+      paintTableLayout(hairline, {
+        ctx: target, scale: 1, dpr, resources,
+      });
+
+      expect(operations).toContainEqual(['stroke', expectedWidthPt]);
+    },
+  );
+
   it('clips a retained table fragment at its page-local boundary', async () => {
     const operations: unknown[] = [];
     const ctx = {
@@ -157,6 +191,104 @@ describe('paintTableLayout', () => {
     paintTableLayout(clipped, { ctx, scale: 2, dpr: 1, resources });
 
     expect(operations).toContainEqual(['rect', 10, 20, 40, 16]);
+  });
+
+  it('keeps a vertically fractional exact-cell content clip at its retained bounds', async () => {
+    const operations: unknown[] = [];
+    const ctx = {
+      globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+      font: '', textAlign: 'left' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      save() {}, restore() {}, beginPath() {},
+      rect(x: number, y: number, width: number, height: number) {
+        operations.push(['rect', x, y, width, height]);
+      },
+      clip() {}, translate() {}, rotate() {}, scale() {}, fillRect() {}, strokeRect() {},
+      setLineDash() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, drawImage() {},
+      fillText() {},
+    } as unknown as PaintCanvas2D;
+    const node = tableLayout();
+    const clippedCell = {
+      ...node.rows[0]!.cells[0]!,
+      clipBounds: { xPt: 10, yPt: 20.2, widthPt: 40, heightPt: 16.4 },
+    };
+    const clipped = {
+      ...node,
+      rows: [{ ...node.rows[0]!, cells: [clippedCell, node.rows[0]!.cells[1]!] }],
+    } as TableLayout;
+    const { paintTableLayout } = await import('./canvas-table.js');
+
+    paintTableLayout(clipped, { ctx, scale: 0.75, dpr: 1, resources });
+
+    expect(operations).toContainEqual(['rect', 10, 20.2, 40, 16.4]);
+  });
+
+  it('gives a direct nested-table border outward raster coverage without repainting its content', async () => {
+    const operations: unknown[] = [];
+    const ctx = {
+      globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+      font: '', textAlign: 'left' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      save() {}, restore() {}, beginPath() {},
+      rect(x: number, y: number, width: number, height: number) {
+        operations.push(['rect', x, y, width, height]);
+      },
+      clip() {}, translate() {}, rotate() {}, scale() {}, fillRect() {}, strokeRect() {},
+      setLineDash() {}, moveTo() {}, lineTo() {},
+      stroke() { operations.push('stroke'); },
+      fill() {}, drawImage() {},
+      fillText(text: string) { operations.push(['fillText', text]); },
+    } as unknown as PaintCanvas2D;
+    const outer = tableLayout();
+    const firstCell = outer.rows[0]!.cells[0]!;
+    const nestedClip = { xPt: 10, yPt: 20, widthPt: 30, heightPt: 8 };
+    const nested = { ...tableLayout(), clipBounds: nestedClip } as TableLayout;
+    const exact = { xPt: 10, yPt: 20.2, widthPt: 40, heightPt: 16.4 };
+    const clipped = {
+      ...outer,
+      rows: [{
+        ...outer.rows[0]!,
+        cells: [{
+          ...firstCell,
+          flowBounds: exact,
+          contentBounds: exact,
+          clipBounds: exact,
+          background: undefined,
+          blocks: [{ layout: nested, offsetPt: 0, advancePt: nested.advancePt }],
+        }, outer.rows[0]!.cells[1]!],
+      }],
+    } as TableLayout;
+    const { paintTableLayout } = await import('./canvas-table.js');
+
+    paintTableLayout(clipped, { ctx, scale: 0.75, dpr: 1, resources });
+
+    const clips = operations.filter((operation) =>
+      Array.isArray(operation) && operation[0] === 'rect');
+    expect(clips).toContainEqual(['rect', 10, 20.2, 40, 16.4]);
+    const rasterCoverage = clips.find((operation) =>
+      Array.isArray(operation) && operation[1] !== 10) as number[] | undefined;
+    expect(rasterCoverage).toBeDefined();
+    expect(rasterCoverage![1]).toBeCloseTo(28 / 3);
+    expect(rasterCoverage![2]).toBe(20);
+    expect(rasterCoverage![3]).toBeCloseTo(124 / 3);
+    expect(rasterCoverage![4]).toBeCloseTo(52 / 3);
+    // The nested fragment clip applies once to its content pass and once to
+    // the isolated border pass. Dropping the latter lets retained fragment
+    // borders repaint outside their own accepted page-local interval.
+    expect(clips.filter((operation) =>
+      Array.isArray(operation)
+      && operation[1] === nestedClip.xPt
+      && operation[2] === nestedClip.yPt
+      && operation[3] === nestedClip.widthPt
+      && operation[4] === nestedClip.heightPt)).toHaveLength(2);
+    expect(operations.filter((operation) =>
+      Array.isArray(operation) && operation[0] === 'fillText')).toEqual([
+      ['fillText', 'child'],
+    ]);
   });
 
   it('paints only retained backgrounds, child layouts, and resolved borders without measuring', async () => {

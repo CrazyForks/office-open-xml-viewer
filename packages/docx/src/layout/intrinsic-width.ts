@@ -102,6 +102,7 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.fontRoute ?? null,
     segment.charScale ?? 1,
     segment.charSpacing ?? 0,
+    segment.punctuationCompressionPt ?? 0,
     segment.fitTextPerGapPx ?? null,
     segment.fitTextTrailingPadPx ?? null,
     segment.fitTextRegionIndex ?? null,
@@ -342,6 +343,7 @@ export function measureParagraphIntrinsicWidths(
     undefined,
     'intrinsic',
     environment.verticalGlyphMeasurement,
+    context.overflowPunct !== false,
   );
   const oppositeIndentPt = context.baseRtl
     ? context.physicalIndentLeftPt

@@ -167,7 +167,10 @@ describe('table intrinsic content widths', () => {
       intrinsicContext({ characterGrid: { active: true, deltaPt: 2 } }),
       200,
       { context: measuringContext(), fontFamilyClasses: {} },
-      { pageIndex: 0, totalPages: 1, documentHasEastAsianText: true },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+      },
     )).toEqual({ minWidthPt: 7, maxWidthPt: 14 });
   });
 
@@ -182,7 +185,10 @@ describe('table intrinsic content widths', () => {
       intrinsicContext({ characterGrid: { active: true, deltaPt: 2 } }),
       200,
       { context: measuringContext(), fontFamilyClasses: {} },
-      { pageIndex: 0, totalPages: 1, documentHasEastAsianText: true },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+      },
     )).toEqual({ minWidthPt: 7, maxWidthPt: 12 });
   });
 
@@ -197,7 +203,10 @@ describe('table intrinsic content widths', () => {
       intrinsicContext(),
       200,
       { context: measuringContext(), fontFamilyClasses: {} },
-      { pageIndex: 0, totalPages: 1, documentHasEastAsianText: true, verticalCJK: true },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'vertical-rl',
+        documentHasEastAsianText: true, verticalCJK: true,
+      },
     )).toEqual({ minWidthPt: 20, maxWidthPt: 20 });
   });
 

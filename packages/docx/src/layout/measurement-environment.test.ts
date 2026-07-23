@@ -90,6 +90,7 @@ describe('layout measurement environment', () => {
       noteNumbers: new Map(),
       verticalCJK: true,
       verticalAllRotated: true,
+      sectionLayout: { textDirection: 'btLr' },
       docEastAsian: true,
       layoutSettings: {
         characterSpacingControl: 'compressPunctuation',
@@ -107,6 +108,7 @@ describe('layout measurement environment', () => {
       pageIndex: 2,
       totalPages: 4,
       verticalCJK: false,
+      pageWritingMode: 'vertical-rl',
       documentHasEastAsianText: true,
       useFeLayout: true,
     });
@@ -115,7 +117,10 @@ describe('layout measurement environment', () => {
     expect(segments.verticalCJK).toBe(false);
 
     const upright = { ...state, verticalAllRotated: false } as BodyMeasurementContext;
-    expect(segmentEnvironmentOf(upright)).toBe(upright);
+    expect(segmentEnvironmentOf(upright)).toMatchObject({
+      verticalCJK: true,
+      characterSpacingControl: 'compressPunctuation',
+    });
     expect(paragraphMeasurementEnvironment(upright).verticalCJK).toBe(true);
   });
 

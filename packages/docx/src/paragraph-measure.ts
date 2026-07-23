@@ -16,7 +16,7 @@ import {
 } from './line-layout.js';
 import type { DocParagraph } from './types.js';
 import type { WrapOracle } from './layout/float-wrap-oracle.js';
-import type { NumberingMarkerShapeInput } from './layout/types.js';
+import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
 import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
 
@@ -27,6 +27,8 @@ export type { WrapOracle } from './layout/float-wrap-oracle.js';
 export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly documentHasEastAsianText: boolean;
   readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
+  /** Canonical section writing mode used by retained page geometry. */
+  readonly pageWritingMode: WritingMode;
   /** The paragraph is acquired in a section-logical frame that paint rotates
    * into a vertical physical page. This is independent of glyph orientation. */
   readonly verticalPageFrame?: boolean;
@@ -251,6 +253,7 @@ export function measureParagraph(
     continuation?.boundary,
     undefined,
     environment.verticalGlyphMeasurement,
+    context.overflowPunct !== false,
   );
   if (lines.length === 0) return measureMarkOnly();
 

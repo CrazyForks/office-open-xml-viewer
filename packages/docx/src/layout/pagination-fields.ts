@@ -1,3 +1,4 @@
+import type { NumberFormat } from '@silurus/ooxml-core';
 import { convergeLayout, type LayoutIteration } from './convergence.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { FlowFragment } from './flow-fragment.js';
@@ -8,6 +9,28 @@ import type {
   DocNote,
   DocRun,
 } from '../types.js';
+import type { DocumentLayout } from './types.js';
+
+export interface PaginationFieldPageContext {
+  readonly pageIndex: number;
+  readonly displayPageNumber: number;
+  readonly pageNumberFormat: NumberFormat;
+}
+
+/**
+ * Exact state read by the following field-acquisition pass. Body paint geometry
+ * is deliberately absent: the deterministic transition consumes only total
+ * page count (the array length) and these destination-page facts.
+ */
+export function paginationFieldPageContexts(
+  layout: Pick<DocumentLayout, 'pages'>,
+): readonly PaginationFieldPageContext[] {
+  return Object.freeze(layout.pages.map((page) => Object.freeze({
+    pageIndex: page.pageIndex,
+    displayPageNumber: page.pageNumber.displayNumber,
+    pageNumberFormat: page.pageNumber.format as NumberFormat,
+  })));
+}
 
 // A resource-safety bound, not visual tuning. Sixteen exceeds the decimal digit
 // transitions of any practical page count; convergeLayout's seen-set catches

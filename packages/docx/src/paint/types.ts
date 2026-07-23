@@ -65,6 +65,9 @@ export interface CanvasPaintContext {
   readonly ctx: PaintCanvas2D;
   readonly scale: number;
   readonly dpr: number;
+  /** Document-level fallback retained independently from any enclosing
+   * DrawingML text-box `fontRef` color override. */
+  readonly documentDefaultTextColor?: string;
   readonly defaultTextColor?: string;
   readonly showTrackChanges?: boolean;
   readonly resources: CanvasPaintResourcePainter;

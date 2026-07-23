@@ -800,6 +800,9 @@ pub struct DocParagraph {
     pub mark_vanish: bool,
     /// Widow/orphan control (w:widowControl). Default per spec: true.
     pub widow_control: bool,
+    /// ECMA-376 §17.3.1.21 `w:overflowPunct` — permit one punctuation
+    /// character beyond paragraph extents. Omission defaults to true.
+    pub overflow_punct: bool,
     /// Paragraph borders (w:pBdr)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub borders: Option<ParagraphBorders>,

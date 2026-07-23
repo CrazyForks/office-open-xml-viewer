@@ -232,6 +232,11 @@ pub struct ParaFmt {
     pub keep_lines: Option<bool>,
     /// Widow/orphan control (w:widowControl). Default per spec: true.
     pub widow_control: Option<bool>,
+    /// ECMA-376 §17.3.1.21 w:overflowPunct — allow one trailing punctuation
+    /// character beyond the paragraph extents. The final default (`true`) is
+    /// applied when the resolved paragraph is built so style/direct `false`
+    /// remains distinguishable from omission during the cascade.
+    pub overflow_punct: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
     pub(crate) paragraph_typography: Option<crate::types::ParagraphTypographyWire>,
@@ -918,6 +923,9 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.widow_control.is_some() {
         dst.widow_control = src.widow_control;
     }
+    if src.overflow_punct.is_some() {
+        dst.overflow_punct = src.overflow_punct;
+    }
     if let Some(src_b) = &src.para_borders {
         // Each pBdr EDGE inherits INDEPENDENTLY across the style hierarchy — bottom
         // §17.3.1.7, left §17.3.1.17, right §17.3.1.28, top §17.3.1.42, between
@@ -1342,6 +1350,11 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // widowControl — avoid leaving a single line at page top/bottom
     // (ECMA-376 default: true; explicit value=0 disables).
     fmt.widow_control = bool_prop(ppr, "widowControl");
+
+    // overflowPunct — allow one punctuation character past paragraph extents.
+    // ECMA-376 §17.3.1.21 defines omission as true; retain Option here so an
+    // explicit style/direct false participates correctly in the cascade.
+    fmt.overflow_punct = bool_prop(ppr, "overflowPunct");
 
     // bidi — right-to-left paragraph (ECMA-376 §17.3.1.6). On-off toggle:
     // present (or w:val="1"/"true") = RTL, w:val="0"/"false" = LTR. Carried to
@@ -2403,6 +2416,32 @@ mod tests {
         let direct = vec![stop(100.0, "clear", "none")];
         let merged = merge_tab_stops(&style, &direct);
         assert_eq!(merged, vec![stop(200.0, "right", "dot")]);
+    }
+
+    #[test]
+    fn overflow_punct_participates_in_paragraph_style_cascade() {
+        let parse = |inner: &str| {
+            let xml = format!(
+                r#"<w:pPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{inner}</w:pPr>"#
+            );
+            let document = XmlDoc::parse(&xml).unwrap();
+            parse_para_fmt(document.root_element())
+        };
+
+        let mut inherited = parse(r#"<w:overflowPunct w:val="0"/>"#);
+        apply_para(&mut inherited, &parse("<w:keepNext/>"));
+        assert_eq!(
+            inherited.overflow_punct,
+            Some(false),
+            "an omitted child property inherits the parent style value"
+        );
+
+        apply_para(&mut inherited, &parse("<w:overflowPunct/>"));
+        assert_eq!(
+            inherited.overflow_punct,
+            Some(true),
+            "a later style/direct on-value overrides inherited false"
+        );
     }
 
     fn run_fmt_from(rpr_xml: &str) -> RunFmt {

@@ -10,6 +10,7 @@ import {
 import type { ParagraphMeasurementEnvironment } from '../paragraph-measure.js';
 import type { ParagraphLayoutContext, StoryContext } from '../layout-context.js';
 import type { BodyMeasurementContext } from './acquisition-context.js';
+import { writingModeFromTextDirection } from './coordinate-space.js';
 
 function kashidaLevelOf(alignment: string | null | undefined): KashidaLevel | null {
   if (alignment === 'lowKashida') return 'low';
@@ -73,11 +74,13 @@ export function paragraphMeasurementEnvironment(
     currentDateMs: state.currentDateMs,
     noteNumbers: state.noteNumbers,
     noteReferenceNumber: state.noteReferenceNumber,
+    pageWritingMode: writingModeFromTextDirection(state.sectionLayout.textDirection),
     // §17.6.20 btLr uses the horizontal line model rotated wholesale.
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
     useFeLayout: state.layoutSettings.compat.useFeLayout,
+    characterSpacingControl: state.layoutSettings.characterSpacingControl,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
     verticalGlyphMeasurement: state.verticalGlyphMeasurement,
@@ -89,7 +92,13 @@ export function paragraphMeasurementEnvironment(
 export function segmentEnvironmentOf(
   state: BodyMeasurementContext,
 ): LineLayoutEnvironment {
-  return state.verticalAllRotated ? { ...state, verticalCJK: false } : state;
+  if (!state.verticalAllRotated
+    && state.layoutSettings.characterSpacingControl === undefined) return state;
+  return {
+    ...state,
+    ...(state.verticalAllRotated ? { verticalCJK: false } : {}),
+    characterSpacingControl: state.layoutSettings.characterSpacingControl,
+  };
 }
 
 /** Snap a uniform paragraph line advance to an integer docGrid pitch. */

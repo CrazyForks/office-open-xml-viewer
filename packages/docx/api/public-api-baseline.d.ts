@@ -343,6 +343,7 @@ export declare interface DocParagraph {
     keepLines?: boolean;
     markVanish?: boolean;
     widowControl?: boolean;
+    overflowPunct?: boolean;
     borders?: ParagraphBorders | null;
     styleId?: string | null;
     defaultFontSize?: number;

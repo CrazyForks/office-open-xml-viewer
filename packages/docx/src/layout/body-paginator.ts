@@ -21,10 +21,11 @@ import {
   type BodyPaginationState,
   type CanonicalPageDraft,
 } from './body-pagination.js';
-import { deepFreezeDocumentLayout, assertDocumentLayout } from './invariants.js';
+import { assertAndDeepFreezeDocumentLayout } from './invariants.js';
 import {
   bodyLayoutKernelOf,
   createFieldAcquisitionServicesView,
+  createParagraphAcquisitionCacheServicesView,
 } from './runtime-state.js';
 import {
   accumulatePagePaintNode,
@@ -113,6 +114,7 @@ import {
   ExactConvergenceError,
   convergeExactState,
 } from './convergence.js';
+import { paginationFieldPageContexts } from './pagination-fields.js';
 
 class FootnoteAdmissionOverflowError extends Error {
   readonly code = 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE' as const;
@@ -706,8 +708,11 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
   const diagnostics = pages.flatMap((page) =>
     pageLayerNodes(page).flatMap(({ node }) => nestedStoryDiagnostics(node, visited)));
   const layout: DocumentLayout = { pages, diagnostics };
-  assertDocumentLayout(layout);
-  return deepFreezeDocumentLayout(layout) as DocumentLayout;
+  // Convergence candidates are private to this synchronous pagination call.
+  // Validating and deep-freezing the full document graph here repeated that
+  // O(document) boundary for every anchor/header/footer pass. The accepted
+  // composed layout crosses the invariant/freeze boundary exactly once below.
+  return layout;
 }
 
 function paginateBodyPass(
@@ -2104,24 +2109,23 @@ export function paginateBody(
   services: LayoutServices,
   options: LayoutOptions,
 ): DocumentLayout {
+  // Every convergence pass and its field-acquisition service views share this
+  // private memo, while a later variant/document pagination starts fresh.
+  services = createParagraphAcquisitionCacheServicesView(services);
   const owners = ownerMap(input);
   const seed = paginateBodyWithColumnBalancing(input, services, options, []);
   const converged = convergeHeaderFooterReserves({
     seed,
     measure: (pass) => headerFooterReserves(pass, owners),
     repaginate: (reserves, current) => {
-      const contexts = current.layout.pages.map((page) => Object.freeze({
-        pageIndex: page.pageIndex,
-        displayPageNumber: page.pageNumber.displayNumber,
-        pageNumberFormat: page.pageNumber.format as import('@silurus/ooxml-core').NumberFormat,
-      }));
+      const contexts = paginationFieldPageContexts(current.layout);
       const iterationServices = createFieldAcquisitionServicesView(services, {
         totalPages: current.layout.pages.length,
         resolveDestinationPage: (pageIndex) => contexts[pageIndex],
       });
       return paginateBodyWithColumnBalancing(input, iterationServices, options, reserves);
     },
-    identity: (pass) => pass.layout,
+    identity: (pass) => paginationFieldPageContexts(pass.layout),
     requiresConvergence: seed.session.hasPaginationFields,
   }).result;
   const bodyComposed = composeCanonicalSectionFlow(
@@ -2184,6 +2188,5 @@ export function paginateBody(
           ...withEndnotes.diagnostics,
         ]),
       });
-  assertDocumentLayout(withParserDiagnostics);
-  return deepFreezeDocumentLayout(withParserDiagnostics) as DocumentLayout;
+  return assertAndDeepFreezeDocumentLayout(withParserDiagnostics) as DocumentLayout;
 }

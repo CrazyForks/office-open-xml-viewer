@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   convergePaginationFields,
   paginatedFlowHasPaginationDependentFields,
+  paginationFieldPageContexts,
   paginationFieldFlowGeometry,
   paginationFieldGeometryFingerprint,
   resolvePaginationFieldLayout,
@@ -38,6 +39,30 @@ function documentWith(body: BodyElement[]): DocxDocumentModel {
 }
 
 describe('pagination field convergence seam', () => {
+  it('projects only the exact page facts consumed by the next field-acquisition pass', () => {
+    const pages = [
+      {
+        pageIndex: 0,
+        pageNumber: { displayNumber: 7, format: 'upperRoman', sectionOccurrenceId: 'section:a' },
+        layers: { body: [{ id: 'irrelevant-body-geometry' }] },
+      },
+      {
+        pageIndex: 1,
+        pageNumber: { displayNumber: 8, format: 'decimal', sectionOccurrenceId: 'section:a' },
+        layers: { body: [{ id: 'different-irrelevant-geometry' }] },
+      },
+    ] as unknown as Parameters<typeof paginationFieldPageContexts>[0]['pages'];
+
+    const contexts = paginationFieldPageContexts({ pages });
+
+    expect(contexts).toEqual([
+      { pageIndex: 0, displayPageNumber: 7, pageNumberFormat: 'upperRoman' },
+      { pageIndex: 1, displayPageNumber: 8, pageNumberFormat: 'decimal' },
+    ]);
+    expect(Object.isFrozen(contexts)).toBe(true);
+    expect(contexts.every(Object.isFrozen)).toBe(true);
+  });
+
   it('acquires field-independent pagination exactly once', () => {
     const hints: number[] = [];
     const result = resolvePaginationFieldLayout((hint) => {

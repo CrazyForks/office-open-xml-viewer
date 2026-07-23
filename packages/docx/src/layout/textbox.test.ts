@@ -92,7 +92,201 @@ function table(): TableLayout {
   };
 }
 
+function paragraphAt(
+  yPt: number,
+  advancePt: number,
+  options: Readonly<{
+    visible?: boolean;
+    afterPt?: number;
+    path?: number;
+  }> = {},
+): ParagraphLayout {
+  const afterPt = options.afterPt ?? 0;
+  const visible = options.visible ?? false;
+  const base = paragraph();
+  const bounds = { xPt: 7, yPt, widthPt: 80, heightPt: advancePt };
+  return {
+    ...base,
+    id: `textbox-paragraph:${options.path ?? 0}`,
+    source: {
+      story: 'textbox',
+      storyInstance: 'shape:anchor',
+      path: [options.path ?? 0],
+    },
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt,
+    spacing: { beforePt: 0, afterPt },
+    lines: visible ? [{
+      range: { start: 0, end: 1 },
+      bounds: { xPt: 7, yPt, widthPt: 10, heightPt: advancePt - afterPt },
+      baselinePt: yPt + Math.max(0, advancePt - afterPt),
+      advancePt: Math.max(0, advancePt - afterPt),
+      placements: [{
+        kind: 'text',
+        text: 'x',
+        range: { start: 0, end: 1 },
+        origin: { xPt: 7, yPt: yPt + Math.max(0, advancePt - afterPt) },
+        bounds: { xPt: 7, yPt, widthPt: 10, heightPt: Math.max(0, advancePt - afterPt) },
+        advancePt: 10,
+        clusters: [],
+        paintOps: [],
+        color: { kind: 'default' },
+        fontRoute: {},
+        fontSizePt: 10,
+        fontWeight: 400,
+        fontStyle: 'normal',
+        direction: 'ltr',
+        decorations: [],
+      } as unknown as ParagraphLayout['lines'][number]['placements'][number]],
+    }] : [],
+  };
+}
+
+function anchoredTextBox(
+  retainedStory: StoryLayout,
+  anchor: 'ctr' | 'b' = 'ctr',
+  options: Readonly<{
+    textVert?: 'eaVert' | 'mongolianVert';
+    rect?: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
+  }> = {},
+): ReturnType<typeof acquireShapeTextBoxLayout> {
+  return acquireShapeTextBoxLayout(
+    {
+      type: 'shape',
+      textAnchor: anchor,
+      ...(options.textVert ? { textVert: options.textVert } : {}),
+      textInsetL: 0,
+      textInsetT: 0,
+      textInsetR: 0,
+      textInsetB: 0,
+      textAutofit: 'none',
+    } as unknown as ShapeRun,
+    options.rect ?? { xPt: 0, yPt: 0, widthPt: 100, heightPt: 100 },
+    {
+      id: 'shape:anchor',
+      source: { story: 'textbox', storyInstance: 'shape:anchor', path: [] },
+      flowDomainId: 'shape-owner',
+      context: paragraphContext,
+      measurer: { context: canvas(), fontFamilyClasses: {} },
+      environment: {
+        pageIndex: 0,
+        totalPages: 1,
+        pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: false,
+      },
+      input: {
+        kind: 'complete',
+        source: { story: 'textbox', storyInstance: 'shape:anchor', path: [] },
+        blocks: retainedStory.blocks.map(() => ({
+          type: 'paragraph',
+          runs: [],
+        })) as unknown as readonly CompleteTextBoxBlockInput[],
+      },
+      acquireCompleteStory: () => retainedStory,
+    },
+  );
+}
+
 describe('rich text-box story acquisition', () => {
+  it('centers the smallest visible text bounds without deleting a trailing empty paragraph', () => {
+    const title = paragraphAt(0, 50, { visible: true, path: 0 });
+    const trailingEmpty = paragraphAt(50, 18, { afterPt: 6, path: 1 });
+    const retainedStory: StoryLayout = {
+      story: 'textbox',
+      flowBounds: { xPt: 7, yPt: 0, widthPt: 80, heightPt: 68 },
+      inkBounds: { xPt: 7, yPt: 0, widthPt: 80, heightPt: 68 },
+      blocks: [title, trailingEmpty],
+      advancePt: 68,
+      diagnostics: [],
+    };
+
+    const layout = anchoredTextBox(retainedStory);
+    const bottomLayout = anchoredTextBox(retainedStory, 'b');
+
+    expect(layout?.story.advancePt).toBe(68);
+    expect(layout?.story.blocks).toHaveLength(2);
+    expect(layout?.story.blocks[0]?.flowBounds.yPt).toBe(25);
+    expect(layout?.story.blocks[1]?.flowBounds.yPt).toBe(75);
+    expect(layout?.story.blocks[1]).toMatchObject({
+      kind: 'paragraph',
+      spacing: { afterPt: 6 },
+      lines: [],
+    });
+    expect(bottomLayout?.story.blocks.map((block) => block.flowBounds.yPt))
+      .toEqual([50, 100]);
+  });
+
+  it('derives the anchor extent before projecting a complete story into vertical paint geometry', () => {
+    // A 40pt physical width becomes the vertical text body's 40pt logical
+    // block-axis capacity, with its local origin at -20pt.
+    const title = paragraphAt(-20, 20, { visible: true, path: 0 });
+    const trailingEmpty = paragraphAt(0, 10, { path: 1 });
+    const retainedStory: StoryLayout = {
+      story: 'textbox',
+      flowBounds: { xPt: -50, yPt: -20, widthPt: 100, heightPt: 30 },
+      inkBounds: { xPt: -50, yPt: -20, widthPt: 100, heightPt: 30 },
+      blocks: [title, trailingEmpty],
+      advancePt: 30,
+      diagnostics: [],
+    };
+
+    const layout = anchoredTextBox(retainedStory, 'ctr', {
+      textVert: 'mongolianVert',
+      rect: { xPt: 0, yPt: 0, widthPt: 40, heightPt: 100 },
+    });
+
+    expect(layout).toMatchObject({
+      verticalMode: 'mongolianVert',
+      story: {
+        advancePt: 30,
+        blocks: [
+          { kind: 'paragraph', flowBounds: { yPt: -10 } },
+          { kind: 'paragraph', flowBounds: { yPt: 10 }, lines: [] },
+        ],
+      },
+    });
+  });
+
+  it('retains meaningful inter-paragraph spacing and a terminal table in the anchor extent', () => {
+    const first = paragraphAt(0, 20, { visible: true, afterPt: 10, path: 0 });
+    const second = paragraphAt(30, 20, { visible: true, afterPt: 5, path: 1 });
+    const terminalTable = {
+      ...table(),
+      source: { story: 'textbox', storyInstance: 'shape:anchor', path: [2] },
+      flowBounds: { xPt: 7, yPt: 50, widthPt: 80, heightPt: 15 },
+      inkBounds: { xPt: 7, yPt: 50, widthPt: 80, heightPt: 15 },
+      advancePt: 15,
+    } as TableLayout;
+    const structuralEmpty = paragraphAt(65, 12, { path: 3 });
+    const retainedStory: StoryLayout = {
+      story: 'textbox',
+      flowBounds: { xPt: 7, yPt: 0, widthPt: 80, heightPt: 77 },
+      inkBounds: { xPt: 7, yPt: 0, widthPt: 80, heightPt: 77 },
+      blocks: [first, second, terminalTable, structuralEmpty],
+      advancePt: 77,
+      diagnostics: [],
+    };
+
+    const layout = anchoredTextBox(retainedStory);
+
+    // The visible extent is 65pt: the 10pt inter-paragraph gap and terminal
+    // table remain authoritative, while only the structural empty tail is
+    // outside the smallest visible text bounds.
+    expect(layout?.story.blocks.map((block) => block.flowBounds.yPt))
+      .toEqual([17.5, 47.5, 67.5, 82.5]);
+    expect(layout?.story.blocks[0]).toMatchObject({
+      kind: 'paragraph',
+      spacing: { afterPt: 10 },
+    });
+    expect(layout?.story.blocks[1]).toMatchObject({
+      kind: 'paragraph',
+      spacing: { afterPt: 5 },
+    });
+    expect(layout?.story.blocks[2]?.kind).toBe('table');
+    expect(layout?.story.advancePt).toBe(77);
+  });
+
   it('prefers complete parser blocks and retains one nested StoryLayout', () => {
     const richBlocks = [
       { type: 'paragraph', runs: [{ type: 'text', text: 'before' }] },
@@ -140,6 +334,7 @@ describe('rich text-box story acquisition', () => {
         environment: {
           pageIndex: 0,
           totalPages: 1,
+          pageWritingMode: 'horizontal-tb',
           documentHasEastAsianText: false,
         },
         input: {
@@ -246,6 +441,7 @@ describe('rich text-box story acquisition', () => {
         environment: {
           pageIndex: 0,
           totalPages: 1,
+          pageWritingMode: 'horizontal-tb',
           documentHasEastAsianText: false,
         },
         input: {

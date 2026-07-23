@@ -384,7 +384,7 @@ for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
   });
 }
 
-test('public Offscreen rendering reproduces an element-backed layout-proven vert glyph', async ({ page }) => {
+test('public detached and Offscreen rendering reproduce layout-proven vert glyphs', async ({ page }) => {
   await page.goto('/tests/visual/vertical-vert-feature.html');
   const result = await page.evaluate(async () => {
     await document.fonts.ready;
@@ -397,25 +397,24 @@ test('public Offscreen rendering reproduces an element-backed layout-proven vert
     const probe = subject.getContext('2d');
     if (!probe || typeof OffscreenCanvas === 'undefined') return null;
 
-    let selected: { family: string; ch: string } | null = null;
+    let selectedFamily: string | null = null;
     for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
       if (!document.fonts.check(`48px "${family}"`)) continue;
       probe.font = `48px "${family}"`;
-      for (const ch of '「」、。ー〜～（）') {
-        if (verticalVertGlyphReachable(probe, ch.codePointAt(0) ?? 0)) {
-          selected = { family, ch };
-          break;
-        }
+      if ([...'ー（）'].every((ch) => (
+        verticalVertGlyphReachable(probe, ch.codePointAt(0) ?? 0)
+      ))) {
+        selectedFamily = family;
+        break;
       }
-      if (selected) break;
     }
-    if (!selected) return null;
+    if (!selectedFamily) return null;
 
     const textRun = {
-      type: 'text', text: selected.ch,
+      type: 'text', text: 'ー（）日',
       bold: false, italic: false, underline: false, strikethrough: false,
       fontSize: 48, color: null,
-      fontFamily: selected.family, fontFamilyEastAsia: selected.family,
+      fontFamily: selectedFamily, fontFamilyEastAsia: selectedFamily,
       isLink: false, background: null, vertAlign: null, hyperlink: null,
     };
     const model = {
@@ -430,7 +429,7 @@ test('public Offscreen rendering reproduces an element-backed layout-proven vert
         indentLeft: 0, indentRight: 0, indentFirst: 0,
         spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
         numbering: null, tabStops: [], runs: [textRun],
-        defaultFontSize: 48, defaultFontFamily: selected.family,
+        defaultFontSize: 48, defaultFontFamily: selectedFamily,
         widowControl: false,
       }],
       headers: { default: null, first: null, even: null },
@@ -449,15 +448,34 @@ test('public Offscreen rendering reproduces an element-backed layout-proven vert
     );
     const pending: unknown[] = [selection.page];
     const seen = new Set<object>();
-    let retainedVertProof = false;
-    while (pending.length > 0 && !retainedVertProof) {
+    const retainedGlyphs: Record<string, { upright: boolean; verticalFeature: boolean }> = {};
+    while (pending.length > 0) {
       const value = pending.pop();
       if (value === null || typeof value !== 'object' || seen.has(value)) continue;
       seen.add(value);
       const record = value as Record<string, unknown>;
-      if (record.verticalFeature === true) retainedVertProof = true;
+      if (
+        typeof record.text === 'string'
+        && [...'ー（）日'].includes(record.text)
+        && record.glyphOrientation === 'upright'
+      ) {
+        retainedGlyphs[record.text] = {
+          upright: true,
+          verticalFeature: record.verticalFeature === true,
+        };
+      }
       pending.push(...Object.values(record));
     }
+
+    const detached = document.createElement('canvas');
+    const detachedConnectedBefore = detached.isConnected;
+    await renderDocumentToCanvas(model, detached, 0, {
+      dpr: 1, width: 240, layoutServices: services, defaultCurrentDateMs,
+    });
+    const detachedConnectedAfter = detached.isConnected;
+    const detachedPixels = detached.getContext('2d')!.getImageData(
+      0, 0, detached.width, detached.height,
+    ).data;
 
     const offscreen = new OffscreenCanvas(1, 1);
     await renderDocumentToCanvas(model, offscreen, 0, {
@@ -477,28 +495,48 @@ test('public Offscreen rendering reproduces an element-backed layout-proven vert
     const projected = referenceContext.getImageData(
       0, 0, reference.width, reference.height,
     ).data;
-    let difference = 0;
-    let weight = 0;
-    for (let index = 0; index < html.length; index += 1) {
-      difference += Math.abs(html[index]! - projected[index]!);
-      weight += html[index]!;
-    }
+    const differenceRatio = (candidate: Uint8ClampedArray): number => {
+      let difference = 0;
+      let inkWeight = 0;
+      for (let index = 0; index < html.length; index += 4) {
+        difference += Math.abs(html[index]! - candidate[index]!)
+          + Math.abs(html[index + 1]! - candidate[index + 1]!)
+          + Math.abs(html[index + 2]! - candidate[index + 2]!);
+        inkWeight += 255 * 3 - html[index]! - html[index + 1]! - html[index + 2]!;
+      }
+      return difference / Math.max(1, inkWeight);
+    };
     return {
-      ...selected,
-      retainedVertProof,
-      dimensionsMatch: subject.width === reference.width && subject.height === reference.height,
-      differenceRatio: difference / Math.max(1, weight),
+      family: selectedFamily,
+      retainedGlyphs,
+      detachedConnectedBefore,
+      detachedConnectedAfter,
+      dimensionsMatch:
+        subject.width === detached.width
+        && subject.height === detached.height
+        && subject.width === reference.width
+        && subject.height === reference.height,
+      detachedDifferenceRatio: differenceRatio(detachedPixels),
+      offscreenDifferenceRatio: differenceRatio(projected),
     };
   });
 
   test.skip(result === null, 'a host font with a reachable OpenType vert glyph is required');
   if (result === null) return;
-  expect(result.retainedVertProof, `${result.family} ${result.ch} is layout-proven`).toBe(true);
+  expect(result.retainedGlyphs).toEqual({
+    'ー': { upright: true, verticalFeature: true },
+    '（': { upright: true, verticalFeature: true },
+    '）': { upright: true, verticalFeature: true },
+    '日': { upright: true, verticalFeature: false },
+  });
+  expect(result.detachedConnectedBefore).toBe(false);
+  expect(result.detachedConnectedAfter).toBe(false);
   expect(result.dimensionsMatch).toBe(true);
-  // The two independent element-backed contexts can choose adjacent AA values;
-  // one percent remains well below the plain-glyph substitution failure while
+  // Independent element-backed contexts can choose adjacent AA values. Five
+  // percent remains well below a horizontal/vertical glyph substitution while
   // keeping the comparison sensitive to the actual `vert` outline.
-  expect(result.differenceRatio).toBeLessThan(0.01);
+  expect(result.detachedDifferenceRatio).toBeLessThan(0.05);
+  expect(result.offscreenDifferenceRatio).toBeLessThan(0.05);
 });
 
 test('forced unreachable keeps FE/upright fallbacks and plain-rotates long marks', async ({ page }) => {

@@ -1,4 +1,5 @@
 import { defineCompatibilityRule } from './compatibility.js';
+import type { ParagraphLayout, StoryLayout } from './types.js';
 
 export const WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK = defineCompatibilityRule({
   id: 'word-zero-relative-size',
@@ -65,6 +66,58 @@ export const WORD_LOWER_LAYER_SAME_PARAGRAPH_ANCHOR_COMPOSITION = defineCompatib
   },
   description: 'Word preserves a source-later, lower-z, page-owned drawing at its authored position when it belongs to the same anchor paragraph as already composed higher layers. This is a Word-observed compatibility override to ECMA-376 §20.4.2.3, not a normative OOXML rule.',
 });
+
+export const WORD_TEXTBOX_VISIBLE_ANCHOR_EXTENT = defineCompatibilityRule({
+  id: 'word-textbox-visible-anchor-extent',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'textbox-visible-anchor-extent',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'For DrawingML middle and bottom text anchoring, derive the positioned extent through the last visible retained block while preserving structural trailing empty paragraphs and terminal paragraph spacing in the complete story.',
+});
+
+function paragraphContributesTextBoxAnchorExtent(paragraph: ParagraphLayout): boolean {
+  if (
+    paragraph.shading
+    || paragraph.borders.length > 0
+    || paragraph.resources.length > 0
+    || paragraph.drawings.length > 0
+    || paragraph.textBoxes.length > 0
+    || paragraph.lineNumbers?.some((line) => line.paintOps.length > 0)
+  ) {
+    return true;
+  }
+  return paragraph.lines.some((line) => line.placements.some((placement) => {
+    if (placement.kind === 'text' || placement.kind === 'resource' || placement.kind === 'drawing') {
+      return true;
+    }
+    return placement.kind === 'tab' && (placement.leaderGlyphs?.length ?? 0) > 0;
+  }));
+}
+
+/** Compatibility projection governed by {@link WORD_TEXTBOX_VISIBLE_ANCHOR_EXTENT}. */
+export function wordTextBoxVisibleAnchorExtentPt(story: StoryLayout): number {
+  const startPt = story.flowBounds.yPt;
+  let visibleEndPt: number | undefined;
+  for (const block of story.blocks) {
+    if (block.kind === 'table') {
+      visibleEndPt = Math.max(
+        visibleEndPt ?? startPt,
+        block.flowBounds.yPt + block.advancePt,
+      );
+      continue;
+    }
+    if (block.kind !== 'paragraph' || !paragraphContributesTextBoxAnchorExtent(block)) continue;
+    visibleEndPt = Math.max(
+      visibleEndPt ?? startPt,
+      block.flowBounds.yPt + Math.max(0, block.advancePt - block.spacing.afterPt),
+    );
+  }
+  return visibleEndPt === undefined ? 0 : Math.max(0, visibleEndPt - startPt);
+}
 
 export function wordZeroRelativeSizeUsesExtent(fraction: number): boolean {
   return fraction === 0;

@@ -245,6 +245,7 @@ function frameOptions(
     }),
     environment: {
       pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+      pageWritingMode: 'horizontal-tb',
       layoutServices: {
         text: service,
         images: {
@@ -404,6 +405,7 @@ describe('retained text-frame grouping', () => {
       {
         pageIndex: 0,
         totalPages: 1,
+        pageWritingMode: 'horizontal-tb',
         documentHasEastAsianText: false,
         layoutServices: {
           text: service,

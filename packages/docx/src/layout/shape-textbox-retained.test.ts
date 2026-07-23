@@ -75,6 +75,7 @@ describe('retained shape text-box acquisition', () => {
         measurer: { context: measureContext, fontFamilyClasses: {} },
         environment: {
           pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+          pageWritingMode: 'horizontal-tb',
           layoutServices: services,
         },
       },
@@ -109,6 +110,7 @@ describe('retained shape text-box acquisition', () => {
       measurer: { context: measureContext, fontFamilyClasses: {} },
       environment: {
         pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+        pageWritingMode: 'horizontal-tb',
         layoutServices: services,
       },
     });
@@ -159,6 +161,7 @@ describe('retained shape text-box acquisition', () => {
         measurer: { context: measureContext, fontFamilyClasses: {} },
         environment: {
           pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+          pageWritingMode: 'horizontal-tb',
           layoutServices: services,
         },
       },

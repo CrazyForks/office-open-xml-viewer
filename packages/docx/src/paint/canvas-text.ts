@@ -8,7 +8,7 @@ import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintRetainedResource } from './canvas-resource.js';
 import { paintTableLayout } from './canvas-table.js';
-import { paintStrokeSegment } from './canvas-border.js';
+import { oneDevicePixelCssWidth, paintStrokeSegment } from './canvas-border.js';
 import {
   composeAffine,
   scaleAffine,
@@ -365,7 +365,13 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
       for (const border of placement.runBorderFragments ?? []) paintStrokeSegment(border, context);
     }
   }
-  for (const border of node.borders) paintStrokeSegment(border, context);
+  // Keep authored paragraph-border geometry in retained layout, while matching
+  // Word's raster treatment of subpixel rules with at least one device pixel
+  // of coverage. Text decorations and run borders retain their own widths.
+  const paragraphBorderMinimumCssWidthPx = oneDevicePixelCssWidth(context);
+  for (const border of node.borders) {
+    paintStrokeSegment(border, context, paragraphBorderMinimumCssWidthPx);
+  }
   for (const drawing of node.drawings.filter((item) => !item.anchorLayer)) {
     paintDrawingWithTextBoxes(drawing);
   }
@@ -458,9 +464,14 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
     );
     context.ctx.clip();
   }) : null;
+  const documentDefaultTextColor = context.documentDefaultTextColor
+    ?? context.defaultTextColor
+    ?? '#000000';
   const storyContext: CanvasPaintContext = {
     ...context,
     pointToCss,
+    documentDefaultTextColor,
+    defaultTextColor: node.defaultTextColor ?? documentDefaultTextColor,
     ...(node.verticalMode ? { textBoxVerticalMode: node.verticalMode } : {}),
   };
   transformFrame(() => {

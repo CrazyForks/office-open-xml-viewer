@@ -12,6 +12,13 @@ import {
 } from './affine.js';
 import type { CanvasPaintContext } from './types.js';
 
+/** Logical CSS width whose raster footprint is exactly one device pixel. */
+export function oneDevicePixelCssWidth(
+  context: Pick<CanvasPaintContext, 'dpr'>,
+): number {
+  return 1 / context.dpr;
+}
+
 /** Paint one already-resolved point-space rule; layout owns every conflict and path. */
 export function paintStrokeSegment(
   retainedSegment: BorderSegment | TextDecorationLayout,

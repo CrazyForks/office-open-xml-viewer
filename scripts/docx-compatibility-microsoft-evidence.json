@@ -2,6 +2,22 @@
   "version": 1,
   "documents": [
     {
+      "id": "MS-OE376",
+      "revision": "4.1",
+      "published": "2022-08-16",
+      "sourceUrl": "https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/db9b9b72-b10b-4e7e-844c-09f88c972219",
+      "sections": [
+        {
+          "id": "2.1.56",
+          "title": "Part 4 Section 2.3.1.21, overflowPunct (Allow Punctuation to Extent Past Text Extents)"
+        },
+        {
+          "id": "2.1.562",
+          "title": "Part 4 Section 2.18.10, ST_CharacterSpacing (Character-Level Whitespace Compression Settings)"
+        }
+      ]
+    },
+    {
       "id": "MS-OI29500",
       "revision": "24.0",
       "published": "2026-05-19",

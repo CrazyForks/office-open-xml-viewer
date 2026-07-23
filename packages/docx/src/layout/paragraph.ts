@@ -10,10 +10,12 @@ import {
 import { createFloatWrapOracle } from './float-wrap-oracle.js';
 import type {
   LayoutImageSeg,
+  LayoutLine,
   LayoutMathSeg,
   LayoutTabSeg,
   LayoutTextSeg,
 } from '../line-layout.js';
+import { effectiveCharacterSpacingPt } from '../line-layout.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, shapeRunToDocRun } from './text.js';
 import type { DocParagraph, DocRun, ShapeRun } from '../types.js';
 import {
@@ -82,7 +84,14 @@ import {
   commitParagraphWrapRegistry,
   createParagraphWrapRegistry,
 } from './paragraph-wrap-registry.js';
-import { wordPreservesLowerLayerSameParagraphComposition } from './anchor-compatibility.js';
+import {
+  paragraphAcquisitionCacheOf,
+  type ParagraphAcquisitionRuntimeCache,
+} from './runtime-state.js';
+import {
+  wordPreservesLowerLayerSameParagraphComposition,
+  wordTextBoxVisibleAnchorExtentPt,
+} from './anchor-compatibility.js';
 import { wordRunVerticalAlignRaisePt } from './line-compatibility.js';
 import {
   resolveFloatPlacement,
@@ -93,6 +102,14 @@ import {
   measureParagraphIntrinsicWidth,
   type BodyFrameGroup,
 } from './frame.js';
+import {
+  createSectionRegionCoordinateSpace,
+  transformPoint,
+  transformRect,
+  transformRectEdges,
+  uprightPhysicalExtent,
+} from './coordinate-space.js';
+import { inverseMapAffinePoint } from './affine.js';
 export {
   bodyFrameGroupFor,
   bodyParagraphBorderEdgesFor,
@@ -110,6 +127,7 @@ import type {
   InlineResourceLayout,
   LineLayout,
   LayoutRect,
+  Matrix2DData,
   ParagraphLayout,
   ParagraphPlacement,
   PointPt,
@@ -117,7 +135,9 @@ import type {
   StoryLayout,
   FlowContainer,
   TextBoxLayout,
+  TextClusterLayout,
   TextDecorationLayout,
+  TextPaintOp,
   TextPlacement,
   WrapExclusion,
 } from './types.js';
@@ -465,6 +485,47 @@ function retainedTextGeometry(
   return { clusters, paintOps };
 }
 
+/**
+ * Keep RTL source coverage complete while preserving the trimmed word-shaped
+ * operation used to anchor trailing whitespace on the physical leading edge.
+ *
+ * Internal justification may split a run immediately before its final space.
+ * Trimming that preceding slice must therefore retain the removed whitespace
+ * as an explicitly zero-ink source slice, or the immutable paint plan contains
+ * an interior range hole.
+ */
+function retainedRtlPaintOperations(
+  operations: readonly TextPaintOp[],
+  clusters: readonly TextClusterLayout[],
+): readonly TextPaintOp[] {
+  return operations.flatMap((operation) => {
+    const text = operation.text.trimEnd();
+    if (text === '' || text.length === operation.text.length) return [operation];
+    if (operation.sourceMapping === 'kashida') return [{ ...operation, text }];
+
+    const trailingStart = operation.range.start + text.length;
+    const trailingCluster = clusters.find((cluster) => cluster.range.start === trailingStart);
+    const {
+      inkBounds: _inkBounds,
+      blockAxisInkBounds: _blockAxisInkBounds,
+      ...zeroInkOperation
+    } = operation;
+    return [
+      {
+        ...operation,
+        text,
+        range: { ...operation.range, end: trailingStart },
+      },
+      {
+        ...zeroInkOperation,
+        text: operation.text.slice(text.length),
+        range: { start: trailingStart, end: operation.range.end },
+        offset: trailingCluster?.offset ?? operation.offset,
+      },
+    ];
+  });
+}
+
 function sameDashPattern(
   left: readonly number[] | undefined,
   right: readonly number[] | undefined,
@@ -723,16 +784,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       const textGeometry = retainedTextGeometry(segment, stretch, perGapPt);
       const direction = visual.rtl[segmentIndex] ? 'rtl' : 'ltr';
       const paintOps = direction === 'rtl'
-        ? textGeometry.paintOps.map((operation) => {
-            const text = operation.text.trimEnd();
-            return text === '' ? operation : {
-              ...operation,
-              text,
-              ...(operation.sourceMapping === 'kashida' ? {} : {
-                range: { ...operation.range, end: operation.range.start + text.length },
-              }),
-            };
-          })
+        ? retainedRtlPaintOperations(textGeometry.paintOps, textGeometry.clusters)
         : textGeometry.paintOps;
       const trailingWhitespaceStart = segment.text.trimEnd().length;
       const rtlLeadingGapPt = direction === 'rtl'
@@ -1197,7 +1249,7 @@ function textPlacement(
       text: segment.text,
       range: { start: sourceOffset, end: sourceOffset + segment.text.length },
       offset: { xPt: 0, yPt: baselineOffsetPt },
-      letterSpacingPt: segment.charSpacing ?? 0,
+      letterSpacingPt: effectiveCharacterSpacingPt(segment),
       scaleX: segment.charScale ?? 1,
       direction: segment.rtl ? 'rtl' : 'ltr',
       kerning: segment.kerning === undefined
@@ -1515,7 +1567,8 @@ function textPlanSegment(
   const projected = textPlacement(segment, paragraph, sourceOffset, 0, 0, 0, 0);
   if (projected.kind !== 'text') throw new Error('Visible text segment projected as anchor host');
   const pitchPt = segment.fitTextPerGapPx
-    ?? (segment.charSpacing ?? 0) + (segment.snapToCharacterGrid === false ? 0 : characterGridDeltaPt);
+    ?? effectiveCharacterSpacingPt(segment)
+      + (segment.snapToCharacterGrid === false ? 0 : characterGridDeltaPt);
   const scaleX = segment.charScale ?? 1;
   const baselineOffsetPt = retainedBaselineOffsetPt(segment);
   const retainedGeometry = retainedGeometryPlan(segment, sourceOffset, projected.color);
@@ -2178,25 +2231,19 @@ function resizeDerivedAnchorRect(
   };
 }
 
-/** Project an upright physical anchor rectangle into the section-logical frame
- * whose retained page transform is `physical = (pageWidth - logical.y, logical.x)`.
- * The projected box is the single authority for wrap, collision, and paint. */
-function projectPhysicalAnchorRect(rect: LayoutRect, physicalPageWidthPt: number): LayoutRect {
+/** Keep DrawingML commands in an upright physical, drawing-local frame and map
+ * them into the logical page with the section coordinate space's canonical
+ * inverse around the anchor's retained centre. Shape geometry and owned text
+ * then share one orientation for both vertical-rl and vertical-lr sections. */
+function uprightPhysicalDrawingTransform(
+  rect: LayoutRect,
+  physicalToLogical: Matrix2DData,
+): Matrix2DData {
   return {
-    xPt: rect.yPt,
-    yPt: physicalPageWidthPt - rect.xPt - rect.widthPt,
-    widthPt: rect.heightPt,
-    heightPt: rect.widthPt,
-  };
-}
-
-/** A vertical page paints section-logical points with a +90° quarter turn.
- * Keep DrawingML commands in an upright physical, drawing-local frame and map
- * them into the logical page with the exact inverse turn around the anchor's
- * retained centre. Shape geometry and owned text then share one orientation. */
-function uprightPhysicalDrawingTransform(rect: LayoutRect): import('./types.js').Matrix2DData {
-  return {
-    a: 0, b: -1, c: 1, d: 0,
+    a: physicalToLogical.a,
+    b: physicalToLogical.b,
+    c: physicalToLogical.c,
+    d: physicalToLogical.d,
     e: rect.xPt + rect.widthPt / 2,
     f: rect.yPt + rect.heightPt / 2,
   };
@@ -2204,44 +2251,66 @@ function uprightPhysicalDrawingTransform(rect: LayoutRect): import('./types.js')
 
 function logicalRectToUprightDrawingLocal(
   rect: LayoutRect,
-  transform: import('./types.js').Matrix2DData,
+  transform: Matrix2DData,
 ): LayoutRect {
-  const centerXPt = rect.xPt + rect.widthPt / 2;
-  const centerYPt = rect.yPt + rect.heightPt / 2;
-  const widthPt = rect.heightPt;
-  const heightPt = rect.widthPt;
+  const corners = [
+    inverseMapAffinePoint(transform, rect),
+    inverseMapAffinePoint(transform, {
+      xPt: rect.xPt + rect.widthPt,
+      yPt: rect.yPt,
+    }),
+    inverseMapAffinePoint(transform, {
+      xPt: rect.xPt,
+      yPt: rect.yPt + rect.heightPt,
+    }),
+    inverseMapAffinePoint(transform, {
+      xPt: rect.xPt + rect.widthPt,
+      yPt: rect.yPt + rect.heightPt,
+    }),
+  ];
+  if (corners.some((point) => point === null)) {
+    throw new Error('Upright drawing transform must be invertible');
+  }
+  const points = corners as readonly import('./types.js').PointPt[];
+  const xPt = Math.min(...points.map((point) => point.xPt));
+  const yPt = Math.min(...points.map((point) => point.yPt));
   return {
-    xPt: transform.f - centerYPt - widthPt / 2,
-    yPt: centerXPt - transform.e - heightPt / 2,
-    widthPt,
-    heightPt,
+    xPt,
+    yPt,
+    widthPt: Math.max(...points.map((point) => point.xPt)) - xPt,
+    heightPt: Math.max(...points.map((point) => point.yPt)) - yPt,
   };
 }
 
 function uprightDrawingLocalRectToLogical(
   rect: LayoutRect,
-  transform: import('./types.js').Matrix2DData,
+  transform: Matrix2DData,
 ): LayoutRect {
-  return {
-    xPt: transform.e + rect.yPt,
-    yPt: transform.f - rect.xPt - rect.widthPt,
-    widthPt: rect.heightPt,
-    heightPt: rect.widthPt,
-  };
+  return transformRect(transform, rect);
 }
 
-function projectPhysicalAnchorResult(
+/** Project a complete upright DrawingML anchor result into section-logical
+ * coordinates through the section writing mode's canonical affine inverse. */
+export function projectPhysicalAnchorResult(
   result: Extract<AnchorFrameResult, { status: 'resolved' }>,
-  physicalPageWidthPt: number,
+  physicalToLogical: Matrix2DData,
 ): Extract<AnchorFrameResult, { status: 'resolved' }> {
-  const rotateEdges = (edges: Readonly<{
+  const projectEdges = (edges: Readonly<{
     topPt: number; rightPt: number; bottomPt: number; leftPt: number;
-  }>) => ({
-    topPt: edges.rightPt,
-    rightPt: edges.bottomPt,
-    bottomPt: edges.leftPt,
-    leftPt: edges.topPt,
-  });
+  }>) => {
+    const projected = transformRectEdges(physicalToLogical, {
+      top: edges.topPt,
+      right: edges.rightPt,
+      bottom: edges.bottomPt,
+      left: edges.leftPt,
+    });
+    return {
+      topPt: projected.top,
+      rightPt: projected.right,
+      bottomPt: projected.bottom,
+      leftPt: projected.left,
+    };
+  };
   return {
     ...result,
     // `resolveAnchorFrame` reports diagnostics in the physical wp:positionH/V
@@ -2253,33 +2322,29 @@ function projectPhysicalAnchorResult(
     },
     geometry: {
       ...result.geometry,
-      objectFrame: projectPhysicalAnchorRect(result.geometry.objectFrame, physicalPageWidthPt),
-      inkBounds: projectPhysicalAnchorRect(result.geometry.inkBounds, physicalPageWidthPt),
+      objectFrame: transformRect(physicalToLogical, result.geometry.objectFrame),
+      inkBounds: transformRect(physicalToLogical, result.geometry.inkBounds),
       wrapBounds: result.geometry.wrapBounds
-        ? projectPhysicalAnchorRect(result.geometry.wrapBounds, physicalPageWidthPt)
+        ? transformRect(physicalToLogical, result.geometry.wrapBounds)
         : null,
       size: {
         horizontal: result.geometry.size.vertical,
         vertical: result.geometry.size.horizontal,
       },
-      parentEffectExtent: rotateEdges(result.geometry.parentEffectExtent),
+      parentEffectExtent: projectEdges(result.geometry.parentEffectExtent),
       wrap: {
         ...result.geometry.wrap,
-        distances: rotateEdges(result.geometry.wrap.distances),
-        distanceSources: {
-          top: result.geometry.wrap.distanceSources.right,
-          right: result.geometry.wrap.distanceSources.bottom,
-          bottom: result.geometry.wrap.distanceSources.left,
-          left: result.geometry.wrap.distanceSources.top,
-        },
-        effectExtent: rotateEdges(result.geometry.wrap.effectExtent),
+        distances: projectEdges(result.geometry.wrap.distances),
+        distanceSources: transformRectEdges(
+          physicalToLogical,
+          result.geometry.wrap.distanceSources,
+        ),
+        effectExtent: projectEdges(result.geometry.wrap.effectExtent),
         ...(result.geometry.wrap.polygon ? {
           polygon: {
             ...result.geometry.wrap.polygon,
-            points: result.geometry.wrap.polygon.points.map((point) => ({
-              xPt: point.yPt,
-              yPt: physicalPageWidthPt - point.xPt,
-            })),
+            points: result.geometry.wrap.polygon.points.map((point) =>
+              transformPoint(physicalToLogical, point)),
           },
         } : {}),
       },
@@ -2327,7 +2392,10 @@ function resizeResolvedAnchorGeometry(
 function retainedAnchorChildFrame(
   acquisition: NonNullable<AnchoredPayloadRun['anchorAcquisitionInput']>,
   outerFrame: LayoutRect,
-  physicalPageWidthPt?: number,
+  coordinateSpace?: Readonly<{
+    physicalToLogical: Matrix2DData;
+    logicalToPhysical: Matrix2DData;
+  }>,
 ): LayoutRect {
   const child = acquisition.group?.resolvedChildFrame;
   if (!child) return outerFrame;
@@ -2343,12 +2411,9 @@ function retainedAnchorChildFrame(
   ) {
     throw new Error('resolved grouped anchor requires its authored wp:extent');
   }
-  const physicalOuter = physicalPageWidthPt === undefined ? outerFrame : {
-    xPt: physicalPageWidthPt - outerFrame.yPt - outerFrame.heightPt,
-    yPt: outerFrame.xPt,
-    widthPt: outerFrame.heightPt,
-    heightPt: outerFrame.widthPt,
-  };
+  const physicalOuter = coordinateSpace === undefined
+    ? outerFrame
+    : transformRect(coordinateSpace.logicalToPhysical, outerFrame);
   const scaleX = physicalOuter.widthPt / authoredWidthPt;
   const scaleY = physicalOuter.heightPt / authoredHeightPt;
   const physicalChild = {
@@ -2357,9 +2422,9 @@ function retainedAnchorChildFrame(
     widthPt: child.widthPt * scaleX,
     heightPt: child.heightPt * scaleY,
   };
-  return physicalPageWidthPt === undefined
+  return coordinateSpace === undefined
     ? physicalChild
-    : projectPhysicalAnchorRect(physicalChild, physicalPageWidthPt);
+    : transformRect(coordinateSpace.physicalToLogical, physicalChild);
 }
 
 function anchorAxisOwnership(
@@ -2465,12 +2530,21 @@ function acquireAnchorOccurrence(
   // ECMA-376 §17.6.20 + §20.4.3.x: anchor positionH/V and extent describe the
   // upright physical drawing layer. Retained body flow is section-logical, so
   // project the complete resolved geometry once before wrap/collision/paint use.
-  const physicalPageWidthPt = options.environment.verticalPageFrame
-    ? baseFrames?.page?.heightPt
+  const physicalPage = options.environment.verticalPageFrame && baseFrames?.page
+    ? uprightPhysicalExtent(baseFrames.page, options.environment.pageWritingMode)
     : undefined;
-  const result = physicalPageWidthPt === undefined
+  const coordinateSpace = physicalPage === undefined
+    ? undefined
+    : createSectionRegionCoordinateSpace(
+        options.environment.pageWritingMode,
+        physicalPage,
+      );
+  const result = physicalPage === undefined
     ? acquiredResult
-    : projectPhysicalAnchorResult(acquiredResult, physicalPageWidthPt);
+    : projectPhysicalAnchorResult(
+        acquiredResult,
+        coordinateSpace!.physicalToLogical,
+      );
   if (
     behavior.behindDocStatus !== 'valid'
     || behavior.relativeHeightStatus !== 'valid'
@@ -2480,9 +2554,9 @@ function acquireAnchorOccurrence(
     throw new Error('resolved anchor frame must retain required CT_Anchor behavior');
   }
   const authoredRect = result.geometry.objectFrame;
-  let uprightTransform = physicalPageWidthPt === undefined
+  let uprightTransform = physicalPage === undefined
     ? undefined
-    : uprightPhysicalDrawingTransform(authoredRect);
+    : uprightPhysicalDrawingTransform(authoredRect, coordinateSpace!.physicalToLogical);
   const uprightEnvironment = uprightTransform ? {
     ...options.environment,
     // The section quarter turn is cancelled by the drawing frame. Text-box
@@ -2619,7 +2693,7 @@ function acquireAnchorOccurrence(
   for (const { run, runIndex } of ordered) {
     const source = runSource(options.source, runIndex);
     const acquisition = run.anchorAcquisitionInput as NonNullable<typeof run.anchorAcquisitionInput>;
-    const commandRect = retainedAnchorChildFrame(acquisition, rect, physicalPageWidthPt);
+    const commandRect = retainedAnchorChildFrame(acquisition, rect, coordinateSpace);
     const paintRect = uprightTransform
       ? logicalRectToUprightDrawingLocal(commandRect, uprightTransform)
       : commandRect;
@@ -3216,6 +3290,11 @@ export function acquireShapeTextBoxLayout(
     advancePt: Math.max(0, fittedExtentPt - insets.topPt - insets.bottomPt),
     diagnostics: [],
   };
+  // `story` is still in its logical block-axis frame here. Vertical text-box
+  // orientation may mirror glyph/line geometry, but `anchor` is defined against
+  // this pre-orientation text-body extent. Retain the scalar now so the later
+  // physical projection cannot change vertical anchoring semantics.
+  const anchorStoryExtentPt = wordTextBoxVisibleAnchorExtentPt(story);
   if (completeStory && verticalMode) {
     story = orientVerticalTextBoxStory(
       translateTextBoxStory(
@@ -3232,13 +3311,16 @@ export function acquireShapeTextBoxLayout(
     textBoxAnchorOffsetPt(
       shape.textAnchor,
       effectiveInnerBounds.heightPt,
-      story.advancePt,
+      anchorStoryExtentPt,
     ),
     false,
   );
   return deepFreezePlainData({
     kind: 'textbox', id: options.id, source: normalized[0]?.source ?? storySource,
     flowDomainId: `${options.flowDomainId}:textbox`, flowBounds: effectiveRect, inkBounds: effectiveRect,
+    ...(shape.defaultTextColor ? {
+      defaultTextColor: `#${shape.defaultTextColor.replace(/^#/u, '')}`,
+    } : {}),
     ...(shape.textAutofit === 'none' ? { clipBounds: effectiveInnerBounds } : {}),
     advancePt: 0, ordinaryFlow: false, story,
     transform: verticalMode ? {
@@ -3397,12 +3479,233 @@ function mergeAnchorCollisions(
   ]);
 }
 
+export function paragraphAcquisitionCacheKey(
+  cache: ParagraphAcquisitionRuntimeCache,
+  paragraph: ParagraphAcquisitionInput,
+  options: ParagraphAcquisitionOptions,
+  continuation?: Parameters<typeof measureParagraph>[5],
+): string {
+  const layoutServices = options.environment.layoutServices;
+  const verticalGlyphMeasurement = options.environment.verticalGlyphMeasurement;
+  const anchorFrames = options.anchorFrames;
+  const hasAnchoredPayload = paragraph.runs.some(anchoredPayloadRun);
+  const hasCompleteTextBox = paragraph.runs.some((run) =>
+    run.type === 'shape' && run.textBoxInput?.kind === 'complete');
+  const {
+    wrap,
+    ...plainPlacement
+  } = options.placement;
+  const context = options.context;
+  const environment = options.environment;
+  // Fixed-order tuples avoid the recursive generic fingerprint cost on this hot
+  // path. A different property insertion order may conservatively miss for the
+  // explicitly JSON-valued geometry below, but can never alias different facts.
+  return `paragraph-acquisition-v1:${JSON.stringify([
+    options.id,
+    [options.source.story, options.source.storyInstance, options.source.path],
+    options.flowDomainId,
+    options.ordinaryFlow,
+    [
+      plainPlacement.startYPt,
+      plainPlacement.paragraphXPt,
+      plainPlacement.availableWidthPt,
+      plainPlacement.maximumYPt,
+      plainPlacement.suppressSpaceBefore,
+      wrap ? cache.objectIdentity(wrap) : null,
+    ],
+    [
+      context.lineGrid.active,
+      context.lineGrid.pitchPt,
+      context.characterGrid.active,
+      context.characterGrid.deltaPt,
+      context.physicalIndentLeftPt,
+      context.physicalIndentRightPt,
+      context.firstIndentPt,
+      context.lineSpacing
+        ? [
+            context.lineSpacing.value,
+            context.lineSpacing.rule,
+            context.lineSpacing.explicit ?? null,
+          ]
+        : null,
+      context.spaceBeforePt,
+      context.spaceAfterPt,
+      context.baseRtl,
+      context.isJustified,
+      context.stretchLastLine,
+      context.tabStops.map((stop) => [stop.pos, stop.alignment, stop.leader]),
+      context.hasRuby,
+      context.hasEastAsianText,
+      [
+        context.kinsoku.enabled,
+        [...context.kinsoku.lineStartForbidden].sort((left, right) => left - right),
+        [...context.kinsoku.lineEndForbidden].sort((left, right) => left - right),
+      ],
+      context.defaultTabPt,
+      context.overflowPunct !== false,
+      context.numberingMarkerGeometry
+        ? JSON.stringify(context.numberingMarkerGeometry)
+        : null,
+      context.mathDefJc ?? null,
+    ],
+    [
+      cache.objectIdentity(options.measurer.context),
+      cache.objectIdentity(options.measurer.fontFamilyClasses),
+    ],
+    [
+      environment.pageIndex,
+      environment.totalPages,
+      environment.displayPageNumber ?? null,
+      environment.pageNumberFormat ?? null,
+      environment.currentDateMs ?? null,
+      environment.noteNumbers
+        ? [...environment.noteNumbers.entries()]
+          .sort(([left], [right]) => left.localeCompare(right))
+        : null,
+      environment.noteReferenceNumber ?? null,
+      environment.pageWritingMode,
+      environment.verticalCJK ?? null,
+      environment.verticalPageFrame ?? null,
+      environment.documentHasEastAsianText,
+      environment.useFeLayout ?? null,
+      environment.characterSpacingControl ?? null,
+      environment.resolvedLocalFonts
+        ? cache.objectIdentity(environment.resolvedLocalFonts)
+        : null,
+      layoutServices?.text.fingerprint ?? null,
+      layoutServices?.images.fingerprint ?? null,
+      layoutServices?.math.fingerprint ?? null,
+      layoutServices?.verticalGlyphFingerprint ?? null,
+      verticalGlyphMeasurement?.fingerprint ?? null,
+    ],
+    JSON.stringify(options.exclusions),
+    hasAnchoredPayload ? JSON.stringify(options.anchorCollisions ?? []) : null,
+    continuation ? JSON.stringify(continuation) : null,
+    options.paragraphBorderEdges
+      ? [options.paragraphBorderEdges.top, options.paragraphBorderEdges.bottom]
+      : null,
+    options.trailingExtentPt ?? null,
+    options.containerShading ?? null,
+    options.continuesFromPrevious ?? null,
+    options.sourceRangeStart ?? null,
+    anchorFrames ? [
+      anchorFrames.page
+        ? [
+            anchorFrames.page.xPt,
+            anchorFrames.page.yPt,
+            anchorFrames.page.widthPt,
+            anchorFrames.page.heightPt,
+          ]
+        : null,
+      anchorFrames.margin
+        ? [
+            anchorFrames.margin.xPt,
+            anchorFrames.margin.yPt,
+            anchorFrames.margin.widthPt,
+            anchorFrames.margin.heightPt,
+          ]
+        : null,
+      anchorFrames.column
+        ? [
+            anchorFrames.column.xPt,
+            anchorFrames.column.yPt,
+            anchorFrames.column.widthPt,
+            anchorFrames.column.heightPt,
+          ]
+        : null,
+      anchorFrames.pageParity,
+    ] : null,
+    hasAnchoredPayload ? JSON.stringify(options.anchorCellBounds ?? null) : null,
+    hasCompleteTextBox && options.acquireCompleteStory
+      ? cache.objectIdentity(options.acquireCompleteStory)
+      : null,
+  ])}`;
+}
+
+type MeasuredLayoutSegment = LayoutLine['segments'][number];
+
+function immutableMeasuredLayoutSegment(
+  segment: MeasuredLayoutSegment,
+): MeasuredLayoutSegment {
+  const source = segment.src ? Object.freeze({ ...segment.src }) : undefined;
+  if ('text' in segment) {
+    return Object.freeze({
+      ...segment,
+      ...(source ? { src: source } : {}),
+      ...(segment.shapedClusters ? {
+        shapedClusters: Object.freeze(segment.shapedClusters.map((cluster) => Object.freeze({
+          ...cluster,
+          range: Object.freeze({ ...cluster.range }),
+        }))),
+      } : {}),
+      ...(segment.selectedFaceInkBounds ? {
+        selectedFaceInkBounds: Object.freeze({ ...segment.selectedFaceInkBounds }),
+      } : {}),
+      ...(segment.ruby ? { ruby: Object.freeze({ ...segment.ruby }) } : {}),
+      ...(segment.border ? { border: Object.freeze({ ...segment.border }) } : {}),
+      ...(segment.revision ? { revision: Object.freeze({ ...segment.revision }) } : {}),
+      ...(segment.hyperlink ? { hyperlink: Object.freeze({ ...segment.hyperlink }) } : {}),
+      ...(segment.seaBreaks ? {
+        seaBreaks: Object.freeze([...segment.seaBreaks]),
+      } : {}),
+    });
+  }
+  if ('imagePath' in segment) {
+    return Object.freeze({
+      ...segment,
+      ...(source ? { src: source } : {}),
+      ...(segment.srcRect ? { srcRect: Object.freeze({ ...segment.srcRect }) } : {}),
+      ...(segment.duotone ? { duotone: Object.freeze({ ...segment.duotone }) } : {}),
+    });
+  }
+  if ('isTab' in segment) {
+    return Object.freeze({
+      ...segment,
+      ...(source ? { src: source } : {}),
+      ...(segment.ptab ? { ptab: Object.freeze({ ...segment.ptab }) } : {}),
+    });
+  }
+  return Object.freeze({
+    ...segment,
+    ...(source ? { src: source } : {}),
+  });
+}
+
+function immutableMeasuredLine(
+  line: MeasuredParagraph['lines'][number],
+): MeasuredParagraph['lines'][number] {
+  return Object.freeze({
+    ...line,
+    layout: Object.freeze({
+      ...line.layout,
+      // LayoutLine predates retained acquisition and exposes a mutable array
+      // type. The cached snapshot is intentionally runtime-immutable.
+      segments: Object.freeze(
+        line.layout.segments.map(immutableMeasuredLayoutSegment),
+      ) as unknown as LayoutLine['segments'],
+      ...(line.layout.consumedEnd ? {
+        consumedEnd: Object.freeze({ ...line.layout.consumedEnd }),
+      } : {}),
+    }),
+  });
+}
+
 /** @internal Acquires the measurement and retained layout as one final candidate. */
 export function acquireParagraphResult(
   paragraph: ParagraphAcquisitionInput,
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  const cache = options.environment.layoutServices
+    ? paragraphAcquisitionCacheOf(options.environment.layoutServices)
+    : undefined;
+  const cacheKey = cache
+    ? paragraphAcquisitionCacheKey(cache, paragraph, options, continuation)
+    : undefined;
+  const cached = cacheKey === undefined
+    ? undefined
+    : cache!.get(paragraph, cacheKey) as AcquiredParagraphResult | undefined;
+  if (cached) return cached;
   const externallyOwnedOccurrenceIds = externalExclusionOccurrenceIds(options.exclusions);
   const occurrenceIds = new Set(paragraph.runs.flatMap((run) =>
     anchoredPayloadRun(run) ? [run.anchorAcquisitionInput!.occurrenceId] : []));
@@ -3453,7 +3756,17 @@ export function acquireParagraphResult(
       // geometry orbit from consuming unbounded work.
       limit: 16,
     }).value;
-    return Object.freeze({ measured: result.measured, layout: result.layout });
+    // A cache hit may cross convergence passes. Retain an immutable measurement
+    // envelope without recursively freezing caller-owned capabilities such as
+    // the wrap oracle referenced by placement.
+    const immutableMeasured: MeasuredParagraph = Object.freeze({
+      ...result.measured,
+      lines: Object.freeze(result.measured.lines.map(immutableMeasuredLine)),
+      placement: Object.freeze({ ...result.measured.placement }),
+    });
+    const acquired = Object.freeze({ measured: immutableMeasured, layout: result.layout });
+    if (cacheKey !== undefined) cache!.set(paragraph, cacheKey, acquired);
+    return acquired;
   } catch (error) {
     if (error instanceof ExactConvergenceError) {
       throw new ParagraphAnchorReflowNonConvergenceError(

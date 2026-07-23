@@ -6,8 +6,10 @@ import {
   attachPrivateResourceLookup,
   createFieldAcquisitionServicesView,
   createImmutableResourceLookup,
+  createParagraphAcquisitionCacheServicesView,
   documentLayoutRuntimeOf,
   fieldAcquisitionContextOf,
+  paragraphAcquisitionCacheOf,
   paintResourceRegistryOf,
   privateResourceLookupOf,
 } from './runtime-state.js';
@@ -96,6 +98,25 @@ describe('document layout runtime state', () => {
     expect(Object.keys(services)).toEqual(['text', 'images', 'math']);
     expect(() => createFieldAcquisitionServicesView(services, { totalPages: 0 }))
       .toThrow(/positive integer/i);
+  });
+
+  it('shares one private paragraph cache with field views but not another pagination scope', () => {
+    const services = {
+      text: {}, images: {}, math: {},
+    } as unknown as LayoutServices;
+    attachUnusedKernel(services);
+
+    const firstScope = createParagraphAcquisitionCacheServicesView(services);
+    const fieldView = createFieldAcquisitionServicesView(firstScope, { totalPages: 12 });
+    const secondScope = createParagraphAcquisitionCacheServicesView(services);
+
+    expect(paragraphAcquisitionCacheOf(firstScope)).toBeDefined();
+    expect(paragraphAcquisitionCacheOf(fieldView))
+      .toBe(paragraphAcquisitionCacheOf(firstScope));
+    expect(paragraphAcquisitionCacheOf(secondScope))
+      .not.toBe(paragraphAcquisitionCacheOf(firstScope));
+    expect(paragraphAcquisitionCacheOf(services)).toBeUndefined();
+    expect(Object.keys(firstScope)).toEqual(['text', 'images', 'math']);
   });
 
   it('keeps destination-page resolution private to its immutable pagination iteration view', () => {

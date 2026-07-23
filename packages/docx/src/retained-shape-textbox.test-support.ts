@@ -97,6 +97,7 @@ export function acquireShapeTextBoxForTest(
       currentDateMs: state?.currentDateMs,
       noteNumbers: state?.noteNumbers,
       noteReferenceNumber: state?.noteReferenceNumber,
+      pageWritingMode: state?.verticalCJK ? 'vertical-rl' : 'horizontal-tb',
       verticalCJK: state?.verticalCJK,
       documentHasEastAsianText: state?.docEastAsian
         ?? shape.textBlocks?.some((block) => /[\u3000-\u9fff\uf900-\ufaff]/u.test(block.text))
@@ -168,8 +169,7 @@ export function acquireAndPaintShapeTextBox(
   });
   paintTextBoxLayout(layout, {
     ctx: viewportContext, scale, dpr: 1,
-    defaultTextColor: shape.defaultTextColor
-      ? `#${shape.defaultTextColor}` : '#000000',
+    defaultTextColor: '#000000',
     resources: {
       paint(resourceKey, kind, bounds, paintContext) {
         if (kind !== 'image') return;

@@ -50,6 +50,60 @@ export function canvasPageScale(page: LayoutPage, width?: number): number {
   return (width ?? page.geometry.widthPt * PT_TO_PX) / page.geometry.widthPt;
 }
 
+function htmlCanvasOwnerDocument(
+  target: HTMLCanvasElement | OffscreenCanvas,
+): Document | null {
+  if (isHTMLCanvas(target)) {
+    return target.ownerDocument ?? (typeof document === 'undefined' ? null : document);
+  }
+  const ownerDocument = (target as unknown as HTMLCanvasElement).ownerDocument;
+  const ownerConstructor = ownerDocument?.defaultView?.HTMLCanvasElement;
+  return ownerConstructor && target instanceof ownerConstructor ? ownerDocument : null;
+}
+
+function isElementBackedCanvas(
+  target: HTMLCanvasElement | OffscreenCanvas,
+): target is HTMLCanvasElement {
+  return htmlCanvasOwnerDocument(target) !== null;
+}
+
+function acquireElementBackedVerticalPaintSurface(
+  target: HTMLCanvasElement | OffscreenCanvas,
+  required: boolean,
+): Readonly<{
+  canvas: HTMLCanvasElement | OffscreenCanvas;
+  release?: () => void;
+}> {
+  const targetDocument = htmlCanvasOwnerDocument(target);
+  if (!required || (targetDocument && (target as HTMLCanvasElement).isConnected)) {
+    return { canvas: target };
+  }
+  const paintDocument = targetDocument ?? (
+    typeof document === 'undefined' ? undefined : document
+  );
+  if (!paintDocument) {
+    throw new Error('OpenType vertical glyph paint requires an element-backed document surface');
+  }
+  const parent = paintDocument.body ?? paintDocument.documentElement;
+  if (!parent) {
+    throw new Error('OpenType vertical glyph paint requires an attached document surface');
+  }
+  const canvas = paintDocument.createElement('canvas');
+  canvas.setAttribute('aria-hidden', 'true');
+  Object.assign(canvas.style, {
+    position: 'fixed',
+    left: '-99999px',
+    top: '0',
+    opacity: '0',
+    pointerEvents: 'none',
+  });
+  parent.appendChild(canvas);
+  return {
+    canvas,
+    release: () => canvas.remove(),
+  };
+}
+
 export async function renderSelectedDocumentPage<TTextRun>(
   layout: DocumentLayout,
   page: LayoutPage,
@@ -59,17 +113,18 @@ export async function renderSelectedDocumentPage<TTextRun>(
   const releaseLease = options.fetchImage
     ? acquireBitmapCacheLease(options.fetchImage)
     : undefined;
+  let releasePaintSurface: (() => void) | undefined;
   try {
     const token = (renderTokens.get(canvas) ?? 0) + 1;
     renderTokens.set(canvas, token);
     const superseded = (): boolean => renderTokens.get(canvas) !== token;
     const dpr = options.dpr ?? defaultDpr();
-    const paintCanvas: HTMLCanvasElement | OffscreenCanvas =
-      page.layers.capabilities.requiresElementBackedVerticalGlyphPaint
-      && !isHTMLCanvas(canvas)
-      && typeof document !== 'undefined'
-        ? document.createElement('canvas')
-        : canvas;
+    const paintSurface = acquireElementBackedVerticalPaintSurface(
+      canvas,
+      !options.parseError && page.layers.capabilities.requiresElementBackedVerticalGlyphPaint,
+    );
+    const paintCanvas = paintSurface.canvas;
+    releasePaintSurface = paintSurface.release;
     const context = paintCanvas.getContext('2d') as PaintCanvas2D | null;
     if (!context) throw new Error('2D canvas is unavailable for DOCX paint');
     const scale = canvasPageScale(page, options.width);
@@ -83,12 +138,12 @@ export async function renderSelectedDocumentPage<TTextRun>(
       paintCanvas.width = clamped.width;
       paintCanvas.height = clamped.height;
     }
-    if (isHTMLCanvas(canvas)) {
+    if (isElementBackedCanvas(canvas)) {
       canvas.style.width = `${cssWidth}px`;
       canvas.style.height = `${cssHeight}px`;
       if (!canvas.style.display) canvas.style.display = 'block';
     }
-    if (isHTMLCanvas(paintCanvas) && paintCanvas !== canvas) {
+    if (isElementBackedCanvas(paintCanvas) && paintCanvas !== canvas) {
       paintCanvas.style.width = `${cssWidth}px`;
       paintCanvas.style.height = `${cssHeight}px`;
     }
@@ -141,6 +196,7 @@ export async function renderSelectedDocumentPage<TTextRun>(
         scale,
         dpr: effectiveDpr,
         resources,
+        documentDefaultTextColor: options.defaultTextColor ?? '#000000',
         defaultTextColor: options.defaultTextColor ?? '#000000',
         showTrackChanges: options.showTrackChanges ?? true,
       });
@@ -157,6 +213,7 @@ export async function renderSelectedDocumentPage<TTextRun>(
       for (const run of options.textRuns) options.onTextRun(run);
     }
   } finally {
+    releasePaintSurface?.();
     releaseLease?.();
   }
 }

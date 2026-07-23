@@ -2088,11 +2088,9 @@ function hasExactInvariantImports(source) {
       || !statement.importClause.namedBindings
       || !ts.isNamedImports(statement.importClause.namedBindings)) return false;
     const elements = statement.importClause.namedBindings.elements;
-    return elements.length === 2
+    return elements.length === 1
       && elements.every((element) => !element.isTypeOnly && !element.propertyName)
-      && new Set(elements.map((element) => element.name.text)).size === 2
-      && elements.some((element) => element.name.text === 'assertDocumentLayout')
-      && elements.some((element) => element.name.text === 'deepFreezeDocumentLayout');
+      && elements[0]?.name.text === 'assertAndDeepFreezeDocumentLayout';
   });
 }
 
@@ -2335,21 +2333,13 @@ function assertCanonicalCutoverBoundaries(root) {
     if (!producer?.body || exportedValues.length !== 1 || runtimeExportForms.length !== 0) {
       fail('CANONICAL_LAYOUT_PRODUCER', `${LAYOUT_SOURCE}/body-paginator.ts#paginateBody`);
     }
-    const validation = producer.body.statements.at(-2);
     const returned = producer.body.statements.at(-1);
-    const validationCall = validation && ts.isExpressionStatement(validation)
-      ? callOf(validation.expression, 'assertDocumentLayout')
-      : null;
     const frozenCall = returned && ts.isReturnStatement(returned)
-      ? callOf(returned.expression, 'deepFreezeDocumentLayout')
+      ? callOf(returned.expression, 'assertAndDeepFreezeDocumentLayout')
       : null;
     if (!hasExactInvariantImports(source)
-      || callsNamed(producer.body, 'assertDocumentLayout').length !== 1
-      || callsNamed(producer.body, 'deepFreezeDocumentLayout').length !== 1
-      || validationCall?.arguments.length !== 1
-      || frozenCall?.arguments.length !== 1
-      || validationCall.arguments[0].getText(source)
-        !== frozenCall.arguments[0].getText(source)) {
+      || callsNamed(producer.body, 'assertAndDeepFreezeDocumentLayout').length !== 1
+      || frozenCall?.arguments.length !== 1) {
       fail('RETAINED_LAYOUT_IMMUTABILITY', `${LAYOUT_SOURCE}/body-paginator.ts#paginateBody`);
     }
   }

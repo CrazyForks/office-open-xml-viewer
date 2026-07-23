@@ -42,6 +42,203 @@ function node(): ParagraphLayout {
 }
 
 describe('paintParagraphLayout', () => {
+  it.each([
+    { dpr: 1, expectedWidthPt: 1 },
+    { dpr: 2, expectedWidthPt: 0.5 },
+  ])(
+    'rasterizes a retained paragraph-border hairline to one device pixel at DPR $dpr',
+    ({ dpr, expectedWidthPt }) => {
+      const strokes: Array<Readonly<{
+        widthPt: number;
+        from: readonly [number, number];
+        to: readonly [number, number];
+      }>> = [];
+      let path: Array<readonly [number, number]> = [];
+      const ctx = {
+        globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+        font: '', textAlign: 'left' as CanvasTextAlign,
+        textBaseline: 'alphabetic' as CanvasTextBaseline,
+        direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+        fontKerning: 'auto' as CanvasFontKerning,
+        save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, transform() {},
+        setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() { path = []; },
+        rect() {}, clip() {},
+        moveTo(x: number, y: number) { path.push([x, y]); },
+        lineTo(x: number, y: number) { path.push([x, y]); },
+        stroke() {
+          if (path.length === 2) {
+            strokes.push({ widthPt: this.lineWidth, from: path[0]!, to: path[1]! });
+          }
+        },
+        fill() {}, drawImage() {}, fillText() {},
+      };
+      const source = node();
+      const bordered = {
+        ...source,
+        borders: [{
+          edge: 'top' as const,
+          from: { xPt: 10, yPt: 10.2 },
+          to: { xPt: 30, yPt: 10.2 },
+          color: '#111111',
+          widthPt: 0.5,
+          authoredStyle: 'single',
+          style: 'solid' as const,
+        }],
+      } as ParagraphLayout;
+      const before = stableFingerprint('paragraph-border-hairline', bordered);
+
+      paintParagraphLayout(bordered, {
+        ctx,
+        scale: 1,
+        dpr,
+        resources: noPaintResources,
+      });
+
+      expect(strokes).toHaveLength(1);
+      expect(strokes[0]!.widthPt).toBe(expectedWidthPt);
+      expect(strokes[0]!.from[0]).toBe(10);
+      expect(strokes[0]!.to[0]).toBe(30);
+      expect(strokes[0]!.from[1] * dpr - 0.5).toBeCloseTo(
+        Math.round(strokes[0]!.from[1] * dpr - 0.5),
+        10,
+      );
+      expect(strokes[0]!.to[1]).toBe(strokes[0]!.from[1]);
+      expect(bordered.borders[0]!.widthPt).toBe(0.5);
+      expect(stableFingerprint('paragraph-border-hairline', bordered)).toBe(before);
+    },
+  );
+
+  it('does not widen retained text decorations with the paragraph-border hairline policy', () => {
+    const widths: number[] = [];
+    const ctx = {
+      globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+      font: '', textAlign: 'left' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, transform() {},
+      setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {}, rect() {}, clip() {},
+      moveTo() {}, lineTo() {}, stroke() { widths.push(this.lineWidth); },
+      fill() {}, drawImage() {}, fillText() {},
+    };
+    const source = node();
+    const line = source.lines[0]!;
+    const placement = line.placements[0]!;
+    if (placement.kind !== 'text') throw new Error('Expected text placement');
+    const bordered = {
+      ...source,
+      lines: [{
+        ...line,
+        placements: [{
+          ...placement,
+          decorations: [{
+            kind: 'underline' as const,
+            from: { xPt: 10, yPt: 19 },
+            to: { xPt: 30, yPt: 19 },
+            color: '#222222',
+            widthPt: 0.5,
+            style: 'solid' as const,
+          }],
+        }],
+      }],
+      borders: [{
+        edge: 'bottom' as const,
+        from: { xPt: 10, yPt: 20 },
+        to: { xPt: 30, yPt: 20 },
+        color: '#111111',
+        widthPt: 0.5,
+        authoredStyle: 'single',
+        style: 'solid' as const,
+      }],
+    } as ParagraphLayout;
+
+    paintParagraphLayout(bordered, {
+      ctx,
+      scale: 1,
+      dpr: 1,
+      resources: noPaintResources,
+    });
+
+    expect(widths).toEqual([0.5, 1]);
+  });
+
+  it('resets an unthemed nested text box to the document default text color', () => {
+    const fills: Array<readonly [string, string]> = [];
+    let fillStyle = '';
+    const ctx = {
+      globalAlpha: 1,
+      get fillStyle() { return fillStyle; },
+      set fillStyle(value: string | CanvasGradient | CanvasPattern) { fillStyle = String(value); },
+      strokeStyle: '', lineWidth: 1, font: '', textAlign: 'left',
+      textBaseline: 'alphabetic', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto',
+      save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, transform() {},
+      setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {}, rect() {}, clip() {},
+      moveTo() {}, lineTo() {}, stroke() {}, fill() {}, drawImage() {},
+      fillText(text: string) { fills.push([text, fillStyle]); },
+    } as unknown as CanvasRenderingContext2D;
+    const defaultColorParagraph = (text: string, textBoxes: readonly TextBoxLayout[] = []): ParagraphLayout => {
+      const paragraph = node();
+      const line = paragraph.lines[0]!;
+      const placement = line.placements[0]!;
+      if (placement.kind !== 'text') throw new Error('Expected text placement');
+      return {
+        ...paragraph,
+        id: `p-${text}`,
+        lines: [{
+          ...line,
+          placements: [{
+            ...placement,
+            text,
+            paintOps: [{ ...placement.paintOps[0]!, text }],
+            color: { kind: 'default' },
+          }],
+        }],
+        textBoxes,
+      };
+    };
+    const textBox = (
+      id: string,
+      paragraph: ParagraphLayout,
+      defaultTextColor?: string,
+    ): TextBoxLayout => ({
+      kind: 'textbox',
+      id,
+      source: { story: 'textbox', storyInstance: id, path: [] },
+      flowDomainId: `textbox:${id}`,
+      ordinaryFlow: false,
+      flowBounds: paragraph.flowBounds,
+      inkBounds: paragraph.inkBounds,
+      advancePt: 0,
+      story: {
+        story: 'textbox',
+        flowBounds: paragraph.flowBounds,
+        inkBounds: paragraph.inkBounds,
+        blocks: [paragraph],
+        advancePt: paragraph.advancePt,
+        diagnostics: [],
+      },
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      writingMode: 'horizontal-tb',
+      insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      ...(defaultTextColor ? { defaultTextColor } : {}),
+    });
+    const inner = textBox('inner', defaultColorParagraph('INNR'));
+    const outer = textBox('outer', defaultColorParagraph('OUTR', [inner]), '#aa0000');
+
+    paintPlacedTextBoxLayout(outer, {
+      ctx,
+      scale: 1,
+      dpr: 1,
+      resources: noPaintResources,
+      defaultTextColor: '#123456',
+    });
+
+    expect(fills).toEqual([
+      ['OUTR', '#aa0000'],
+      ['INNR', '#123456'],
+    ]);
+  });
+
   it('paints retained table blocks inside a text-box story', () => {
     const texts: string[] = [];
     const ctx = {

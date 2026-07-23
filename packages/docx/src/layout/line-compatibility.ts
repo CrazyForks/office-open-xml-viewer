@@ -93,6 +93,54 @@ export const WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT = defineCompatibilityRule({
   description: 'On a full paragraph-width line that will be fully justified, include the candidate word separator in its wrap-fit width; lines narrowed by DrawingML wrap exclusions retain collapsible line-end separator fit behavior.',
 });
 
+export const WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS = defineCompatibilityRule({
+  id: 'word-overflow-punctuation-language-sets',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OE376] §2.1.56',
+  },
+  description: 'Apply the language-specific punctuation sets documented for Word in [MS-OE376] §2.1.56, and let overflowPunct override kinsoku when both rules affect the same character.',
+});
+
+export const WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE = defineCompatibilityRule({
+  id: 'word-full-width-character-spacing-scope',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OE376] §2.1.562',
+  },
+  description: 'Interpret ST_CharacterSpacing as applying whitespace compression to full-width punctuation characters. The note establishes eligibility, not a universal trim amount; compression geometry comes only from authoritative selected-glyph ink bounds.',
+});
+
+const WORD_OVERFLOW_PUNCTUATION = {
+  ja: new Set([...',.’”、。」』】），．］｝｡､']),
+  zhHans: new Set([...`!%),.:;>?]}¢°·ˇ’”‰′″℃∶、。〃〉》」』】〗〕〞﹚﹜﹞！＂％＇），．：；？］｝￠`]),
+  zhHant: new Set([...`!),.:;?]}’”′、。〉》」』】〕〞﹚﹜﹞！），．：；？］｝`]),
+  ko: new Set([...`!%),.:;?]}¢°’”′″℃〉》」』】〕！％），．：；？］｝￠`]),
+} as const;
+const ALL_WORD_OVERFLOW_PUNCTUATION = new Set([
+  ...WORD_OVERFLOW_PUNCTUATION.ja,
+  ...WORD_OVERFLOW_PUNCTUATION.zhHans,
+  ...WORD_OVERFLOW_PUNCTUATION.zhHant,
+  ...WORD_OVERFLOW_PUNCTUATION.ko,
+]);
+
+/** Compatibility projection governed by
+ * {@link WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS}. */
+export function wordIsOverflowPunctuation(
+  character: string,
+  language: string | undefined,
+): boolean {
+  const normalized = language?.toLowerCase();
+  if (normalized?.startsWith('ja')) return WORD_OVERFLOW_PUNCTUATION.ja.has(character);
+  if (normalized?.startsWith('ko')) return WORD_OVERFLOW_PUNCTUATION.ko.has(character);
+  if (normalized?.startsWith('zh')) {
+    return (/(?:^|-)(?:tw|hk|mo)(?:-|$)|hant/u.test(normalized)
+      ? WORD_OVERFLOW_PUNCTUATION.zhHant
+      : WORD_OVERFLOW_PUNCTUATION.zhHans).has(character);
+  }
+  return ALL_WORD_OVERFLOW_PUNCTUATION.has(character);
+}
+
 /** Compatibility projection governed by {@link WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT}. */
 export function wordCandidateFitWidthPx(input: Readonly<{
   widthPx: number;

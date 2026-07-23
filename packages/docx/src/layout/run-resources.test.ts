@@ -125,6 +125,7 @@ function acquireSameParagraph(
     wrap?: WrapOracle;
     exclusions?: Parameters<typeof acquireParagraphLayout>[1]['exclusions'];
     verticalPageFrame?: boolean;
+    pageWritingMode?: 'vertical-rl' | 'vertical-lr';
   }> | undefined = undefined,
 ) {
   const paragraph: DocParagraph = {
@@ -151,6 +152,9 @@ function acquireSameParagraph(
     measurer: { context: sameParagraphMeasureContext, fontFamilyClasses: {} },
     environment: {
       pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+      pageWritingMode: overrides?.pageWritingMode ?? (
+        overrides?.verticalPageFrame ? 'vertical-rl' : 'horizontal-tb'
+      ),
       ...(overrides?.verticalPageFrame ? { verticalPageFrame: true } : {}),
       layoutServices: {
         text: sameParagraphTextService,
@@ -500,7 +504,10 @@ describe('paragraph run resource projection', () => {
       context,
       placement: { startYPt: 10, paragraphXPt: 10, availableWidthPt: 300, maximumYPt: 700, suppressSpaceBefore: false },
       measurer: { context: measureContext, fontFamilyClasses: {} },
-      environment: { pageIndex: 2, totalPages: 9, documentHasEastAsianText: false, layoutServices: services },
+      environment: {
+        pageIndex: 2, totalPages: 9, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: false, layoutServices: services,
+      },
       exclusions: [],
     });
 
@@ -558,7 +565,10 @@ describe('paragraph run resource projection', () => {
       context: { ...context, spaceBeforePt: 0, spaceAfterPt: 0 },
       placement: { startYPt: 10, paragraphXPt: 10, availableWidthPt: 100, maximumYPt: 100, suppressSpaceBefore: false },
       measurer: { context: measureContext, fontFamilyClasses: {} },
-      environment: { pageIndex: 0, totalPages: 1, documentHasEastAsianText: false, layoutServices: services },
+      environment: {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: false, layoutServices: services,
+      },
       exclusions: [],
     });
     expect(markSnapshot.paragraphMarkShapeInput?.fontSizePt).toBe(14);
@@ -574,7 +584,10 @@ describe('paragraph run resource projection', () => {
       context: { ...context, spaceBeforePt: 0, spaceAfterPt: 0 },
       placement: { startYPt: 10, paragraphXPt: 10, availableWidthPt: 100, maximumYPt: 100, suppressSpaceBefore: false },
       measurer: { context: measureContext, fontFamilyClasses: {} },
-      environment: { pageIndex: 0, totalPages: 1, documentHasEastAsianText: false, layoutServices: services },
+      environment: {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: false, layoutServices: services,
+      },
       exclusions: [{
         id: 'float', wrap: 'square', bounds: { xPt: 10, yPt: 10, widthPt: 85, heightPt: 25 },
         polygon: [{ xPt: 10, yPt: 10 }, { xPt: 95, yPt: 10 }, { xPt: 95, yPt: 35 }, { xPt: 10, yPt: 35 }],
@@ -597,7 +610,10 @@ describe('paragraph run resource projection', () => {
       context: variantContext,
       placement: { startYPt: 10, paragraphXPt: 10, availableWidthPt: widthPt, maximumYPt: 300, suppressSpaceBefore: false },
       measurer: { context: measureContext, fontFamilyClasses: {} },
-      environment: { pageIndex: 0, totalPages: 1, documentHasEastAsianText: true, layoutServices: services },
+      environment: {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true, layoutServices: services,
+      },
       exclusions,
     });
 

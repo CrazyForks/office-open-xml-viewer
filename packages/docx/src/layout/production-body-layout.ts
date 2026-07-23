@@ -43,7 +43,7 @@ import { layoutTable as layoutRetainedTableInput } from './table.js';
 import { startTableFragmentCursor, takeTableFragment, type PageDependentTableBlockRequest } from './table-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, type BodyFrameGroup } from './paragraph.js';
+import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, type BodyFrameGroup } from './paragraph.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, RetainedTableRecord } from './acquisition-context.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
@@ -57,6 +57,11 @@ import type { MeasurementTextContext } from './measurement-capabilities.js';
 import type { TblpPr } from '../types.js';
 import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import type { BodySectionIndexInput } from './context.js';
+import {
+  physicalToLogicalMatrix,
+  uprightPhysicalExtent,
+  writingModeFromTextDirection,
+} from './coordinate-space.js';
 
 export interface ProductionBodyModelGateway {
   readonly acquisitionInputs: BodyAcquisitionInputProjections;
@@ -79,6 +84,10 @@ export function createProductionBodyLayoutRuntime(
   const bodySectionIndexInput = () => model.bodySectionIndex;
   const effectiveTablePositioning = model.effectiveTablePositioning;
   const publicAnchorBridge = model.publicAnchorBridge;
+  const documentFontFamilyClasses = fontClassesWithPitches(
+    doc.fontFamilyClasses,
+    doc.fontFamilyPitches,
+  );
   const anchoredImageCollisionKey = (
     imagePath: string,
     colorReplaceFrom?: string,
@@ -486,7 +495,7 @@ function buildConcreteBodyLayoutKernel(
       const state = buildMeasureState(
         measureContext,
         section,
-        fontClassesWithPitches(doc.fontFamilyClasses, doc.fontFamilyPitches),
+        documentFontFamilyClasses,
         resolveDocumentLayoutSettings(doc),
         resolvedLocalFonts,
         services,
@@ -1999,11 +2008,33 @@ function buildConcreteBodyLayoutKernel(
             if (result.status !== 'resolved') {
               throw new Error(`Page-anchor prescan could not resolve occurrence: ${anchor.occurrenceId}`);
             }
-            const wrapBounds = result.geometry.wrapBounds;
-            if (wrapBounds === null || result.geometry.wrap.kind === 'none') {
+            // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
+            // extent resolve in the upright physical drawing frame. The page
+            // registry is section-logical, so page-start prescan must apply the
+            // section writing mode's canonical physical-to-logical affine
+            // inverse before the exclusion can affect earlier body content.
+            const retainedResult = isVerticalTextDirection(
+              request.location.section.textDirection,
+            )
+              ? (() => {
+                  const writingMode = writingModeFromTextDirection(
+                    request.location.section.textDirection as string,
+                  );
+                  const physicalPage = uprightPhysicalExtent({
+                    widthPt: frames.page.widthPt,
+                    heightPt: frames.page.heightPt,
+                  }, writingMode);
+                  return projectPhysicalAnchorResult(
+                    result,
+                    physicalToLogicalMatrix(writingMode, physicalPage),
+                  );
+                })()
+              : result;
+            const wrapBounds = retainedResult.geometry.wrapBounds;
+            if (wrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
               return [];
             }
-            const polygon = result.geometry.wrap.polygon?.points ?? Object.freeze([
+            const polygon = retainedResult.geometry.wrap.polygon?.points ?? Object.freeze([
               Object.freeze({ xPt: wrapBounds.xPt, yPt: wrapBounds.yPt }),
               Object.freeze({ xPt: wrapBounds.xPt + wrapBounds.widthPt, yPt: wrapBounds.yPt }),
               Object.freeze({
@@ -2016,11 +2047,11 @@ function buildConcreteBodyLayoutKernel(
               kind: 'shape' as const,
               occurrenceId: anchor.occurrenceId,
               paragraphId: paragraphIdFor(anchor.paragraphSource),
-              bounds: result.geometry.objectFrame,
+              bounds: retainedResult.geometry.objectFrame,
               exclusionBounds: wrapBounds,
-              wrap: result.geometry.wrap.kind,
-              wrapSide: result.geometry.wrap.side,
-              wrapDistances: result.geometry.wrap.distances,
+              wrap: retainedResult.geometry.wrap.kind,
+              wrapSide: retainedResult.geometry.wrap.side,
+              wrapDistances: retainedResult.geometry.wrap.distances,
               wrapPolygon: Object.freeze([...polygon]),
             })];
           });
