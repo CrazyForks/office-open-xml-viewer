@@ -13,15 +13,30 @@ class RecordingContext {
   save(): void { this.operations.push('save'); }
   restore(): void { this.operations.push('restore'); }
   drawImage(): void { this.operations.push('drawImage'); }
+  setTransform(): void { this.operations.push('setTransform'); }
+  clearRect(): void { this.operations.push('clearRect'); }
 }
 
 class ElementCanvas {
   width = 1;
   height = 1;
+  isConnected = false;
+  removeCalls = 0;
+  ownerDocument?: {
+    defaultView?: { HTMLCanvasElement: typeof ElementCanvas };
+  };
+  readonly attributes: Record<string, string> = {};
   readonly style: Record<string, string> = {};
   readonly context = new RecordingContext();
 
   getContext(): RecordingContext { return this.context; }
+  setAttribute(name: string, value: string): void {
+    this.attributes[name] = value;
+  }
+  remove(): void {
+    this.isConnected = false;
+    this.removeCalls += 1;
+  }
 }
 
 class WorkerCanvas {
@@ -80,6 +95,12 @@ describe('vertical OpenType paint target projection', () => {
         created.push(canvas);
         return canvas;
       },
+      body: {
+        appendChild(canvas: ElementCanvas) {
+          canvas.isConnected = true;
+          return canvas;
+        },
+      },
     });
     const target = new WorkerCanvas();
 
@@ -99,5 +120,163 @@ describe('vertical OpenType paint target projection', () => {
       width: created[0]!.width,
       height: created[0]!.height,
     });
+    expect(created[0]!.isConnected).toBe(false);
+    expect(created[0]!.removeCalls).toBe(1);
+    expect(created[0]!.attributes['aria-hidden']).toBe('true');
+  });
+
+  it('leaves a detached caller canvas detached and projects from a hidden attached surface', async () => {
+    const created: ElementCanvas[] = [];
+    vi.stubGlobal('HTMLCanvasElement', ElementCanvas);
+    vi.stubGlobal('document', {
+      createElement() {
+        const canvas = new ElementCanvas();
+        created.push(canvas);
+        return canvas;
+      },
+      body: {
+        appendChild(canvas: ElementCanvas) {
+          canvas.isConnected = true;
+          return canvas;
+        },
+      },
+    });
+    const target = new ElementCanvas();
+
+    await renderSelectedDocumentPage(layout, page, target as unknown as HTMLCanvasElement, {
+      dpr: 1, parseError: false, registry, textRuns: [],
+    });
+
+    expect(target.isConnected).toBe(false);
+    expect(target.context.operations).toEqual(['drawImage']);
+    expect(created).toHaveLength(1);
+    expect(created[0]!.context.operations).toContain('fillRect');
+    expect(created[0]!.isConnected).toBe(false);
+    expect(created[0]!.removeCalls).toBe(1);
+  });
+
+  it('paints directly into an already attached caller canvas without reparenting it', async () => {
+    const created: ElementCanvas[] = [];
+    vi.stubGlobal('HTMLCanvasElement', ElementCanvas);
+    vi.stubGlobal('document', {
+      createElement() {
+        const canvas = new ElementCanvas();
+        created.push(canvas);
+        return canvas;
+      },
+      body: {
+        appendChild(canvas: ElementCanvas) {
+          canvas.isConnected = true;
+          return canvas;
+        },
+      },
+    });
+    const target = new ElementCanvas();
+    target.isConnected = true;
+
+    await renderSelectedDocumentPage(layout, page, target as unknown as HTMLCanvasElement, {
+      dpr: 1, parseError: false, registry, textRuns: [],
+    });
+
+    expect(created).toEqual([]);
+    expect(target.isConnected).toBe(true);
+    expect(target.removeCalls).toBe(0);
+    expect(target.context.operations).toContain('fillRect');
+    expect(target.context.operations).not.toContain('drawImage');
+  });
+
+  it('removes the hidden attached surface when target projection fails', async () => {
+    const created: ElementCanvas[] = [];
+    vi.stubGlobal('HTMLCanvasElement', ElementCanvas);
+    vi.stubGlobal('document', {
+      createElement() {
+        const canvas = new ElementCanvas();
+        created.push(canvas);
+        return canvas;
+      },
+      body: {
+        appendChild(canvas: ElementCanvas) {
+          canvas.isConnected = true;
+          return canvas;
+        },
+      },
+    });
+    const target = {
+      width: 1,
+      height: 1,
+      getContext() { return null; },
+    };
+
+    await expect(renderSelectedDocumentPage(
+      layout,
+      page,
+      target as unknown as OffscreenCanvas,
+      { dpr: 1, parseError: false, registry, textRuns: [] },
+    )).rejects.toThrow('2D canvas is unavailable for DOCX paint projection');
+
+    expect(created).toHaveLength(1);
+    expect(created[0]!.isConnected).toBe(false);
+    expect(created[0]!.removeCalls).toBe(1);
+  });
+
+  it('creates the hidden paint surface in a detached caller canvas owner document', async () => {
+    class MainCanvas {}
+    class ForeignCanvas extends ElementCanvas {}
+    const created: ForeignCanvas[] = [];
+    const foreignDocument = {
+      defaultView: { HTMLCanvasElement: ForeignCanvas },
+      createElement() {
+        const canvas = new ForeignCanvas();
+        canvas.ownerDocument = foreignDocument;
+        created.push(canvas);
+        return canvas;
+      },
+      body: {
+        appendChild(canvas: ForeignCanvas) {
+          canvas.isConnected = true;
+          return canvas;
+        },
+      },
+    };
+    vi.stubGlobal('HTMLCanvasElement', MainCanvas);
+    vi.stubGlobal('document', {
+      createElement() {
+        throw new Error('global document must not own a foreign canvas staging surface');
+      },
+      body: {
+        appendChild() {
+          throw new Error('global document must not receive a foreign canvas staging surface');
+        },
+      },
+    });
+    const target = new ForeignCanvas();
+    target.ownerDocument = foreignDocument;
+
+    await renderSelectedDocumentPage(layout, page, target as unknown as HTMLCanvasElement, {
+      dpr: 1, parseError: false, registry, textRuns: [],
+    });
+
+    expect(created).toHaveLength(1);
+    expect(target.isConnected).toBe(false);
+    expect(target.context.operations).toEqual(['drawImage']);
+    expect(created[0]!.ownerDocument).toBe(foreignDocument);
+    expect(created[0]!.attributes['aria-hidden']).toBe('true');
+    expect(created[0]!.removeCalls).toBe(1);
+  });
+
+  it('does not require a document staging surface for parse-error fallback paint', async () => {
+    vi.stubGlobal('HTMLCanvasElement', undefined);
+    vi.stubGlobal('document', undefined);
+    const target = new WorkerCanvas();
+
+    await renderSelectedDocumentPage(
+      layout,
+      page,
+      target as unknown as OffscreenCanvas,
+      { dpr: 1, parseError: true, registry, textRuns: [] },
+    );
+
+    expect(target.context.operations).toContain('clearRect');
+    expect(target.context.operations).not.toContain('drawImage');
   });
 });
