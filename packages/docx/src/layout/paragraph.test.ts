@@ -1464,6 +1464,10 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     const segment = {
       text: value, sourceRunIndex: 0, measuredWidth: 50,
       fontSize: 10, fontFamily: 'Test Sans', fontRoute, verticalRun: true,
+      // A negative East Asian pitch narrows each retained cell. Upright/rotate
+      // glyphs are already positioned by those cell origins; only the
+      // contextual sideways pieces still need Canvas letter spacing.
+      fitTextPerGapPx: -6,
       shapedClusters: [...value].map((_character, index) => ({
         range: { start: index, end: index + 1 }, offsetPt: index * 10, advancePt: 10,
       })),
@@ -1513,22 +1517,26 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         expect.objectContaining({
           text: 'A', range: { start: 0, end: 1 }, glyphOrientation: 'sideways',
           offset: { xPt: 0, yPt: 0 }, glyphOffsetPt: { xPt: 0, yPt: 4 },
+          letterSpacingPt: -6,
         }),
         expect.objectContaining({
           text: '︵', range: { start: 1, end: 2 }, glyphOrientation: 'upright',
           offset: { xPt: 15, yPt: 0 }, glyphOffsetPt: { xPt: 0, yPt: -2 },
+          letterSpacingPt: 0,
         }),
         expect.objectContaining({
           text: 'ー', range: { start: 2, end: 3 }, glyphOrientation: 'rotate',
           offset: { xPt: 25, yPt: 0 },
+          letterSpacingPt: 0,
         }),
         expect.objectContaining({
           text: '）', range: { start: 3, end: 4 }, glyphOrientation: 'upright',
-          offset: { xPt: 35, yPt: 0 }, verticalFeature: true,
+          offset: { xPt: 35, yPt: 0 }, verticalFeature: true, letterSpacingPt: 0,
         }),
         expect.objectContaining({
           text: 'B', range: { start: 4, end: 5 }, glyphOrientation: 'sideways',
           offset: { xPt: 40, yPt: 0 }, glyphOffsetPt: { xPt: 0, yPt: 4 },
+          letterSpacingPt: -6,
         }),
       ],
     });

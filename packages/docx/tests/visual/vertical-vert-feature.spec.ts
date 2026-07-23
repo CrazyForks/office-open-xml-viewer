@@ -408,6 +408,130 @@ test('layer A: the document font keeps Word-adjudicated vertical relationships',
   }
 });
 
+test('negative vertical pitch changes cell advance without shifting punctuation across the column', async ({ page }) => {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  const result = await page.evaluate(async () => {
+    await document.fonts.ready;
+    const family = ['Yu Mincho', 'Hiragino Mincho ProN']
+      .find((candidate) => document.fonts.check(`48px "${candidate}"`));
+    if (!family) return null;
+
+    const { createLayoutServices } = await import('/src/layout-runtime.ts');
+    const { renderDocumentToCanvas } = await import('/src/renderer.ts');
+    const { selectDocumentLayoutPage } = await import('/src/layout/document-layout-variants.ts');
+    const canvas = document.querySelector('#subject') as HTMLCanvasElement;
+    const glyphs = [...'「」『』（）〔〕［］｛｝〈〉《》【】、。，．：；！？ー〜～…‥・'];
+
+    const makeModel = (text: string, charSpacing: number) => ({
+      section: {
+        pageWidth: 120, pageHeight: 120,
+        marginTop: 12, marginRight: 12, marginBottom: 12, marginLeft: 12,
+        headerDistance: 0, footerDistance: 0,
+        titlePage: false, evenAndOddHeaders: false, textDirection: 'tbRl',
+      },
+      body: [{
+        type: 'paragraph', alignment: 'left',
+        indentLeft: 0, indentRight: 0, indentFirst: 0,
+        spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+        numbering: null, tabStops: [],
+        runs: [{
+          type: 'text', text,
+          bold: false, italic: false, underline: false, strikethrough: false,
+          fontSize: 48, color: null,
+          fontFamily: family, fontFamilyEastAsia: family,
+          isLink: false, background: null, vertAlign: null, hyperlink: null,
+          charSpacing,
+        }],
+        defaultFontSize: 48, defaultFontFamily: family,
+        widowControl: false,
+      }],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    }) as never;
+
+    const render = async (text: string, charSpacing: number) => {
+      const model = makeModel(text, charSpacing);
+      const services = createLayoutServices(model);
+      await renderDocumentToCanvas(model, canvas, 0, {
+        dpr: 1, width: 120, layoutServices: services, defaultCurrentDateMs: 1,
+      });
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('2D context unavailable');
+      const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let inkSum = 0;
+      let weightedX = 0;
+      for (let y = 0; y < canvas.height; y += 1) {
+        for (let x = 0; x < canvas.width; x += 1) {
+          const offset = (y * canvas.width + x) * 4;
+          const alpha = rgba[offset + 3];
+          const ink = alpha * (765 - rgba[offset] - rgba[offset + 1] - rgba[offset + 2]) / 765;
+          if (ink === 0) continue;
+          inkSum += ink;
+          weightedX += x * ink;
+        }
+      }
+      if (inkSum === 0) throw new Error(`${text} produced no ink`);
+
+      const selection = selectDocumentLayoutPage(
+        services,
+        { defaultCurrentDateMs: 1 },
+        0,
+      );
+      const pending: unknown[] = [selection.page];
+      const seen = new Set<object>();
+      const retainedOps: { orientation: string; spacing: number }[] = [];
+      while (pending.length > 0) {
+        const value = pending.pop();
+        if (value === null || typeof value !== 'object' || seen.has(value)) continue;
+        seen.add(value);
+        const record = value as Record<string, unknown>;
+        if (
+          typeof record.glyphOrientation === 'string'
+          && typeof record.letterSpacingPt === 'number'
+        ) {
+          retainedOps.push({
+            orientation: record.glyphOrientation,
+            spacing: record.letterSpacingPt,
+          });
+        }
+        pending.push(...Object.values(record));
+      }
+      return { centroidX: weightedX / inkSum, retainedOps };
+    };
+
+    return Promise.all(glyphs.map(async (glyph) => {
+      const normal = await render(glyph, 0);
+      const compressed = await render(glyph, -6);
+      return {
+        glyph,
+        crossAxisDeltaPx: compressed.centroidX - normal.centroidX,
+        compressedOps: compressed.retainedOps,
+      };
+    }));
+  });
+
+  test.skip(result === null, 'a Japanese document font is required');
+  if (result === null) return;
+  for (const glyph of result) {
+    expect(
+      glyph.compressedOps.length,
+      `${glyph.glyph} has a retained vertical paint operation`,
+    ).toBeGreaterThan(0);
+    for (const operation of glyph.compressedOps) {
+      if (operation.orientation === 'sideways') continue;
+      expect(
+        operation.spacing,
+        `${glyph.glyph} retains upright/rotate pitch in cell geometry only`,
+      ).toBe(0);
+    }
+    expect(
+      Math.abs(glyph.crossAxisDeltaPx),
+      `${glyph.glyph} stays on the same vertical column under negative pitch`,
+    ).toBeLessThanOrEqual(1);
+  }
+});
+
 const VERT_REPERTOIRE = 'ー〜～、。「」（）：；！';
 for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
   test(`layer A/B: ${family} reachable glyphs reproduce the font own vert design`, async ({ page }) => {
