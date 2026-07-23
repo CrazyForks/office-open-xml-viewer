@@ -48,9 +48,9 @@
 // resolved against the physical page then projected into the logical flow
 // (PDF-verified centroid); inline/anchored/float image uprighting; and the
 // vertical text-layer transform. Still approximated / deferred (flagged inline):
-// the `0.12em` upright-centring nudge and the Tu upper-right corner nudge are
-// font-dependent stage-1 heuristics; paragraph-relative vertical anchors are a
-// follow-up. `btLr` shares the +90° page FRAME but bypasses this module's
+// the U+FF0E Tu upper-right corner fallback is a font-dependent heuristic;
+// paragraph-relative vertical anchors are a follow-up. `btLr` shares the +90°
+// page FRAME but bypasses this module's
 // upright/substitute glyph handling entirely (issue #988 re-adjudication: every
 // glyph rides the page rotation — see BodyAcquisitionState.verticalAllRotated).
 
