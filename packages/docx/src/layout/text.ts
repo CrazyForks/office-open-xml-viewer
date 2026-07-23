@@ -535,6 +535,14 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     measurementCache.set(key, snapshot);
     return snapshot;
   };
+  // Contextual cluster geometry measures every grapheme prefix of a script
+  // span. Those prefixes are useful only while deriving this shape result:
+  // retaining their text-bearing keys for the document lifetime would consume
+  // quadratic space for one long run. The per-shape prefixAdvances map below
+  // already deduplicates shared cluster edges within the acquisition.
+  const measureContextualPrefixAdvance = (
+    request: Readonly<GlyphMeasureRequest>,
+  ): number => input.measurer.measure(request).advancePt;
   const shapeCache = new Map<string, TextShapeResult>();
   return Object.freeze({
     fingerprint,
@@ -676,7 +684,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
                   continue;
                 }
                 if (boundary <= span.start) break;
-                advancePt += measureGlyph({
+                advancePt += measureContextualPrefixAdvance({
                   text: span.text.slice(0, boundary - span.start),
                   fontRoute: span.fontRoute,
                   fontSizePt: request.fontSizePt,
@@ -684,7 +692,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
                   style: span.font.style,
                   letterSpacingPt: request.letterSpacingPt ?? 0,
                   kerning: request.kerning,
-                }).advancePt;
+                });
                 break;
               }
               // One boundary is the trailing edge of one cluster and the leading
