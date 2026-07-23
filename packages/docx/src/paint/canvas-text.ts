@@ -461,6 +461,7 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
   const storyContext: CanvasPaintContext = {
     ...context,
     pointToCss,
+    ...(node.defaultTextColor ? { defaultTextColor: node.defaultTextColor } : {}),
     ...(node.verticalMode ? { textBoxVerticalMode: node.verticalMode } : {}),
   };
   transformFrame(() => {

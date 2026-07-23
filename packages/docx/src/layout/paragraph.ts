@@ -3239,6 +3239,9 @@ export function acquireShapeTextBoxLayout(
   return deepFreezePlainData({
     kind: 'textbox', id: options.id, source: normalized[0]?.source ?? storySource,
     flowDomainId: `${options.flowDomainId}:textbox`, flowBounds: effectiveRect, inkBounds: effectiveRect,
+    ...(shape.defaultTextColor ? {
+      defaultTextColor: `#${shape.defaultTextColor.replace(/^#/u, '')}`,
+    } : {}),
     ...(shape.textAutofit === 'none' ? { clipBounds: effectiveInnerBounds } : {}),
     advancePt: 0, ordinaryFlow: false, story,
     transform: verticalMode ? {

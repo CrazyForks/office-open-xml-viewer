@@ -807,6 +807,8 @@ export interface ResolvedFloatingTablePlacementLayout {
 export interface TextBoxLayout extends LayoutNodeBase {
   readonly kind: 'textbox';
   readonly story: StoryLayout;
+  /** DrawingML fontRef color inherited by runs without an explicit w:color. */
+  readonly defaultTextColor?: string;
   /** Acquisition-local story coordinates to the containing page/shape frame. */
   readonly transform: Matrix2DData;
   readonly writingMode: WritingMode;

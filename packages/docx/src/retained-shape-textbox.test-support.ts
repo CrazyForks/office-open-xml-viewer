@@ -168,8 +168,7 @@ export function acquireAndPaintShapeTextBox(
   });
   paintTextBoxLayout(layout, {
     ctx: viewportContext, scale, dpr: 1,
-    defaultTextColor: shape.defaultTextColor
-      ? `#${shape.defaultTextColor}` : '#000000',
+    defaultTextColor: '#000000',
     resources: {
       paint(resourceKey, kind, bounds, paintContext) {
         if (kind !== 'image') return;
