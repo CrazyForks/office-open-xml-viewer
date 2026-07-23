@@ -1,13 +1,61 @@
 import type {
+  LayoutRect,
   ParagraphLayout,
   ResolvedFloatingTablePlacementLayout,
   TableLayout,
 } from '../layout/types.js';
-import { composeAffine, scaleAffine, translationAffine } from './affine.js';
+import {
+  composeAffine,
+  inverseMapAffinePoint,
+  mapAffinePoint,
+  scaleAffine,
+  translationAffine,
+} from './affine.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import { paintParagraphLayout } from './canvas-text.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
 import type { CanvasPaintContext } from './types.js';
+
+function outwardRasterClipBounds(
+  bounds: LayoutRect,
+  context: CanvasPaintContext,
+): LayoutRect {
+  const pointToCss = context.pointToCss ?? scaleAffine(context.scale);
+  // A rotated/skewed clip is a polygon in device space; expanding its
+  // axis-aligned bounding box and mapping that box back would change the clip
+  // shape. Retain the exact authored rectangle for those uncommon transforms.
+  if (pointToCss.b !== 0 || pointToCss.c !== 0) return bounds;
+  const corners = [
+    { xPt: bounds.xPt, yPt: bounds.yPt },
+    { xPt: bounds.xPt + bounds.widthPt, yPt: bounds.yPt },
+    { xPt: bounds.xPt, yPt: bounds.yPt + bounds.heightPt },
+    { xPt: bounds.xPt + bounds.widthPt, yPt: bounds.yPt + bounds.heightPt },
+  ].map((point) => mapAffinePoint(pointToCss, point));
+  const cssXs = corners.map((point) => point.xPt);
+  const cssYs = corners.map((point) => point.yPt);
+  const leftCss = Math.floor(Math.min(...cssXs) * context.dpr) / context.dpr;
+  const topCss = Math.floor(Math.min(...cssYs) * context.dpr) / context.dpr;
+  const rightCss = Math.ceil(Math.max(...cssXs) * context.dpr) / context.dpr;
+  const bottomCss = Math.ceil(Math.max(...cssYs) * context.dpr) / context.dpr;
+  const localCorners = [
+    { xPt: leftCss, yPt: topCss },
+    { xPt: rightCss, yPt: topCss },
+    { xPt: leftCss, yPt: bottomCss },
+    { xPt: rightCss, yPt: bottomCss },
+  ].map((point) => inverseMapAffinePoint(pointToCss, point));
+  if (localCorners.some((point) => point === null)) return bounds;
+  const local = localCorners.filter(
+    (point): point is Readonly<{ xPt: number; yPt: number }> => point !== null,
+  );
+  const xs = local.map((point) => point.xPt);
+  const ys = local.map((point) => point.yPt);
+  return {
+    xPt: Math.min(...xs),
+    yPt: Math.min(...ys),
+    widthPt: Math.max(...xs) - Math.min(...xs),
+    heightPt: Math.max(...ys) - Math.min(...ys),
+  };
+}
 
 function paintPlacedChild(
   layout: ParagraphLayout | TableLayout,
@@ -76,7 +124,11 @@ function paintTableContents(
         paintBlocks(context);
         continue;
       }
-      const clipBounds = cell.clipBounds;
+      // Exact-height cell content remains clipped, but the raster clip must
+      // include every device pixel touched by its retained boundary. A
+      // fractional viewport scale otherwise cuts off nested table hairlines
+      // that lie exactly on the cell's top/left/right edge.
+      const clipBounds = outwardRasterClipBounds(cell.clipBounds, context);
       const frame = canvasPaintFrame(context.ctx, () => {
         context.ctx.beginPath();
         context.ctx.rect(
@@ -91,7 +143,13 @@ function paintTableContents(
     }
   }
   paintResolvedFloatingTablePlacements(floatingTables, context);
-  for (const border of node.borders) paintStrokeSegment(border, context);
+  // Word preserves authored table-border geometry, but rasterizes a subpixel
+  // hairline with at least one device pixel of coverage. Keep that distinction
+  // in paint so layout/conflict resolution continues to use the OOXML width.
+  const minimumCssWidthPx = 1 / context.dpr;
+  for (const border of node.borders) {
+    paintStrokeSegment(border, context, minimumCssWidthPx);
+  }
 }
 
 /** Paint stored table geometry. No inheritance, sizing, shaping, or conflict resolution occurs here. */
