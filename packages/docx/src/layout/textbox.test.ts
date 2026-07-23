@@ -172,6 +172,7 @@ function anchoredTextBox(
       environment: {
         pageIndex: 0,
         totalPages: 1,
+        pageWritingMode: 'horizontal-tb',
         documentHasEastAsianText: false,
       },
       input: {
@@ -333,6 +334,7 @@ describe('rich text-box story acquisition', () => {
         environment: {
           pageIndex: 0,
           totalPages: 1,
+          pageWritingMode: 'horizontal-tb',
           documentHasEastAsianText: false,
         },
         input: {
@@ -439,6 +441,7 @@ describe('rich text-box story acquisition', () => {
         environment: {
           pageIndex: 0,
           totalPages: 1,
+          pageWritingMode: 'horizontal-tb',
           documentHasEastAsianText: false,
         },
         input: {

@@ -90,6 +90,7 @@ describe('layout measurement environment', () => {
       noteNumbers: new Map(),
       verticalCJK: true,
       verticalAllRotated: true,
+      sectionLayout: { textDirection: 'btLr' },
       docEastAsian: true,
       layoutSettings: {
         characterSpacingControl: 'compressPunctuation',
@@ -107,6 +108,7 @@ describe('layout measurement environment', () => {
       pageIndex: 2,
       totalPages: 4,
       verticalCJK: false,
+      pageWritingMode: 'vertical-rl',
       documentHasEastAsianText: true,
       useFeLayout: true,
     });

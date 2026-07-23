@@ -69,6 +69,7 @@ function projectMeasuredSegment(
     measurer: {} as never,
     environment: {
       documentHasEastAsianText: false, layoutServices, verticalGlyphMeasurement,
+      pageWritingMode: verticalPageFrame ? 'vertical-rl' : 'horizontal-tb',
       verticalPageFrame,
     } as never,
     exclusions: [],
@@ -1261,6 +1262,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       { context: measureContext, fontFamilyClasses: {} },
       {
         pageIndex: 0, totalPages: 1, documentHasEastAsianText: true,
+        pageWritingMode: 'horizontal-tb',
         layoutServices: services,
       },
     );
@@ -1270,6 +1272,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       measurer: { context: measureContext, fontFamilyClasses: {} },
       environment: {
         pageIndex: 0, totalPages: 1, documentHasEastAsianText: true,
+        pageWritingMode: 'horizontal-tb',
         layoutServices: services,
       },
       exclusions: [],
@@ -1291,14 +1294,20 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         maximumYPt: 500, suppressSpaceBefore: false,
       },
       { context: measureContext, fontFamilyClasses: {} },
-      { pageIndex: 0, totalPages: 1, documentHasEastAsianText: false },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: false,
+      },
     );
 
     expect(() => paragraphLayoutFromMeasurement(paragraph as never, {
       id: 'missing-clusters', source, flowDomainId: 'body', ordinaryFlow: true,
       context: acquisitionContext, placement: measured.placement,
       measurer: { context: measureContext, fontFamilyClasses: {} },
-      environment: { pageIndex: 0, totalPages: 1, documentHasEastAsianText: false },
+      environment: {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: false,
+      },
       exclusions: [],
     }, measured)).toThrow(/authoritative grapheme clusters/i);
   });

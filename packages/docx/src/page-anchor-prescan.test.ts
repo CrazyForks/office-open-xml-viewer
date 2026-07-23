@@ -440,6 +440,8 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
     });
     const earlier = sourceParagraphs(layout, 0)[0]!;
     const controlEarlier = sourceParagraphs(control, 0)[0]!;
+    const owner = sourceParagraphs(layout, 1)[0]!;
+    const drawing = owner.drawings[0]!;
 
     // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: wp:positionH/V and
     // wp:extent resolve in the upright physical 300×200 page. Retained vertical
@@ -452,6 +454,9 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
         bounds: { xPt: 50, yPt: 0, widthPt: 30, heightPt: 80 },
       }),
     ]);
+    expect(drawing.flowBounds).toEqual({ xPt: 50, yPt: 0, widthPt: 30, heightPt: 80 });
+    expect(drawing.transform).toEqual({ a: 0, b: -1, c: 1, d: 0, e: 65, f: 40 });
+    expect(owner.exclusions[0]?.bounds).toEqual(drawing.flowBounds);
     expect(earlier.lines.length).toBeGreaterThan(controlEarlier.lines.length);
   });
 
@@ -478,6 +483,8 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
       textDirection: 'tbLrV',
     });
     const earlier = sourceParagraphs(layout, 0)[0]!;
+    const owner = sourceParagraphs(layout, 1)[0]!;
+    const drawing = owner.drawings[0]!;
 
     // ECMA-376 Part 4 §14.11.7 makes tbLrV semantically equivalent to lrV.
     // Its physical-to-logical mapping is (x, y) -> (y, x), so the physical
@@ -488,6 +495,9 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
         bounds: { xPt: 50, yPt: 220, widthPt: 30, heightPt: 80 },
       }),
     ]);
+    expect(drawing.flowBounds).toEqual({ xPt: 50, yPt: 220, widthPt: 30, heightPt: 80 });
+    expect(drawing.transform).toEqual({ a: 0, b: 1, c: 1, d: 0, e: 65, f: 260 });
+    expect(owner.exclusions[0]?.bounds).toEqual(drawing.flowBounds);
   });
 
   it('projects tbLrV prescan edges and polygons through the same affine transform', () => {

@@ -103,11 +103,13 @@ import {
   type BodyFrameGroup,
 } from './frame.js';
 import {
-  physicalToLogicalMatrix,
+  createSectionRegionCoordinateSpace,
   transformPoint,
   transformRect,
   transformRectEdges,
+  uprightPhysicalExtent,
 } from './coordinate-space.js';
+import { inverseMapAffinePoint } from './affine.js';
 export {
   bodyFrameGroupFor,
   bodyParagraphBorderEdgesFor,
@@ -2229,25 +2231,19 @@ function resizeDerivedAnchorRect(
   };
 }
 
-/** Project an upright physical anchor rectangle into the section-logical frame
- * whose retained page transform is `physical = (pageWidth - logical.y, logical.x)`.
- * The projected box is the single authority for wrap, collision, and paint. */
-function projectPhysicalAnchorRect(rect: LayoutRect, physicalPageWidthPt: number): LayoutRect {
+/** Keep DrawingML commands in an upright physical, drawing-local frame and map
+ * them into the logical page with the section coordinate space's canonical
+ * inverse around the anchor's retained centre. Shape geometry and owned text
+ * then share one orientation for both vertical-rl and vertical-lr sections. */
+function uprightPhysicalDrawingTransform(
+  rect: LayoutRect,
+  physicalToLogical: Matrix2DData,
+): Matrix2DData {
   return {
-    xPt: rect.yPt,
-    yPt: physicalPageWidthPt - rect.xPt - rect.widthPt,
-    widthPt: rect.heightPt,
-    heightPt: rect.widthPt,
-  };
-}
-
-/** A vertical page paints section-logical points with a +90° quarter turn.
- * Keep DrawingML commands in an upright physical, drawing-local frame and map
- * them into the logical page with the exact inverse turn around the anchor's
- * retained centre. Shape geometry and owned text then share one orientation. */
-function uprightPhysicalDrawingTransform(rect: LayoutRect): import('./types.js').Matrix2DData {
-  return {
-    a: 0, b: -1, c: 1, d: 0,
+    a: physicalToLogical.a,
+    b: physicalToLogical.b,
+    c: physicalToLogical.c,
+    d: physicalToLogical.d,
     e: rect.xPt + rect.widthPt / 2,
     f: rect.yPt + rect.heightPt / 2,
   };
@@ -2255,30 +2251,42 @@ function uprightPhysicalDrawingTransform(rect: LayoutRect): import('./types.js')
 
 function logicalRectToUprightDrawingLocal(
   rect: LayoutRect,
-  transform: import('./types.js').Matrix2DData,
+  transform: Matrix2DData,
 ): LayoutRect {
-  const centerXPt = rect.xPt + rect.widthPt / 2;
-  const centerYPt = rect.yPt + rect.heightPt / 2;
-  const widthPt = rect.heightPt;
-  const heightPt = rect.widthPt;
+  const corners = [
+    inverseMapAffinePoint(transform, rect),
+    inverseMapAffinePoint(transform, {
+      xPt: rect.xPt + rect.widthPt,
+      yPt: rect.yPt,
+    }),
+    inverseMapAffinePoint(transform, {
+      xPt: rect.xPt,
+      yPt: rect.yPt + rect.heightPt,
+    }),
+    inverseMapAffinePoint(transform, {
+      xPt: rect.xPt + rect.widthPt,
+      yPt: rect.yPt + rect.heightPt,
+    }),
+  ];
+  if (corners.some((point) => point === null)) {
+    throw new Error('Upright drawing transform must be invertible');
+  }
+  const points = corners as readonly import('./types.js').PointPt[];
+  const xPt = Math.min(...points.map((point) => point.xPt));
+  const yPt = Math.min(...points.map((point) => point.yPt));
   return {
-    xPt: transform.f - centerYPt - widthPt / 2,
-    yPt: centerXPt - transform.e - heightPt / 2,
-    widthPt,
-    heightPt,
+    xPt,
+    yPt,
+    widthPt: Math.max(...points.map((point) => point.xPt)) - xPt,
+    heightPt: Math.max(...points.map((point) => point.yPt)) - yPt,
   };
 }
 
 function uprightDrawingLocalRectToLogical(
   rect: LayoutRect,
-  transform: import('./types.js').Matrix2DData,
+  transform: Matrix2DData,
 ): LayoutRect {
-  return {
-    xPt: transform.e + rect.yPt,
-    yPt: transform.f - rect.xPt - rect.widthPt,
-    widthPt: rect.heightPt,
-    heightPt: rect.widthPt,
-  };
+  return transformRect(transform, rect);
 }
 
 /** Project a complete upright DrawingML anchor result into section-logical
@@ -2384,7 +2392,10 @@ function resizeResolvedAnchorGeometry(
 function retainedAnchorChildFrame(
   acquisition: NonNullable<AnchoredPayloadRun['anchorAcquisitionInput']>,
   outerFrame: LayoutRect,
-  physicalPageWidthPt?: number,
+  coordinateSpace?: Readonly<{
+    physicalToLogical: Matrix2DData;
+    logicalToPhysical: Matrix2DData;
+  }>,
 ): LayoutRect {
   const child = acquisition.group?.resolvedChildFrame;
   if (!child) return outerFrame;
@@ -2400,12 +2411,9 @@ function retainedAnchorChildFrame(
   ) {
     throw new Error('resolved grouped anchor requires its authored wp:extent');
   }
-  const physicalOuter = physicalPageWidthPt === undefined ? outerFrame : {
-    xPt: physicalPageWidthPt - outerFrame.yPt - outerFrame.heightPt,
-    yPt: outerFrame.xPt,
-    widthPt: outerFrame.heightPt,
-    heightPt: outerFrame.widthPt,
-  };
+  const physicalOuter = coordinateSpace === undefined
+    ? outerFrame
+    : transformRect(coordinateSpace.logicalToPhysical, outerFrame);
   const scaleX = physicalOuter.widthPt / authoredWidthPt;
   const scaleY = physicalOuter.heightPt / authoredHeightPt;
   const physicalChild = {
@@ -2414,9 +2422,9 @@ function retainedAnchorChildFrame(
     widthPt: child.widthPt * scaleX,
     heightPt: child.heightPt * scaleY,
   };
-  return physicalPageWidthPt === undefined
+  return coordinateSpace === undefined
     ? physicalChild
-    : projectPhysicalAnchorRect(physicalChild, physicalPageWidthPt);
+    : transformRect(coordinateSpace.physicalToLogical, physicalChild);
 }
 
 function anchorAxisOwnership(
@@ -2523,17 +2531,19 @@ function acquireAnchorOccurrence(
   // upright physical drawing layer. Retained body flow is section-logical, so
   // project the complete resolved geometry once before wrap/collision/paint use.
   const physicalPage = options.environment.verticalPageFrame && baseFrames?.page
-    ? {
-        widthPt: baseFrames.page.heightPt,
-        heightPt: baseFrames.page.widthPt,
-      }
+    ? uprightPhysicalExtent(baseFrames.page, options.environment.pageWritingMode)
     : undefined;
-  const physicalPageWidthPt = physicalPage?.widthPt;
+  const coordinateSpace = physicalPage === undefined
+    ? undefined
+    : createSectionRegionCoordinateSpace(
+        options.environment.pageWritingMode,
+        physicalPage,
+      );
   const result = physicalPage === undefined
     ? acquiredResult
     : projectPhysicalAnchorResult(
         acquiredResult,
-        physicalToLogicalMatrix('vertical-rl', physicalPage),
+        coordinateSpace!.physicalToLogical,
       );
   if (
     behavior.behindDocStatus !== 'valid'
@@ -2546,7 +2556,7 @@ function acquireAnchorOccurrence(
   const authoredRect = result.geometry.objectFrame;
   let uprightTransform = physicalPage === undefined
     ? undefined
-    : uprightPhysicalDrawingTransform(authoredRect);
+    : uprightPhysicalDrawingTransform(authoredRect, coordinateSpace!.physicalToLogical);
   const uprightEnvironment = uprightTransform ? {
     ...options.environment,
     // The section quarter turn is cancelled by the drawing frame. Text-box
@@ -2683,7 +2693,7 @@ function acquireAnchorOccurrence(
   for (const { run, runIndex } of ordered) {
     const source = runSource(options.source, runIndex);
     const acquisition = run.anchorAcquisitionInput as NonNullable<typeof run.anchorAcquisitionInput>;
-    const commandRect = retainedAnchorChildFrame(acquisition, rect, physicalPageWidthPt);
+    const commandRect = retainedAnchorChildFrame(acquisition, rect, coordinateSpace);
     const paintRect = uprightTransform
       ? logicalRectToUprightDrawingLocal(commandRect, uprightTransform)
       : commandRect;
@@ -3553,6 +3563,7 @@ export function paragraphAcquisitionCacheKey(
           .sort(([left], [right]) => left.localeCompare(right))
         : null,
       environment.noteReferenceNumber ?? null,
+      environment.pageWritingMode,
       environment.verticalCJK ?? null,
       environment.verticalPageFrame ?? null,
       environment.documentHasEastAsianText,

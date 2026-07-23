@@ -44,6 +44,7 @@ const environment = (
 ): ParagraphMeasurementEnvironment => ({
   pageIndex: 0,
   totalPages: 1,
+  pageWritingMode: 'horizontal-tb',
   documentHasEastAsianText: false,
   ...overrides,
 });
