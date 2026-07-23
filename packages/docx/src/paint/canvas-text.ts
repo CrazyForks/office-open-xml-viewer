@@ -458,10 +458,14 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
     );
     context.ctx.clip();
   }) : null;
+  const documentDefaultTextColor = context.documentDefaultTextColor
+    ?? context.defaultTextColor
+    ?? '#000000';
   const storyContext: CanvasPaintContext = {
     ...context,
     pointToCss,
-    ...(node.defaultTextColor ? { defaultTextColor: node.defaultTextColor } : {}),
+    documentDefaultTextColor,
+    defaultTextColor: node.defaultTextColor ?? documentDefaultTextColor,
     ...(node.verticalMode ? { textBoxVerticalMode: node.verticalMode } : {}),
   };
   transformFrame(() => {

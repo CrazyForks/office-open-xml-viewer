@@ -42,6 +42,83 @@ function node(): ParagraphLayout {
 }
 
 describe('paintParagraphLayout', () => {
+  it('resets an unthemed nested text box to the document default text color', () => {
+    const fills: Array<readonly [string, string]> = [];
+    let fillStyle = '';
+    const ctx = {
+      globalAlpha: 1,
+      get fillStyle() { return fillStyle; },
+      set fillStyle(value: string | CanvasGradient | CanvasPattern) { fillStyle = String(value); },
+      strokeStyle: '', lineWidth: 1, font: '', textAlign: 'left',
+      textBaseline: 'alphabetic', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto',
+      save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, transform() {},
+      setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {}, rect() {}, clip() {},
+      moveTo() {}, lineTo() {}, stroke() {}, fill() {}, drawImage() {},
+      fillText(text: string) { fills.push([text, fillStyle]); },
+    } as unknown as CanvasRenderingContext2D;
+    const defaultColorParagraph = (text: string, textBoxes: readonly TextBoxLayout[] = []): ParagraphLayout => {
+      const paragraph = node();
+      const line = paragraph.lines[0]!;
+      const placement = line.placements[0]!;
+      if (placement.kind !== 'text') throw new Error('Expected text placement');
+      return {
+        ...paragraph,
+        id: `p-${text}`,
+        lines: [{
+          ...line,
+          placements: [{
+            ...placement,
+            text,
+            paintOps: [{ ...placement.paintOps[0]!, text }],
+            color: { kind: 'default' },
+          }],
+        }],
+        textBoxes,
+      };
+    };
+    const textBox = (
+      id: string,
+      paragraph: ParagraphLayout,
+      defaultTextColor?: string,
+    ): TextBoxLayout => ({
+      kind: 'textbox',
+      id,
+      source: { story: 'textbox', storyInstance: id, path: [] },
+      flowDomainId: `textbox:${id}`,
+      ordinaryFlow: false,
+      flowBounds: paragraph.flowBounds,
+      inkBounds: paragraph.inkBounds,
+      advancePt: 0,
+      story: {
+        story: 'textbox',
+        flowBounds: paragraph.flowBounds,
+        inkBounds: paragraph.inkBounds,
+        blocks: [paragraph],
+        advancePt: paragraph.advancePt,
+        diagnostics: [],
+      },
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      writingMode: 'horizontal-tb',
+      insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      ...(defaultTextColor ? { defaultTextColor } : {}),
+    });
+    const inner = textBox('inner', defaultColorParagraph('INNR'));
+    const outer = textBox('outer', defaultColorParagraph('OUTR', [inner]), '#aa0000');
+
+    paintPlacedTextBoxLayout(outer, {
+      ctx,
+      scale: 1,
+      dpr: 1,
+      resources: noPaintResources,
+      defaultTextColor: '#123456',
+    });
+
+    expect(fills).toEqual([
+      ['OUTR', '#aa0000'],
+      ['INNR', '#123456'],
+    ]);
+  });
+
   it('paints retained table blocks inside a text-box story', () => {
     const texts: string[] = [];
     const ctx = {

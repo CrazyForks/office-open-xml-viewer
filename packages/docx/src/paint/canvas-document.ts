@@ -141,6 +141,7 @@ export async function renderSelectedDocumentPage<TTextRun>(
         scale,
         dpr: effectiveDpr,
         resources,
+        documentDefaultTextColor: options.defaultTextColor ?? '#000000',
         defaultTextColor: options.defaultTextColor ?? '#000000',
         showTrackChanges: options.showTrackChanges ?? true,
       });
