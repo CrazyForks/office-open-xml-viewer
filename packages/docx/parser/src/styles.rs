@@ -677,6 +677,23 @@ impl StyleMap {
         self.resolve_para_cond(style_id, table_style_id, None)
     }
 
+    /// Resolve only the named/default paragraph-style chain, without document
+    /// defaults or table-style layers. Callers that combine numbering paragraph
+    /// properties need this provenance because §17.7.2 places style-origin
+    /// numbering below the paragraph style, while direct `numPr` and its
+    /// associated properties are applied in the final direct-formatting layer.
+    pub(crate) fn resolve_paragraph_style_layer(&self, style_id: Option<&str>) -> ParaFmt {
+        let mut paragraph = ParaFmt::default();
+        let mut run = RunFmt::default();
+        let effective_id = style_id
+            .map(str::to_string)
+            .or_else(|| self.default_para_style_id.clone());
+        if let Some(id) = effective_id.as_deref() {
+            self.apply_style_chain(id, &mut paragraph, &mut run);
+        }
+        paragraph
+    }
+
     /// Like [`resolve_para`], but additionally layers a table style's resolved
     /// conditional formatting (`w:tblStylePr`'s `<w:rPr>`/`<w:pPr>`, §17.7.6)
     /// onto the cell's base formatting.

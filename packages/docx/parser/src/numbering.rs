@@ -27,6 +27,10 @@ pub struct LevelDef {
     pub format: String,   // "decimal" | "bullet" | etc.
     pub text: String,     // lvlText val, e.g. "%1." or "•"
     pub indent_left: f64, // pt — w:ind@left ≡ logical START indent (§17.3.1.12)
+    /// Whether `indent_left` came from this level's authored `w:ind@left`.
+    /// False means the value is only the legacy depth fallback used when no
+    /// lower style layer supplies an indent.
+    pub indent_left_authored: bool,
     /// pt — w:ind@right ≡ logical END indent (Part 4 §14.11.2). RTL list levels
     /// carry their indent here (the renderer maps it to the physical left side).
     pub indent_right: Option<f64>,
@@ -34,6 +38,8 @@ pub struct LevelDef {
     /// marker hangs left of the body), `w:firstLine` ⇒ positive (an additional
     /// first-line indent). Mirrors how `styles.rs` stores a direct `w:ind`.
     pub indent_first: f64,
+    /// Whether `indent_first` came from authored `w:hanging` / `w:firstLine`.
+    pub indent_first_authored: bool,
     /// pt — POSITIVE magnitude of the first-line indent (= `indent_first.abs()`).
     /// Distinct from `indent_first` because the renderer uses it as the marker's
     /// tab-advance distance (§17.9.6 + §17.3.1.38, suff=tab), which is unsigned.
@@ -99,8 +105,10 @@ impl Default for LevelDef {
             format: "decimal".to_string(),
             text: "%1.".to_string(),
             indent_left: 36.0,
+            indent_left_authored: false,
             indent_right: None,
             indent_first: -36.0,
+            indent_first_authored: false,
             tab: 36.0,
             suff: "tab".to_string(),
             lvl_jc: "left".to_string(),
@@ -185,6 +193,7 @@ fn parse_level_def(
     // start indent from this source" (an RTL level carries its
     // indent in @right ≡ end instead); the per-level depth default
     // applies only when no w:ind exists at all.
+    let indent_left_authored = ind_node.and_then(|i| attr_w(i, "left")).is_some();
     let indent_left = ind_node
         .and_then(|i| attr_w(i, "left"))
         .map(|v| twips_to_pt(&v))
@@ -202,6 +211,8 @@ fn parse_level_def(
     // same precedence `styles.rs` applies to a direct `w:ind`. Keep the
     // SIGN in `indent_first`; `tab` keeps the positive magnitude for the
     // marker's tab-advance.
+    let indent_first_authored = ind_node
+        .is_some_and(|i| attr_w(i, "hanging").is_some() || attr_w(i, "firstLine").is_some());
     let indent_first = ind_node
         .and_then(|i| {
             attr_w(i, "hanging")
@@ -237,8 +248,10 @@ fn parse_level_def(
         format,
         text,
         indent_left,
+        indent_left_authored,
         indent_right,
         indent_first,
+        indent_first_authored,
         tab,
         suff,
         lvl_jc,

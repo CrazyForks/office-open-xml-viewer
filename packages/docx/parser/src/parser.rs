@@ -3452,9 +3452,11 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     // Resolve base formatting from style (incl. table-style conditional rPr/pPr).
     let (mut base_para, base_run) =
         style_map.resolve_para_cond(explicit_style_id.as_deref(), table_style_id, cond);
-    let style_indent_left = base_para.indent_left;
-    let style_indent_first = base_para.indent_first;
-    let style_indent_right = base_para.indent_right;
+    let paragraph_style = style_map.resolve_paragraph_style_layer(explicit_style_id.as_deref());
+    let style_indent_left = paragraph_style.indent_left;
+    let style_indent_first = paragraph_style.indent_first;
+    let style_indent_right = paragraph_style.indent_right;
+    let direct_numbering = ppr_node.and_then(|ppr| child_w(ppr, "numPr")).is_some();
 
     // Apply direct paragraph formatting overrides.
     //
@@ -3637,24 +3639,47 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         .as_ref()
         .and_then(|num| num_map.get_level(num.num_id, num.level));
 
-    // Indent precedence (ECMA-376 §17.7.2 style hierarchy + §17.9.22): the
-    // paragraph's own DIRECT `w:ind` overrides its resolved paragraph STYLE,
-    // which overrides the numbering level's `pPr/ind`. The merge is
-    // per-attribute (§17.3.1.12), so an omitted axis falls through independently.
-    // This matters when a paragraph style associates numbering and also authors
-    // a different hanging band: Word retains the style's band rather than
-    // replacing it with the abstract level's defaults.
+    // Indent precedence (ECMA-376 §17.7.2 style hierarchy + §§17.7.8.1,
+    // 17.9.22) depends on where numPr originated. Style-origin numbering is
+    // applied before the paragraph style; direct numPr and its associated level
+    // properties are part of the final direct-formatting layer. Direct w:ind is
+    // always last. Resolve each axis independently.
+    //
+    // The numbering parser retains a legacy depth fallback for levels without
+    // authored w:ind. That non-normative fallback is used only after every real
+    // style layer, so it cannot overwrite document/table/paragraph formatting.
     // When no level resolves, a de-listed paragraph (numId=0) keeps only its direct
     // ind and a plain paragraph keeps its style/direct (base) ind.
     let (indent_left, indent_first) = if let Some(l) = level {
-        (
-            direct_indent_left
-                .or(style_indent_left)
-                .unwrap_or(l.indent_left),
-            direct_indent_first
-                .or(style_indent_first)
-                .unwrap_or(l.indent_first),
-        )
+        let level_left = l.indent_left_authored.then_some(l.indent_left);
+        let level_first = l.indent_first_authored.then_some(l.indent_first);
+        if direct_numbering {
+            (
+                direct_indent_left
+                    .or(level_left)
+                    .or(style_indent_left)
+                    .or(base_para.indent_left)
+                    .unwrap_or(l.indent_left),
+                direct_indent_first
+                    .or(level_first)
+                    .or(style_indent_first)
+                    .or(base_para.indent_first)
+                    .unwrap_or(l.indent_first),
+            )
+        } else {
+            (
+                direct_indent_left
+                    .or(style_indent_left)
+                    .or(level_left)
+                    .or(base_para.indent_left)
+                    .unwrap_or(l.indent_left),
+                direct_indent_first
+                    .or(style_indent_first)
+                    .or(level_first)
+                    .or(base_para.indent_first)
+                    .unwrap_or(l.indent_first),
+            )
+        }
     } else if base_para.num_id == Some(0) {
         // `numId=0` explicitly removes numbering (ECMA-376 §17.3.1.19 / §17.9.18). That
         // drops the NUMBERING LEVEL's indent (handled by `numbering` being None here).
@@ -3686,7 +3711,17 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     // indent, else the level's end indent (an RTL list carries its indent there,
     // e.g. w:right="720" w:hanging="360"), else the style/de-list (base) value
     // already resolved into `indent_right` above.
-    let numbered_indent_right = level.and_then(|l| style_indent_right.or(l.indent_right));
+    let numbered_indent_right = level.and_then(|l| {
+        if direct_numbering {
+            l.indent_right
+                .or(style_indent_right)
+                .or(base_para.indent_right)
+        } else {
+            style_indent_right
+                .or(l.indent_right)
+                .or(base_para.indent_right)
+        }
+    });
     let indent_right = direct_indent_right
         .or(numbered_indent_right)
         .unwrap_or(indent_right);
@@ -15427,6 +15462,39 @@ mod footnote_tests {
         panic!("no paragraph parsed");
     }
 
+    fn first_para_with_table_style(
+        body_inner: &str,
+        styles_xml: &str,
+        numbering_xml: &str,
+        table_style_id: &str,
+    ) -> crate::types::DocParagraph {
+        let xml = format!(
+            r#"<w:document xmlns:w="{ns}"><w:body>{inner}</w:body></w:document>"#,
+            ns = W_NS,
+            inner = body_inner,
+        );
+        let doc = XmlDoc::parse(&xml).unwrap();
+        let paragraph_node = doc
+            .root_element()
+            .descendants()
+            .find(|node| node.tag_name().name() == "p")
+            .unwrap();
+        let mut style_map = StyleMap::parse(styles_xml);
+        let mut num_map = NumberingMap::parse(numbering_xml, &HashMap::new());
+        style_map.resolve_numbering_level_backlinks(&num_map);
+        parse_paragraph(
+            paragraph_node,
+            &style_map,
+            &mut num_map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            Some(table_style_id),
+            &mut FieldState::default(),
+        )
+    }
+
     /// Like `first_para_with`, but returns EVERY body paragraph (in order) so a
     /// numbering SEQUENCE across several paragraphs can be exercised end-to-end
     /// (the running counter lives in `NumberingMap`, so a single-paragraph helper
@@ -15689,6 +15757,100 @@ mod footnote_tests {
             (paragraph.indent_first + 10.2).abs() < 0.01,
             "style hanging=204 twips must survive the level default, got {}",
             paragraph.indent_first
+        );
+    }
+
+    /// ECMA-376 §17.7.2: when `numPr` is direct formatting, the numbering
+    /// definition and its associated paragraph properties are applied in the
+    /// final direct-formatting layer. Its level indent therefore overrides
+    /// paragraph-style, table-style, and document-default indents independently
+    /// for every authored axis (§17.9.22).
+    #[test]
+    fn direct_numbering_level_indents_override_lower_style_layers() {
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="21">
+                <w:lvl w:ilvl="0">
+                  <w:start w:val="1"/>
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="4"><w:abstractNumId w:val="21"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+        let direct_numbering = r#"<w:p><w:pPr>
+          <w:numPr><w:ilvl w:val="0"/><w:numId w:val="4"/></w:numPr>
+          <w:pBdr>
+            <w:top w:val="single" w:sz="4" w:space="1"/>
+            <w:left w:val="single" w:sz="4" w:space="4"/>
+            <w:bottom w:val="single" w:sz="4" w:space="1"/>
+            <w:right w:val="single" w:sz="4" w:space="4"/>
+          </w:pBdr>
+          <w:ind w:leftChars="0"/>
+        </w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#;
+        let assert_level_indent = |paragraph: crate::types::DocParagraph, layer: &str| {
+            assert!(
+                (paragraph.indent_left - 36.0).abs() < 0.01,
+                "direct numbering level left must override {layer}, got {}",
+                paragraph.indent_left,
+            );
+            assert!(
+                (paragraph.indent_first + 18.0).abs() < 0.01,
+                "direct numbering level hanging must override {layer}, got {}",
+                paragraph.indent_first,
+            );
+        };
+
+        let paragraph_style = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                <w:name w:val="Normal"/>
+                <w:pPr><w:ind w:left="840" w:hanging="204"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let bordered = first_para_with(direct_numbering, &paragraph_style, &numbering);
+        assert!(
+            bordered.borders.is_some(),
+            "the direct paragraph border must survive the numbering cascade",
+        );
+        assert_level_indent(bordered, "paragraph style");
+
+        let document_defaults = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:docDefaults><w:pPrDefault><w:pPr>
+                <w:ind w:left="100" w:hanging="200"/>
+              </w:pPr></w:pPrDefault></w:docDefaults>
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                <w:name w:val="Normal"/>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        assert_level_indent(
+            first_para_with(direct_numbering, &document_defaults, &numbering),
+            "document defaults",
+        );
+
+        let table_style = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+                <w:name w:val="Normal"/>
+              </w:style>
+              <w:style w:type="table" w:styleId="Box">
+                <w:name w:val="Box"/>
+                <w:pPr><w:ind w:left="100" w:hanging="200"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        assert_level_indent(
+            first_para_with_table_style(direct_numbering, &table_style, &numbering, "Box"),
+            "table style",
         );
     }
 
