@@ -39,6 +39,7 @@ const verticalEdgeParagraph = (
   visibleResourceEndPt?: number,
   visibleInkDescentPt?: number,
   blockAxisInkEndPt?: number,
+  transformedGlyph = false,
 ): ParagraphLayout => ({
   ...paragraph(),
   flowBounds: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 25 },
@@ -58,6 +59,7 @@ const verticalEdgeParagraph = (
           text: 'A', range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 },
           letterSpacingPt: 0, scaleX: 1, direction: 'ltr', kerning: 'auto',
           writingMode,
+          ...(transformedGlyph ? { glyphOrientation: 'upright' as const } : {}),
           inkBounds: {
             xMinPt: 0, xMaxPt: 7, ascentPt: 7, descentPt: visibleInkDescentPt,
           },
@@ -120,7 +122,22 @@ describe('paragraph page-local reserve selection', () => {
 
   it('relocates a vertical final line whose selected-face ink crosses the edge', () => {
     const selected = selectParagraphFragment(
-      verticalEdgeParagraph('vertical-rl', 17.5, undefined, 0, 3),
+      verticalEdgeParagraph('vertical-rl', 17.5, undefined, 0, 3, true),
+      { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
+      20, 40, true,
+      { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },
+    );
+
+    expect(selected).toMatchObject({
+      fragment: null,
+      nextCursor: { boundary: null },
+      requiresFreshFlowRegion: true,
+    });
+  });
+
+  it('fails closed when transformed final-line ink metrics are unavailable', () => {
+    const selected = selectParagraphFragment(
+      verticalEdgeParagraph('vertical-rl', 17.5, undefined, 0, undefined, true),
       { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
       20, 40, true,
       { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },

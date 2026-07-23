@@ -168,6 +168,12 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   }
   const finalLine = input.paragraph.lines.at(-1);
   if (!finalLine) return input.logicalLineBoxExtentPt;
+  const hasUnprovedTransformedInk = finalLine.placements.some((placement) =>
+    placement.kind === 'text'
+    && (placement.paintOps ?? []).some((operation) =>
+      operation.glyphOrientation !== undefined
+      && operation.blockAxisInkBounds === undefined));
+  if (hasUnprovedTransformedInk) return input.logicalLineBoxExtentPt;
   const visibleEnds = finalLine.placements.flatMap((placement) => {
     const endPt = placementVisibleBlockEndPt(placement);
     return endPt === null ? [] : [endPt];
