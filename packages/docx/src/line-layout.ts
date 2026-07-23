@@ -91,6 +91,8 @@ import {
   wordCandidateFitWidthPx,
   wordJustifiedCandidateFitAllowancePx,
   wordIsOverflowPunctuation,
+  wordJapanesePunctuationRetainedExtentPt,
+  wordMsMinchoEmptyEastAsianMarkSingleLinePx,
 } from './layout/line-compatibility.js';
 import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
 
@@ -1426,9 +1428,17 @@ export function paragraphMarkLineMetrics(
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  const intendedSingle = resolvedLocalFont?.lineHeightRatio != null
+  const measuredIntendedSingle = resolvedLocalFont?.lineHeightRatio != null
     ? fs * scale * resolvedLocalFont.lineHeightRatio
     : emptyIntendedSingleForScriptPx(para, scale, markUsesEastAsianFace);
+  const intendedSingle = Math.max(
+    measuredIntendedSingle,
+    wordMsMinchoEmptyEastAsianMarkSingleLinePx(
+      authoredFamily,
+      fs * scale,
+      markUsesEastAsianFace,
+    ),
+  );
   const gridCountSingle = eastAsian
     ? eastAsianGridCountSinglePx(intendedSingle, fs * scale)
     : undefined;
@@ -2475,21 +2485,57 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
               measure: true,
               clusterGeometry: false,
             });
-            // `characterSpacingControl` removes the selected full-width
-            // character's blank trailing side. Only authoritative tight ink can
-            // identify that whitespace. Neither ECMA-376 §17.15.1.18 nor
-            // the implementation note defines a universal fixed trim, so a
-            // backend without tight horizontal bounds deterministically applies
-            // no trim.
+            // ECMA-376 §17.15.1.18 defines only compression eligibility. The
+            // registered Word observation retains half of the selected route's
+            // ideographic cell for punctuation; this is not assumed to be half
+            // of a proportional punctuation glyph's own advance. Kana in
+            // `compressPunctuationAndJapaneseKana` has no observed cell floor,
+            // so only its measured trailing sidebearing is removed.
             const removableUnscaledPt = measured?.inkBounds
               && measured.horizontalInkBoundsAreTight === true
-              ? Math.max(
-                  0,
-                  Math.min(
-                    measured.advancePt,
-                    measured.advancePt - measured.inkBounds.xMaxPt,
-                  ),
-                )
+              ? (() => {
+                  const trailingWhitespacePt = Math.max(
+                    0,
+                    Math.min(
+                      measured.advancePt,
+                      measured.advancePt - measured.inkBounds.xMaxPt,
+                    ),
+                  );
+                  if (!COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(text)) {
+                    return trailingWhitespacePt;
+                  }
+                  const punctuationRoute = measured.spans[0]?.fontRoute.fingerprint;
+                  const ideographicCell = environment.layoutServices?.text.shape({
+                    ...textShapeRequest,
+                    text: '\u3000',
+                    fontHint: 'eastAsia',
+                    measure: true,
+                    clusterGeometry: false,
+                  });
+                  const cellRoute = ideographicCell?.spans[0]?.fontRoute.fingerprint;
+                  const cellAdvancePt = ideographicCell?.advancePt;
+                  if (
+                    !punctuationRoute
+                    || cellRoute !== punctuationRoute
+                    || cellAdvancePt === undefined
+                    || !Number.isFinite(cellAdvancePt)
+                    || cellAdvancePt <= 0
+                  ) {
+                    return 0;
+                  }
+                  const retainedExtentPt = wordJapanesePunctuationRetainedExtentPt({
+                    punctuationAdvancePt: measured.advancePt,
+                    punctuationInkEndPt: measured.inkBounds.xMaxPt,
+                    ideographicCellAdvancePt: cellAdvancePt,
+                  });
+                  return Math.max(
+                    0,
+                    Math.min(
+                      trailingWhitespacePt,
+                      measured.advancePt - retainedExtentPt,
+                    ),
+                  );
+                })()
               : 0;
             // §17.3.2.43 w:w scales the glyph and both of its sidebearings;
             // trim in the same post-scale coordinate space as segAdvanceWidth.
