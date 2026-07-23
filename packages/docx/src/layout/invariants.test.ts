@@ -468,6 +468,87 @@ describe('assertDocumentLayout', () => {
     expect(() => assertDocumentLayout(layout)).not.toThrow();
   });
 
+  it('accepts a non-body node ending one floating-point ULP at its authored domain edge', () => {
+    const domainTopPt = 690.4570068359375;
+    const domainHeightPt = 101.8429931640625;
+    const nodeTopPt = 777.2570068359375;
+    const nodeHeightPt = 15.042993164062494;
+    const domain: FlowDomain = {
+      id: 'footer:fractional', kind: 'footer',
+      logicalBounds: rect(85.05, domainTopPt, 425.2, domainHeightPt),
+      physicalBounds: rect(85.05, domainTopPt, 425.2, domainHeightPt),
+    };
+    const footer = {
+      ...drawing('footer-fractional', rect(85.05, nodeTopPt, 425.2, nodeHeightPt), {
+        flowDomainId: domain.id,
+      }),
+      source: { story: 'footer' as const, storyInstance: 'default', path: [0] },
+    };
+    const base = documentWith([]);
+    const withFooter = (heightPt: number): DocumentLayout => ({
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        flowDomains: [bodyDomain, domain],
+        layers: buildPageLayers([
+          {
+            layer: 'footer',
+            node: {
+              ...footer,
+              flowBounds: { ...footer.flowBounds, heightPt },
+              inkBounds: { ...footer.inkBounds, heightPt },
+              advancePt: heightPt,
+            },
+            coordinateSpace: 'section-logical',
+          },
+        ]),
+        readingOrder: [footer.id],
+      }],
+    });
+
+    expect(nodeTopPt + nodeHeightPt).toBeGreaterThan(domainTopPt + domainHeightPt);
+    expect(() => assertDocumentLayout(withFooter(nodeHeightPt))).not.toThrow();
+    expect(() => assertDocumentLayout(withFooter(nodeHeightPt + 0.001)))
+      .toThrow(/FLOW_DOMAIN_INVASION/);
+  });
+
+  it('does not report one-ULP arithmetic drift at an ordinary-flow boundary as overlap', () => {
+    const domain: FlowDomain = {
+      id: 'footer:touching', kind: 'footer',
+      logicalBounds: rect(85.05, 690, 425.2, 102),
+      physicalBounds: rect(85.05, 690, 425.2, 102),
+    };
+    const first = {
+      ...drawing('footer-first', rect(
+        85.05, 722.6570068359375, 425.2, 18.200000000000003,
+      ), { flowDomainId: domain.id }),
+      source: { story: 'footer' as const, storyInstance: 'default', path: [0] },
+    };
+    const second = {
+      ...drawing('footer-second', rect(
+        85.05, 740.8570068359375, 425.2, 18.200000000000003,
+      ), { flowDomainId: domain.id }),
+      source: { story: 'footer' as const, storyInstance: 'default', path: [1] },
+    };
+    const base = documentWith([]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        flowDomains: [bodyDomain, domain],
+        layers: buildPageLayers([
+          { layer: 'footer', node: first, coordinateSpace: 'section-logical' },
+          { layer: 'footer', node: second, coordinateSpace: 'section-logical' },
+        ]),
+        readingOrder: [first.id, second.id],
+      }],
+    };
+
+    expect(first.flowBounds.yPt + first.flowBounds.heightPt)
+      .toBeGreaterThan(second.flowBounds.yPt);
+    expect(() => assertDocumentLayout(layout)).not.toThrow();
+  });
+
   it('rejects overlap within one domain but permits the same geometry in independent cells', () => {
     const first = drawing('cell-1', rect(100, 100, 80, 20), { flowDomainId: 'cell:1' });
     const second = drawing('cell-2', rect(100, 100, 80, 20), { flowDomainId: 'cell:2' });
