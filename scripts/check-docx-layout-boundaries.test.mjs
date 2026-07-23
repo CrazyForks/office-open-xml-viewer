@@ -172,14 +172,12 @@ function production(state, table, para, group) {
       + 'export const pageFactory = [coordinate, PAGE_LAYER_IDS] satisfies unknown;\n'
       + 'export type Destination = BodyOccurrenceDestination;\n');
   write(root, 'packages/docx/src/layout/invariants.ts',
-    'export function assertDocumentLayout(value) { return value; }\n'
-      + 'export function deepFreezeDocumentLayout(value) { return Object.freeze(value); }\n');
+    'export function assertAndDeepFreezeDocumentLayout(value) { return Object.freeze(value); }\n');
   write(root, 'packages/docx/src/layout/body-paginator.ts',
-    "import { assertDocumentLayout, deepFreezeDocumentLayout } from './invariants.js';\n"
+    "import { assertAndDeepFreezeDocumentLayout } from './invariants.js';\n"
       + 'export function paginateBody(input, services, options) {\n'
       + '  const layout = { pages: [], diagnostics: [], input, services, options };\n'
-      + '  assertDocumentLayout(layout);\n'
-      + '  return deepFreezeDocumentLayout(layout);\n'
+      + '  return assertAndDeepFreezeDocumentLayout(layout);\n'
       + '}\n');
   write(root, 'packages/docx/src/layout/document.ts',
     "import { paginateBody } from './body-paginator.js';\n"
@@ -1626,27 +1624,25 @@ test('the canonical body producer rejects runtime re-exports', () => {
   expectDiagnostic(root, 'CANONICAL_LAYOUT_PRODUCER', 'runtime re-export', '--final');
 });
 
-test('retained layout validation and freezing must target the same returned value', () => {
+test('retained layout validation and freezing must wrap the returned value', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-immutability-identity-');
   write(root, 'packages/docx/src/layout/body-paginator.ts',
     'export function paginateBody() {\n'
       + '  const validated = { pages: [], diagnostics: [] };\n'
       + '  const returned = { pages: [], diagnostics: [] };\n'
-      + '  assertDocumentLayout(validated);\n'
-      + '  return deepFreezeDocumentLayout(returned);\n'
+      + '  assertAndDeepFreezeDocumentLayout(validated);\n'
+      + '  return returned;\n'
       + '}\n');
-  expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'different validated value', '--final');
+  expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'unvalidated returned value', '--final');
 });
 
 test('retained layout validation uses the reviewed invariants import', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-immutability-impostor-');
   write(root, 'packages/docx/src/layout/body-paginator.ts',
-    'function assertDocumentLayout(value) { return value; }\n'
-      + 'function deepFreezeDocumentLayout(value) { return value; }\n'
+    'function assertAndDeepFreezeDocumentLayout(value) { return Object.freeze(value); }\n'
       + 'export function paginateBody() {\n'
       + '  const layout = { pages: [], diagnostics: [] };\n'
-      + '  assertDocumentLayout(layout);\n'
-      + '  return deepFreezeDocumentLayout(layout);\n'
+      + '  return assertAndDeepFreezeDocumentLayout(layout);\n'
       + '}\n');
   expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'local impostor invariants', '--final');
 });
