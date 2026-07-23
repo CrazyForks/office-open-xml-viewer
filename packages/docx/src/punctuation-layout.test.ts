@@ -113,16 +113,25 @@ function punctuationMetricsServices(): LayoutServices {
       fingerprint: 'punctuation-layout:tight-ink',
       measure(request) {
         const scalarCount = [...request.text].length;
+        const tightTrailingWhitespace = new Set([
+          '。', '．', '！', '？', '：', '；', 'あ', 'ア', 'ー', 'か\u3099',
+        ]).has(request.text);
+        const advancePt = scalarCount * 10;
         return {
-          advancePt: scalarCount * 10,
+          advancePt,
           ascentPt: 8,
           descentPt: 2,
-          ...(request.text === '．'
+          ...(tightTrailingWhitespace
             ? {
-                inkBounds: { xMinPt: 1, xMaxPt: 3, ascentPt: 2, descentPt: 0 },
+                inkBounds: {
+                  xMinPt: 1,
+                  xMaxPt: request.text === '．' ? 3 : advancePt - 5,
+                  ascentPt: 2,
+                  descentPt: 0,
+                },
                 horizontalInkBoundsAreTight: true,
               }
-            : { inkBounds: { xMinPt: 0, xMaxPt: scalarCount * 10, ascentPt: 8, descentPt: 2 } }),
+            : { inkBounds: { xMinPt: 0, xMaxPt: advancePt, ascentPt: 8, descentPt: 2 } }),
         };
       },
     },
@@ -131,11 +140,12 @@ function punctuationMetricsServices(): LayoutServices {
 }
 
 describe('ECMA-376 East-Asian punctuation fit', () => {
-  it('compresses a full-width trailing period by half an em in measure and paint geometry', () => {
+  it('compresses a full-width trailing period from tight selected-glyph geometry', () => {
     const segments = buildSegments([textRun('甲乙．')], {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
     });
 
     expect(segments.map((segment) => 'text' in segment ? segment.text : '')).toEqual([
@@ -144,29 +154,25 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     ]);
     const punctuation = segments[1] as LayoutTextSeg;
     expect(punctuation.charSpacing).toBeUndefined();
-    expect(punctuation.punctuationCompressionPt).toBe(-5);
-
-    const laidOut = lines(segments, 25, false);
-    expect(laidOut).toHaveLength(1);
-    expect(textOf(laidOut[0])).toBe('甲乙．');
-    expect((laidOut[0].segments[1] as LayoutTextSeg).measuredWidth).toBe(5);
-  });
-
-  it('trims the selected punctuation glyph to its tight trailing ink edge', () => {
-    const segments = buildSegments([textRun('甲乙．')], {
-      pageIndex: 0,
-      totalPages: 1,
-      characterSpacingControl: 'compressPunctuation',
-      layoutServices: punctuationMetricsServices(),
-    });
-
-    const punctuation = segments[1] as LayoutTextSeg;
-    expect(punctuation.text).toBe('．');
     expect(punctuation.punctuationCompressionPt).toBe(-7);
+
     const laidOut = lines(segments, 23, false);
     expect(laidOut).toHaveLength(1);
     expect(textOf(laidOut[0])).toBe('甲乙．');
     expect((laidOut[0].segments[1] as LayoutTextSeg).measuredWidth).toBe(3);
+  });
+
+  it('does not invent a fixed trim when tight horizontal ink bounds are unavailable', () => {
+    const segments = buildSegments([textRun('甲乙．')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+    });
+
+    const punctuation = segments[1] as LayoutTextSeg;
+    expect(punctuation.text).toBe('．');
+    expect(punctuation.punctuationCompressionPt).toBeUndefined();
+    expect(lines(segments, 23, false)).toHaveLength(2);
   });
 
   it('scales punctuation sidebearing trim with the authored glyph width', () => {
@@ -223,17 +229,19 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
     }) as LayoutTextSeg[];
     expect(punctuationOnly.map((segment) => segment.text)).toEqual(['あアー', '．']);
     expect(punctuationOnly.map((segment) => segment.punctuationCompressionPt)).toEqual([
       undefined,
-      -5,
+      -7,
     ]);
 
     const punctuationAndKana = buildSegments([textRun('あアー・漢．')], {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuationAndJapaneseKana',
+      layoutServices: punctuationMetricsServices(),
     }) as LayoutTextSeg[];
     expect(punctuationAndKana.map((segment) => segment.text)).toEqual([
       'あ',
@@ -247,13 +255,14 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       -5,
       -5,
       undefined,
-      -5,
+      -7,
     ]);
 
     const unknownPrefix = buildSegments([textRun('あ．')], {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuationFuture',
+      layoutServices: punctuationMetricsServices(),
     }) as LayoutTextSeg[];
     expect(unknownPrefix).toHaveLength(1);
     expect(unknownPrefix[0].punctuationCompressionPt).toBeUndefined();
@@ -269,6 +278,36 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(segments).toHaveLength(1);
     expect(segments[0].text).toBe('｡､');
     expect(segments[0].punctuationCompressionPt).toBeUndefined();
+  });
+
+  it('keeps a decomposed kana base and combining mark in one compressed grapheme', () => {
+    const decomposedGa = 'か\u3099';
+    const segments = buildSegments([textRun(`甲${decomposedGa}乙`)], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuationAndJapaneseKana',
+      layoutServices: punctuationMetricsServices(),
+    }) as LayoutTextSeg[];
+
+    expect(segments.map((segment) => segment.text)).toEqual(['甲', decomposedGa, '乙']);
+    expect(segments[1].punctuationCompressionPt).toBe(-5);
+    expect(segments.every((segment) => segment.text !== '\u3099')).toBe(true);
+  });
+
+  it('recognizes unambiguous full-width exclamation, question, colon, and semicolon punctuation', () => {
+    const segments = buildSegments([textRun('！甲？乙：丙；')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
+    }) as LayoutTextSeg[];
+
+    expect(segments.map((segment) => segment.text)).toEqual([
+      '！', '甲', '？', '乙', '：', '丙', '；',
+    ]);
+    expect(segments.map((segment) => segment.punctuationCompressionPt)).toEqual([
+      -5, undefined, -5, undefined, -5, undefined, -5,
+    ]);
   });
 
   it('preserves cross-segment kinsoku ownership when compression splits the punctuation', () => {
@@ -294,8 +333,9 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       totalPages: 1,
       verticalCJK: true,
       characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
     });
-    // 37 full-em cells + one compressed half-em punctuation cell = 375pt.
+    // 37 full-em cells + the selected period's retained 5pt ink extent = 375pt.
     expect(lines(compressed, 375, false)).toHaveLength(1);
     const compressedMark = compressed.at(-1) as LayoutTextSeg;
     expect(compressedMark.text).toBe('。');
@@ -334,11 +374,26 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     }), 30, false).map(textOf)).toEqual(['A ', 'B.']);
   });
 
+  it('finds the final visible punctuation before a collapsible separator', () => {
+    const enabled = buildSegments([textRun('A B. C', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    });
+    const disabled = buildSegments([textRun('A B. C', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    });
+
+    expect(lines(enabled, 30, true).map(textOf)).toEqual(['A B. ', 'C']);
+    expect(lines(disabled, 30, false).map(textOf)).toEqual(['A ', 'B. ', 'C']);
+  });
+
   it('limits U+3017 to the Simplified Chinese overflow-punctuation set', () => {
     expect(wordIsOverflowPunctuation('〗', 'zh-cn')).toBe(true);
     expect(wordIsOverflowPunctuation('〗', 'zh-hans')).toBe(true);
     expect(wordIsOverflowPunctuation('〗', 'zh-tw')).toBe(false);
     expect(wordIsOverflowPunctuation('〗', 'zh-hant')).toBe(false);
+    expect(wordIsOverflowPunctuation('〗', 'zh-mo')).toBe(false);
     expect(wordIsOverflowPunctuation('〗', 'ja-jp')).toBe(false);
     expect(wordIsOverflowPunctuation('〗', 'ko-kr')).toBe(false);
   });

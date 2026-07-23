@@ -42,6 +42,7 @@ import {
   WORD_EAST_ASIAN_GRID_LINE_ALLOCATION,
   WORD_FAR_EAST_SINGLE_LINE_FACTOR,
   WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
+  WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE,
   WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED,
   WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
   WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT,
@@ -49,6 +50,7 @@ import {
   WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
   WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB,
   WORD_NUMERIC_DECIMAL_TAB_INFERENCE,
+  WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS,
   WORD_OVERLONG_TOKEN_EMERGENCY_BREAK,
   WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
   WORD_TAB_STOP_PAGE_EDGE_CLAMP,
@@ -287,6 +289,8 @@ describe('layout compatibility inventory', () => {
       WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
       WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
       WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT,
+      WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS,
+      WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE,
       WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
       WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
       WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
@@ -346,6 +350,19 @@ describe('layout compatibility inventory', () => {
     });
     expect(WORD_LOWER_LAYER_SAME_PARAGRAPH_ANCHOR_COMPOSITION.description)
       .not.toMatch(/sample|private|\.docx|\.pdf/i);
+  });
+
+  it('registers the public Microsoft punctuation notes without claiming a fixed trim', () => {
+    expect(WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS.evidence).toEqual({
+      kind: 'microsoft-note',
+      reference: '[MS-OE376] §2.1.56',
+    });
+    expect(WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE.evidence).toEqual({
+      kind: 'microsoft-note',
+      reference: '[MS-OE376] §2.1.562',
+    });
+    expect(WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE.description)
+      .toMatch(/eligibility.*not a universal trim amount/i);
   });
 
   it('records the anonymized Word observation for vertical final-line admission', () => {

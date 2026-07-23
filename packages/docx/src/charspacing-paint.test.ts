@@ -62,6 +62,10 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] }
       const w = [...s].length * p;
       return {
         width: w,
+        actualBoundingBoxLeft: 0,
+        // The punctuation fixture exposes a selected-glyph right ink edge at
+        // half its full-width cell. Other text fills its complete advance.
+        actualBoundingBoxRight: s === '．' ? p / 2 : w,
         fontBoundingBoxAscent: p * 0.8,
         fontBoundingBoxDescent: p * 0.2,
         actualBoundingBoxAscent: p * 0.8,
@@ -163,8 +167,8 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
 
     const punctuation = drawOf(fills, '．');
     const following = drawOf(fills, '次');
-    // This deterministic adapter exposes no tight horizontal ink bounds, so the
-    // document-level trim uses its half-em fallback: 20 - 0.2 - 10 = 9.8pt.
+    // The synthetic selected glyph exposes a tight 10pt trailing sidebearing:
+    // 20 - 0.2 - 10 = 9.8pt.
     // The following run starts at that exact measured/painted pen.
     expect(punctuation.letterSpacing).toBe('-10.2px');
     expect(following.x - punctuation.x).toBeCloseTo(9.8, 5);
@@ -181,9 +185,9 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
 
     const textFills = fills.filter((fill) => /[甲乙・丙丁]/u.test(fill.text));
     // `characterSpacingControl` is not a license to remove half an em from
-    // every punctuation cell. Word keeps this left-aligned contextual run at
-    // its natural advance; splitting after U+30FB and shifting the next slice
-    // left makes the middle dot and following glyph overlap.
+    // every punctuation cell. U+30FB remains outside the reviewed supported
+    // subset because the public sources do not define an exhaustive character
+    // set; splitting it without evidence would shift the following glyph left.
     expect(textFills).toEqual([
       expect.objectContaining({ text: '甲乙・丙丁', letterSpacing: '0px' }),
     ]);

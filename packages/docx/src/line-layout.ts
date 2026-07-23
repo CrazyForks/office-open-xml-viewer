@@ -1670,12 +1670,16 @@ export function hasCJKBreakOpportunity(text: string): boolean {
 }
 
 // ECMA-376 §17.15.1.18 / §17.18.7 distinguishes punctuation-only compression
-// from punctuation-plus-Japanese-kana compression. These full-width closing
-// forms have removable trailing cells. Halfwidth U+FF61/U+FF64 and U+30FB
-// KATAKANA MIDDLE DOT are intentionally absent. Opening punctuation needs
-// line-start positioning rather than a pen-advance reduction.
+// from punctuation-plus-Japanese-kana compression. This is the reviewed
+// supported subset: full-width closing forms plus the unambiguous full-width
+// ! ? : ; forms. Halfwidth U+FF61/U+FF64 are not full-width. U+30FB remains
+// outside the supported subset because the normative character set is not
+// exhaustive. Opening punctuation needs line-start positioning rather than a
+// pen-advance reduction. The implementation-note evidence for the full-width
+// punctuation scope is registered in layout/line-compatibility.ts.
 const COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION = new Set([
   '、', '。', '，', '．', '」', '』', '】', '〗', '）', '］', '｝',
+  '！', '？', '：', '；',
 ]);
 
 /** Full-width Japanese kana characters for
@@ -1699,15 +1703,15 @@ function isFullWidthJapaneseKana(character: string): boolean {
 }
 
 function characterSpacingControlCompresses(
-  character: string,
+  grapheme: string,
   setting: string | undefined,
 ): boolean {
   switch (setting) {
     case 'compressPunctuation':
-      return COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(character);
+      return COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(grapheme);
     case 'compressPunctuationAndJapaneseKana':
-      return COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(character)
-        || isFullWidthJapaneseKana(character);
+      return COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(grapheme)
+        || isFullWidthJapaneseKana(grapheme);
     case 'doNotCompress':
     default:
       return false;
@@ -2406,10 +2410,13 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         !compressCharacterWhitespace
         && fitTextRegionIndex === undefined
       ) {
-        const chars = [...text];
-        if (chars.some((character) =>
+        const boundaries = [0, ...graphemeClusterOffsets(text), text.length];
+        const graphemes = boundaries.slice(0, -1).map(
+          (start, index) => text.slice(start, boundaries[index + 1]),
+        );
+        if (graphemes.some((grapheme) =>
           characterSpacingControlCompresses(
-            character,
+            grapheme,
             environment.characterSpacingControl,
           ))) {
           let pending = '';
@@ -2418,15 +2425,15 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
             pushSeg(pending, cs, fontFamily);
             pending = '';
           };
-          for (const character of chars) {
+          for (const grapheme of graphemes) {
             if (characterSpacingControlCompresses(
-              character,
+              grapheme,
               environment.characterSpacingControl,
             )) {
               flushPending();
-              pushSeg(character, cs, fontFamily, undefined, true);
+              pushSeg(grapheme, cs, fontFamily, undefined, true);
             } else {
-              pending += character;
+              pending += grapheme;
             }
           }
           flushPending();
@@ -2463,16 +2470,17 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         : environment.layoutServices?.text.shape(textShapeRequest);
       const punctuationCompressionPt = compressCharacterWhitespace
         ? (() => {
-            const fontSizePt = cs ? csFontSize : base.fontSize;
             const measured = environment.layoutServices?.text.shape({
               ...textShapeRequest,
               measure: true,
               clusterGeometry: false,
             });
             // `characterSpacingControl` removes the selected full-width
-            // character's blank trailing side. Tight ink is authoritative when
-            // available; the half-em fallback keeps service-free measurement
-            // deterministic.
+            // character's blank trailing side. Only authoritative tight ink can
+            // identify that whitespace. Neither ECMA-376 §17.15.1.18 nor
+            // the implementation note defines a universal fixed trim, so a
+            // backend without tight horizontal bounds deterministically applies
+            // no trim.
             const removableUnscaledPt = measured?.inkBounds
               && measured.horizontalInkBoundsAreTight === true
               ? Math.max(
@@ -2482,7 +2490,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
                     measured.advancePt - measured.inkBounds.xMaxPt,
                   ),
                 )
-              : fontSizePt / 2;
+              : 0;
             // §17.3.2.43 w:w scales the glyph and both of its sidebearings;
             // trim in the same post-scale coordinate space as segAdvanceWidth.
             const removablePt = removableUnscaledPt * (r.charScale ?? 1);
@@ -4220,9 +4228,9 @@ export function layoutLines(
     // extent before selecting a script-specific wrap algorithm. The isolated
     // predicate owns the compatibility character sets. CJK segments that need
     // an internal split retain their separate overflowPunct-vs-kinsoku rule.
-    const segmentScalars = [...s.text];
-    const trailingOverflowCharacter = segmentScalars.at(-1);
-    const textBeforeTrailingOverflow = segmentScalars.slice(0, -1).join('');
+    const visibleSegmentScalars = [...trimmed];
+    const trailingOverflowCharacter = visibleSegmentScalars.at(-1);
+    const textBeforeTrailingOverflow = visibleSegmentScalars.slice(0, -1).join('');
     const admitsTrailingOverflowPunctuation =
       overflowPunct
       && trailingOverflowCharacter !== undefined

@@ -96,10 +96,19 @@ export const WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT = defineCompatibilityRule({
 export const WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS = defineCompatibilityRule({
   id: 'word-overflow-punctuation-language-sets',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/punctuation-layout.test.ts#limits U+3017 to the Simplified Chinese overflow-punctuation set',
+    kind: 'microsoft-note',
+    reference: '[MS-OE376] §2.1.56',
   },
   description: 'Apply the language-specific punctuation sets documented for Word in [MS-OE376] §2.1.56, and let overflowPunct override kinsoku when both rules affect the same character.',
+});
+
+export const WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE = defineCompatibilityRule({
+  id: 'word-full-width-character-spacing-scope',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OE376] §2.1.562',
+  },
+  description: 'Interpret ST_CharacterSpacing as applying whitespace compression to full-width punctuation characters. The note establishes eligibility, not a universal trim amount; compression geometry comes only from authoritative selected-glyph ink bounds.',
 });
 
 const WORD_OVERFLOW_PUNCTUATION = {
@@ -125,7 +134,7 @@ export function wordIsOverflowPunctuation(
   if (normalized?.startsWith('ja')) return WORD_OVERFLOW_PUNCTUATION.ja.has(character);
   if (normalized?.startsWith('ko')) return WORD_OVERFLOW_PUNCTUATION.ko.has(character);
   if (normalized?.startsWith('zh')) {
-    return (/(?:^|-)tw(?:-|$)|(?:^|-)hk(?:-|$)|hant/u.test(normalized)
+    return (/(?:^|-)(?:tw|hk|mo)(?:-|$)|hant/u.test(normalized)
       ? WORD_OVERFLOW_PUNCTUATION.zhHant
       : WORD_OVERFLOW_PUNCTUATION.zhHans).has(character);
   }
