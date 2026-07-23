@@ -11,7 +11,7 @@ import {
   scaleAffine,
   translationAffine,
 } from './affine.js';
-import { paintStrokeSegment } from './canvas-border.js';
+import { oneDevicePixelCssWidth, paintStrokeSegment } from './canvas-border.js';
 import { paintParagraphLayout } from './canvas-text.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
 import type { CanvasPaintContext } from './types.js';
@@ -97,7 +97,7 @@ function paintTableBorders(node: TableLayout, context: CanvasPaintContext): void
   // Word preserves authored table-border geometry, but rasterizes a subpixel
   // hairline with at least one device pixel of coverage. Keep that distinction
   // in paint so layout/conflict resolution continues to use the OOXML width.
-  const minimumCssWidthPx = 1 / context.dpr;
+  const minimumCssWidthPx = oneDevicePixelCssWidth(context);
   for (const border of node.borders) {
     paintStrokeSegment(border, context, minimumCssWidthPx);
   }
