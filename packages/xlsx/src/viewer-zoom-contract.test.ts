@@ -414,6 +414,12 @@ describe('XlsxViewer built-in +/- buttons follow the shared ladder (issue #842)'
     b.v.zoomIn();
     expect(a.v.getScale()).toBe(b.v.getScale());
   });
+
+  it('uses non-submit buttons so a surrounding form is not submitted (issue #1082)', () => {
+    const { minus, plus } = mountWithButtons();
+    expect(minus.type).toBe('button');
+    expect(plus.type).toBe('button');
+  });
 });
 
 /**
