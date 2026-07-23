@@ -190,7 +190,7 @@ describe('production layout service integration', () => {
     expect(fonts).toContain(expected);
 
     fonts.length = 0;
-    const segments = buildSegments([textRun('AV', { fontFamily: 'Roman Face' })], {
+    const segments = buildSegments([textRun('AVA', { fontFamily: 'Roman Face' })], {
       pageIndex: 0, totalPages: 1, layoutServices: services,
     });
     layoutLines(ctx, segments, 300, 0, 1);

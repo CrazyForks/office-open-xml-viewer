@@ -21,7 +21,7 @@ import {
   type BodyPaginationState,
   type CanonicalPageDraft,
 } from './body-pagination.js';
-import { deepFreezeDocumentLayout, assertDocumentLayout } from './invariants.js';
+import { assertAndDeepFreezeDocumentLayout } from './invariants.js';
 import {
   bodyLayoutKernelOf,
   createFieldAcquisitionServicesView,
@@ -706,8 +706,11 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
   const diagnostics = pages.flatMap((page) =>
     pageLayerNodes(page).flatMap(({ node }) => nestedStoryDiagnostics(node, visited)));
   const layout: DocumentLayout = { pages, diagnostics };
-  assertDocumentLayout(layout);
-  return deepFreezeDocumentLayout(layout) as DocumentLayout;
+  // Convergence candidates are private to this synchronous pagination call.
+  // Validating and deep-freezing the full document graph here repeated that
+  // O(document) boundary for every anchor/header/footer pass. The accepted
+  // composed layout crosses the invariant/freeze boundary exactly once below.
+  return layout;
 }
 
 function paginateBodyPass(
@@ -2184,6 +2187,5 @@ export function paginateBody(
           ...withEndnotes.diagnostics,
         ]),
       });
-  assertDocumentLayout(withParserDiagnostics);
-  return deepFreezeDocumentLayout(withParserDiagnostics) as DocumentLayout;
+  return assertAndDeepFreezeDocumentLayout(withParserDiagnostics) as DocumentLayout;
 }

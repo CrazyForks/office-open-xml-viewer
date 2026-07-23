@@ -367,6 +367,33 @@ describe('font layout services', () => {
     expect(measured).toEqual(['abcd', 'a', 'ab', 'abc']);
   });
 
+  it('reuses identical glyph measurements across convergence shape calls', () => {
+    const measured: string[] = [];
+    const service = createTextLayoutService({
+      fonts: createFontResolver(faces),
+      measurer: {
+        fingerprint: 'convergence-measure-cache-v1',
+        measure: (request) => {
+          measured.push(request.text);
+          return {
+            advancePt: request.text.length,
+            ascentPt: 1,
+            descentPt: 0,
+          };
+        },
+      },
+    });
+    const request = {
+      text: 'repeat',
+      fontSizePt: 10,
+      fonts: { ascii: 'Embedded Sans' },
+    } as const;
+
+    expect(service.shape(request)).toBe(service.shape(request));
+
+    expect(measured).toEqual(['repeat', 'r', 're', 'rep', 'repe', 'repea']);
+  });
+
   it('can acquire aggregate metrics without contextual cluster geometry', () => {
     const measured: string[] = [];
     const service = createTextLayoutService({

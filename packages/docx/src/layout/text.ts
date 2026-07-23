@@ -504,6 +504,35 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       style: request.style,
     });
   };
+  // Pagination convergence reacquires equal paragraphs under equal service
+  // fingerprints. Native Canvas metrics are pure for this complete request
+  // tuple, so retain one immutable document-scoped result across those passes.
+  const measurementCache = new Map<string, Readonly<GlyphMeasurement>>();
+  const measureGlyph = (request: Readonly<GlyphMeasureRequest>): Readonly<GlyphMeasurement> => {
+    const key = JSON.stringify([
+      request.text,
+      request.fontRoute.familyList,
+      request.fontRoute.scope,
+      request.fontRoute.fingerprint,
+      request.fontSizePt,
+      request.weight,
+      request.style,
+      request.letterSpacingPt,
+      request.kerning ?? null,
+    ]);
+    const retained = measurementCache.get(key);
+    if (retained) return retained;
+    const measured = input.measurer.measure(request);
+    const snapshot = Object.freeze({
+      ...measured,
+      ...(measured.inkBounds ? {
+        inkBounds: Object.freeze({ ...measured.inkBounds }),
+      } : {}),
+    });
+    measurementCache.set(key, snapshot);
+    return snapshot;
+  };
+  const shapeCache = new Map<string, TextShapeResult>();
   return Object.freeze({
     fingerprint,
     localMetrics,
@@ -512,6 +541,41 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       if (!Number.isFinite(request.fontSizePt) || request.fontSizePt < 0) {
         throw new RangeError('fontSizePt must be a finite non-negative number');
       }
+      const shapeKey = JSON.stringify([
+        request.text,
+        request.fontSizePt,
+        [
+          request.fonts.ascii ?? null,
+          request.fonts.highAnsi ?? null,
+          request.fonts.eastAsia ?? null,
+          request.fonts.complexScript ?? null,
+        ],
+        [
+          request.themeFonts?.ascii ?? null,
+          request.themeFonts?.highAnsi ?? null,
+          request.themeFonts?.eastAsia ?? null,
+          request.themeFonts?.complexScript ?? null,
+        ],
+        [
+          request.themeFontPresence?.ascii ?? null,
+          request.themeFontPresence?.highAnsi ?? null,
+          request.themeFontPresence?.eastAsia ?? null,
+          request.themeFontPresence?.complexScript ?? null,
+        ],
+        request.weight ?? null,
+        request.style ?? null,
+        request.complexScript ?? null,
+        request.fontHint ?? null,
+        request.eastAsiaLanguage ?? null,
+        request.eastAsiaFontCharset ?? null,
+        request.genericFamily ?? null,
+        request.letterSpacingPt ?? null,
+        request.kerning ?? null,
+        request.measure ?? null,
+        request.clusterGeometry ?? null,
+      ]);
+      const retainedShape = shapeCache.get(shapeKey);
+      if (retainedShape) return retainedShape;
       const grouped: {
         text: string; start: number; end: number; script: FontScriptSlot; breakBefore: boolean;
       }[] = [];
@@ -558,7 +622,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           advancePt: 0,
           ascentPt: 0,
           descentPt: 0,
-        } : input.measurer.measure({
+        } : measureGlyph({
           text: group.text,
           fontRoute: font.route,
           fontSizePt: request.fontSizePt,
@@ -609,7 +673,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
                   continue;
                 }
                 if (boundary <= span.start) break;
-                advancePt += input.measurer.measure({
+                advancePt += measureGlyph({
                   text: span.text.slice(0, boundary - span.start),
                   fontRoute: span.fontRoute,
                   fontSizePt: request.fontSizePt,
@@ -635,7 +699,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
               });
             }));
           })();
-      return Object.freeze({
+      const result: TextShapeResult = Object.freeze({
         advancePt: totalAdvancePt,
         ascentPt: Math.max(0, ...spans.map((span) => span.ascentPt)),
         descentPt: Math.max(0, ...spans.map((span) => span.descentPt)),
@@ -645,6 +709,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         ...(clusters ? { clusters } : {}),
         diagnostics: Object.freeze(diagnostics),
       });
+      shapeCache.set(shapeKey, result);
+      return result;
     },
   });
 }
