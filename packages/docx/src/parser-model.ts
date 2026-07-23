@@ -28,7 +28,7 @@ import type {
   VmlTextPathAcquisitionInput,
 } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
-import { anchorOccurrenceKey, mathResourceKey } from './layout/source-key.js';
+import { anchorOccurrenceKey, mathResourceKey, sourceKey } from './layout/source-key.js';
 import type {
   ComplexFieldBoundaryInput,
   TextFontSlotPresence,
@@ -1860,6 +1860,7 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
   const acquiredBodyLayout = (): BodyLayoutAcquisitionInput => (
     bodyLayoutAcquisition ??= bodyLayoutAcquisitionInput(document)
   );
+  const acquisitionInputs = documentScopedBodyAcquisitionInputProjections();
   return Object.freeze({
     document,
     mathOccurrences: Object.freeze(occurrences),
@@ -1868,7 +1869,7 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
       return projectBodyLayoutInput(acquiredBodyLayout());
     },
     bodyModelGateway: Object.freeze({
-      acquisitionInputs: bodyAcquisitionInputProjections,
+      acquisitionInputs,
       get bodySectionIndex() {
         return acquiredBodyLayout().sectionIndex;
       },
@@ -1909,3 +1910,40 @@ export const bodyAcquisitionInputProjections = Object.freeze({
   tableParticipatesInOrdinaryFlow,
   paragraphAcquisitionInput,
 }) satisfies BodyAcquisitionInputProjections;
+
+/**
+ * Parser-fact projections are independent of pagination location, continuation,
+ * wrap exclusions, and every other acquisition-time input. Keep their cache on
+ * the normalized document gateway so repeated whole-document convergence passes
+ * reuse the same immutable snapshot without sharing facts between documents.
+ *
+ * Paragraph object identity prevents equal-looking hand-built paragraphs from
+ * aliasing. The canonical source key keeps source-scoped anchor, field, math,
+ * and text-box identities distinct while accepting equivalent SourceRef values.
+ */
+function documentScopedBodyAcquisitionInputProjections(): BodyAcquisitionInputProjections {
+  const paragraphInputs = new WeakMap<
+    DocParagraph,
+    Map<string, ParagraphAcquisitionInput>
+  >();
+  const cachedParagraphAcquisitionInput: BodyAcquisitionInputProjections['paragraphAcquisitionInput'] = (
+    paragraph,
+    source,
+  ) => {
+    let bySource = paragraphInputs.get(paragraph);
+    if (!bySource) {
+      bySource = new Map();
+      paragraphInputs.set(paragraph, bySource);
+    }
+    const key = sourceKey(source);
+    const retained = bySource.get(key);
+    if (retained) return retained;
+    const projected = paragraphAcquisitionInput(paragraph, source);
+    bySource.set(key, projected);
+    return projected;
+  };
+  return Object.freeze({
+    ...bodyAcquisitionInputProjections,
+    paragraphAcquisitionInput: cachedParagraphAcquisitionInput,
+  });
+}
