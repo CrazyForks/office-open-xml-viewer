@@ -213,7 +213,15 @@ describe('ShapeRun drawing command planner', () => {
       kind: 'watermark-text',
       sourceBounds: { xPt: -2, yPt: -7, widthPt: 5, heightPt: 8 },
     });
-    expect(() => make(false)).toThrow(/degenerate metrics/);
+    expect(make(false)).toEqual({
+      status: 'unsupported',
+      command: { kind: 'noop' },
+      diagnostics: [{
+        code: 'UNSUPPORTED_FEATURE',
+        severity: 'error',
+        message: 'VML textPath produced empty glyph metrics',
+      }],
+    });
   });
 
   it('turns whitespace-only content into a paint no-op without shaping', () => {
@@ -262,7 +270,31 @@ describe('ShapeRun drawing command planner', () => {
       .toThrow(expected);
   });
 
-  it('rejects trim when the measurement adapter cannot provide ink bounds', () => {
+  it('isolates fitShape=false without an authored font size before shaping', () => {
+    const text = {
+      shape: () => { throw new Error('unsupported input must not be shaped'); },
+    } as unknown as TextLayoutService;
+
+    const result = textPathPlan(shape({
+      textPath: {
+        string: 'DRAFT', fontFamily: 'Arial', bold: false, italic: false,
+        textPathOk: true, on: true, fitShape: false, fitPath: false,
+        trim: false, xScale: false,
+      },
+    } as InternalShapeRun), { xPt: 1, yPt: 2, widthPt: 300, heightPt: 120 }, text);
+
+    expect(result).toEqual({
+      status: 'unsupported',
+      command: { kind: 'noop' },
+      diagnostics: [{
+        code: 'UNSUPPORTED_FEATURE',
+        severity: 'error',
+        message: 'VML textPath fitShape=false requires an authored font-size',
+      }],
+    });
+  });
+
+  it('isolates trim when the measurement adapter cannot provide ink bounds', () => {
     const text = {
       shape: () => ({
         advancePt: 20, ascentPt: 8, descentPt: 2,
@@ -275,14 +307,45 @@ describe('ShapeRun drawing command planner', () => {
       }),
     } as unknown as TextLayoutService;
 
-    expect(() => textPathPlan(shape({
+    const result = textPathPlan(shape({
       textPath: {
         string: 'DRAFT', fontFamily: 'Arial', bold: false, italic: false,
         textPathOk: true, on: true, fitShape: true, fitPath: false,
         trim: true, xScale: false, fontSizePt: 12,
       },
-    } as InternalShapeRun), { xPt: 1, yPt: 2, widthPt: 300, heightPt: 120 }, text)).toThrow(
-      'VML textPath trim=true requires glyph ink bounds',
-    );
+    } as InternalShapeRun), { xPt: 1, yPt: 2, widthPt: 300, heightPt: 120 }, text);
+
+    expect(result).toEqual({
+      status: 'unsupported',
+      command: { kind: 'noop' },
+      diagnostics: [{
+        code: 'UNSUPPORTED_FEATURE',
+        severity: 'error',
+        message: 'VML textPath trim=true requires glyph ink bounds',
+      }],
+    });
+  });
+
+  it('keeps non-finite shaped text metrics fatal', () => {
+    const text = {
+      shape: () => ({
+        advancePt: Number.POSITIVE_INFINITY, ascentPt: 8, descentPt: 2,
+        spans: [{
+          text: 'DRAFT', start: 0, end: 5, script: 'ascii', breakBefore: true,
+          advancePt: Number.POSITIVE_INFINITY, ascentPt: 8, descentPt: 2,
+          font: { route: { familyList: 'Arial', scope: 'native', fingerprint: 'arial' }, weight: 400, style: 'normal', diagnostics: [] },
+          fontRoute: { familyList: 'Arial', scope: 'native', fingerprint: 'arial' },
+        }], graphemeBoundaries: [0, 5], diagnostics: [],
+      }),
+    } as unknown as TextLayoutService;
+
+    expect(() => textPathPlan(shape({
+      textPath: {
+        string: 'DRAFT', fontFamily: 'Arial', bold: false, italic: false,
+        textPathOk: true, on: true, fitShape: true, fitPath: false,
+        trim: false, xScale: false, fontSizePt: 12,
+      },
+    } as InternalShapeRun), { xPt: 1, yPt: 2, widthPt: 300, heightPt: 120 }, text))
+      .toThrow('Shape textPath acquisition produced non-finite metrics');
   });
 });
