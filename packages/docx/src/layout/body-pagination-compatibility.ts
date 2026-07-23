@@ -113,23 +113,34 @@ function placementVisibleBlockEndPt(placement: ParagraphPlacement): number | nul
   const paintOps = placement.paintOps ?? [];
   const visibleEnds = paintOps.length > 0
     ? paintOps.map((operation) => placement.origin.yPt + operation.offset.yPt
-      + (operation.inkBounds?.descentPt ?? 0))
+      + (operation.blockAxisInkBounds?.endPt
+        ?? operation.inkBounds?.descentPt
+        ?? 0))
     : [placement.origin.yPt];
   for (const decoration of placement.decorations) {
-    visibleEnds.push(decoration.from.yPt, decoration.to.yPt);
-    for (const point of decoration.path ?? []) visibleEnds.push(point.yPt);
+    const strokeExtentPt = decoration.widthPt / 2;
+    visibleEnds.push(
+      decoration.from.yPt + strokeExtentPt,
+      decoration.to.yPt + strokeExtentPt,
+    );
+    for (const point of decoration.path ?? []) visibleEnds.push(point.yPt + strokeExtentPt);
   }
   for (const fragment of placement.highlightFragments ?? []) {
     visibleEnds.push(fragment.rect.yPt + fragment.rect.heightPt);
   }
   for (const border of placement.runBorderFragments ?? []) {
-    visibleEnds.push(border.from.yPt, border.to.yPt);
+    const strokeExtentPt = border.widthPt / 2;
+    visibleEnds.push(border.from.yPt + strokeExtentPt, border.to.yPt + strokeExtentPt);
   }
   for (const glyph of placement.emphasis?.glyphs ?? []) {
     visibleEnds.push(glyphBlockEndPt(glyph));
   }
   for (const glyph of placement.ruby?.paintOps ?? []) {
     visibleEnds.push(glyphBlockEndPt(glyph));
+  }
+  for (const path of placement.emphasis?.paths ?? []) {
+    const strokeExtentPt = path.stroke === null ? 0 : path.strokeWidthPt / 2;
+    for (const point of path.points) visibleEnds.push(point.yPt + strokeExtentPt);
   }
   return Math.max(...visibleEnds);
 }
@@ -146,8 +157,15 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   paragraph: ParagraphLayout;
   writingMode: WritingMode;
   logicalLineBoxExtentPt: number;
+  availableBlockExtentPt: number;
 }>): number {
   if (input.writingMode !== 'vertical-rl') return input.logicalLineBoxExtentPt;
+  // This rule is a narrow reduced-extent admission when the retained line box
+  // itself does not fit. Ordinary line boxes that fit keep their established
+  // admission extent; glyph ink may overhang a text column into its margin.
+  if (input.logicalLineBoxExtentPt <= input.availableBlockExtentPt) {
+    return input.logicalLineBoxExtentPt;
+  }
   const finalLine = input.paragraph.lines.at(-1);
   if (!finalLine) return input.logicalLineBoxExtentPt;
   const visibleEnds = finalLine.placements.flatMap((placement) => {
@@ -157,7 +175,8 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   if (visibleEnds.length === 0) return input.logicalLineBoxExtentPt;
   if (input.paragraph.shading) return input.logicalLineBoxExtentPt;
   for (const border of input.paragraph.borders) {
-    visibleEnds.push(border.from.yPt, border.to.yPt);
+    const strokeExtentPt = border.widthPt / 2;
+    visibleEnds.push(border.from.yPt + strokeExtentPt, border.to.yPt + strokeExtentPt);
   }
   if (input.paragraph.paragraphMark && !input.paragraph.paragraphMark.hidden) {
     const mark = input.paragraph.paragraphMark.bounds;
@@ -165,7 +184,7 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   }
   const visibleExtentPt = Math.max(0,
     Math.max(...visibleEnds) - input.paragraph.flowBounds.yPt);
-  return Math.min(input.logicalLineBoxExtentPt, visibleExtentPt);
+  return visibleExtentPt;
 }
 
 /** Compatibility projection governed by {@link WORD_EMPTY_KEEP_NEXT_BRIDGE}. */

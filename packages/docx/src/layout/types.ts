@@ -301,6 +301,14 @@ export interface TextPaintOp {
   /** Selected-face ink relative to this operation's alphabetic baseline.
    * Pagination may consume it, but paint must never reconstruct it. */
   readonly inkBounds?: GlyphInkBounds;
+  /** Tight ink after applying this operation's retained glyph transform,
+   * expressed on the paragraph's logical block axis relative to `offset.yPt`.
+   * Vertical final-line admission consumes this instead of reinterpreting
+   * alphabetic metrics for counter-rotated glyphs. */
+  readonly blockAxisInkBounds?: Readonly<{
+    startPt: number;
+    endPt: number;
+  }>;
 }
 
 export type TextColorPolicy =

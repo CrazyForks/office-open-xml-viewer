@@ -107,6 +107,31 @@ describe('planVerticalRunWithCapability (retained vertical paint geometry)', () 
       { text: '）', orientation: 'upright', verticalFeature: true },
     ]);
   });
+
+  it('retains counter-rotated logical block ink after the upright glyph offset', () => {
+    const { ctx } = mockCtx({
+      inkLR: { '．': { left: 2, right: 6 } },
+    });
+
+    const [cell] = planVerticalRunWithCapability(
+      ctx,
+      '．',
+      10,
+      0,
+      0.5,
+      true,
+      () => false,
+    );
+
+    expect(cell).toMatchObject({
+      orientation: 'upright',
+      drawOffsetPt: { xPt: 4, yPt: -4 },
+      // Paint rotates the local x ink [4 - 2, 4 + 6] onto logical -y.
+      // vertical-rl w:w scales local y, so the 0.5 scale does not alter this
+      // block-axis interval.
+      blockAxisInkBounds: { startPt: -10, endPt: -2 },
+    });
+  });
 });
 
 describe('isUprightVerticalGlyph (UAX#50 vo ∈ {U, Tu})', () => {

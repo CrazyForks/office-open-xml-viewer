@@ -86,6 +86,7 @@ export function selectParagraphFragment(
       paragraph: fragment,
       writingMode: policy.writingMode ?? 'horizontal-tb',
       logicalLineBoxExtentPt,
+      availableBlockExtentPt,
     });
   };
   if (total === 0) {

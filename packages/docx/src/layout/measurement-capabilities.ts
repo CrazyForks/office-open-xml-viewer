@@ -25,6 +25,7 @@ export interface VerticalGlyphMeasurementService {
     letterSpacingPt: number;
     charScale: number;
     growTrRotateInk: boolean;
+    writingMode: 'horizontal-tb' | 'vertical-rl' | 'vertical-lr';
   }>): readonly Readonly<{
     range: Readonly<{ start: number; end: number }>;
     text: string;
@@ -33,5 +34,6 @@ export interface VerticalGlyphMeasurementService {
     advancePt: number;
     drawOffsetPt: Readonly<{ xPt: number; yPt: number }>;
     verticalFeature: boolean;
+    blockAxisInkBounds?: Readonly<{ startPt: number; endPt: number }>;
   }>[];
 }

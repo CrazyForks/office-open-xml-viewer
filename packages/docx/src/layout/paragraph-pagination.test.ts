@@ -38,6 +38,7 @@ const verticalEdgeParagraph = (
   baselinePt: number,
   visibleResourceEndPt?: number,
   visibleInkDescentPt?: number,
+  blockAxisInkEndPt?: number,
 ): ParagraphLayout => ({
   ...paragraph(),
   flowBounds: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 25 },
@@ -60,6 +61,9 @@ const verticalEdgeParagraph = (
           inkBounds: {
             xMinPt: 0, xMaxPt: 7, ascentPt: 7, descentPt: visibleInkDescentPt,
           },
+          ...(blockAxisInkEndPt === undefined ? {} : {
+            blockAxisInkBounds: { startPt: -7, endPt: blockAxisInkEndPt },
+          }),
         }],
         color: { kind: 'default' },
         fontRoute: { familyList: 'serif', scope: 'native', fingerprint: 'serif' },
@@ -116,7 +120,39 @@ describe('paragraph page-local reserve selection', () => {
 
   it('relocates a vertical final line whose selected-face ink crosses the edge', () => {
     const selected = selectParagraphFragment(
-      verticalEdgeParagraph('vertical-rl', 17.5, undefined, 3),
+      verticalEdgeParagraph('vertical-rl', 17.5, undefined, 0, 3),
+      { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
+      20, 40, true,
+      { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },
+    );
+
+    expect(selected).toMatchObject({
+      fragment: null,
+      nextCursor: { boundary: null },
+      requiresFreshFlowRegion: true,
+    });
+  });
+
+  it('relocates when a retained decoration stroke crosses the block edge', () => {
+    const retained = verticalEdgeParagraph('vertical-rl', 17.5);
+    const text = retained.lines[0]!.placements[0]!;
+    if (text.kind !== 'text') throw new Error('Expected a text fixture');
+    const withStroke: ParagraphLayout = {
+      ...retained,
+      lines: [{
+        ...retained.lines[0]!,
+        placements: [{
+          ...text,
+          decorations: [{
+            kind: 'underline', from: { xPt: 0, yPt: 19 }, to: { xPt: 10, yPt: 19 },
+            color: '#000', widthPt: 4, style: 'solid',
+          }],
+        }],
+      }],
+    };
+
+    const selected = selectParagraphFragment(
+      withStroke,
       { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
       20, 40, true,
       { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },

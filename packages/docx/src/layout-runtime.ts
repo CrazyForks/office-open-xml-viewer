@@ -106,6 +106,7 @@ export function createLayoutServices(
           input.charScale,
           input.growTrRotateInk,
           (cp) => verticalVertGlyphReachable(canvasContext, cp),
+          input.writingMode,
         );
       } finally {
         canvasContext.font = previousFont;

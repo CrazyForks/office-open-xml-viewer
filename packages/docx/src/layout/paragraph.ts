@@ -1597,6 +1597,7 @@ function textPlanSegment(
           letterSpacingPt: pitchPt,
           charScale: scaleX,
           growTrRotateInk: true,
+          writingMode: template.writingMode,
         }).map((cell) => ({
           ...template,
           text: cell.text,
@@ -1611,6 +1612,7 @@ function textPlanSegment(
           letterSpacingPt: pitchPt,
           glyphOrientation: cell.orientation,
           ...(cell.verticalFeature ? { verticalFeature: true } : {}),
+          ...(cell.blockAxisInkBounds ? { blockAxisInkBounds: cell.blockAxisInkBounds } : {}),
           ...(cell.drawOffsetPt.xPt !== 0 || cell.drawOffsetPt.yPt !== 0
             ? { glyphOffsetPt: cell.drawOffsetPt }
             : {}),
@@ -1637,8 +1639,19 @@ function textPlanSegment(
       // into one authoritative per-scalar pitch. Paint retains that same value;
       // it must never reconstruct pitch from parser source or remeasure glyphs.
       letterSpacingPt: pitchPt,
-      ...(segment.selectedFaceInkBounds
+      ...(!segment.verticalRun && segment.selectedFaceInkBounds
         ? { inkBounds: segment.selectedFaceInkBounds }
+        : {}),
+      ...(!segment.verticalRun && segment.selectedFaceInkBounds
+        && operation.glyphOrientation === undefined
+        ? {
+            blockAxisInkBounds: {
+              startPt: (operation.glyphOffsetPt?.yPt ?? 0)
+                - segment.selectedFaceInkBounds.ascentPt,
+              endPt: (operation.glyphOffsetPt?.yPt ?? 0)
+                + segment.selectedFaceInkBounds.descentPt,
+            },
+          }
         : {}),
     })),
     breakBefore: segment.breakBefore !== false && !segment.joinPrev,

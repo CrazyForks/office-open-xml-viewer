@@ -1466,22 +1466,27 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         {
           text: 'A', range: { start: 0, end: 1 }, orientation: 'sideways',
           originPt: 0, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: 4 }, verticalFeature: false,
+          blockAxisInkBounds: { startPt: -4, endPt: 6 },
         },
         {
           text: '︵', range: { start: 1, end: 2 }, orientation: 'upright',
           originPt: 15, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: -2 }, verticalFeature: false,
+          blockAxisInkBounds: { startPt: -5, endPt: 5 },
         },
         {
           text: 'ー', range: { start: 2, end: 3 }, orientation: 'rotate',
           originPt: 25, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: 0 }, verticalFeature: false,
+          blockAxisInkBounds: { startPt: -5, endPt: 5 },
         },
         {
           text: '）', range: { start: 3, end: 4 }, orientation: 'upright',
           originPt: 35, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: 0 }, verticalFeature: true,
+          blockAxisInkBounds: { startPt: -5, endPt: 5 },
         },
         {
           text: 'B', range: { start: 4, end: 5 }, orientation: 'sideways',
           originPt: 40, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: 4 }, verticalFeature: false,
+          blockAxisInkBounds: { startPt: -4, endPt: 6 },
         },
       ],
     };

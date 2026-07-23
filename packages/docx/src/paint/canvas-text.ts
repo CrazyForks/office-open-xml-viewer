@@ -52,6 +52,10 @@ function validateTextSlices(placement: import('../layout/types.js').TextPlacemen
     const invalidGeometry = !Number.isFinite(op.offset.xPt) || !Number.isFinite(op.offset.yPt)
       || (op.glyphOffsetPt !== undefined
         && (!Number.isFinite(op.glyphOffsetPt.xPt) || !Number.isFinite(op.glyphOffsetPt.yPt)))
+      || (op.blockAxisInkBounds !== undefined
+        && (!Number.isFinite(op.blockAxisInkBounds.startPt)
+          || !Number.isFinite(op.blockAxisInkBounds.endPt)
+          || op.blockAxisInkBounds.endPt < op.blockAxisInkBounds.startPt))
       || !Number.isFinite(op.letterSpacingPt)
       || !Number.isFinite(op.scaleX) || op.scaleX <= 0
       || (op.scaleY !== undefined && (!Number.isFinite(op.scaleY) || op.scaleY <= 0));
