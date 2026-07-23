@@ -114,6 +114,7 @@ import {
   ExactConvergenceError,
   convergeExactState,
 } from './convergence.js';
+import { paginationFieldPageContexts } from './pagination-fields.js';
 
 class FootnoteAdmissionOverflowError extends Error {
   readonly code = 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE' as const;
@@ -2117,18 +2118,14 @@ export function paginateBody(
     seed,
     measure: (pass) => headerFooterReserves(pass, owners),
     repaginate: (reserves, current) => {
-      const contexts = current.layout.pages.map((page) => Object.freeze({
-        pageIndex: page.pageIndex,
-        displayPageNumber: page.pageNumber.displayNumber,
-        pageNumberFormat: page.pageNumber.format as import('@silurus/ooxml-core').NumberFormat,
-      }));
+      const contexts = paginationFieldPageContexts(current.layout);
       const iterationServices = createFieldAcquisitionServicesView(services, {
         totalPages: current.layout.pages.length,
         resolveDestinationPage: (pageIndex) => contexts[pageIndex],
       });
       return paginateBodyWithColumnBalancing(input, iterationServices, options, reserves);
     },
-    identity: (pass) => pass.layout,
+    identity: (pass) => paginationFieldPageContexts(pass.layout),
     requiresConvergence: seed.session.hasPaginationFields,
   }).result;
   const bodyComposed = composeCanonicalSectionFlow(
