@@ -275,9 +275,10 @@ describe('textbox rich text — per-run formatting', () => {
       fontFamilyClasses: { 'Roman Face': 'roman' },
     } as DocxDocumentModel;
     const services = createLayoutServices(doc, { measureContext: ctx });
-    const route = services.text.shape({
-      text: 'route', fontSizePt: 10, fonts: { ascii: 'Roman Face', highAnsi: 'Roman Face' },
-    }).spans[0]!.fontRoute;
+    const route = services.text.resolve({
+      fonts: { ascii: 'Roman Face', highAnsi: 'Roman Face' },
+      slot: 'ascii',
+    }).route;
     const expected = canvasFontString(route, 10, 400, 'normal');
     const state = {
       pageIndex: 0,
