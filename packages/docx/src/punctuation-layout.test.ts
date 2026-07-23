@@ -11,6 +11,7 @@ import {
   createTextLayoutService,
   type TextLayoutService,
 } from './layout/text.js';
+import { wordIsOverflowPunctuation } from './layout/line-compatibility.js';
 import type { LayoutServices } from './layout/types.js';
 import type { DocParagraph, DocxTextRun } from './types.js';
 import type { VerticalGlyphMeasurementService } from './layout/measurement-capabilities.js';
@@ -40,7 +41,10 @@ function context(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-function textRun(text: string): DocParagraph['runs'][number] {
+function textRun(
+  text: string,
+  eastAsiaLanguage = 'ja-jp',
+): DocParagraph['runs'][number] {
   const run: DocxTextRun = {
     text,
     bold: false,
@@ -59,8 +63,9 @@ function textRun(text: string): DocParagraph['runs'][number] {
   return {
     type: 'text',
     ...run,
-    // Parser-only effective language input used by [MS-OE376] §2.1.56.
-    langEastAsia: 'ja-jp',
+    // Parser-only effective language input consumed by the isolated
+    // overflow-punctuation compatibility projection.
+    langEastAsia: eastAsiaLanguage,
   } as DocParagraph['runs'][number];
 }
 
@@ -213,6 +218,59 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect((line.segments[0] as LayoutTextSeg).measuredWidth).toBe(50);
   });
 
+  it('dispatches exact ST_CharacterSpacing values and compresses kana only in the combined mode', () => {
+    const punctuationOnly = buildSegments([textRun('あアー．')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+    }) as LayoutTextSeg[];
+    expect(punctuationOnly.map((segment) => segment.text)).toEqual(['あアー', '．']);
+    expect(punctuationOnly.map((segment) => segment.punctuationCompressionPt)).toEqual([
+      undefined,
+      -5,
+    ]);
+
+    const punctuationAndKana = buildSegments([textRun('あアー・漢．')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuationAndJapaneseKana',
+    }) as LayoutTextSeg[];
+    expect(punctuationAndKana.map((segment) => segment.text)).toEqual([
+      'あ',
+      'ア',
+      'ー',
+      '・漢',
+      '．',
+    ]);
+    expect(punctuationAndKana.map((segment) => segment.punctuationCompressionPt)).toEqual([
+      -5,
+      -5,
+      -5,
+      undefined,
+      -5,
+    ]);
+
+    const unknownPrefix = buildSegments([textRun('あ．')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuationFuture',
+    }) as LayoutTextSeg[];
+    expect(unknownPrefix).toHaveLength(1);
+    expect(unknownPrefix[0].punctuationCompressionPt).toBeUndefined();
+  });
+
+  it('does not compress halfwidth punctuation as full-width punctuation', () => {
+    const segments = buildSegments([textRun('｡､')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+    }) as LayoutTextSeg[];
+
+    expect(segments).toHaveLength(1);
+    expect(segments[0].text).toBe('｡､');
+    expect(segments[0].punctuationCompressionPt).toBeUndefined();
+  });
+
   it('preserves cross-segment kinsoku ownership when compression splits the punctuation', () => {
     const segments = buildSegments([textRun('一二三四五六、七')], {
       pageIndex: 0,
@@ -261,5 +319,27 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(middleDot).toHaveLength(1);
     expect((middleDot[0] as LayoutTextSeg).punctuationCompressionPt).toBeUndefined();
     expect(lines(middleDot, 375, false)).toHaveLength(2);
+  });
+
+  it('admits an eligible trailing punctuation character independently of script', () => {
+    const latin = buildSegments([textRun('A B.', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    });
+
+    expect(lines(latin, 30, true).map(textOf)).toEqual(['A B.']);
+    expect(lines(buildSegments([textRun('A B.', 'en-us')], {
+      pageIndex: 0,
+      totalPages: 1,
+    }), 30, false).map(textOf)).toEqual(['A ', 'B.']);
+  });
+
+  it('limits U+3017 to the Simplified Chinese overflow-punctuation set', () => {
+    expect(wordIsOverflowPunctuation('〗', 'zh-cn')).toBe(true);
+    expect(wordIsOverflowPunctuation('〗', 'zh-hans')).toBe(true);
+    expect(wordIsOverflowPunctuation('〗', 'zh-tw')).toBe(false);
+    expect(wordIsOverflowPunctuation('〗', 'zh-hant')).toBe(false);
+    expect(wordIsOverflowPunctuation('〗', 'ja-jp')).toBe(false);
+    expect(wordIsOverflowPunctuation('〗', 'ko-kr')).toBe(false);
   });
 });

@@ -218,12 +218,12 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  `ctx.letterSpacing` delta on BOTH measure and paint (measure==paint), on top
    *  of any docGrid / justify delta. Absent ⇒ 0. */
   charSpacing?: number;
-  /** ECMA-376 §17.15.1.18 document-level full-width punctuation compression,
+  /** ECMA-376 §17.15.1.18 document-level full-width character compression,
    *  represented separately from authored `w:spacing`. Negative points;
-   *  present only on one-punctuation pieces emitted by buildSegments. */
+   *  present only on one-character pieces emitted by buildSegments. */
   punctuationCompressionPt?: number;
-  /** Effective `w:lang/@w:eastAsia` used by Word's language-specific
-   *  overflow-punctuation character sets ([MS-OE376] §2.1.56). */
+  /** Effective `w:lang/@w:eastAsia` consumed by the isolated
+   *  {@link wordIsOverflowPunctuation} compatibility projection. */
   eastAsiaLanguage?: string;
   /** ECMA-376 §17.3.2.43 `<w:w>` — horizontal glyph-width scale as a FRACTION
    *  (0.67 = 67%). Measured widths are multiplied by it and the paint pass draws
@@ -1669,14 +1669,50 @@ export function hasCJKBreakOpportunity(text: string): boolean {
   return false;
 }
 
-// ECMA-376 §17.15.1.18 applies whitespace compression only to full-width
-// punctuation for `compressPunctuation`. These closing forms have removable
-// trailing half-em cells; U+30FB KATAKANA MIDDLE DOT is intentionally absent.
-// Opening punctuation needs line-start positioning rather than a pen-advance
-// reduction and remains a separate follow-up.
+// ECMA-376 §17.15.1.18 / §17.18.7 distinguishes punctuation-only compression
+// from punctuation-plus-Japanese-kana compression. These full-width closing
+// forms have removable trailing cells. Halfwidth U+FF61/U+FF64 and U+30FB
+// KATAKANA MIDDLE DOT are intentionally absent. Opening punctuation needs
+// line-start positioning rather than a pen-advance reduction.
 const COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION = new Set([
-  '、', '。', '，', '．', '」', '』', '】', '〗', '）', '］', '｝', '｡', '､',
+  '、', '。', '，', '．', '」', '』', '】', '〗', '）', '］', '｝',
 ]);
+
+/** Full-width Japanese kana characters for
+ * `compressPunctuationAndJapaneseKana`. The ranges follow Unicode's Hiragana,
+ * Katakana, Katakana Phonetic Extensions, and supplementary Kana blocks while
+ * excluding halfwidth Katakana and punctuation such as U+30FB. U+30FC is the
+ * shared full-width kana prolonged-sound mark. */
+function isFullWidthJapaneseKana(character: string): boolean {
+  const cp = character.codePointAt(0);
+  if (cp === undefined) return false;
+  return (
+    (cp >= 0x3041 && cp <= 0x3096)
+    || (cp >= 0x309d && cp <= 0x309f)
+    || (cp >= 0x30a1 && cp <= 0x30fa)
+    || cp === 0x30fc
+    || (cp >= 0x30fd && cp <= 0x30ff)
+    || (cp >= 0x31f0 && cp <= 0x31ff)
+    || (cp >= 0x1aff0 && cp <= 0x1afff)
+    || (cp >= 0x1b000 && cp <= 0x1b16f)
+  );
+}
+
+function characterSpacingControlCompresses(
+  character: string,
+  setting: string | undefined,
+): boolean {
+  switch (setting) {
+    case 'compressPunctuation':
+      return COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(character);
+    case 'compressPunctuationAndJapaneseKana':
+      return COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(character)
+        || isFullWidthJapaneseKana(character);
+    case 'doNotCompress':
+    default:
+      return false;
+  }
+}
 
 /** Shift a SEA break-offset list (issue #797) onto a suffix that drops the first
  *  `cut` UTF-16 units: keep offsets strictly greater than `cut` and rebase them.
@@ -2360,22 +2396,22 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       cs: boolean,
       fontFamily: string | null,
       authoritativeSpan?: TextShapeSpan,
-      trimTrailingPunctuation = false,
+      compressCharacterWhitespace = false,
     ) => {
-      // ECMA-376 §17.15.1.18 — trim the removable trailing whitespace from
-      // full-width closing punctuation. Split each eligible character so its
-      // selected face's own tight ink bounds can define that whitespace; ordinary
-      // runs (including U+30FB middle dot) retain one contextual shaping/paint
-      // operation. The compressed character is re-shaped through the same text
-      // service and carries its negative pitch into both measurement and paint.
+      // ECMA-376 §17.15.1.18 / §17.18.7 — dispatch the exact
+      // ST_CharacterSpacing value and split each eligible full-width character
+      // so its selected face's tight ink bounds can define the removable
+      // whitespace. Non-eligible text retains contextual shaping.
       if (
-        !trimTrailingPunctuation
-        && environment.characterSpacingControl?.startsWith('compressPunctuation')
+        !compressCharacterWhitespace
         && fitTextRegionIndex === undefined
       ) {
         const chars = [...text];
         if (chars.some((character) =>
-          COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(character))) {
+          characterSpacingControlCompresses(
+            character,
+            environment.characterSpacingControl,
+          ))) {
           let pending = '';
           const flushPending = () => {
             if (pending === '') return;
@@ -2383,7 +2419,10 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
             pending = '';
           };
           for (const character of chars) {
-            if (COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(character)) {
+            if (characterSpacingControlCompresses(
+              character,
+              environment.characterSpacingControl,
+            )) {
               flushPending();
               pushSeg(character, cs, fontFamily, undefined, true);
             } else {
@@ -2422,7 +2461,7 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       const shaped = authoritativeSpan
         ? { spans: [authoritativeSpan] }
         : environment.layoutServices?.text.shape(textShapeRequest);
-      const punctuationCompressionPt = trimTrailingPunctuation
+      const punctuationCompressionPt = compressCharacterWhitespace
         ? (() => {
             const fontSizePt = cs ? csFontSize : base.fontSize;
             const measured = environment.layoutServices?.text.shape({
@@ -2430,11 +2469,10 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
               measure: true,
               clusterGeometry: false,
             });
-            // `characterSpacingControl` removes the selected glyph's blank
-            // trailing side, not a face-independent fraction of the em. Tight
-            // ink is authoritative when the text service can provide it. The
-            // half-em fallback preserves the standard's illustrated behavior
-            // for measurement adapters that expose advances but no ink bounds.
+            // `characterSpacingControl` removes the selected full-width
+            // character's blank trailing side. Tight ink is authoritative when
+            // available; the half-em fallback keeps service-free measurement
+            // deterministic.
             const removableUnscaledPt = measured?.inkBounds
               && measured.horizontalInkBoundsAreTight === true
               ? Math.max(
@@ -4177,9 +4215,30 @@ export function layoutLines(
       lineBiasBudget + biasBudgetContribution(s, trimmed),
       candidateMeasurementRoutes,
     );
+    // §17.3.1.21 is script-neutral: if the segment would fit without its final
+    // eligible punctuation character, admit that one character beyond the text
+    // extent before selecting a script-specific wrap algorithm. The isolated
+    // predicate owns the compatibility character sets. CJK segments that need
+    // an internal split retain their separate overflowPunct-vs-kinsoku rule.
+    const segmentScalars = [...s.text];
+    const trailingOverflowCharacter = segmentScalars.at(-1);
+    const textBeforeTrailingOverflow = segmentScalars.slice(0, -1).join('');
+    const admitsTrailingOverflowPunctuation =
+      overflowPunct
+      && trailingOverflowCharacter !== undefined
+      && (currentLine.length > 0 || textBeforeTrailingOverflow.length > 0)
+      && wordIsOverflowPunctuation(
+        trailingOverflowCharacter,
+        s.eastAsiaLanguage,
+      )
+      && currentWidth + strAdvance(s, textBeforeTrailingOverflow)
+        <= availW() + shrinkBudget;
 
     if (currentWidth + wForFit <= availW() + shrinkBudget) {
       // Fits on current line as-is
+      s.measuredWidth = w;
+      addToLine(s, w, h, asc, desc, trailingSpaceW);
+    } else if (admitsTrailingOverflowPunctuation) {
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc, trailingSpaceW);
     } else if (hasCJKBreakOpportunity(s.text) && s.seaBreaks === undefined) {
@@ -4220,10 +4279,10 @@ export function layoutLines(
       const allChars = [...s.text];
       const rawSplit = [...rawPrefix].length;
       const minSplit = currentLine.length > 0 ? 0 : 1;
-      // ECMA-376 §17.3.1.21 permits ONE punctuation character beyond the
-      // paragraph extents. Apply that before kinsoku: [MS-OE376] §2.1.56 says
-      // Word lets overflowPunct win when the two conflict. The language-specific
-      // punctuation set is retained on the segment from effective w:lang.
+      // ECMA-376 §17.3.1.21 permits one punctuation character beyond the
+      // paragraph extents. The isolated compatibility projection resolves the
+      // language-specific set and its precedence over kinsoku at this internal
+      // CJK split.
       const hangingSplit = overflowPunct
         && rawSplit < allChars.length
         && (currentLine.length > 0 || rawSplit > 0)

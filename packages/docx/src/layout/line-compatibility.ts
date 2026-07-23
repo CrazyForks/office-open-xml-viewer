@@ -97,16 +97,16 @@ export const WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS = defineCompatibilityRule({
   id: 'word-overflow-punctuation-language-sets',
   evidence: {
     kind: 'regression-test',
-    reference: 'packages/docx/src/punctuation-layout.test.ts#allows one eligible punctuation character past the line extent by default policy',
+    reference: 'packages/docx/src/punctuation-layout.test.ts#limits U+3017 to the Simplified Chinese overflow-punctuation set',
   },
   description: 'Apply the language-specific punctuation sets documented for Word in [MS-OE376] §2.1.56, and let overflowPunct override kinsoku when both rules affect the same character.',
 });
 
 const WORD_OVERFLOW_PUNCTUATION = {
-  ja: new Set([...',.’”、。」』】〗），．］｝｡､']),
+  ja: new Set([...',.’”、。」』】），．］｝｡､']),
   zhHans: new Set([...`!%),.:;>?]}¢°·ˇ’”‰′″℃∶、。〃〉》」』】〗〕〞﹚﹜﹞！＂％＇），．：；？］｝￠`]),
-  zhHant: new Set([...`!),.:;?]}’”′、。〉》」』】〗〕〞﹚﹜﹞！），．：；？］｝`]),
-  ko: new Set([...`!%),.:;?]}¢°’”′″℃〉》」』】〗〕！％），．：；？］｝￠`]),
+  zhHant: new Set([...`!),.:;?]}’”′、。〉》」』】〕〞﹚﹜﹞！），．：；？］｝`]),
+  ko: new Set([...`!%),.:;?]}¢°’”′″℃〉》」』】〕！％），．：；？］｝￠`]),
 } as const;
 const ALL_WORD_OVERFLOW_PUNCTUATION = new Set([
   ...WORD_OVERFLOW_PUNCTUATION.ja,
