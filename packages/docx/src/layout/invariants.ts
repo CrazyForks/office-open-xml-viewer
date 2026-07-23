@@ -998,20 +998,24 @@ function deepFreeze<T>(value: T, seen: WeakSet<object>): DeepReadonly<T> {
   return Object.freeze(value) as DeepReadonly<T>;
 }
 
+const frozenDocumentLayouts = new WeakSet<object>();
 const verifiedFrozenDocumentLayouts = new WeakSet<object>();
 
-function freezeVerifiedDocumentLayout(layout: DocumentLayout): DeepReadonly<DocumentLayout> {
+function freezeDocumentLayout(layout: DocumentLayout): DeepReadonly<DocumentLayout> {
+  if (frozenDocumentLayouts.has(layout)) {
+    return layout as DeepReadonly<DocumentLayout>;
+  }
   const frozen = deepFreeze(layout, new WeakSet<object>());
-  verifiedFrozenDocumentLayouts.add(frozen);
+  frozenDocumentLayouts.add(frozen);
   return frozen;
 }
 
 export function deepFreezeDocumentLayout(layout: DocumentLayout): DeepReadonly<DocumentLayout> {
-  if (verifiedFrozenDocumentLayouts.has(layout)) {
+  if (frozenDocumentLayouts.has(layout)) {
     return layout as DeepReadonly<DocumentLayout>;
   }
   assertPlainData(layout, 'layout');
-  return freezeVerifiedDocumentLayout(layout);
+  return freezeDocumentLayout(layout);
 }
 
 /** Validate the complete retained-layout contract and freeze the same accepted
@@ -1023,5 +1027,7 @@ export function assertAndDeepFreezeDocumentLayout(
     return layout as DeepReadonly<DocumentLayout>;
   }
   assertDocumentLayout(layout);
-  return freezeVerifiedDocumentLayout(layout);
+  const frozen = freezeDocumentLayout(layout);
+  verifiedFrozenDocumentLayouts.add(frozen);
+  return frozen;
 }

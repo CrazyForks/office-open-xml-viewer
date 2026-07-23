@@ -152,14 +152,31 @@ describe('paragraph acquisition cache', () => {
     const fieldView = createFieldAcquisitionServicesView(services, { totalPages: 1 });
     const input = paragraphAcquisitionInput(textParagraph(), source);
     const first = acquireParagraphResult(input, options(services));
+    const firstLayoutLine = first.measured.lines[0]!.layout;
+    const firstSegment = firstLayoutLine.segments[0]!;
+    const originalMeasuredWidth = firstSegment.measuredWidth;
+    let mutationError: unknown;
+    try {
+      Object.assign(firstSegment, { measuredWidth: originalMeasuredWidth + 100 });
+    } catch (error) {
+      mutationError = error;
+    }
     const second = acquireParagraphResult(input, options(fieldView));
 
     expect(second).toBe(first);
+    expect(mutationError).toBeInstanceOf(TypeError);
+    expect(second.measured.lines[0]!.layout.segments[0]!.measuredWidth)
+      .toBe(originalMeasuredWidth);
     expect(Object.isFrozen(second)).toBe(true);
     expect(Object.isFrozen(second.measured)).toBe(true);
     expect(Object.isFrozen(second.measured.lines)).toBe(true);
     expect(Object.isFrozen(second.measured.placement)).toBe(true);
-    for (const line of second.measured.lines) expect(Object.isFrozen(line)).toBe(true);
+    for (const line of second.measured.lines) {
+      expect(Object.isFrozen(line)).toBe(true);
+      expect(Object.isFrozen(line.layout)).toBe(true);
+      expect(Object.isFrozen(line.layout.segments)).toBe(true);
+      for (const segment of line.layout.segments) expect(Object.isFrozen(segment)).toBe(true);
+    }
 
     const otherScope = scopedServices();
     expect(acquireParagraphResult(input, options(otherScope))).not.toBe(first);
@@ -182,6 +199,42 @@ describe('paragraph acquisition cache', () => {
     expect(second).toBe(first);
     expect(afterFirst).not.toBe(before);
     expect(afterSecond).not.toBe(afterFirst);
+  });
+
+  it('does not reuse public anchored drawings across distinct supplied frames', () => {
+    const services = scopedServices();
+    const input = paragraphAcquisitionInput({
+      ...textParagraph(),
+      runs: [{
+        type: 'image',
+        imagePath: 'word/media/image.png',
+        mimeType: 'image/png',
+        widthPt: 20,
+        heightPt: 10,
+        anchor: true,
+        anchorXPt: 5,
+        anchorYPt: 6,
+        anchorXRelativeFrom: 'page',
+        anchorYRelativeFrom: 'page',
+      }],
+    } as DocParagraph, source);
+    const anchorFrames = {
+      page: { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 },
+      margin: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
+      column: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
+      pageParity: 'odd' as const,
+    };
+    const first = acquireParagraphResult(input, options(services, { anchorFrames }));
+    const second = acquireParagraphResult(input, options(services, {
+      anchorFrames: {
+        ...anchorFrames,
+        page: { ...anchorFrames.page, xPt: 100 },
+      },
+    }));
+
+    expect(first.layout.drawings[0]?.flowBounds.xPt).toBe(5);
+    expect(second.layout.drawings[0]?.flowBounds.xPt).toBe(105);
+    expect(second).not.toBe(first);
   });
 
   it('keys every value that can change acquisition output', () => {

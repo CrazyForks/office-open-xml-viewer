@@ -10,6 +10,7 @@ import {
 import { createFloatWrapOracle } from './float-wrap-oracle.js';
 import type {
   LayoutImageSeg,
+  LayoutLine,
   LayoutMathSeg,
   LayoutTabSeg,
   LayoutTextSeg,
@@ -3454,10 +3455,10 @@ export function paragraphAcquisitionCacheKey(
 ): string {
   const layoutServices = options.environment.layoutServices;
   const verticalGlyphMeasurement = options.environment.verticalGlyphMeasurement;
+  const anchorFrames = options.anchorFrames;
   const hasAnchoredPayload = paragraph.runs.some(anchoredPayloadRun);
   const hasCompleteTextBox = paragraph.runs.some((run) =>
     run.type === 'shape' && run.textBoxInput?.kind === 'complete');
-  const anchorFramesAffectMeasurement = hasAnchoredPayload || options.exclusions.length > 0;
   const {
     wrap,
     ...plainPlacement
@@ -3552,12 +3553,106 @@ export function paragraphAcquisitionCacheKey(
     options.containerShading ?? null,
     options.continuesFromPrevious ?? null,
     options.sourceRangeStart ?? null,
-    anchorFramesAffectMeasurement ? JSON.stringify(options.anchorFrames ?? null) : null,
+    anchorFrames ? [
+      anchorFrames.page
+        ? [
+            anchorFrames.page.xPt,
+            anchorFrames.page.yPt,
+            anchorFrames.page.widthPt,
+            anchorFrames.page.heightPt,
+          ]
+        : null,
+      anchorFrames.margin
+        ? [
+            anchorFrames.margin.xPt,
+            anchorFrames.margin.yPt,
+            anchorFrames.margin.widthPt,
+            anchorFrames.margin.heightPt,
+          ]
+        : null,
+      anchorFrames.column
+        ? [
+            anchorFrames.column.xPt,
+            anchorFrames.column.yPt,
+            anchorFrames.column.widthPt,
+            anchorFrames.column.heightPt,
+          ]
+        : null,
+      anchorFrames.pageParity,
+    ] : null,
     hasAnchoredPayload ? JSON.stringify(options.anchorCellBounds ?? null) : null,
     hasCompleteTextBox && options.acquireCompleteStory
       ? cache.objectIdentity(options.acquireCompleteStory)
       : null,
   ])}`;
+}
+
+type MeasuredLayoutSegment = LayoutLine['segments'][number];
+
+function immutableMeasuredLayoutSegment(
+  segment: MeasuredLayoutSegment,
+): MeasuredLayoutSegment {
+  const source = segment.src ? Object.freeze({ ...segment.src }) : undefined;
+  if ('text' in segment) {
+    return Object.freeze({
+      ...segment,
+      ...(source ? { src: source } : {}),
+      ...(segment.shapedClusters ? {
+        shapedClusters: Object.freeze(segment.shapedClusters.map((cluster) => Object.freeze({
+          ...cluster,
+          range: Object.freeze({ ...cluster.range }),
+        }))),
+      } : {}),
+      ...(segment.selectedFaceInkBounds ? {
+        selectedFaceInkBounds: Object.freeze({ ...segment.selectedFaceInkBounds }),
+      } : {}),
+      ...(segment.ruby ? { ruby: Object.freeze({ ...segment.ruby }) } : {}),
+      ...(segment.border ? { border: Object.freeze({ ...segment.border }) } : {}),
+      ...(segment.revision ? { revision: Object.freeze({ ...segment.revision }) } : {}),
+      ...(segment.hyperlink ? { hyperlink: Object.freeze({ ...segment.hyperlink }) } : {}),
+      ...(segment.seaBreaks ? {
+        seaBreaks: Object.freeze([...segment.seaBreaks]),
+      } : {}),
+    });
+  }
+  if ('imagePath' in segment) {
+    return Object.freeze({
+      ...segment,
+      ...(source ? { src: source } : {}),
+      ...(segment.srcRect ? { srcRect: Object.freeze({ ...segment.srcRect }) } : {}),
+      ...(segment.duotone ? { duotone: Object.freeze({ ...segment.duotone }) } : {}),
+    });
+  }
+  if ('isTab' in segment) {
+    return Object.freeze({
+      ...segment,
+      ...(source ? { src: source } : {}),
+      ...(segment.ptab ? { ptab: Object.freeze({ ...segment.ptab }) } : {}),
+    });
+  }
+  return Object.freeze({
+    ...segment,
+    ...(source ? { src: source } : {}),
+  });
+}
+
+function immutableMeasuredLine(
+  line: MeasuredParagraph['lines'][number],
+): MeasuredParagraph['lines'][number] {
+  return Object.freeze({
+    ...line,
+    layout: Object.freeze({
+      ...line.layout,
+      // LayoutLine predates retained acquisition and exposes a mutable array
+      // type. The cached snapshot is intentionally runtime-immutable.
+      segments: Object.freeze(
+        line.layout.segments.map(immutableMeasuredLayoutSegment),
+      ) as unknown as LayoutLine['segments'],
+      ...(line.layout.consumedEnd ? {
+        consumedEnd: Object.freeze({ ...line.layout.consumedEnd }),
+      } : {}),
+    }),
+  });
 }
 
 /** @internal Acquires the measurement and retained layout as one final candidate. */
@@ -3631,7 +3726,7 @@ export function acquireParagraphResult(
     // the wrap oracle referenced by placement.
     const immutableMeasured: MeasuredParagraph = Object.freeze({
       ...result.measured,
-      lines: Object.freeze(result.measured.lines.map((line) => Object.freeze({ ...line }))),
+      lines: Object.freeze(result.measured.lines.map(immutableMeasuredLine)),
       placement: Object.freeze({ ...result.measured.placement }),
     });
     const acquired = Object.freeze({ measured: immutableMeasured, layout: result.layout });

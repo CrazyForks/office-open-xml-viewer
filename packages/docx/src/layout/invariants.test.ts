@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { FlowCapacityExceededError, layoutFlowBlocks } from './flow.js';
-import { assertDocumentLayout, layoutFingerprint } from './invariants.js';
+import {
+  assertAndDeepFreezeDocumentLayout,
+  assertDocumentLayout,
+  deepFreezeDocumentLayout,
+  layoutFingerprint,
+} from './invariants.js';
 import { LayoutInvariantError } from './diagnostics.js';
 import type {
   BlockLayoutAlgorithms,
@@ -290,6 +295,17 @@ function documentWith(
 }
 
 describe('assertDocumentLayout', () => {
+  it('does not treat plain-data freezing as semantic verification', () => {
+    const layout = documentWith([
+      drawing('missing-domain', rect(72, 100, 200, 30), { flowDomainId: 'missing' }),
+    ]);
+
+    const frozen = deepFreezeDocumentLayout(layout);
+
+    expect(() => assertAndDeepFreezeDocumentLayout(frozen as DocumentLayout))
+      .toThrow(/INVALID_REFERENCE/);
+  });
+
   it('rejects duplicate or invalid retained DrawingML collision geometry', () => {
     const collision = {
       occurrenceId: 'same',
