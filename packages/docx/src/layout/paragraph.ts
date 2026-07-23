@@ -1689,9 +1689,15 @@ function textPlanSegment(
     basePaintOps: basePaintOps.map((operation) => ({
       ...operation,
       // Measurement resolves w:spacing, docGrid character pitch, and w:fitText
-      // into one authoritative per-scalar pitch. Paint retains that same value;
-      // it must never reconstruct pitch from parser source or remeasure glyphs.
-      letterSpacingPt: pitchPt,
+      // into one authoritative per-scalar pitch. A planned vertical upright or
+      // rotate cell already owns that pitch in its retained origin and advance;
+      // applying Canvas letterSpacing again would move a centered single glyph
+      // on the physical cross axis. Contextual sideways text and horizontal
+      // tate-chu-yoko retain Canvas spacing within their multi-glyph operation.
+      letterSpacingPt:
+        segment.verticalRun && operation.glyphOrientation !== 'sideways'
+          ? 0
+          : pitchPt,
       ...(!segment.verticalRun && segment.selectedFaceInkBounds
         ? { inkBounds: segment.selectedFaceInkBounds }
         : {}),

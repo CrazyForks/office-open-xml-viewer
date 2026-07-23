@@ -86,9 +86,12 @@ describe('planVerticalRunWithCapability (retained vertical paint geometry)', () 
       { text: '︶', orientation: 'upright', range: { start: 3, end: 4 }, verticalFeature: false },
       { text: 'B', orientation: 'sideways', range: { start: 4, end: 5 }, verticalFeature: false },
     ]);
+    // Unicode presentation-form fallbacks are ordinary centred Canvas glyphs.
+    // Feature-backed placement adjustments must not leak into this route.
+    expect(cells.map(({ drawOffsetPt }) => drawOffsetPt.xPt)).toEqual([0, 0, 0, 0, 0]);
   });
 
-  it('retains original transform characters and the proved OpenType vert feature route', () => {
+  it('retains original transform characters and projects their vertical origin into the cell', () => {
     const { ctx } = mockCtx({
       vert: {
         '（': { width: 12, asc: 9, desc: 3 },
@@ -106,6 +109,7 @@ describe('planVerticalRunWithCapability (retained vertical paint geometry)', () 
       { text: 'ー', orientation: 'upright', verticalFeature: true },
       { text: '）', orientation: 'upright', verticalFeature: true },
     ]);
+    expect(cells.map(({ drawOffsetPt }) => drawOffsetPt.xPt)).toEqual([0, 0, 0]);
   });
 
   it('retains counter-rotated logical block ink after the upright glyph offset', () => {

@@ -413,6 +413,7 @@ export {
   measureVerticalVertGlyph,
   verticalVertGlyphReachable,
   withVertFeature,
+  withVertFeatureCanvasScope,
 } from './text/vertical-vert-feature';
 export type { VerticalGlyphCellMetrics } from './text/vertical-vert-feature';
 // Shared Excel serial-date → UTC `Date` conversion (ECMA-376 §18.17.4.1),

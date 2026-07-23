@@ -25,8 +25,17 @@ export interface VerticalGlyphCellMetrics {
 }
 
 function canvasElementFor(ctx: Ctx2D): HTMLCanvasElement | null {
-  if (typeof HTMLCanvasElement === 'undefined') return null;
-  return ctx.canvas instanceof HTMLCanvasElement ? ctx.canvas : null;
+  const candidate = ctx.canvas as HTMLCanvasElement;
+  const ownerConstructor = candidate?.ownerDocument?.defaultView?.HTMLCanvasElement;
+  if (
+    typeof ownerConstructor === 'function'
+    && candidate instanceof ownerConstructor
+  ) return candidate;
+  if (
+    typeof HTMLCanvasElement !== 'undefined'
+    && candidate instanceof HTMLCanvasElement
+  ) return candidate;
+  return null;
 }
 
 function replaceFontSize(font: string, replacement: string): string {
@@ -61,6 +70,90 @@ function sourceFeatureSettings(target: HTMLCanvasElement): string {
     // value is still an exact, restorable feature source for the DOM route.
   }
   return target.style.fontFeatureSettings;
+}
+
+/**
+ * Chromium only resolves Canvas OpenType feature metrics while the backing
+ * element participates in a document. Layout normally owns a detached canvas,
+ * whereas paint uses an attached surface, so feature measurement must briefly
+ * acquire the same DOM capability. Restore both the caller's tree position and
+ * inline presentation exactly; the canvas remains caller-owned.
+ */
+function withConnectedCanvas<T>(
+  canvas: HTMLCanvasElement,
+  operation: () => T,
+): T {
+  if (canvas.isConnected) return operation();
+
+  const doc = canvas.ownerDocument
+    ?? (typeof document === 'undefined' ? null : document);
+  const connectedParent = doc?.body ?? doc?.documentElement;
+  if (!connectedParent) return operation();
+
+  const originalParent = canvas.parentNode;
+  const originalNextSibling = canvas.nextSibling;
+  const style = canvas.style;
+  const previousPresentation = {
+    position: style.position,
+    left: style.left,
+    top: style.top,
+    opacity: style.opacity,
+    pointerEvents: style.pointerEvents,
+  };
+  Object.assign(style, {
+    position: 'fixed',
+    left: '-99999px',
+    top: '0',
+    opacity: '0',
+    pointerEvents: 'none',
+  });
+  connectedParent.appendChild(canvas);
+  let operationThrew = false;
+  try {
+    return operation();
+  } catch (error) {
+    operationThrew = true;
+    throw error;
+  } finally {
+    let treeRestoreError: unknown;
+    try {
+      if (originalParent) {
+        const liveAnchor = originalNextSibling?.parentNode === originalParent
+          ? originalNextSibling
+          : null;
+        originalParent.insertBefore(canvas, liveAnchor);
+      } else {
+        canvas.remove();
+      }
+    } catch (error) {
+      treeRestoreError = error;
+      // If the caller changed the original tree beyond repair, do not leave a
+      // hidden caller-owned canvas attached to the acquisition document.
+      try {
+        canvas.remove();
+      } catch {
+        // Presentation restoration below remains mandatory.
+      }
+    } finally {
+      Object.assign(style, previousPresentation);
+    }
+    // Preserve the callback's primary failure. A restoration error is surfaced
+    // only when the callback itself completed successfully.
+    if (treeRestoreError !== undefined && !operationThrew) throw treeRestoreError;
+  }
+}
+
+/**
+ * Keep an element-backed context connected for one synchronous vertical-glyph
+ * acquisition unit. Inner feature toggles then use their already-connected
+ * fast path, while detached and Offscreen callers retain their ownership.
+ */
+export function withVertFeatureCanvasScope<T>(
+  ctx: Ctx2D,
+  operation: () => T,
+): T {
+  const canvas = canvasElementFor(ctx);
+  return canvas === null ? operation() : withConnectedCanvas(canvas, operation);
 }
 
 function probeState(doc: Document): ProbeState {
@@ -239,18 +332,21 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
 /** Compose `vert` onto the element features, refont, draw, then restore exactly. */
 export function withVertFeature<T>(ctx: Ctx2D, draw: () => T): T {
   const canvas = ctx.canvas as HTMLCanvasElement;
-  const style = canvas?.style;
-  if (!style) return draw();
+  if (!canvas?.style) return draw();
 
-  const previous = style.fontFeatureSettings;
-  style.fontFeatureSettings = composeVertFeature(sourceFeatureSettings(canvas));
-  ctx.font = ctx.font;
-  try {
-    return draw();
-  } finally {
-    style.fontFeatureSettings = previous;
+  const applyFeature = () => {
+    const style = canvas.style;
+    const previous = style.fontFeatureSettings;
+    style.fontFeatureSettings = composeVertFeature(sourceFeatureSettings(canvas));
     ctx.font = ctx.font;
-  }
+    try {
+      return draw();
+    } finally {
+      style.fontFeatureSettings = previous;
+      ctx.font = ctx.font;
+    }
+  };
+  return withVertFeatureCanvasScope(ctx, applyFeature);
 }
 
 /**

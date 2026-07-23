@@ -877,7 +877,7 @@ describe('paintParagraphLayout', () => {
     })).toThrow('Retained glyph slices are incomplete (geometry)');
   });
 
-  it('paints retained vertical glyph routing and offsets without remeasurement', () => {
+  it('paints retained vertical glyph routing, pitch, and offsets without remeasurement', () => {
     const layout = node();
     const placement = layout.lines[0]!.placements[0]!;
     if (placement.kind !== 'text') throw new Error('fixture must contain text');
@@ -894,7 +894,7 @@ describe('paintParagraphLayout', () => {
           {
             text: 'A', range: { start: 0, end: 1 }, offset: { xPt: 1, yPt: 2 },
             glyphOffsetPt: { xPt: 3, yPt: 4 }, glyphOrientation: 'sideways',
-            letterSpacingPt: 0, scaleX: .8, direction: 'ltr', kerning: 'auto',
+            letterSpacingPt: -6, scaleX: .8, direction: 'ltr', kerning: 'auto',
             writingMode: 'vertical-rl',
           },
           {
@@ -912,7 +912,7 @@ describe('paintParagraphLayout', () => {
           {
             text: '２９', range: { start: 3, end: 5 }, offset: { xPt: 24, yPt: 0 },
             glyphOrientation: 'upright',
-            letterSpacingPt: 0, scaleX: .8, scaleY: .75, direction: 'ltr', kerning: 'auto',
+            letterSpacingPt: -6, scaleX: .8, scaleY: .75, direction: 'ltr', kerning: 'auto',
             writingMode: 'horizontal-tb',
           },
         ],
@@ -928,7 +928,9 @@ describe('paintParagraphLayout', () => {
       rotate(angle: number) { calls.push(['rotate', angle]); },
       setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {},
       moveTo() {}, lineTo() {}, stroke() {},
-      fillText(text: string, x: number, y: number) { calls.push(['fillText', text, x, y]); },
+      fillText(this: { letterSpacing: string }, text: string, x: number, y: number) {
+        calls.push(['fillText', text, x, y, this.letterSpacing]);
+      },
       measureText() { throw new Error('retained vertical paint must not measure'); },
     } as unknown as CanvasRenderingContext2D;
 
@@ -939,13 +941,13 @@ describe('paintParagraphLayout', () => {
     paintParagraphLayout(vertical, { ctx, scale: 1, dpr: 1, resources: noPaintResources });
 
     expect(calls).toEqual([
-      'save', ['translate', 14, 24], ['scale', .8, 1], ['fillText', 'A', 0, 0], 'restore',
+      'save', ['translate', 14, 24], ['scale', .8, 1], ['fillText', 'A', 0, 0, '-7.5px'], 'restore',
       'save', ['translate', 18, 18], ['rotate', -Math.PI / 2], ['scale', 1, .8],
-      ['fillText', '︵', 2, 3], 'restore',
+      ['fillText', '︵', 2, 3, '0px'], 'restore',
       'save', ['translate', 26, 18], ['scale', .8, 1],
-      ['fillText', 'ー', 1, 2], 'restore',
+      ['fillText', 'ー', 1, 2, '0px'], 'restore',
       'save', ['translate', 34, 18], ['rotate', -Math.PI / 2], ['scale', .8, .75],
-      ['fillText', '２９', 0, 0], 'restore',
+      ['fillText', '２９', 0, 0, '-6px'], 'restore',
     ]);
   });
 

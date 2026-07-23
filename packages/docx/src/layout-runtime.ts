@@ -1,3 +1,4 @@
+import { withVertFeatureCanvasScope } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
 import type { ResolvedLocalFontMetric } from './layout/text.js';
 import { snapshotLocalMetrics } from './layout/text.js';
@@ -73,45 +74,60 @@ export function createLayoutServices(
         set fontKerning(value: CanvasFontKerning) { canvasContext.fontKerning = value; },
         measureText(text: string) { return canvasContext.measureText(text); },
       });
+  const canvasElement = canvasContext?.canvas as HTMLCanvasElement | undefined;
+  const ownerCanvasConstructor =
+    canvasElement?.ownerDocument?.defaultView?.HTMLCanvasElement;
   const hasDomVerticalProbe = canvasContext !== null
-    && typeof HTMLCanvasElement !== 'undefined'
-    && canvasContext.canvas instanceof HTMLCanvasElement
-    && typeof document !== 'undefined';
+    && (
+      (
+        typeof ownerCanvasConstructor === 'function'
+        && canvasElement instanceof ownerCanvasConstructor
+      )
+      || (
+        typeof HTMLCanvasElement !== 'undefined'
+        && canvasElement instanceof HTMLCanvasElement
+      )
+    );
   const verticalGlyphMeasurement: VerticalGlyphMeasurementService = Object.freeze({
     fingerprint: canvasContext === null
       ? 'vertical-glyph-measurement:deterministic-v1'
       : hasDomVerticalProbe
-        ? 'vertical-glyph-measurement:dom-vert-probe-v1'
+        ? 'vertical-glyph-measurement:dom-vert-probe-v2'
         : 'vertical-glyph-measurement:no-dom-vert-probe-v1',
     measureRunInkExtra(text: string): number {
       if (canvasContext === null) {
         throw new Error('Vertical glyph measurement requires a concrete text context');
       }
-      return verticalRunInkExtraPx(canvasContext, text);
+      return withVertFeatureCanvasScope(
+        canvasContext,
+        () => verticalRunInkExtraPx(canvasContext, text),
+      );
     },
     planRun(input: Parameters<VerticalGlyphMeasurementService['planRun']>[0]) {
       if (canvasContext === null) {
         throw new Error('Vertical glyph planning requires a concrete text context');
       }
-      const previousFont = canvasContext.font;
-      const previousKerning = canvasContext.fontKerning;
-      canvasContext.font = input.font;
-      canvasContext.fontKerning = input.fontKerning;
-      try {
-        return planVerticalRunWithCapability(
-          canvasContext,
-          input.text,
-          input.fontSizePt,
-          input.letterSpacingPt,
-          input.charScale,
-          input.growTrRotateInk,
-          (cp) => verticalVertGlyphReachable(canvasContext, cp),
-          input.writingMode,
-        );
-      } finally {
-        canvasContext.font = previousFont;
-        canvasContext.fontKerning = previousKerning;
-      }
+      return withVertFeatureCanvasScope(canvasContext, () => {
+        const previousFont = canvasContext.font;
+        const previousKerning = canvasContext.fontKerning;
+        canvasContext.font = input.font;
+        canvasContext.fontKerning = input.fontKerning;
+        try {
+          return planVerticalRunWithCapability(
+            canvasContext,
+            input.text,
+            input.fontSizePt,
+            input.letterSpacingPt,
+            input.charScale,
+            input.growTrRotateInk,
+            (cp) => verticalVertGlyphReachable(canvasContext, cp),
+            input.writingMode,
+          );
+        } finally {
+          canvasContext.font = previousFont;
+          canvasContext.fontKerning = previousKerning;
+        }
+      });
     },
   });
   const localMetrics = snapshotLocalMetrics(options.localMetrics);

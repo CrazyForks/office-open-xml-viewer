@@ -106,7 +106,7 @@ describe('production measurement capability composition', () => {
       });
 
       expect(verticalGlyphMeasurementServiceOf(dom).fingerprint)
-        .toBe('vertical-glyph-measurement:dom-vert-probe-v1');
+        .toBe('vertical-glyph-measurement:dom-vert-probe-v2');
       expect(verticalGlyphMeasurementServiceOf(worker).fingerprint)
         .toBe('vertical-glyph-measurement:no-dom-vert-probe-v1');
       expect(dom.text.fingerprint).toBe(worker.text.fingerprint);
@@ -121,6 +121,34 @@ describe('production measurement capability composition', () => {
         Object.defineProperty(globalThis, 'document', documentDescriptor);
       } else {
         Reflect.deleteProperty(globalThis, 'document');
+      }
+    }
+  });
+
+  it('recognizes an element-backed measurement canvas from its owner realm', () => {
+    class ParentHtmlCanvasElement {}
+    class OwnerHtmlCanvasElement {
+      ownerDocument = {
+        defaultView: { HTMLCanvasElement: OwnerHtmlCanvasElement },
+      };
+    }
+    const canvasDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'HTMLCanvasElement');
+    try {
+      Object.defineProperty(globalThis, 'HTMLCanvasElement', {
+        configurable: true,
+        value: ParentHtmlCanvasElement,
+      });
+      const services = createLayoutServices(model, {
+        measureContext: measurementContext(new OwnerHtmlCanvasElement()),
+      });
+
+      expect(verticalGlyphMeasurementServiceOf(services).fingerprint)
+        .toBe('vertical-glyph-measurement:dom-vert-probe-v2');
+    } finally {
+      if (canvasDescriptor) {
+        Object.defineProperty(globalThis, 'HTMLCanvasElement', canvasDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, 'HTMLCanvasElement');
       }
     }
   });
@@ -163,7 +191,7 @@ describe('production measurement capability composition', () => {
       const services = createLayoutServices(model);
 
       expect(verticalGlyphMeasurementServiceOf(services).fingerprint)
-        .toBe('vertical-glyph-measurement:dom-vert-probe-v1');
+        .toBe('vertical-glyph-measurement:dom-vert-probe-v2');
       expect(domContexts).toBe(1);
       expect(offscreenContexts).toBe(0);
     } finally {

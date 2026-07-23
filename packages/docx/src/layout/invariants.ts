@@ -214,23 +214,46 @@ function requireDrawingMLShapePlan(
   }
 }
 
+/** Inclusive geometry comparisons must tolerate the single-ULP drift produced
+ * when the same authored boundary is reconstructed through different retained
+ * subtraction/addition paths. This is floating-point precision, not a layout
+ * tolerance: a geometrically distinct point value remains outside. */
+function atMostWithinFloatingPrecision(left: number, right: number): boolean {
+  if (left <= right) return true;
+  const precision = Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right));
+  return left - right <= precision;
+}
+
+function strictlyLessBeyondFloatingPrecision(left: number, right: number): boolean {
+  return left < right && !atMostWithinFloatingPrecision(right, left);
+}
+
 function overlaps(a: LayoutRect, b: LayoutRect): boolean {
-  return a.xPt < b.xPt + b.widthPt
-    && b.xPt < a.xPt + a.widthPt
-    && a.yPt < b.yPt + b.heightPt
-    && b.yPt < a.yPt + a.heightPt;
+  return strictlyLessBeyondFloatingPrecision(a.xPt, b.xPt + b.widthPt)
+    && strictlyLessBeyondFloatingPrecision(b.xPt, a.xPt + a.widthPt)
+    && strictlyLessBeyondFloatingPrecision(a.yPt, b.yPt + b.heightPt)
+    && strictlyLessBeyondFloatingPrecision(b.yPt, a.yPt + a.heightPt);
 }
 
 function contains(outer: LayoutRect, inner: LayoutRect): boolean {
-  return inner.xPt >= outer.xPt
-    && inner.yPt >= outer.yPt
-    && inner.xPt + inner.widthPt <= outer.xPt + outer.widthPt
-    && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
+  return atMostWithinFloatingPrecision(outer.xPt, inner.xPt)
+    && atMostWithinFloatingPrecision(outer.yPt, inner.yPt)
+    && atMostWithinFloatingPrecision(
+      inner.xPt + inner.widthPt,
+      outer.xPt + outer.widthPt,
+    )
+    && atMostWithinFloatingPrecision(
+      inner.yPt + inner.heightPt,
+      outer.yPt + outer.heightPt,
+    );
 }
 
 function containsInlineExtent(outer: LayoutRect, inner: LayoutRect): boolean {
-  return inner.xPt >= outer.xPt
-    && inner.xPt + inner.widthPt <= outer.xPt + outer.widthPt;
+  return atMostWithinFloatingPrecision(outer.xPt, inner.xPt)
+    && atMostWithinFloatingPrecision(
+      inner.xPt + inner.widthPt,
+      outer.xPt + outer.widthPt,
+    );
 }
 
 function containsBlockInterval(
@@ -238,13 +261,16 @@ function containsBlockInterval(
   blockEndPt: number,
   inner: LayoutRect,
 ): boolean {
-  return inner.yPt >= blockStartPt
-    && inner.yPt + inner.heightPt <= blockEndPt;
+  return atMostWithinFloatingPrecision(blockStartPt, inner.yPt)
+    && atMostWithinFloatingPrecision(inner.yPt + inner.heightPt, blockEndPt);
 }
 
 function containsBlockExtent(outer: LayoutRect, inner: LayoutRect): boolean {
-  return inner.yPt >= outer.yPt
-    && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
+  return atMostWithinFloatingPrecision(outer.yPt, inner.yPt)
+    && atMostWithinFloatingPrecision(
+      inner.yPt + inner.heightPt,
+      outer.yPt + outer.heightPt,
+    );
 }
 
 function equalRect(left: LayoutRect, right: LayoutRect): boolean {
