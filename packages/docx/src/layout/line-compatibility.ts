@@ -21,6 +21,24 @@ export const WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM = defineCompatibilityRule
   description: 'With useFELayout enabled, a Latin line carrying an eastAsia-hinted run participates in Far East grid metrics; inherited automatic spacing keeps the larger of its whole-cell design allocation and one grid pitch multiplied by the inherited spacing value.',
 });
 
+export const WORD_USE_FE_LAYOUT_EMPTY_MARK_GRID_ALLOCATION = defineCompatibilityRule({
+  id: 'word-use-fe-layout-empty-mark-grid-allocation',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/paragraph-measure.test.ts#applies useFELayout grid-cell allocation to an empty paragraph mark',
+  },
+  description: 'With useFELayout enabled, a content-less paragraph mark participates in Far East whole-cell document-grid allocation even when the document contains no literal East Asian text.',
+});
+
+export const WORD_CONTIGUOUS_UNDERLINE_GEOMETRY = defineCompatibilityRule({
+  id: 'word-contiguous-underline-geometry',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/paragraph.test.ts#uses one safe baseline for a solid underline spanning adjacent source runs',
+  },
+  description: 'Adjacent compatible underlined source runs share one safe baseline and continuous authored cadence while style, color, and thickness boundaries remain distinct.',
+});
+
 export const WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED = defineCompatibilityRule({
   id: 'word-grid-at-least-tall-line-unsnapped',
   evidence: {

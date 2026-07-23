@@ -115,7 +115,7 @@ export function measureParagraph(
   const requestedSpaceAfterPt = context.spaceAfterPt;
   const recordedPlacement = Object.freeze({ ...placement });
   const fontFamilyClasses = measurer.fontFamilyClasses as Record<string, string>;
-  // Word's `w:useFELayout` compatibility mode applies the Far East docGrid
+  // The `w:useFELayout` compatibility projection applies the Far East docGrid
   // allocation to an otherwise content-less paragraph mark as well as to its
   // text lines. This matters when the mark's design height crosses a grid-cell
   // boundary: a 16pt East Asian mark on an 18pt grid occupies two cells even

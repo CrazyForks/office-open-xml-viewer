@@ -751,8 +751,8 @@ function paginateBodyPass(
   state = setBodyBalanceTarget(state, balanceTargetFor(state));
   const factory = transitionFactory(owners, reserves);
   // Source entry whose keep-with-next set was relocated to a new physical page
-  // by automatic overflow. The observed Word compatibility rule suppresses
-  // that leading paragraph's space-before only for this grouped relocation;
+  // by automatic overflow. The compatibility projection suppresses that
+  // leading paragraph's space-before only for this grouped relocation;
   // ordinary overflow and authored page/section breaks retain their own rules.
   let automaticPageStartEntryIndex: number | null = null;
   const session = kernel.openBodyLayoutSession({

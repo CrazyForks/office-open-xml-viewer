@@ -505,7 +505,7 @@ function mergedContinuousDecoration(
   };
 }
 
-/** Adjacent underlined source runs form one visual rule. Word keeps a common
+/** Adjacent underlined source runs form one visual rule. Use a common
  * clearance below every glyph in the contiguous span; acquiring each run in
  * isolation instead creates stepped solid rules and restarts dash/wave phase
  * at source seams. Normalize the span before paint while keeping authored
