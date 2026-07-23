@@ -359,7 +359,12 @@ export interface ColumnGeom {
 export type BodyElement =
   | { type: 'paragraph' } & DocParagraph
   | { type: 'table' } & DocTable
-  | { type: 'pageBreak'; parity?: 'odd' | 'even' }
+  | {
+      type: 'pageBreak';
+      parity?: 'odd' | 'even';
+      /** The hard break followed visible content in the same source paragraph. */
+      sameParagraphAsPrevious?: boolean;
+    }
   /** ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following content
    *  into the next newspaper column (or the next page's first column when
    *  already in the last column). Hoisted to the body level by the parser. */
@@ -584,7 +589,9 @@ export interface DocxRunBorder {
 export interface TabStop {
   /** tab stop position in pt (from the left of paragraph content area) */
   pos: number;
-  alignment: 'left' | 'center' | 'right' | 'decimal' | 'bar' | 'clear';
+  /** ECMA-376 ST_TabJc. `num` is the list tab between a numbering marker and
+   * paragraph contents; start/end are logical-direction aliases. */
+  alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'decimal' | 'bar' | 'clear' | 'num';
   leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
 }
 

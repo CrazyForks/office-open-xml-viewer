@@ -6,7 +6,28 @@ import type { MathNode, MathStyle } from '../types/math';
 const ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ESC[c]);
 
-function variant(style: MathStyle): string | null {
+type MathScriptVariant = 'double-struck' | 'fraktur' | 'monospace' | 'roman' | 'sans-serif' | 'script';
+// Issue #1037 keeps the published MathNode declaration byte-for-byte compatible.
+// The parser therefore carries ECMA-376 m:scr as an internal wire until that API
+// parity gate is lifted; it is consumed only at the MathML resource boundary.
+type InternalMathRun = Extract<MathNode, { kind: 'run' }> & Readonly<{ __script?: MathScriptVariant }>;
+
+function variant(style: MathStyle, script: MathScriptVariant = 'roman'): string | null {
+  if (script === 'double-struck' || script === 'monospace') return script;
+  if (script === 'fraktur') return style === 'bold' || style === 'boldItalic' ? 'bold-fraktur' : 'fraktur';
+  if (script === 'script') return style === 'bold' || style === 'boldItalic' ? 'bold-script' : 'script';
+  if (script === 'sans-serif') {
+    switch (style) {
+      case 'roman':
+        return 'sans-serif';
+      case 'italic':
+        return 'sans-serif-italic';
+      case 'bold':
+        return 'bold-sans-serif';
+      case 'boldItalic':
+        return 'sans-serif-bold-italic';
+    }
+  }
   switch (style) {
     case 'roman':
       return 'normal';
@@ -30,8 +51,8 @@ const CLOSE = ')]}⟩⌉⌋';
 const PUNCT = ',;';
 
 /** Tokenize a run's text into MathML token elements (mi/mn/mo) by character class. */
-function runToMathML(text: string, style: MathStyle): string {
-  const mv = variant(style);
+function runToMathML(text: string, style: MathStyle, script?: MathScriptVariant): string {
+  const mv = variant(style, script);
   const mvAttr = mv ? ` mathvariant="${mv}"` : '';
   let out = '';
   let numBuf = '';
@@ -77,7 +98,7 @@ function row(nodes: MathNode[]): string {
 function nodeToMathML(node: MathNode): string {
   switch (node.kind) {
     case 'run':
-      return runToMathML(node.text, node.style);
+      return runToMathML(node.text, node.style, (node as InternalMathRun).__script);
     case 'group':
       return row(node.items);
     case 'fraction':

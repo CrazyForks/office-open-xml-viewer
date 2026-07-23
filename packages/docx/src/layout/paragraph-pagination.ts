@@ -1,7 +1,11 @@
 import { adjustForWidowOrphan, selectLargestFittingEnd } from '../line-fit-policy.js';
 import type { LineBoundary } from '../line-layout.js';
+import {
+  wordFinalParagraphAdmissionExtentPt,
+  wordVerticalRlFinalLineAdmissionExtentPt,
+} from './body-pagination-compatibility.js';
 import { sliceParagraphLayout } from './paragraph.js';
-import type { ParagraphLayout } from './types.js';
+import type { ParagraphLayout, WritingMode } from './types.js';
 
 export interface ParagraphFragmentCursor {
   readonly boundary: LineBoundary | null;
@@ -29,7 +33,16 @@ export function selectParagraphFragment(
   availableBlockExtentPt: number,
   freshFlowRegionBlockExtentPt: number,
   canRelocate: boolean,
-  policy: Readonly<{ keepLines: boolean; widowControl: boolean }>,
+  policy: Readonly<{
+    keepLines: boolean;
+    widowControl: boolean;
+    /** Authored §17.3.1.33 trailing whitespace; final-fragment fit is governed
+     * by WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION. */
+    authoredSpaceAfterPt?: number;
+    /** Owning section-region flow axis. Vertical final-line admission is
+     * governed by WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION. */
+    writingMode?: WritingMode;
+  }>,
   additionalReserveFor?: (fragment: ParagraphLayout) => number,
   uniformRubyAdvancePt?: number,
   additionalReserveFits?: (reservePt: number) => boolean,
@@ -39,6 +52,10 @@ export function selectParagraphFragment(
   )) throw new RangeError('Paragraph fragment extents must be finite and non-negative');
   if (lineEndBoundaries.length !== acquired.lines.length) {
     throw new RangeError('Paragraph source boundaries must align with retained lines');
+  }
+  const authoredSpaceAfterPt = policy.authoredSpaceAfterPt ?? 0;
+  if (!Number.isFinite(authoredSpaceAfterPt) || authoredSpaceAfterPt < 0) {
+    throw new RangeError('Authored paragraph spaceAfter must be finite and non-negative');
   }
   const total = acquired.lines.length;
   const slice = (end: number) => sliceParagraphLayout(acquired, {
@@ -55,13 +72,31 @@ export function selectParagraphFragment(
     return reserve;
   };
   const reserveFits = (reservePt: number): boolean => additionalReserveFits?.(reservePt) ?? true;
+  const admissionExtent = (fragment: ParagraphLayout, completesParagraph: boolean): number => {
+    if (!completesParagraph) return fragment.advancePt;
+    // Keep retained advance authoritative for placement and paint. Only the
+    // page/column fit comparison ignores authored trailing whitespace; any
+    // retained trailing extent beyond it (for example a bottom border) remains.
+    const logicalLineBoxExtentPt = wordFinalParagraphAdmissionExtentPt({
+      advancePt: fragment.advancePt,
+      retainedSpaceAfterPt: fragment.spacing.afterPt,
+      authoredSpaceAfterPt,
+    });
+    return wordVerticalRlFinalLineAdmissionExtentPt({
+      paragraph: fragment,
+      writingMode: policy.writingMode ?? 'horizontal-tb',
+      logicalLineBoxExtentPt,
+      availableBlockExtentPt,
+    });
+  };
   if (total === 0) {
     const reserve = reserveFor(acquired);
+    const completeExtentPt = admissionExtent(acquired, true);
     if (canRelocate && (
-      acquired.advancePt + reserve > availableBlockExtentPt
+      completeExtentPt + reserve > availableBlockExtentPt
       || !reserveFits(reserve)
     )
-      && acquired.advancePt + reserve <= freshFlowRegionBlockExtentPt) {
+      && completeExtentPt + reserve <= freshFlowRegionBlockExtentPt) {
       return {
         fragment: null, nextCursor: cursor,
         requiresFreshFlowRegion: true, additionalReservePt: 0, admittedBlockExtentPt: 0,
@@ -74,26 +109,30 @@ export function selectParagraphFragment(
     };
   }
   const completeReserve = reserveFor(acquired);
+  const completeExtentPt = admissionExtent(acquired, true);
   if (cursor.boundary === null && policy.keepLines && canRelocate
     && (
-      acquired.advancePt + completeReserve > availableBlockExtentPt
+      completeExtentPt + completeReserve > availableBlockExtentPt
       || !reserveFits(completeReserve)
     )
-    && acquired.advancePt + completeReserve <= freshFlowRegionBlockExtentPt) {
+    && completeExtentPt + completeReserve <= freshFlowRegionBlockExtentPt) {
     return {
       fragment: null, nextCursor: cursor,
       requiresFreshFlowRegion: true, additionalReservePt: 0, admittedBlockExtentPt: 0,
     };
   }
-  let end = selectLargestFittingEnd(0, total, availableBlockExtentPt, (lineEnd) => (
-    (() => {
+  let end = selectLargestFittingEnd(
+    0,
+    total,
+    availableBlockExtentPt,
+    (lineEnd) => (() => {
       const candidate = slice(lineEnd);
       const reserve = reserveFor(candidate);
       return reserveFits(reserve)
-        ? candidate.advancePt + reserve
+        ? admissionExtent(candidate, lineEnd === total) + reserve
         : availableBlockExtentPt + 1;
-    })()
-  )).end;
+    })(),
+  ).end;
   if (end === 0) {
     if (canRelocate) return {
       fragment: null, nextCursor: cursor,

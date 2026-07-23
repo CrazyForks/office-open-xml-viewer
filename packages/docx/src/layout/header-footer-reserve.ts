@@ -72,6 +72,9 @@ export function headerFooterOverflowReservePt(
     throw new RangeError('Header/footer reserve inputs must be finite');
   }
   if (storyExtentPt < 0) throw new RangeError('Story extent must be non-negative');
+  // A selected but empty story has no occupied interval. Its anchor distance
+  // alone cannot overlap the body or reduce the canonical body-flow domain.
+  if (storyExtentPt === 0) return 0;
   return marginPt < 0 ? 0 : Math.max(0, storyExtentPt - (marginPt - distancePt));
 }
 

@@ -230,6 +230,21 @@ describe('production layout service integration', () => {
       : false)).toEqual([true, false]);
   });
 
+  it('classifies an eastAsia-hinted Latin run for Far East metrics only when useFELayout is active', () => {
+    const run = textRun('Latin title', {
+      fontFamilyEastAsia: 'EA Face',
+      fontHint: 'eastAsia',
+      langEastAsia: 'ja-jp',
+    });
+    const off = buildSegments([run], { pageIndex: 0, totalPages: 1 });
+    const on = buildSegments([run], { pageIndex: 0, totalPages: 1, useFeLayout: true });
+
+    expect(off.filter((segment) => 'text' in segment)
+      .every((segment) => !('metricEastAsian' in segment))).toBe(true);
+    expect(on.filter((segment) => 'text' in segment)
+      .every((segment) => 'metricEastAsian' in segment && segment.metricEastAsian === true)).toBe(true);
+  });
+
   it('keeps a single pure-CJK hint-protected rtl span on non-cs formatting', () => {
     const services = createLayoutServices(model(), { measureContext: measureContext() });
     const [segment] = buildSegments([textRun('国', {
@@ -503,7 +518,7 @@ describe('production layout service integration', () => {
     expect(shape('Timed Out', 400).spans[0]?.font.source).toBe('native');
   });
 
-  it('collects every currently representable math story, including nested tables', () => {
+  it('collects every currently representable math story, including rich text boxes and nested tables', () => {
     const math = (value: string) => ({
       type: 'math', nodes: [{ type: 'text', text: value }], display: false, fontSize: 10,
     });
@@ -511,8 +526,15 @@ describe('production layout service integration', () => {
     const table = (value: string) => ({
       type: 'table', rows: [{ cells: [{ content: [paragraph(value)] }] }],
     });
+    const shapeWithRichTextBox = {
+      type: 'shape',
+      textBoxContent: [paragraph('shape-inline'), table('shape-table')],
+    };
     const doc = model({
-      body: [paragraph('body')],
+      body: [
+        paragraph('body'),
+        { type: 'paragraph', runs: [shapeWithRichTextBox] },
+      ],
       headers: { default: { body: [table('header')] }, first: null, even: null },
       footers: { default: null, first: { body: [paragraph('footer')] }, even: null },
       footnotes: [{ id: '1', content: [table('footnote')] }],
@@ -521,6 +543,13 @@ describe('production layout service integration', () => {
     const normalized = normalizeInternalDocumentModel(doc);
     const services = createLayoutServices(normalized.document, { measureContext: measureContext() });
 
+    expect(normalized.mathOccurrences).toHaveLength(7);
+    expect(normalized.mathOccurrences.map((occurrence) => occurrence.source)).toEqual(
+      expect.arrayContaining([
+        { story: 'textbox', storyInstance: 'body:body:1.0', path: [0, 0] },
+        { story: 'textbox', storyInstance: 'body:body:1.0', path: [1, 0, 0, 0, 0] },
+      ]),
+    );
     for (const occurrence of normalized.mathOccurrences) {
       expect(occurrence.resourceKey).toBe(mathResourceKey(occurrence.source, 'inline'));
       expect(() => services.math.resolve(occurrence.resourceKey)).not.toThrow();

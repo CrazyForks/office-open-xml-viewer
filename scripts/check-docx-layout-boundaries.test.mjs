@@ -150,6 +150,7 @@ function production(state, table, para, group) {
       + 'export interface VerticalGlyphMeasurementService {\n'
       + '  fingerprint: string;\n'
       + '  measureRunInkExtra(text: string): number;\n'
+      + '  planRun(input: unknown): unknown;\n'
       + '}\n');
   write(root, 'packages/docx/src/layout/section-orientation.ts',
     'export function isVerticalSection() {}\n'
@@ -419,7 +420,7 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     measurementRoot,
     'packages/docx/src/layout/measurement-capabilities.ts',
     'export interface MeasurementTextContext { canvas: HTMLCanvasElement }\n'
-      + 'export interface VerticalGlyphMeasurementService { measureRunInkExtra(text: string): number }\n',
+      + 'export interface VerticalGlyphMeasurementService { measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n',
   );
   expectDiagnostic(
     measurementRoot,
@@ -432,19 +433,19 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     [
       'unlisted member',
       'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown; fillRect(): void }\n'
-        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number }\n',
+        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n',
       'fillRect',
     ],
     [
       'heritage clause',
       'export interface MeasurementTextContext extends CanvasRenderingContext2D { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
-        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number }\n',
+        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n',
       'heritage',
     ],
     [
       'extra declaration',
       'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
-        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number }\n'
+        + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n'
         + 'export interface PaintEscape { fillRect(): void }\n',
       'PaintEscape',
     ],

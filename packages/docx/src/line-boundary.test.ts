@@ -251,6 +251,28 @@ function isEnd(boundary: LineBoundary, segCount: number): boolean {
   return boundary.segIndex === segCount && boundary.charOffset === 0;
 }
 
+describe('strict tab-stop alignment aliases', () => {
+  const tabFixture = (alignment: TabStop['alignment']): Fixture => ({
+    name: alignment,
+    width: 100,
+    tabStops: [{ pos: 60, alignment, leader: 'none' }],
+    segs: () => [
+      textSeg('lead'),
+      { isTab: true, fontSize: 10, measuredWidth: 0 },
+      textSeg('tail'),
+    ],
+  });
+
+  it('maps start and num to leading, and end to trailing, in an LTR reading frame', () => {
+    const structure = (alignment: TabStop['alignment']) =>
+      lineStructure(layoutFixture(tabFixture(alignment)));
+
+    expect(structure('start')).toEqual(structure('left'));
+    expect(structure('num')).toEqual(structure('left'));
+    expect(structure('end')).toEqual(structure('right'));
+  });
+});
+
 describe('layoutLines consumed-content boundaries', () => {
   for (const fixture of fixtures) {
     it(`reproduces every content-bearing suffix for ${fixture.name}`, () => {

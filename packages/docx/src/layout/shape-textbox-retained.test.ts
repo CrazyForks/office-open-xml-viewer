@@ -40,6 +40,50 @@ function canvas(): CanvasRenderingContext2D {
 }
 
 describe('retained shape text-box acquisition', () => {
+  it.each([
+    { anchor: undefined, expectedTopPt: 30, label: 'defaults to top' },
+    { anchor: 'ctr', expectedTopPt: 65, label: 'centers' },
+    { anchor: 'b', expectedTopPt: 100, label: 'bottom-aligns' },
+  ])('$label the retained text story from bodyPr@anchor', ({ anchor, expectedTopPt }) => {
+    const measureContext = canvas();
+    const services = createLayoutServices({
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [], headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as DocxDocumentModel, { measureContext });
+    const shape = {
+      textInsetL: 0, textInsetT: 10, textInsetR: 0, textInsetB: 10,
+      ...(anchor ? { textAnchor: anchor } : {}),
+      textBlocks: [{
+        text: 'abcd', fontSizePt: 10, color: '112233', alignment: 'left',
+        runs: [{ text: 'abcd', fontSizePt: 10, color: '112233' }],
+      }],
+    } as unknown as ShapeRun;
+
+    const layout = acquireShapeTextBoxLayout(
+      shape,
+      { xPt: 10, yPt: 20, widthPt: 40, heightPt: 100 },
+      {
+        id: `anchor-${anchor ?? 'default'}`,
+        source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+        flowDomainId: 'body', context,
+        measurer: { context: measureContext, fontFamilyClasses: {} },
+        environment: {
+          pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+          layoutServices: services,
+        },
+      },
+    );
+
+    expect(layout?.story.blocks[0]?.flowBounds.yPt).toBe(expectedTopPt);
+    expect(layout?.contentBounds).toEqual({ xPt: 10, yPt: 20, widthPt: 40, heightPt: 100 });
+  });
+
   it('partitions once and paint at scale 1/2 never measures', () => {
     const measureContext = canvas();
     const services = createLayoutServices({

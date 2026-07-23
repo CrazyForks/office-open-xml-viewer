@@ -165,7 +165,11 @@ export function createProductionLayoutServices(
       classifyDocxFontGeneric(family, doc.fontFamilyClasses, doc.fontFamilyPitches),
     ])),
     measurer: {
-      fingerprint: `${context ? 'canvas-text-metrics-v1' : 'deterministic-text-metrics-v1'}:${options.verticalGlyphMeasurement.fingerprint}`,
+      // Vertical OpenType capability is consulted only by vertical acquisition.
+      // DOM-dependent vertical documents cannot retain worker mode, so folding
+      // that unused capability into the general text snapshot would make equal
+      // horizontal main/worker services advertise unequal cache identities.
+      fingerprint: context ? 'canvas-text-metrics-v1' : 'deterministic-text-metrics-v1',
       measure(request: Readonly<GlyphMeasureRequest>) {
         if (!context) return {
           advancePt: [...request.text].length * request.fontSizePt * 0.5,
@@ -235,6 +239,7 @@ export function createProductionLayoutServices(
     text,
     images: createImageMetadataService(imageMetadata),
     math: createMathMetadataService(mathResources),
+    verticalGlyphFingerprint: options.verticalGlyphMeasurement.fingerprint,
   });
   const occurrenceKeys = options.mathOccurrences.map(({ source, display }) =>
     mathResourceKey(source, display ? 'display' : 'inline'));

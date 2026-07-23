@@ -9,6 +9,7 @@ import type {
 } from '../types.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
+import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { acquireShapeTextBoxLayout } from './paragraph.js';
 import type { CompleteTextBoxBlockInput } from './textbox-input.js';
 import type {
@@ -370,6 +371,13 @@ describe('rich text-box story acquisition', () => {
       fill: 'D9EAF7',
       stroke: null,
     } as unknown as DocRun);
+    const mathParagraph = textParagraph('');
+    mathParagraph.runs = [{
+      type: 'math',
+      nodes: [{ type: 'text', text: 'x + y' }],
+      display: false,
+      fontSize: 10,
+    } as unknown as DocRun];
     const shape = {
       type: 'shape',
       widthPt: 100,
@@ -399,6 +407,7 @@ describe('rich text-box story acquisition', () => {
           sourcePath: [2],
         },
         textParagraph('after'),
+        mathParagraph,
       ],
     } as unknown as ShapeRun;
     const verticalTableBlock = tableWithContent([
@@ -446,9 +455,10 @@ describe('rich text-box story acquisition', () => {
       fontFamilyClasses: {},
     } as unknown as DocxDocumentModel;
 
+    const normalized = normalizeInternalDocumentModel(model);
     const layout = layoutDocument(
-      model,
-      createLayoutServices(model, { measureContext: canvas() }),
+      normalized.document,
+      createLayoutServices(normalized.document, { measureContext: canvas() }),
       { currentDateMs: 0 },
     );
     const bodyParagraph = layout.pages[0]?.layers.body.find(
@@ -462,10 +472,19 @@ describe('rich text-box story acquisition', () => {
     expect(textBox?.flowBounds.heightPt).toBeGreaterThan(20);
     expect(textBox?.clipBounds).toBeUndefined();
     expect(textBox?.story.blocks.map((block) => block.kind)).toEqual([
-      'paragraph', 'table', 'paragraph',
+      'paragraph', 'table', 'paragraph', 'paragraph',
     ]);
     expect(textBox?.story.blocks.map((block) => block.source.path)).toEqual([
-      [0], [1], [3],
+      [0], [1], [3], [4],
+    ]);
+    expect(normalized.mathOccurrences).toEqual([
+      expect.objectContaining({
+        source: {
+          story: 'textbox',
+          storyInstance: 'body:body:0.0',
+          path: [4, 0],
+        },
+      }),
     ]);
     expect(textBox?.story.diagnostics).toEqual([{
       code: 'UNSUPPORTED_FEATURE',

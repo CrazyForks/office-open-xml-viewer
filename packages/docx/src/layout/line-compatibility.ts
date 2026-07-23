@@ -9,6 +9,36 @@ export const WORD_EAST_ASIAN_GRID_LINE_ALLOCATION = defineCompatibilityRule({
   description: 'For an East Asian single-spaced line on a document grid, preserve the measured whole-cell allocation from the intended face design height and use the established 1.3-times-em fallback only when that design height is unavailable.',
 });
 
+export const WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM = defineCompatibilityRule({
+  id: 'word-use-fe-layout-inherited-grid-minimum',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'far-east-hinted-latin-grid-multiple',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'With useFELayout enabled, a Latin line carrying an eastAsia-hinted run participates in Far East grid metrics; inherited automatic spacing keeps the larger of its whole-cell design allocation and one grid pitch multiplied by the inherited spacing value.',
+});
+
+export const WORD_USE_FE_LAYOUT_EMPTY_MARK_GRID_ALLOCATION = defineCompatibilityRule({
+  id: 'word-use-fe-layout-empty-mark-grid-allocation',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/paragraph-measure.test.ts#applies useFELayout grid-cell allocation to an empty paragraph mark',
+  },
+  description: 'With useFELayout enabled, a content-less paragraph mark participates in Far East whole-cell document-grid allocation even when the document contains no literal East Asian text.',
+});
+
+export const WORD_CONTIGUOUS_UNDERLINE_GEOMETRY = defineCompatibilityRule({
+  id: 'word-contiguous-underline-geometry',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/paragraph.test.ts#uses one safe baseline for a solid underline spanning adjacent source runs',
+  },
+  description: 'Adjacent compatible underlined source runs share one safe baseline and continuous authored cadence while style, color, and thickness boundaries remain distinct.',
+});
+
 export const WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED = defineCompatibilityRule({
   id: 'word-grid-at-least-tall-line-unsnapped',
   evidence: {
@@ -53,6 +83,36 @@ export const WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION = defineCompatibilityRu
   },
   description: 'Keep leading whitespace used as a first-line text indent fixed while distributing justified-line slack across content in a left-to-right line.',
 });
+
+export const WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT = defineCompatibilityRule({
+  id: 'word-justified-candidate-separator-fit',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/justify-shrink-overshoot.test.ts#counts a candidate trailing space when the prospective line will justify',
+  },
+  description: 'On a full paragraph-width line that will be fully justified, include the candidate word separator in its wrap-fit width; lines narrowed by DrawingML wrap exclusions retain collapsible line-end separator fit behavior.',
+});
+
+/** Compatibility projection governed by {@link WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT}. */
+export function wordCandidateFitWidthPx(input: Readonly<{
+  widthPx: number;
+  trailingSpacePx: number;
+  lineWillJustify: boolean;
+  wrapNarrowed?: boolean;
+}>): number {
+  return input.lineWillJustify && input.wrapNarrowed !== true
+    ? input.widthPx
+    : input.widthPx - input.trailingSpacePx;
+}
+
+/** A calibrated same-route allowance cannot be projected across a line whose
+ * characters resolve to different measurement routes. */
+export function wordJustifiedCandidateFitAllowancePx(input: Readonly<{
+  biasBudgetPx: number;
+  resolvedMeasurementRouteCount: number;
+}>): number {
+  return input.resolvedMeasurementRouteCount === 1 ? input.biasBudgetPx : 0;
+}
 
 export const WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE = defineCompatibilityRule({
   id: 'word-ruby-paragraph-uniform-line-advance',
@@ -108,6 +168,23 @@ export const WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE = defineCompatibilityRul
   description: 'When a numbering marker overruns its hanging-indent budget, advance the body to the next reachable tab stop beyond the marker edge.',
 });
 
+export const WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB = defineCompatibilityRule({
+  id: 'word-numbering-suffix-coincident-list-tab',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/numbering-marker.test.ts#keeps a suffix tab on the list stop coincident with the marker end',
+  },
+  description: 'For the tab synthesized by a numbering suffix, accept an authored numeric list tab coincident with the shaped marker end instead of advancing to the next automatic tab stop.',
+});
+
+/** Compatibility projection governed by {@link WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB}. */
+export function wordNumberingSuffixAcceptsCoincidentListTab(
+  markerEndPt: number,
+  stop: Readonly<{ pos: number; alignment: string }>,
+): boolean {
+  return stop.alignment === 'num' && Math.abs(stop.pos - markerEndPt) <= 1e-6;
+}
+
 export const WORD_TAB_STOP_PAGE_EDGE_CLAMP = defineCompatibilityRule({
   id: 'word-tab-stop-page-edge-clamp',
   evidence: {
@@ -144,6 +221,26 @@ export const WORD_OVERLONG_TOKEN_EMERGENCY_BREAK = defineCompatibilityRule({
   description: 'Emergency-break a non-CJK token that is wider than an empty line at grapheme-safe character boundaries so it remains inside the content band.',
 });
 
+export const WORD_RUN_VERTICAL_ALIGN_BASELINE_SHIFT = defineCompatibilityRule({
+  id: 'word-run-vertical-align-baseline-shift',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/run-char-metrics-render.test.ts#w:vertAlign raises superscript, lowers subscript, and leaves ordinary baselines unchanged',
+  },
+  description: 'Retain the established run-level baseline displacement for vertically aligned text: superscript rises by 0.35 of its authored font size and subscript falls by 0.15, while the separately authored w:position remains additive.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_RUN_VERTICAL_ALIGN_BASELINE_SHIFT}. */
+export function wordRunVerticalAlignRaisePt(
+  verticalAlign: string | null | undefined,
+  authoredFontSizePt: number,
+): number {
+  if (verticalAlign === 'super') return authoredFontSizePt * 0.35;
+  if (verticalAlign === 'sub') return -authoredFontSizePt * 0.15;
+  return 0;
+}
+
 export const WORD_FAR_EAST_SINGLE_LINE_FACTOR = 1.3;
 
 export function wordEastAsianGridLineCells(
@@ -160,6 +257,16 @@ export function wordFarEastSingleLinePx(
   return intendedSinglePx > 0
     ? intendedSinglePx
     : emPx * WORD_FAR_EAST_SINGLE_LINE_FACTOR;
+}
+
+/** Compatibility projection governed by
+ * {@link WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM}. */
+export function wordUseFeLayoutInheritedGridHeightPx(
+  allocatedCellHeightPx: number,
+  pitchPx: number,
+  inheritedMultiple: number,
+): number {
+  return Math.max(allocatedCellHeightPx, pitchPx * inheritedMultiple);
 }
 
 export function wordGridAtLeastLineHeightPx(

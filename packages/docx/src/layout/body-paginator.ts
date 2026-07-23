@@ -72,6 +72,7 @@ import {
 } from './section-page-identity.js';
 import {
   wordActiveColumnBreakIndexes,
+  wordEmptyKeepNextBridgesSuccessor,
   wordFlowNeutralPreBreakAnchorParagraph,
   wordPreBreakHostAnchorExtentPt,
   wordPreBreakInlineDrawingResource,
@@ -532,21 +533,25 @@ function acceptNode(
   const ownershipRetained = placement?.sectionFlowOwnership === undefined
     ? projected
     : Object.freeze({ ...projected, sectionFlowOwnership: placement.sectionFlowOwnership });
+  const admittedBlockStartPt = placement?.yPt ?? state.flow.cursorBlockPt;
   const contentOwned = ownershipRetained.kind === 'paragraph' && ownershipRetained.ordinaryFlow
-    ? Object.freeze({
-        ...ownershipRetained,
-        flowBounds: Object.freeze({
-          ...ownershipRetained.flowBounds,
-          yPt: ownershipRetained.flowBounds.yPt + ownershipRetained.spacing.beforePt,
-          // Admission owns flow containment; intrinsic line and ink geometry stay retained separately.
-          heightPt: Math.max(
-            0,
-            blockExtentPt
-              - ownershipRetained.spacing.beforePt
-              - ownershipRetained.spacing.afterPt,
-          ),
-        }),
-      })
+    ? (() => {
+        const contentStartPt = admittedBlockStartPt + ownershipRetained.spacing.beforePt;
+        const contentEndPt = admittedBlockStartPt
+          + blockExtentPt
+          - ownershipRetained.spacing.afterPt;
+        return Object.freeze({
+          ...ownershipRetained,
+          flowBounds: Object.freeze({
+            ...ownershipRetained.flowBounds,
+            yPt: contentStartPt,
+            // Derive both edges from the admitted allocation before retaining
+            // the extent. Spacing collapse reuses the same block-end arithmetic,
+            // so adjacent content cannot acquire two floating-point boundaries.
+            heightPt: Math.max(0, contentEndPt - contentStartPt),
+          }),
+        });
+      })()
     : ownershipRetained;
   const retainedAtDestination = placement?.coordinateSpace === 'upright-physical'
     ? ({
@@ -745,6 +750,11 @@ function paginateBodyPass(
   };
   state = setBodyBalanceTarget(state, balanceTargetFor(state));
   const factory = transitionFactory(owners, reserves);
+  // Source entry whose keep-with-next set was relocated to a new physical page
+  // by automatic overflow. The compatibility projection suppresses that
+  // leading paragraph's space-before only for this grouped relocation;
+  // ordinary overflow and authored page/section breaks retain their own rules.
+  let automaticPageStartEntryIndex: number | null = null;
   const session = kernel.openBodyLayoutSession({
     source: input.source,
     section: input.initialSection.context,
@@ -810,8 +820,12 @@ function paginateBodyPass(
   const commitTransition = (
     transition: ReturnType<typeof applyAuthoredBreak>,
     nextEntryIndex: number,
+    suppressFirstParagraphSpaceBefore = false,
   ) => {
     const previousPageIndex = state.flow.pageIndex;
+    const opensAutomaticPage = transition.events.some((event) => (
+      event.type === 'next-page' && event.reason === 'overflow'
+    ));
     const opensSamePageColumnRegion = transition.events.some((event) => (
       event.type === 'begin-section'
       && 'placement' in event
@@ -821,6 +835,9 @@ function paginateBodyPass(
     state = setBodyBalanceTarget(state, balanceTargetFor(state));
     const nextLocation = acquisitionLocation(state);
     if (state.flow.pageIndex !== previousPageIndex) {
+      automaticPageStartEntryIndex = opensAutomaticPage && suppressFirstParagraphSpaceBefore
+        ? nextEntryIndex
+        : null;
       session.resetPageAcquisition(nextLocation);
       prescanPageAnchors(state, nextEntryIndex);
     } else {
@@ -1028,7 +1045,12 @@ function paginateBodyPass(
           availableInlineExtentPt: location.availableBounds.widthPt,
           suppressSpaceBefore: cursor.boundary !== null
             || block.continuousSectionRole === 'suppress-before'
-            || spacing.suppressBefore,
+            || spacing.suppressBefore
+            || (
+              cursor.boundary === null
+              && !state.flow.pageHasContent
+              && automaticPageStartEntryIndex === entryIndex
+            ),
           continuation: cursor,
         });
         if (acquired.placement) {
@@ -1091,6 +1113,11 @@ function paginateBodyPass(
           let keepSetExtentPt = acquired.blockExtentPt;
           const keepSetReferenceIds = new Set(footnoteIdsInRetainedSlice(acquired.layout));
           let hasTerminalBlock = false;
+          let bridgeSuccessor = wordEmptyKeepNextBridgesSuccessor({
+            keepNext: block.keepNext,
+            inkless: block.inkless === true,
+            undecoratedMark: isUndecoratedInklessMark(acquired.layout),
+          });
           for (let nextIndex = entryIndex + 1; nextIndex < input.sequence.length; nextIndex += 1) {
             const nextEntry = input.sequence[nextIndex]!;
             if (nextEntry.kind === 'consume-source') continue;
@@ -1104,7 +1131,9 @@ function paginateBodyPass(
               location,
               availableInlineExtentPt: location.availableBounds.widthPt,
             });
-            const continues = nextBlock.kind === 'paragraph' && nextBlock.keepNext;
+            const continues = nextBlock.kind === 'paragraph'
+              && (nextBlock.keepNext || bridgeSuccessor);
+            bridgeSuccessor = false;
             keepSetExtentPt += continues
               ? following.fullExtentPt
               : following.leadContentExtentPt;
@@ -1130,6 +1159,7 @@ function paginateBodyPass(
             commitTransition(
               advanceColumnOrPage(state.flow, 'overflow'),
               entryIndex,
+              true,
             );
             continue;
           }
@@ -1139,7 +1169,11 @@ function paginateBodyPass(
         const isImmediatelyPreBreakAnchor = nextEntry?.kind === 'body-block'
           && nextEntry.block.kind === 'paragraph'
           && afterNext?.kind === 'authored-break'
-          && afterNext.break === 'page';
+          && afterNext.break === 'page'
+          // A trailing hard break belongs to the anchor's own source paragraph.
+          // It governs what follows that paragraph; it is not evidence that the
+          // preceding inline resource and anchor form a movable keep group.
+          && afterNext.sameSourceParagraphAsPrevious !== true;
         const hasInlineDrawingResource = wordPreBreakInlineDrawingResource(acquired.layout);
         if (
           cursor.boundary === null
@@ -1227,7 +1261,12 @@ function paginateBodyPass(
           location.availableBounds.heightPt + trailingMarkAdmissionAllowancePt,
           freshPageExtent(state),
           state.flow.pageHasContent,
-          { keepLines: block.keepLines, widowControl: block.widowControl },
+          {
+            keepLines: block.keepLines,
+            widowControl: block.widowControl,
+            authoredSpaceAfterPt: block.spaceAfterPt,
+            writingMode: activeRegion(state).writingMode,
+          },
           (fragment) => footnoteAdmission(
             fragment,
             location.availableBounds.widthPt,

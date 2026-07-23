@@ -16,6 +16,7 @@ import { measureParagraph } from '../paragraph-measure.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import type { DocParagraph } from '../types.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
+import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 
 const fontRoute = {
   familyList: '"Test Sans"', scope: 'native', fingerprint: 'test-font-route',
@@ -41,6 +42,8 @@ function projectMeasuredSegment(
   layoutServices?: unknown,
   anchorFrames?: Parameters<typeof paragraphLayoutFromMeasurement>[1]['anchorFrames'],
   paragraphBorderEdges?: Parameters<typeof paragraphLayoutFromMeasurement>[1]['paragraphBorderEdges'],
+  verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
+  verticalPageFrame = false,
 ) {
   const measured = {
     lines: [{
@@ -64,7 +67,10 @@ function projectMeasuredSegment(
     context,
     placement: measured.placement,
     measurer: {} as never,
-    environment: { documentHasEastAsianText: false, layoutServices } as never,
+    environment: {
+      documentHasEastAsianText: false, layoutServices, verticalGlyphMeasurement,
+      verticalPageFrame,
+    } as never,
     exclusions: [],
     ...(anchorFrames ? { anchorFrames } : {}),
     ...(paragraphBorderEdges ? { paragraphBorderEdges } : {}),
@@ -763,6 +769,31 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     });
   });
 
+  it('retains selected-face ink on text paint operations for page admission', () => {
+    const textParagraph = {
+      ...paragraph,
+      runs: [{ ...(paragraph.runs[0] as object), text: 'A' }],
+    } as unknown as DocParagraph;
+    const segment = {
+      text: 'A', sourceRunIndex: 0, measuredWidth: 7,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+      shapedClusters: [{
+        range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 7,
+      }],
+      selectedFaceInkBounds: {
+        xMinPt: 0, xMaxPt: 7, ascentPt: 7, descentPt: 3,
+      },
+    } as unknown as LayoutTextSeg;
+
+    expect(projectMeasuredSegment(textParagraph, segment)
+      .lines[0]?.placements[0]).toMatchObject({
+      kind: 'text',
+      paintOps: [{
+        inkBounds: { xMinPt: 0, xMaxPt: 7, ascentPt: 7, descentPt: 3 },
+      }],
+    });
+  });
+
   it('matches one scoped host to one anchored payload and retains one drawing and exclusion', () => {
     const occurrenceId = 'anchor:body:body:3:wp-anchor-1';
     const anchored = retainedAnchor(occurrenceId);
@@ -924,6 +955,76 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     expect(node.exclusions).toHaveLength(1);
     expect(node.exclusions[0]).toMatchObject({
       bounds: { xPt: 12, yPt: 13, widthPt: 40, heightPt: 30 },
+    });
+  });
+
+  it('plans a directional vertical-page anchor in an upright physical paint frame', () => {
+    const occurrenceId = 'anchor:body:body:3:vertical-right-arrow';
+    const anchored = retainedAnchor(occurrenceId, {
+      horizontal: {
+        relativeFrom: 'page', relativeFromStatus: 'valid',
+        choice: { kind: 'offset', valuePt: 40 },
+      },
+      vertical: {
+        relativeFrom: 'page', relativeFromStatus: 'valid',
+        choice: { kind: 'offset', valuePt: 50 },
+      },
+      extent: {
+        widthPt: 80, widthStatus: 'valid', heightPt: 30, heightStatus: 'valid',
+      },
+      wrap: {
+        kind: 'none', authoredKinds: [], side: null,
+        distances: retainedAnchor(occurrenceId).wrap.distances,
+        effectExtent: null, polygon: null,
+      },
+    });
+    const anchorParagraph = {
+      ...paragraph,
+      runs: [
+        { type: 'anchorHost', fontSize: 10, anchorOccurrenceId: occurrenceId },
+        {
+          type: 'shape', widthPt: 80, heightPt: 30,
+          anchorXPt: 40, anchorYPt: 50,
+          anchorXFromMargin: false, anchorYFromPara: false,
+          anchorAcquisitionInput: anchored,
+          presetGeometry: 'rightArrow', subpaths: [], fill: null, stroke: null,
+        },
+      ],
+    } as unknown as DocParagraph;
+    const host = {
+      text: '', metricOnly: true, sourceRunIndex: 0, measuredWidth: 0,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+    } as unknown as LayoutTextSeg;
+
+    const node = projectMeasuredSegment(
+      anchorParagraph,
+      host,
+      acquisitionContext,
+      undefined,
+      {
+        // Vertical layout retains the physical 300 x 200 page as a 300 x 200
+        // anchor-reference frame; page.height is the physical paint width.
+        page: { xPt: 0, yPt: 0, widthPt: 300, heightPt: 200 },
+        margin: { xPt: 10, yPt: 20, widthPt: 280, heightPt: 160 },
+        column: { xPt: 10, yPt: 20, widthPt: 140, heightPt: 160 },
+        pageParity: 'odd',
+      },
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(node.drawings[0]).toMatchObject({
+      orientation: 'upright-physical',
+      flowBounds: { xPt: 50, yPt: 80, widthPt: 30, heightPt: 80 },
+      transform: { a: 0, b: -1, c: 1, d: 0, e: 65, f: 120 },
+      commands: [{
+        kind: 'drawingml-shape',
+        plan: {
+          geometry: { kind: 'preset', name: 'rightArrow' },
+          rect: { x: -40, y: -15, w: 80, h: 30 },
+        },
+      }],
     });
   });
 
@@ -1345,6 +1446,85 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     expect(node.lines[0]?.baselinePt).toBe(19);
   });
 
+  it('retains the vertical glyph plan instead of reclassifying text at paint time', () => {
+    const value = 'A（ー）B';
+    const verticalParagraph = {
+      ...paragraph,
+      runs: [{ ...(paragraph.runs[0] as object), text: value }],
+    } as unknown as DocParagraph;
+    const segment = {
+      text: value, sourceRunIndex: 0, measuredWidth: 50,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute, verticalRun: true,
+      shapedClusters: [...value].map((_character, index) => ({
+        range: { start: index, end: index + 1 }, offsetPt: index * 10, advancePt: 10,
+      })),
+    } as unknown as LayoutTextSeg;
+    const verticalGlyphMeasurement: VerticalGlyphMeasurementService = {
+      fingerprint: 'vertical:retained-plan-test',
+      measureRunInkExtra: () => 0,
+      planRun: () => [
+        {
+          text: 'A', range: { start: 0, end: 1 }, orientation: 'sideways',
+          originPt: 0, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: 4 }, verticalFeature: false,
+          blockAxisInkBounds: { startPt: -4, endPt: 6 },
+        },
+        {
+          text: '︵', range: { start: 1, end: 2 }, orientation: 'upright',
+          originPt: 15, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: -2 }, verticalFeature: false,
+          blockAxisInkBounds: { startPt: -5, endPt: 5 },
+        },
+        {
+          text: 'ー', range: { start: 2, end: 3 }, orientation: 'rotate',
+          originPt: 25, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: 0 }, verticalFeature: false,
+          blockAxisInkBounds: { startPt: -5, endPt: 5 },
+        },
+        {
+          text: '）', range: { start: 3, end: 4 }, orientation: 'upright',
+          originPt: 35, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: 0 }, verticalFeature: true,
+          blockAxisInkBounds: { startPt: -5, endPt: 5 },
+        },
+        {
+          text: 'B', range: { start: 4, end: 5 }, orientation: 'sideways',
+          originPt: 40, advancePt: 10, drawOffsetPt: { xPt: 0, yPt: 4 }, verticalFeature: false,
+          blockAxisInkBounds: { startPt: -4, endPt: 6 },
+        },
+      ],
+    };
+
+    const node = projectMeasuredSegment(
+      verticalParagraph, segment, acquisitionContext,
+      undefined, undefined, undefined, verticalGlyphMeasurement,
+    );
+    const placement = node.lines[0]?.placements[0];
+
+    expect(placement).toMatchObject({
+      kind: 'text',
+      text: value,
+      paintOps: [
+        expect.objectContaining({
+          text: 'A', range: { start: 0, end: 1 }, glyphOrientation: 'sideways',
+          offset: { xPt: 0, yPt: 0 }, glyphOffsetPt: { xPt: 0, yPt: 4 },
+        }),
+        expect.objectContaining({
+          text: '︵', range: { start: 1, end: 2 }, glyphOrientation: 'upright',
+          offset: { xPt: 15, yPt: 0 }, glyphOffsetPt: { xPt: 0, yPt: -2 },
+        }),
+        expect.objectContaining({
+          text: 'ー', range: { start: 2, end: 3 }, glyphOrientation: 'rotate',
+          offset: { xPt: 25, yPt: 0 },
+        }),
+        expect.objectContaining({
+          text: '）', range: { start: 3, end: 4 }, glyphOrientation: 'upright',
+          offset: { xPt: 35, yPt: 0 }, verticalFeature: true,
+        }),
+        expect.objectContaining({
+          text: 'B', range: { start: 4, end: 5 }, glyphOrientation: 'sideways',
+          offset: { xPt: 40, yPt: 0 }, glyphOffsetPt: { xPt: 0, yPt: 4 },
+        }),
+      ],
+    });
+  });
+
   it('applies the decimal auto-tab only to numeric content without an explicit tab', () => {
     const decimalContext = {
       ...acquisitionContext,
@@ -1501,6 +1681,104 @@ describe('planLine visual geometry', () => {
     ]);
   });
 
+  it('retains one continuous dotted underline cadence across adjacent source runs', () => {
+    const dotted = (fromXPt: number, toXPt: number) => ({
+      kind: 'underline' as const,
+      authoredStyle: 'dotted',
+      from: { xPt: fromXPt, yPt: 16 },
+      to: { xPt: toXPt, yPt: 16 },
+      color: '#000000',
+      widthPt: 1,
+      style: 'dotted' as const,
+      dashPatternPt: [1, 2] as const,
+    });
+    const first = { ...measuredText('aa', 0, 20), decorations: [dotted(0, 20)] };
+    const second = { ...measuredText('bb', 2, 20), decorations: [dotted(20, 40)] };
+
+    const line = planLine({
+      paragraphXPt: 0,
+      availableWidthPt: 100,
+      alignment: 'left',
+      baseRtl: false,
+      isFirstLine: true,
+      isLastLine: true,
+      stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 4 },
+        topPt: 5,
+        baselinePt: 15,
+        advancePt: 14,
+        xOffsetPt: 0,
+        availableWidthPt: 100,
+        endsWithBreak: false,
+        segments: [first, second],
+      },
+    });
+
+    expect(line.placements).toMatchObject([
+      { kind: 'text', decorations: [{ from: { xPt: 0 }, to: { xPt: 40 } }] },
+      { kind: 'text', decorations: [] },
+    ]);
+  });
+
+  it('uses one safe baseline for a solid underline spanning adjacent source runs', () => {
+    const underline = (fromXPt: number, toXPt: number, yPt: number) => ({
+      kind: 'underline' as const,
+      from: { xPt: fromXPt, yPt }, to: { xPt: toXPt, yPt },
+      color: '#000000', widthPt: 1, style: 'solid' as const,
+    });
+    const first = { ...measuredText('aa', 0, 20), decorations: [underline(0, 20, 16)] };
+    const second = { ...measuredText('bb', 2, 20), decorations: [underline(20, 40, 17)] };
+
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'left', baseRtl: false,
+      isFirstLine: true, isLastLine: true, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 4 }, topPt: 5, baselinePt: 15, advancePt: 14,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false,
+        segments: [first, second],
+      },
+    });
+
+    expect(line.placements).toMatchObject([
+      { kind: 'text', decorations: [{ from: { xPt: 0, yPt: 17 }, to: { xPt: 40, yPt: 17 } }] },
+      { kind: 'text', decorations: [] },
+    ]);
+  });
+
+  it('retains one wave cadence across adjacent underlined source runs', () => {
+    const wave = (fromXPt: number, toXPt: number) => ({
+      kind: 'underline' as const,
+      authoredStyle: 'wave',
+      from: { xPt: fromXPt, yPt: 16 }, to: { xPt: toXPt, yPt: 16 },
+      color: '#000000', widthPt: 1, style: 'wavy' as const,
+      path: [
+        { xPt: fromXPt, yPt: 15.5 },
+        { xPt: toXPt, yPt: 16.5 },
+      ],
+    });
+    const first = { ...measuredText('aa', 0, 20), decorations: [wave(0, 20)] };
+    const second = { ...measuredText('bb', 2, 20), decorations: [wave(20, 40)] };
+
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'left', baseRtl: false,
+      isFirstLine: true, isLastLine: true, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 4 }, topPt: 5, baselinePt: 15, advancePt: 14,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false,
+        segments: [first, second],
+      },
+    });
+
+    const decorations = line.placements.flatMap((placement) =>
+      placement.kind === 'text' ? placement.decorations : []);
+    expect(decorations).toHaveLength(1);
+    expect(decorations[0]).toMatchObject({
+      style: 'wavy', from: { xPt: 0, yPt: 16 }, to: { xPt: 40, yPt: 16 },
+    });
+    expect(decorations[0]?.path?.filter((point) => point.xPt === 20)).toHaveLength(1);
+  });
+
   it('materializes justified trailing slack and tab geometry without paint decisions', () => {
     const line = planLine({
       paragraphXPt: 0,
@@ -1564,6 +1842,102 @@ describe('planLine visual geometry', () => {
           text: '観察', range: { start: 0, end: 2 },
           offset: { xPt: 0, yPt: 0 }, letterSpacingPt: 20,
         }),
+      ],
+    });
+  });
+
+  it('shifts cluster-aligned vertical paint operations during internal justification', () => {
+    const base = measuredText('観察', 0, 20);
+    const line = planLine({
+      paragraphXPt: 5,
+      availableWidthPt: 40,
+      alignment: 'both',
+      baseRtl: false,
+      isFirstLine: true,
+      isLastLine: false,
+      stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 2 }, topPt: 2, baselinePt: 12, advancePt: 14,
+        xOffsetPt: 0, availableWidthPt: 40, endsWithBreak: false,
+        segments: [{
+          ...base,
+          clusters: [
+            { range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 }, advancePt: 10 },
+            { range: { start: 1, end: 2 }, offset: { xPt: 10, yPt: 0 }, advancePt: 10 },
+          ],
+          basePaintOps: [
+            {
+              ...base.basePaintOps[0]!, text: '観', range: { start: 0, end: 1 },
+              offset: { xPt: 5, yPt: 0 }, writingMode: 'vertical-rl', glyphOrientation: 'upright',
+            },
+            {
+              ...base.basePaintOps[0]!, text: '察', range: { start: 1, end: 2 },
+              offset: { xPt: 15, yPt: 0 }, writingMode: 'vertical-rl', glyphOrientation: 'upright',
+            },
+          ],
+        }],
+      },
+    });
+
+    expect(line.placements[0]).toMatchObject({
+      kind: 'text',
+      clusters: [
+        { range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 } },
+        { range: { start: 1, end: 2 }, offset: { xPt: 30, yPt: 0 } },
+      ],
+      paintOps: [
+        expect.objectContaining({
+          text: '観', range: { start: 0, end: 1 }, offset: { xPt: 5, yPt: 0 },
+          writingMode: 'vertical-rl', glyphOrientation: 'upright',
+        }),
+        expect.objectContaining({
+          text: '察', range: { start: 1, end: 2 }, offset: { xPt: 35, yPt: 0 },
+          writingMode: 'vertical-rl', glyphOrientation: 'upright',
+        }),
+      ],
+    });
+  });
+
+  it('intersects internal justification cuts with several retained paint operations', () => {
+    const base = measuredText('観察林', 0, 30);
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 60, alignment: 'both', baseRtl: false,
+      isFirstLine: true, isLastLine: false, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 3 }, topPt: 0, baselinePt: 10, advancePt: 12,
+        xOffsetPt: 0, availableWidthPt: 60, endsWithBreak: false,
+        segments: [{
+          ...base,
+          clusters: [
+            { range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 }, advancePt: 10 },
+            { range: { start: 1, end: 2 }, offset: { xPt: 10, yPt: 0 }, advancePt: 10 },
+            { range: { start: 2, end: 3 }, offset: { xPt: 20, yPt: 0 }, advancePt: 10 },
+          ],
+          basePaintOps: [
+            {
+              ...base.basePaintOps[0]!, text: '観察', range: { start: 0, end: 2 },
+              offset: { xPt: 0, yPt: 0 },
+            },
+            {
+              ...base.basePaintOps[0]!, text: '林', range: { start: 2, end: 3 },
+              offset: { xPt: 20, yPt: 0 },
+            },
+          ],
+        }],
+      },
+    });
+
+    expect(line.placements[0]).toMatchObject({
+      kind: 'text',
+      clusters: [
+        { range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 } },
+        { range: { start: 1, end: 2 }, offset: { xPt: 25, yPt: 0 } },
+        { range: { start: 2, end: 3 }, offset: { xPt: 50, yPt: 0 } },
+      ],
+      paintOps: [
+        expect.objectContaining({ text: '観', range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 } }),
+        expect.objectContaining({ text: '察', range: { start: 1, end: 2 }, offset: { xPt: 25, yPt: 0 } }),
+        expect.objectContaining({ text: '林', range: { start: 2, end: 3 }, offset: { xPt: 50, yPt: 0 } }),
       ],
     });
   });
@@ -1717,6 +2091,36 @@ describe('planLine visual geometry', () => {
     });
   });
 
+  it('retains superscript baseline geometry across the main/worker clone boundary', () => {
+    const superscript = {
+      ...measuredText('S', 0, 5),
+      verticalAlign: 'super' as const,
+      basePaintOps: [{
+        ...measuredText('S', 0, 5).basePaintOps[0],
+        offset: { xPt: 0, yPt: -3.5 },
+      }],
+    };
+    const main = planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'left', baseRtl: false,
+      isFirstLine: true, isLastLine: true, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 1 }, topPt: 0, baselinePt: 10, advancePt: 12,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false,
+        segments: [superscript],
+      },
+    });
+    const workerClone = structuredClone(main);
+
+    expect(workerClone).toEqual(main);
+    expect(workerClone.placements[0]).toMatchObject({
+      kind: 'text',
+      verticalAlign: 'super',
+      paintOps: [{ offset: { xPt: 0, yPt: -3.5 } }],
+    });
+    expect(stableFingerprint('superscript-line', workerClone))
+      .toBe(stableFingerprint('superscript-line', main));
+  });
+
   it('retains complete authored typography facts independently from effective geometry', () => {
     const typographyInput = {
       sourceText: 'AB',
@@ -1755,11 +2159,15 @@ describe('planLine visual geometry', () => {
       shape(request: { text: string; fontSizePt: number }) {
         const advancePt = [...request.text].length * 5;
         const lowLine = request.text === '_';
-        const inkBounds = {
+        // Canvas reports a low-line wholly below the alphabetic baseline with
+        // a signed ascent. The aggregate deliberately mirrors the old lossy
+        // shape union so this test requires the selected probe span itself.
+        const spanInkBounds = {
           xMinPt: 0, xMaxPt: advancePt,
-          ascentPt: lowLine ? 0 : request.fontSizePt * 0.7,
-          descentPt: lowLine ? 1 : request.fontSizePt * 0.2,
+          ascentPt: lowLine ? -2.5 : request.fontSizePt * 0.7,
+          descentPt: lowLine ? 3 : request.fontSizePt * 0.2,
         };
+        const inkBounds = lowLine ? { ...spanInkBounds, ascentPt: 0 } : spanInkBounds;
         return {
           advancePt, ascentPt: request.fontSizePt * 0.8,
           descentPt: request.fontSizePt * 0.2, inkBounds,
@@ -1772,7 +2180,7 @@ describe('planLine visual geometry', () => {
               source: 'native', weight: 400, style: 'normal', diagnostics: [], genericFamily: 'sans-serif',
             },
             fontRoute, advancePt, ascentPt: request.fontSizePt * 0.8,
-            descentPt: request.fontSizePt * 0.2, inkBounds,
+            descentPt: request.fontSizePt * 0.2, inkBounds: spanInkBounds,
           }],
           graphemeBoundaries: [0, request.text.length],
           clusters: [...request.text].map((_character, index) => ({
@@ -1813,7 +2221,9 @@ describe('planLine visual geometry', () => {
     expect(placement).not.toHaveProperty('unsupportedGeometry');
     expect(placement).toMatchObject({
       decorations: [
-        { kind: 'underline' }, { kind: 'underline' }, { kind: 'strikethrough' },
+        { kind: 'underline', widthPt: .5 },
+        { kind: 'underline', widthPt: .5 },
+        { kind: 'strikethrough' },
       ],
       emphasis: {
         authored: 'dot',

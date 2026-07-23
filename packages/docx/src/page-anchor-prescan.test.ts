@@ -114,6 +114,7 @@ function parserAnchor(
     verticalRelativeFrom?: 'margin' | 'paragraph';
     wrap?: 'square' | 'topAndBottom' | 'none';
     allowOverlap?: boolean;
+    relativeHeight?: number;
   }> = {},
 ): AnchorAcquisitionInput {
   const wrap = overrides.wrap ?? 'square';
@@ -150,7 +151,7 @@ function parserAnchor(
     },
     behavior: {
       behindDoc: false, behindDocStatus: 'valid',
-      relativeHeight: 1, relativeHeightStatus: 'valid',
+      relativeHeight: overrides.relativeHeight ?? 1, relativeHeightStatus: 'valid',
       locked: false, lockedStatus: 'valid',
       allowOverlap: overrides.allowOverlap ?? true, allowOverlapStatus: 'valid',
       layoutInCell: true, layoutInCellStatus: 'valid',
@@ -185,8 +186,11 @@ function canonicalModel(body: BodyElement[]): DocxDocumentModel {
   } as unknown as DocxDocumentModel;
 }
 
-function canonicalLayout(body: BodyElement[]) {
-  const model = canonicalModel(body);
+function canonicalLayout(body: BodyElement[], sectionOverrides: Partial<SectionProps> = {}) {
+  const model = {
+    ...canonicalModel(body),
+    section: section({ sectionStart: 'nextPage', columns: null, ...sectionOverrides }),
+  };
   return layoutDocument(
     model,
     createLayoutServices(model, { measureContext: makeCtx() }),
@@ -410,6 +414,82 @@ describe('canonical page-owned anchor prescan (§20.4.2.3/.17/.20)', () => {
       { wrap: 'topAndBottom' },
     ]);
     expect(new Set(canonical.map((exclusion) => exclusion.anchorOccurrenceId)).size).toBe(2);
+  });
+
+  it('preserves an authored four-anchor composition within one source paragraph', () => {
+    // Word preserves this authored composition as one title/metadata block.
+    // The leading host-owned object overlaps the full-width page-owned object
+    // by 0.30pt; the two page-owned objects otherwise abut exactly. Resolving
+    // all four as independent CT_Anchor collisions cascades the full-width
+    // object below the second page-owned object instead of preserving the
+    // authored composition.
+    const leadingHostOwned = parserAnchor('composition-leading-host', {
+      xPt: 0.3,
+      yPt: -28.2,
+      widthPt: 285.85,
+      heightPt: 28.5,
+      verticalRelativeFrom: 'paragraph',
+      wrap: 'none',
+      allowOverlap: false,
+      relativeHeight: 251658240,
+    });
+    const trailingPageOwned = parserAnchor('composition-trailing-page', {
+      xPt: 36.1,
+      yPt: 102.05,
+      widthPt: 402.95,
+      heightPt: 75.2,
+      wrap: 'topAndBottom',
+      allowOverlap: false,
+      relativeHeight: 251657216,
+    });
+    const trailingHostOwned = parserAnchor('composition-trailing-host', {
+      xPt: 246.15,
+      yPt: 177.85,
+      widthPt: 237.4,
+      heightPt: 121.45,
+      verticalRelativeFrom: 'paragraph',
+      wrap: 'square',
+      allowOverlap: true,
+      relativeHeight: 251659264,
+    });
+    const leadingPageOwned = parserAnchor('composition-leading-page', {
+      xPt: 0,
+      yPt: 0,
+      widthPt: 481.9,
+      heightPt: 102.05,
+      wrap: 'topAndBottom',
+      allowOverlap: false,
+      relativeHeight: 251656192,
+    });
+    const layout = canonicalLayout([
+      paraWith([
+        ...parserAnchoredImage(leadingHostOwned),
+        ...parserAnchoredImage(trailingPageOwned),
+        ...parserAnchoredImage(trailingHostOwned),
+        ...parserAnchoredImage(leadingPageOwned),
+      ]),
+    ], {
+      pageWidth: 612,
+      pageHeight: 792,
+      marginTop: 56.7,
+      marginRight: 73.4,
+      marginBottom: 56.7,
+      marginLeft: 56.7,
+    });
+    const drawings = sourceParagraphs(layout, 0).flatMap((paragraph) => paragraph.drawings);
+    const bounds = (suffix: string) => drawings.find((drawing) =>
+      drawing.anchorLayer?.occurrenceId.endsWith(suffix))?.flowBounds;
+    const expectVerticalBounds = (suffix: string, yPt: number, heightPt: number) => {
+      const actual = bounds(suffix);
+      expect(actual).toBeDefined();
+      expect(actual!.yPt).toBeCloseTo(yPt, 8);
+      expect(actual!.heightPt).toBeCloseTo(heightPt, 8);
+    };
+
+    expectVerticalBounds('composition-leading-host', 28.5, 28.5);
+    expectVerticalBounds('composition-leading-page', 56.7, 102.05);
+    expectVerticalBounds('composition-trailing-page', 158.75, 75.2);
+    expectVerticalBounds('composition-trailing-host', 234.55, 121.45);
   });
 
   it('does not let a future prescanned text float displace an earlier object', () => {

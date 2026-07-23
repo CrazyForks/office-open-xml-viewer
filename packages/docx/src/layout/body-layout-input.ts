@@ -74,6 +74,7 @@ export type BodyLayoutSequenceEntryFor<TSection> =
       source: SourceRef;
       break: AuthoredBreak;
       parity?: 'odd' | 'even';
+      sameSourceParagraphAsPrevious?: boolean;
     }>
   | Readonly<{ kind: 'begin-section'; source: SourceRef; section: TSection }>
   | Readonly<{ kind: 'consume-source'; source: SourceRef; reason: 'hidden-paragraph' }>;

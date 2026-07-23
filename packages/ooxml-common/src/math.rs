@@ -24,6 +24,10 @@ pub enum MathNode {
         text: String,
         /// "roman" | "italic" | "bold" | "boldItalic"
         style: String,
+        /// ECMA-376 §22.1.2.94 `m:scr`; private parser-to-renderer wire so the
+        /// migration does not expand the published `MathNode` API.
+        #[serde(rename = "__script", default, skip_serializing_if = "Option::is_none")]
+        script: Option<String>,
     },
     Fraction {
         num: Vec<MathNode>,
@@ -237,6 +241,7 @@ fn parse_omath_nodes_d(el: Node, depth: DepthGuard) -> Vec<MathNode> {
                     out.push(MathNode::Run {
                         text,
                         style: run_style(child),
+                        script: run_script(child),
                     });
                 }
             }
@@ -561,7 +566,12 @@ fn parse_eqarr(el: Node, depth: DepthGuard) -> MathNode {
 fn split_align_cells(nodes: Vec<MathNode>) -> Vec<Vec<MathNode>> {
     let mut cells: Vec<Vec<MathNode>> = vec![Vec::new()];
     for node in nodes {
-        if let MathNode::Run { text, style } = &node {
+        if let MathNode::Run {
+            text,
+            style,
+            script,
+        } = &node
+        {
             if text.contains('&') {
                 for (i, part) in text.split('&').enumerate() {
                     if i > 0 {
@@ -574,6 +584,7 @@ fn split_align_cells(nodes: Vec<MathNode>) -> Vec<Vec<MathNode>> {
                         cells.last_mut().unwrap().push(MathNode::Run {
                             text: part.to_string(),
                             style: style.clone(),
+                            script: script.clone(),
                         });
                     }
                 }
@@ -627,6 +638,21 @@ fn run_style(r: Node) -> String {
         }
     }
     "italic".to_string()
+}
+
+/// Preserve the authored OMML script family for the MathML renderer. Per
+/// ECMA-376 §22.1.2.94, a present `m:scr` without `m:val` defaults to `roman`.
+/// An absent element is omitted from the wire because roman is also the script
+/// default and this keeps existing parser payloads stable.
+fn run_script(r: Node) -> Option<String> {
+    let rpr = mchild(r, "rPr")?;
+    mchild(rpr, "scr")?;
+    let script = mval(rpr, "scr").unwrap_or_else(|| "roman".to_string());
+    matches!(
+        script.as_str(),
+        "double-struck" | "fraktur" | "monospace" | "roman" | "sans-serif" | "script"
+    )
+    .then_some(script)
 }
 
 #[cfg(test)]
@@ -757,6 +783,36 @@ mod tests {
             }
             _ => panic!("expected two runs, got {nodes:?}"),
         }
+    }
+
+    #[test]
+    fn run_script_preserves_omml_script_variants() {
+        let xml = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+          <m:r><m:rPr><m:scr m:val="script"/><m:sty m:val="p"/></m:rPr><m:t>A</m:t></m:r>
+          <m:r><m:rPr><m:scr m:val="fraktur"/><m:sty m:val="p"/></m:rPr><m:t>B</m:t></m:r>
+          <m:r><m:rPr><m:scr m:val="double-struck"/><m:sty m:val="p"/></m:rPr><m:t>C</m:t></m:r>
+        </m:oMath>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let nodes = parse_omath_nodes(doc.root_element());
+
+        let scripts: Vec<_> = nodes
+            .iter()
+            .map(|node| match node {
+                MathNode::Run { script, .. } => script.as_deref(),
+                _ => panic!("expected math run"),
+            })
+            .collect();
+        assert_eq!(
+            scripts,
+            [Some("script"), Some("fraktur"), Some("double-struck")]
+        );
+        let json = serde_json::to_string(&nodes).unwrap();
+        assert!(json.contains(r#""__script":"script""#), "json: {json}");
+        assert!(json.contains(r#""__script":"fraktur""#), "json: {json}");
+        assert!(
+            json.contains(r#""__script":"double-struck""#),
+            "json: {json}"
+        );
     }
 
     // ── §22.1.2.81 m:phant — previously flattened, leaking the base ─────────────

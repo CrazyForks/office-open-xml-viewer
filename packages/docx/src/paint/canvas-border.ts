@@ -130,6 +130,16 @@ export function paintStrokeSegment(
   for (const point of path.slice(1)) {
     ctx.lineTo(point.xPt + localOffset.xPt, point.yPt + localOffset.yPt);
   }
+  // Layout bounds generated wavy paths by their vertices plus half the stroke
+  // width. Canvas' default miter protrudes beyond that envelope at zig-zag
+  // peaks, so retain a bevel join for the generated waveform and keep paint
+  // exactly inside the acquired point-space bound.
+  const boundedWaveJoin = segment.style === 'wavy' && path.length > 2;
+  if (boundedWaveJoin) {
+    ctx.save();
+    (ctx as unknown as { lineJoin: CanvasLineJoin }).lineJoin = 'bevel';
+  }
   ctx.stroke();
+  if (boundedWaveJoin) ctx.restore();
   ctx.setLineDash([]);
 }

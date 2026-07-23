@@ -84,8 +84,11 @@ const missingEdges = (): AnchorEdgesInput => ({
 
 function anchoredImageRuns(options: Readonly<{
   occurrenceId?: string;
-  verticalRelativeFrom?: 'line' | 'paragraph';
+  verticalRelativeFrom?: 'line' | 'paragraph' | 'page' | 'margin';
+  horizontalRelativeFrom?: 'column' | 'margin';
   horizontalOffsetPt?: number;
+  verticalOffsetPt?: number;
+  simplePosition?: Readonly<{ xPt: number; yPt: number }>;
   widthPt?: number;
   heightPt?: number;
   allowOverlap?: boolean;
@@ -93,7 +96,9 @@ function anchoredImageRuns(options: Readonly<{
 }> = {}): DocParagraph['runs'] {
   const occurrenceId = options.occurrenceId ?? 'cell-later';
   const verticalRelativeFrom = options.verticalRelativeFrom ?? 'line';
+  const horizontalRelativeFrom = options.horizontalRelativeFrom ?? 'column';
   const horizontalOffsetPt = options.horizontalOffsetPt ?? 80;
+  const verticalOffsetPt = options.verticalOffsetPt ?? 0;
   const widthPt = options.widthPt ?? 80;
   const heightPt = options.heightPt ?? 40;
   const allowOverlap = options.allowOverlap ?? true;
@@ -101,16 +106,17 @@ function anchoredImageRuns(options: Readonly<{
   const acquisition: AnchorAcquisitionInput = {
     occurrenceId,
     simplePosition: {
-      enabled: false, status: 'valid',
-      xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid',
+      enabled: options.simplePosition !== undefined, status: 'valid',
+      xPt: options.simplePosition?.xPt ?? 0, xStatus: 'valid',
+      yPt: options.simplePosition?.yPt ?? 0, yStatus: 'valid',
     },
     horizontal: {
-      relativeFrom: 'column', relativeFromStatus: 'valid',
+      relativeFrom: horizontalRelativeFrom, relativeFromStatus: 'valid',
       choice: { kind: 'offset', valuePt: horizontalOffsetPt },
     },
     vertical: {
       relativeFrom: verticalRelativeFrom, relativeFromStatus: 'valid',
-      choice: { kind: 'offset', valuePt: 0 },
+      choice: { kind: 'offset', valuePt: verticalOffsetPt },
     },
     extent: {
       widthPt, heightPt,
@@ -150,8 +156,8 @@ function anchoredImageRuns(options: Readonly<{
       heightPt,
       anchor: true,
       anchorXPt: horizontalOffsetPt,
-      anchorXRelativeFrom: 'column',
-      anchorYPt: 0,
+      anchorXRelativeFrom: horizontalRelativeFrom,
+      anchorYPt: verticalOffsetPt,
       anchorYRelativeFrom: verticalRelativeFrom,
       anchorYFromPara: true,
       wrapMode: wrapKind,
@@ -256,6 +262,151 @@ function bodyParagraphs(paragraphs: DocParagraph[]): ParagraphLayout[] {
 }
 
 describe('table-cell parser-owned anchor reflow', () => {
+  it('keeps a layoutInCell column anchor in the owning cell coordinate space', () => {
+    const retainedParagraph = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-column-owned',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: -3,
+          widthPt: 80,
+          heightPt: 40,
+          wrapKind: 'none',
+        }),
+      ]),
+    ]))[0]!;
+    const drawing = retainedParagraph.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-column-owned'));
+
+    expect(drawing).toBeDefined();
+    // ECMA-376 Part 1 §20.4.2.3: with layoutInCell=true, positioning is
+    // relative to the existing cell. The page paint plan must therefore retain
+    // the cell placement instead of undoing it as a page-owned coordinate.
+    expect(drawing!.flowBounds.xPt).toBe(-3);
+    expect(drawing!.anchorLayer?.horizontalOwnership).toBe('host');
+  });
+
+  it('resolves a layoutInCell margin anchor from the owning cell', () => {
+    const retainedParagraph = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-margin-owned',
+          horizontalRelativeFrom: 'margin',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 2,
+          widthPt: 80,
+          heightPt: 40,
+          wrapKind: 'none',
+        }),
+      ]),
+    ]))[0]!;
+    const drawing = retainedParagraph.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-margin-owned'));
+
+    expect(drawing).toBeDefined();
+    expect(drawing!.flowBounds.xPt).toBe(2);
+    expect(drawing!.anchorLayer?.horizontalOwnership).toBe('host');
+  });
+
+  it.each(['page', 'margin'] as const)(
+    'resolves a layoutInCell %s vertical offset from the owning cell',
+    (verticalRelativeFrom) => {
+      const retainedParagraph = cellParagraphs(model([
+        paragraph([
+          ...anchoredImageRuns({
+            occurrenceId: `cell-${verticalRelativeFrom}-vertical-owned`,
+            verticalRelativeFrom,
+            horizontalOffsetPt: 0,
+            verticalOffsetPt: 6,
+            widthPt: 80,
+            heightPt: 40,
+            wrapKind: 'none',
+          }),
+        ]),
+      ]))[0]!;
+      const drawing = retainedParagraph.drawings.find((candidate) =>
+        candidate.anchorLayer?.occurrenceId.endsWith(
+          `cell-${verticalRelativeFrom}-vertical-owned`,
+        ));
+
+      expect(drawing).toBeDefined();
+      expect(drawing!.flowBounds.yPt).toBe(6);
+      expect(drawing!.anchorLayer?.verticalOwnership).toBe('host');
+    },
+  );
+
+  it('resolves layoutInCell simplePos coordinates from the owning cell', () => {
+    const retainedParagraph = cellParagraphs(model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-simple-position-owned',
+          simplePosition: { xPt: 3, yPt: 7 },
+          horizontalOffsetPt: 0,
+          widthPt: 80,
+          heightPt: 40,
+          wrapKind: 'none',
+        }),
+      ]),
+    ]))[0]!;
+    const drawing = retainedParagraph.drawings.find((candidate) =>
+      candidate.anchorLayer?.occurrenceId.endsWith('cell-simple-position-owned'));
+
+    expect(drawing).toBeDefined();
+    expect(drawing!.flowBounds).toMatchObject({ xPt: 3, yPt: 7 });
+    expect(drawing!.anchorLayer).toMatchObject({
+      horizontalOwnership: 'host',
+      verticalOwnership: 'host',
+    });
+  });
+
+  it('retains both cell-owned axes through the final page paint translation', () => {
+    const document = model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-final-paint-owned',
+          verticalRelativeFrom: 'page',
+          horizontalOffsetPt: 2,
+          verticalOffsetPt: 5,
+          widthPt: 80,
+          heightPt: 40,
+          wrapKind: 'none',
+        }),
+      ]),
+    ]);
+    const result = layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: makeCtx() }),
+      { currentDateMs: 0 },
+    );
+    const table = result.pages[0]!.layers.body.find((node) => node.kind === 'table');
+    if (!table || table.kind !== 'table') throw new Error('Expected retained table');
+    const cell = table.rows[0]!.cells[0]!;
+    const block = cell.blocks[0]!;
+    const drawingEntry = result.pages[0]!.layers.paintOrder.find((entry) =>
+      entry.kind === 'drawing'
+      && entry.node.anchorLayer?.occurrenceId.includes('cell-final-paint-owned'));
+
+    expect(drawingEntry?.kind).toBe('drawing');
+    if (!drawingEntry || drawingEntry.kind !== 'drawing') {
+      throw new Error('Expected retained page drawing entry');
+    }
+    expect(drawingEntry.node.anchorLayer).toMatchObject({
+      horizontalOwnership: 'host',
+      verticalOwnership: 'host',
+    });
+    expect(drawingEntry.layoutTranslationPt).toEqual({
+      xPt: cell.contentBounds.xPt,
+      yPt: cell.flowBounds.yPt + block.offsetPt,
+    });
+    expect({
+      xPt: drawingEntry.node.flowBounds.xPt + drawingEntry.layoutTranslationPt.xPt,
+      yPt: drawingEntry.node.flowBounds.yPt + drawingEntry.layoutTranslationPt.yPt,
+    }).toEqual({
+      xPt: cell.contentBounds.xPt + 2,
+      yPt: cell.flowBounds.yPt + block.offsetPt + 5,
+    });
+  });
+
   it('measures and retains the same occurrence-keyed exclusion fixed point', () => {
     const paragraph = cellParagraphs()[0]!;
     const lineTexts = paragraph.lines.map((line) => line.placements

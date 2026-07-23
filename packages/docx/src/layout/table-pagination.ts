@@ -205,6 +205,35 @@ function paginationRowHeightForOccurrence(
   return Math.max(0, occurrence.rows[0]?.heightPt ?? occurrence.advancePt);
 }
 
+function paginationRowTrackHeightForOccurrence(
+  source: RetainedTableAcquisition,
+  row: TableRowLayoutInput,
+  rowIndex: number,
+  context: TableFragmentContext,
+): number {
+  if (row === source.input.rows[rowIndex]) {
+    return Math.max(0, source.layout.rows[rowIndex]?.heightPt ?? 0);
+  }
+  return paginationRowHeightForOccurrence(source, row, rowIndex, context);
+}
+
+function completedPartialRowTrackHeight(
+  source: RetainedTableAcquisition,
+  row: TableRowLayoutInput,
+  rowIndex: number,
+  context: TableFragmentContext,
+): number {
+  // A merged owner's deficit is assigned across its complete continuation
+  // interval. Resolve that interval once so the completed partial row is
+  // charged its physical track, not the owner's full isolated content height.
+  const occurrence = layoutTable({
+    ...source.input,
+    id: `${source.input.id}:completed-partial:${context.page.occurrenceId}:${row.logicalRowIndex}`,
+    rows: [row, ...source.input.rows.slice(rowIndex + 1)],
+  }, context.placement, context.services).layout;
+  return Math.max(0, occurrence.rows[0]?.heightPt ?? 0);
+}
+
 function rowRanges(row: TableRowLayoutInput): readonly (readonly BlockContinuationRange[])[] {
   return row.cells.map((cell) => cell.blocks.map((block) => ({
     kind: 'whole' as const,
@@ -661,6 +690,18 @@ function selectCell(
         paragraphLineStart = 0;
         continue;
       }
+      // A retained paragraph may legitimately own no paintable lines. It is
+      // still a source block and must advance the cell cursor; asking the line
+      // slicer for a first line can never make progress from an empty array.
+      if (child.lines.length === 0) {
+        if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock])
+          > availableContentHeightPt + EPSILON_PT) break;
+        blocks.push(sourceBlock);
+        range.push({ kind: 'whole', blockIndex: sourceBlock.sourceBlockIndex });
+        blockIndex += 1;
+        paragraphLineStart = 0;
+        continue;
+      }
       const selected = selectParagraph(
         child,
         sourceBlock.sourceBlockIndex,
@@ -992,6 +1033,7 @@ export function takeTableFragment(
 
   let nextCursor: TableFragmentCursor | null = cursor;
   let rowIndex = cursor.rowIndex;
+  let followsCompletedPartialRow = false;
   while (rowIndex < source.input.rows.length) {
     const ownership: TableFragmentOwnership = 'source';
     const acquiredRow = rowForOccurrence(
@@ -1033,7 +1075,9 @@ export function takeTableFragment(
       nextParagraphId: floatParagraphId,
     };
     const row = preparedRow.row;
-    const wholeHeightPt = paginationRowHeightForOccurrence(source, row, rowIndex, context);
+    const wholeHeightPt = followsCompletedPartialRow
+      ? paginationRowTrackHeightForOccurrence(source, row, rowIndex, context)
+      : paginationRowHeightForOccurrence(source, row, rowIndex, context);
     if (canTakeWhole) {
       if (wholeHeightPt <= availablePt + EPSILON_PT) {
         selected.push(selectedWholeRow(row, 'source', 0, false, preparedRow.resolved));
@@ -1154,6 +1198,22 @@ export function takeTableFragment(
       floatRegistry = Object.freeze([...floatRegistry, ...committedEntries]);
       floatParagraphId += committedEntries.length;
       nextCursor = partial.next.rowIndex >= source.input.rows.length ? null : partial.next;
+      if (partial.complete && partial.next.rowIndex < source.input.rows.length) {
+        // A completed continuation can own vertically merged content whose
+        // physical track is resolved only after following logical rows join the
+        // same fragment. Keep admitting those rows by their retained tracks;
+        // the canonical materialization below remains the final fit authority
+        // and trims any over-admission at whole-row boundaries.
+        availablePt = Math.max(0, availablePt - completedPartialRowTrackHeight(
+          source,
+          partial.selected.input,
+          rowIndex,
+          context,
+        ));
+        followsCompletedPartialRow = true;
+        rowIndex = partial.next.rowIndex;
+        continue;
+      }
     }
     break;
   }
@@ -1161,10 +1221,16 @@ export function takeTableFragment(
   const sourceRows = selected.filter((row) => row.ownership === 'source');
   if (sourceRows.length === 0) {
     const canProgressOnFreshPage = context.availableHeightPt + EPSILON_PT < context.freshPageHeightPt;
+    if (!canProgressOnFreshPage) {
+      throw new LayoutInvariantError(
+        'NON_CONVERGENCE',
+        'Table pagination cannot advance from a fresh page',
+      );
+    }
     return {
       fragment: null,
       nextCursor: cursor,
-      requiresFreshPage: canProgressOnFreshPage,
+      requiresFreshPage: true,
     };
   }
   let fragment = materializeFragment(source, selected, context);

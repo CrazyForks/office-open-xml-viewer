@@ -27,6 +27,9 @@ export type { WrapOracle } from './layout/float-wrap-oracle.js';
 export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly documentHasEastAsianText: boolean;
   readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
+  /** The paragraph is acquired in a section-logical frame that paint rotates
+   * into a vertical physical page. This is independent of glyph orientation. */
+  readonly verticalPageFrame?: boolean;
 }
 
 export interface TextMeasurer {
@@ -112,6 +115,13 @@ export function measureParagraph(
   const requestedSpaceAfterPt = context.spaceAfterPt;
   const recordedPlacement = Object.freeze({ ...placement });
   const fontFamilyClasses = measurer.fontFamilyClasses as Record<string, string>;
+  // The `w:useFELayout` compatibility projection applies the Far East docGrid
+  // allocation to an otherwise content-less paragraph mark as well as to its
+  // text lines. This matters when the mark's design height crosses a grid-cell
+  // boundary: a 16pt East Asian mark on an 18pt grid occupies two cells even
+  // when the document contains no literal CJK code point.
+  const markUsesEastAsianGrid = environment.documentHasEastAsianText === true
+    || environment.useFeLayout === true;
 
   let cursorPt = placement.startYPt
     + (placement.suppressSpaceBefore ? 0 : requestedSpaceBeforePt);
@@ -136,7 +146,7 @@ export function measureParagraph(
       1,
       grid,
       context.hasRuby,
-      environment.documentHasEastAsianText === true,
+      markUsesEastAsianGrid,
       measurer.context,
       fontFamilyClasses,
       context.lineSpacing,
@@ -173,7 +183,7 @@ export function measureParagraph(
         paragraph,
         grid,
         context.hasRuby,
-        environment.documentHasEastAsianText === true,
+        markUsesEastAsianGrid,
         measurer.context,
         fontFamilyClasses,
         context.lineSpacing,

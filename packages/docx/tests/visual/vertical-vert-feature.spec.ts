@@ -384,6 +384,123 @@ for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
   });
 }
 
+test('public Offscreen rendering reproduces an element-backed layout-proven vert glyph', async ({ page }) => {
+  await page.goto('/tests/visual/vertical-vert-feature.html');
+  const result = await page.evaluate(async () => {
+    await document.fonts.ready;
+    const { verticalVertGlyphReachable } = await import('/src/vertical-text.ts');
+    const { createLayoutServices } = await import('/src/layout-runtime.ts');
+    const { renderDocumentToCanvas } = await import('/src/renderer.ts');
+    const { selectDocumentLayoutPage } = await import('/src/layout/document-layout-variants.ts');
+    const subject = document.querySelector('#subject') as HTMLCanvasElement;
+    const reference = document.querySelector('#reference') as HTMLCanvasElement;
+    const probe = subject.getContext('2d');
+    if (!probe || typeof OffscreenCanvas === 'undefined') return null;
+
+    let selected: { family: string; ch: string } | null = null;
+    for (const family of ['Yu Mincho', 'Hiragino Mincho ProN']) {
+      if (!document.fonts.check(`48px "${family}"`)) continue;
+      probe.font = `48px "${family}"`;
+      for (const ch of '「」、。ー〜～（）') {
+        if (verticalVertGlyphReachable(probe, ch.codePointAt(0) ?? 0)) {
+          selected = { family, ch };
+          break;
+        }
+      }
+      if (selected) break;
+    }
+    if (!selected) return null;
+
+    const textRun = {
+      type: 'text', text: selected.ch,
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 48, color: null,
+      fontFamily: selected.family, fontFamilyEastAsia: selected.family,
+      isLink: false, background: null, vertAlign: null, hyperlink: null,
+    };
+    const model = {
+      section: {
+        pageWidth: 240, pageHeight: 180,
+        marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+        headerDistance: 0, footerDistance: 0,
+        titlePage: false, evenAndOddHeaders: false, textDirection: 'tbRl',
+      },
+      body: [{
+        type: 'paragraph', alignment: 'left',
+        indentLeft: 0, indentRight: 0, indentFirst: 0,
+        spaceBefore: 0, spaceAfter: 0, lineSpacing: null,
+        numbering: null, tabStops: [], runs: [textRun],
+        defaultFontSize: 48, defaultFontFamily: selected.family,
+        widowControl: false,
+      }],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as never;
+    const services = createLayoutServices(model);
+    const defaultCurrentDateMs = 1;
+    await renderDocumentToCanvas(model, subject, 0, {
+      dpr: 1, width: 240, layoutServices: services, defaultCurrentDateMs,
+    });
+    const selection = selectDocumentLayoutPage(
+      services,
+      { defaultCurrentDateMs },
+      0,
+    );
+    const pending: unknown[] = [selection.page];
+    const seen = new Set<object>();
+    let retainedVertProof = false;
+    while (pending.length > 0 && !retainedVertProof) {
+      const value = pending.pop();
+      if (value === null || typeof value !== 'object' || seen.has(value)) continue;
+      seen.add(value);
+      const record = value as Record<string, unknown>;
+      if (record.verticalFeature === true) retainedVertProof = true;
+      pending.push(...Object.values(record));
+    }
+
+    const offscreen = new OffscreenCanvas(1, 1);
+    await renderDocumentToCanvas(model, offscreen, 0, {
+      dpr: 1, width: 240, layoutServices: services, defaultCurrentDateMs,
+    });
+    const bitmap = offscreen.transferToImageBitmap();
+    reference.width = offscreen.width;
+    reference.height = offscreen.height;
+    const referenceContext = reference.getContext('2d');
+    if (!referenceContext) throw new Error('bitmap comparison context unavailable');
+    referenceContext.drawImage(bitmap, 0, 0);
+    bitmap.close();
+
+    const html = subject.getContext('2d')!.getImageData(
+      0, 0, subject.width, subject.height,
+    ).data;
+    const projected = referenceContext.getImageData(
+      0, 0, reference.width, reference.height,
+    ).data;
+    let difference = 0;
+    let weight = 0;
+    for (let index = 0; index < html.length; index += 1) {
+      difference += Math.abs(html[index]! - projected[index]!);
+      weight += html[index]!;
+    }
+    return {
+      ...selected,
+      retainedVertProof,
+      dimensionsMatch: subject.width === reference.width && subject.height === reference.height,
+      differenceRatio: difference / Math.max(1, weight),
+    };
+  });
+
+  test.skip(result === null, 'a host font with a reachable OpenType vert glyph is required');
+  if (result === null) return;
+  expect(result.retainedVertProof, `${result.family} ${result.ch} is layout-proven`).toBe(true);
+  expect(result.dimensionsMatch).toBe(true);
+  // The two independent element-backed contexts can choose adjacent AA values;
+  // one percent remains well below the plain-glyph substitution failure while
+  // keeping the comparison sensitive to the actual `vert` outline.
+  expect(result.differenceRatio).toBeLessThan(0.01);
+});
+
 test('forced unreachable keeps FE/upright fallbacks and plain-rotates long marks', async ({ page }) => {
   await page.goto('/tests/visual/vertical-vert-feature.html');
   const result = await page.evaluate(async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { BorderSegment } from '../layout/types.js';
+import type { BorderSegment, TextDecorationLayout } from '../layout/types.js';
 import type {
   CanvasPaintContext,
   PaintCanvas2D,
@@ -27,8 +27,8 @@ function recordingContext(operations: unknown[]): PaintCanvas2D {
     scale() {},
     transform() {},
     drawImage() {},
-    save() {},
-    restore() {},
+    save() { operations.push(['save']); },
+    restore() { operations.push(['restore']); },
     beginPath() {},
     rect() {},
     clip() {},
@@ -79,5 +79,80 @@ describe('retained Canvas border paint', () => {
 
     expect(operations).toContainEqual(['dash', [3, 2]]);
     expect(operations).toContainEqual(['stroke', 1]);
+  });
+
+  it('bounds retained wavy paths with a bevel join instead of an unretained miter', () => {
+    const operations: unknown[] = [];
+    const ctx = recordingContext(operations);
+    Object.defineProperty(ctx, 'lineJoin', {
+      configurable: true,
+      get: () => 'miter',
+      set: (value) => operations.push(['lineJoin', value]),
+    });
+    const context: CanvasPaintContext = {
+      ctx,
+      scale: 1,
+      dpr: 1,
+      resources: { paint() {} },
+    };
+    const wavy: TextDecorationLayout = {
+      kind: 'underline',
+      from: { xPt: 0, yPt: 10 },
+      to: { xPt: 8, yPt: 10 },
+      color: '#000000',
+      widthPt: 2,
+      style: 'wavy',
+      path: [
+        { xPt: 0, yPt: 9 },
+        { xPt: 2, yPt: 11 },
+        { xPt: 4, yPt: 9 },
+      ],
+    };
+
+    paintStrokeSegment(wavy, context);
+
+    expect(operations).toContainEqual(['lineJoin', 'bevel']);
+    expect(operations).toContainEqual(['save']);
+    expect(operations).toContainEqual(['stroke', 2]);
+    expect(operations).toContainEqual(['restore']);
+    const operationIndex = (expected: unknown): number => operations.findIndex(
+      (operation) => JSON.stringify(operation) === JSON.stringify(expected),
+    );
+    expect(operationIndex(['save']))
+      .toBeLessThan(operationIndex(['lineJoin', 'bevel']));
+    expect(operationIndex(['lineJoin', 'bevel']))
+      .toBeLessThan(operationIndex(['stroke', 2]));
+    expect(operationIndex(['stroke', 2]))
+      .toBeLessThan(operationIndex(['restore']));
+  });
+
+  it('does not override the join for a two-point wavy segment', () => {
+    const operations: unknown[] = [];
+    const ctx = recordingContext(operations);
+    Object.defineProperty(ctx, 'lineJoin', {
+      configurable: true,
+      get: () => 'miter',
+      set: (value) => operations.push(['lineJoin', value]),
+    });
+    const context: CanvasPaintContext = {
+      ctx,
+      scale: 1,
+      dpr: 1,
+      resources: { paint() {} },
+    };
+
+    paintStrokeSegment({
+      kind: 'underline',
+      from: { xPt: 0, yPt: 10 },
+      to: { xPt: 8, yPt: 10 },
+      color: '#000000',
+      widthPt: 2,
+      style: 'wavy',
+      path: [{ xPt: 0, yPt: 9 }, { xPt: 8, yPt: 11 }],
+    }, context);
+
+    expect(operations).not.toContainEqual(['lineJoin', 'bevel']);
+    expect(operations).not.toContainEqual(['save']);
+    expect(operations).not.toContainEqual(['restore']);
   });
 });

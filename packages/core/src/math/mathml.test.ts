@@ -2,6 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { mathToMathML } from './mathml';
 import type { MathNode } from '../types/math';
 
+function scriptedRun(
+  text: string,
+  style: Extract<MathNode, { kind: 'run' }>['style'],
+  script: 'double-struck' | 'fraktur' | 'monospace' | 'roman' | 'sans-serif' | 'script',
+): MathNode {
+  return { kind: 'run', text, style, __script: script } as MathNode;
+}
+
 describe('mathToMathML', () => {
   it('wraps in a math element with display mode', () => {
     const ml = mathToMathML([{ kind: 'run', text: 'x', style: 'italic' }], true);
@@ -22,6 +30,36 @@ describe('mathToMathML', () => {
   it('marks roman style as mathvariant=normal', () => {
     const ml = mathToMathML([{ kind: 'run', text: 'd', style: 'roman' }], false);
     expect(ml).toContain('mathvariant="normal"');
+  });
+
+  it('maps OMML script, fraktur, and double-struck runs to distinct MathML variants', () => {
+    const ml = mathToMathML(
+      [
+        scriptedRun('A', 'roman', 'script'),
+        scriptedRun('B', 'roman', 'fraktur'),
+        scriptedRun('C', 'roman', 'double-struck'),
+      ],
+      false,
+    );
+    expect(ml).toContain('<mi mathvariant="script">A</mi>');
+    expect(ml).toContain('<mi mathvariant="fraktur">B</mi>');
+    expect(ml).toContain('<mi mathvariant="double-struck">C</mi>');
+  });
+
+  it('combines OMML script families with bold and italic style where MathML supports it', () => {
+    const ml = mathToMathML(
+      [
+        scriptedRun('S', 'bold', 'script'),
+        scriptedRun('F', 'boldItalic', 'fraktur'),
+        scriptedRun('I', 'italic', 'sans-serif'),
+        scriptedRun('B', 'boldItalic', 'sans-serif'),
+      ],
+      false,
+    );
+    expect(ml).toContain('mathvariant="bold-script"');
+    expect(ml).toContain('mathvariant="bold-fraktur"');
+    expect(ml).toContain('mathvariant="sans-serif-italic"');
+    expect(ml).toContain('mathvariant="sans-serif-bold-italic"');
   });
 
   it('emits mfrac / msup / msqrt / msubsup', () => {

@@ -8,6 +8,7 @@ import {
   drawVerticalRunWithCapability,
   drawTateChuYokoRun,
   drawUprightBox,
+  planVerticalRunWithCapability,
   physicalToLogicalAnchorBox,
   verticalRunInkExtraPx,
   verticalRunInkExtraPxWithCapability,
@@ -37,6 +38,99 @@ describe('verticalDrawMode (UAX#50 vo → draw mode)', () => {
     for (const ch of ['A', 'z', '0', '5', '9', '@', '-', '.']) {
       expect(verticalDrawMode(cp(ch))).toBe('sideways');
     }
+  });
+});
+
+describe('planVerticalRunWithCapability (retained vertical paint geometry)', () => {
+  it('retains the font em-box cross-axis correction for a sideways phone number', () => {
+    const { ctx } = mockCtx({
+      fontBoundingBoxAscent: 10,
+      fontBoundingBoxDescent: 2,
+    });
+
+    const cells = planVerticalRunWithCapability(
+      ctx,
+      '電話03-1234-5678',
+      12,
+      0,
+      1,
+      false,
+      () => false,
+    );
+
+    expect(cells.map((cell) => ({
+      text: cell.text,
+      orientation: cell.orientation,
+      crossAxisOffsetPt: cell.drawOffsetPt.yPt,
+    }))).toEqual([
+      { text: '電', orientation: 'upright', crossAxisOffsetPt: 0 },
+      { text: '話', orientation: 'upright', crossAxisOffsetPt: 0 },
+      // Sideways text uses an alphabetic baseline. Retain the font-level
+      // (ascent - descent) / 2 correction so paint can share the same physical
+      // column centre as the upright cells without measuring the font again.
+      { text: '03-1234-5678', orientation: 'sideways', crossAxisOffsetPt: 4 },
+    ]);
+  });
+
+  it('retains UAX #50 Tr substitution and rotate fallbacks with original source ranges', () => {
+    const { ctx } = mockCtx();
+
+    const cells = planVerticalRunWithCapability(ctx, 'A（ー）B', 12, 0, 1, true, () => false);
+
+    expect(cells.map(({ text, orientation, range, verticalFeature }) => ({
+      text, orientation, range, verticalFeature,
+    }))).toEqual([
+      { text: 'A', orientation: 'sideways', range: { start: 0, end: 1 }, verticalFeature: false },
+      { text: '︵', orientation: 'upright', range: { start: 1, end: 2 }, verticalFeature: false },
+      { text: 'ー', orientation: 'rotate', range: { start: 2, end: 3 }, verticalFeature: false },
+      { text: '︶', orientation: 'upright', range: { start: 3, end: 4 }, verticalFeature: false },
+      { text: 'B', orientation: 'sideways', range: { start: 4, end: 5 }, verticalFeature: false },
+    ]);
+  });
+
+  it('retains original transform characters and the proved OpenType vert feature route', () => {
+    const { ctx } = mockCtx({
+      vert: {
+        '（': { width: 12, asc: 9, desc: 3 },
+        'ー': { width: 12, asc: 9, desc: 3 },
+        '）': { width: 12, asc: 9, desc: 3 },
+      },
+    });
+
+    const cells = planVerticalRunWithCapability(ctx, '（ー）', 12, 0, 1, true, () => true);
+
+    expect(cells.map(({ text, orientation, verticalFeature }) => ({
+      text, orientation, verticalFeature,
+    }))).toEqual([
+      { text: '（', orientation: 'upright', verticalFeature: true },
+      { text: 'ー', orientation: 'upright', verticalFeature: true },
+      { text: '）', orientation: 'upright', verticalFeature: true },
+    ]);
+  });
+
+  it('retains counter-rotated logical block ink after the upright glyph offset', () => {
+    const { ctx } = mockCtx({
+      inkLR: { '．': { left: 2, right: 6 } },
+    });
+
+    const [cell] = planVerticalRunWithCapability(
+      ctx,
+      '．',
+      10,
+      0,
+      0.5,
+      true,
+      () => false,
+    );
+
+    expect(cell).toMatchObject({
+      orientation: 'upright',
+      drawOffsetPt: { xPt: 4, yPt: -4 },
+      // Paint rotates the local x ink [4 - 2, 4 + 6] onto logical -y.
+      // vertical-rl w:w scales local y, so the 0.5 scale does not alter this
+      // block-axis interval.
+      blockAxisInkBounds: { startPt: -10, endPt: -2 },
+    });
   });
 });
 

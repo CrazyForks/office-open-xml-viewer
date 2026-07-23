@@ -129,6 +129,208 @@ mod private_typography_wire_tests {
     }
 
     #[test]
+    fn complex_ref_result_preserves_boundaries_and_hyperlink_semantics() {
+        let paragraph = parse_p(
+            r#"
+              <w:r><w:t>before</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF DestinationBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>cached </w:t></w:r>
+              <w:r><w:t>result</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+              <w:r><w:t>after</w:t></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+
+        let wire = serde_json::to_value(&paragraph).expect("paragraph serializes");
+        assert_eq!(
+            wire["__complexFieldBoundaries"],
+            serde_json::json!([
+                {
+                    "occurrenceId": 0,
+                    "boundary": "start",
+                    "runIndex": 1,
+                    "fieldType": "ref",
+                    "instruction": "REF DestinationBookmark \\h",
+                    "hyperlinkAnchor": "DestinationBookmark"
+                },
+                {
+                    "occurrenceId": 0,
+                    "boundary": "end",
+                    "runIndex": 3,
+                    "fieldType": "ref",
+                    "instruction": "REF DestinationBookmark \\h",
+                    "hyperlinkAnchor": "DestinationBookmark"
+                }
+            ]),
+            "the parser must retain the exact cached-result interval without adding flow runs",
+        );
+
+        let result_runs = paragraph.runs.iter().filter_map(|run| match run {
+            DocRun::Text(text) if text.text == "cached " || text.text == "result" => Some(text),
+            _ => None,
+        });
+        for result in result_runs {
+            assert!(result.is_link, "REF \\h result is a navigation link");
+            assert_eq!(
+                result.hyperlink_anchor.as_deref(),
+                Some("DestinationBookmark"),
+                "ECMA-376 §17.16.5.51 \\h targets the referenced bookmark",
+            );
+        }
+    }
+
+    #[test]
+    fn complex_pageref_hyperlink_and_plain_ref_boundaries_are_distinct() {
+        let pageref = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> PAGEREF PageBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>7</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+        let pageref_wire = serde_json::to_value(&pageref).expect("PAGEREF serializes");
+        assert_eq!(
+            pageref_wire["__complexFieldBoundaries"][0]["fieldType"],
+            "pageRef"
+        );
+        assert_eq!(
+            pageref_wire["__complexFieldBoundaries"][0]["hyperlinkAnchor"],
+            "PageBookmark",
+        );
+        let page_number = first_run_json(&pageref, "text");
+        assert_eq!(page_number["isLink"], true);
+        assert_eq!(page_number["hyperlinkAnchor"], "PageBookmark");
+
+        let plain_ref = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF PlainBookmark </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>plain result</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+        let plain_wire = serde_json::to_value(&plain_ref).expect("plain REF serializes");
+        assert_eq!(
+            plain_wire["__complexFieldBoundaries"][0]["fieldType"],
+            "ref"
+        );
+        assert!(
+            plain_wire["__complexFieldBoundaries"][0]
+                .get("hyperlinkAnchor")
+                .is_none(),
+            "REF without \\h is not a hyperlink",
+        );
+        let result = first_run_json(&plain_ref, "text");
+        assert_eq!(result["isLink"], false);
+        assert!(result.get("hyperlinkAnchor").is_none());
+    }
+
+    #[test]
+    fn complex_field_boundaries_follow_paragraph_break_splitting() {
+        let paragraph = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF DestinationBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>before break</w:t></w:r>
+              <w:r><w:br w:type="page"/></w:r>
+              <w:r><w:lastRenderedPageBreak/></w:r>
+              <w:r><w:t>after break</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+
+        let pieces = split_para_on_page_breaks(paragraph);
+        let paragraphs: Vec<&DocParagraph> = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                ParaPiece::Para(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paragraphs.len(), 2);
+        assert_eq!(
+            paragraphs[0].complex_field_boundaries,
+            vec![ComplexFieldBoundaryWire {
+                occurrence_id: 0,
+                boundary: "start".to_string(),
+                run_index: 0,
+                field_type: "ref".to_string(),
+                instruction: "REF DestinationBookmark \\h".to_string(),
+                hyperlink_anchor: Some("DestinationBookmark".to_string()),
+            }],
+        );
+        assert_eq!(
+            paragraphs[1].complex_field_boundaries,
+            vec![ComplexFieldBoundaryWire {
+                occurrence_id: 0,
+                boundary: "end".to_string(),
+                run_index: 1,
+                field_type: "ref".to_string(),
+                instruction: "REF DestinationBookmark \\h".to_string(),
+                hyperlink_anchor: Some("DestinationBookmark".to_string()),
+            }],
+            "the ignored lastRenderedPageBreak must not leave a stale boundary index",
+        );
+    }
+
+    #[test]
+    fn complex_field_start_moves_to_visible_chunk_after_leading_page_break() {
+        let paragraph = parse_p(
+            r#"
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> REF DestinationBookmark \h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:br w:type="page"/></w:r>
+              <w:r><w:t>cached result</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            "#,
+            &StyleMap::parse(""),
+        );
+
+        let pieces = split_para_on_page_breaks(paragraph);
+        assert!(matches!(pieces.first(), Some(ParaPiece::PageBreak { .. })));
+        let visible = pieces
+            .iter()
+            .find_map(|piece| match piece {
+                ParaPiece::Para(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .expect("visible paragraph after the leading page break");
+        assert_eq!(
+            visible.complex_field_boundaries,
+            vec![
+                ComplexFieldBoundaryWire {
+                    occurrence_id: 0,
+                    boundary: "start".to_string(),
+                    run_index: 0,
+                    field_type: "ref".to_string(),
+                    instruction: "REF DestinationBookmark \\h".to_string(),
+                    hyperlink_anchor: Some("DestinationBookmark".to_string()),
+                },
+                ComplexFieldBoundaryWire {
+                    occurrence_id: 0,
+                    boundary: "end".to_string(),
+                    run_index: 1,
+                    field_type: "ref".to_string(),
+                    instruction: "REF DestinationBookmark \\h".to_string(),
+                    hyperlink_anchor: Some("DestinationBookmark".to_string()),
+                },
+            ],
+            "dropping the empty leading chunk must not orphan its complex-field start",
+        );
+    }
+
+    #[test]
     fn private_run_typography_inherits_complete_underline_and_border_facts() {
         let styles = StyleMap::parse(&format!(
             r#"<w:styles xmlns:w="{W_NS}">
@@ -1860,7 +2062,10 @@ fn parse_body_elements_in_story(
                 // still needs the synthetic page break; a final hard page break is
                 // deduplicated by apply_cover_page_breaks.)
                 match lone_break {
-                    Some(BreakType::Page) => body.push(BodyElement::PageBreak { parity: None }),
+                    Some(BreakType::Page) => body.push(BodyElement::PageBreak {
+                        parity: None,
+                        same_paragraph_as_previous: None,
+                    }),
                     Some(BreakType::Column) => body.push(BodyElement::ColumnBreak),
                     _ => {
                         // Mid-paragraph page / column breaks come from
@@ -1874,9 +2079,13 @@ fn parse_body_elements_in_story(
                                 ParaPiece::Para(p) => {
                                     body.push(BodyElement::Paragraph(Box::new(p)))
                                 }
-                                ParaPiece::PageBreak => {
-                                    body.push(BodyElement::PageBreak { parity: None })
-                                }
+                                ParaPiece::PageBreak {
+                                    same_paragraph_as_previous,
+                                } => body.push(BodyElement::PageBreak {
+                                    parity: None,
+                                    same_paragraph_as_previous: same_paragraph_as_previous
+                                        .then_some(true),
+                                }),
                                 ParaPiece::ColumnBreak => body.push(BodyElement::ColumnBreak),
                             }
                         }
@@ -1951,7 +2160,10 @@ fn parse_body_elements_in_story(
         // the next page. Emit the page break after the cover's content.
         if cover_break_after {
             cover_break_positions.push(body.len());
-            body.push(BodyElement::PageBreak { parity: None });
+            body.push(BodyElement::PageBreak {
+                parity: None,
+                same_paragraph_as_previous: None,
+            });
         }
     }
 
@@ -2149,7 +2361,7 @@ fn apply_cover_page_breaks(
 #[allow(clippy::large_enum_variant)]
 enum ParaPiece {
     Para(DocParagraph),
-    PageBreak,
+    PageBreak { same_paragraph_as_previous: bool },
     ColumnBreak,
 }
 
@@ -2199,6 +2411,21 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     if !has_break {
         // Strip the (ignored) RenderedPage runs so they don't pollute layout.
         let mut p = para;
+        for boundary in &mut p.complex_field_boundaries {
+            boundary.run_index = p
+                .runs
+                .iter()
+                .take(boundary.run_index)
+                .filter(|run| {
+                    !matches!(
+                        run,
+                        DocRun::Break {
+                            break_type: BreakType::RenderedPage
+                        }
+                    )
+                })
+                .count();
+        }
         p.runs.retain(|r| {
             !matches!(
                 r,
@@ -2214,19 +2441,35 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // dropped. `seps` records the break kind that separates chunk[i] from
     // chunk[i+1] so we can interleave the matching ParaPiece below.
     let mut chunks: Vec<Vec<DocRun>> = vec![Vec::new()];
+    let mut boundary_chunks: Vec<Vec<ComplexFieldBoundaryWire>> = vec![Vec::new()];
     let mut seps: Vec<ParaPiece> = Vec::new();
-    for run in para.runs.iter().cloned() {
+    for (original_index, run) in para.runs.iter().cloned().enumerate() {
+        for boundary in para
+            .complex_field_boundaries
+            .iter()
+            .filter(|boundary| boundary.run_index == original_index)
+        {
+            let mut boundary = boundary.clone();
+            boundary.run_index = chunks.last().map(Vec::len).unwrap_or(0);
+            // Seeded and pushed in lock-step with `chunks`.
+            // ast-grep-ignore: no-unwrap-in-parser-production
+            boundary_chunks.last_mut().unwrap().push(boundary);
+        }
         match &run {
             DocRun::Break {
                 break_type: BreakType::Page,
             } => {
                 chunks.push(Vec::new());
-                seps.push(ParaPiece::PageBreak);
+                boundary_chunks.push(Vec::new());
+                seps.push(ParaPiece::PageBreak {
+                    same_paragraph_as_previous: false,
+                });
             }
             DocRun::Break {
                 break_type: BreakType::Column,
             } => {
                 chunks.push(Vec::new());
+                boundary_chunks.push(Vec::new());
                 seps.push(ParaPiece::ColumnBreak);
             }
             DocRun::Break {
@@ -2237,6 +2480,17 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
             // ast-grep-ignore: no-unwrap-in-parser-production
             _ => chunks.last_mut().unwrap().push(run),
         }
+    }
+    for boundary in para
+        .complex_field_boundaries
+        .iter()
+        .filter(|boundary| boundary.run_index == para.runs.len())
+    {
+        let mut boundary = boundary.clone();
+        boundary.run_index = chunks.last().map(Vec::len).unwrap_or(0);
+        // Seeded and pushed in lock-step with `chunks`.
+        // ast-grep-ignore: no-unwrap-in-parser-production
+        boundary_chunks.last_mut().unwrap().push(boundary);
     }
 
     let has_visible = |runs: &Vec<DocRun>| {
@@ -2255,12 +2509,27 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // (Word's anchored shapes paragraph at the cover commonly does this
     // to force the cover onto its own page; the trailing empty chunk
     // would otherwise emit an extra blank paragraph + page break).
-    let (chunks, seps, trailing_seps): (Vec<Vec<DocRun>>, Vec<ParaPiece>, Vec<ParaPiece>) = {
+    type SplitParagraphChunks = (
+        Vec<Vec<DocRun>>,
+        Vec<Vec<ComplexFieldBoundaryWire>>,
+        Vec<ParaPiece>,
+        Vec<ParaPiece>,
+    );
+    let (chunks, mut boundary_chunks, seps, trailing_seps): SplitParagraphChunks = {
         let mut c = chunks;
+        let mut b = boundary_chunks;
         let mut s = seps;
         let mut trailing = Vec::new();
         while c.last().map(|r| !has_visible(r)).unwrap_or(false) && c.len() > 1 {
             c.pop();
+            let removed_boundaries = b.pop().unwrap_or_default();
+            if let Some(previous) = b.last_mut() {
+                let end_index = c.last().map(Vec::len).unwrap_or(0);
+                previous.extend(removed_boundaries.into_iter().map(|mut boundary| {
+                    boundary.run_index = end_index;
+                    boundary
+                }));
+            }
             // Each pop removes the empty chunk produced AFTER a hard break at
             // the paragraph end, but the break itself remains authoritative:
             // Para(visible), PageBreak is exactly how Word authors anchored
@@ -2270,9 +2539,31 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
                 trailing.push(sep);
             }
         }
-        (c, s, trailing)
+        (c, b, s, trailing)
     };
 
+    // A complex-field result may start immediately before a hard break. In
+    // that case the first chunk has no visible runs and is intentionally
+    // omitted below, but its start event still owns the cached result in the
+    // following chunk (ECMA-376 §17.16). Move every structural event from that
+    // discarded chunk to the first retained run boundary, preserving event
+    // order ahead of boundaries authored in the following chunk itself.
+    if chunks
+        .first()
+        .map(|runs| !has_visible(runs))
+        .unwrap_or(false)
+        && boundary_chunks.len() > 1
+    {
+        let mut migrated = std::mem::take(&mut boundary_chunks[0]);
+        for boundary in &mut migrated {
+            boundary.run_index = 0;
+        }
+        let following = std::mem::take(&mut boundary_chunks[1]);
+        migrated.extend(following);
+        boundary_chunks[1] = migrated;
+    }
+
+    let chunk_visibility: Vec<bool> = chunks.iter().map(has_visible).collect();
     let mut out: Vec<ParaPiece> = Vec::new();
     for (i, runs) in chunks.into_iter().enumerate() {
         // Drop the leading chunk when it carries no visible content — this
@@ -2298,17 +2589,25 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
         if i > 0 {
             out.push(match seps.get(i - 1) {
                 Some(ParaPiece::ColumnBreak) => ParaPiece::ColumnBreak,
-                _ => ParaPiece::PageBreak,
+                _ => ParaPiece::PageBreak {
+                    same_paragraph_as_previous: chunk_visibility
+                        .get(i - 1)
+                        .copied()
+                        .unwrap_or(false),
+                },
             });
         }
         let mut chunk = para.clone();
         chunk.runs = runs;
+        chunk.complex_field_boundaries = boundary_chunks.get(i).cloned().unwrap_or_default();
         out.push(ParaPiece::Para(chunk));
     }
     for sep in trailing_seps.into_iter().rev() {
         out.push(match sep {
             ParaPiece::ColumnBreak => ParaPiece::ColumnBreak,
-            _ => ParaPiece::PageBreak,
+            _ => ParaPiece::PageBreak {
+                same_paragraph_as_previous: true,
+            },
         });
     }
     if out.is_empty() {
@@ -3387,6 +3686,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
 
     // Parse runs
     let mut runs = vec![];
+    let mut complex_field_boundaries = vec![];
     parse_para_content(
         node,
         &base_run,
@@ -3397,6 +3697,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         rel_map,
         theme,
         &mut runs,
+        &mut complex_field_boundaries,
         None,
         field,
         depth,
@@ -3456,6 +3757,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         numbering,
         tab_stops,
         runs,
+        complex_field_boundaries,
         bookmarks,
         shading: base_para.shading.clone(),
         page_break_before: base_para.page_break_before.unwrap_or(false),
@@ -3527,6 +3829,9 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
 /// single flat state.
 #[derive(Default)]
 struct FieldFrame {
+    /// Stable within this field scope (body/story/table-cell). The TypeScript
+    /// parser boundary scopes it by the owning container before layout sees it.
+    occurrence_id: u32,
     /// Have we passed this frame's `separate` fldChar yet?
     past_separate: bool,
     /// Accumulated instruction text for THIS frame (PAGE, TOC, PAGEREF, …).
@@ -3540,12 +3845,17 @@ struct FieldFrame {
     substitute: bool,
     /// True when this frame's instruction is a TOC field (§17.16.5.69).
     is_toc: bool,
+    /// Classified when `separate` closes the instruction region.
+    field_type: String,
+    /// REF/PAGEREF bookmark when the field-specific `\\h` switch is authored.
+    hyperlink_anchor: Option<String>,
 }
 
 /// Stack of open field frames for the current paragraph content walk.
 #[derive(Default)]
 struct FieldState {
     stack: Vec<FieldFrame>,
+    next_occurrence_id: u32,
 }
 
 impl FieldState {
@@ -3566,6 +3876,14 @@ impl FieldState {
     fn in_toc(&self) -> bool {
         self.stack.iter().any(|f| f.is_toc)
     }
+
+    fn result_hyperlink_anchor(&self) -> Option<String> {
+        self.stack
+            .iter()
+            .rev()
+            .filter(|frame| frame.past_separate && !frame.substitute)
+            .find_map(|frame| frame.hyperlink_anchor.clone())
+    }
 }
 
 // Threads the immutable parse context (style/media/rel maps, theme) plus the
@@ -3582,6 +3900,7 @@ fn parse_para_content(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
+    complex_field_boundaries: &mut Vec<ComplexFieldBoundaryWire>,
     revision: Option<&RunRevision>,
     // Complex-field state threaded across paragraphs. A field is delimited by
     // its fldChar begin/end (§17.16.18), NOT by paragraph boundaries — a TOC
@@ -3604,6 +3923,7 @@ fn parse_para_content(
                     rel_map,
                     theme,
                     runs,
+                    complex_field_boundaries,
                     field,
                     None,
                     None,
@@ -3641,6 +3961,7 @@ fn parse_para_content(
                         rel_map,
                         theme,
                         runs,
+                        complex_field_boundaries,
                         field,
                         Some(href.clone()),
                         anchor.clone(),
@@ -3691,6 +4012,7 @@ fn parse_para_content(
                     rel_map,
                     theme,
                     runs,
+                    complex_field_boundaries,
                     Some(&inner),
                     field,
                     depth,
@@ -3708,6 +4030,7 @@ fn parse_para_content(
                     rel_map,
                     theme,
                     runs,
+                    complex_field_boundaries,
                     revision,
                     field,
                     depth,
@@ -3789,6 +4112,7 @@ fn handle_run_in_para(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
+    complex_field_boundaries: &mut Vec<ComplexFieldBoundaryWire>,
     field: &mut FieldState,
     // Outer None = not inside a hyperlink. Some(None) = hyperlink without URL. Some(Some(url)) = hyperlink with URL.
     link_href: Option<Option<String>>,
@@ -3824,7 +4148,12 @@ fn handle_run_in_para(
             "begin" => {
                 // Push a new (nested) field frame. §17.16.18 — fields nest, so a
                 // TOC field's result region may itself open PAGEREF fields.
-                field.stack.push(FieldFrame::default());
+                let occurrence_id = field.next_occurrence_id;
+                field.next_occurrence_id = field.next_occurrence_id.saturating_add(1);
+                field.stack.push(FieldFrame {
+                    occurrence_id,
+                    ..FieldFrame::default()
+                });
             }
             "separate" => {
                 if let Some(frame) = field.top_mut() {
@@ -3834,6 +4163,16 @@ fn handle_run_in_para(
                     // content as normal runs — so multi-paragraph / nested fields like a TOC
                     // keep their headings, tabs and page numbers.
                     frame.substitute = classify_field(&frame.instruction) != "other";
+                    let semantics = classify_complex_field(&frame.instruction);
+                    frame.field_type = semantics.field_type;
+                    frame.hyperlink_anchor = semantics.hyperlink_anchor;
+                    if !frame.substitute {
+                        complex_field_boundaries.push(complex_field_boundary(
+                            frame,
+                            "start",
+                            runs.len(),
+                        ));
+                    }
                 }
             }
             "end" => {
@@ -3846,6 +4185,12 @@ fn handle_run_in_para(
                             &frame.fallback,
                             theme,
                             revision,
+                        ));
+                    } else if frame.past_separate {
+                        complex_field_boundaries.push(complex_field_boundary(
+                            &frame,
+                            "end",
+                            runs.len(),
                         ));
                     }
                 }
@@ -3906,6 +4251,18 @@ fn handle_run_in_para(
 
     // Normal run
     let in_toc = field.in_toc();
+    // ECMA-376 §17.16.5.45/§17.16.5.51: PAGEREF/REF `\\h` makes the
+    // cached result a link to the referenced bookmark even without an enclosing
+    // `<w:hyperlink>`. An authored external hyperlink still wins downstream.
+    let field_hyperlink_anchor = field.result_hyperlink_anchor();
+    let link_anchor = link_anchor.or_else(|| field_hyperlink_anchor.clone());
+    let link_href = if link_href.is_some() {
+        link_href
+    } else if field_hyperlink_anchor.is_some() {
+        Some(None)
+    } else {
+        None
+    };
     parse_run_inner(
         r_node,
         base_run,
@@ -3933,6 +4290,57 @@ fn classify_toc(instr: &str) -> bool {
         .split_whitespace()
         .next()
         .is_some_and(|tok| tok.eq_ignore_ascii_case("TOC"))
+}
+
+struct ComplexFieldSemantics {
+    field_type: String,
+    hyperlink_anchor: Option<String>,
+}
+
+/// Classify the complex-field facts needed by acquisition. REF (§17.16.5.51)
+/// and PAGEREF (§17.16.5.45) both use the first field argument as a bookmark;
+/// their field-specific `\\h` switch creates an internal hyperlink to it.
+fn classify_complex_field(instr: &str) -> ComplexFieldSemantics {
+    let tokens: Vec<&str> = instr.split_whitespace().collect();
+    let token = tokens.first().copied().unwrap_or_default();
+    let field_type = if token.eq_ignore_ascii_case("REF") {
+        "ref"
+    } else if token.eq_ignore_ascii_case("PAGEREF") {
+        "pageRef"
+    } else {
+        "other"
+    };
+    let has_hyperlink_switch = tokens
+        .iter()
+        .skip(2)
+        .any(|candidate| candidate.eq_ignore_ascii_case("\\h"));
+    let hyperlink_anchor = if field_type != "other" && has_hyperlink_switch {
+        tokens
+            .get(1)
+            .map(|target| target.trim_matches(['\'', '"']).to_string())
+            .filter(|target| !target.is_empty())
+    } else {
+        None
+    };
+    ComplexFieldSemantics {
+        field_type: field_type.to_string(),
+        hyperlink_anchor,
+    }
+}
+
+fn complex_field_boundary(
+    frame: &FieldFrame,
+    boundary: &str,
+    run_index: usize,
+) -> ComplexFieldBoundaryWire {
+    ComplexFieldBoundaryWire {
+        occurrence_id: frame.occurrence_id,
+        boundary: boundary.to_string(),
+        run_index,
+        field_type: frame.field_type.clone(),
+        instruction: frame.instruction.trim().to_string(),
+        hyperlink_anchor: frame.hyperlink_anchor.clone(),
+    }
 }
 
 fn extract_text_from_runs(node: roxmltree::Node) -> String {
@@ -11898,6 +12306,7 @@ mod tests {
         let mut field = FieldState::default();
         let mut num_map = NumberingMap::default();
         let mut diagnostics = Vec::new();
+        let mut complex_field_boundaries = Vec::new();
         parse_para_content(
             doc.root_element(),
             base_run,
@@ -11908,6 +12317,7 @@ mod tests {
             &rels,
             &theme,
             &mut runs,
+            &mut complex_field_boundaries,
             None,
             &mut field,
             DepthGuard::root(),
@@ -18057,7 +18467,16 @@ mod column_tests {
         // Para(a), PageBreak, Para(b), ColumnBreak, Para(c).
         assert_eq!(body.len(), 5);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
-        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(
+            body[1],
+            BodyElement::PageBreak {
+                same_paragraph_as_previous: Some(true),
+                ..
+            }
+        ));
+        let wire = serde_json::to_value(&body[1]).expect("page break serializes");
+        assert_eq!(wire["sameParagraphAsPrevious"], true);
+        assert!(wire.get("same_paragraph_as_previous").is_none());
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
         assert!(matches!(body[3], BodyElement::ColumnBreak));
         assert!(matches!(body[4], BodyElement::Paragraph(_)));
@@ -18083,7 +18502,13 @@ mod column_tests {
         // Para(before), PageBreak, Para(annex).
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
-        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(
+            body[1],
+            BodyElement::PageBreak {
+                same_paragraph_as_previous: None,
+                ..
+            }
+        ));
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 
@@ -18103,7 +18528,13 @@ mod column_tests {
         // Para(shape-anchor), PageBreak, Para(after).
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
-        assert!(matches!(body[1], BodyElement::PageBreak { .. }));
+        assert!(matches!(
+            body[1],
+            BodyElement::PageBreak {
+                same_paragraph_as_previous: Some(true),
+                ..
+            }
+        ));
         assert!(matches!(body[2], BodyElement::Paragraph(_)));
     }
 

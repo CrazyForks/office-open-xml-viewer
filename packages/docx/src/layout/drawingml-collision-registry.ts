@@ -32,6 +32,9 @@ function snapshotEntry(
     bounds: Object.freeze({ ...entry.bounds }),
     horizontalOwnership: entry.horizontalOwnership,
     verticalOwnership: entry.verticalOwnership,
+    ...(entry.relativeHeight !== undefined
+      ? { relativeHeight: entry.relativeHeight }
+      : {}),
   });
 }
 

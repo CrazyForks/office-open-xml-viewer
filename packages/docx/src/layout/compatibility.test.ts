@@ -16,16 +16,21 @@ import {
   WORD_PRE_BREAK_INLINE_DRAWING_GROUP,
   WORD_CONTINUOUS_SECTION_MARK_SPACING,
   WORD_CONTEXTUAL_SPACING_PER_SIDE,
+  WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION,
+  WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION,
   WORD_TERMINAL_COLUMN_BREAK,
+  wordFinalParagraphAdmissionExtentPt,
 } from './body-pagination-compatibility.js';
 import {
   WORD_FRAME_AUTO_WRAP_AROUND,
+  WORD_LOWER_LAYER_SAME_PARAGRAPH_ANCHOR_COMPOSITION,
   WORD_PAGE_LEVEL_FLOAT_PRESCAN,
   WORD_PARAGRAPH_ANCHOR_PRE_SPACING_ORIGIN,
   WORD_VERTICAL_SECTION_PHYSICAL_HEADER_FOOTER,
   WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER,
   WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
   wordPageLevelAnchorY,
+  wordPreservesLowerLayerSameParagraphComposition,
   wordZeroRelativeSizeUsesExtent,
 } from './anchor-compatibility.js';
 import {
@@ -39,8 +44,10 @@ import {
   WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
   WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED,
   WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
+  WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT,
   WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
   WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
+  WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB,
   WORD_NUMERIC_DECIMAL_TAB_INFERENCE,
   WORD_OVERLONG_TOKEN_EMERGENCY_BREAK,
   WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
@@ -52,6 +59,10 @@ import {
   wordFarEastSingleLinePx,
   wordFirstJustifiedContentSegment,
   wordGridAtLeastLineHeightPx,
+  wordUseFeLayoutInheritedGridHeightPx,
+  wordCandidateFitWidthPx,
+  wordJustifiedCandidateFitAllowancePx,
+  wordNumberingSuffixAcceptsCoincidentListTab,
   wordRubyUniformLineHeightPx,
   wordVisibleLineMetricPx,
 } from './line-compatibility.js';
@@ -275,12 +286,14 @@ describe('layout compatibility inventory', () => {
       WORD_AUTO_MULTIPLE_BASELINE_PIN,
       WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
       WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
+      WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT,
       WORD_RUBY_PARAGRAPH_UNIFORM_LINE_ADVANCE,
       WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
       WORD_CJK_BOTH_INTER_CHARACTER_EXPANSION,
       WORD_THAI_DISTRIBUTE_CLUSTER_POLICY,
       WORD_NUMERIC_DECIMAL_TAB_INFERENCE,
       WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
+      WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB,
       WORD_TAB_STOP_PAGE_EDGE_CLAMP,
       WORD_DICTIONARY_SEA_NATURAL_FIT,
       WORD_DICTIONARY_SEA_ATOMIC_CHUNK,
@@ -302,6 +315,7 @@ describe('layout compatibility inventory', () => {
       WORD_PARAGRAPH_ANCHOR_PRE_SPACING_ORIGIN,
       WORD_VERTICAL_SECTION_PHYSICAL_HEADER_FOOTER,
       WORD_FRAME_AUTO_WRAP_AROUND,
+      WORD_LOWER_LAYER_SAME_PARAGRAPH_ANCHOR_COMPOSITION,
       WORD_TABLE_BORDER_WEIGHT_PRECEDENCE,
       WORD_OMITTED_ROW_HEIGHT_RULE_AT_LEAST,
       WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR,
@@ -313,6 +327,8 @@ describe('layout compatibility inventory', () => {
       WORD_CELL_VERTICAL_ALIGNMENT_INK_BLOCK,
       WORD_VERTICAL_MERGE_TERMINAL_BORDER,
       WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE,
+      WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION,
+      WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION,
     ];
 
     expect(new Set(rules.map((rule) => rule.id)).size).toBe(rules.length);
@@ -320,9 +336,37 @@ describe('layout compatibility inventory', () => {
     expect(rules.every((rule) => Object.isFrozen(rule.evidence))).toBe(true);
   });
 
+  it('records the anonymized Word observation for lower-layer anchor composition', () => {
+    expect(WORD_LOWER_LAYER_SAME_PARAGRAPH_ANCHOR_COMPOSITION.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'lower-layer-same-paragraph-anchor-composition',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_LOWER_LAYER_SAME_PARAGRAPH_ANCHOR_COMPOSITION.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+  });
+
+  it('records the anonymized Word observation for vertical final-line admission', () => {
+    expect(WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'vertical-rl-final-line-baseline-admission',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+  });
+
   it('pins behavior-preserving compatibility decision helpers', () => {
     expect(wordZeroRelativeSizeUsesExtent(0)).toBe(true);
     expect(wordZeroRelativeSizeUsesExtent(-0.1)).toBe(false);
+    expect(wordPreservesLowerLayerSameParagraphComposition('page', 1, 2)).toBe(true);
+    expect(wordPreservesLowerLayerSameParagraphComposition('page', 2, 1)).toBe(false);
+    expect(wordPreservesLowerLayerSameParagraphComposition('page', 1, undefined)).toBe(false);
+    expect(wordPreservesLowerLayerSameParagraphComposition('host', 1, 2)).toBe(false);
     expect(wordExactRowFloorPt(12, [2, 4, 3])).toBe(16);
     expect(wordAuthoredBorderParticipates('none')).toBe(false);
     expect(wordAuthoredBorderParticipates('nil')).toBe(true);
@@ -377,6 +421,43 @@ describe('layout compatibility inventory', () => {
       ...trailingMark,
       hasFollowingInk: false,
     })).toBe(0);
+    expect(wordFinalParagraphAdmissionExtentPt({
+      advancePt: 30,
+      retainedSpaceAfterPt: 10,
+      authoredSpaceAfterPt: 10,
+    })).toBe(20);
+    expect(wordNumberingSuffixAcceptsCoincidentListTab(
+      20,
+      { pos: 20, alignment: 'num' },
+    )).toBe(true);
+    expect(wordNumberingSuffixAcceptsCoincidentListTab(
+      20,
+      { pos: 20, alignment: 'left' },
+    )).toBe(false);
+    expect(wordCandidateFitWidthPx({
+      widthPx: 60,
+      trailingSpacePx: 12,
+      lineWillJustify: true,
+    })).toBe(60);
+    expect(wordCandidateFitWidthPx({
+      widthPx: 60,
+      trailingSpacePx: 12,
+      lineWillJustify: true,
+      wrapNarrowed: true,
+    })).toBe(48);
+    expect(wordJustifiedCandidateFitAllowancePx({
+      biasBudgetPx: 5.25,
+      resolvedMeasurementRouteCount: 1,
+    })).toBe(5.25);
+    expect(wordJustifiedCandidateFitAllowancePx({
+      biasBudgetPx: 5.25,
+      resolvedMeasurementRouteCount: 2,
+    })).toBe(0);
+    expect(wordCandidateFitWidthPx({
+      widthPx: 60,
+      trailingSpacePx: 12,
+      lineWillJustify: false,
+    })).toBe(48);
   });
 
   it('pins East Asian grid allocation and the untabled Far East metric factor', () => {
@@ -386,6 +467,8 @@ describe('layout compatibility inventory', () => {
     expect(wordEastAsianGridLineCells(0, 18)).toBe(1);
     expect(wordFarEastSingleLinePx(22, 10)).toBe(22);
     expect(wordFarEastSingleLinePx(0, 10)).toBe(13);
+    expect(wordUseFeLayoutInheritedGridHeightPx(36, 18, 1.15)).toBe(36);
+    expect(wordUseFeLayoutInheritedGridHeightPx(18, 18, 1.15)).toBeCloseTo(20.7, 12);
   });
 
   it('pins the eight track-change author colors independently of author indexing', () => {

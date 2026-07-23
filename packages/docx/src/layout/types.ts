@@ -1,5 +1,6 @@
 import type { SectionLayoutContext } from '../layout-context.js';
 import type {
+  GlyphInkBounds,
   TextFontSlotPresence,
   TextFontSlots,
   TextLayoutService,
@@ -166,10 +167,17 @@ export type DrawingPaintCommand =
       resourceKey: string;
       resourceKind: PaintResourceKind;
       rect: LayoutRect;
+      /** Keep a non-text graphic upright after the enclosing section-logical
+       * frame is rotated into a vertical physical page. */
+      orientation?: 'upright-physical';
     }>;
 
 export interface DrawingLayout extends LayoutNodeBase {
   readonly kind: 'drawing';
+  /** The commands and owned text boxes are authored in an upright, drawing-
+   * local physical frame. `transform` maps that frame into section-logical
+   * points, where the page's quarter turn cancels it during paint. */
+  readonly orientation?: 'upright-physical';
   readonly transform?: Matrix2DData;
   readonly clip?: ClipPathData;
   readonly commands: readonly DrawingPaintCommand[];
@@ -276,12 +284,31 @@ export interface TextPaintOp {
   readonly offset: PointPt;
   readonly letterSpacingPt: number;
   readonly scaleX: number;
+  /** Acquisition-retained glyph-local block-axis scale. Used by
+   * `eastAsianLayout@vertCompress` so paint never remeasures font metrics. */
+  readonly scaleY?: number;
   readonly direction: TextDirection;
   readonly kerning: 'auto' | 'normal' | 'none';
   readonly writingMode: WritingMode;
-  readonly glyphOrientation?: 'sideways' | 'upright';
+  readonly glyphOrientation?: 'sideways' | 'upright' | 'rotate';
+  /** Acquisition proved that the selected face exposes this code point through
+   * OpenType `vert`; paint applies the feature without probing or measuring. */
+  readonly verticalFeature?: boolean;
+  /** Glyph-local offset retained from vertical-form ink/corner geometry. */
+  readonly glyphOffsetPt?: PointPt;
   /** `kashida` permits acquisition-inserted U+0640 glyphs over one source range. */
   readonly sourceMapping?: 'identity' | 'kashida';
+  /** Selected-face ink relative to this operation's alphabetic baseline.
+   * Pagination may consume it, but paint must never reconstruct it. */
+  readonly inkBounds?: GlyphInkBounds;
+  /** Tight ink after applying this operation's retained glyph transform,
+   * expressed on the paragraph's logical block axis relative to `offset.yPt`.
+   * Vertical final-line admission consumes this instead of reinterpreting
+   * alphabetic metrics for counter-rotated glyphs. */
+  readonly blockAxisInkBounds?: Readonly<{
+    startPt: number;
+    endPt: number;
+  }>;
 }
 
 export type TextColorPolicy =
@@ -456,6 +483,9 @@ export interface ResourcePlacement {
   readonly range: TextRange;
   readonly resourceKey: string;
   readonly resourceKind: InlineResourceKind;
+  /** Keep a non-text graphic upright after the enclosing section-logical frame
+   * is rotated into a vertical physical page. Absent means flow-relative. */
+  readonly orientation?: 'upright-physical';
   readonly bounds: LayoutRect;
   readonly advancePt: number;
 }
@@ -522,6 +552,9 @@ export interface DrawingMLCollisionEntryPt {
   readonly bounds: LayoutRect;
   readonly horizontalOwnership: 'page' | 'host';
   readonly verticalOwnership: 'page' | 'host';
+  /** Authored wp:anchor z-order, when the collision came from a retained
+   * DrawingML anchor rather than a legacy compatibility float. */
+  readonly relativeHeight?: number;
 }
 
 export interface ParagraphFlowEvent {
@@ -876,6 +909,13 @@ export interface PagePaintDrawingEntry extends PagePaintEntryBase {
 
 export type PagePaintEntry = PagePaintNodeEntry | PagePaintDrawingEntry;
 
+export interface PagePaintCapabilities {
+  /** At least one retained text operation proved an OpenType `vert` form.
+   * Canvas paint must therefore use an element-backed context when available,
+   * because OffscreenCanvas cannot apply the proven feature. */
+  readonly requiresElementBackedVerticalGlyphPaint: boolean;
+}
+
 export interface PageLayers {
   /** Top-level retained story roots in composition order. This is graph and
    * reading-order authority, not paint-order authority. */
@@ -883,6 +923,8 @@ export interface PageLayers {
   /** Completed layout-owned order. Paint consumes it without graph discovery,
    * sorting, callback collection, or callback re-entry. */
   readonly paintOrder: readonly PagePaintEntry[];
+  /** Target requirements derived once from the immutable retained paint plan. */
+  readonly capabilities: PagePaintCapabilities;
   readonly background: readonly PaintNode[];
   readonly behindText: readonly PaintNode[];
   readonly header: readonly PaintNode[];
@@ -999,6 +1041,9 @@ export interface LayoutServices {
   readonly text: TextLayoutService;
   readonly images: ImageMetadataService;
   readonly math: MathMetadataService;
+  /** Geometry-affecting vertical glyph acquisition capability. Kept separate
+   * from horizontal text shaping so each service fingerprint stays truthful. */
+  readonly verticalGlyphFingerprint?: string;
 }
 
 /** Plain, parser-independent input for shaping a numbering marker. The renderer

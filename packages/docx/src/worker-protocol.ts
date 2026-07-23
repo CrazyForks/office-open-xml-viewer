@@ -43,6 +43,11 @@ export type RenderWorkerRequest =
 export type RenderWorkerResponse =
   | Exclude<WorkerResponse, { type: 'parsed' }>
   | { type: 'parsedMeta'; id: number; meta: DocumentMeta }
+  // OffscreenCanvas cannot select/probe the OpenType `vert` feature. A render
+  // worker that parses vertical East-Asian content returns the normalized model
+  // so the proxy can continue through main-thread rendering instead of silently
+  // painting horizontal glyph forms.
+  | { type: 'mainThreadVerticalFallback'; id: number; documentJson: ArrayBuffer }
   // The worker projects structured-clone-safe run geometry from the same
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[] }

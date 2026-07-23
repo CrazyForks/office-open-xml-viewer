@@ -72,6 +72,11 @@ function translateDrawingCommand(command: DrawingPaintCommand, delta: LayoutTran
 }
 
 export function translateDrawing(drawing: DrawingLayout, delta: LayoutTranslation): DrawingLayout {
+  // Upright physical commands/text boxes are drawing-local. Only their shared
+  // logical placement transform moves with the retained anchor occurrence.
+  const commandDelta = drawing.orientation === 'upright-physical'
+    ? { xPt: 0, yPt: 0 }
+    : delta;
   return {
     ...drawing,
     flowBounds: translateRect(drawing.flowBounds, delta),
@@ -81,7 +86,7 @@ export function translateDrawing(drawing: DrawingLayout, delta: LayoutTranslatio
       ...drawing.transform, e: drawing.transform.e + delta.xPt, f: drawing.transform.f + delta.yPt,
     } } : {}),
     ...(drawing.clip ? { clip: translateClip(drawing.clip, delta) } : {}),
-    commands: drawing.commands.map((command) => translateDrawingCommand(command, delta)),
+    commands: drawing.commands.map((command) => translateDrawingCommand(command, commandDelta)),
   };
 }
 
@@ -153,7 +158,9 @@ export function translateLine(
   drawingTranslations?: ReadonlyMap<LayoutNodeId, LayoutTranslation>,
 ): LineLayout {
   return {
-    ...line, bounds: translateRect(line.bounds, delta), baselinePt: line.baselinePt + delta.yPt,
+    ...line,
+    bounds: translateRect(line.bounds, delta),
+    baselinePt: line.baselinePt + delta.yPt,
     placements: line.placements.map((placement) => translatePlacement(placement, delta, drawingTranslations)),
   };
 }
@@ -226,7 +233,12 @@ function translateParagraphWithContext(
       yPt: drawing.anchorLayer?.verticalOwnership === 'page' ? 0 : delta.yPt,
     };
     drawingTranslations.set(drawing.id, drawingDelta);
-    drawing.textBoxIds?.forEach((id) => textBoxTranslations.set(id, drawingDelta));
+    drawing.textBoxIds?.forEach((id) => textBoxTranslations.set(
+      id,
+      drawing.orientation === 'upright-physical'
+        ? { xPt: 0, yPt: 0 }
+        : drawingDelta,
+    ));
   }
   const drawings = paragraph.drawings.map((drawing) => translateDrawingWithContext(
     drawing, drawingTranslations.get(drawing.id) ?? delta, context,

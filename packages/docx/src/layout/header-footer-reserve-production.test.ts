@@ -308,6 +308,27 @@ describe('canonical header/footer reservation', () => {
     expect(layout.pages[0]?.layers.body[0]?.flowBounds.yPt).toBe(10);
   });
 
+  it('does not reserve an empty selected footer whose anchor lies inside the body margin', () => {
+    const base = section();
+    const context: SectionLayoutContext = {
+      ...base,
+      geometry: { ...base.geometry, footerDistance: 15 },
+    };
+    const sectionOwner = owner('section:empty-footer', context, {
+      footers: { default: footer, first: null, even: null },
+    });
+    const layout = paginate({
+      initialSection: sectionOwner,
+      sequence: [bodyBlock(0), bodyBlock(1)],
+      heightPt: 40,
+      storyExtentPt: () => 0,
+    });
+
+    expect(layout.pages).toHaveLength(1);
+    expect(layout.pages[0]?.geometry).toMatchObject({ contentTopPt: 10, contentBottomPt: 90 });
+    expect(layout.pages[0]?.layers.body).toHaveLength(2);
+  });
+
   it('uses the section occurrence that owns the physical page across a continuous boundary', () => {
     const measuredStories: Array<Readonly<{ source: SourceRef; pageIndex: number }>> = [];
     const outgoingHeader = storySource('header', 'default');

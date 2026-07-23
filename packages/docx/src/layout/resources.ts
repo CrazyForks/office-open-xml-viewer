@@ -91,11 +91,9 @@ export function bodyMathOccurrences(
   return found;
 }
 
-/** Collect every story whose current model retains OMML MathNode runs. Shape
- * txbxContent is intentionally excluded: the parser currently flattens its
- * equations into ShapeTextRun.text. Planned rich-textbox work must extend this
- * traversal when that model begins retaining MathNode rather than silently
- * resolving an absent resource. */
+/** Collect every story whose current model retains OMML MathNode runs. Parser
+ * normalization gives rich text-box content its own structural story identity,
+ * including equations nested in text-box tables. */
 export function documentMathOccurrences(doc: DocxDocumentModel): MathOccurrence[] {
   return [...normalizeInternalDocumentModel(doc).mathOccurrences];
 }

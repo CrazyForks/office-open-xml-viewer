@@ -110,7 +110,11 @@ function underlineStyle(authored: string | undefined): TextDecorationLayout['sty
   return 'solid';
 }
 
-function wavePath(from: PointPt, to: PointPt, strokeWidthPt: number): readonly PointPt[] {
+export function retainedWavePath(
+  from: PointPt,
+  to: PointPt,
+  strokeWidthPt: number,
+): readonly PointPt[] {
   const widthPt = Math.max(0, to.xPt - from.xPt);
   const stepPt = strokeWidthPt * 2;
   const count = Math.max(1, Math.ceil(widthPt / stepPt));
@@ -162,7 +166,7 @@ export function retainedTextDecorations(input: Readonly<{
         style,
         from,
         to,
-        ...(style === 'wavy' ? { path: wavePath(from, to, strokeWidthPt) } : {}),
+        ...(style === 'wavy' ? { path: retainedWavePath(from, to, strokeWidthPt) } : {}),
         ...(style === 'dotted' ? { dashPatternPt: [strokeWidthPt, strokeWidthPt * 2] } : {}),
         ...(style === 'dashed' ? { dashPatternPt: [strokeWidthPt * 4, strokeWidthPt * 3] } : {}),
       });

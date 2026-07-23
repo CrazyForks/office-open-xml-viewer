@@ -21,6 +21,7 @@ export declare type BodyElement = ({
 } & DocTable) | {
     type: 'pageBreak';
     parity?: 'odd' | 'even';
+    sameParagraphAsPrevious?: boolean;
 } | {
     type: 'columnBreak';
 } | {
@@ -1273,7 +1274,7 @@ export declare interface TableBorders {
 }
 export declare interface TabStop {
     pos: number;
-    alignment: 'left' | 'center' | 'right' | 'decimal' | 'bar' | 'clear';
+    alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'decimal' | 'bar' | 'clear' | 'num';
     leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
 }
 export declare interface TblpPr {

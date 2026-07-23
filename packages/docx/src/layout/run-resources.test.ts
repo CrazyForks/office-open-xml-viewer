@@ -124,6 +124,7 @@ function acquireSameParagraph(
   overrides: Readonly<{
     wrap?: WrapOracle;
     exclusions?: Parameters<typeof acquireParagraphLayout>[1]['exclusions'];
+    verticalPageFrame?: boolean;
   }> | undefined = undefined,
 ) {
   const paragraph: DocParagraph = {
@@ -150,6 +151,7 @@ function acquireSameParagraph(
     measurer: { context: sameParagraphMeasureContext, fontFamilyClasses: {} },
     environment: {
       pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+      ...(overrides?.verticalPageFrame ? { verticalPageFrame: true } : {}),
       layoutServices: {
         text: sameParagraphTextService,
         images: {
@@ -207,6 +209,36 @@ const cases: ReadonlyArray<readonly [string, ParagraphPlacement | undefined, Inl
 ];
 
 describe('paragraph run resource projection', () => {
+  it('retains upright physical orientation for an anchored image in a vertical page frame', () => {
+    const anchor = sameParagraphAnchor(sameParagraphOccurrenceId, {
+      kind: 'none', authoredKinds: ['wrapNone'], side: 'bothSides',
+      distances: validEdges(0, 0, 0, 0), effectExtent: null, polygon: null,
+    });
+
+    const vertical = acquireSameParagraph(anchor, { verticalPageFrame: true });
+    const horizontal = acquireSameParagraph(anchor);
+
+    expect(vertical.drawings[0]).toMatchObject({
+      orientation: 'upright-physical',
+      flowBounds: { xPt: 10, yPt: 178, widthPt: 20, heightPt: 30 },
+      transform: { a: 0, b: -1, c: 1, d: 0, e: 20, f: 193 },
+    });
+    expect(vertical.drawings[0]?.commands[0]).toMatchObject({
+      kind: 'resource', resourceKind: 'image',
+      rect: { xPt: -15, yPt: -10, widthPt: 30, heightPt: 20 },
+    });
+    expect(vertical.drawings[0]?.commands[0]).not.toHaveProperty('orientation');
+    expect(vertical.drawings[0]?.anchorLayer).toMatchObject({
+      horizontalOwnership: 'host',
+      verticalOwnership: 'page',
+    });
+    expect(horizontal.drawings[0]?.anchorLayer).toMatchObject({
+      horizontalOwnership: 'page',
+      verticalOwnership: 'host',
+    });
+    expect(horizontal.drawings[0]?.commands[0]).not.toHaveProperty('orientation');
+  });
+
   it('reflows a host paragraph around its parser-owned square anchor to a fixed point', () => {
     const missingEdges = validEdges(0, 0, 0, 0);
     const square = sameParagraphAnchor(sameParagraphOccurrenceId, {

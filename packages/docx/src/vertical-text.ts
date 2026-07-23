@@ -320,6 +320,70 @@ interface RoutedVerticalGlyphCell {
   rotateInkShiftPx: number;
 }
 
+export interface PlannedVerticalGlyphCell {
+  readonly range: Readonly<{ start: number; end: number }>;
+  readonly text: string;
+  readonly orientation: 'upright' | 'rotate' | 'sideways';
+  readonly originPt: number;
+  readonly advancePt: number;
+  readonly drawOffsetPt: Readonly<{ xPt: number; yPt: number }>;
+  readonly verticalFeature: boolean;
+  readonly blockAxisInkBounds?: Readonly<{ startPt: number; endPt: number }>;
+}
+
+function plannedVerticalBlockAxisInkBounds(
+  ctx: Ctx2D,
+  text: string,
+  orientation: PlannedVerticalGlyphCell['orientation'],
+  drawOffsetPt: Readonly<{ xPt: number; yPt: number }>,
+  charScale: number,
+  writingMode: 'horizontal-tb' | 'vertical-rl' | 'vertical-lr',
+  verticalFeature: boolean,
+): PlannedVerticalGlyphCell['blockAxisInkBounds'] {
+  const previousAlign = ctx.textAlign;
+  const previousBaseline = ctx.textBaseline;
+  const measure = (): TextMetrics => {
+    ctx.textAlign = orientation === 'sideways' ? 'left' : 'center';
+    ctx.textBaseline = orientation === 'sideways' ? 'alphabetic' : 'middle';
+    return ctx.measureText(text);
+  };
+  let metrics: TextMetrics;
+  try {
+    metrics = verticalFeature
+      ? withVertFeature(ctx as CanvasRenderingContext2D, measure)
+      : measure();
+  } finally {
+    ctx.textAlign = previousAlign;
+    ctx.textBaseline = previousBaseline;
+  }
+  if (orientation === 'upright') {
+    if (!Number.isFinite(metrics.actualBoundingBoxLeft)
+      || !Number.isFinite(metrics.actualBoundingBoxRight)) return undefined;
+    const leftPt = metrics.actualBoundingBoxLeft;
+    const rightPt = metrics.actualBoundingBoxRight;
+    // Paint applies rotate(-90deg) after the page transform. In vertical-rl,
+    // w:w scales glyph-local y (the cross axis), not local x (the logical block
+    // axis). Other frames scale local x, exactly as canvas-text does.
+    const blockScale = writingMode === 'vertical-rl' ? 1 : charScale;
+    const firstPt = -(drawOffsetPt.xPt - leftPt) * blockScale;
+    const secondPt = -(drawOffsetPt.xPt + rightPt) * blockScale;
+    return Object.freeze({
+      startPt: Math.min(firstPt, secondPt),
+      endPt: Math.max(firstPt, secondPt),
+    });
+  }
+  if (!Number.isFinite(metrics.actualBoundingBoxAscent)
+    || !Number.isFinite(metrics.actualBoundingBoxDescent)) return undefined;
+  const ascentPt = metrics.actualBoundingBoxAscent;
+  const descentPt = metrics.actualBoundingBoxDescent;
+  const firstPt = drawOffsetPt.yPt - ascentPt;
+  const secondPt = drawOffsetPt.yPt + descentPt;
+  return Object.freeze({
+    startPt: Math.min(firstPt, secondPt),
+    endPt: Math.max(firstPt, secondPt),
+  });
+}
+
 /** The single cell router shared by layout measurement and paint. */
 function routedVerticalGlyphCell(
   ctx: Ctx2D,
@@ -344,6 +408,120 @@ function routedVerticalGlyphCell(
     }
   }
   return { naturalPx: plainAdvance, vert: null, rotateInkShiftPx: 0 };
+}
+
+/** Resolve the legacy UAX #50/`vert` routing into immutable glyph cells for the
+ * retained layout pipeline. The returned plan contains every paint decision and
+ * metric; retained paint never probes fonts or remeasures text. */
+export function planVerticalRunWithCapability(
+  ctx: Ctx2D,
+  text: string,
+  fontPt: number,
+  letterSpacingPt: number,
+  charScale = 1,
+  growTrRotateInk = false,
+  vertCapability: VertCapability = NO_VERT_CAPABILITY,
+  writingMode: 'horizontal-tb' | 'vertical-rl' | 'vertical-lr' = 'vertical-rl',
+): readonly PlannedVerticalGlyphCell[] {
+  const cells: PlannedVerticalGlyphCell[] = [];
+  const emBoxCenterPt = emBoxCenterAboveBaselinePx(ctx, text, fontPt);
+  let ax = 0;
+  let sourceOffset = 0;
+  for (const piece of splitVerticalOrientationRuns(text)) {
+    if (piece.mode === 'sideways') {
+      const glyphCount = [...piece.text].length;
+      const advancePt = ctx.measureText(piece.text).width * charScale
+        + letterSpacingPt * glyphCount;
+      const drawOffsetPt = { xPt: 0, yPt: emBoxCenterPt };
+      const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
+        ctx, piece.text, 'sideways', drawOffsetPt, charScale, writingMode, false,
+      );
+      cells.push({
+        range: { start: sourceOffset, end: sourceOffset + piece.text.length },
+        text: piece.text,
+        orientation: 'sideways',
+        originPt: ax,
+        advancePt,
+        drawOffsetPt,
+        verticalFeature: false,
+        ...(blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+      });
+      ax += advancePt;
+      sourceOffset += piece.text.length;
+      continue;
+    }
+    for (const ch of piece.text) {
+      const cp = ch.codePointAt(0) ?? 0;
+      const mode = verticalDrawMode(cp);
+      const bracketCp = mode === 'rotate' ? verticalBracketFormSubstitute(cp) : null;
+      const uprightFallback = mode === 'rotate'
+        && bracketCp === null
+        && verticalTrUprightFallback(cp);
+      const routed = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, growTrRotateInk);
+      const advancePt = routed.naturalPx * charScale + letterSpacingPt;
+      const range = { start: sourceOffset, end: sourceOffset + ch.length };
+      if (routed.vert !== null) {
+        const drawOffsetPt = { xPt: 0, yPt: 0 };
+        const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
+          ctx, ch, 'upright', drawOffsetPt, charScale, writingMode, true,
+        );
+        cells.push({
+          range,
+          text: ch,
+          orientation: 'upright',
+          originPt: ax + routed.vert.originInCellPx * charScale,
+          advancePt,
+          drawOffsetPt,
+          verticalFeature: true,
+          ...(blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+        });
+      } else if (mode === 'upright' || bracketCp !== null || uprightFallback) {
+        const puncCp = bracketCp !== null ? null : verticalFormSubstitute(cp);
+        const drawCp = bracketCp ?? puncCp;
+        const drawText = drawCp === null ? ch : String.fromCodePoint(drawCp);
+        const offset = drawCp === null ? verticalGlyphOffset(cp) : { dx: 0, dy: 0 };
+        const preserveCorner = wordPreservesVerticalTuCorner(puncCp);
+        const alongEm = offset.dy === 0 && !preserveCorner
+          ? inkCenterAboveMiddlePx(ctx, drawText) / fontPt
+          : 0;
+        const drawOffsetPt = {
+          xPt: offset.dx * fontPt,
+          yPt: (alongEm + offset.dy) * fontPt,
+        };
+        const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
+          ctx, drawText, 'upright', drawOffsetPt, charScale, writingMode, false,
+        );
+        cells.push({
+          range,
+          text: drawText,
+          orientation: 'upright',
+          originPt: ax + advancePt / 2,
+          advancePt,
+          drawOffsetPt,
+          verticalFeature: false,
+          ...(blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+        });
+      } else {
+        const drawOffsetPt = { xPt: 0, yPt: 0 };
+        const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
+          ctx, ch, 'rotate', drawOffsetPt, charScale, writingMode, false,
+        );
+        cells.push({
+          range,
+          text: ch,
+          orientation: 'rotate',
+          originPt: ax + advancePt / 2 + charScale * routed.rotateInkShiftPx,
+          advancePt,
+          drawOffsetPt,
+          verticalFeature: false,
+          ...(blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+        });
+      }
+      ax += advancePt;
+      sourceOffset += ch.length;
+    }
+  }
+  return cells;
 }
 
 /**

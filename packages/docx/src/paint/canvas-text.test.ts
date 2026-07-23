@@ -631,6 +631,127 @@ describe('paintParagraphLayout', () => {
       .toThrow('Retained glyph slices are incomplete');
   });
 
+  it('accepts finite negative cluster advances from authored overlapping character spacing', () => {
+    const layout = node();
+    const placement = layout.lines[0]!.placements[0]!;
+    if (placement.kind !== 'text') throw new Error('fixture must contain text');
+    const overlapping: ParagraphLayout = {
+      ...layout,
+      lines: [{ ...layout.lines[0]!, placements: [{
+        ...placement,
+        clusters: [{
+          range: { ...placement.range }, offset: { xPt: 0, yPt: 0 }, advancePt: -3,
+        }],
+      }] }],
+    };
+    const painted: string[] = [];
+    const ctx = {
+      fillStyle: '', font: '', textAlign: 'left', textBaseline: 'alphabetic', direction: 'ltr',
+      letterSpacing: '0px', fontKerning: 'auto',
+      save() {}, restore() {}, setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {},
+      moveTo() {}, lineTo() {}, stroke() {}, fillText(text: string) { painted.push(text); },
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(() => paintParagraphLayout(overlapping, {
+      ctx, scale: 1, dpr: 1, resources: noPaintResources,
+    })).not.toThrow();
+    expect(painted).toContain('test');
+  });
+
+  it('rejects a non-positive retained glyph-local scaleY', () => {
+    const layout = node();
+    const placement = layout.lines[0]!.placements[0]!;
+    if (placement.kind !== 'text') throw new Error('fixture must contain text');
+    const invalid: ParagraphLayout = {
+      ...layout,
+      lines: [{ ...layout.lines[0]!, placements: [{
+        ...placement,
+        paintOps: placement.paintOps.map((operation) => ({ ...operation, scaleY: 0 })),
+      }] }],
+    };
+    const ctx = {
+      fillStyle: '', font: '', textAlign: 'left', textBaseline: 'alphabetic', direction: 'ltr',
+      save() {}, restore() {}, setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {},
+      moveTo() {}, lineTo() {}, stroke() {}, fillText() {},
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(() => paintParagraphLayout(invalid, {
+      ctx, scale: 1, dpr: 1, resources: noPaintResources,
+    })).toThrow('Retained glyph slices are incomplete (geometry)');
+  });
+
+  it('paints retained vertical glyph routing and offsets without remeasurement', () => {
+    const layout = node();
+    const placement = layout.lines[0]!.placements[0]!;
+    if (placement.kind !== 'text') throw new Error('fixture must contain text');
+    const vertical: ParagraphLayout = {
+      ...layout,
+      lines: [{ ...layout.lines[0]!, range: { start: 0, end: 5 }, placements: [{
+        ...placement,
+        text: 'A（ー２９',
+        range: { start: 0, end: 5 },
+        clusters: [{
+          range: { start: 0, end: 5 }, offset: { xPt: 0, yPt: 0 }, advancePt: 32,
+        }],
+        paintOps: [
+          {
+            text: 'A', range: { start: 0, end: 1 }, offset: { xPt: 1, yPt: 2 },
+            glyphOffsetPt: { xPt: 3, yPt: 4 }, glyphOrientation: 'sideways',
+            letterSpacingPt: 0, scaleX: .8, direction: 'ltr', kerning: 'auto',
+            writingMode: 'vertical-rl',
+          },
+          {
+            text: '︵', range: { start: 1, end: 2 }, offset: { xPt: 8, yPt: 0 },
+            glyphOffsetPt: { xPt: 2, yPt: 3 }, glyphOrientation: 'upright',
+            letterSpacingPt: 0, scaleX: .8, direction: 'ltr', kerning: 'auto',
+            writingMode: 'vertical-rl',
+          },
+          {
+            text: 'ー', range: { start: 2, end: 3 }, offset: { xPt: 16, yPt: 0 },
+            glyphOffsetPt: { xPt: 1, yPt: 2 }, glyphOrientation: 'rotate',
+            letterSpacingPt: 0, scaleX: .8, direction: 'ltr', kerning: 'auto',
+            writingMode: 'vertical-rl',
+          },
+          {
+            text: '２９', range: { start: 3, end: 5 }, offset: { xPt: 24, yPt: 0 },
+            glyphOrientation: 'upright',
+            letterSpacingPt: 0, scaleX: .8, scaleY: .75, direction: 'ltr', kerning: 'auto',
+            writingMode: 'horizontal-tb',
+          },
+        ],
+      }] }],
+    };
+    const calls: unknown[] = [];
+    const ctx = {
+      fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: 'left',
+      textBaseline: 'alphabetic', direction: 'ltr', letterSpacing: '0px', fontKerning: 'auto',
+      save() { calls.push('save'); }, restore() { calls.push('restore'); },
+      translate(x: number, y: number) { calls.push(['translate', x, y]); },
+      scale(x: number, y: number) { calls.push(['scale', x, y]); },
+      rotate(angle: number) { calls.push(['rotate', angle]); },
+      setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {},
+      moveTo() {}, lineTo() {}, stroke() {},
+      fillText(text: string, x: number, y: number) { calls.push(['fillText', text, x, y]); },
+      measureText() { throw new Error('retained vertical paint must not measure'); },
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(structuredClone(vertical).lines[0]!.placements[0]!.kind).toBe('text');
+    expect((structuredClone(vertical).lines[0]!.placements[0] as typeof placement)
+      .paintOps[3]?.scaleY).toBe(.75);
+
+    paintParagraphLayout(vertical, { ctx, scale: 1, dpr: 1, resources: noPaintResources });
+
+    expect(calls).toEqual([
+      'save', ['translate', 14, 24], ['scale', .8, 1], ['fillText', 'A', 0, 0], 'restore',
+      'save', ['translate', 18, 18], ['rotate', -Math.PI / 2], ['scale', 1, .8],
+      ['fillText', '︵', 2, 3], 'restore',
+      'save', ['translate', 26, 18], ['scale', .8, 1],
+      ['fillText', 'ー', 1, 2], 'restore',
+      'save', ['translate', 34, 18], ['rotate', -Math.PI / 2], ['scale', .8, .75],
+      ['fillText', '２９', 0, 0], 'restore',
+    ]);
+  });
+
   it.each([
     ['missing cluster coverage', {
       clusters: [{ range: { start: 0, end: 2 }, offset: { xPt: 0, yPt: 0 }, advancePt: 10 }],

@@ -12,6 +12,16 @@ describe('svgExtents', () => {
     expect(e.descentEm).toBeCloseTo(0.696, 3);
   });
 
+  it('clamps an above-baseline box to zero descent', () => {
+    const e = svgExtents('<svg viewBox="0 -900 1200 700"></svg>');
+    expect(e).toEqual({ widthEm: 1.2, ascentEm: 0.9, descentEm: 0 });
+  });
+
+  it('clamps a below-baseline box to zero ascent', () => {
+    const e = svgExtents('<svg viewBox="0 200 1200 700"></svg>');
+    expect(e).toEqual({ widthEm: 1.2, ascentEm: 0, descentEm: 0.9 });
+  });
+
   it('returns zeros when no viewBox is present', () => {
     expect(svgExtents('<svg></svg>')).toEqual({ widthEm: 0, ascentEm: 0, descentEm: 0 });
   });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { DrawingLayout } from '../layout/types.js';
+import type { DrawingLayout, TextBoxLayout } from '../layout/types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
+import { paintDrawingWithOwnedTextBoxes } from './canvas-text.js';
 import type { CanvasPaintContext } from './types.js';
 
 function shapeDrawing(): DrawingLayout {
@@ -35,6 +36,9 @@ function recordingContext(): { context: CanvasPaintContext; operations: string[]
     save: () => operations.push('save'),
     restore: () => operations.push('restore'),
     beginPath: () => operations.push('beginPath'),
+    moveTo: () => operations.push('moveTo'),
+    lineTo: () => operations.push('lineTo'),
+    closePath: () => operations.push('closePath'),
     rect: () => operations.push('rect'),
     fill: () => operations.push('fill'),
     stroke: () => operations.push('stroke'),
@@ -61,6 +65,114 @@ function recordingContext(): { context: CanvasPaintContext; operations: string[]
 }
 
 describe('retained DrawingML shape painting', () => {
+  it('counter-rotates one upright physical frame around a shape and its owned text box', () => {
+    const { context, operations } = recordingContext();
+    const localBounds = { xPt: -40, yPt: -15, widthPt: 80, heightPt: 30 };
+    const drawing: DrawingLayout = {
+      kind: 'drawing', id: 'vertical-right-arrow',
+      source: { story: 'body', storyInstance: 'body', path: [0] },
+      flowDomainId: 'body',
+      flowBounds: { xPt: 50, yPt: 80, widthPt: 30, heightPt: 80 },
+      inkBounds: { xPt: 50, yPt: 80, widthPt: 30, heightPt: 80 },
+      advancePt: 0, ordinaryFlow: false,
+      orientation: 'upright-physical',
+      transform: { a: 0, b: -1, c: 1, d: 0, e: 65, f: 120 },
+      commands: [{
+        kind: 'drawingml-shape',
+        plan: {
+          rect: { x: -40, y: -15, w: 80, h: 30 },
+          geometry: { kind: 'preset', name: 'rightArrow', adjustments: [] },
+          fill: { fillType: 'solid', color: 'FF0000' },
+          stroke: null,
+          transform: { rotationDeg: 0, flipH: false, flipV: false },
+        },
+      }],
+      textBoxIds: ['vertical-right-arrow-text'],
+    };
+    const textBox: TextBoxLayout = {
+      kind: 'textbox', id: 'vertical-right-arrow-text',
+      source: { story: 'textbox', storyInstance: 'shape', path: [0] },
+      flowDomainId: 'body:textbox', flowBounds: localBounds, inkBounds: localBounds,
+      advancePt: 0, ordinaryFlow: false,
+      story: {
+        story: 'textbox', flowBounds: localBounds, inkBounds: localBounds,
+        advancePt: 10, diagnostics: [],
+        blocks: [{
+          kind: 'paragraph', id: 'vertical-right-arrow-text:p',
+          source: { story: 'textbox', storyInstance: 'shape', path: [0] },
+          flowDomainId: 'body:textbox',
+          flowBounds: localBounds, inkBounds: localBounds,
+          advancePt: 10, ordinaryFlow: true,
+          spacing: { beforePt: 0, afterPt: 0 }, contextualSpacing: false,
+          lines: [{
+            range: { start: 0, end: 1 },
+            bounds: { xPt: -30, yPt: -5, widthPt: 10, heightPt: 10 },
+            baselinePt: 3, advancePt: 10,
+            placements: [{
+              kind: 'text', text: 'R', range: { start: 0, end: 1 },
+              origin: { xPt: -30, yPt: 3 },
+              bounds: { xPt: -30, yPt: -5, widthPt: 10, heightPt: 10 },
+              advancePt: 10,
+              clusters: [{
+                range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 }, advancePt: 10,
+              }],
+              paintOps: [{
+                text: 'R', range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 },
+                letterSpacingPt: 0, scaleX: 1, direction: 'ltr', kerning: 'auto',
+                writingMode: 'horizontal-tb',
+              }],
+              color: { kind: 'explicit', color: '#000000' },
+              fontRoute: { familyList: 'Arial', scope: 'native', fingerprint: 'arial' },
+              fontSizePt: 10, fontWeight: 400, fontStyle: 'normal',
+              direction: 'ltr', decorations: [],
+            }],
+          }],
+          borders: [], resources: [], drawings: [], textBoxes: [], events: [], exclusions: [],
+        }],
+      },
+      transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      writingMode: 'horizontal-tb',
+      insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+    };
+
+    paintDrawingWithOwnedTextBoxes(drawing, [textBox], context);
+
+    expect(operations.slice(0, 3)).toEqual(['save', 'translate', 'rotate']);
+    expect(operations).toContain('fillText');
+    expect(operations.at(-1)).toBe('restore');
+    expect(operations.indexOf('beginPath')).toBeLessThan(operations.indexOf('fillText'));
+  });
+
+  it('counter-rotates an upright physical image inside a vertical section frame', () => {
+    const { context, operations } = recordingContext();
+    const bounds = { xPt: 10, yPt: 20, widthPt: 100, heightPt: 40 };
+    let paintedBounds: typeof bounds | undefined;
+    const resourceContext: CanvasPaintContext = {
+      ...context,
+      resources: {
+        paint(_resourceKey, _kind, retainedBounds) {
+          operations.push('paintResource');
+          paintedBounds = retainedBounds;
+        },
+      },
+    };
+    const drawing = {
+      kind: 'drawing', id: 'upright-image',
+      source: { story: 'body', storyInstance: 'body', path: [0] },
+      flowDomainId: 'body', flowBounds: bounds, inkBounds: bounds,
+      advancePt: 0, ordinaryFlow: false,
+      commands: [{
+        kind: 'resource', resourceKind: 'image', resourceKey: 'image:body:0',
+        rect: bounds, orientation: 'upright-physical',
+      }],
+    } as DrawingLayout;
+
+    paintDrawingLayout(drawing, resourceContext);
+
+    expect(operations).toEqual(['save', 'translate', 'rotate', 'paintResource', 'restore']);
+    expect(paintedBounds).toEqual({ xPt: -20, yPt: -50, widthPt: 40, heightPt: 100 });
+  });
+
   it('dispatches explicit shape plans to the shared point-space painter', () => {
     const { context, operations } = recordingContext();
 

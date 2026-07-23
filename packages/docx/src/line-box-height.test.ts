@@ -256,6 +256,23 @@ describe('lineBoxHeight — docGrid line-cell rounding (East Asian vs Latin)', (
     // 22px natural, Latin → max(22, 20) = 22px (Word does not cell-round it).
     expect(lineBoxHeight(null, 17.6, 4.4, 1, grid20, false, 0, false)).toBe(22);
   });
+  it('combines inherited spacing with useFELayout-classified Far East grid metrics', () => {
+    const inherited = { value: 1.15, rule: 'auto', explicit: false } as const;
+    // An 18pt hinted Latin title has a 1.3em FE design height and therefore
+    // needs two 18pt cells. The allocation itself exceeds the 1.15-pitch floor.
+    expect(lineBoxHeight(
+      inherited, 17, 4, 1, grid18, false, 0, true,
+      eastAsianGridCountSinglePx(0, 18),
+    )).toBe(36);
+    // A smaller hinted Latin label stays in one cell, but inherited 1.15 line
+    // spacing raises the one-pitch minimum to 20.7pt.
+    expect(lineBoxHeight(
+      inherited, 7, 2, 1, grid18, false, 0, true,
+      eastAsianGridCountSinglePx(0, 8),
+    )).toBeCloseTo(20.7, 12);
+    // Face hinting alone never changes an empty/Latin mark's grid class.
+    expect(lineBoxHeight(inherited, 14, 2, 1, grid18, false, 0, false)).toBe(18);
+  });
   it('a RUBY EA line reserves its measured furigana height, NOT the design cell count', () => {
     // sample-5: a 13.5pt ruby base + 8pt rt on an 18pt pitch reserves the base +
     // annotation glyph box (~41px = asc 33 + desc 8), which Word spreads over

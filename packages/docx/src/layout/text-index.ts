@@ -149,6 +149,17 @@ function visitDrawingTextBoxes(
 ): void {
   const textBoxes = drawingTextBoxes(textBoxesById, drawing);
   if (textBoxes.length === 0) return;
+  const ownedProjection = drawingOwnedContentProjection(drawing, projection, context);
+  for (const textBox of textBoxes) {
+    visitTextBox(textBox, ownedProjection, context);
+  }
+}
+
+function drawingOwnedContentProjection(
+  drawing: DrawingLayout,
+  projection: NodeProjection,
+  context: ProjectionContext,
+): NodeProjection {
   const retainedEntry = context.drawingEntries.get(drawing.id);
   let drawingProjection = projection;
   if (
@@ -166,7 +177,7 @@ function visitDrawingTextBoxes(
     ? -translation.xPt : 0;
   const undoY = drawing.anchorLayer?.verticalOwnership === 'page'
     ? -translation.yPt : 0;
-  const ownedProjection = undoX === 0 && undoY === 0
+  let ownedProjection = undoX === 0 && undoY === 0
     ? drawingProjection
     : {
         ...drawingProjection,
@@ -175,9 +186,16 @@ function visitDrawingTextBoxes(
           translationAffine(undoX, undoY),
         ),
       };
-  for (const textBox of textBoxes) {
-    visitTextBox(textBox, ownedProjection, context);
+  if (drawing.orientation === 'upright-physical') {
+    if (!drawing.transform) {
+      throw new Error(`Upright physical drawing ${drawing.id} is missing its logical transform`);
+    }
+    ownedProjection = {
+      ...ownedProjection,
+      pointToPage: composeAffine(ownedProjection.pointToPage, drawing.transform),
+    };
   }
+  return ownedProjection;
 }
 
 function visitParagraph(
@@ -275,8 +293,9 @@ function visitNode(
       return;
     case 'drawing': {
       const entry = context.drawingEntries.get(node.id);
+      const ownedProjection = drawingOwnedContentProjection(node, projection, context);
       for (const textBox of entry?.textBoxes ?? []) {
-        visitTextBox(textBox, projection, context);
+        visitTextBox(textBox, ownedProjection, context);
       }
       return;
     }

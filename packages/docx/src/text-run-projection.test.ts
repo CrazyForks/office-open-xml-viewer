@@ -214,6 +214,8 @@ function anchoredDrawing(
     sourceOrder: number;
     horizontalOwnership?: 'page' | 'host';
     verticalOwnership?: 'page' | 'host';
+    orientation?: DrawingLayout['orientation'];
+    transform?: Matrix2DData;
   }>,
 ): DrawingLayout {
   return Object.freeze({
@@ -226,6 +228,8 @@ function anchoredDrawing(
     advancePt: 0,
     ordinaryFlow: false,
     commands: Object.freeze([]),
+    ...(options.orientation ? { orientation: options.orientation } : {}),
+    ...(options.transform ? { transform: options.transform } : {}),
     anchorLayer: Object.freeze({
       occurrenceId: `anchor:${id}`,
       behindDoc: options.behindDoc,
@@ -642,6 +646,44 @@ describe('textRunsForPage', () => {
     );
     expect(runs.map((run) => run.text)).toEqual(['B', 'O', 'I']);
     expect(runs[2]).toMatchObject({ x: 11, y: 14 });
+  });
+
+  it('projects an upright drawing-owned text box through the retained inverse page turn', () => {
+    const owned = textBox('upright-box', 'U');
+    const drawing = anchoredDrawing('upright-drawing', owned.id, {
+      behindDoc: false,
+      relativeHeight: 1,
+      sourceOrder: 0,
+      orientation: 'upright-physical',
+      transform: Object.freeze({ a: 0, b: -1, c: 1, d: 0, e: 65, f: 120 }),
+    });
+    const body = paragraph('body', 'body', [], {
+      drawings: [drawing],
+      textBoxes: [owned],
+    });
+    const layers = buildPageLayers([
+      { layer: 'body', node: body, coordinateSpace: 'section-logical' },
+    ]);
+    const verticalPage = page(layers, [body.id]);
+    const transformedPage: LayoutPage = {
+      ...verticalPage,
+      sectionRegions: verticalPage.sectionRegions.map((region) => ({
+        ...region,
+        coordinateSpace: {
+          writingMode: 'vertical-rl',
+          logicalToPhysical: { a: 0, b: 1, c: -1, d: 0, e: 200, f: 0 },
+          physicalToLogical: { a: 0, b: -1, c: 1, d: 0, e: 0, f: 200 },
+        },
+      })),
+    };
+
+    expect(textRunGeometryForPage(documentLayout(transformedPage), 0)[0])
+      .toMatchObject({
+        placement: { text: 'U' },
+        pointToPage: { a: 1, b: 0, c: 0, d: 1, e: 85, f: 71 },
+      });
+    expect(textRunsForPage(documentLayout(transformedPage), 0, { scale: 1 }))
+      .toEqual([expect.objectContaining({ text: 'U', x: 86, y: 73 })]);
   });
 
   it('keeps anchored text-box sequence stable under z-order edits and uses retained frames for geometry', () => {

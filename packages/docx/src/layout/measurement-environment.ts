@@ -75,7 +75,9 @@ export function paragraphMeasurementEnvironment(
     noteReferenceNumber: state.noteReferenceNumber,
     // §17.6.20 btLr uses the horizontal line model rotated wholesale.
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
+    verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
+    useFeLayout: state.layoutSettings.compat.useFeLayout,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
     verticalGlyphMeasurement: state.verticalGlyphMeasurement,

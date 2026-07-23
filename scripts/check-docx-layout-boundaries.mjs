@@ -103,6 +103,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['mathToMathML', 'value'],
     ['metafileRasterSize', 'value'],
     ['paintDrawingMLShape', 'value'],
+    ['withVertFeature', 'value'],
     ['preferVectorBlip', 'value'],
     ['PT_TO_PX', 'value'],
     // Shared fill resolution keeps gradient/no-fill semantics identical across
@@ -266,6 +267,7 @@ const EXACT_ACQUISITION_SURFACE_MEMBERS = new Map([
     ['VerticalGlyphMeasurementService', new Set([
       'fingerprint',
       'measureRunInkExtra',
+      'planRun',
     ])],
   ])],
 ]);

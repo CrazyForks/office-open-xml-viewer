@@ -148,15 +148,6 @@ export function computeLineVisualOrder(
     classOverride,
   );
 
-  // Ordering: each segment takes the RESOLVED level of its first real code unit
-  // (255-removed → paragraph level), then UAX#9 L2 permutes them — the shared
-  // `buildVisualOrder` back half. No level forcing for rtl-marked segments:
-  // Latin letters keep their even (LTR) level (so English words in an rtl-marked
-  // run keep their mutual LTR order), while the run's
-  // punctuation resolves to the odd level via the §17.3.2.30 class override
-  // above.
-  const { order } = buildVisualOrder(levels, paragraphLevel, segStart);
-
   // Direction hint = "does the segment contain ANY odd-level unit". A
   // digits-with-punctuation slice like "1. " has its "." resolve to the odd
   // level, so the slice draws with ctx.direction rtl and Canvas mirrors it to
@@ -164,6 +155,7 @@ export function computeLineVisualOrder(
   // keeps its LTR rendering. This is docx-specific (pptx/xlsx use plain
   // first-unit level parity), so it stays here rather than in buildVisualOrder.
   const rtl: boolean[] = new Array(n);
+  const visualAnchor: number[] = new Array(n);
   for (let i = 0; i < n; i++) {
     // Scan excludes the segment's TRAILING whitespace: an inter-word space's
     // level is seam context (N2 gives it the embedding level between
@@ -180,7 +172,25 @@ export function computeLineVisualOrder(
       }
     }
     rtl[i] = anyOdd;
+    // L2 must order the slice with the same parity Canvas will use to paint it.
+    // A leading neutral can resolve to the paragraph level even when the rest
+    // of its whitespace-delimited slice is strong RTL (`:word` under an LTR
+    // paragraph base). Using segStart would strand that whole RTL slice on the
+    // LTR edge. Pick the first retained unit with the paint parity instead.
+    visualAnchor[i] = segStart[i];
+    for (let k = segStart[i]; k < scanEnd; k++) {
+      const level = levels[k];
+      if (level !== 255 && ((level & 1) === 1) === anyOdd) {
+        visualAnchor[i] = k;
+        break;
+      }
+    }
   }
+
+  // UAX#9 L2 permutes the segment representatives. This does not force a new
+  // embedding level: Latin content still selects an even anchor, while RTL
+  // content and registered rtl-run punctuation select an odd anchor.
+  const { order } = buildVisualOrder(levels, paragraphLevel, visualAnchor);
 
   return { order, rtl };
 }
