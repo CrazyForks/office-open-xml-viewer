@@ -108,8 +108,50 @@ export const WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE = defineCompatibilityRule({
     kind: 'microsoft-note',
     reference: '[MS-OE376] §2.1.562',
   },
-  description: 'Interpret ST_CharacterSpacing as applying whitespace compression to full-width punctuation characters. The note establishes eligibility, not a universal trim amount; compression geometry comes only from authoritative selected-glyph ink bounds.',
+  description: 'Interpret ST_CharacterSpacing as applying whitespace compression to full-width punctuation characters. This rule establishes only which characters are eligible; it does not define a universal compression amount.',
 });
+
+export const WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL = defineCompatibilityRule({
+  id: 'word-japanese-punctuation-compression-cell',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'japanese-fullwidth-punctuation-compression-cell',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'In the observed Japanese compatibility fixture, compressed full-width punctuation retains at least half of the ideographic cell measured through the selected font route. Tight glyph ink can require a larger retained extent. This is an Office-observed compression amount, not a normative interpretation of ST_CharacterSpacing.',
+});
+
+export const WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT = defineCompatibilityRule({
+  id: 'word-ms-mincho-empty-east-asian-mark-height',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'ms-mincho-empty-east-asian-paragraph-mark',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'In the observed compatibility fixture, an empty 12-point East-Asian paragraph mark routed to MS Mincho occupies a 15.6-point single-line box. Scope this 1.3-em floor to empty East-Asian paragraph marks; ordinary MS Mincho text lines and Latin marks retain their independently measured metrics.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL}. */
+export function wordJapanesePunctuationRetainedExtentPt(input: Readonly<{
+  punctuationAdvancePt: number;
+  punctuationInkEndPt: number;
+  ideographicCellAdvancePt: number;
+}>): number {
+  const advancePt = Math.max(0, input.punctuationAdvancePt);
+  return Math.min(
+    advancePt,
+    Math.max(
+      0,
+      input.punctuationInkEndPt,
+      input.ideographicCellAdvancePt / 2,
+    ),
+  );
+}
 
 const WORD_OVERFLOW_PUNCTUATION = {
   ja: new Set([...',.’”、。」』】），．］｝｡､']),
@@ -290,6 +332,20 @@ export function wordRunVerticalAlignRaisePt(
 }
 
 export const WORD_FAR_EAST_SINGLE_LINE_FACTOR = 1.3;
+
+/** Compatibility projection governed by
+ * {@link WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT}. */
+export function wordMsMinchoEmptyEastAsianMarkSingleLinePx(
+  family: string | null | undefined,
+  emPx: number,
+  eastAsianMark: boolean,
+): number {
+  if (!eastAsianMark || !family) return 0;
+  const normalized = family.trim().toLowerCase();
+  return normalized === 'ms mincho' || normalized === 'ｍｓ 明朝'
+    ? emPx * WORD_FAR_EAST_SINGLE_LINE_FACTOR
+    : 0;
+}
 
 export function wordEastAsianGridLineCells(
   naturalHeightPx: number,

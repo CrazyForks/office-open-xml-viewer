@@ -44,9 +44,11 @@ import {
   WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION,
   WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE,
   WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED,
+  WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL,
   WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION,
   WORD_JUSTIFIED_CANDIDATE_SEPARATOR_FIT,
   WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS,
+  WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT,
   WORD_NUMBERING_MARKER_OVERFLOW_TAB_ADVANCE,
   WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB,
   WORD_NUMERIC_DECIMAL_TAB_INFERENCE,
@@ -64,6 +66,8 @@ import {
   wordUseFeLayoutInheritedGridHeightPx,
   wordCandidateFitWidthPx,
   wordJustifiedCandidateFitAllowancePx,
+  wordJapanesePunctuationRetainedExtentPt,
+  wordMsMinchoEmptyEastAsianMarkSingleLinePx,
   wordNumberingSuffixAcceptsCoincidentListTab,
   wordRubyUniformLineHeightPx,
   wordVisibleLineMetricPx,
@@ -352,7 +356,7 @@ describe('layout compatibility inventory', () => {
       .not.toMatch(/sample|private|\.docx|\.pdf/i);
   });
 
-  it('registers the public Microsoft punctuation notes without claiming a fixed trim', () => {
+  it('separates normative punctuation eligibility from the observed compression amount', () => {
     expect(WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS.evidence).toEqual({
       kind: 'microsoft-note',
       reference: '[MS-OE376] §2.1.56',
@@ -362,7 +366,42 @@ describe('layout compatibility inventory', () => {
       reference: '[MS-OE376] §2.1.562',
     });
     expect(WORD_FULL_WIDTH_CHARACTER_SPACING_SCOPE.description)
-      .toMatch(/eligibility.*not a universal trim amount/i);
+      .toMatch(/only which characters are eligible.*not define.*compression amount/i);
+    expect(WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'japanese-fullwidth-punctuation-compression-cell',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+    expect(wordJapanesePunctuationRetainedExtentPt({
+      punctuationAdvancePt: 8,
+      punctuationInkEndPt: 1,
+      ideographicCellAdvancePt: 10,
+    })).toBe(5);
+    expect(wordJapanesePunctuationRetainedExtentPt({
+      punctuationAdvancePt: 8,
+      punctuationInkEndPt: 6,
+      ideographicCellAdvancePt: 10,
+    })).toBe(6);
+  });
+
+  it('scopes the observed MS Mincho height to empty East-Asian marks', () => {
+    expect(WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'ms-mincho-empty-east-asian-paragraph-mark',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+    expect(wordMsMinchoEmptyEastAsianMarkSingleLinePx('MS Mincho', 12, true)).toBeCloseTo(15.6, 5);
+    expect(wordMsMinchoEmptyEastAsianMarkSingleLinePx('ＭＳ 明朝', 12, true)).toBeCloseTo(15.6, 5);
+    expect(wordMsMinchoEmptyEastAsianMarkSingleLinePx('MS Mincho', 12, false)).toBe(0);
+    expect(wordMsMinchoEmptyEastAsianMarkSingleLinePx('MS PMincho', 12, true)).toBe(0);
   });
 
   it('records the anonymized Word observation for vertical final-line admission', () => {

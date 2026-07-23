@@ -106,7 +106,10 @@ const textOf = (line: LayoutLine): string =>
     .map((segment) => segment.text)
     .join('');
 
-function punctuationMetricsServices(): LayoutServices {
+function punctuationMetricsServices(options: Readonly<{
+  punctuationAdvancePt?: number;
+  ideographicCellAdvancePt?: number;
+}> = {}): LayoutServices {
   const text: TextLayoutService = createTextLayoutService({
     fonts: createFontResolver([]),
     measurer: {
@@ -114,9 +117,13 @@ function punctuationMetricsServices(): LayoutServices {
       measure(request) {
         const scalarCount = [...request.text].length;
         const tightTrailingWhitespace = new Set([
-          '。', '．', '！', '？', '：', '；', 'あ', 'ア', 'ー', 'か\u3099',
+          '、', '。', '．', '）', '！', '？', '：', '；', 'あ', 'ア', 'ー', 'か\u3099',
         ]).has(request.text);
-        const advancePt = scalarCount * 10;
+        const advancePt = request.text === '\u3000'
+          ? (options.ideographicCellAdvancePt ?? 10)
+          : tightTrailingWhitespace
+            ? (options.punctuationAdvancePt ?? scalarCount * 10)
+            : scalarCount * 10;
         return {
           advancePt,
           ascentPt: 8,
@@ -125,7 +132,11 @@ function punctuationMetricsServices(): LayoutServices {
             ? {
                 inkBounds: {
                   xMinPt: 1,
-                  xMaxPt: request.text === '．' ? 3 : advancePt - 5,
+                  xMaxPt: request.text === '．'
+                    ? 3
+                    : request.text === '、'
+                      ? 1
+                      : advancePt - 5,
                   ascentPt: 2,
                   descentPt: 0,
                 },
@@ -140,8 +151,8 @@ function punctuationMetricsServices(): LayoutServices {
 }
 
 describe('ECMA-376 East-Asian punctuation fit', () => {
-  it('compresses a full-width trailing period from tight selected-glyph geometry', () => {
-    const segments = buildSegments([textRun('甲乙．')], {
+  it('retains at least a half-width cell around compressed full-width punctuation', () => {
+    const segments = buildSegments([textRun('甲乙．丙')], {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuation',
@@ -151,19 +162,59 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(segments.map((segment) => 'text' in segment ? segment.text : '')).toEqual([
       '甲乙',
       '．',
+      '丙',
     ]);
     const punctuation = segments[1] as LayoutTextSeg;
     expect(punctuation.charSpacing).toBeUndefined();
-    expect(punctuation.punctuationCompressionPt).toBe(-7);
+    expect(punctuation.punctuationCompressionPt).toBe(-5);
 
-    const laidOut = lines(segments, 23, false);
+    const laidOut = lines(segments, 35, false);
     expect(laidOut).toHaveLength(1);
-    expect(textOf(laidOut[0])).toBe('甲乙．');
-    expect((laidOut[0].segments[1] as LayoutTextSeg).measuredWidth).toBe(3);
+    expect(textOf(laidOut[0])).toBe('甲乙．丙');
+    expect((laidOut[0].segments[1] as LayoutTextSeg).measuredWidth).toBe(5);
+  });
+
+  it('does not trim a Japanese comma to its tiny ink bounds', () => {
+    const segments = buildSegments([textRun('甲、乙')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
+    }) as LayoutTextSeg[];
+
+    expect(segments.map((segment) => segment.text)).toEqual(['甲', '、', '乙']);
+    // The comma ink ends at 1pt in a 10pt cell. Compressing all 9pt of trailing
+    // whitespace makes the following ideograph touch the comma; Word's
+    // punctuation compression retains the half-em punctuation cell.
+    expect(segments[1].punctuationCompressionPt).toBe(-5);
+    expect(lines(segments, 25, false)).toHaveLength(1);
+    expect(lines(segments, 25, false)[0].segments.map((segment) =>
+      'text' in segment ? segment.measuredWidth : undefined,
+    )).toEqual([10, 5, 10]);
+  });
+
+  it('derives the retained half-cell from the selected font route, not punctuation advance', () => {
+    const segments = buildSegments([textRun('甲、乙')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices({
+        punctuationAdvancePt: 8,
+        ideographicCellAdvancePt: 10,
+      }),
+    }) as LayoutTextSeg[];
+
+    // The proportional punctuation advance is 8pt, while the same route's
+    // ideographic cell is 10pt. Retain 5pt (half the cell), so only 3pt may be
+    // removed despite the comma's 1pt tight ink extent.
+    expect(segments[1].punctuationCompressionPt).toBe(-3);
+    expect(lines(segments, 25, false)[0].segments.map((segment) =>
+      'text' in segment ? segment.measuredWidth : undefined,
+    )).toEqual([10, 5, 10]);
   });
 
   it('does not invent a fixed trim when tight horizontal ink bounds are unavailable', () => {
-    const segments = buildSegments([textRun('甲乙．')], {
+    const segments = buildSegments([textRun('甲乙．丙')], {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuation',
@@ -172,12 +223,12 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     const punctuation = segments[1] as LayoutTextSeg;
     expect(punctuation.text).toBe('．');
     expect(punctuation.punctuationCompressionPt).toBeUndefined();
-    expect(lines(segments, 23, false)).toHaveLength(2);
+    expect(lines(segments, 35, false)).toHaveLength(2);
   });
 
   it('scales punctuation sidebearing trim with the authored glyph width', () => {
     const run = {
-      ...textRun('．'),
+      ...textRun('．甲'),
       charScale: 0.5,
     } as DocParagraph['runs'][number];
     const [punctuation] = buildSegments([run], {
@@ -187,9 +238,9 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       layoutServices: punctuationMetricsServices(),
     }) as LayoutTextSeg[];
 
-    // Natural 10pt cell and 7pt trailing sidebearing are both scaled to 50%.
-    expect(punctuation.punctuationCompressionPt).toBe(-3.5);
-    expect(lines([punctuation], 1.5, false)).toHaveLength(1);
+    // The retained half-cell and its 5pt trim are both scaled to 50%.
+    expect(punctuation.punctuationCompressionPt).toBe(-2.5);
+    expect(lines([punctuation], 2.5, false)).toHaveLength(1);
   });
 
   it('allows one eligible punctuation character past the line extent by default policy', () => {
@@ -225,19 +276,20 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
   });
 
   it('dispatches exact ST_CharacterSpacing values and compresses kana only in the combined mode', () => {
-    const punctuationOnly = buildSegments([textRun('あアー．')], {
+    const punctuationOnly = buildSegments([textRun('あアー．漢')], {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuation',
       layoutServices: punctuationMetricsServices(),
     }) as LayoutTextSeg[];
-    expect(punctuationOnly.map((segment) => segment.text)).toEqual(['あアー', '．']);
+    expect(punctuationOnly.map((segment) => segment.text)).toEqual(['あアー', '．', '漢']);
     expect(punctuationOnly.map((segment) => segment.punctuationCompressionPt)).toEqual([
       undefined,
-      -7,
+      -5,
+      undefined,
     ]);
 
-    const punctuationAndKana = buildSegments([textRun('あアー・漢．')], {
+    const punctuationAndKana = buildSegments([textRun('あアー・漢．乙')], {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuationAndJapaneseKana',
@@ -249,13 +301,15 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       'ー',
       '・漢',
       '．',
+      '乙',
     ]);
     expect(punctuationAndKana.map((segment) => segment.punctuationCompressionPt)).toEqual([
       -5,
       -5,
       -5,
       undefined,
-      -7,
+      -5,
+      undefined,
     ]);
 
     const unknownPrefix = buildSegments([textRun('あ．')], {
@@ -295,7 +349,7 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
   });
 
   it('recognizes unambiguous full-width exclamation, question, colon, and semicolon punctuation', () => {
-    const segments = buildSegments([textRun('！甲？乙：丙；')], {
+    const segments = buildSegments([textRun('！甲？乙：丙；丁')], {
       pageIndex: 0,
       totalPages: 1,
       characterSpacingControl: 'compressPunctuation',
@@ -303,10 +357,10 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     }) as LayoutTextSeg[];
 
     expect(segments.map((segment) => segment.text)).toEqual([
-      '！', '甲', '？', '乙', '：', '丙', '；',
+      '！', '甲', '？', '乙', '：', '丙', '；', '丁',
     ]);
     expect(segments.map((segment) => segment.punctuationCompressionPt)).toEqual([
-      -5, undefined, -5, undefined, -5, undefined, -5,
+      -5, undefined, -5, undefined, -5, undefined, -5, undefined,
     ]);
   });
 
@@ -327,7 +381,7 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
   });
 
   it('applies the document-wide punctuation compression in vertical CJK columns', () => {
-    const text = `${'甲'.repeat(37)}。`;
+    const text = `${'甲'.repeat(36)}。甲`;
     const compressed = buildSegments([textRun(text)], {
       pageIndex: 0,
       totalPages: 1,
@@ -335,9 +389,11 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       characterSpacingControl: 'compressPunctuation',
       layoutServices: punctuationMetricsServices(),
     });
-    // 37 full-em cells + the selected period's retained 5pt ink extent = 375pt.
+    // 37 full-em ideographs + the selected period's retained half-em cell = 375pt.
     expect(lines(compressed, 375, false)).toHaveLength(1);
-    const compressedMark = compressed.at(-1) as LayoutTextSeg;
+    const compressedMark = compressed.find((segment) =>
+      'text' in segment && segment.text === '。'
+    ) as LayoutTextSeg;
     expect(compressedMark.text).toBe('。');
     expect(compressedMark.verticalRun).toBe(true);
     expect(compressedMark.punctuationCompressionPt).toBe(-5);
@@ -350,7 +406,7 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     });
     expect(lines(uncompressed, 375, false)).toHaveLength(2);
 
-    const middleDot = buildSegments([textRun(`${'甲'.repeat(37)}・`)], {
+    const middleDot = buildSegments([textRun(`${'甲'.repeat(36)}・甲`)], {
       pageIndex: 0,
       totalPages: 1,
       verticalCJK: true,

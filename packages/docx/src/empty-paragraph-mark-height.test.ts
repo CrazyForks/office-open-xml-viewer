@@ -191,14 +191,14 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     const p = {
       ...para(''),
       defaultFontFamily: 'Century',
-      defaultFontFamilyEastAsia: 'ＭＳ 明朝',
+      defaultFontFamilyEastAsia: 'Test East Asian Serif',
     } as DocParagraph;
     let font = '';
     const ctx = {
       get font() { return font; },
       set font(v: string) { font = v; },
       measureText: () => {
-        const ea = font.includes('ＭＳ 明朝');
+        const ea = font.includes('Test East Asian Serif');
         const total = ea ? 30 : 10;
         return {
           width: 0,
@@ -212,6 +212,117 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
 
     expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, false, ctx, {})).toBe(10);
     expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, true, ctx, {})).toBe(30);
+  });
+
+  it('uses the MS Mincho Far East single-line height for an empty East Asian mark', () => {
+    const p = {
+      ...para(''),
+      defaultFontSize: 12,
+      defaultFontFamily: 'Century',
+      defaultFontFamilyEastAsia: 'ＭＳ 明朝',
+    } as DocParagraph;
+    const ctx = {
+      font: '',
+      measureText: () => ({
+        width: 12,
+        fontBoundingBoxAscent: 10.3125,
+        fontBoundingBoxDescent: 1.6875,
+        actualBoundingBoxAscent: 10.3125,
+        actualBoundingBoxDescent: 1.6875,
+      } as TextMetrics),
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(paragraphMarkLineHeight(
+      p,
+      1,
+      { type: null, linePitchPt: null },
+      false,
+      false,
+      ctx,
+      {},
+      null,
+      {},
+      undefined,
+      {
+        fontSizePt: 12,
+        fonts: { complexScript: 'Times New Roman' },
+        themeFonts: {
+          ascii: 'ＭＳ 明朝',
+          highAnsi: 'ＭＳ 明朝',
+          eastAsia: 'ＭＳ 明朝',
+        },
+        themeFontPresence: {
+          ascii: true,
+          highAnsi: true,
+          eastAsia: true,
+          complexScript: false,
+        },
+        weight: 400,
+        style: 'normal',
+        complexScript: false,
+        fontHint: 'eastAsia',
+        eastAsiaLanguage: 'ja-jp',
+      },
+    )).toBeCloseTo(15.6, 5);
+  });
+
+  it('keeps the following East-Asian line on page two in the observed MS Mincho fixture', async () => {
+    const observedParagraph = (text: string, shading?: string): DocParagraph => ({
+      ...para(text),
+      runs: text === ''
+        ? []
+        : [{
+            type: 'text',
+            ...textRun(text),
+            fontSize: 12,
+            fontFamily: 'Century',
+            fontFamilyEastAsia: 'ＭＳ 明朝',
+          } as DocParagraph['runs'][number]],
+      defaultFontSize: 12,
+      defaultFontFamily: 'Century',
+      defaultFontFamilyEastAsia: 'ＭＳ 明朝',
+      shading,
+      paragraphMarkFontFacts: {
+        fontSize: 12,
+        fontFamily: 'Century',
+        fontFamilyEastAsia: 'ＭＳ 明朝',
+        fontHint: 'eastAsia',
+        langEastAsia: 'ja-jp',
+      },
+    } as unknown as DocParagraph);
+    const model = docOf([
+      observedParagraph('甲'),
+      observedParagraph('', 'c0ffee'),
+      observedParagraph('乙'),
+    ]);
+    model.section.pageWidth = 200;
+    model.section.pageHeight = 39;
+    model.fontFamilyClasses = {};
+    const measurement = makeResolvedMetricCanvas();
+    const services = createLayoutServices(model, {
+      measureContext: measurement.canvas.getContext('2d') as CanvasRenderingContext2D,
+    });
+
+    // Word records the empty 12pt MS Mincho EA mark as a 15.6pt line. Together
+    // with the two 12pt visible lines this is 39.6pt, so the final line starts
+    // on page two. Treating the mark as the font's raw 12pt design box would
+    // incorrectly fit all three lines into the 39pt first-page band.
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+    expect(layout.pages).toHaveLength(2);
+
+    const painted = [] as ReturnType<typeof makeResolvedMetricCanvas>[];
+    for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex++) {
+      const recording = makeResolvedMetricCanvas();
+      painted.push(recording);
+      await renderDocumentToCanvas(model, recording.canvas, pageIndex, {
+        dpr: 1,
+        width: 200,
+        layoutServices: services,
+      });
+    }
+    expect(painted[0].textCalls.map((call) => call.text)).toContain('甲');
+    expect(painted[0].textCalls.map((call) => call.text)).not.toContain('乙');
+    expect(painted[1].textCalls.map((call) => call.text)).toContain('乙');
   });
 
   it('counts an untabled 20pt East Asian mark as two cells on a 20pt grid', () => {
