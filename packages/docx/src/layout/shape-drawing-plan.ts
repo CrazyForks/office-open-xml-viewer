@@ -2,21 +2,47 @@ import type { ArrowEnd, DrawingMLShapePaintPlan, Stroke } from '@silurus/ooxml-c
 import type { ShapeRun } from '../types.js';
 import type {
   DrawingPaintCommand,
+  LayoutDiagnostic,
   LayoutRect,
   VmlTextPathAcquisitionInput,
 } from './types.js';
 import { snapshotPlainData } from './plain-data.js';
 import type { TextLayoutService } from './text.js';
 
-export type ShapeDrawingPlanResult = Readonly<{
-  status: 'planned';
-  command: Extract<DrawingPaintCommand, { kind: 'noop' | 'drawingml-shape' | 'watermark-text' }>;
-}>;
+type ShapeDrawingCommand = Extract<
+  DrawingPaintCommand,
+  { kind: 'noop' | 'drawingml-shape' | 'watermark-text' }
+>;
+
+export type ShapeDrawingPlanResult =
+  | Readonly<{
+      status: 'planned';
+      command: ShapeDrawingCommand;
+    }>
+  | Readonly<{
+      status: 'unsupported';
+      command: Extract<DrawingPaintCommand, { kind: 'noop' }>;
+      diagnostics: readonly Readonly<Omit<LayoutDiagnostic, 'source'>>[];
+    }>;
 
 // When fitshape is active, every shaped dimension is multiplied by the same
 // target/source ratio, so a 1pt internal reference cancels out exactly. This is
 // used only when VML omitted font-size; an authored size is never replaced.
 const SCALE_NEUTRAL_REFERENCE_FONT_SIZE_PT = 1;
+
+function unsupportedTextPathPlan(
+  message: string,
+): Extract<ShapeDrawingPlanResult, { status: 'unsupported' }> {
+  return Object.freeze({
+    status: 'unsupported',
+    command: Object.freeze({ kind: 'noop' }),
+    diagnostics: Object.freeze([Object.freeze({
+      code: 'UNSUPPORTED_FEATURE',
+      severity: 'error',
+      message,
+    })]),
+  });
+}
 
 function arrowEnd(end: ShapeRun['headEnd']): ArrowEnd | undefined {
   return end ? { type: end.type, w: end.w, len: end.len } : undefined;
@@ -58,10 +84,10 @@ export function planShapeDrawing(
   );
   if (textPathEnabled) {
     if (textPath.fitPath === true) {
-      throw new Error('Unsupported VML textPath fitPath=true');
+      return unsupportedTextPathPlan('VML textPath fitPath=true is not rendered');
     }
     if (textPath.xScale === true) {
-      throw new Error('Unsupported VML textPath xScale=true');
+      return unsupportedTextPathPlan('VML textPath xScale=true is not rendered');
     }
     if (textPath.string.trim().length === 0) {
       return Object.freeze({ status: 'planned', command: Object.freeze({ kind: 'noop' }) });
@@ -73,7 +99,9 @@ export function planShapeDrawing(
       throw new RangeError('VML textPath fontSizePt must be finite and non-negative');
     }
     if (!fitShape && textPath.fontSizePt === undefined) {
-      throw new Error('VML textPath fitShape=false requires an authored font-size');
+      return unsupportedTextPathPlan(
+        'VML textPath fitShape=false requires an authored font-size',
+      );
     }
     if (textPath.fontSizePt === 0) {
       return Object.freeze({ status: 'planned', command: Object.freeze({ kind: 'noop' }) });
@@ -94,7 +122,9 @@ export function planShapeDrawing(
       measure: true,
     });
     if (textPath.trim === true && !shaped.inkBounds) {
-      throw new Error('VML textPath trim=true requires glyph ink bounds');
+      return unsupportedTextPathPlan(
+        'VML textPath trim=true requires glyph ink bounds',
+      );
     }
     // The retained source rectangle must choose one coherent metric domain:
     // trim removes the font's reserved box and uses tight actual ink, while
@@ -113,13 +143,17 @@ export function planShapeDrawing(
     };
     if (
       !Number.isFinite(shaped.advancePt)
-      || !Number.isFinite(sourceBounds.widthPt)
-      || sourceBounds.widthPt <= 0
-      || !Number.isFinite(sourceBounds.heightPt)
+      || Object.values(sourceBounds).some((value) => !Number.isFinite(value))
+      || shaped.spans.some((span) => !Number.isFinite(span.advancePt))
+    ) {
+      throw new Error('Shape textPath acquisition produced non-finite metrics');
+    }
+    if (
+      sourceBounds.widthPt <= 0
       || sourceBounds.heightPt <= 0
       || shaped.spans.length === 0
     ) {
-      throw new Error('Shape textPath acquisition produced degenerate metrics');
+      return unsupportedTextPathPlan('VML textPath produced empty glyph metrics');
     }
     return Object.freeze({
       status: 'planned',

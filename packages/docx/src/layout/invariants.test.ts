@@ -1183,6 +1183,24 @@ describe('layoutFingerprint', () => {
     expect(layoutFingerprint(first)).toBe(layoutFingerprint(second));
     expect(layoutFingerprint(first)).not.toBe(layoutFingerprint(changedCode));
   });
+
+  it('excludes retained node diagnostic prose while preserving its identity', () => {
+    const retained = (message: string, code: DocumentLayout['diagnostics'][number]['code']) => ({
+      ...drawing('n1', rect(72, 100, 200, 30)),
+      diagnostics: [{
+        code,
+        severity: 'warning' as const,
+        source: source(1),
+        message,
+      }],
+    });
+    const first = documentWith([retained('first prose', 'UNSUPPORTED_FEATURE')]);
+    const second = documentWith([retained('different prose', 'UNSUPPORTED_FEATURE')]);
+    const changedCode = documentWith([retained('different prose', 'NON_CONVERGENCE')]);
+
+    expect(layoutFingerprint(first)).toBe(layoutFingerprint(second));
+    expect(layoutFingerprint(first)).not.toBe(layoutFingerprint(changedCode));
+  });
 });
 
 describe('layoutFlowBlocks', () => {

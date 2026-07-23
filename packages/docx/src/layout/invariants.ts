@@ -991,6 +991,15 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
   }
 }
 
+function isLayoutDiagnosticRecord(
+  value: Readonly<Record<string, unknown>>,
+): boolean {
+  return typeof value.code === 'string'
+    && LAYOUT_DIAGNOSTIC_CODES.has(value.code as LayoutDiagnosticCode)
+    && (value.severity === 'warning' || value.severity === 'error')
+    && typeof value.message === 'string';
+}
+
 function canonicalize(value: unknown): unknown {
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new LayoutInvariantError('INVALID_GEOMETRY', 'fingerprint input is not finite');
@@ -1000,7 +1009,10 @@ function canonicalize(value: unknown): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
   if (typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    const record = value as Record<string, unknown>;
+    const diagnostic = isLayoutDiagnosticRecord(record);
+    return Object.fromEntries(Object.entries(record)
+      .filter(([entryKey]) => !(diagnostic && entryKey === 'message'))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([entryKey, entry]) => [entryKey, canonicalize(entry)]));
   }

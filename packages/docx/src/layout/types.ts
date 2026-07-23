@@ -108,6 +108,8 @@ export interface FlowOwnership {
 interface LayoutNodeBase extends FlowOwnership {
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
+  /** Recoverable acquisition facts owned by this retained node. */
+  readonly diagnostics?: readonly LayoutDiagnostic[];
 }
 
 export type DrawingPaintCommand =
