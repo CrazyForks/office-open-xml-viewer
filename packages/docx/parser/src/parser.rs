@@ -3452,6 +3452,9 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     // Resolve base formatting from style (incl. table-style conditional rPr/pPr).
     let (mut base_para, base_run) =
         style_map.resolve_para_cond(explicit_style_id.as_deref(), table_style_id, cond);
+    let style_indent_left = base_para.indent_left;
+    let style_indent_first = base_para.indent_first;
+    let style_indent_right = base_para.indent_right;
 
     // Apply direct paragraph formatting overrides.
     //
@@ -3634,20 +3637,23 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         .as_ref()
         .and_then(|num| num_map.get_level(num.num_id, num.level));
 
-    // Indent precedence (ECMA-376 §17.9.22 + §17.7.2): the paragraph's own DIRECT
-    // `w:ind` overrides the numbering level's `pPr/ind` ("paragraph properties
-    // specified on the numbered paragraph itself override the paragraph properties
-    // specified by pPr elements within a numbering lvl element"), which in turn
-    // overrides the paragraph STYLE. The merge is per-attribute (§17.3.1.12), so a
-    // direct `w:left` that omits `w:hanging`/`w:firstLine` keeps the level's
-    // first-line indent — e.g. sample-15's REFERENCES list: level ind left=720
-    // hanging=360, direct `w:ind w:left="360"` ⇒ body at 18 pt, marker at the margin.
+    // Indent precedence (ECMA-376 §17.7.2 style hierarchy + §17.9.22): the
+    // paragraph's own DIRECT `w:ind` overrides its resolved paragraph STYLE,
+    // which overrides the numbering level's `pPr/ind`. The merge is
+    // per-attribute (§17.3.1.12), so an omitted axis falls through independently.
+    // This matters when a paragraph style associates numbering and also authors
+    // a different hanging band: Word retains the style's band rather than
+    // replacing it with the abstract level's defaults.
     // When no level resolves, a de-listed paragraph (numId=0) keeps only its direct
     // ind and a plain paragraph keeps its style/direct (base) ind.
     let (indent_left, indent_first) = if let Some(l) = level {
         (
-            direct_indent_left.unwrap_or(l.indent_left),
-            direct_indent_first.unwrap_or(l.indent_first),
+            direct_indent_left
+                .or(style_indent_left)
+                .unwrap_or(l.indent_left),
+            direct_indent_first
+                .or(style_indent_first)
+                .unwrap_or(l.indent_first),
         )
     } else if base_para.num_id == Some(0) {
         // `numId=0` explicitly removes numbering (ECMA-376 §17.3.1.19 / §17.9.18). That
@@ -3680,8 +3686,9 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     // indent, else the level's end indent (an RTL list carries its indent there,
     // e.g. w:right="720" w:hanging="360"), else the style/de-list (base) value
     // already resolved into `indent_right` above.
+    let numbered_indent_right = level.and_then(|l| style_indent_right.or(l.indent_right));
     let indent_right = direct_indent_right
-        .or_else(|| level.and_then(|l| l.indent_right))
+        .or(numbered_indent_right)
         .unwrap_or(indent_right);
 
     // Parse runs
@@ -8584,8 +8591,14 @@ fn extract_simple_paragraph_text(
         .and_then(|num| num_map.get_level(num.num_id, num.level));
     let (indent_left, indent_first) = if let Some(l) = level {
         (
-            direct_ind.indent_left.unwrap_or(l.indent_left),
-            direct_ind.indent_first.unwrap_or(l.indent_first),
+            direct_ind
+                .indent_left
+                .or(style_para.indent_left)
+                .unwrap_or(l.indent_left),
+            direct_ind
+                .indent_first
+                .or(style_para.indent_first)
+                .unwrap_or(l.indent_first),
         )
     } else {
         (
@@ -8601,8 +8614,8 @@ fn extract_simple_paragraph_text(
     };
     let indent_right = direct_ind
         .indent_right
-        .or_else(|| level.and_then(|l| l.indent_right))
         .or(style_para.indent_right)
+        .or_else(|| level.and_then(|l| l.indent_right))
         .unwrap_or(0.0);
 
     // ECMA-376 §17.3.1.33 — the txbxContent paragraph's own `<w:spacing>` is
@@ -15627,10 +15640,61 @@ mod footnote_tests {
         );
     }
 
+    /// ECMA-376 §17.7.2 — paragraph-style properties are retained when the
+    /// style also associates a numbering definition. A level's generic `pPr`
+    /// supplies missing axes; it does not replace a style-authored hanging band.
+    #[test]
+    fn numbered_para_style_ind_overrides_numbering_level_per_attribute() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{ns}">
+              <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+              <w:style w:type="paragraph" w:styleId="BulletStyle">
+                <w:name w:val="Bullet Style"/>
+                <w:basedOn w:val="Normal"/>
+                <w:pPr>
+                  <w:numPr><w:numId w:val="4"/></w:numPr>
+                  <w:ind w:left="408" w:hanging="204"/>
+                </w:pPr>
+              </w:style>
+            </w:styles>"#,
+            ns = W_NS
+        );
+        let numbering = format!(
+            r#"<w:numbering xmlns:w="{ns}">
+              <w:abstractNum w:abstractNumId="21">
+                <w:lvl w:ilvl="0">
+                  <w:start w:val="1"/>
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  <w:pPr><w:ind w:left="360" w:hanging="360"/></w:pPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="4"><w:abstractNumId w:val="21"/></w:num>
+            </w:numbering>"#,
+            ns = W_NS
+        );
+
+        let paragraph = first_para_with(
+            r#"<w:p><w:pPr><w:pStyle w:val="BulletStyle"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#,
+            &styles,
+            &numbering,
+        );
+
+        assert!(
+            (paragraph.indent_left - 20.4).abs() < 0.01,
+            "style left=408 twips must survive the level default, got {}",
+            paragraph.indent_left
+        );
+        assert!(
+            (paragraph.indent_first + 10.2).abs() < 0.01,
+            "style hanging=204 twips must survive the level default, got {}",
+            paragraph.indent_first
+        );
+    }
+
     /// ECMA-376 §17.7.2 (property precedence) — a paragraph's own DIRECT `w:ind`
     /// overrides the numbering level's `w:ind`. Direct formatting is more specific
-    /// than the numbering definition, which in turn overrides the paragraph style
-    /// (Control A in `numid_zero_drops_inherited_list_indent`). The merge is
+    /// than the paragraph style and numbering definition. The merge is
     /// per-attribute: a direct `w:left` that omits `w:hanging` keeps the level's
     /// hanging. sample-15's REFERENCES list proves it — numbering level
     /// `ind left=720 hanging=360`, but each item carries a direct `<w:ind w:left="360"/>`;
