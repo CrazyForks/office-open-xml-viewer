@@ -100,7 +100,11 @@ test.describe('local Word PDF acceptance', () => {
     await page.goto('/tests/visual/fixture.html');
     const rendered = await page.evaluate(async ({ documentPath: path, width }) => {
       const { DocxDocument } = await import('/src/document.ts');
-      const document = await DocxDocument.load(`/${path}`, { useGoogleFonts: false });
+      const { math } = await import('/tests/visual/math-engine.ts');
+      const document = await DocxDocument.load(`/${path}`, {
+        useGoogleFonts: false,
+        math,
+      });
       const pages = [];
       for (let pageIndex = 0; pageIndex < document.pageCount; pageIndex += 1) {
         const canvas = window.document.createElement('canvas');
