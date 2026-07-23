@@ -88,7 +88,7 @@ describe('planVerticalRunWithCapability (retained vertical paint geometry)', () 
     ]);
   });
 
-  it('retains original transform characters and the proved OpenType vert feature route', () => {
+  it('retains original transform characters and projects their vertical origin into the cell', () => {
     const { ctx } = mockCtx({
       vert: {
         '（': { width: 12, asc: 9, desc: 3 },
@@ -106,6 +106,7 @@ describe('planVerticalRunWithCapability (retained vertical paint geometry)', () 
       { text: 'ー', orientation: 'upright', verticalFeature: true },
       { text: '）', orientation: 'upright', verticalFeature: true },
     ]);
+    expect(cells.map(({ drawOffsetPt }) => drawOffsetPt.xPt)).toEqual([-6, 0, -6]);
   });
 
   it('retains counter-rotated logical block ink after the upright glyph offset', () => {

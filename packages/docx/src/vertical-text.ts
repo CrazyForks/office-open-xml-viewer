@@ -276,6 +276,25 @@ function isVerticalVertCandidate(cp: number): boolean {
 }
 
 /**
+ * Canvas exposes an OpenType vertical alternate through the horizontal text
+ * API. Its raw glyph origin remains on the vertical cell edge: for example,
+ * the featured bracket's reported ink centre is one half-advance to the right
+ * of the requested point. Retained upright paint addresses the Word vertical
+ * cell centre, so project that OpenType vertical origin back by the exact
+ * featured half-advance acquired for the same glyph. Corner punctuation keeps
+ * its designed in-cell offset because this moves the origin, not the ink.
+ */
+function verticalPresentationOriginCorrectionPx(
+  cp: number,
+  cellAdvancePx: number,
+): number {
+  return (
+    verticalFormSubstitute(cp) !== null
+    || verticalBracketFormSubstitute(cp) !== null
+  ) ? -cellAdvancePx / 2 : 0;
+}
+
+/**
  * Along-column ink geometry of a vo=Tr rotate-fallback glyph (issue #1014). The
  * glyph is painted by a plain `fillText` in the +90°-rotated page frame, so its
  * HORIZONTAL ink extent maps onto the ALONG-COLUMN axis (the advance axis). Read
@@ -459,9 +478,13 @@ export function planVerticalRunWithCapability(
         && verticalTrUprightFallback(cp);
       const routed = routedVerticalGlyphCell(ctx, ch, cp, vertCapability, growTrRotateInk);
       const advancePt = routed.naturalPx * charScale + letterSpacingPt;
+      const presentationOriginXPt = verticalPresentationOriginCorrectionPx(
+        cp,
+        routed.naturalPx,
+      );
       const range = { start: sourceOffset, end: sourceOffset + ch.length };
       if (routed.vert !== null) {
-        const drawOffsetPt = { xPt: 0, yPt: 0 };
+        const drawOffsetPt = { xPt: presentationOriginXPt, yPt: 0 };
         const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(
           ctx, ch, 'upright', drawOffsetPt, charScale, writingMode, true,
         );
@@ -485,7 +508,7 @@ export function planVerticalRunWithCapability(
           ? inkCenterAboveMiddlePx(ctx, drawText) / fontPt
           : 0;
         const drawOffsetPt = {
-          xPt: offset.dx * fontPt,
+          xPt: offset.dx * fontPt + presentationOriginXPt,
           yPt: (alongEm + offset.dy) * fontPt,
         };
         const blockAxisInkBounds = plannedVerticalBlockAxisInkBounds(

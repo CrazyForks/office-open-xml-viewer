@@ -335,6 +335,18 @@ describe('vertical OpenType vert feature', () => {
     ]);
   });
 
+  it('briefly connects a detached element so measurement and paint resolve the same feature', () => {
+    const fixture = fakeHtmlCanvasProbe();
+    const canvas = fixture.ctx.canvas as HTMLCanvasElement;
+    expect(canvas.isConnected).toBe(false);
+
+    withVertFeature(fixture.ctx, () => {
+      expect(canvas.isConnected).toBe(true);
+    });
+
+    expect(canvas.isConnected).toBe(false);
+  });
+
   it('preserves computed features while restoring the exact inline value', () => {
     let font = '16px serif';
     const style = { fontFeatureSettings: '' };

@@ -63,6 +63,54 @@ function sourceFeatureSettings(target: HTMLCanvasElement): string {
   return target.style.fontFeatureSettings;
 }
 
+/**
+ * Chromium only resolves Canvas OpenType feature metrics while the backing
+ * element participates in a document. Layout normally owns a detached canvas,
+ * whereas paint uses an attached surface, so feature measurement must briefly
+ * acquire the same DOM capability. Restore both the caller's tree position and
+ * inline presentation exactly; the canvas remains caller-owned.
+ */
+function withConnectedCanvas<T>(
+  canvas: HTMLCanvasElement,
+  operation: () => T,
+): T {
+  if (canvas.isConnected) return operation();
+
+  const doc = canvas.ownerDocument
+    ?? (typeof document === 'undefined' ? null : document);
+  const connectedParent = doc?.body ?? doc?.documentElement;
+  if (!connectedParent) return operation();
+
+  const originalParent = canvas.parentNode;
+  const originalNextSibling = canvas.nextSibling;
+  const style = canvas.style;
+  const previousPresentation = {
+    position: style.position,
+    left: style.left,
+    top: style.top,
+    opacity: style.opacity,
+    pointerEvents: style.pointerEvents,
+  };
+  Object.assign(style, {
+    position: 'fixed',
+    left: '-99999px',
+    top: '0',
+    opacity: '0',
+    pointerEvents: 'none',
+  });
+  connectedParent.appendChild(canvas);
+  try {
+    return operation();
+  } finally {
+    if (originalParent) {
+      originalParent.insertBefore(canvas, originalNextSibling);
+    } else {
+      canvas.remove();
+    }
+    Object.assign(style, previousPresentation);
+  }
+}
+
 function probeState(doc: Document): ProbeState {
   const existing = probeStates.get(doc);
   if (existing) return existing;
@@ -239,18 +287,23 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
 /** Compose `vert` onto the element features, refont, draw, then restore exactly. */
 export function withVertFeature<T>(ctx: Ctx2D, draw: () => T): T {
   const canvas = ctx.canvas as HTMLCanvasElement;
-  const style = canvas?.style;
-  if (!style) return draw();
+  if (!canvas?.style) return draw();
 
-  const previous = style.fontFeatureSettings;
-  style.fontFeatureSettings = composeVertFeature(sourceFeatureSettings(canvas));
-  ctx.font = ctx.font;
-  try {
-    return draw();
-  } finally {
-    style.fontFeatureSettings = previous;
+  const applyFeature = () => {
+    const style = canvas.style;
+    const previous = style.fontFeatureSettings;
+    style.fontFeatureSettings = composeVertFeature(sourceFeatureSettings(canvas));
     ctx.font = ctx.font;
-  }
+    try {
+      return draw();
+    } finally {
+      style.fontFeatureSettings = previous;
+      ctx.font = ctx.font;
+    }
+  };
+  return canvasElementFor(ctx) === null
+    ? applyFeature()
+    : withConnectedCanvas(canvas, applyFeature);
 }
 
 /**

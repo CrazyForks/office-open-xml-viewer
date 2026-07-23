@@ -388,7 +388,10 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
   await page.goto('/tests/visual/vertical-vert-feature.html');
   const result = await page.evaluate(async () => {
     await document.fonts.ready;
-    const { verticalVertGlyphReachable } = await import('/src/vertical-text.ts');
+    const {
+      planVerticalRunWithCapability,
+      verticalVertGlyphReachable,
+    } = await import('/src/vertical-text.ts');
     const { createLayoutServices } = await import('/src/layout-runtime.ts');
     const { renderDocumentToCanvas } = await import('/src/renderer.ts');
     const { selectDocumentLayoutPage } = await import('/src/layout/document-layout-variants.ts');
@@ -409,6 +412,38 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
       }
     }
     if (!selectedFamily) return null;
+
+    const plan = (ctx: CanvasRenderingContext2D) => {
+      ctx.font = `48px "${selectedFamily}"`;
+      return planVerticalRunWithCapability(
+        ctx,
+        '（）',
+        48,
+        0,
+        1,
+        true,
+        (cp) => verticalVertGlyphReachable(ctx, cp),
+      ).map((cell) => ({
+        text: cell.text,
+        originPt: cell.originPt,
+        advancePt: cell.advancePt,
+        drawOffsetXPt: cell.drawOffsetPt.xPt,
+        verticalFeature: cell.verticalFeature,
+      }));
+    };
+    const detachedMeasureCanvas = document.createElement('canvas');
+    const detachedMeasure = detachedMeasureCanvas.getContext('2d');
+    if (!detachedMeasure) throw new Error('detached measure context unavailable');
+    const detachedPlan = plan(detachedMeasure);
+    const detachedMeasureConnectedAfter = detachedMeasureCanvas.isConnected;
+    const attachedMeasureCanvas = document.createElement('canvas');
+    attachedMeasureCanvas.style.position = 'fixed';
+    attachedMeasureCanvas.style.left = '-99999px';
+    document.body.appendChild(attachedMeasureCanvas);
+    const attachedMeasure = attachedMeasureCanvas.getContext('2d');
+    if (!attachedMeasure) throw new Error('attached measure context unavailable');
+    const attachedPlan = plan(attachedMeasure);
+    attachedMeasureCanvas.remove();
 
     const textRun = {
       type: 'text', text: 'ー（）日',
@@ -508,6 +543,9 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
     };
     return {
       family: selectedFamily,
+      detachedPlan,
+      attachedPlan,
+      detachedMeasureConnectedAfter,
       retainedGlyphs,
       detachedConnectedBefore,
       detachedConnectedAfter,
@@ -523,6 +561,8 @@ test('public detached and Offscreen rendering reproduce layout-proven vert glyph
 
   test.skip(result === null, 'a host font with a reachable OpenType vert glyph is required');
   if (result === null) return;
+  expect(result.detachedPlan).toEqual(result.attachedPlan);
+  expect(result.detachedMeasureConnectedAfter).toBe(false);
   expect(result.retainedGlyphs).toEqual({
     'ー': { upright: true, verticalFeature: true },
     '（': { upright: true, verticalFeature: true },
