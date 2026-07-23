@@ -1846,6 +1846,74 @@ describe('planLine visual geometry', () => {
     });
   });
 
+  it('retains every RTL trailing-space source slice after internal justification', () => {
+    const value = 'نص  ';
+    const start = 246;
+    const base = measuredText(value, start, 30, true);
+    const line = planLine({
+      paragraphXPt: 0,
+      availableWidthPt: 80,
+      alignment: 'both',
+      baseRtl: true,
+      isFirstLine: true,
+      isLastLine: false,
+      stretchLastLine: false,
+      line: {
+        range: { start: start - 4, end: start + value.length + 2 },
+        topPt: 0,
+        baselinePt: 10,
+        advancePt: 12,
+        xOffsetPt: 0,
+        availableWidthPt: 100,
+        endsWithBreak: false,
+        segments: [
+          {
+            ...measuredText('قبل ', start - 4, 20, true),
+            clusters: [...'قبل '].map((_character, index) => ({
+              range: { start: start - 4 + index, end: start - 3 + index },
+              offset: { xPt: index * 5, yPt: 0 },
+              advancePt: 5,
+            })),
+          },
+          {
+            ...base,
+            clusters: [...value].map((_character, index) => ({
+              range: { start: start + index, end: start + index + 1 },
+              offset: { xPt: index * 5, yPt: 0 },
+              advancePt: 5,
+            })),
+          },
+          {
+            ...measuredText('24', start + value.length, 10, false),
+            clusters: [...'24'].map((_character, index) => ({
+              range: {
+                start: start + value.length + index,
+                end: start + value.length + index + 1,
+              },
+              offset: { xPt: index * 5, yPt: 0 },
+              advancePt: 5,
+            })),
+          },
+        ],
+      },
+    });
+    const placement = line.placements.find((candidate) => candidate.range.start === start);
+    expect(placement?.kind).toBe('text');
+    if (placement?.kind !== 'text') throw new Error('expected retained text placement');
+
+    expect(placement.range).toEqual({ start: 246, end: 250 });
+    expect(placement.paintOps.map((operation) => operation.range)).toEqual([
+      { start: 246, end: 248 },
+      { start: 248, end: 249 },
+      { start: 249, end: 250 },
+    ]);
+    expect(placement.paintOps.map((operation) => operation.text)).toEqual([
+      'نص',
+      ' ',
+      ' ',
+    ]);
+  });
+
   it('shifts cluster-aligned vertical paint operations during internal justification', () => {
     const base = measuredText('観察', 0, 20);
     const line = planLine({

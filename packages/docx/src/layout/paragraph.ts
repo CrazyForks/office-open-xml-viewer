@@ -121,7 +121,9 @@ import type {
   StoryLayout,
   FlowContainer,
   TextBoxLayout,
+  TextClusterLayout,
   TextDecorationLayout,
+  TextPaintOp,
   TextPlacement,
   WrapExclusion,
 } from './types.js';
@@ -469,6 +471,47 @@ function retainedTextGeometry(
   return { clusters, paintOps };
 }
 
+/**
+ * Keep RTL source coverage complete while preserving the trimmed word-shaped
+ * operation used to anchor trailing whitespace on the physical leading edge.
+ *
+ * Internal justification may split a run immediately before its final space.
+ * Trimming that preceding slice must therefore retain the removed whitespace
+ * as an explicitly zero-ink source slice, or the immutable paint plan contains
+ * an interior range hole.
+ */
+function retainedRtlPaintOperations(
+  operations: readonly TextPaintOp[],
+  clusters: readonly TextClusterLayout[],
+): readonly TextPaintOp[] {
+  return operations.flatMap((operation) => {
+    const text = operation.text.trimEnd();
+    if (text === '' || text.length === operation.text.length) return [operation];
+    if (operation.sourceMapping === 'kashida') return [{ ...operation, text }];
+
+    const trailingStart = operation.range.start + text.length;
+    const trailingCluster = clusters.find((cluster) => cluster.range.start === trailingStart);
+    const {
+      inkBounds: _inkBounds,
+      blockAxisInkBounds: _blockAxisInkBounds,
+      ...zeroInkOperation
+    } = operation;
+    return [
+      {
+        ...operation,
+        text,
+        range: { ...operation.range, end: trailingStart },
+      },
+      {
+        ...zeroInkOperation,
+        text: operation.text.slice(text.length),
+        range: { start: trailingStart, end: operation.range.end },
+        offset: trailingCluster?.offset ?? operation.offset,
+      },
+    ];
+  });
+}
+
 function sameDashPattern(
   left: readonly number[] | undefined,
   right: readonly number[] | undefined,
@@ -727,16 +770,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       const textGeometry = retainedTextGeometry(segment, stretch, perGapPt);
       const direction = visual.rtl[segmentIndex] ? 'rtl' : 'ltr';
       const paintOps = direction === 'rtl'
-        ? textGeometry.paintOps.map((operation) => {
-            const text = operation.text.trimEnd();
-            return text === '' ? operation : {
-              ...operation,
-              text,
-              ...(operation.sourceMapping === 'kashida' ? {} : {
-                range: { ...operation.range, end: operation.range.start + text.length },
-              }),
-            };
-          })
+        ? retainedRtlPaintOperations(textGeometry.paintOps, textGeometry.clusters)
         : textGeometry.paintOps;
       const trailingWhitespaceStart = segment.text.trimEnd().length;
       const rtlLeadingGapPt = direction === 'rtl'
