@@ -251,6 +251,7 @@ export function measureParagraph(
     continuation?.boundary,
     undefined,
     environment.verticalGlyphMeasurement,
+    context.overflowPunct !== false,
   );
   if (lines.length === 0) return measureMarkOnly();
 

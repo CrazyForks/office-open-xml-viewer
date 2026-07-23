@@ -90,6 +90,7 @@ import {
   wordUseFeLayoutInheritedGridHeightPx,
   wordCandidateFitWidthPx,
   wordJustifiedCandidateFitAllowancePx,
+  wordIsOverflowPunctuation,
 } from './layout/line-compatibility.js';
 import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
 
@@ -217,6 +218,13 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  `ctx.letterSpacing` delta on BOTH measure and paint (measure==paint), on top
    *  of any docGrid / justify delta. Absent ⇒ 0. */
   charSpacing?: number;
+  /** ECMA-376 §17.15.1.18 document-level full-width punctuation compression,
+   *  represented separately from authored `w:spacing`. Negative points;
+   *  present only on one-punctuation pieces emitted by buildSegments. */
+  punctuationCompressionPt?: number;
+  /** Effective `w:lang/@w:eastAsia` used by Word's language-specific
+   *  overflow-punctuation character sets ([MS-OE376] §2.1.56). */
+  eastAsiaLanguage?: string;
   /** ECMA-376 §17.3.2.43 `<w:w>` — horizontal glyph-width scale as a FRACTION
    *  (0.67 = 67%). Measured widths are multiplied by it and the paint pass draws
    *  under `ctx.scale(charScale, 1)`; decorations follow the scaled extent.
@@ -574,6 +582,8 @@ export interface LineLayoutEnvironment {
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
   readonly layoutServices?: LayoutServices;
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
+  /** ECMA-376 §17.15.1.18 document-wide full-width character compression. */
+  readonly characterSpacingControl?: string;
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
@@ -1000,7 +1010,14 @@ export function charSpacingDeltaPx(seg: LayoutTextSeg, scale: number): number {
   // §17.3.2.14 fitText replaces cached §17.3.2.35 spacing with the resolved
   // region gap. The paint path already reads this authority.
   if (seg.fitTextPerGapPx !== undefined) return seg.fitTextPerGapPx;
-  return (seg.charSpacing ?? 0) * scale;
+  return effectiveCharacterSpacingPt(seg) * scale;
+}
+
+/** The paint/measure pitch after combining run-authored `w:spacing` with the
+ * document-level punctuation trim. Keeping the sources separate on LayoutTextSeg
+ * prevents a document setting from masquerading as direct run formatting. */
+export function effectiveCharacterSpacingPt(seg: LayoutTextSeg): number {
+  return (seg.charSpacing ?? 0) + (seg.punctuationCompressionPt ?? 0);
 }
 
 /** ECMA-376 §17.3.2.43 `<w:w>` — the horizontal glyph-width scale fraction of a
@@ -1651,6 +1668,15 @@ export function hasCJKBreakOpportunity(text: string): boolean {
   }
   return false;
 }
+
+// ECMA-376 §17.15.1.18 applies whitespace compression only to full-width
+// punctuation for `compressPunctuation`. These closing forms have removable
+// trailing half-em cells; U+30FB KATAKANA MIDDLE DOT is intentionally absent.
+// Opening punctuation needs line-start positioning rather than a pen-advance
+// reduction and remains a separate follow-up.
+const COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION = new Set([
+  '、', '。', '，', '．', '」', '』', '】', '〗', '）', '］', '｝', '｡', '､',
+]);
 
 /** Shift a SEA break-offset list (issue #797) onto a suffix that drops the first
  *  `cut` UTF-16 units: keep offsets strictly greater than `cut` and rebase them.
@@ -2334,7 +2360,40 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       cs: boolean,
       fontFamily: string | null,
       authoritativeSpan?: TextShapeSpan,
+      trimTrailingPunctuation = false,
     ) => {
+      // ECMA-376 §17.15.1.18 — trim the removable trailing whitespace from
+      // full-width closing punctuation. Split each eligible character so its
+      // selected face's own tight ink bounds can define that whitespace; ordinary
+      // runs (including U+30FB middle dot) retain one contextual shaping/paint
+      // operation. The compressed character is re-shaped through the same text
+      // service and carries its negative pitch into both measurement and paint.
+      if (
+        !trimTrailingPunctuation
+        && environment.characterSpacingControl?.startsWith('compressPunctuation')
+        && fitTextRegionIndex === undefined
+      ) {
+        const chars = [...text];
+        if (chars.some((character) =>
+          COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(character))) {
+          let pending = '';
+          const flushPending = () => {
+            if (pending === '') return;
+            pushSeg(pending, cs, fontFamily);
+            pending = '';
+          };
+          for (const character of chars) {
+            if (COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(character)) {
+              flushPending();
+              pushSeg(character, cs, fontFamily, undefined, true);
+            } else {
+              pending += character;
+            }
+          }
+          flushPending();
+          return;
+        }
+      }
       const bold = cs ? csBold : base.bold;
       const italic = cs ? csItalic : base.italic;
       const weight = bold ? 700 : 400;
@@ -2363,6 +2422,35 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       const shaped = authoritativeSpan
         ? { spans: [authoritativeSpan] }
         : environment.layoutServices?.text.shape(textShapeRequest);
+      const punctuationCompressionPt = trimTrailingPunctuation
+        ? (() => {
+            const fontSizePt = cs ? csFontSize : base.fontSize;
+            const measured = environment.layoutServices?.text.shape({
+              ...textShapeRequest,
+              measure: true,
+              clusterGeometry: false,
+            });
+            // `characterSpacingControl` removes the selected glyph's blank
+            // trailing side, not a face-independent fraction of the em. Tight
+            // ink is authoritative when the text service can provide it. The
+            // half-em fallback preserves the standard's illustrated behavior
+            // for measurement adapters that expose advances but no ink bounds.
+            const removableUnscaledPt = measured?.inkBounds
+              && measured.horizontalInkBoundsAreTight === true
+              ? Math.max(
+                  0,
+                  Math.min(
+                    measured.advancePt,
+                    measured.advancePt - measured.inkBounds.xMaxPt,
+                  ),
+                )
+              : fontSizePt / 2;
+            // §17.3.2.43 w:w scales the glyph and both of its sidebearings;
+            // trim in the same post-scale coordinate space as segAdvanceWidth.
+            const removablePt = removableUnscaledPt * (r.charScale ?? 1);
+            return removablePt > 0 ? -removablePt : undefined;
+          })()
+        : undefined;
       const resolvedAxisDiffers = shaped?.spans.some((span) =>
         (span.script === 'complexScript') !== cs,
       ) ?? false;
@@ -2466,6 +2554,11 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         // every emitted segment carries the same values; the measure and paint
         // passes apply them identically (measure==paint).
         charSpacing: r.charSpacing,
+        punctuationCompressionPt:
+          punctuationCompressionPt && punctuationCompressionPt !== 0
+            ? punctuationCompressionPt
+            : undefined,
+        eastAsiaLanguage: r.langEastAsia,
         charScale: r.charScale,
         fitTextVal: fitTextRegionIndex === undefined ? undefined : r.fitTextVal,
         fitTextId: fitTextRegionIndex === undefined ? undefined : r.fitTextId,
@@ -2842,6 +2935,7 @@ export function layoutLines(
   startBoundary?: LineBoundary,
   widthPolicy?: 'bounded' | 'intrinsic',
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
+  overflowPunct?: boolean,
 ): LayoutLine[];
 export function layoutLines(
   ctx: MeasurementTextContext,
@@ -2889,6 +2983,7 @@ export function layoutLines(
   startBoundary?: LineBoundary,
   widthPolicy: 'bounded' | 'intrinsic' = 'bounded',
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
+  overflowPunct = false,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
     preparedFloatWrap?: PreparedFloatWrap;
@@ -2924,6 +3019,7 @@ export function layoutLines(
       startBoundary,
       widthPolicy,
       verticalGlyphMeasurement,
+      overflowPunct,
       { probeHeights, preparedFloatWrap },
     );
     if (!wrapCtx || widthPolicy === 'intrinsic') return runPass(null);
@@ -4124,9 +4220,19 @@ export function layoutLines(
       const allChars = [...s.text];
       const rawSplit = [...rawPrefix].length;
       const minSplit = currentLine.length > 0 ? 0 : 1;
+      // ECMA-376 §17.3.1.21 permits ONE punctuation character beyond the
+      // paragraph extents. Apply that before kinsoku: [MS-OE376] §2.1.56 says
+      // Word lets overflowPunct win when the two conflict. The language-specific
+      // punctuation set is retained on the segment from effective w:lang.
+      const hangingSplit = overflowPunct
+        && rawSplit < allChars.length
+        && (currentLine.length > 0 || rawSplit > 0)
+        && wordIsOverflowPunctuation(allChars[rawSplit], s.eastAsiaLanguage)
+          ? rawSplit + 1
+          : null;
       const split = extendThroughTrailingIdeographicSpaces(
         allChars,
-        kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit),
+        hangingSplit ?? kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit),
       );
       const prefix = allChars.slice(0, split).join('');
       if (prefix.length > 0) {

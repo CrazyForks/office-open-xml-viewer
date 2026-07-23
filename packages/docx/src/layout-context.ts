@@ -105,6 +105,8 @@ export interface ParagraphLayoutContext {
   readonly hasEastAsianText: boolean;
   readonly kinsoku: KinsokuRules;
   readonly defaultTabPt: number;
+  /** ECMA-376 §17.3.1.21 — omission on the source paragraph resolves true. */
+  readonly overflowPunct?: boolean;
   /** Effective marker geometry acquired with the paragraph context and reused
    * by retained layout instead of shaping the marker a second time. */
   readonly numberingMarkerGeometry?: NumberingMarkerGeometry;
@@ -317,6 +319,7 @@ export function resolveParagraphLayoutContext(
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
     kinsoku: settings.kinsoku,
     defaultTabPt: settings.defaultTabPt,
+    overflowPunct: paragraph.overflowPunct !== false,
     mathDefJc: settings.mathDefJc,
   };
 }

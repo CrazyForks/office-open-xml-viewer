@@ -263,6 +263,9 @@ export interface GlyphMeasurement {
    * Unlike advance/ascent/descent, this can describe ink from a zero-advance
    * combining mark and excludes the font's reserved ascender/descender space. */
   readonly inkBounds?: GlyphInkBounds;
+  /** True only when the horizontal ink edges came from the measurement backend
+   * rather than an advance-width fallback. */
+  readonly horizontalInkBoundsAreTight?: boolean;
 }
 
 export interface GlyphInkBounds {
@@ -704,6 +707,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         ascentPt: Math.max(0, ...spans.map((span) => span.ascentPt)),
         descentPt: Math.max(0, ...spans.map((span) => span.descentPt)),
         ...(inkBounds ? { inkBounds } : {}),
+        ...(inkBounds && spans.every((span) => span.horizontalInkBoundsAreTight === true)
+          ? { horizontalInkBoundsAreTight: true }
+          : {}),
         spans: Object.freeze(spans),
         graphemeBoundaries,
         ...(clusters ? { clusters } : {}),

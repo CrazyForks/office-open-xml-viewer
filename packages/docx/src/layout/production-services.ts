@@ -189,10 +189,17 @@ export function createProductionLayoutServices(
           context.letterSpacing = `${request.letterSpacingPt}px`;
           if (request.kerning != null) context.fontKerning = request.kerning ? 'normal' : 'none';
           const metrics = context.measureText(request.text);
+          const horizontalInkBoundsAreTight =
+            Number.isFinite(metrics.actualBoundingBoxLeft)
+            && Number.isFinite(metrics.actualBoundingBoxRight);
+          // Retain the historical full-advance fallback for consumers that need
+          // a stable ink box (ruby, decoration, hit geometry), but label whether
+          // the horizontal edges are genuinely tight. Whitespace-trimming
+          // consumers must not infer sidebearings from the fallback box.
           const inkBounds = {
-            xMinPt: Number.isFinite(metrics.actualBoundingBoxLeft)
+            xMinPt: horizontalInkBoundsAreTight
               ? -metrics.actualBoundingBoxLeft : 0,
-            xMaxPt: Number.isFinite(metrics.actualBoundingBoxRight)
+            xMaxPt: horizontalInkBoundsAreTight
               ? metrics.actualBoundingBoxRight : metrics.width,
             ascentPt: metrics.actualBoundingBoxAscent,
             descentPt: metrics.actualBoundingBoxDescent,
@@ -201,7 +208,10 @@ export function createProductionLayoutServices(
             advancePt: metrics.width,
             ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
             descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
-            ...(Object.values(inkBounds).every(Number.isFinite) ? { inkBounds } : {}),
+            ...(Object.values(inkBounds).every(Number.isFinite) ? {
+              inkBounds,
+              ...(horizontalInkBoundsAreTight ? { horizontalInkBoundsAreTight: true } : {}),
+            } : {}),
           };
         } finally {
           context.font = previousFont;

@@ -15,6 +15,7 @@ import type {
   LayoutTabSeg,
   LayoutTextSeg,
 } from '../line-layout.js';
+import { effectiveCharacterSpacingPt } from '../line-layout.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, shapeRunToDocRun } from './text.js';
 import type { DocParagraph, DocRun, ShapeRun } from '../types.js';
 import {
@@ -1239,7 +1240,7 @@ function textPlacement(
       text: segment.text,
       range: { start: sourceOffset, end: sourceOffset + segment.text.length },
       offset: { xPt: 0, yPt: baselineOffsetPt },
-      letterSpacingPt: segment.charSpacing ?? 0,
+      letterSpacingPt: effectiveCharacterSpacingPt(segment),
       scaleX: segment.charScale ?? 1,
       direction: segment.rtl ? 'rtl' : 'ltr',
       kerning: segment.kerning === undefined
@@ -1557,7 +1558,8 @@ function textPlanSegment(
   const projected = textPlacement(segment, paragraph, sourceOffset, 0, 0, 0, 0);
   if (projected.kind !== 'text') throw new Error('Visible text segment projected as anchor host');
   const pitchPt = segment.fitTextPerGapPx
-    ?? (segment.charSpacing ?? 0) + (segment.snapToCharacterGrid === false ? 0 : characterGridDeltaPt);
+    ?? effectiveCharacterSpacingPt(segment)
+      + (segment.snapToCharacterGrid === false ? 0 : characterGridDeltaPt);
   const scaleX = segment.charScale ?? 1;
   const baselineOffsetPt = retainedBaselineOffsetPt(segment);
   const retainedGeometry = retainedGeometryPlan(segment, sourceOffset, projected.color);
@@ -3510,6 +3512,7 @@ export function paragraphAcquisitionCacheKey(
         [...context.kinsoku.lineEndForbidden].sort((left, right) => left - right),
       ],
       context.defaultTabPt,
+      context.overflowPunct !== false,
       context.numberingMarkerGeometry
         ? JSON.stringify(context.numberingMarkerGeometry)
         : null,
@@ -3534,6 +3537,7 @@ export function paragraphAcquisitionCacheKey(
       environment.verticalPageFrame ?? null,
       environment.documentHasEastAsianText,
       environment.useFeLayout ?? null,
+      environment.characterSpacingControl ?? null,
       environment.resolvedLocalFonts
         ? cache.objectIdentity(environment.resolvedLocalFonts)
         : null,

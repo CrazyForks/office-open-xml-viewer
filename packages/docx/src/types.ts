@@ -471,6 +471,9 @@ export interface DocParagraph {
   markVanish?: boolean;
   /** Widow/orphan control (w:widowControl). ECMA-376 default is true. */
   widowControl?: boolean;
+  /** ECMA-376 §17.3.1.21 `<w:overflowPunct>` — permit one trailing
+   *  punctuation character beyond paragraph indents/margins. Omission is true. */
+  overflowPunct?: boolean;
   /** Paragraph borders (w:pBdr) */
   borders?: ParagraphBorders | null;
   /** Style ID of the applied paragraph style */

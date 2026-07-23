@@ -103,15 +103,14 @@ function block(text: string, extra: Partial<ShapeText> = {}): ShapeText {
 describe('text-box text on the main line engine (B2/B5)', () => {
   // (a) KINSOKU (§17.15.1.59 行頭禁則) — a line-start-forbidden mark (、 U+3001)
   // must never BEGIN a wrapped line. 10px/char, box inner width 60px ⇒ 6 CJK
-  // cells/line. Without kinsoku the 7th glyph (、) would open line 2; the engine
-  // retracts the preceding glyph so 、 stays at the end of line 1.
+  // cells/line. Because omitted w:overflowPunct defaults to true (§17.3.1.21),
+  // the 7th glyph (、) hangs past the first line instead of opening line 2.
   it('(a) keeps a line-start-forbidden mark off the head of a wrapped line', () => {
     // "一二三四五六、七八九". Inner box 60px wide (shape width 60, no insets) ⇒ 6 CJK
-    // cells fit per line. A naive greedy wrap fills line 1 with 六 glyphs
-    // (一二三四五六) and pushes 、 to the head of line 2 — but 、 (U+3001) is
-    // line-start-forbidden (§17.15.1.59), so the engine breaks EARLIER, retracting
-    // 六 so line 2 begins 六、… and the mark never opens a line. Without the main
-    // engine the old wrapper had no kinsoku and 、 would head line 2.
+    // cells fit per line. A naive greedy wrap fills line 1 with six glyphs
+    // (一二三四五六) and pushes 、 to the head of line 2. The default-true
+    // overflowPunct rule instead lets 、 extend one character beyond the line;
+    // [MS-OE376] §2.1.56(b) says that rule wins when it conflicts with kinsoku.
     const evs = render([block('一二三四五六、七八九')], 60, 400);
     const ls = lines(evs);
     expect(ls.length).toBeGreaterThanOrEqual(2);
@@ -119,8 +118,9 @@ describe('text-box text on the main line engine (B2/B5)', () => {
     for (let i = 1; i < ls.length; i++) {
       expect(lineText(ls[i]).startsWith('、')).toBe(false);
     }
-    // Concretely the mark rode down with its preceding glyph: line 2 begins 六、.
-    expect(lineText(ls[1]).startsWith('六、')).toBe(true);
+    // Concretely the mark hangs from line 1 and line 2 starts with ordinary text.
+    expect(lineText(ls[0]).endsWith('六、')).toBe(true);
+    expect(lineText(ls[1]).startsWith('七')).toBe(true);
   });
 
   // (b) BIDI (§17.3.1.6 <w:bidi>) — the flag seeds the paragraph base direction,

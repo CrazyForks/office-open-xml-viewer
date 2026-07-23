@@ -3779,6 +3779,8 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         mark_vanish: mark_run.vanish.unwrap_or(false),
         // ECMA-376 §17.3.1.44: widowControl defaults to true when absent.
         widow_control: base_para.widow_control.unwrap_or(true),
+        // ECMA-376 §17.3.1.21: omission is explicitly equivalent to true.
+        overflow_punct: base_para.overflow_punct.unwrap_or(true),
         borders: base_para.para_borders.clone(),
         // Fall back to the document's default paragraph style (w:default="1")
         // rather than the literal "Normal" — international templates often use
@@ -15145,6 +15147,7 @@ mod rtl_tests {
                 <w:keepNext/>
                 <w:keepLines/>
                 <w:widowControl w:val="0"/>
+                <w:overflowPunct w:val="0"/>
                 <w:contextualSpacing/>
               </w:pPr>
             </w:p>
@@ -15185,9 +15188,27 @@ mod rtl_tests {
             "direct widowControl=0 must override the spec default-true"
         );
         assert!(
+            !para.overflow_punct,
+            "direct overflowPunct=0 must override the spec default-true"
+        );
+        assert!(
             para.contextual_spacing,
             "direct contextualSpacing must survive"
         );
+    }
+
+    /// ECMA-376 §17.3.1.21 explicitly defines omission as true.
+    #[test]
+    fn overflow_punct_omission_defaults_true() {
+        let body = body_from(r#"<w:p><w:r><w:t>text</w:t></w:r></w:p>"#);
+        let para = body
+            .iter()
+            .find_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .expect("paragraph present");
+        assert!(para.overflow_punct);
     }
 
     /// ECMA-376 §17.3.1.7 — a `between` border is a first-class pBdr edge: a

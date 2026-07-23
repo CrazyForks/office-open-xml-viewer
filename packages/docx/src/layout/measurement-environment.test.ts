@@ -115,7 +115,10 @@ describe('layout measurement environment', () => {
     expect(segments.verticalCJK).toBe(false);
 
     const upright = { ...state, verticalAllRotated: false } as BodyMeasurementContext;
-    expect(segmentEnvironmentOf(upright)).toBe(upright);
+    expect(segmentEnvironmentOf(upright)).toMatchObject({
+      verticalCJK: true,
+      characterSpacingControl: 'compressPunctuation',
+    });
     expect(paragraphMeasurementEnvironment(upright).verticalCJK).toBe(true);
   });
 

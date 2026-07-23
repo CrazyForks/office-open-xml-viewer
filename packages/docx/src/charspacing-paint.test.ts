@@ -149,6 +149,27 @@ function glyphCenters(fills: FillCall[], chars: string[]): number[] {
 }
 
 describe('run charSpacing/charScale reach the painted glyphs on every branch', () => {
+  it('paints full-width punctuation with the same compressed advance used by layout', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([
+        textRun('甲乙．', { charSpacing: -0.2 }),
+        textRun('次'),
+      ])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const punctuation = drawOf(fills, '．');
+    const following = drawOf(fills, '次');
+    // This deterministic adapter exposes no tight horizontal ink bounds, so the
+    // document-level trim uses its half-em fallback: 20 - 0.2 - 10 = 9.8pt.
+    // The following run starts at that exact measured/painted pen.
+    expect(punctuation.letterSpacing).toBe('-10.2px');
+    expect(following.x - punctuation.x).toBeCloseTo(9.8, 5);
+  });
+
   it('does not collapse middle-punctuation advance into the following glyph', async () => {
     const { canvas, fills } = makeRecordingCanvas();
     const model = {
