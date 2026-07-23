@@ -25,6 +25,7 @@ import { assertAndDeepFreezeDocumentLayout } from './invariants.js';
 import {
   bodyLayoutKernelOf,
   createFieldAcquisitionServicesView,
+  createParagraphAcquisitionCacheServicesView,
 } from './runtime-state.js';
 import {
   accumulatePagePaintNode,
@@ -2107,6 +2108,9 @@ export function paginateBody(
   services: LayoutServices,
   options: LayoutOptions,
 ): DocumentLayout {
+  // Every convergence pass and its field-acquisition service views share this
+  // private memo, while a later variant/document pagination starts fresh.
+  services = createParagraphAcquisitionCacheServicesView(services);
   const owners = ownerMap(input);
   const seed = paginateBodyWithColumnBalancing(input, services, options, []);
   const converged = convergeHeaderFooterReserves({

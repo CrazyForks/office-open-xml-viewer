@@ -64,6 +64,48 @@ const verticalGlyphMeasurementServices = new WeakMap<
 >();
 const layoutVariantStores = new WeakMap<LayoutServices, LayoutVariantStore>();
 
+/** One synchronous paginateBody invocation owns this memo. It never enters
+ * LayoutServices or DocumentLayout; field-acquisition service views inherit the
+ * same private handle through createLayoutServicesRuntimeView. */
+export interface ParagraphAcquisitionRuntimeCache {
+  objectIdentity(value: object): number;
+  get(input: object, key: string): unknown;
+  set(input: object, key: string, value: unknown): void;
+}
+
+const paragraphAcquisitionCaches = new WeakMap<
+  LayoutServices,
+  ParagraphAcquisitionRuntimeCache
+>();
+
+function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCache {
+  const identities = new WeakMap<object, number>();
+  const results = new WeakMap<object, Map<string, unknown>>();
+  let nextIdentity = 1;
+  return Object.freeze({
+    objectIdentity(value: object): number {
+      let retained = identities.get(value);
+      if (retained === undefined) {
+        retained = nextIdentity;
+        nextIdentity += 1;
+        identities.set(value, retained);
+      }
+      return retained;
+    },
+    get(input: object, key: string): unknown {
+      return results.get(input)?.get(key);
+    },
+    set(input: object, key: string, value: unknown): void {
+      let byKey = results.get(input);
+      if (!byKey) {
+        byKey = new Map();
+        results.set(input, byKey);
+      }
+      byKey.set(key, value);
+    },
+  });
+}
+
 /** Service views may replace one component, but mixing components already owned
  * by different documents must fail before acquisition can use a foreign kernel. */
 function layoutServicesRuntimeOwner(
@@ -200,7 +242,26 @@ export function createLayoutServicesRuntimeView(
   if (lookup) privateResourceLookups.set(view, lookup);
   const registry = paintResourceRegistries.get(services);
   if (registry) paintResourceRegistries.set(view, registry);
+  const paragraphCache = paragraphAcquisitionCaches.get(services);
+  if (paragraphCache) paragraphAcquisitionCaches.set(view, paragraphCache);
   return view;
+}
+
+/** Start one paragraph-acquisition memo scope. The returned service view owns a
+ * fresh cache even when its document services were used by an earlier layout
+ * variant or another document layout request. */
+export function createParagraphAcquisitionCacheServicesView(
+  services: LayoutServices,
+): LayoutServices {
+  const view = createLayoutServicesRuntimeView(services);
+  paragraphAcquisitionCaches.set(view, createParagraphAcquisitionRuntimeCache());
+  return view;
+}
+
+export function paragraphAcquisitionCacheOf(
+  services: LayoutServices,
+): ParagraphAcquisitionRuntimeCache | undefined {
+  return paragraphAcquisitionCaches.get(services);
 }
 
 /** Create one immutable service identity for a pagination-field iteration. */

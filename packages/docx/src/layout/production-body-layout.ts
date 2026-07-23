@@ -79,6 +79,10 @@ export function createProductionBodyLayoutRuntime(
   const bodySectionIndexInput = () => model.bodySectionIndex;
   const effectiveTablePositioning = model.effectiveTablePositioning;
   const publicAnchorBridge = model.publicAnchorBridge;
+  const documentFontFamilyClasses = fontClassesWithPitches(
+    doc.fontFamilyClasses,
+    doc.fontFamilyPitches,
+  );
   const anchoredImageCollisionKey = (
     imagePath: string,
     colorReplaceFrom?: string,
@@ -486,7 +490,7 @@ function buildConcreteBodyLayoutKernel(
       const state = buildMeasureState(
         measureContext,
         section,
-        fontClassesWithPitches(doc.fontFamilyClasses, doc.fontFamilyPitches),
+        documentFontFamilyClasses,
         resolveDocumentLayoutSettings(doc),
         resolvedLocalFonts,
         services,

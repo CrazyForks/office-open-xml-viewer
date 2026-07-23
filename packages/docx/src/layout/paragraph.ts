@@ -82,6 +82,10 @@ import {
   commitParagraphWrapRegistry,
   createParagraphWrapRegistry,
 } from './paragraph-wrap-registry.js';
+import {
+  paragraphAcquisitionCacheOf,
+  type ParagraphAcquisitionRuntimeCache,
+} from './runtime-state.js';
 import { wordPreservesLowerLayerSameParagraphComposition } from './anchor-compatibility.js';
 import { wordRunVerticalAlignRaisePt } from './line-compatibility.js';
 import {
@@ -3457,12 +3461,136 @@ function mergeAnchorCollisions(
   ]);
 }
 
+export function paragraphAcquisitionCacheKey(
+  cache: ParagraphAcquisitionRuntimeCache,
+  paragraph: ParagraphAcquisitionInput,
+  options: ParagraphAcquisitionOptions,
+  continuation?: Parameters<typeof measureParagraph>[5],
+): string {
+  const layoutServices = options.environment.layoutServices;
+  const verticalGlyphMeasurement = options.environment.verticalGlyphMeasurement;
+  const hasAnchoredPayload = paragraph.runs.some(anchoredPayloadRun);
+  const hasCompleteTextBox = paragraph.runs.some((run) =>
+    run.type === 'shape' && run.textBoxInput?.kind === 'complete');
+  const anchorFramesAffectMeasurement = hasAnchoredPayload || options.exclusions.length > 0;
+  const {
+    wrap,
+    ...plainPlacement
+  } = options.placement;
+  const context = options.context;
+  const environment = options.environment;
+  // Fixed-order tuples avoid the recursive generic fingerprint cost on this hot
+  // path. A different property insertion order may conservatively miss for the
+  // explicitly JSON-valued geometry below, but can never alias different facts.
+  return `paragraph-acquisition-v1:${JSON.stringify([
+    options.id,
+    [options.source.story, options.source.storyInstance, options.source.path],
+    options.flowDomainId,
+    options.ordinaryFlow,
+    [
+      plainPlacement.startYPt,
+      plainPlacement.paragraphXPt,
+      plainPlacement.availableWidthPt,
+      plainPlacement.maximumYPt,
+      plainPlacement.suppressSpaceBefore,
+      wrap ? cache.objectIdentity(wrap) : null,
+    ],
+    [
+      context.lineGrid.active,
+      context.lineGrid.pitchPt,
+      context.characterGrid.active,
+      context.characterGrid.deltaPt,
+      context.physicalIndentLeftPt,
+      context.physicalIndentRightPt,
+      context.firstIndentPt,
+      context.lineSpacing
+        ? [
+            context.lineSpacing.value,
+            context.lineSpacing.rule,
+            context.lineSpacing.explicit ?? null,
+          ]
+        : null,
+      context.spaceBeforePt,
+      context.spaceAfterPt,
+      context.baseRtl,
+      context.isJustified,
+      context.stretchLastLine,
+      context.tabStops.map((stop) => [stop.pos, stop.alignment, stop.leader]),
+      context.hasRuby,
+      context.hasEastAsianText,
+      [
+        context.kinsoku.enabled,
+        [...context.kinsoku.lineStartForbidden].sort((left, right) => left - right),
+        [...context.kinsoku.lineEndForbidden].sort((left, right) => left - right),
+      ],
+      context.defaultTabPt,
+      context.numberingMarkerGeometry
+        ? JSON.stringify(context.numberingMarkerGeometry)
+        : null,
+      context.mathDefJc ?? null,
+    ],
+    [
+      cache.objectIdentity(options.measurer.context),
+      cache.objectIdentity(options.measurer.fontFamilyClasses),
+    ],
+    [
+      environment.pageIndex,
+      environment.totalPages,
+      environment.displayPageNumber ?? null,
+      environment.pageNumberFormat ?? null,
+      environment.currentDateMs ?? null,
+      environment.noteNumbers
+        ? [...environment.noteNumbers.entries()]
+          .sort(([left], [right]) => left.localeCompare(right))
+        : null,
+      environment.noteReferenceNumber ?? null,
+      environment.verticalCJK ?? null,
+      environment.verticalPageFrame ?? null,
+      environment.documentHasEastAsianText,
+      environment.useFeLayout ?? null,
+      environment.resolvedLocalFonts
+        ? cache.objectIdentity(environment.resolvedLocalFonts)
+        : null,
+      layoutServices?.text.fingerprint ?? null,
+      layoutServices?.images.fingerprint ?? null,
+      layoutServices?.math.fingerprint ?? null,
+      layoutServices?.verticalGlyphFingerprint ?? null,
+      verticalGlyphMeasurement?.fingerprint ?? null,
+    ],
+    JSON.stringify(options.exclusions),
+    hasAnchoredPayload ? JSON.stringify(options.anchorCollisions ?? []) : null,
+    continuation ? JSON.stringify(continuation) : null,
+    options.paragraphBorderEdges
+      ? [options.paragraphBorderEdges.top, options.paragraphBorderEdges.bottom]
+      : null,
+    options.trailingExtentPt ?? null,
+    options.containerShading ?? null,
+    options.continuesFromPrevious ?? null,
+    options.sourceRangeStart ?? null,
+    anchorFramesAffectMeasurement ? JSON.stringify(options.anchorFrames ?? null) : null,
+    hasAnchoredPayload ? JSON.stringify(options.anchorCellBounds ?? null) : null,
+    hasCompleteTextBox && options.acquireCompleteStory
+      ? cache.objectIdentity(options.acquireCompleteStory)
+      : null,
+  ])}`;
+}
+
 /** @internal Acquires the measurement and retained layout as one final candidate. */
 export function acquireParagraphResult(
   paragraph: ParagraphAcquisitionInput,
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  const cache = options.environment.layoutServices
+    ? paragraphAcquisitionCacheOf(options.environment.layoutServices)
+    : undefined;
+  const cacheKey = cache
+    ? paragraphAcquisitionCacheKey(cache, paragraph, options, continuation)
+    : undefined;
+  const cached = cacheKey === undefined
+    ? undefined
+    : cache!.get(paragraph, cacheKey) as AcquiredParagraphResult | undefined;
+  if (cached) return cached;
   const externallyOwnedOccurrenceIds = externalExclusionOccurrenceIds(options.exclusions);
   const occurrenceIds = new Set(paragraph.runs.flatMap((run) =>
     anchoredPayloadRun(run) ? [run.anchorAcquisitionInput!.occurrenceId] : []));
@@ -3513,7 +3641,9 @@ export function acquireParagraphResult(
       // geometry orbit from consuming unbounded work.
       limit: 16,
     }).value;
-    return Object.freeze({ measured: result.measured, layout: result.layout });
+    const acquired = Object.freeze({ measured: result.measured, layout: result.layout });
+    if (cacheKey !== undefined) cache!.set(paragraph, cacheKey, acquired);
+    return acquired;
   } catch (error) {
     if (error instanceof ExactConvergenceError) {
       throw new ParagraphAnchorReflowNonConvergenceError(
