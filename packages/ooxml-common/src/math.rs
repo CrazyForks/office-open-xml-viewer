@@ -26,11 +26,7 @@ pub enum MathNode {
         style: String,
         /// ECMA-376 §22.1.2.94 `m:scr`; private parser-to-renderer wire so the
         /// migration does not expand the published `MathNode` API.
-        #[serde(
-            rename = "__script",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(rename = "__script", default, skip_serializing_if = "Option::is_none")]
         script: Option<String>,
     },
     Fraction {
@@ -806,11 +802,17 @@ mod tests {
                 _ => panic!("expected math run"),
             })
             .collect();
-        assert_eq!(scripts, [Some("script"), Some("fraktur"), Some("double-struck")]);
+        assert_eq!(
+            scripts,
+            [Some("script"), Some("fraktur"), Some("double-struck")]
+        );
         let json = serde_json::to_string(&nodes).unwrap();
         assert!(json.contains(r#""__script":"script""#), "json: {json}");
         assert!(json.contains(r#""__script":"fraktur""#), "json: {json}");
-        assert!(json.contains(r#""__script":"double-struck""#), "json: {json}");
+        assert!(
+            json.contains(r#""__script":"double-struck""#),
+            "json: {json}"
+        );
     }
 
     // ── §22.1.2.81 m:phant — previously flattened, leaking the base ─────────────

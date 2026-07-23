@@ -2509,12 +2509,13 @@ fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
     // (Word's anchored shapes paragraph at the cover commonly does this
     // to force the cover onto its own page; the trailing empty chunk
     // would otherwise emit an extra blank paragraph + page break).
-    let (chunks, mut boundary_chunks, seps, trailing_seps): (
+    type SplitParagraphChunks = (
         Vec<Vec<DocRun>>,
         Vec<Vec<ComplexFieldBoundaryWire>>,
         Vec<ParaPiece>,
         Vec<ParaPiece>,
-    ) = {
+    );
+    let (chunks, mut boundary_chunks, seps, trailing_seps): SplitParagraphChunks = {
         let mut c = chunks;
         let mut b = boundary_chunks;
         let mut s = seps;
