@@ -3059,6 +3059,7 @@ export class XlsxViewer implements ZoomableViewer {
     // Pre-IX9 these stepped ±0.1 linearly.
     const mkBtn = (glyph: string, label: string, step: () => void): HTMLButtonElement => {
       const b = document.createElement('button');
+      b.type = 'button';
       b.textContent = glyph;
       b.setAttribute('aria-label', label);
       b.title = label;
