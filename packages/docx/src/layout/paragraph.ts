@@ -3641,7 +3641,15 @@ export function acquireParagraphResult(
       // geometry orbit from consuming unbounded work.
       limit: 16,
     }).value;
-    const acquired = Object.freeze({ measured: result.measured, layout: result.layout });
+    // A cache hit may cross convergence passes. Retain an immutable measurement
+    // envelope without recursively freezing caller-owned capabilities such as
+    // the wrap oracle referenced by placement.
+    const immutableMeasured: MeasuredParagraph = Object.freeze({
+      ...result.measured,
+      lines: Object.freeze(result.measured.lines.map((line) => Object.freeze({ ...line }))),
+      placement: Object.freeze({ ...result.measured.placement }),
+    });
+    const acquired = Object.freeze({ measured: immutableMeasured, layout: result.layout });
     if (cacheKey !== undefined) cache!.set(paragraph, cacheKey, acquired);
     return acquired;
   } catch (error) {

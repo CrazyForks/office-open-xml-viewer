@@ -156,6 +156,10 @@ describe('paragraph acquisition cache', () => {
 
     expect(second).toBe(first);
     expect(Object.isFrozen(second)).toBe(true);
+    expect(Object.isFrozen(second.measured)).toBe(true);
+    expect(Object.isFrozen(second.measured.lines)).toBe(true);
+    expect(Object.isFrozen(second.measured.placement)).toBe(true);
+    for (const line of second.measured.lines) expect(Object.isFrozen(line)).toBe(true);
 
     const otherScope = scopedServices();
     expect(acquireParagraphResult(input, options(otherScope))).not.toBe(first);
