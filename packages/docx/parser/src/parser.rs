@@ -14,10 +14,10 @@ use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
 use zip::ZipArchive;
 
-use crate::numbering::NumberingMap;
+use crate::numbering::{LevelDef, NumberingMap};
 use crate::styles::{
     apply_para, apply_run, merge_cond_layers, merge_tab_stops, merge_table_margin_layer,
-    parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, RawTblBorders, RunFmt, StyleMap,
+    parse_para_fmt, parse_run_fmt, CondFmt, EdgeBorder, ParaFmt, RawTblBorders, RunFmt, StyleMap,
 };
 use crate::types::*;
 use crate::xml_util::*;
@@ -3427,6 +3427,68 @@ fn parse_paragraph_cond_at_depth(
     )
 }
 
+/// Resolve the three paragraph-indent axes when a numbering level is active.
+///
+/// ECMA-376 §§17.7.2, 17.7.8.1 and 17.9.22 place style-origin numbering below
+/// the paragraph style, but place directly selected numbering and its associated
+/// level properties in the final direct-formatting layer. A direct `w:ind`
+/// remains highest in both cases. Keeping this cascade shared prevents the body
+/// paragraph and the stable text-box legacy projection from drifting apart.
+fn resolve_numbered_indent_axes(
+    direct: &ParaFmt,
+    paragraph_style: &ParaFmt,
+    lower_layers: &ParaFmt,
+    level: &LevelDef,
+    direct_numbering: bool,
+) -> (f64, f64, f64) {
+    let level_left = level.indent_left_authored.then_some(level.indent_left);
+    let level_first = level.indent_first_authored.then_some(level.indent_first);
+
+    if direct_numbering {
+        (
+            direct
+                .indent_left
+                .or(level_left)
+                .or(paragraph_style.indent_left)
+                .or(lower_layers.indent_left)
+                .unwrap_or(level.indent_left),
+            direct
+                .indent_first
+                .or(level_first)
+                .or(paragraph_style.indent_first)
+                .or(lower_layers.indent_first)
+                .unwrap_or(level.indent_first),
+            direct
+                .indent_right
+                .or(level.indent_right)
+                .or(paragraph_style.indent_right)
+                .or(lower_layers.indent_right)
+                .unwrap_or(0.0),
+        )
+    } else {
+        (
+            direct
+                .indent_left
+                .or(paragraph_style.indent_left)
+                .or(level_left)
+                .or(lower_layers.indent_left)
+                .unwrap_or(level.indent_left),
+            direct
+                .indent_first
+                .or(paragraph_style.indent_first)
+                .or(level_first)
+                .or(lower_layers.indent_first)
+                .unwrap_or(level.indent_first),
+            direct
+                .indent_right
+                .or(paragraph_style.indent_right)
+                .or(level.indent_right)
+                .or(lower_layers.indent_right)
+                .unwrap_or(0.0),
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_paragraph_cond_at_depth_with_diagnostics(
     node: roxmltree::Node,
@@ -3453,9 +3515,6 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     let (mut base_para, base_run) =
         style_map.resolve_para_cond(explicit_style_id.as_deref(), table_style_id, cond);
     let paragraph_style = style_map.resolve_paragraph_style_layer(explicit_style_id.as_deref());
-    let style_indent_left = paragraph_style.indent_left;
-    let style_indent_first = paragraph_style.indent_first;
-    let style_indent_right = paragraph_style.indent_right;
     let direct_numbering = ppr_node.and_then(|ppr| child_w(ppr, "numPr")).is_some();
 
     // Apply direct paragraph formatting overrides.
@@ -3478,20 +3537,17 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     // indent is honored even when numbering is removed (the numId=0 case below); an
     // inherited indent is not. Captured for all three axes (start/end/first-line) so the
     // de-list drop is symmetric for LTR and RTL.
-    let mut direct_indent_left: Option<f64> = None;
-    let mut direct_indent_first: Option<f64> = None;
-    let mut direct_indent_right: Option<f64> = None;
+    let direct_para = ppr_node.map(parse_para_fmt).unwrap_or_default();
+    let direct_indent_left = direct_para.indent_left;
+    let direct_indent_first = direct_para.indent_first;
+    let direct_indent_right = direct_para.indent_right;
     if let Some(ppr) = ppr_node {
-        let direct = parse_para_fmt(ppr);
-        direct_indent_left = direct.indent_left;
-        direct_indent_first = direct.indent_first;
-        direct_indent_right = direct.indent_right;
         // Layer the paragraph's DIRECT pPr over its resolved style. Reuse the
         // canonical style-cascade merge (`apply_para`) so the two paths can never
         // drift: an earlier hand-written copy here omitted para_borders / shading /
         // pageBreakBefore / contextualSpacing / keepNext / keepLines / widowControl,
         // dropping every DIRECT pBdr (sample-14's full-width references rule).
-        apply_para(&mut base_para, &direct);
+        apply_para(&mut base_para, &direct_para);
         if let Some(rpr) = child_w(ppr, "rPr") {
             let direct_run = parse_run_fmt(rpr);
             apply_direct_run(&mut mark_run, &direct_run);
@@ -3507,7 +3563,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     // A de-listed paragraph (numId=0, see the indent_left/first resolution below) drops
     // its inherited END indent too, honoring only a direct one — symmetric with the
     // start side so an RTL list item de-lists consistently.
-    let indent_right = if base_para.num_id == Some(0) {
+    let fallback_indent_right = if base_para.num_id == Some(0) {
         direct_indent_right.unwrap_or(0.0)
     } else {
         base_para.indent_right.unwrap_or(0.0)
@@ -3650,36 +3706,14 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     // style layer, so it cannot overwrite document/table/paragraph formatting.
     // When no level resolves, a de-listed paragraph (numId=0) keeps only its direct
     // ind and a plain paragraph keeps its style/direct (base) ind.
-    let (indent_left, indent_first) = if let Some(l) = level {
-        let level_left = l.indent_left_authored.then_some(l.indent_left);
-        let level_first = l.indent_first_authored.then_some(l.indent_first);
-        if direct_numbering {
-            (
-                direct_indent_left
-                    .or(level_left)
-                    .or(style_indent_left)
-                    .or(base_para.indent_left)
-                    .unwrap_or(l.indent_left),
-                direct_indent_first
-                    .or(level_first)
-                    .or(style_indent_first)
-                    .or(base_para.indent_first)
-                    .unwrap_or(l.indent_first),
-            )
-        } else {
-            (
-                direct_indent_left
-                    .or(style_indent_left)
-                    .or(level_left)
-                    .or(base_para.indent_left)
-                    .unwrap_or(l.indent_left),
-                direct_indent_first
-                    .or(style_indent_first)
-                    .or(level_first)
-                    .or(base_para.indent_first)
-                    .unwrap_or(l.indent_first),
-            )
-        }
+    let (indent_left, indent_first, indent_right) = if let Some(l) = level {
+        resolve_numbered_indent_axes(
+            &direct_para,
+            &paragraph_style,
+            &base_para,
+            l,
+            direct_numbering,
+        )
     } else if base_para.num_id == Some(0) {
         // `numId=0` explicitly removes numbering (ECMA-376 §17.3.1.19 / §17.9.18). That
         // drops the NUMBERING LEVEL's indent (handled by `numbering` being None here).
@@ -3700,31 +3734,15 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         (
             direct_indent_left.unwrap_or(0.0),
             direct_indent_first.unwrap_or(0.0),
+            direct_indent_right.unwrap_or(0.0),
         )
     } else {
         (
             base_para.indent_left.unwrap_or(0.0),
             base_para.indent_first.unwrap_or(0.0),
+            fallback_indent_right,
         )
     };
-    // The end-side axis (w:ind@right ≡ end) follows the same ladder: direct end
-    // indent, else the level's end indent (an RTL list carries its indent there,
-    // e.g. w:right="720" w:hanging="360"), else the style/de-list (base) value
-    // already resolved into `indent_right` above.
-    let numbered_indent_right = level.and_then(|l| {
-        if direct_numbering {
-            l.indent_right
-                .or(style_indent_right)
-                .or(base_para.indent_right)
-        } else {
-            style_indent_right
-                .or(l.indent_right)
-                .or(base_para.indent_right)
-        }
-    });
-    let indent_right = direct_indent_right
-        .or(numbered_indent_right)
-        .unwrap_or(indent_right);
 
     // Parse runs
     let mut runs = vec![];
@@ -8272,13 +8290,16 @@ fn extract_simple_paragraph_text(
             .or_else(|| theme.default_east_asia_font_ref())
     };
 
-    let style_id = child_w(p, "pPr")
+    let ppr_node = child_w(p, "pPr");
+    let style_id = ppr_node
         .and_then(|ppr| child_w(ppr, "pStyle"))
         .and_then(|s| attr_w(s, "val"));
     // ECMA-376 §17.7.2 — resolve the paragraph style chain once. The
     // paragraph half feeds layout below; the run half is the docDefaults +
     // paragraph-style rPr baseline for every run in this paragraph.
     let (style_para, base_run) = style_map.resolve_para(style_id.as_deref(), None);
+    let paragraph_style = style_map.resolve_paragraph_style_layer(style_id.as_deref());
+    let direct_numbering = ppr_node.and_then(|ppr| child_w(ppr, "numPr")).is_some();
     let resolve_run_fmt = |rpr_node: Option<roxmltree::Node>| -> RunFmt {
         let mut fmt = base_run.clone();
         if let Some(rpr) = rpr_node {
@@ -8531,7 +8552,7 @@ fn extract_simple_paragraph_text(
     // as the docx BODY renderer does (Word honors a signed hanging first-line
     // list-independently), unlike the pptx/xlsx shape paths which clamp because
     // they have no list marker to hang.
-    let direct_ind = child_w(p, "pPr").map(parse_para_fmt).unwrap_or_default();
+    let direct_ind = ppr_node.map(parse_para_fmt).unwrap_or_default();
     let numbering = direct_ind.num_id.or(style_para.num_id).and_then(|num_id| {
         if num_id == 0 {
             return None;
@@ -8624,16 +8645,13 @@ fn extract_simple_paragraph_text(
     let level = numbering
         .as_ref()
         .and_then(|num| num_map.get_level(num.num_id, num.level));
-    let (indent_left, indent_first) = if let Some(l) = level {
-        (
-            direct_ind
-                .indent_left
-                .or(style_para.indent_left)
-                .unwrap_or(l.indent_left),
-            direct_ind
-                .indent_first
-                .or(style_para.indent_first)
-                .unwrap_or(l.indent_first),
+    let (indent_left, indent_first, indent_right) = if let Some(l) = level {
+        resolve_numbered_indent_axes(
+            &direct_ind,
+            &paragraph_style,
+            &style_para,
+            l,
+            direct_numbering,
         )
     } else {
         (
@@ -8645,13 +8663,12 @@ fn extract_simple_paragraph_text(
                 .indent_first
                 .or(style_para.indent_first)
                 .unwrap_or(0.0),
+            direct_ind
+                .indent_right
+                .or(style_para.indent_right)
+                .unwrap_or(0.0),
         )
     };
-    let indent_right = direct_ind
-        .indent_right
-        .or(style_para.indent_right)
-        .or_else(|| level.and_then(|l| l.indent_right))
-        .unwrap_or(0.0);
 
     // ECMA-376 §17.3.1.33 — the txbxContent paragraph's own `<w:spacing>` is
     // reserved INSIDE the text box (twips → pt). Word offsets the text down by
@@ -20351,6 +20368,148 @@ mod txbx_inline_image_tests {
         assert_eq!(numbering.level, 0);
         assert!((block.indent_left - 36.0).abs() < 1e-6);
         assert!((block.indent_first + 36.0).abs() < 1e-6);
+    }
+
+    /// ECMA-376 §§17.7.2, 17.7.8.1, 17.9.22 — when a text-box paragraph
+    /// directly selects numbering, the authored numbering-level paragraph
+    /// properties belong to the final direct-formatting layer. They therefore
+    /// override paragraph-style indents, just as they do for body paragraphs.
+    #[test]
+    fn extract_simple_paragraph_text_direct_numbering_indents_override_style() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Indented">
+                <w:pPr><w:ind w:left="840" w:right="360" w:firstLine="240"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let paragraph = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr>
+                <w:pStyle w:val="Indented"/>
+                <w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr>
+              </w:pPr>
+              <w:r><w:t>Numbered text</w:t></w:r>
+            </w:p>"#,
+        )
+        .unwrap();
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:abstractNum w:abstractNumId="3">
+                <w:lvl w:ilvl="0">
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  <w:pPr><w:ind w:left="360" w:right="480" w:hanging="360"/></w:pPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="3"/></w:num>
+            </w:numbering>"#;
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let block = super::extract_simple_paragraph_text(
+            &styles,
+            &mut num_map,
+            paragraph.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("numbered text-box paragraph yields text");
+
+        assert!((block.indent_left - 18.0).abs() < 1e-6);
+        assert!((block.indent_right - 24.0).abs() < 1e-6);
+        assert!((block.indent_first + 18.0).abs() < 1e-6);
+    }
+
+    /// Style-origin numbering is applied before the paragraph style
+    /// (§§17.7.2, 17.7.8.1), so the style's own per-axis indents win.
+    #[test]
+    fn extract_simple_paragraph_text_style_indents_override_style_numbering() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Numbered">
+                <w:pPr>
+                  <w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr>
+                  <w:ind w:left="840" w:right="360" w:firstLine="240"/>
+                </w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let paragraph = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr><w:pStyle w:val="Numbered"/></w:pPr>
+              <w:r><w:t>Numbered text</w:t></w:r>
+            </w:p>"#,
+        )
+        .unwrap();
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:abstractNum w:abstractNumId="3">
+                <w:lvl w:ilvl="0">
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                  <w:pPr><w:ind w:left="360" w:right="480" w:hanging="360"/></w:pPr>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="3"/></w:num>
+            </w:numbering>"#;
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let block = super::extract_simple_paragraph_text(
+            &styles,
+            &mut num_map,
+            paragraph.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("numbered text-box paragraph yields text");
+
+        assert!((block.indent_left - 42.0).abs() < 1e-6);
+        assert!((block.indent_right - 18.0).abs() < 1e-6);
+        assert!((block.indent_first - 12.0).abs() < 1e-6);
+    }
+
+    /// A level with no authored `w:ind` carries only the parser's legacy depth
+    /// fallback. That fallback must not displace real paragraph-style values,
+    /// even when the paragraph selects the numbering directly.
+    #[test]
+    fn extract_simple_paragraph_text_ignores_unauthored_numbering_indent_fallback() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:style w:type="paragraph" w:styleId="Indented">
+                <w:pPr><w:ind w:left="840" w:firstLine="240"/></w:pPr>
+              </w:style>
+            </w:styles>"#,
+        );
+        let paragraph = roxmltree::Document::parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:pPr>
+                <w:pStyle w:val="Indented"/>
+                <w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr>
+              </w:pPr>
+              <w:r><w:t>Numbered text</w:t></w:r>
+            </w:p>"#,
+        )
+        .unwrap();
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:abstractNum w:abstractNumId="3">
+                <w:lvl w:ilvl="0">
+                  <w:numFmt w:val="bullet"/>
+                  <w:lvlText w:val="•"/>
+                </w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="3"/></w:num>
+            </w:numbering>"#;
+        let mut num_map = NumberingMap::parse(numbering, &HashMap::new());
+
+        let block = super::extract_simple_paragraph_text(
+            &styles,
+            &mut num_map,
+            paragraph.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("numbered text-box paragraph yields text");
+
+        assert!((block.indent_left - 42.0).abs() < 1e-6);
+        assert!((block.indent_first - 12.0).abs() < 1e-6);
     }
 
     #[test]
