@@ -11,6 +11,7 @@ pub mod chart;
 pub mod color;
 pub mod depth;
 pub mod drawing;
+mod drawing_compatibility;
 pub mod fill;
 pub mod math;
 pub mod mce;

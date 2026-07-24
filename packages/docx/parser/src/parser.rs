@@ -24061,9 +24061,9 @@ mod vml_pict_tests {
 mod wgp_shape_transform_tests {
     use super::*;
 
-    /// Annex L §L.4.7.4–§L.4.7.5: horizontal/vertical scales are multiplied on
-    /// their authored axes; child rotation is summed independently. The full
-    /// group transform maps the child's original centre.
+    /// Word applies a non-uniform group scale after an exact child quarter turn,
+    /// so the parent scale axes exchange against the child's unrotated frame.
+    /// The full group transform still maps the child's original centre.
     #[test]
     fn quarter_turned_child_composes_non_uniform_group_scale_about_its_center() {
         let xml = r#"
@@ -24102,17 +24102,17 @@ mod wgp_shape_transform_tests {
         let shape = &shapes[0];
         assert!((shape.rotation - 90.0).abs() < 1e-6);
         assert!(
-            (shape.width_pt - 10.0).abs() < 1e-6,
+            (shape.width_pt - 20.0).abs() < 1e-6,
             "width={}",
             shape.width_pt
         );
         assert!(
-            (shape.height_pt - 4.0).abs() < 1e-6,
+            (shape.height_pt - 2.0).abs() < 1e-6,
             "height={}",
             shape.height_pt
         );
         assert!(
-            (shape.anchor_y_pt - 8.0).abs() < 1e-6,
+            (shape.anchor_y_pt - 9.0).abs() < 1e-6,
             "y={}",
             shape.anchor_y_pt
         );

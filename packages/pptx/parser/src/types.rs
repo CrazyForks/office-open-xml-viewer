@@ -1352,8 +1352,8 @@ mod group_transform_tests {
             ..Default::default()
         });
 
-        assert_eq!((mapped.x, mapped.y), (0, 101_600));
-        assert_eq!((mapped.cx, mapped.cy), (127_000, 50_800));
+        assert_eq!((mapped.x, mapped.y), (-63_500, 114_300));
+        assert_eq!((mapped.cx, mapped.cy), (254_000, 25_400));
         assert_eq!(mapped.rot, 90.0);
     }
 

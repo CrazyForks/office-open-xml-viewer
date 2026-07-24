@@ -9,6 +9,8 @@
 
 use roxmltree::Node;
 
+use crate::drawing_compatibility::office_group_scale_for_leaf_rotation;
+
 /// Parse an `xsd:boolean` attribute value. Per the W3C XML Schema lexical
 /// space, the four valid literals are `true` / `false` / `1` / `0`; any other
 /// text is not a valid boolean and yields `None` (callers apply the schema
@@ -161,13 +163,16 @@ impl DrawingGroupTransform {
         )
     }
 
-    /// Apply the Annex L nested-transform rendering procedure to a leaf's
-    /// authored bounding box and own rotation/flip.
+    /// Apply the Annex L nested-transform rendering procedure plus the isolated
+    /// Office quarter-turn compatibility rule to a leaf's authored bounding box
+    /// and own rotation/flip.
     pub fn apply_rect(self, rect: DrawingRect) -> DrawingRect {
         let (center_x, center_y) =
             self.map_point(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
-        let mapped_width = rect.width * self.scale_x;
-        let mapped_height = rect.height * self.scale_y;
+        let (width_scale, height_scale) =
+            office_group_scale_for_leaf_rotation(self.scale_x, self.scale_y, rect.rotation_degrees);
+        let mapped_width = rect.width * width_scale;
+        let mapped_height = rect.height * height_scale;
         DrawingRect {
             x: center_x - mapped_width / 2.0,
             y: center_y - mapped_height / 2.0,
@@ -223,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn group_transform_keeps_scale_axes_independent_of_child_rotation() {
+    fn office_group_scale_follows_a_quarter_turned_child_axes() {
         let transform = DrawingGroupTransform::from_group(DrawingGroupSpec {
             off_x: 0.0,
             off_y: 0.0,
@@ -247,10 +252,10 @@ mod tests {
             flip_v: false,
         });
 
-        assert!((mapped.x - 0.0).abs() < 1e-6);
-        assert!((mapped.y - 101_600.0).abs() < 1e-6);
-        assert!((mapped.width - 127_000.0).abs() < 1e-6);
-        assert!((mapped.height - 50_800.0).abs() < 1e-6);
+        assert!((mapped.x + 63_500.0).abs() < 1e-6);
+        assert!((mapped.y - 114_300.0).abs() < 1e-6);
+        assert!((mapped.width - 254_000.0).abs() < 1e-6);
+        assert!((mapped.height - 25_400.0).abs() < 1e-6);
         assert!((mapped.rotation_degrees - 90.0).abs() < 1e-6);
     }
 

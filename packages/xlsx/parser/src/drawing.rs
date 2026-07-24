@@ -4196,10 +4196,10 @@ mod group_transform_contract_tests {
 
         assert_eq!(shapes.len(), 1);
         let shape = &shapes[0];
-        assert!((shape.x - 0.0).abs() < 1e-9);
-        assert!((shape.y - 0.4).abs() < 1e-9);
-        assert!((shape.w - 1.0).abs() < 1e-9);
-        assert!((shape.h - 0.2).abs() < 1e-9);
+        assert!((shape.x + 0.5).abs() < 1e-9);
+        assert!((shape.y - 0.45).abs() < 1e-9);
+        assert!((shape.w - 2.0).abs() < 1e-9);
+        assert!((shape.h - 0.1).abs() < 1e-9);
         assert_eq!(shape.rot, 90.0);
     }
 
