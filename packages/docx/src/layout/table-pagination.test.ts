@@ -1098,8 +1098,8 @@ describe('retained table pagination', () => {
 
   it('keeps vMerge source roles immutable when a page boundary cuts the span', () => {
     const source = acquisition([
-      row(0, 60, { verticalMerge: 'restart' }),
-      row(1, 60, { verticalMerge: 'continue' }),
+      row(0, 60, { verticalMerge: 'restart', heightRule: 'exact' }),
+      row(1, 60, { verticalMerge: 'continue', heightRule: 'exact' }),
     ]);
 
     const first = take(source, 60);
@@ -1109,6 +1109,30 @@ describe('retained table pagination', () => {
     expect(second.fragment?.rows[0]?.cells[0]?.verticalMerge).toBe('continue');
     expect(second.fragment?.rows[0]?.cells[0]?.visualMergeOwnership).toBe('continuation');
     expect(source.input.rows[1]?.cells[0]?.verticalMerge).toBe('continue');
+  });
+
+  it('admits a complete vMerge table by its resolved row tracks', () => {
+    const source = acquisition([
+      row(0, 20, {
+        verticalMerge: 'restart',
+        paragraph: paragraph('merged-owner', [20, 20, 20, 20]),
+      }),
+      row(1, 20, { verticalMerge: 'continue' }),
+      row(2, 20, { verticalMerge: 'continue' }),
+      row(3, 20, { verticalMerge: 'continue' }),
+      row(4, 20),
+    ]);
+
+    const result = take(
+      source,
+      source.layout.advancePt,
+      startTableFragmentCursor(),
+      { freshPageHeightPt: source.layout.advancePt },
+    );
+
+    expect(result.fragment?.advancePt).toBeCloseTo(source.layout.advancePt, 6);
+    expect(result.fragment?.rows).toHaveLength(source.input.rows.length);
+    expect(result.nextCursor).toBeNull();
   });
 
   it('does not treat exact height or repeated-header as implicit cantSplit', () => {

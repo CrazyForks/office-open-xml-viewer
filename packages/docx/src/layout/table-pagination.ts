@@ -1033,6 +1033,12 @@ export function takeTableFragment(
 
   let nextCursor: TableFragmentCursor | null = cursor;
   let rowIndex = cursor.rowIndex;
+  const retainedRemainderFits = cursor.rowFragmentIndex === 0
+    && cursor.cells.length === 0
+    && source.layout.rows
+      .slice(cursor.rowIndex)
+      .reduce((heightPt, row) => heightPt + Math.max(0, row.heightPt), 0)
+      <= availablePt + EPSILON_PT;
   let followsCompletedPartialRow = false;
   while (rowIndex < source.input.rows.length) {
     const ownership: TableFragmentOwnership = 'source';
@@ -1075,7 +1081,12 @@ export function takeTableFragment(
       nextParagraphId: floatParagraphId,
     };
     const row = preparedRow.row;
-    const wholeHeightPt = followsCompletedPartialRow
+    // If every retained physical track fits, admit the canonical table by those
+    // tracks. A vMerge owner's contentHeightPt spans its following tracks and
+    // must not be charged again. When the remainder does cross the boundary,
+    // keep the conservative content-aware height so partial rows and page-local
+    // merge continuation ownership are derived before materialization.
+    const wholeHeightPt = retainedRemainderFits || followsCompletedPartialRow
       ? paginationRowTrackHeightForOccurrence(source, row, rowIndex, context)
       : paginationRowHeightForOccurrence(source, row, rowIndex, context);
     if (canTakeWhole) {
