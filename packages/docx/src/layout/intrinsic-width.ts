@@ -6,7 +6,6 @@ import {
   buildSegments,
   hasCJKBreakOpportunity,
   layoutLines,
-  punctuationCompressionTotalPt,
   segAdvanceWidth,
   slicedPunctuationCompressions,
   splitTextForLayout,
