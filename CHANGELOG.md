@@ -4,6 +4,19 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.73.1 — 2026-07-24
+
+Patch. Prevents compressed full-width punctuation from colliding with the
+following glyph in horizontal DOCX text.
+
+- **docx:** bound document-level full-width punctuation compression by both
+  adjacent glyph ink extents. A following glyph that extends left of its
+  advance origin can no longer overlap a closing parenthesis or other eligible
+  punctuation, including across source-run formatting boundaries. The
+  collision constraint is resolved once during layout with a linear grapheme
+  pass; paint remains measurement-free and vertical text retains its separate
+  geometry path. (§17.15.1.18, §17.18.7; [MS-OE376] §2.1.562; #1094)
+
 ## 0.73.0 — 2026-07-24
 
 Minor. Completes the DOCX migration to one immutable layout-to-paint pipeline,
