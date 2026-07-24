@@ -1953,15 +1953,18 @@ function buildConcreteBodyLayoutKernel(
             const payloads = acquired.runs
               .map((run, runIndex) => ({ run, runIndex }))
               .filter((candidate): candidate is typeof candidate & {
-                run: Extract<typeof candidate.run, { type: 'image' | 'chart' | 'shape' }> & {
+                run: Extract<typeof candidate.run, {
+                  type: 'image' | 'chart' | 'shape' | 'unavailableDrawing';
+                }> & {
                   anchorAcquisitionInput: NonNullable<Extract<typeof candidate.run, {
-                    type: 'image' | 'chart' | 'shape';
+                    type: 'image' | 'chart' | 'shape' | 'unavailableDrawing';
                   }>['anchorAcquisitionInput']>;
                 };
               } => (
                 (candidate.run.type === 'image'
                   || candidate.run.type === 'chart'
-                  || candidate.run.type === 'shape')
+                  || candidate.run.type === 'shape'
+                  || candidate.run.type === 'unavailableDrawing')
                 && candidate.run.anchorAcquisitionInput?.occurrenceId === anchor.occurrenceId
               ))
               .sort((left, right) => (

@@ -119,6 +119,60 @@ const sameParagraphTextService: LayoutServices['text'] = {
 
 const sameParagraphOccurrenceId = 'anchor:body:body:0:same-paragraph';
 
+function acquireRuns(
+  runs: readonly unknown[],
+  pathIndex: number,
+  id: string,
+) {
+  const paragraph = {
+    alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
+    runs,
+  } as unknown as DocParagraph;
+  const runSource = { ...source, path: [pathIndex] } as const;
+  return acquireParagraphLayout(paragraphAcquisitionInput(paragraph, runSource), {
+    id,
+    source: runSource,
+    flowDomainId: 'body',
+    ordinaryFlow: true,
+    context: sameParagraphContext,
+    placement: {
+      startYPt: 10,
+      paragraphXPt: 10,
+      availableWidthPt: 100,
+      maximumYPt: 300,
+      suppressSpaceBefore: false,
+    },
+    measurer: { context: sameParagraphMeasureContext, fontFamilyClasses: {} },
+    environment: {
+      pageIndex: 0,
+      totalPages: 1,
+      pageWritingMode: 'horizontal-tb',
+      documentHasEastAsianText: false,
+      layoutServices: {
+        text: sameParagraphTextService,
+        images: {
+          fingerprint: 'images',
+          resolve: () => ({ widthPt: 30, heightPt: 20, mimeType: 'image/png' }),
+        },
+        math: {
+          fingerprint: 'math',
+          resolve: (resourceKey) => ({
+            resourceKey, widthEm: 1, ascentEm: .8, descentEm: .2, diagnostics: [],
+          }),
+        },
+      },
+    },
+    exclusions: [],
+    anchorFrames: {
+      page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+      margin: { xPt: 10, yPt: 10, widthPt: 180, heightPt: 280 },
+      column: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 280 },
+      pageParity: 'odd',
+    },
+  });
+}
+
 function acquireSameParagraph(
   anchorAcquisitionInput: AnchorAcquisitionInput,
   overrides: Readonly<{
@@ -213,6 +267,92 @@ const cases: ReadonlyArray<readonly [string, ParagraphPlacement | undefined, Inl
 ];
 
 describe('paragraph run resource projection', () => {
+  it('retains inline geometry and surrounding text without registering an unavailable resource', () => {
+    const node = acquireRuns([
+      sameParagraphTextRun('A'),
+      {
+        type: 'unavailableDrawing',
+        resourceKind: 'image',
+        widthPt: 24,
+        heightPt: 12,
+      },
+      sameParagraphTextRun('B'),
+    ], 4, 'unavailable-inline');
+
+    const placements = node.lines.flatMap((line) => line.placements);
+    const drawingPlacement = placements.find((placement) => placement.kind === 'drawing');
+    const textPlacements = placements.filter((placement) => placement.kind === 'text');
+
+    expect(drawingPlacement).toMatchObject({
+      kind: 'drawing',
+      bounds: { widthPt: 24, heightPt: 12 },
+      advancePt: 24,
+    });
+    expect(textPlacements.map((placement) => placement.kind === 'text' ? placement.text : ''))
+      .toEqual(['A', 'B']);
+    expect(textPlacements[1]?.origin.xPt).toBe(39);
+    expect(node.resources).toEqual([]);
+    expect(node.drawings).toHaveLength(1);
+    expect(node.drawings[0]).toMatchObject({
+      commands: [{ kind: 'noop' }],
+      diagnostics: [{
+        code: 'MISSING_RESOURCE',
+        severity: 'warning',
+        source: { story: 'body', storyInstance: 'body', path: [4, 1] },
+      }],
+    });
+    expect(Object.isFrozen(node.drawings[0]?.diagnostics)).toBe(true);
+    expect(JSON.stringify(node)).not.toContain('imagePath');
+  });
+
+  it('retains anchored placement and wrap geometry when the drawing resource is unavailable', () => {
+    const occurrenceId = 'unavailable-anchor';
+    const anchor = sameParagraphAnchor(occurrenceId, {
+      kind: 'square',
+      authoredKinds: ['wrapSquare'],
+      side: 'bothSides',
+      distances: validEdges(5, 6, 7, 8),
+      effectExtent: validEdges(2, 3, 4, 1),
+      polygon: null,
+    });
+    const node = acquireRuns([
+      {
+        type: 'anchorHost',
+        fontSize: 10,
+        fontFamily: 'Test Sans',
+        __anchorOccurrenceId: occurrenceId,
+      },
+      {
+        type: 'unavailableDrawing',
+        resourceKind: 'image',
+        widthPt: 30,
+        heightPt: 20,
+        __anchorAcquisition: anchor,
+      },
+      sameParagraphTextRun('abcdefghijklmnopqrstuvwxyzabcdefghi'),
+    ], 5, 'unavailable-anchor');
+
+    expect(node.resources).toEqual([]);
+    expect(node.drawings).toHaveLength(1);
+    expect(node.drawings[0]).toMatchObject({
+      flowBounds: { xPt: 92, yPt: 10, widthPt: 30, heightPt: 20 },
+      commands: [{ kind: 'noop' }],
+      diagnostics: [{
+        code: 'MISSING_RESOURCE',
+        severity: 'warning',
+        source: { story: 'body', storyInstance: 'body', path: [5, 1] },
+      }],
+      anchorLayer: {
+        occurrenceId: 'anchor:body:body:5:unavailable-anchor',
+      },
+    });
+    expect(node.exclusions[0]).toMatchObject({
+      anchorOccurrenceId: 'anchor:body:body:5:unavailable-anchor',
+      bounds: { xPt: 83, yPt: 3, widthPt: 48, heightPt: 38 },
+    });
+    expect(node.lines.length).toBeGreaterThan(1);
+  });
+
   it('retains upright physical orientation for an anchored image in a vertical page frame', () => {
     const anchor = sameParagraphAnchor(sameParagraphOccurrenceId, {
       kind: 'none', authoredKinds: ['wrapNone'], side: 'bothSides',

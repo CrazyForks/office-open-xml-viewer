@@ -7,6 +7,7 @@ import {
   hasCJKBreakOpportunity,
   layoutLines,
   segAdvanceWidth,
+  slicedPunctuationCompressions,
   splitTextForLayout,
   type LayoutLine,
   type LayoutSeg,
@@ -102,7 +103,6 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.fontRoute ?? null,
     segment.charScale ?? 1,
     segment.charSpacing ?? 0,
-    segment.punctuationCompressionPt ?? 0,
     segment.fitTextPerGapPx ?? null,
     segment.fitTextTrailingPadPx ?? null,
     segment.fitTextRegionIndex ?? null,
@@ -136,10 +136,21 @@ function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[
       && 'text' in segment
       && compatibleTextKey(previous) === compatibleTextKey(segment)
     ) {
+      const previousTextLength = previous.text.length;
       const text = previous.text + segment.text;
+      const punctuationCompressions = [
+        ...(previous.punctuationCompressions ?? []),
+        ...(segment.punctuationCompressions ?? []).map((compression) => ({
+          end: previousTextLength + compression.end,
+          adjustmentPt: compression.adjustmentPt,
+        })),
+      ];
       merged[merged.length - 1] = {
         ...previous,
         text,
+        punctuationCompressions: punctuationCompressions.length > 0
+          ? punctuationCompressions
+          : undefined,
         textShapeRequest: previous.textShapeRequest
           ? { ...previous.textShapeRequest, text }
           : undefined,
@@ -165,7 +176,17 @@ function measureTextRange(
     const overlapEnd = Math.min(end, piece.end);
     if (overlapStart >= overlapEnd) continue;
     const text = joinedText.slice(overlapStart, overlapEnd);
-    const candidate = { ...piece.segment, text };
+    const localStart = overlapStart - piece.start;
+    const localEnd = overlapEnd - piece.start;
+    const candidate = {
+      ...piece.segment,
+      text,
+      punctuationCompressions: slicedPunctuationCompressions(
+        piece.segment,
+        localStart,
+        localEnd,
+      ),
+    };
     if (candidate.textLayoutService && candidate.textShapeRequest) {
       const shaped = candidate.textLayoutService.shape({
         ...candidate.textShapeRequest,

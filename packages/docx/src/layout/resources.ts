@@ -3,6 +3,7 @@ import { stableFingerprint } from './fingerprint.js';
 import type { BodyElement, DocParagraph, DocRun, DocTable, DocxDocumentModel, ShapeRun } from '../types.js';
 import type { BodyLayoutInput } from './body-layout-input.js';
 import type { ProductionBodyModelGateway } from './production-body-layout.js';
+import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import type { MathNode } from '@silurus/ooxml-core';
 import { rasterExceedsBudget, sniffRasterDimensions } from '@silurus/ooxml-core';
 import { imageResourceKey, mathResourceKey } from './source-key.js';
@@ -173,6 +174,7 @@ export type PictureBulletSizeResolver = (
 export function documentImageMetadataRecords(
   doc: DocxDocumentModel,
   resolvePictureBulletSize?: PictureBulletSizeResolver,
+  acquisitionInputs?: BodyAcquisitionInputProjections,
 ): ImageMetadataRecord[] {
   const records: ImageMetadataRecord[] = [];
   const add = (source: SourceRef, imagePath: string, mimeType: string, widthPt: number, heightPt: number): void => {
@@ -221,7 +223,15 @@ export function documentImageMetadataRecords(
             );
           }
         }
-        element.runs.forEach((run, runIndex) => visitRun(run, { story, storyInstance, path: [...path, runIndex] }));
+        const paragraphSource = { story, storyInstance, path };
+        const authoredRuns = acquisitionInputs
+          ?.paragraphAcquisitionInput(element, paragraphSource).runs
+          ?? element.runs;
+        authoredRuns.forEach((run, runIndex) => {
+          if (run.type === 'image' || run.type === 'shape') {
+            visitRun(run, { ...paragraphSource, path: [...path, runIndex] });
+          }
+        });
       } else if (element.type === 'table') {
         visitTable(element, story, storyInstance, path);
       }

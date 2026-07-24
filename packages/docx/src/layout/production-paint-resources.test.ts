@@ -6,6 +6,8 @@ import {
   chartPaintResourceKey,
   createDocumentPaintResourceRegistry,
 } from './production-paint-resources.js';
+import { normalizeInternalDocumentModel } from '../parser-model.js';
+import { documentImageMetadataRecords } from './resources.js';
 
 function chartModel(): ChartModel {
   return {
@@ -101,5 +103,46 @@ describe('production paint resources', () => {
       partPath: 'word/media/bullet.gif', intrinsicSize: { widthPt: 6, heightPt: 7 },
     });
     expect(structuredClone(registry.descriptors)).toEqual(registry.descriptors);
+  });
+
+  it('addresses a valid image by authored order after an unavailable drawing', () => {
+    const doc = {
+      section: {},
+      headers: {},
+      footers: {},
+      body: [paragraph([{
+        type: 'unavailableDrawing',
+        resourceKind: 'image',
+        widthPt: 12,
+        heightPt: 8,
+      } as never, {
+        type: 'image',
+        imagePath: 'word/media/available.png',
+        mimeType: 'image/png',
+        widthPt: 24,
+        heightPt: 16,
+      }])],
+    } as DocxDocumentModel;
+    const normalized = normalizeInternalDocumentModel(doc);
+    const projections = normalized.bodyModelGateway.acquisitionInputs;
+    const metadata = documentImageMetadataRecords(
+      normalized.document,
+      undefined,
+      projections,
+    );
+    const registry = createDocumentPaintResourceRegistry(
+      normalized.document,
+      metadata,
+      projections,
+    );
+    const authoredKey = imageResourceKey(
+      { story: 'body', storyInstance: 'body', path: [0, 1] },
+      'word/media/available.png',
+    );
+
+    expect(registry.resolve(authoredKey, 'image')).toMatchObject({
+      partPath: 'word/media/available.png',
+      intrinsicSize: { widthPt: 24, heightPt: 16 },
+    });
   });
 });

@@ -14,6 +14,7 @@ import {
   type LineLayoutEnvironment,
   type WrapLayoutCtx,
 } from './line-layout.js';
+import type { ParagraphAcquisitionInput } from './layout/text.js';
 import type { DocParagraph } from './types.js';
 import type { WrapOracle } from './layout/float-wrap-oracle.js';
 import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
@@ -95,7 +96,7 @@ function snapParagraphLineToGrid(heightPt: number, grid: DocGridCtx): number {
 }
 
 export function measureParagraph(
-  paragraph: DocParagraph,
+  paragraph: DocParagraph | ParagraphAcquisitionInput,
   context: ParagraphLayoutContext,
   placement: ParagraphPlacement,
   measurer: TextMeasurer,

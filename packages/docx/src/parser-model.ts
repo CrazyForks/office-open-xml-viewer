@@ -33,6 +33,7 @@ import type {
   ComplexFieldBoundaryInput,
   TextFontSlotPresence,
   TextFontSlots,
+  UnavailableDrawingAcquisitionRun,
 } from './layout/text.js';
 import type { ParagraphAcquisitionInput, ParagraphAcquisitionRun } from './layout/text.js';
 import type { AnchorAcquisitionInput, InternalAnchorRunWire } from './layout/anchor-input.js';
@@ -121,6 +122,58 @@ export interface InternalDocParagraph extends DocParagraph {
   numbering: InternalNumberingInfo | null;
   paragraphMarkFontFacts?: InternalRunFontFacts;
   readonly __complexFieldBoundaries?: readonly InternalComplexFieldBoundaryWire[];
+}
+
+type UnavailableDrawingRunWire = Omit<
+  UnavailableDrawingAcquisitionRun,
+  'anchorAcquisitionInput'
+> & InternalAnchorRunWire;
+
+interface UnavailableDrawingSidecarEntry {
+  /** Insertion point in the stable public `runs` array. Equal insertion points
+   * retain parser order. */
+  readonly publicRunIndex: number;
+  readonly run: Readonly<UnavailableDrawingRunWire>;
+}
+
+/** Parser-only flow occurrences removed from the stable public document model.
+ * The normalized paragraph identity is the ownership boundary: acquisition can
+ * reconstruct the authored run order, while callers observing/serializing
+ * `DocxDocumentModel` see only the declared `DocRun` union. */
+const unavailableDrawingSidecars = new WeakMap<
+  DocParagraph,
+  readonly UnavailableDrawingSidecarEntry[]
+>();
+
+function unavailableDrawingEntries(
+  paragraph: Readonly<DocParagraph>,
+): readonly UnavailableDrawingSidecarEntry[] {
+  return unavailableDrawingSidecars.get(paragraph as DocParagraph) ?? [];
+}
+
+function paragraphRunsWithUnavailableDrawings(
+  paragraph: Readonly<DocParagraph>,
+): readonly Readonly<DocRun | UnavailableDrawingRunWire>[] {
+  const entries = unavailableDrawingEntries(paragraph);
+  if (entries.length === 0) {
+    return paragraph.runs as readonly Readonly<DocRun>[];
+  }
+  const runs: Readonly<DocRun | UnavailableDrawingRunWire>[] = [];
+  let entryIndex = 0;
+  for (let publicRunIndex = 0; publicRunIndex <= paragraph.runs.length; publicRunIndex += 1) {
+    while (entries[entryIndex]?.publicRunIndex === publicRunIndex) {
+      runs.push(entries[entryIndex]!.run);
+      entryIndex += 1;
+    }
+    if (publicRunIndex < paragraph.runs.length) {
+      runs.push(paragraph.runs[publicRunIndex]!);
+    }
+  }
+  return runs;
+}
+
+function paragraphHasUnavailableDrawing(paragraph: Readonly<DocParagraph>): boolean {
+  return unavailableDrawingEntries(paragraph).length > 0;
 }
 
 export interface InternalComplexFieldBoundaryWire {
@@ -760,22 +813,32 @@ export function publicAnchorBridge(
 
 function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
   const hostRelative = new Set(['paragraph', 'line', 'character']);
-  const pageOwnedAnchorOccurrenceIds = Object.freeze([...new Set(paragraph.runs.flatMap((run, runIndex) => {
-    if (run.type !== 'shape' && run.type !== 'image' && run.type !== 'chart') return [];
-    const acquisition = anchorAcquisitionInput(run);
-    if (!acquisition) {
-      const bridge = publicAnchorBridge(run, source, runIndex);
-      return bridge?.pageOwned ? [bridge.occurrenceId] : [];
-    }
-    if (acquisition.horizontal.relativeFromStatus !== 'valid'
-      || acquisition.vertical.relativeFromStatus !== 'valid'
-      || acquisition.horizontal.relativeFrom === null
-      || acquisition.vertical.relativeFrom === null
-      || acquisition.wrap.kind === 'none'
-      || hostRelative.has(acquisition.horizontal.relativeFrom)
-      || hostRelative.has(acquisition.vertical.relativeFrom)) return [];
-    return [anchorOccurrenceKey(source, acquisition.occurrenceId)];
-  }))]);
+  const pageOwnedAnchorOccurrenceIds = Object.freeze([...new Set(
+    paragraphRunsWithUnavailableDrawings(paragraph).flatMap((run, runIndex) => {
+      const internalRun = run as Readonly<DocRun | UnavailableDrawingRunWire>;
+      if (
+        run.type !== 'shape'
+        && run.type !== 'image'
+        && run.type !== 'chart'
+        && internalRun.type !== 'unavailableDrawing'
+      ) return [];
+      const acquisition = anchorAcquisitionInput(internalRun);
+      if (!acquisition) {
+        const bridge = internalRun.type === 'unavailableDrawing'
+          ? null
+          : publicAnchorBridge(internalRun as Readonly<DocRun>, source, runIndex);
+        return bridge?.pageOwned ? [bridge.occurrenceId] : [];
+      }
+      if (acquisition.horizontal.relativeFromStatus !== 'valid'
+        || acquisition.vertical.relativeFromStatus !== 'valid'
+        || acquisition.horizontal.relativeFrom === null
+        || acquisition.vertical.relativeFrom === null
+        || acquisition.wrap.kind === 'none'
+        || hostRelative.has(acquisition.horizontal.relativeFrom)
+        || hostRelative.has(acquisition.vertical.relativeFrom)) return [];
+      return [anchorOccurrenceKey(source, acquisition.occurrenceId)];
+    }),
+  )]);
   return Object.freeze({
     kind: 'paragraph' as const,
     source,
@@ -787,7 +850,7 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     spaceAfterPt: paragraph.spaceAfter ?? 0,
     contextualSpacing: paragraph.contextualSpacing === true,
     styleId: paragraph.styleId ?? null,
-    inkless: isInklessParagraph(paragraph),
+    inkless: !paragraphHasUnavailableDrawing(paragraph) && isInklessParagraph(paragraph),
     ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
   });
 }
@@ -823,7 +886,9 @@ function bodyLayoutSequenceInput(
     const source = bodySourceAt(entryBodyIndex);
     bodyIndex += 1;
     if (element.type === 'paragraph') {
-      return element.markVanish === true && isInklessParagraph(element)
+      return element.markVanish === true
+        && !paragraphHasUnavailableDrawing(element)
+        && isInklessParagraph(element)
         ? Object.freeze({ kind: 'consume-source' as const, source, reason: 'hidden-paragraph' as const })
         : Object.freeze({ kind: 'body-block' as const, block: acquiredBodyParagraph(element, source) });
     }
@@ -1464,9 +1529,9 @@ export function textBoxContentAcquisitionInput(
  * Parser-produced malformed input remains distinguishable from a hand-built
  * public run because required-but-missing values are explicit nulls. */
 export function anchorAcquisitionInput(
-  run: Readonly<DocRun | ShapeRun | ImageRun | ChartRun>,
+  run: Readonly<object>,
 ): Readonly<AnchorAcquisitionInput> | undefined {
-  const wire = (run as Readonly<DocRun & InternalAnchorRunWire>).__anchorAcquisition;
+  const wire = (run as Readonly<InternalAnchorRunWire>).__anchorAcquisition;
   if (wire === undefined) return undefined;
   return snapshotPlainData(wire, 'DOCX anchor acquisition input');
 }
@@ -1605,7 +1670,50 @@ export function paragraphAcquisitionInput(
       : { hyperlinkAnchor: boundary.hyperlinkAnchor }),
   }));
   const snapshot = structuredClone(semanticParagraph) as DocParagraph;
-  const runs = snapshot.runs.map((run, runIndex): ParagraphAcquisitionRun => {
+  const sidecarEntries = unavailableDrawingEntries(paragraph);
+  const runPairs: Array<Readonly<{
+    run: DocRun | UnavailableDrawingRunWire;
+    originalRun: DocRun | UnavailableDrawingRunWire;
+  }>> = [];
+  if (sidecarEntries.length === 0) {
+    snapshot.runs.forEach((run, runIndex) => {
+      runPairs.push({ run, originalRun: paragraph.runs[runIndex]! });
+    });
+  } else {
+    let entryIndex = 0;
+    for (let publicRunIndex = 0; publicRunIndex <= snapshot.runs.length; publicRunIndex += 1) {
+      while (sidecarEntries[entryIndex]?.publicRunIndex === publicRunIndex) {
+        const originalRun = sidecarEntries[entryIndex]!.run;
+        runPairs.push({
+          run: structuredClone(originalRun) as UnavailableDrawingRunWire,
+          originalRun,
+        });
+        entryIndex += 1;
+      }
+      if (publicRunIndex < snapshot.runs.length) {
+        runPairs.push({
+          run: snapshot.runs[publicRunIndex]!,
+          originalRun: paragraph.runs[publicRunIndex]!,
+        });
+      }
+    }
+  }
+  const runs = runPairs.map(({ run, originalRun }, runIndex): ParagraphAcquisitionRun => {
+    const internalRun = run as UnavailableDrawingRunWire;
+    if (internalRun.type === 'unavailableDrawing') {
+      const localAnchorInput = anchorAcquisitionInput(originalRun);
+      const anchorInput = localAnchorInput === undefined
+        ? undefined
+        : snapshotPlainData({
+            ...localAnchorInput,
+            occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
+          }, 'DOCX scoped unavailable drawing anchor acquisition input');
+      const { __anchorAcquisition: _privateAnchor, ...retainedRun } = internalRun;
+      return Object.freeze({
+        ...retainedRun,
+        ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
+      });
+    }
     if (run.type === 'math') {
       const runRef: SourceRef = Object.freeze({ ...source, path: Object.freeze([...source.path, runIndex]) });
       const internal = run as Partial<InternalMathRun>;
@@ -1626,7 +1734,6 @@ export function paragraphAcquisitionInput(
       }) as ParagraphAcquisitionRun;
     }
     if (run.type === 'shape' || run.type === 'image' || run.type === 'chart') {
-      const originalRun = paragraph.runs[runIndex] as DocRun;
       const localAnchorInput = anchorAcquisitionInput(originalRun);
       const anchorInput = localAnchorInput === undefined
         ? undefined
@@ -1662,8 +1769,8 @@ export function paragraphAcquisitionInput(
       }) as ParagraphAcquisitionRun;
     }
     if (run.type === 'text' || run.type === 'field') {
-      const originalRun = paragraph.runs[runIndex] as Extract<DocRun, { type: 'text' | 'field' }>;
-      const runTypographyInput = runTypographyAcquisitionInput(originalRun);
+      const originalTextRun = originalRun as Extract<DocRun, { type: 'text' | 'field' }>;
+      const runTypographyInput = runTypographyAcquisitionInput(originalTextRun);
       const {
         __typographyAcquisition: _privateRunTypography,
         ...publicRun
@@ -1695,8 +1802,10 @@ export function paragraphAcquisitionInput(
   }) as unknown as ParagraphAcquisitionInput;
 }
 
-/** Pure structural normalization for stable math addressing. Only ancestry that
- * contains a math run is shallow-cloned; the caller's parser model is untouched. */
+/** Pure structural normalization for stable math addressing and parser-only
+ * acquisition sidecars. Only affected ancestry is shallow-cloned; the caller's
+ * parser model is untouched and the returned public model contains only the
+ * declared `DocRun` union. */
 export function normalizeInternalDocumentModel(doc: DocxDocumentModel): NormalizedDocumentInput {
   const occurrences: MathOccurrence[] = [];
   const normalizeElement = (
@@ -1707,7 +1816,23 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
   ): BodyElement => {
     if (element.type === 'paragraph') {
       let runsChanged = false;
-      const runs = element.runs.map((run, runIndex): DocRun => {
+      const runs: DocRun[] = [];
+      const unavailableDrawings: UnavailableDrawingSidecarEntry[] = [];
+      const hasEmbeddedUnavailableDrawing = (
+        element.runs as unknown as readonly Readonly<{ type: string }>[]
+      ).some((run) => run.type === 'unavailableDrawing');
+      paragraphRunsWithUnavailableDrawings(element).forEach((run, runIndex) => {
+        if (run.type === 'unavailableDrawing') {
+          unavailableDrawings.push(Object.freeze({
+            publicRunIndex: runs.length,
+            run: snapshotPlainData(
+              run,
+              'DOCX unavailable drawing parser sidecar',
+            ) as Readonly<UnavailableDrawingRunWire>,
+          }));
+          if (hasEmbeddedUnavailableDrawing) runsChanged = true;
+          return;
+        }
         if (run.type === 'math') {
           runsChanged = true;
           const source: SourceRef = Object.freeze({
@@ -1722,12 +1847,19 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
             source,
             resourceKey,
           }));
-          return Object.freeze({ ...run, source, resourceKey }) as InternalMathRun;
+          runs.push(Object.freeze({ ...run, source, resourceKey }) as InternalMathRun);
+          return;
         }
-        if (run.type !== 'shape') return run;
+        if (run.type !== 'shape') {
+          runs.push(run);
+          return;
+        }
         const shape = run as InternalShapeRun;
         const content = shape.textBoxContent;
-        if (content === undefined) return run;
+        if (content === undefined) {
+          runs.push(run);
+          return;
+        }
         const shapeSource: SourceRef = {
           story,
           storyInstance,
@@ -1746,11 +1878,21 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
           if (normalized !== block) contentChanged = true;
           return normalized;
         });
-        if (!contentChanged) return run;
+        if (!contentChanged) {
+          runs.push(run);
+          return;
+        }
         runsChanged = true;
-        return { ...run, textBoxContent } as DocRun;
+        runs.push({ ...run, textBoxContent } as DocRun);
       });
-      return runsChanged ? { ...element, runs } : element;
+      const paragraph = runsChanged ? { ...element, runs } : element;
+      if (unavailableDrawings.length > 0) {
+        unavailableDrawingSidecars.set(
+          paragraph,
+          Object.freeze(unavailableDrawings),
+        );
+      }
+      return paragraph;
     }
     if (element.type === 'table') {
       let tableChanged = false;
@@ -1877,6 +2019,12 @@ export function normalizeInternalDocumentModel(doc: DocxDocumentModel): Normaliz
       publicAnchorBridge,
     }),
   });
+}
+
+/** Return the stable public model while registering parser-private acquisition
+ * sidecars on the returned object identities for same-realm rendering. */
+export function normalizeDocxDocumentModel(doc: DocxDocumentModel): DocxDocumentModel {
+  return normalizeInternalDocumentModel(doc).document;
 }
 
 export function internalFieldRun(run: FieldRun): InternalFieldRun {

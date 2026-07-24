@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   anchorAcquisitionInput,
+  normalizeInternalDocumentModel,
   paragraphAcquisitionInput,
 } from './parser-model.js';
-import type { DocParagraph, ImageRun } from './types.js';
+import type { DocParagraph, DocxDocumentModel, ImageRun } from './types.js';
 
 const privateWire = {
   occurrenceId: 'wp-anchor-120',
@@ -125,5 +126,70 @@ describe('private anchor acquisition projection', () => {
       occurrenceId: scopedOccurrenceId,
     });
     expect(Object.isFrozen(acquired.anchorAcquisitionInput)).toBe(true);
+  });
+
+  it('keeps unavailable drawing recovery clone-safe while scoping its anchor facts', () => {
+    const host = {
+      type: 'anchorHost', fontSize: 11,
+      __anchorOccurrenceId: privateWire.occurrenceId,
+    };
+    const unavailable = {
+      type: 'unavailableDrawing',
+      resourceKind: 'image',
+      widthPt: 20,
+      heightPt: 10,
+      __anchorAcquisition: privateWire,
+    };
+    const paragraph = {
+      type: 'paragraph',
+      alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
+      tabStops: [], runs: [host, unavailable],
+    } as unknown as DocParagraph;
+
+    const raw = {
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+      },
+      body: [paragraph],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as unknown as DocxDocumentModel;
+    const normalized = normalizeInternalDocumentModel(raw);
+    const publicParagraph = normalized.document.body[0] as DocParagraph;
+    const snapshot = normalized.bodyModelGateway.acquisitionInputs
+      .paragraphAcquisitionInput(publicParagraph, {
+      story: 'body', storyInstance: 'body', path: [3],
+    });
+    const acquired = snapshot.runs[1] as unknown as Record<string, unknown> & {
+      anchorAcquisitionInput?: typeof privateWire;
+    };
+
+    expect(publicParagraph.runs.map((run) => run.type))
+      .toEqual(['anchorHost']);
+    expect(JSON.stringify(publicParagraph)).not.toContain('__anchorAcquisition');
+    expect(JSON.stringify(publicParagraph)).not.toContain('unavailableDrawing');
+    expect(acquired).toMatchObject({
+      type: 'unavailableDrawing',
+      resourceKind: 'image',
+      widthPt: 20,
+      heightPt: 10,
+    });
+    expect(acquired).not.toHaveProperty('__anchorAcquisition');
+    expect(acquired).not.toHaveProperty('recoveryAnchorInput');
+    expect(acquired.anchorAcquisitionInput?.occurrenceId)
+      .toBe('anchor:body:body:3:wp-anchor-120');
+    expect(Object.isFrozen(acquired.anchorAcquisitionInput)).toBe(true);
+
+    const cloned = normalizeInternalDocumentModel(
+      structuredClone(raw),
+    );
+    const clonedParagraph = cloned.document.body[0] as DocParagraph;
+    expect(cloned.bodyModelGateway.acquisitionInputs
+      .paragraphAcquisitionInput(clonedParagraph, {
+        story: 'body', storyInstance: 'body', path: [3],
+      }).runs).toEqual(snapshot.runs);
   });
 });

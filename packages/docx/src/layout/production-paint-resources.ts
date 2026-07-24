@@ -20,6 +20,7 @@ import type {
   PaintResourceDescriptor,
   PaintResourceRegistry,
 } from './types.js';
+import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 
 export function chartPaintResourceKey(source: import('./types.js').SourceRef): string {
   return stableFingerprint('chart-resource', source);
@@ -51,6 +52,7 @@ function imageCandidate(
 function collectDescriptorCandidates(
   doc: DocxDocumentModel,
   retainedImageMetadata?: readonly ImageMetadataRecord[],
+  acquisitionInputs?: BodyAcquisitionInputProjections,
 ): PaintResourceDescriptor[] {
   const imageCandidates: ImageDescriptorCandidate[] = [];
   const descriptors: PaintResourceDescriptor[] = [];
@@ -125,8 +127,13 @@ function collectDescriptorCandidates(
         numbering.picBulletImagePath,
       ));
     }
-    paragraph.runs.forEach((run, runIndex) => {
-      visitRun(run, { ...source, path: [...source.path, runIndex] });
+    const authoredRuns = acquisitionInputs
+      ?.paragraphAcquisitionInput(paragraph, source).runs
+      ?? paragraph.runs;
+    authoredRuns.forEach((run, runIndex) => {
+      if (run.type === 'image' || run.type === 'chart' || run.type === 'shape') {
+        visitRun(run, { ...source, path: [...source.path, runIndex] });
+      }
     });
   };
   const visitBody = (
@@ -154,7 +161,8 @@ function collectDescriptorCandidates(
   for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
   for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
 
-  const metadata = retainedImageMetadata ?? documentImageMetadataRecords(doc);
+  const metadata = retainedImageMetadata
+    ?? documentImageMetadataRecords(doc, undefined, acquisitionInputs);
   const metadataByKey = new Map(metadata.map((record) => [record.resourceKey, record]));
   const candidateKeys = imageCandidates.map((candidate) => candidate.resourceKey).sort();
   const metadataKeys = metadata.map((record) => record.resourceKey).sort();
@@ -181,6 +189,9 @@ function collectDescriptorCandidates(
 export function createDocumentPaintResourceRegistry(
   doc: DocxDocumentModel,
   retainedImageMetadata?: readonly ImageMetadataRecord[],
+  acquisitionInputs?: BodyAcquisitionInputProjections,
 ): PaintResourceRegistry {
-  return createPaintResourceRegistry(collectDescriptorCandidates(doc, retainedImageMetadata));
+  return createPaintResourceRegistry(
+    collectDescriptorCandidates(doc, retainedImageMetadata, acquisitionInputs),
+  );
 }

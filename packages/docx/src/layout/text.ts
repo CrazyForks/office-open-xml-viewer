@@ -158,6 +158,18 @@ type ParagraphAnchorPayloadRun = Extract<DocRun, { type: 'image' | 'chart' }> & 
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
+/** Parser-private placeholder for a recognized DrawingML payload whose package
+ * resource could not be resolved. Authored geometry survives acquisition so
+ * surrounding flow and anchor ownership remain deterministic, but this type is
+ * intentionally excluded from the public `DocRun` contract. */
+export interface UnavailableDrawingAcquisitionRun {
+  readonly type: 'unavailableDrawing';
+  readonly resourceKind: 'image' | 'chart';
+  readonly widthPt: number;
+  readonly heightPt: number;
+  readonly anchorAcquisitionInput?: AnchorAcquisitionInput;
+}
+
 type ParagraphAnchorHostRun = Extract<DocRun, { type: 'anchorHost' }> & Readonly<{
   anchorOccurrenceId?: string;
 }>;
@@ -165,11 +177,12 @@ type ParagraphAnchorHostRun = Extract<DocRun, { type: 'anchorHost' }> & Readonly
 export type ParagraphAcquisitionRun =
   | (Extract<DocRun, { type: 'text' }> & ParagraphTextBearingRun)
   | (Extract<DocRun, { type: 'field' }> & ParagraphTextBearingRun)
-  | Exclude<DocRun, { type: 'text' } | { type: 'field' } | { type: 'math' } | { type: 'shape' } | { type: 'image' } | { type: 'chart' } | { type: 'anchorHost' }>
+  | Exclude<DocRun, { type: 'text' } | { type: 'field' } | { type: 'math' } | { type: 'shape' } | { type: 'image' } | { type: 'chart' } | { type: 'anchorHost' } | { type: 'unavailableDrawing' }>
   | ParagraphAnchorPayloadRun
   | ParagraphAnchorHostRun
   | ParagraphShapeRun
-  | ParagraphMathRun;
+  | ParagraphMathRun
+  | UnavailableDrawingAcquisitionRun;
 
 /** Immutable parser-boundary event describing one edge of a complex field's
  * cached result interval (ECMA-376 §17.16). The interval is structural only:

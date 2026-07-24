@@ -37,6 +37,7 @@ const LAYOUT_DIAGNOSTIC_CODE_MEMBERS = {
   INVALID_REFERENCE: true,
   INVALID_GEOMETRY: true,
   INVALID_VALUE: true,
+  MISSING_RESOURCE: true,
   NON_CONVERGENCE: true,
   UNSUPPORTED_FEATURE: true,
 } as const satisfies Readonly<Record<LayoutDiagnosticCode, true>>;

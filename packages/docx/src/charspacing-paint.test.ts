@@ -65,7 +65,8 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] }
         actualBoundingBoxLeft: 0,
         // The punctuation fixture exposes a selected-glyph right ink edge at
         // half its full-width cell. Other text fills its complete advance.
-        actualBoundingBoxRight: s === '．' ? p / 2 : w,
+        actualBoundingBoxRight:
+          [...s].length === 1 && /[、．しない）]/u.test(s) ? p / 2 : w,
         fontBoundingBoxAscent: p * 0.8,
         fontBoundingBoxDescent: p * 0.2,
         actualBoundingBoxAscent: p * 0.8,
@@ -165,13 +166,50 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
 
     await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
 
-    const punctuation = drawOf(fills, '．');
+    const punctuation = drawOf(fills, '甲乙．');
     const following = drawOf(fills, '次');
     // The synthetic selected glyph exposes a tight 10pt trailing sidebearing:
-    // 20 - 0.2 - 10 = 9.8pt.
-    // The following run starts at that exact measured/painted pen.
-    expect(punctuation.letterSpacing).toBe('-10.2px');
-    expect(following.x - punctuation.x).toBeCloseTo(9.8, 5);
+    // (3 × 20) + (3 × -0.2) - 10 = 49.4pt. The compressed punctuation
+    // stays joined to its preceding text so the browser preserves contextual
+    // shaping at that boundary; only the retained trailing advance is trimmed.
+    expect(punctuation.letterSpacing).toBe('-0.2px');
+    expect(following.x - punctuation.x).toBeCloseTo(49.4, 5);
+  });
+
+  it('paints consecutive compressed kana and closing punctuation as one retained group', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([
+        textRun('希望しない）'),
+        textRun('次'),
+      ])], section()),
+      settings: {
+        characterSpacingControl: 'compressPunctuationAndJapaneseKana',
+      },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    expect(drawOf(fills, 'しない）').letterSpacing).toBe('-10px');
+    expect(fills.some(({ text }) => text === '）')).toBe(false);
+    expect(drawOf(fills, '次').x).toBeCloseTo(80, 5);
+  });
+
+  it('paints a single internal punctuation compression at its retained cluster offsets', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([textRun('甲、乙')])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const first = drawOf(fills, '甲');
+    const punctuation = drawOf(fills, '、');
+    const following = drawOf(fills, '乙');
+    expect(punctuation.letterSpacing).toBe('-10px');
+    expect(punctuation.x - first.x).toBeCloseTo(20, 5);
+    expect(following.x - first.x).toBeCloseTo(30, 5);
   });
 
   it('does not collapse middle-punctuation advance into the following glyph', async () => {
