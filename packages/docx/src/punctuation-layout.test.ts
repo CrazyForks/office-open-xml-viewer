@@ -115,6 +115,7 @@ const textOf = (line: LayoutLine): string =>
 function punctuationMetricsServices(options: Readonly<{
   punctuationAdvancePt?: number;
   ideographicCellAdvancePt?: number;
+  leadingInkStartPt?: number;
 }> = {}): LayoutServices {
   const text: TextLayoutService = createTextLayoutService({
     fonts: createFontResolver([]),
@@ -155,7 +156,15 @@ function punctuationMetricsServices(options: Readonly<{
                 },
                 horizontalInkBoundsAreTight: true,
               }
-            : { inkBounds: { xMinPt: 0, xMaxPt: advancePt, ascentPt: 8, descentPt: 2 } }),
+            : {
+                inkBounds: {
+                  xMinPt: options.leadingInkStartPt ?? 0,
+                  xMaxPt: advancePt,
+                  ascentPt: 8,
+                  descentPt: 2,
+                },
+                horizontalInkBoundsAreTight: true,
+              }),
         };
       },
     },
@@ -201,6 +210,29 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(lines(segments, 25, false)[0].segments.map((segment) =>
       'text' in segment ? segment.measuredWidth : undefined,
     )).toEqual([25]);
+  });
+
+  it.each([
+    ['inside one run', [textRun('）次')]],
+    ['across a source-run boundary', [textRun('）'), textRun('次')]],
+  ])('keeps compressed closing punctuation clear of following-glyph left overhang %s', (
+    _case,
+    runs,
+  ) => {
+    const segments = buildSegments(runs, {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices({ leadingInkStartPt: -2 }),
+    }) as LayoutTextSeg[];
+
+    const closing = segments[0]!;
+    // The closing parenthesis ink ends at 5pt. The next glyph reaches 2pt left
+    // of its origin, so its origin must remain at or beyond 7pt. A 10pt
+    // full-width cell may therefore be compressed by at most 3pt.
+    expect(closing.punctuationCompressions).toEqual([
+      { end: 1, adjustmentPt: -3 },
+    ]);
   });
 
   it('derives the retained half-cell from the selected font route, not punctuation advance', () => {

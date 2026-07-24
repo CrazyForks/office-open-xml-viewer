@@ -120,7 +120,7 @@ export const WORD_JAPANESE_PUNCTUATION_COMPRESSION_CELL = defineCompatibilityRul
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'In the observed Japanese compatibility fixture, compressed full-width punctuation retains at least half of the ideographic cell measured through the selected font route. Tight glyph ink can require a larger retained extent. This is an Office-observed compression amount, not a normative interpretation of ST_CharacterSpacing.',
+  description: 'In the observed Japanese compatibility fixture, compressed full-width punctuation retains at least half of the ideographic cell measured through the selected font route. Tight adjacent glyph ink can require a larger retained extent to prevent collision. This is an Office-observed compression amount, not a normative interpretation of ST_CharacterSpacing.',
 });
 
 export const WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT = defineCompatibilityRule({
