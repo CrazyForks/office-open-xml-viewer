@@ -182,7 +182,6 @@ export function documentImageMetadataRecords(
   };
   const visitRun = (run: DocRun, source: SourceRef): void => {
     if (run.type === 'image') {
-      if (run.unavailableResourceKind !== undefined) return;
       add(source, run.imagePath, run.mimeType, run.widthPt, run.heightPt);
       return;
     }

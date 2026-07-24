@@ -147,7 +147,7 @@ describe('private anchor acquisition projection', () => {
       tabStops: [], runs: [host, unavailable],
     } as unknown as DocParagraph;
 
-    const normalized = normalizeInternalDocumentModel({
+    const raw = {
       section: {
         pageWidth: 612, pageHeight: 792,
         marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
@@ -156,7 +156,8 @@ describe('private anchor acquisition projection', () => {
       body: [paragraph],
       headers: { default: null, first: null, even: null },
       footers: { default: null, first: null, even: null },
-    } as unknown as DocxDocumentModel);
+    } as unknown as DocxDocumentModel;
+    const normalized = normalizeInternalDocumentModel(raw);
     const publicParagraph = normalized.document.body[0] as DocParagraph;
     const snapshot = normalized.bodyModelGateway.acquisitionInputs
       .paragraphAcquisitionInput(publicParagraph, {
@@ -167,15 +168,9 @@ describe('private anchor acquisition projection', () => {
     };
 
     expect(publicParagraph.runs.map((run) => run.type))
-      .toEqual(['anchorHost', 'image']);
-    expect(publicParagraph.runs[1]).toMatchObject({
-      type: 'image',
-      imagePath: '',
-      mimeType: '',
-      unavailableResourceKind: 'image',
-    });
-    expect(publicParagraph.runs[1]).not.toHaveProperty('__anchorAcquisition');
-    expect(publicParagraph.runs[1]).toHaveProperty('recoveryAnchorInput');
+      .toEqual(['anchorHost']);
+    expect(JSON.stringify(publicParagraph)).not.toContain('__anchorAcquisition');
+    expect(JSON.stringify(publicParagraph)).not.toContain('unavailableDrawing');
     expect(acquired).toMatchObject({
       type: 'unavailableDrawing',
       resourceKind: 'image',
@@ -189,7 +184,7 @@ describe('private anchor acquisition projection', () => {
     expect(Object.isFrozen(acquired.anchorAcquisitionInput)).toBe(true);
 
     const cloned = normalizeInternalDocumentModel(
-      structuredClone(normalized.document),
+      structuredClone(raw),
     );
     const clonedParagraph = cloned.document.body[0] as DocParagraph;
     expect(cloned.bodyModelGateway.acquisitionInputs

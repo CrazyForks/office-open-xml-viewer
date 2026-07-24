@@ -162,11 +162,7 @@ describe('layout resource snapshots', () => {
       runs: Array<{ type: string }>;
     }).runs.map((run) => run.type)).toEqual([
       'image',
-      'image',
     ]);
-    expect((normalized.document.body[0] as {
-      runs: Array<{ unavailableResourceKind?: string }>;
-    }).runs[0]?.unavailableResourceKind).toBe('image');
     expect(documentImageMetadataRecords(
       normalized.document,
       undefined,

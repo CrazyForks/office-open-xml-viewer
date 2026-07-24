@@ -121,19 +121,14 @@ describe('parser-to-body-acquisition projection capability', () => {
       { ...textRun, text: 'after unavailable drawing' },
     ] as unknown as DocParagraph['runs'];
 
-    const normalized = normalizeInternalDocumentModel(document(inputParagraph));
+    const raw = document(inputParagraph);
+    const normalized = normalizeInternalDocumentModel(raw);
     const publicParagraph = normalized.document.body[0] as DocParagraph;
     const acquired = normalized.bodyModelGateway.acquisitionInputs
       .paragraphAcquisitionInput(publicParagraph, bodySource());
 
     expect(publicParagraph.runs.map((run) => run.type))
-      .toEqual(['text', 'image', 'text']);
-    expect(publicParagraph.runs[1]).toMatchObject({
-      type: 'image',
-      imagePath: '',
-      mimeType: '',
-      unavailableResourceKind: 'image',
-    });
+      .toEqual(['text', 'text']);
     expect(JSON.stringify(structuredClone(normalized.document)))
       .not.toContain('unavailableDrawing');
     expect(acquired.runs.map((run) => run.type))
@@ -144,7 +139,7 @@ describe('parser-to-body-acquisition projection capability', () => {
       heightPt: 12,
     });
     const cloned = normalizeInternalDocumentModel(
-      structuredClone(normalized.document),
+      structuredClone(raw),
     );
     const clonedParagraph = cloned.document.body[0] as DocParagraph;
     expect(cloned.bodyModelGateway.acquisitionInputs

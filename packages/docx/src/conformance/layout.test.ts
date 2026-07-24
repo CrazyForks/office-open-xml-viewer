@@ -47,16 +47,19 @@ function measureContext(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-function parse(bytes: Uint8Array): DocxDocumentModel {
+function parseRaw(bytes: Uint8Array): DocxDocumentModel {
   const archive = new DocxArchive(bytes);
   try {
-    const parsed = JSON.parse(
+    return JSON.parse(
       new TextDecoder().decode(archive.parse()),
     ) as DocxDocumentModel;
-    return normalizeInternalDocumentModel(parsed).document;
   } finally {
     archive.free();
   }
+}
+
+function parse(bytes: Uint8Array): DocxDocumentModel {
+  return normalizeInternalDocumentModel(parseRaw(bytes)).document;
 }
 
 function serviceIdentity(services: LayoutServices): readonly string[] {
@@ -446,14 +449,9 @@ describe('recoverable missing drawing resources', () => {
       const runs = (model.body[0] as DocParagraph).runs;
       expect(runs.map((run) => run.type)).toEqual([
         'text',
-        'image',
         kind,
       ]);
-      expect(runs[1]).toMatchObject({
-        type: 'image',
-        unavailableResourceKind: kind,
-        imagePath: '',
-      });
+      expect(JSON.stringify(model)).not.toContain('unavailableDrawing');
 
       const services = createLayoutServices(model, { measureContext: measureContext() });
       const layout = layoutDocument(model, services, { currentDateMs: 0 });
@@ -476,16 +474,15 @@ describe('recoverable missing drawing resources', () => {
     const parts = new Map(generateConformanceParts(testCase));
     parts.delete('word/media/pixel.png');
 
-    const model = parse(storeZip(parts));
+    const raw = parseRaw(storeZip(parts));
+    const model = normalizeInternalDocumentModel(raw).document;
     expect(records(model).some((record) =>
-      record.type === 'image'
-      && record.unavailableResourceKind === 'image')).toBe(true);
+      record.type === 'unavailableDrawing')).toBe(false);
     expect(JSON.stringify(model)).not.toContain('unavailableDrawing');
-    expect(JSON.stringify(structuredClone(model))).not.toContain('__anchorAcquisition');
 
     const services = createLayoutServices(model, { measureContext: measureContext() });
     const layout = layoutDocument(model, services, { currentDateMs: 0 });
-    const cloned = structuredClone(model);
+    const cloned = normalizeInternalDocumentModel(structuredClone(raw)).document;
     const clonedServices = createLayoutServices(cloned, { measureContext: measureContext() });
     const clonedLayout = layoutDocument(cloned, clonedServices, { currentDateMs: 0 });
 
@@ -510,7 +507,7 @@ describe('recoverable missing drawing resources', () => {
     ]));
   });
 
-  it('retains anchored recovery geometry after the public model is cloned', () => {
+  it('retains anchored recovery geometry when the parser wire is cloned', () => {
     const testCase = CONFORMANCE_CASES.find(({ axes }) =>
       axes.story === 'body'
       && axes.container === 'paragraph'
@@ -519,11 +516,11 @@ describe('recoverable missing drawing resources', () => {
     const parts = new Map(generateConformanceParts(testCase));
     parts.delete('word/media/pixel.png');
 
-    const model = parse(storeZip(parts));
-    const cloned = structuredClone(model);
+    const raw = parseRaw(storeZip(parts));
+    const model = normalizeInternalDocumentModel(raw).document;
+    const cloned = normalizeInternalDocumentModel(structuredClone(raw)).document;
     expect(records(cloned).some((record) =>
-      record.type === 'image'
-      && record.unavailableResourceKind === 'image')).toBe(true);
+      record.type === 'unavailableDrawing')).toBe(false);
     expect(JSON.stringify(cloned)).not.toContain('unavailableDrawing');
     expect(JSON.stringify(cloned)).not.toContain('__anchorAcquisition');
 

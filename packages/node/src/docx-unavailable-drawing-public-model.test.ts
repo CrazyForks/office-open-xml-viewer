@@ -4,6 +4,8 @@ import {
   generateConformanceParts,
   storeZip,
 } from '../../docx/src/conformance/generate.ts';
+import { layoutDocument } from '../../docx/src/document-layout.ts';
+import { createLayoutServices } from '../../docx/src/layout-runtime.ts';
 import { parseDocx } from './docx.ts';
 
 function objectRecords(value: unknown): Array<Record<string, unknown>> {
@@ -23,7 +25,7 @@ function objectRecords(value: unknown): Array<Record<string, unknown>> {
 }
 
 describe('Node DOCX public parser projection', () => {
-  it('returns a declared clone-safe recovery run without parser-private fields', () => {
+  it('hides parser-private recovery runs while same-realm layout retains geometry', () => {
     const testCase = CONFORMANCE_CASES.find(({ axes }) =>
       axes.story === 'body'
       && axes.container === 'paragraph'
@@ -33,19 +35,39 @@ describe('Node DOCX public parser projection', () => {
     parts.delete('word/media/pixel.png');
 
     const model = parseDocx(storeZip(parts));
-    const cloned = structuredClone(model);
-    const recovery = objectRecords(cloned).find((record) =>
-      record.type === 'image' && record.unavailableResourceKind === 'image');
+    const serialized = JSON.stringify(model);
+    expect(objectRecords(model).some((record) =>
+      record.type === 'unavailableDrawing')).toBe(false);
+    expect(serialized).not.toContain('__anchorAcquisition');
+    expect(serialized).not.toContain('unavailableDrawing');
 
-    expect(recovery).toMatchObject({
-      type: 'image',
-      imagePath: '',
-      mimeType: '',
-      unavailableResourceKind: 'image',
-      widthPt: 36,
-      heightPt: 21.6,
-    });
-    expect(JSON.stringify(cloned)).not.toContain('__anchorAcquisition');
-    expect(JSON.stringify(cloned)).not.toContain('unavailableDrawing');
+    const measureContext = {
+      font: '10px serif',
+      letterSpacing: '0px',
+      fontKerning: 'auto',
+      measureText: (text: string) => ({
+        width: [...text].length * 6,
+        actualBoundingBoxAscent: 8,
+        actualBoundingBoxDescent: 2,
+        fontBoundingBoxAscent: 8,
+        fontBoundingBoxDescent: 2,
+      }),
+    } as unknown as CanvasRenderingContext2D;
+    const services = createLayoutServices(model, { measureContext });
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+    expect(layout.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'MISSING_RESOURCE',
+        severity: 'warning',
+      }),
+    ]));
+    expect(objectRecords(layout)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'drawing',
+        commands: [{ kind: 'noop' }],
+        flowBounds: expect.objectContaining({ widthPt: 36, heightPt: 21.6 }),
+      }),
+    ]));
   });
 });

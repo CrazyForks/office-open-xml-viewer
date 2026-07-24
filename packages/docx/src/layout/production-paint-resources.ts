@@ -58,7 +58,6 @@ function collectDescriptorCandidates(
   const descriptors: PaintResourceDescriptor[] = [];
   const visitRun = (run: DocRun, source: import('./types.js').SourceRef): void => {
     if (run.type === 'image') {
-      if (run.unavailableResourceKind !== undefined) return;
       imageCandidates.push(imageCandidate(
         'image', imageResourceKey(source, run.imagePath), run.imagePath, run,
       ));
