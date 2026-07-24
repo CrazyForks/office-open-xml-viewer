@@ -35,16 +35,15 @@ export function numberingMarkerLogicalInterval(input: Readonly<{
  * acquisition and final retained placement from choosing different origins. */
 export function numberingMarkerPhysicalLeft(input: Readonly<{
   baseRtl: boolean;
-  paragraphXPt: number;
-  availableWidthPt: number;
+  alignedLeadingEdgePt: number;
   authoredFirstIndentPt: number;
   markerShiftPt: number;
   markerWidthPt: number;
 }>): number {
   const logicalStartPt = input.authoredFirstIndentPt + input.markerShiftPt;
   return input.baseRtl
-    ? input.paragraphXPt + input.availableWidthPt - logicalStartPt - input.markerWidthPt
-    : input.paragraphXPt + logicalStartPt;
+    ? input.alignedLeadingEdgePt - logicalStartPt - input.markerWidthPt
+    : input.alignedLeadingEdgePt + logicalStartPt;
 }
 
 /** Apply retained marker geometry to an otherwise parser-independent paragraph context. */
