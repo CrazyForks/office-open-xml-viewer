@@ -66,7 +66,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] }
         // The punctuation fixture exposes a selected-glyph right ink edge at
         // half its full-width cell. Other text fills its complete advance.
         actualBoundingBoxRight:
-          [...s].length === 1 && /[、．しない）]/u.test(s) ? p / 2 : w,
+          [...s].length === 1 && /[、．：しない）]/u.test(s) ? p / 2 : w,
         fontBoundingBoxAscent: p * 0.8,
         fontBoundingBoxDescent: p * 0.2,
         actualBoundingBoxAscent: p * 0.8,
@@ -229,6 +229,23 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(textFills).toEqual([
       expect.objectContaining({ text: '甲乙・丙丁', letterSpacing: '0px' }),
     ]);
+  });
+
+  it('retains a full-width middle-punctuation cell before a following Latin run', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([
+        textRun('E-mail：'),
+        textRun('kifu@example.test', { isLink: true }),
+      ])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const label = drawOf(fills, 'E-mail');
+    const address = drawOf(fills, 'kifu@example.test');
+    expect(address.x - label.x).toBeCloseTo(7 * FONT_PX, 5);
   });
 
   it('horizontal common path: following run starts at the expanded right edge', async () => {

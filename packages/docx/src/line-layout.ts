@@ -1726,15 +1726,17 @@ export function hasCJKBreakOpportunity(text: string): boolean {
 
 // ECMA-376 §17.15.1.18 / §17.18.7 distinguishes punctuation-only compression
 // from punctuation-plus-Japanese-kana compression. This is the reviewed
-// supported subset: full-width closing forms plus the unambiguous full-width
-// ! ? : ; forms. Halfwidth U+FF61/U+FF64 are not full-width. U+30FB remains
-// outside the supported subset because the normative character set is not
-// exhaustive. Opening punctuation needs line-start positioning rather than a
-// pen-advance reduction. The implementation-note evidence for the full-width
-// punctuation scope is registered in layout/line-compatibility.ts.
+// supported subset: full-width closing forms plus full-width ! and ?.
+// JLReq classifies middle dot, colon, and semicolon together (cl-05); their
+// whitespace belongs on both sides and must be resolved from the adjacent
+// character classes, so they cannot use this trailing-side-only projection.
+// Halfwidth U+FF61/U+FF64 are not full-width. Opening punctuation likewise
+// needs line-start positioning rather than a pen-advance reduction. The
+// implementation-note evidence for the full-width punctuation scope is
+// registered in layout/line-compatibility.ts.
 const COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION = new Set([
   '、', '。', '，', '．', '」', '』', '】', '〗', '）', '］', '｝',
-  '！', '？', '：', '；',
+  '！', '？',
 ]);
 
 /** Full-width Japanese kana characters for
