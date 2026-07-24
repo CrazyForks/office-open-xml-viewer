@@ -4,6 +4,23 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.73.2 — 2026-07-24
+
+Patch. Restores DOCX list-marker, table-pagination, and grouped-drawing geometry
+that regressed during the retained-layout migration.
+
+- **docx:** anchor right-to-left numbering markers to the retained aligned line
+  instead of the page edge, so bullets and item numbers stay attached to their
+  paragraph text.
+- **docx:** admit a merged table when its resolved row tracks fit the remaining
+  page, avoiding continuation pages that contain only overflowed gauge or bar
+  rows.
+- **docx:** reproduce Word's observed non-uniform scaling for directly grouped
+  leaves at exact odd quarter turns while keeping nested groups and the shared
+  DOCX/XLSX/PPTX DrawingML transform on the normative Annex L path. The
+  compatibility rule is deliberately scoped to the evidence available in Word.
+  (ECMA-376 Part 1 Annex L §L.4.7.4; [MS-OE376] §2.1.1360; #1037, #1096)
+
 ## 0.73.1 — 2026-07-24
 
 Patch. Prevents compressed full-width punctuation from colliding with the
