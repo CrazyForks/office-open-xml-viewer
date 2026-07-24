@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "ooxml-mcp-server"
-version = "0.72.2"
+version = "0.73.0"
 dependencies = [
  "anyhow",
  "docx-parser",

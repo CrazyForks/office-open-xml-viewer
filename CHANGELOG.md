@@ -4,6 +4,70 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.73.0 — 2026-07-24
+
+Minor. Completes the DOCX migration to one immutable layout-to-paint pipeline,
+then restores the full fidelity corpus through that architecture rather than
+reintroducing renderer-side measurement or legacy fallbacks. The release also
+adds bounded partial rendering for unsupported optional drawings, exposes stable
+source identities in text-run callbacks, and moves normal type-checking to
+TypeScript 7.
+
+**docx — retained layout architecture and fidelity**
+
+- Replace renderer-owned pagination and reduced-state fallback paths with one
+  retained, point-space `DocumentLayout`: immutable page/column transitions,
+  occurrence-owned paragraphs/tables/drawings, canonical page stories and
+  layers, deterministic convergence, and identical main-thread/worker layout
+  inputs. Final architecture and compatibility gates now fail closed if an
+  alternate layout path is introduced. Public DOCX declarations and worker
+  contracts remain compatible. (#1037, #1038–#1077)
+- Restore the parser and layout facts needed for Word-compatible pagination and
+  paint after the cutover: field/tab boundaries, numbering-indent provenance,
+  table/frame/border geometry, text-box and page-owned anchors, inherited shape
+  text color, section decorations, East Asian line metrics, and selected-font
+  ink. Canvas paint consumes retained geometry without re-measuring it.
+  (#1080, #1083, #1084)
+- Keep OpenType `vert` acquisition and painting on the same Canvas/font route;
+  retain vertical glyph advances and origins; avoid applying negative pitch
+  twice to brackets, punctuation, question/exclamation marks, long marks,
+  middle dots, and ellipses. Preserve Japanese punctuation/kana compression per
+  grapheme through wrapping, continuation, intrinsic measurement, and paint.
+  (§17.3.2.10, §17.6.20, §17.15.1.18; #1086, #1091, #1092)
+- Reduce repeated retained-layout work through immutable paragraph projection
+  caches and dense wrap-polygon memoization. Shared deeply frozen polygons now
+  compile once at O(V²) plus O(PV) validation instead of O(PV²), eliminating
+  the former O(V³) aggregate case when paragraph acquisitions scale with
+  polygon vertices. (#1076)
+
+**docx — failure containment**
+
+- Preserve surrounding document content when an optional VML text path is
+  unsupported or an image/chart relationship is unavailable but its authored
+  extent is valid. The canonical layout retains a diagnostic no-op node and its
+  geometry; invalid numeric geometry and structural failures remain fatal.
+  This is a bounded recovery policy, not catch-all exception suppression or a
+  legacy renderer fallback. (#1090, #1091; progresses #1088)
+
+**public callbacks and viewer fixes**
+
+- Text-run callbacks now expose stable source identities:
+  `DocxTextRunInfo.paragraphId` (`w14:paraId`),
+  `PptxTextRunInfo.shapeId` (`cNvPr@id`), and required
+  `XlsxTextRunInfo.sheetName` / `cellRef` values. (#1078, #1079)
+- XLSX built-in zoom controls explicitly use `type="button"`, preventing them
+  from submitting an ancestor HTML form. (#1087)
+
+**tooling and packaging**
+
+- Run project type-checks and declaration emission with the native TypeScript 7
+  CLI while isolating TypeScript 6 for tools that still require the legacy
+  JavaScript Compiler API. Remove duplicate CI package type-checks, replace
+  `vite-plugin-dts` / API Extractor with `rolldown-plugin-dts`, and preserve all
+  five published declaration entries and their TypeScript 5.9/6/7 compatibility.
+  On the measured Apple Silicon baseline, cold `pnpm typecheck` fell from
+  7.41 s to 1.51 s and cold `pnpm build` from 8.47 s to 1.79 s. (#1075)
+
 ## 0.72.2 — 2026-07-13
 
 Patch (fixes on v0.72.1). Word-compatible docx layout geometry plus xlsx
