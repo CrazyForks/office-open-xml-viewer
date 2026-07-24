@@ -223,8 +223,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  of any docGrid / justify delta. Absent ⇒ 0. */
   charSpacing?: number;
   /** ECMA-376 §17.15.1.18 document-level full-width character compression,
-   *  represented separately from authored `w:spacing`. Negative points;
-   *  present only on one-character pieces emitted by buildSegments. */
+   *  represented separately from authored `w:spacing`. Negative points applied
+   *  once to this segment's trailing advance. The segment ends at the eligible
+   *  grapheme so its preceding text keeps contextual shaping. */
   punctuationCompressionPt?: number;
   /** Effective `w:lang/@w:eastAsia` consumed by the isolated
    *  {@link wordIsOverflowPunctuation} compatibility projection. */
@@ -1031,11 +1032,11 @@ export function charSpacingDeltaPx(seg: LayoutTextSeg, scale: number): number {
   return effectiveCharacterSpacingPt(seg) * scale;
 }
 
-/** The paint/measure pitch after combining run-authored `w:spacing` with the
- * document-level punctuation trim. Keeping the sources separate on LayoutTextSeg
- * prevents a document setting from masquerading as direct run formatting. */
+/** The uniform paint/measure pitch contributed by run-authored `w:spacing`.
+ * Document-level punctuation compression is a one-time trailing-cell advance
+ * adjustment, not a per-glyph Canvas letter-spacing value. */
 export function effectiveCharacterSpacingPt(seg: LayoutTextSeg): number {
-  return (seg.charSpacing ?? 0) + (seg.punctuationCompressionPt ?? 0);
+  return seg.charSpacing ?? 0;
 }
 
 /** ECMA-376 §17.3.2.43 `<w:w>` — the horizontal glyph-width scale fraction of a
@@ -1115,7 +1116,7 @@ export function segAdvanceWidth(
     segmentDelta,
     charScaleFactor(seg),
     charSpacingDeltaPx(seg, scale),
-  );
+  ) + (seg.punctuationCompressionPt ?? 0) * scale;
 }
 
 export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
@@ -2433,6 +2434,7 @@ export function buildSegments(
       fontFamily: string | null,
       authoritativeSpan?: TextShapeSpan,
       compressCharacterWhitespace = false,
+      compressedGrapheme?: string,
     ) => {
       // ECMA-376 §17.15.1.18 / §17.18.7 — dispatch the exact
       // ST_CharacterSpacing value and split each eligible full-width character
@@ -2458,14 +2460,13 @@ export function buildSegments(
             pending = '';
           };
           for (const grapheme of graphemes) {
+            pending += grapheme;
             if (characterSpacingControlCompresses(
               grapheme,
               environment.characterSpacingControl,
             )) {
-              flushPending();
-              pushSeg(grapheme, cs, fontFamily, undefined, true);
-            } else {
-              pending += grapheme;
+              pushSeg(pending, cs, fontFamily, undefined, true, grapheme);
+              pending = '';
             }
           }
           flushPending();
@@ -2504,6 +2505,7 @@ export function buildSegments(
         ? (() => {
             const measured = environment.layoutServices?.text.shape({
               ...textShapeRequest,
+              text: compressedGrapheme ?? text,
               measure: true,
               clusterGeometry: false,
             });
@@ -2523,7 +2525,9 @@ export function buildSegments(
                       measured.advancePt - measured.inkBounds.xMaxPt,
                     ),
                   );
-                  if (!COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(text)) {
+                  if (!COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(
+                    compressedGrapheme ?? text,
+                  )) {
                     return trailingWhitespacePt;
                   }
                   const punctuationRoute = measured.spans[0]?.fontRoute.fingerprint;
@@ -2569,7 +2573,8 @@ export function buildSegments(
         (span.script === 'complexScript') !== cs,
       ) ?? false;
       if (shaped && (shaped.spans.length > 1 || resolvedAxisDiffers)) {
-        for (const span of shaped.spans) {
+        for (let spanIndex = 0; spanIndex < shaped.spans.length; spanIndex += 1) {
+          const span = shaped.spans[spanIndex]!;
           const spanCs = span.script === 'complexScript';
           const spanFamily = spanCs
             ? csFontFamily
@@ -2578,7 +2583,17 @@ export function buildSegments(
               : span.script === 'highAnsi'
                 ? highAnsiFontFamily
                 : base.fontFamily;
-          pushSeg(span.text, spanCs, spanFamily, span);
+          const trailingCompressedSpan =
+            compressCharacterWhitespace
+            && spanIndex === shaped.spans.length - 1;
+          pushSeg(
+            span.text,
+            spanCs,
+            spanFamily,
+            span,
+            trailingCompressedSpan,
+            trailingCompressedSpan ? compressedGrapheme : undefined,
+          );
         }
         return;
       }
@@ -3702,7 +3717,20 @@ export function layoutLines(
   // the same width model as a whole segment BUT with the substring's own
   // text/length so char-spacing scales with the piece — the split-prefix vs
   // whole-segment advances must agree.
-  const strAdvance = (s: LayoutTextSeg, text: string): number => {
+  const strAdvance = (
+    s: LayoutTextSeg,
+    text: string,
+    retainTrailingPunctuationCompression = false,
+  ): number => {
+    const retainsTrailingAdjustment =
+      retainTrailingPunctuationCompression || text.length === s.text.length;
+    const measuredSegment = {
+      ...s,
+      text,
+      punctuationCompressionPt: retainsTrailingAdjustment
+        ? s.punctuationCompressionPt
+        : undefined,
+    };
     if (s.textLayoutService && s.textShapeRequest) {
       const shaped = s.textLayoutService.shape({
         ...s.textShapeRequest,
@@ -3711,13 +3739,23 @@ export function layoutLines(
         measure: true,
         clusterGeometry: false,
       });
-      return segAdvanceWidth({ ...s, text }, shaped.advancePt + verticalInkExtra(s, text), gridDeltaPx, scale);
+      return segAdvanceWidth(
+        measuredSegment,
+        shaped.advancePt + verticalInkExtra(s, text),
+        gridDeltaPx,
+        scale,
+      );
     }
     setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
     const prevKern = setSegKerning(s);
     const natural = ctx.measureText(text).width;
     restoreKerning(prevKern);
-    return segAdvanceWidth({ ...s, text }, natural + verticalInkExtra(s, text), gridDeltaPx, scale);
+    return segAdvanceWidth(
+      measuredSegment,
+      natural + verticalInkExtra(s, text),
+      gridDeltaPx,
+      scale,
+    );
   };
 
   // Width of a queued segment, for right/center tab look-ahead.
@@ -4387,7 +4425,14 @@ export function layoutLines(
       if (prefix.length > 0) {
         // Grid advance for the head piece — the same model as the line box / draw.
         const pw = strAdvance(s, prefix);
-        const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pw };
+        const headSeg: LayoutTextSeg = {
+          ...s,
+          text: prefix,
+          measuredWidth: pw,
+          punctuationCompressionPt: prefix.length === s.text.length
+            ? s.punctuationCompressionPt
+            : undefined,
+        };
         addToLine(headSeg, pw, h, asc, desc);
         const tail = s.text.slice(prefix.length);
         if (tail) {
@@ -4422,7 +4467,7 @@ export function layoutLines(
             retracted = {
               ...lastText,
               text: tailText,
-              measuredWidth: strAdvance(lastText, tailText),
+              measuredWidth: strAdvance(lastText, tailText, true),
               src: {
                 segIndex: lastText.src!.segIndex,
                 charOffset: lastText.src!.charOffset + headText.length,
@@ -4431,7 +4476,14 @@ export function layoutLines(
             if (headText) {
               const headW = strAdvance(lastText, headText);
               currentWidth -= lastText.measuredWidth - headW;
-              currentLine[currentLine.length - 1] = { ...lastText, text: headText, measuredWidth: headW };
+              currentLine[currentLine.length - 1] = {
+                ...lastText,
+                text: headText,
+                measuredWidth: headW,
+                punctuationCompressionPt: headText.length === lastText.text.length
+                  ? lastText.punctuationCompressionPt
+                  : undefined,
+              };
             } else {
               // Whole last segment moves down. Line metrics (ascent/descent) are
               // not recomputed; the retracted graphemes share the line's font in
@@ -4453,7 +4505,14 @@ export function layoutLines(
         const firstChar = forcedChars.slice(0, forcedSplit).join('');
         if (firstChar) {
           const fw = strAdvance(s, firstChar);
-          const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fw };
+          const headSeg: LayoutTextSeg = {
+            ...s,
+            text: firstChar,
+            measuredWidth: fw,
+            punctuationCompressionPt: firstChar.length === s.text.length
+              ? s.punctuationCompressionPt
+              : undefined,
+          };
           addToLine(headSeg, fw, h, asc, desc);
           const tail = s.text.slice(firstChar.length);
           if (tail) {
@@ -4494,7 +4553,14 @@ export function layoutLines(
       if (split > 0) {
         const prefix = s.text.slice(0, split);
         const pw = strAdvance(s, prefix);
-        addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
+        addToLine({
+          ...s,
+          text: prefix,
+          measuredWidth: pw,
+          punctuationCompressionPt: prefix.length === s.text.length
+            ? s.punctuationCompressionPt
+            : undefined,
+        }, pw, h, asc, desc);
         const tail = s.text.slice(split);
         if (tail) {
           queue.unshift({
@@ -4527,7 +4593,7 @@ export function layoutLines(
             retracted = {
               ...lastText,
               text: tailText,
-              measuredWidth: strAdvance(lastText, tailText),
+              measuredWidth: strAdvance(lastText, tailText, true),
               src: {
                 segIndex: lastText.src!.segIndex,
                 charOffset: lastText.src!.charOffset + headText.length,
@@ -4537,7 +4603,14 @@ export function layoutLines(
             if (headText) {
               const headW = strAdvance(lastText, headText);
               currentWidth -= lastText.measuredWidth - headW;
-              currentLine[currentLine.length - 1] = { ...lastText, text: headText, measuredWidth: headW };
+              currentLine[currentLine.length - 1] = {
+                ...lastText,
+                text: headText,
+                measuredWidth: headW,
+                punctuationCompressionPt: headText.length === lastText.text.length
+                  ? lastText.punctuationCompressionPt
+                  : undefined,
+              };
             } else {
               currentWidth -= lastText.measuredWidth;
               currentLine.pop();
@@ -4558,7 +4631,14 @@ export function layoutLines(
         if (gsplit <= 0) gsplit = graphemes.length > 0 ? graphemes[0] : firstWord.length;
         const prefix = s.text.slice(0, gsplit);
         const pw = strAdvance(s, prefix);
-        addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
+        addToLine({
+          ...s,
+          text: prefix,
+          measuredWidth: pw,
+          punctuationCompressionPt: prefix.length === s.text.length
+            ? s.punctuationCompressionPt
+            : undefined,
+        }, pw, h, asc, desc);
         const tail = s.text.slice(gsplit);
         if (tail) {
           queue.unshift({
@@ -4610,7 +4690,14 @@ export function layoutLines(
       } else {
         const prefix = s.text.slice(0, split);
         const pw = strAdvance(s, prefix);
-        addToLine({ ...s, text: prefix, measuredWidth: pw }, pw, h, asc, desc);
+        addToLine({
+          ...s,
+          text: prefix,
+          measuredWidth: pw,
+          punctuationCompressionPt: prefix.length === s.text.length
+            ? s.punctuationCompressionPt
+            : undefined,
+        }, pw, h, asc, desc);
         queue.unshift({
           ...s,
           text: s.text.slice(split),

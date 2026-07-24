@@ -165,13 +165,14 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
 
     await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
 
-    const punctuation = drawOf(fills, '．');
+    const punctuation = drawOf(fills, '甲乙．');
     const following = drawOf(fills, '次');
     // The synthetic selected glyph exposes a tight 10pt trailing sidebearing:
-    // 20 - 0.2 - 10 = 9.8pt.
-    // The following run starts at that exact measured/painted pen.
-    expect(punctuation.letterSpacing).toBe('-10.2px');
-    expect(following.x - punctuation.x).toBeCloseTo(9.8, 5);
+    // (3 × 20) + (3 × -0.2) - 10 = 49.4pt. The compressed punctuation
+    // stays joined to its preceding text so the browser preserves contextual
+    // shaping at that boundary; only the retained trailing advance is trimmed.
+    expect(punctuation.letterSpacing).toBe('-0.2px');
+    expect(following.x - punctuation.x).toBeCloseTo(49.4, 5);
   });
 
   it('does not collapse middle-punctuation advance into the following glyph', async () => {

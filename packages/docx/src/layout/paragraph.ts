@@ -1664,6 +1664,10 @@ function textPlanSegment(
     const trailingFitPad = index === (shapedClusters?.length ?? 0) - 1
       ? segment.fitTextTrailingPadPx ?? 0
       : 0;
+    const trailingPunctuationCompression =
+      index === (shapedClusters?.length ?? 0) - 1
+        ? segment.punctuationCompressionPt ?? 0
+        : 0;
     return {
       range: {
         start: sourceOffset + cluster.range.start,
@@ -1673,7 +1677,11 @@ function textPlanSegment(
         xPt: cluster.offsetPt * scaleX + precedingScalars * pitchPt,
         yPt: baselineOffsetPt,
       },
-      advancePt: cluster.advancePt * scaleX + scalarCount * pitchPt + trailingFitPad,
+      advancePt:
+        cluster.advancePt * scaleX
+        + scalarCount * pitchPt
+        + trailingFitPad
+        + trailingPunctuationCompression,
     };
   });
   const {
