@@ -807,6 +807,8 @@ export declare type HyperlinkTarget = {
     slideIndex?: number;
 };
 export declare interface ImageRun {
+    unavailableResourceKind?: 'image' | 'chart';
+    recoveryAnchorInput?: unknown;
     imagePath: string;
     mimeType: string;
     svgImagePath?: string;

@@ -112,12 +112,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       });
       const model = normalizeInternalDocumentModel(parsedModel).document;
       if (documentRequiresDomVerticalGlyphLayout(model)) {
-        // The normalized public model deliberately omits parser-only sidecars
-        // such as unavailable-drawing geometry. Send the untouched parser wire
-        // to the main-thread fallback so its normalization boundary can rebuild
-        // those identity-owned acquisition facts without exposing them through
-        // `DocxDocument.document`.
-        const encoded = new TextEncoder().encode(JSON.stringify(parsedModel));
+        // Recovery geometry is part of the normalized clone-safe public model,
+        // so the main-thread fallback receives that same browser-visible value;
+        // parser-private wire fields never need to cross this boundary.
+        const encoded = new TextEncoder().encode(JSON.stringify(model));
         const documentJson = encoded.buffer.slice(
           encoded.byteOffset,
           encoded.byteOffset + encoded.byteLength,

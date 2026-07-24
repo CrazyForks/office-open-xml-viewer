@@ -1226,6 +1226,18 @@ export type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
 
 export interface ImageRun {
   /**
+   * Clone-safe recovery marker for a DrawingML picture or chart whose
+   * relationship/part is unavailable but whose authored extent is valid.
+   * Such a run has empty `imagePath`/`mimeType`; the renderer preserves its
+   * geometry, emits `MISSING_RESOURCE`, and never requests an image resource.
+   */
+  unavailableResourceKind?: 'image' | 'chart';
+  /**
+   * Opaque parser projection needed to retain exact anchored recovery geometry
+   * across `structuredClone`. Consumers should preserve but not interpret it.
+   */
+  recoveryAnchorInput?: unknown;
+  /**
    * Embedded zip path of the raster blip (e.g. `word/media/image1.png`) — the
    * raster fallback (PNG/JPEG), or the SVG part itself when no raster blip is
    * embedded. The renderer fetches the bytes lazily by path (see {@link

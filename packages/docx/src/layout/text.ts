@@ -177,7 +177,7 @@ type ParagraphAnchorHostRun = Extract<DocRun, { type: 'anchorHost' }> & Readonly
 export type ParagraphAcquisitionRun =
   | (Extract<DocRun, { type: 'text' }> & ParagraphTextBearingRun)
   | (Extract<DocRun, { type: 'field' }> & ParagraphTextBearingRun)
-  | Exclude<DocRun, { type: 'text' } | { type: 'field' } | { type: 'math' } | { type: 'shape' } | { type: 'image' } | { type: 'chart' } | { type: 'anchorHost' }>
+  | Exclude<DocRun, { type: 'text' } | { type: 'field' } | { type: 'math' } | { type: 'shape' } | { type: 'image' } | { type: 'chart' } | { type: 'anchorHost' } | { type: 'unavailableDrawing' }>
   | ParagraphAnchorPayloadRun
   | ParagraphAnchorHostRun
   | ParagraphShapeRun

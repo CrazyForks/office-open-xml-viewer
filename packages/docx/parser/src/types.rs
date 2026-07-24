@@ -1109,10 +1109,10 @@ pub enum DocRun {
     // Boxed with Field because these rich payloads otherwise make every run
     // reserve image/field-sized storage; Serde keeps the wire unchanged.
     Image(Box<ImageRun>),
-    /// Parser-private placeholder for a recognized picture/chart whose payload
+    /// Parser-wire placeholder for a recognized picture/chart whose payload
     /// relationship cannot be resolved while its authored DrawingML geometry
-    /// remains valid. Layout preserves that geometry and emits diagnostic no-op
-    /// paint; no fake image path or public resource model is synthesized.
+    /// remains valid. The TypeScript normalization boundary projects this into
+    /// a clone-safe unavailable ImageRun without inventing a resource path.
     UnavailableDrawing(Box<UnavailableDrawingRun>),
     /// ECMA-376 §21.2 DrawingML chart embedded in a `<w:drawing>` whose
     /// `<a:graphicData uri=".../chart">` carries a `<c:chart r:id>`. The chart

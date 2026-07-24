@@ -244,7 +244,7 @@ export function createProductionLayoutServices(
       widthPt: numbering.picBulletWidthPt ?? marker.fontSizePt,
       heightPt: numbering.picBulletHeightPt ?? marker.fontSizePt,
     };
-  });
+  }, options.acquisitionInputs);
   const services: LayoutServices = Object.freeze({
     text,
     images: createImageMetadataService(imageMetadata),
@@ -267,7 +267,10 @@ export function createProductionLayoutServices(
     mathResources.filter((resource) => resource.available !== false)
       .map((resource) => resource.resourceKey),
   );
-  attachPaintResourceRegistry(services, createDocumentPaintResourceRegistry(doc, imageMetadata));
+  attachPaintResourceRegistry(
+    services,
+    createDocumentPaintResourceRegistry(doc, imageMetadata, options.acquisitionInputs),
+  );
   attachVerticalGlyphMeasurementService(services, options.verticalGlyphMeasurement);
   return services;
 }

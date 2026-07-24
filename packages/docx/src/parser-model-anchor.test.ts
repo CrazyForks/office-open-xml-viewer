@@ -128,7 +128,7 @@ describe('private anchor acquisition projection', () => {
     expect(Object.isFrozen(acquired.anchorAcquisitionInput)).toBe(true);
   });
 
-  it('keeps unavailable drawing geometry internal while scoping its anchor facts', () => {
+  it('keeps unavailable drawing recovery clone-safe while scoping its anchor facts', () => {
     const host = {
       type: 'anchorHost', fontSize: 11,
       __anchorOccurrenceId: privateWire.occurrenceId,
@@ -166,7 +166,16 @@ describe('private anchor acquisition projection', () => {
       anchorAcquisitionInput?: typeof privateWire;
     };
 
-    expect(publicParagraph.runs.map((run) => run.type)).toEqual(['anchorHost']);
+    expect(publicParagraph.runs.map((run) => run.type))
+      .toEqual(['anchorHost', 'image']);
+    expect(publicParagraph.runs[1]).toMatchObject({
+      type: 'image',
+      imagePath: '',
+      mimeType: '',
+      unavailableResourceKind: 'image',
+    });
+    expect(publicParagraph.runs[1]).not.toHaveProperty('__anchorAcquisition');
+    expect(publicParagraph.runs[1]).toHaveProperty('recoveryAnchorInput');
     expect(acquired).toMatchObject({
       type: 'unavailableDrawing',
       resourceKind: 'image',
@@ -174,8 +183,18 @@ describe('private anchor acquisition projection', () => {
       heightPt: 10,
     });
     expect(acquired).not.toHaveProperty('__anchorAcquisition');
+    expect(acquired).not.toHaveProperty('recoveryAnchorInput');
     expect(acquired.anchorAcquisitionInput?.occurrenceId)
       .toBe('anchor:body:body:3:wp-anchor-120');
     expect(Object.isFrozen(acquired.anchorAcquisitionInput)).toBe(true);
+
+    const cloned = normalizeInternalDocumentModel(
+      structuredClone(normalized.document),
+    );
+    const clonedParagraph = cloned.document.body[0] as DocParagraph;
+    expect(cloned.bodyModelGateway.acquisitionInputs
+      .paragraphAcquisitionInput(clonedParagraph, {
+        story: 'body', storyInstance: 'body', path: [3],
+      }).runs).toEqual(snapshot.runs);
   });
 });

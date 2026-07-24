@@ -9,6 +9,7 @@ import {
 } from './resources.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { DocxDocumentModel } from '../types.js';
+import { normalizeInternalDocumentModel } from '../parser-model.js';
 
 const source: SourceRef = { story: 'body', storyInstance: 'body', path: [2, 1] };
 
@@ -132,5 +133,52 @@ describe('layout resource snapshots', () => {
       { resourceKey: imageResourceKey({ story: 'endnote', storyInstance: '9', path: [0, 0] }, 'word/media/shared.png'), widthPt: 14, heightPt: 24, mimeType: 'image/png' },
     ]));
     expect(new Set(records.map((record) => record.resourceKey)).size).toBe(records.length);
+  });
+
+  it('keeps authored run indexes after a parser-private unavailable drawing', () => {
+    const doc = {
+      section: {},
+      headers: {},
+      footers: {},
+      body: [{
+        type: 'paragraph',
+        runs: [{
+          type: 'unavailableDrawing',
+          resourceKind: 'image',
+          widthPt: 12,
+          heightPt: 8,
+        }, {
+          type: 'image',
+          imagePath: 'word/media/available.png',
+          mimeType: 'image/png',
+          widthPt: 24,
+          heightPt: 16,
+        }],
+      }],
+    } as unknown as DocxDocumentModel;
+    const normalized = normalizeInternalDocumentModel(doc);
+
+    expect((normalized.document.body[0] as {
+      runs: Array<{ type: string }>;
+    }).runs.map((run) => run.type)).toEqual([
+      'image',
+      'image',
+    ]);
+    expect((normalized.document.body[0] as {
+      runs: Array<{ unavailableResourceKind?: string }>;
+    }).runs[0]?.unavailableResourceKind).toBe('image');
+    expect(documentImageMetadataRecords(
+      normalized.document,
+      undefined,
+      normalized.bodyModelGateway.acquisitionInputs,
+    )).toEqual([{
+      resourceKey: imageResourceKey(
+        { story: 'body', storyInstance: 'body', path: [0, 1] },
+        'word/media/available.png',
+      ),
+      widthPt: 24,
+      heightPt: 16,
+      mimeType: 'image/png',
+    }]);
   });
 });

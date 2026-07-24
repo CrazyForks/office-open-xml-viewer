@@ -1664,24 +1664,35 @@ function textPlanSegment(
     const trailingFitPad = index === (shapedClusters?.length ?? 0) - 1
       ? segment.fitTextTrailingPadPx ?? 0
       : 0;
-    const trailingPunctuationCompression =
-      index === (shapedClusters?.length ?? 0) - 1
-        ? segment.punctuationCompressionPt ?? 0
-        : 0;
+    const precedingPunctuationCompression =
+      segment.punctuationCompressions
+        ?.filter((compression) => compression.end <= cluster.range.start)
+        .reduce((sum, compression) => sum + compression.adjustmentPt, 0)
+      ?? 0;
+    const clusterPunctuationCompression =
+      segment.punctuationCompressions
+        ?.filter((compression) =>
+          compression.end > cluster.range.start
+          && compression.end <= cluster.range.end)
+        .reduce((sum, compression) => sum + compression.adjustmentPt, 0)
+      ?? 0;
     return {
       range: {
         start: sourceOffset + cluster.range.start,
         end: sourceOffset + cluster.range.end,
       },
       offset: {
-        xPt: cluster.offsetPt * scaleX + precedingScalars * pitchPt,
+        xPt:
+          cluster.offsetPt * scaleX
+          + precedingScalars * pitchPt
+          + precedingPunctuationCompression,
         yPt: baselineOffsetPt,
       },
       advancePt:
         cluster.advancePt * scaleX
         + scalarCount * pitchPt
         + trailingFitPad
-        + trailingPunctuationCompression,
+        + clusterPunctuationCompression,
     };
   });
   const {
@@ -1734,7 +1745,12 @@ function textPlanSegment(
             end: sourceOffset + cell.range.end,
           },
           offset: {
-            xPt: cell.originPt,
+            xPt: cell.originPt + (
+              segment.punctuationCompressions
+                ?.filter((compression) => compression.end <= cell.range.start)
+                .reduce((sum, compression) => sum + compression.adjustmentPt, 0)
+              ?? 0
+            ),
             yPt: baselineOffsetPt,
           },
           letterSpacingPt: pitchPt,
@@ -1756,7 +1772,44 @@ function textPlanSegment(
           glyphOrientation: 'upright' as const,
           ...(tateChuYokoScaleY !== 1 ? { scaleY: tateChuYokoScaleY } : {}),
         }))
-      : paintOps;
+      : (segment.punctuationCompressions?.length ?? 0) > 1
+        ? (() => {
+            const template = paintOps[0]!;
+            const groups: Array<{
+              start: number;
+              end: number;
+              offset: typeof clusters[number]['offset'];
+              adjustmentPt: number | null;
+            }> = [];
+            for (const cluster of clusters) {
+              const relativeEnd = cluster.range.end - sourceOffset;
+              const adjustmentPt = segment.punctuationCompressions
+                ?.find((compression) => compression.end === relativeEnd)
+                ?.adjustmentPt ?? null;
+              const previous = groups.at(-1);
+              if (previous && previous.adjustmentPt === adjustmentPt) {
+                previous.end = cluster.range.end;
+              } else {
+                groups.push({
+                  start: cluster.range.start,
+                  end: cluster.range.end,
+                  offset: cluster.offset,
+                  adjustmentPt,
+                });
+              }
+            }
+            return groups.map((group) => ({
+              ...template,
+              text: segment.text.slice(
+                group.start - sourceOffset,
+                group.end - sourceOffset,
+              ),
+              range: { start: group.start, end: group.end },
+              offset: group.offset,
+              letterSpacingPt: pitchPt + (group.adjustmentPt ?? 0),
+            }));
+          })()
+        : paintOps;
   return {
     ...style,
     kind: 'text', measuredWidthPt: segment.measuredWidth,
@@ -1772,7 +1825,9 @@ function textPlanSegment(
       letterSpacingPt:
         segment.verticalRun && operation.glyphOrientation !== 'sideways'
           ? 0
-          : pitchPt,
+          : (segment.punctuationCompressions?.length ?? 0) > 1
+            ? operation.letterSpacingPt
+            : pitchPt,
       ...(!segment.verticalRun && segment.selectedFaceInkBounds
         ? { inkBounds: segment.selectedFaceInkBounds }
         : {}),

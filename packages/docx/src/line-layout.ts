@@ -222,11 +222,15 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  `ctx.letterSpacing` delta on BOTH measure and paint (measure==paint), on top
    *  of any docGrid / justify delta. Absent ⇒ 0. */
   charSpacing?: number;
-  /** ECMA-376 §17.15.1.18 document-level full-width character compression,
-   *  represented separately from authored `w:spacing`. Negative points applied
-   *  once to this segment's trailing advance. The segment ends at the eligible
-   *  grapheme so its preceding text keeps contextual shaping. */
-  punctuationCompressionPt?: number;
+  /** ECMA-376 §17.15.1.18 document-level full-width character compression.
+   * Each entry belongs to one shaped grapheme and adjusts the advance after its
+   * UTF-16 end offset. Keeping the complete list preserves contextual shaping
+   * for consecutive punctuation/kana while retained clusters, wrapping, and
+   * paint all consume the same per-cluster geometry. */
+  punctuationCompressions?: readonly Readonly<{
+    end: number;
+    adjustmentPt: number;
+  }>[];
   /** Effective `w:lang/@w:eastAsia` consumed by the isolated
    *  {@link wordIsOverflowPunctuation} compatibility projection. */
   eastAsiaLanguage?: string;
@@ -1039,6 +1043,27 @@ export function effectiveCharacterSpacingPt(seg: LayoutTextSeg): number {
   return seg.charSpacing ?? 0;
 }
 
+export function punctuationCompressionTotalPt(seg: LayoutTextSeg): number {
+  return seg.punctuationCompressions?.reduce(
+    (sum, compression) => sum + compression.adjustmentPt,
+    0,
+  ) ?? 0;
+}
+
+function slicedPunctuationCompressions(
+  seg: LayoutTextSeg,
+  start: number,
+  end: number,
+): LayoutTextSeg['punctuationCompressions'] {
+  const sliced = seg.punctuationCompressions
+    ?.filter((compression) => compression.end > start && compression.end <= end)
+    .map((compression) => Object.freeze({
+      end: compression.end - start,
+      adjustmentPt: compression.adjustmentPt,
+    }));
+  return sliced && sliced.length > 0 ? Object.freeze(sliced) : undefined;
+}
+
 /** ECMA-376 §17.3.2.43 `<w:w>` — the horizontal glyph-width scale fraction of a
  *  segment (0.67 = 67%). 1 when the run declares no `w:w`. Multiplies the
  *  natural `measureText` width; the paint pass reproduces it with `ctx.scale`. */
@@ -1116,7 +1141,7 @@ export function segAdvanceWidth(
     segmentDelta,
     charScaleFactor(seg),
     charSpacingDeltaPx(seg, scale),
-  ) + (seg.punctuationCompressionPt ?? 0) * scale;
+  ) + punctuationCompressionTotalPt(seg) * scale;
 }
 
 export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
@@ -2434,7 +2459,6 @@ export function buildSegments(
       fontFamily: string | null,
       authoritativeSpan?: TextShapeSpan,
       compressCharacterWhitespace = false,
-      compressedGrapheme?: string,
     ) => {
       // ECMA-376 §17.15.1.18 / §17.18.7 — dispatch the exact
       // ST_CharacterSpacing value and split each eligible full-width character
@@ -2453,23 +2477,7 @@ export function buildSegments(
             grapheme,
             environment.characterSpacingControl,
           ))) {
-          let pending = '';
-          const flushPending = () => {
-            if (pending === '') return;
-            pushSeg(pending, cs, fontFamily);
-            pending = '';
-          };
-          for (const grapheme of graphemes) {
-            pending += grapheme;
-            if (characterSpacingControlCompresses(
-              grapheme,
-              environment.characterSpacingControl,
-            )) {
-              pushSeg(pending, cs, fontFamily, undefined, true, grapheme);
-              pending = '';
-            }
-          }
-          flushPending();
+          pushSeg(text, cs, fontFamily, undefined, true);
           return;
         }
       }
@@ -2501,11 +2509,21 @@ export function buildSegments(
       const shaped = authoritativeSpan
         ? { spans: [authoritativeSpan] }
         : environment.layoutServices?.text.shape(textShapeRequest);
-      const punctuationCompressionPt = compressCharacterWhitespace
+      const punctuationCompressions = compressCharacterWhitespace
         ? (() => {
+            const boundaries = [0, ...graphemeClusterOffsets(text), text.length];
+            const compressions: Array<{ end: number; adjustmentPt: number }> = [];
+            for (let index = 0; index < boundaries.length - 1; index += 1) {
+              const start = boundaries[index]!;
+              const end = boundaries[index + 1]!;
+              const compressedGrapheme = text.slice(start, end);
+              if (!characterSpacingControlCompresses(
+                compressedGrapheme,
+                environment.characterSpacingControl,
+              )) continue;
             const measured = environment.layoutServices?.text.shape({
               ...textShapeRequest,
-              text: compressedGrapheme ?? text,
+              text: compressedGrapheme,
               measure: true,
               clusterGeometry: false,
             });
@@ -2526,7 +2544,7 @@ export function buildSegments(
                     ),
                   );
                   if (!COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION.has(
-                    compressedGrapheme ?? text,
+                    compressedGrapheme,
                   )) {
                     return trailingWhitespacePt;
                   }
@@ -2566,7 +2584,14 @@ export function buildSegments(
             // §17.3.2.43 w:w scales the glyph and both of its sidebearings;
             // trim in the same post-scale coordinate space as segAdvanceWidth.
             const removablePt = removableUnscaledPt * (r.charScale ?? 1);
-            return removablePt > 0 ? -removablePt : undefined;
+              if (removablePt > 0) {
+                compressions.push({ end, adjustmentPt: -removablePt });
+              }
+            }
+            return compressions.length === 0
+              ? undefined
+              : Object.freeze(compressions.map((compression) =>
+                  Object.freeze(compression)));
           })()
         : undefined;
       const resolvedAxisDiffers = shaped?.spans.some((span) =>
@@ -2583,16 +2608,18 @@ export function buildSegments(
               : span.script === 'highAnsi'
                 ? highAnsiFontFamily
                 : base.fontFamily;
-          const trailingCompressedSpan =
-            compressCharacterWhitespace
-            && spanIndex === shaped.spans.length - 1;
+          const compressedSpan = compressCharacterWhitespace
+            && [...span.text].some((grapheme) =>
+              characterSpacingControlCompresses(
+                grapheme,
+                environment.characterSpacingControl,
+              ));
           pushSeg(
             span.text,
             spanCs,
             spanFamily,
             span,
-            trailingCompressedSpan,
-            trailingCompressedSpan ? compressedGrapheme : undefined,
+            compressedSpan,
           );
         }
         return;
@@ -2683,10 +2710,7 @@ export function buildSegments(
         // every emitted segment carries the same values; the measure and paint
         // passes apply them identically (measure==paint).
         charSpacing: r.charSpacing,
-        punctuationCompressionPt:
-          punctuationCompressionPt && punctuationCompressionPt !== 0
-            ? punctuationCompressionPt
-            : undefined,
+        punctuationCompressions,
         eastAsiaLanguage: r.langEastAsia,
         charScale: r.charScale,
         fitTextVal: fitTextRegionIndex === undefined ? undefined : r.fitTextVal,
@@ -2874,12 +2898,15 @@ export function buildSegments(
         measuredWidth: 0,
       });
     } else if (run.type === 'unavailableDrawing') {
+      const acquiredAnchor = 'anchorAcquisitionInput' in run
+        ? run.anchorAcquisitionInput
+        : undefined;
       segs.push({
         imagePath: '',
         mimeType: '',
         widthPt: run.widthPt,
         heightPt: run.heightPt,
-        anchor: run.anchorAcquisitionInput !== undefined,
+        anchor: acquiredAnchor !== undefined,
         anchorXPt: 0,
         anchorYPt: 0,
         anchorXFromMargin: false,
@@ -3722,14 +3749,17 @@ export function layoutLines(
     text: string,
     retainTrailingPunctuationCompression = false,
   ): number => {
-    const retainsTrailingAdjustment =
-      retainTrailingPunctuationCompression || text.length === s.text.length;
+    const start = retainTrailingPunctuationCompression
+      ? s.text.length - text.length
+      : 0;
     const measuredSegment = {
       ...s,
       text,
-      punctuationCompressionPt: retainsTrailingAdjustment
-        ? s.punctuationCompressionPt
-        : undefined,
+      punctuationCompressions: slicedPunctuationCompressions(
+        s,
+        Math.max(0, start),
+        Math.max(0, start) + text.length,
+      ),
     };
     if (s.textLayoutService && s.textShapeRequest) {
       const shaped = s.textLayoutService.shape({
@@ -4429,9 +4459,7 @@ export function layoutLines(
           ...s,
           text: prefix,
           measuredWidth: pw,
-          punctuationCompressionPt: prefix.length === s.text.length
-            ? s.punctuationCompressionPt
-            : undefined,
+          punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
         };
         addToLine(headSeg, pw, h, asc, desc);
         const tail = s.text.slice(prefix.length);
@@ -4439,6 +4467,11 @@ export function layoutLines(
           queue.unshift({
             ...s,
             text: tail,
+            punctuationCompressions: slicedPunctuationCompressions(
+              s,
+              prefix.length,
+              s.text.length,
+            ),
             measuredWidth: 0,
             src: {
               segIndex: s.src!.segIndex,
@@ -4467,6 +4500,11 @@ export function layoutLines(
             retracted = {
               ...lastText,
               text: tailText,
+              punctuationCompressions: slicedPunctuationCompressions(
+                lastText,
+                headText.length,
+                lastText.text.length,
+              ),
               measuredWidth: strAdvance(lastText, tailText, true),
               src: {
                 segIndex: lastText.src!.segIndex,
@@ -4480,9 +4518,11 @@ export function layoutLines(
                 ...lastText,
                 text: headText,
                 measuredWidth: headW,
-                punctuationCompressionPt: headText.length === lastText.text.length
-                  ? lastText.punctuationCompressionPt
-                  : undefined,
+                punctuationCompressions: slicedPunctuationCompressions(
+                  lastText,
+                  0,
+                  headText.length,
+                ),
               };
             } else {
               // Whole last segment moves down. Line metrics (ascent/descent) are
@@ -4509,9 +4549,7 @@ export function layoutLines(
             ...s,
             text: firstChar,
             measuredWidth: fw,
-            punctuationCompressionPt: firstChar.length === s.text.length
-              ? s.punctuationCompressionPt
-              : undefined,
+            punctuationCompressions: slicedPunctuationCompressions(s, 0, firstChar.length),
           };
           addToLine(headSeg, fw, h, asc, desc);
           const tail = s.text.slice(firstChar.length);
@@ -4519,6 +4557,11 @@ export function layoutLines(
             queue.unshift({
               ...s,
               text: tail,
+              punctuationCompressions: slicedPunctuationCompressions(
+                s,
+                firstChar.length,
+                s.text.length,
+              ),
               measuredWidth: 0,
               src: {
                 segIndex: s.src!.segIndex,
@@ -4557,15 +4600,18 @@ export function layoutLines(
           ...s,
           text: prefix,
           measuredWidth: pw,
-          punctuationCompressionPt: prefix.length === s.text.length
-            ? s.punctuationCompressionPt
-            : undefined,
+          punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
         }, pw, h, asc, desc);
         const tail = s.text.slice(split);
         if (tail) {
           queue.unshift({
             ...s,
             text: tail,
+            punctuationCompressions: slicedPunctuationCompressions(
+              s,
+              split,
+              s.text.length,
+            ),
             measuredWidth: 0,
             src: { segIndex: s.src!.segIndex, charOffset: s.src!.charOffset + split },
             seaBreaks: rebaseSeaBreaks(s.seaBreaks, split),
@@ -4593,6 +4639,11 @@ export function layoutLines(
             retracted = {
               ...lastText,
               text: tailText,
+              punctuationCompressions: slicedPunctuationCompressions(
+                lastText,
+                headText.length,
+                lastText.text.length,
+              ),
               measuredWidth: strAdvance(lastText, tailText, true),
               src: {
                 segIndex: lastText.src!.segIndex,
@@ -4607,9 +4658,11 @@ export function layoutLines(
                 ...lastText,
                 text: headText,
                 measuredWidth: headW,
-                punctuationCompressionPt: headText.length === lastText.text.length
-                  ? lastText.punctuationCompressionPt
-                  : undefined,
+                punctuationCompressions: slicedPunctuationCompressions(
+                  lastText,
+                  0,
+                  headText.length,
+                ),
               };
             } else {
               currentWidth -= lastText.measuredWidth;
@@ -4635,15 +4688,18 @@ export function layoutLines(
           ...s,
           text: prefix,
           measuredWidth: pw,
-          punctuationCompressionPt: prefix.length === s.text.length
-            ? s.punctuationCompressionPt
-            : undefined,
+          punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
         }, pw, h, asc, desc);
         const tail = s.text.slice(gsplit);
         if (tail) {
           queue.unshift({
             ...s,
             text: tail,
+            punctuationCompressions: slicedPunctuationCompressions(
+              s,
+              gsplit,
+              s.text.length,
+            ),
             measuredWidth: 0,
             src: { segIndex: s.src!.segIndex, charOffset: s.src!.charOffset + gsplit },
             seaBreaks: rebaseSeaBreaks(s.seaBreaks, gsplit),
@@ -4694,13 +4750,16 @@ export function layoutLines(
           ...s,
           text: prefix,
           measuredWidth: pw,
-          punctuationCompressionPt: prefix.length === s.text.length
-            ? s.punctuationCompressionPt
-            : undefined,
+          punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
         }, pw, h, asc, desc);
         queue.unshift({
           ...s,
           text: s.text.slice(split),
+          punctuationCompressions: slicedPunctuationCompressions(
+            s,
+            split,
+            s.text.length,
+          ),
           measuredWidth: 0,
           src: {
             segIndex: s.src!.segIndex,

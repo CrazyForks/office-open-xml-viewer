@@ -212,6 +212,92 @@ function decodedPart(parts: ReadonlyMap<string, Uint8Array>, name: string): stri
   return new TextDecoder().decode(bytes);
 }
 
+function encodedXml(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+function inlineDrawingCase() {
+  const testCase = CONFORMANCE_CASES.find(({ axes }) =>
+    axes.story === 'body'
+    && axes.container === 'paragraph'
+    && axes.object === 'inline');
+  if (!testCase) throw new Error('conformance corpus lacks a body inline-drawing case');
+  return testCase;
+}
+
+function duplicateInlineDrawingParts(
+  kind: 'image' | 'chart',
+): Map<string, Uint8Array> {
+  const parts = new Map(generateConformanceParts(inlineDrawingCase()));
+  const documentXml = decodedPart(parts, 'word/document.xml');
+  const drawing = documentXml.match(
+    /<w:r><w:drawing>[\s\S]*?<\/w:drawing><\/w:r>/u,
+  )?.[0];
+  if (!drawing) throw new Error('generated inline drawing is unavailable');
+  const relationships = decodedPart(parts, 'word/_rels/document.xml.rels');
+
+  if (kind === 'image') {
+    const missing = drawing.replaceAll('rIdImage', 'rIdMissingImage');
+    const available = drawing
+      .replaceAll('rIdImage', 'rIdAvailableImage')
+      .replaceAll('id="1"', 'id="2"');
+    parts.set(
+      'word/document.xml',
+      encodedXml(documentXml.replace(drawing, `${missing}${available}`)),
+    );
+    parts.set(
+      'word/_rels/document.xml.rels',
+      encodedXml(relationships.replace(
+        /<Relationship Id="rIdImage"[^>]*\/>/u,
+        '<Relationship Id="rIdMissingImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/missing.png"/>'
+        + '<Relationship Id="rIdAvailableImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/pixel.png"/>',
+      )),
+    );
+    return parts;
+  }
+
+  const graphic = (relationshipId: string) =>
+    `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">`
+    + '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+    + `<c:chart r:id="${relationshipId}"/>`
+    + '</a:graphicData></a:graphic>';
+  const chartDrawing = (relationshipId: string, id: string) => drawing
+    .replace(/<a:graphic[\s\S]*<\/a:graphic>/u, graphic(relationshipId))
+    .replaceAll('id="1"', `id="${id}"`);
+  parts.set(
+    'word/document.xml',
+    encodedXml(documentXml.replace(
+      drawing,
+      chartDrawing('rIdMissingChart', '3')
+      + chartDrawing('rIdAvailableChart', '4'),
+    )),
+  );
+  parts.set(
+    'word/_rels/document.xml.rels',
+    encodedXml(relationships.replace(
+      /<Relationship Id="rIdImage"[^>]*\/>/u,
+      '<Relationship Id="rIdMissingChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/missing.xml"/>'
+      + '<Relationship Id="rIdAvailableChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/>',
+    )),
+  );
+  parts.set(
+    '[Content_Types].xml',
+    encodedXml(decodedPart(parts, '[Content_Types].xml').replace(
+      '</Types>',
+      '<Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>',
+    )),
+  );
+  parts.delete('word/media/pixel.png');
+  parts.set('word/charts/chart1.xml', encodedXml(
+    '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+    + '<c:chart><c:plotArea><c:barChart><c:barDir val="col"/>'
+    + '<c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/>'
+    + '<c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt>'
+    + '</c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>',
+  ));
+  return parts;
+}
+
 beforeAll(async () => {
   const wasm = await readFile(new URL('../wasm/docx_parser_bg.wasm', import.meta.url));
   await init({ module_or_path: wasm });
@@ -353,24 +439,60 @@ describe.each(CONFORMANCE_CASES)('$id', (testCase) => {
 });
 
 describe('recoverable missing drawing resources', () => {
+  it.each(['image', 'chart'] as const)(
+    'keeps a valid %s addressable after a missing drawing in authored order',
+    (kind) => {
+      const model = parse(storeZip(duplicateInlineDrawingParts(kind)));
+      const runs = (model.body[0] as DocParagraph).runs;
+      expect(runs.map((run) => run.type)).toEqual([
+        'text',
+        'image',
+        kind,
+      ]);
+      expect(runs[1]).toMatchObject({
+        type: 'image',
+        unavailableResourceKind: kind,
+        imagePath: '',
+      });
+
+      const services = createLayoutServices(model, { measureContext: measureContext() });
+      const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+      assertDocumentLayout(layout);
+      expect(layout.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'MISSING_RESOURCE', severity: 'warning' }),
+      ]));
+      expect(rootRecords(layout)).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'resource',
+          resourceKind: kind,
+        }),
+      ]));
+    },
+  );
+
   it('retains inline geometry and visible content through the real WASM-to-layout pipeline', () => {
-    const testCase = CONFORMANCE_CASES.find(({ axes }) =>
-      axes.story === 'body'
-      && axes.container === 'paragraph'
-      && axes.object === 'inline');
-    if (!testCase) throw new Error('conformance corpus lacks a body inline-drawing case');
+    const testCase = inlineDrawingCase();
     const parts = new Map(generateConformanceParts(testCase));
     parts.delete('word/media/pixel.png');
 
     const model = parse(storeZip(parts));
     expect(records(model).some((record) =>
-      record.type === 'unavailableDrawing')).toBe(false);
-    expect(JSON.stringify(structuredClone(model))).not.toContain('unavailableDrawing');
+      record.type === 'image'
+      && record.unavailableResourceKind === 'image')).toBe(true);
+    expect(JSON.stringify(model)).not.toContain('unavailableDrawing');
+    expect(JSON.stringify(structuredClone(model))).not.toContain('__anchorAcquisition');
 
     const services = createLayoutServices(model, { measureContext: measureContext() });
     const layout = layoutDocument(model, services, { currentDateMs: 0 });
+    const cloned = structuredClone(model);
+    const clonedServices = createLayoutServices(cloned, { measureContext: measureContext() });
+    const clonedLayout = layoutDocument(cloned, clonedServices, { currentDateMs: 0 });
 
     assertDocumentLayout(layout);
+    assertDocumentLayout(clonedLayout);
+    expect(serviceIdentity(clonedServices)).toEqual(serviceIdentity(services));
+    expect(layoutFingerprint(clonedLayout)).toBe(layoutFingerprint(layout));
     expect(targetTextPlacements(layout, testCase.expected.targetText).length)
       .toBeGreaterThan(0);
     expect(layout.diagnostics).toEqual(expect.arrayContaining([
@@ -384,6 +506,43 @@ describe('recoverable missing drawing resources', () => {
         kind: 'drawing',
         commands: [{ kind: 'noop' }],
         flowBounds: expect.objectContaining({ widthPt: 36, heightPt: 21.6 }),
+      }),
+    ]));
+  });
+
+  it('retains anchored recovery geometry after the public model is cloned', () => {
+    const testCase = CONFORMANCE_CASES.find(({ axes }) =>
+      axes.story === 'body'
+      && axes.container === 'paragraph'
+      && axes.object === 'floating');
+    if (!testCase) throw new Error('conformance corpus lacks a body floating-drawing case');
+    const parts = new Map(generateConformanceParts(testCase));
+    parts.delete('word/media/pixel.png');
+
+    const model = parse(storeZip(parts));
+    const cloned = structuredClone(model);
+    expect(records(cloned).some((record) =>
+      record.type === 'image'
+      && record.unavailableResourceKind === 'image')).toBe(true);
+    expect(JSON.stringify(cloned)).not.toContain('unavailableDrawing');
+    expect(JSON.stringify(cloned)).not.toContain('__anchorAcquisition');
+
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+    const clonedServices = createLayoutServices(cloned, { measureContext: measureContext() });
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+    const clonedLayout = layoutDocument(cloned, clonedServices, { currentDateMs: 0 });
+
+    assertDocumentLayout(layout);
+    assertDocumentLayout(clonedLayout);
+    expect(serviceIdentity(clonedServices)).toEqual(serviceIdentity(services));
+    expect(layoutFingerprint(clonedLayout)).toBe(layoutFingerprint(layout));
+    expect(layout.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'MISSING_RESOURCE', severity: 'warning' }),
+    ]));
+    expect(rootRecords(layout)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'drawing',
+        commands: [{ kind: 'noop' }],
       }),
     ]));
   });

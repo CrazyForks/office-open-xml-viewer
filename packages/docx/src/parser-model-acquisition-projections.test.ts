@@ -107,7 +107,7 @@ describe('parser-to-body-acquisition projection capability', () => {
     )).not.toBe(first);
   });
 
-  it('keeps unavailable drawing occurrences in the acquisition sidecar only', () => {
+  it('keeps unavailable drawing geometry clone-safe without widening the public run union', () => {
     const inputParagraph = paragraph();
     const textRun = inputParagraph.runs[0]!;
     inputParagraph.runs = [
@@ -126,7 +126,14 @@ describe('parser-to-body-acquisition projection capability', () => {
     const acquired = normalized.bodyModelGateway.acquisitionInputs
       .paragraphAcquisitionInput(publicParagraph, bodySource());
 
-    expect(publicParagraph.runs.map((run) => run.type)).toEqual(['text', 'text']);
+    expect(publicParagraph.runs.map((run) => run.type))
+      .toEqual(['text', 'image', 'text']);
+    expect(publicParagraph.runs[1]).toMatchObject({
+      type: 'image',
+      imagePath: '',
+      mimeType: '',
+      unavailableResourceKind: 'image',
+    });
     expect(JSON.stringify(structuredClone(normalized.document)))
       .not.toContain('unavailableDrawing');
     expect(acquired.runs.map((run) => run.type))
@@ -136,5 +143,12 @@ describe('parser-to-body-acquisition projection capability', () => {
       widthPt: 24,
       heightPt: 12,
     });
+    const cloned = normalizeInternalDocumentModel(
+      structuredClone(normalized.document),
+    );
+    const clonedParagraph = cloned.document.body[0] as DocParagraph;
+    expect(cloned.bodyModelGateway.acquisitionInputs
+      .paragraphAcquisitionInput(clonedParagraph, bodySource()).runs)
+      .toEqual(acquired.runs);
   });
 });
