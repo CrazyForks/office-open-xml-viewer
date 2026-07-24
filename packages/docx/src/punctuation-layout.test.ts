@@ -347,7 +347,7 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(segments.every((segment) => segment.text !== '\u3099')).toBe(true);
   });
 
-  it('recognizes unambiguous full-width exclamation, question, colon, and semicolon punctuation', () => {
+  it('keeps middle-punctuation spacing pair-aware while compressing full-width dividing punctuation', () => {
     const segments = buildSegments([textRun('！甲？乙：丙；丁')], {
       pageIndex: 0,
       totalPages: 1,
@@ -361,8 +361,6 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(segments[0].punctuationCompressions).toEqual([
       { end: 1, adjustmentPt: -5 },
       { end: 3, adjustmentPt: -5 },
-      { end: 5, adjustmentPt: -5 },
-      { end: 7, adjustmentPt: -5 },
     ]);
   });
 
