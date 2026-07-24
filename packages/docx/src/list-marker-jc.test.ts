@@ -62,6 +62,16 @@ function romanItem(markerText: string, body: string, jc: string): DocParagraph {
   } as unknown as DocParagraph;
 }
 
+function rtlItem(markerText: string, body: string): DocParagraph {
+  return {
+    ...romanItem(markerText, body, 'right'),
+    alignment: 'right',
+    bidi: true,
+    indentLeft: 0,
+    indentRight: 36,
+  } as unknown as DocParagraph;
+}
+
 function doc(paras: DocParagraph[]): DocxDocumentModel {
   return {
     section: {
@@ -104,5 +114,24 @@ describe('list marker lvlJc (§17.9.8)', () => {
     const miii = fills.find((f) => f.text === 'iii.');
     expect(mi!.x).toBeCloseTo(FIRST_LINE_X, 3);
     expect(miii!.x).toBeCloseTo(FIRST_LINE_X, 3);
+  });
+
+  it('keeps an RTL marker beside the physically left-aligned body', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      doc([rtlItem('1.', 'Body')]),
+      canvas,
+      0,
+      { dpr: 1, width: 400 },
+    );
+
+    const marker = fills.find((fill) => fill.text === '1.');
+    const body = fills.find((fill) => fill.text === 'Body');
+    expect(marker, 'RTL marker drawn').toBeDefined();
+    expect(body, 'RTL body drawn').toBeDefined();
+    expect(body!.x).toBeCloseTo(36, 3);
+    expect(marker!.x).toBeCloseTo(94, 3);
+    expect(marker!.x).toBeGreaterThan(body!.x + 4 * 10);
+    expect(marker!.x).toBeLessThan(100);
   });
 });

@@ -1373,6 +1373,24 @@ function retainedNumberingPlan(
   }, service);
 }
 
+function numberingAlignedLeadingEdgePt(
+  plan: RetainedNumberingPlan,
+  context: ParagraphLayoutContext,
+  paragraphXPt: number,
+  availableWidthPt: number,
+  line: LineLayout,
+): number {
+  // Non-empty lines retain their aligned body bounds. A numbering-only line has
+  // zero width and therefore retains the paragraph frame origin instead of a
+  // body origin with the resolved marker suffix offset applied.
+  if (line.bounds.widthPt <= 0) {
+    return context.baseRtl ? paragraphXPt + availableWidthPt : paragraphXPt;
+  }
+  return context.baseRtl
+    ? line.bounds.xPt + line.bounds.widthPt + plan.bodyOffsetPt
+    : line.bounds.xPt - plan.bodyOffsetPt;
+}
+
 function numberingMarkerPlacements(
   plan: RetainedNumberingPlan,
   paragraph: ParagraphAcquisitionInput,
@@ -1385,8 +1403,13 @@ function numberingMarkerPlacements(
   const shape = plan.shape;
   const markerLeftPt = numberingMarkerPhysicalLeft({
     baseRtl: context.baseRtl,
-    paragraphXPt,
-    availableWidthPt,
+    alignedLeadingEdgePt: numberingAlignedLeadingEdgePt(
+      plan,
+      context,
+      paragraphXPt,
+      availableWidthPt,
+      line,
+    ),
     authoredFirstIndentPt: paragraph.indentFirst,
     markerShiftPt: plan.markerShiftPt,
     markerWidthPt: plan.markerWidthPt,
@@ -4387,8 +4410,13 @@ export function paragraphLayoutFromMeasurement(
     }
     const markerLeftPt = numberingMarkerPhysicalLeft({
       baseRtl: options.context.baseRtl,
-      paragraphXPt,
-      availableWidthPt,
+      alignedLeadingEdgePt: numberingAlignedLeadingEdgePt(
+        numberingPlan,
+        options.context,
+        paragraphXPt,
+        availableWidthPt,
+        lines[0],
+      ),
       authoredFirstIndentPt: paragraph.indentFirst,
       markerShiftPt: numberingPlan.markerShiftPt,
       markerWidthPt: widthPt,

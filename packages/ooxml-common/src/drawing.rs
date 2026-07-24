@@ -66,6 +66,7 @@ pub struct DrawingGroupTransform {
     m22: f64,
     tx: f64,
     ty: f64,
+    group_depth: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,6 +93,7 @@ impl DrawingGroupTransform {
         m22: 1.0,
         tx: 0.0,
         ty: 0.0,
+        group_depth: 0,
     };
 
     pub fn from_group(spec: DrawingGroupSpec) -> Self {
@@ -134,6 +136,7 @@ impl DrawingGroupTransform {
             m22,
             tx,
             ty,
+            group_depth: 1,
         }
     }
 
@@ -151,7 +154,12 @@ impl DrawingGroupTransform {
             m22: self.m21 * child.m12 + self.m22 * child.m22,
             tx: self.m11 * child.tx + self.m12 * child.ty + self.tx,
             ty: self.m21 * child.tx + self.m22 * child.ty + self.ty,
+            group_depth: self.group_depth + 1,
         }
+    }
+
+    pub fn group_depth(self) -> u32 {
+        self.group_depth
     }
 
     pub fn map_point(self, x: f64, y: f64) -> (f64, f64) {

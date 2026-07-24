@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
 
+mod drawing_compatibility;
 mod markdown;
 mod math;
 mod numbering;

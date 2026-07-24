@@ -14,6 +14,7 @@ use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
 use zip::ZipArchive;
 
+use crate::drawing_compatibility::apply_word_direct_group_rect;
 use crate::numbering::{LevelDef, NumberingMap};
 use crate::styles::{
     apply_para, apply_run, merge_cond_layers, merge_tab_stops, merge_table_margin_layer,
@@ -7268,15 +7269,18 @@ fn parse_group_pic(
         / 60000.0;
     let leaf_flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
     let leaf_flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
-    let mapped = xform.apply_rect(DrawingRect {
-        x: ox,
-        y: oy,
-        width: cx,
-        height: cy,
-        rotation_degrees: leaf_rotation,
-        flip_h: leaf_flip_h,
-        flip_v: leaf_flip_v,
-    });
+    let mapped = apply_word_direct_group_rect(
+        xform,
+        DrawingRect {
+            x: ox,
+            y: oy,
+            width: cx,
+            height: cy,
+            rotation_degrees: leaf_rotation,
+            flip_h: leaf_flip_h,
+            flip_v: leaf_flip_v,
+        },
+    );
 
     if cx <= 0.0 || cy <= 0.0 {
         return None;
@@ -7717,15 +7721,18 @@ fn parse_wsp_shape(
     // child's original centre to determine translation.
     let (width_pt, height_pt, local_x_pt, local_y_pt, rotation, flip_h, flip_v) =
         if let Some(transform) = group_transform {
-            let mapped = transform.apply_rect(DrawingRect {
-                x: ox,
-                y: oy,
-                width: cx,
-                height: cy,
-                rotation_degrees: rotation,
-                flip_h,
-                flip_v,
-            });
+            let mapped = apply_word_direct_group_rect(
+                transform,
+                DrawingRect {
+                    x: ox,
+                    y: oy,
+                    width: cx,
+                    height: cy,
+                    rotation_degrees: rotation,
+                    flip_h,
+                    flip_v,
+                },
+            );
             (
                 mapped.width / 12700.0,
                 mapped.height / 12700.0,
@@ -24061,9 +24068,9 @@ mod vml_pict_tests {
 mod wgp_shape_transform_tests {
     use super::*;
 
-    /// Annex L §L.4.7.4–§L.4.7.5: horizontal/vertical scales are multiplied on
-    /// their authored axes; child rotation is summed independently. The full
-    /// group transform maps the child's original centre.
+    /// Word applies a non-uniform group scale after an exact child quarter turn,
+    /// so the parent scale axes exchange against the child's unrotated frame.
+    /// The full group transform still maps the child's original centre.
     #[test]
     fn quarter_turned_child_composes_non_uniform_group_scale_about_its_center() {
         let xml = r#"
@@ -24102,17 +24109,17 @@ mod wgp_shape_transform_tests {
         let shape = &shapes[0];
         assert!((shape.rotation - 90.0).abs() < 1e-6);
         assert!(
-            (shape.width_pt - 10.0).abs() < 1e-6,
+            (shape.width_pt - 20.0).abs() < 1e-6,
             "width={}",
             shape.width_pt
         );
         assert!(
-            (shape.height_pt - 4.0).abs() < 1e-6,
+            (shape.height_pt - 2.0).abs() < 1e-6,
             "height={}",
             shape.height_pt
         );
         assert!(
-            (shape.anchor_y_pt - 8.0).abs() < 1e-6,
+            (shape.anchor_y_pt - 9.0).abs() < 1e-6,
             "y={}",
             shape.anchor_y_pt
         );
