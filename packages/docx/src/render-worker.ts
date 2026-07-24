@@ -112,7 +112,12 @@ self.onmessage = async (e: MessageEvent<RenderWorkerRequest>) => {
       });
       const model = normalizeInternalDocumentModel(parsedModel).document;
       if (documentRequiresDomVerticalGlyphLayout(model)) {
-        const encoded = new TextEncoder().encode(JSON.stringify(model));
+        // The normalized public model deliberately omits parser-only sidecars
+        // such as unavailable-drawing geometry. Send the untouched parser wire
+        // to the main-thread fallback so its normalization boundary can rebuild
+        // those identity-owned acquisition facts without exposing them through
+        // `DocxDocument.document`.
+        const encoded = new TextEncoder().encode(JSON.stringify(parsedModel));
         const documentJson = encoded.buffer.slice(
           encoded.byteOffset,
           encoded.byteOffset + encoded.byteLength,

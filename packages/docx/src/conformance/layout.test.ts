@@ -363,15 +363,9 @@ describe('recoverable missing drawing resources', () => {
     parts.delete('word/media/pixel.png');
 
     const model = parse(storeZip(parts));
-    const unavailable = records(model).find((record) =>
-      record.type === 'unavailableDrawing');
-    expect(unavailable).toMatchObject({
-      type: 'unavailableDrawing',
-      resourceKind: 'image',
-      widthPt: 36,
-      heightPt: 21.6,
-    });
-    expect(unavailable).not.toHaveProperty('imagePath');
+    expect(records(model).some((record) =>
+      record.type === 'unavailableDrawing')).toBe(false);
+    expect(JSON.stringify(structuredClone(model))).not.toContain('unavailableDrawing');
 
     const services = createLayoutServices(model, { measureContext: measureContext() });
     const layout = layoutDocument(model, services, { currentDateMs: 0 });

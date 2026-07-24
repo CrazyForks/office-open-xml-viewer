@@ -106,4 +106,35 @@ describe('parser-to-body-acquisition projection capability', () => {
       bodySource(),
     )).not.toBe(first);
   });
+
+  it('keeps unavailable drawing occurrences in the acquisition sidecar only', () => {
+    const inputParagraph = paragraph();
+    const textRun = inputParagraph.runs[0]!;
+    inputParagraph.runs = [
+      textRun,
+      {
+        type: 'unavailableDrawing',
+        resourceKind: 'image',
+        widthPt: 24,
+        heightPt: 12,
+      },
+      { ...textRun, text: 'after unavailable drawing' },
+    ] as unknown as DocParagraph['runs'];
+
+    const normalized = normalizeInternalDocumentModel(document(inputParagraph));
+    const publicParagraph = normalized.document.body[0] as DocParagraph;
+    const acquired = normalized.bodyModelGateway.acquisitionInputs
+      .paragraphAcquisitionInput(publicParagraph, bodySource());
+
+    expect(publicParagraph.runs.map((run) => run.type)).toEqual(['text', 'text']);
+    expect(JSON.stringify(structuredClone(normalized.document)))
+      .not.toContain('unavailableDrawing');
+    expect(acquired.runs.map((run) => run.type))
+      .toEqual(['text', 'unavailableDrawing', 'text']);
+    expect(acquired.runs[1]).toMatchObject({
+      resourceKind: 'image',
+      widthPt: 24,
+      heightPt: 12,
+    });
+  });
 });

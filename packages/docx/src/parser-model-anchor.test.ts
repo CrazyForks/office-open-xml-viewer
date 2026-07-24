@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   anchorAcquisitionInput,
+  normalizeInternalDocumentModel,
   paragraphAcquisitionInput,
 } from './parser-model.js';
-import type { DocParagraph, ImageRun } from './types.js';
+import type { DocParagraph, DocxDocumentModel, ImageRun } from './types.js';
 
 const privateWire = {
   occurrenceId: 'wp-anchor-120',
@@ -140,18 +141,32 @@ describe('private anchor acquisition projection', () => {
       __anchorAcquisition: privateWire,
     };
     const paragraph = {
+      type: 'paragraph',
       alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
       spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null,
       tabStops: [], runs: [host, unavailable],
     } as unknown as DocParagraph;
 
-    const snapshot = paragraphAcquisitionInput(paragraph, {
+    const normalized = normalizeInternalDocumentModel({
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+      },
+      body: [paragraph],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as unknown as DocxDocumentModel);
+    const publicParagraph = normalized.document.body[0] as DocParagraph;
+    const snapshot = normalized.bodyModelGateway.acquisitionInputs
+      .paragraphAcquisitionInput(publicParagraph, {
       story: 'body', storyInstance: 'body', path: [3],
     });
     const acquired = snapshot.runs[1] as unknown as Record<string, unknown> & {
       anchorAcquisitionInput?: typeof privateWire;
     };
 
+    expect(publicParagraph.runs.map((run) => run.type)).toEqual(['anchorHost']);
     expect(acquired).toMatchObject({
       type: 'unavailableDrawing',
       resourceKind: 'image',
