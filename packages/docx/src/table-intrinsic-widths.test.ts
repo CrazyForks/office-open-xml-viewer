@@ -34,8 +34,11 @@ function measuringContext(
     letterSpacing: '0px',
     fontKerning: 'auto',
     measureText(text: string) {
+      const width = widthOf(text);
       return {
-        width: widthOf(text),
+        width,
+        actualBoundingBoxLeft: 0,
+        actualBoundingBoxRight: /^[、。]$/u.test(text) ? width / 2 : width,
         fontBoundingBoxAscent: 8,
         fontBoundingBoxDescent: 2,
         actualBoundingBoxAscent: 8,
@@ -288,6 +291,30 @@ describe('table intrinsic content widths', () => {
     ])])], [0]);
 
     expect(resolveColumnWidths(source, 200, columnState(ctx))).toEqual([15]);
+  });
+
+  it('retains every rebased punctuation compression across compatible run seams', () => {
+    const ctx = measuringContext();
+    const document = model([]);
+    const services = createLayoutServices(document, { measureContext: ctx });
+    const source = paragraph([textRun('甲、'), textRun('乙。')]);
+
+    const intrinsic = measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext(),
+      200,
+      { context: ctx, fontFamilyClasses: {} },
+      {
+        pageIndex: 0,
+        totalPages: 1,
+        pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+        characterSpacingControl: 'compressPunctuation',
+        layoutServices: services,
+      },
+    );
+
+    expect(intrinsic.maxWidthPt).toBeCloseTo(15, 5);
   });
 
   it('does not acquire content widths for fixed-layout columns', () => {

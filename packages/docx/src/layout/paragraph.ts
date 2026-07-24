@@ -1717,6 +1717,8 @@ function textPlanSegment(
           : 1;
       })()
     : 1;
+  const hasInternalPunctuationCompression = segment.punctuationCompressions
+    ?.some((compression) => compression.end < segment.text.length) ?? false;
   const basePaintOps = segment.verticalRun
     ? (() => {
         if (!verticalGlyphMeasurement) {
@@ -1772,7 +1774,7 @@ function textPlanSegment(
           glyphOrientation: 'upright' as const,
           ...(tateChuYokoScaleY !== 1 ? { scaleY: tateChuYokoScaleY } : {}),
         }))
-      : (segment.punctuationCompressions?.length ?? 0) > 1
+      : hasInternalPunctuationCompression
         ? (() => {
             const template = paintOps[0]!;
             const groups: Array<{
@@ -1825,7 +1827,7 @@ function textPlanSegment(
       letterSpacingPt:
         segment.verticalRun && operation.glyphOrientation !== 'sideways'
           ? 0
-          : (segment.punctuationCompressions?.length ?? 0) > 1
+          : hasInternalPunctuationCompression
             ? operation.letterSpacingPt
             : pitchPt,
       ...(!segment.verticalRun && segment.selectedFaceInkBounds

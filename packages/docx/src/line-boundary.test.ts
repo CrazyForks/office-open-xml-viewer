@@ -240,6 +240,27 @@ function lineStructure(lines: LayoutLine[]) {
   }));
 }
 
+describe('resumed text segment geometry', () => {
+  it('rebases punctuation compressions after the pagination boundary', () => {
+    const resumed = layoutFixture({
+      name: 'compressed punctuation resume',
+      width: 100,
+      segs: () => [textSeg('甲、乙。丙', {
+        punctuationCompressions: [
+          { end: 2, adjustmentPt: -5 },
+          { end: 4, adjustmentPt: -5 },
+        ],
+      })],
+    }, { segIndex: 0, charOffset: 2 });
+    const first = resumed[0]?.segments[0];
+
+    expect(first && 'text' in first ? first.text : undefined).toBe('乙。丙');
+    expect(first && 'text' in first ? first.punctuationCompressions : undefined)
+      .toEqual([{ end: 2, adjustmentPt: -5 }]);
+    expect(first?.measuredWidth).toBeCloseTo(10, 5);
+  });
+});
+
 function textSequence(lines: LayoutLine[]): string[] {
   return lines.map((line) => line.segments
     .filter((segment): segment is LayoutTextSeg => 'text' in segment)

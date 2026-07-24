@@ -66,7 +66,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[] }
         // The punctuation fixture exposes a selected-glyph right ink edge at
         // half its full-width cell. Other text fills its complete advance.
         actualBoundingBoxRight:
-          [...s].length === 1 && /[．しない）]/u.test(s) ? p / 2 : w,
+          [...s].length === 1 && /[、．しない）]/u.test(s) ? p / 2 : w,
         fontBoundingBoxAscent: p * 0.8,
         fontBoundingBoxDescent: p * 0.2,
         actualBoundingBoxAscent: p * 0.8,
@@ -193,6 +193,23 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(drawOf(fills, 'しない）').letterSpacing).toBe('-10px');
     expect(fills.some(({ text }) => text === '）')).toBe(false);
     expect(drawOf(fills, '次').x).toBeCloseTo(80, 5);
+  });
+
+  it('paints a single internal punctuation compression at its retained cluster offsets', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const model = {
+      ...doc([para([textRun('甲、乙')])], section()),
+      settings: { characterSpacingControl: 'compressPunctuation' },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const first = drawOf(fills, '甲');
+    const punctuation = drawOf(fills, '、');
+    const following = drawOf(fills, '乙');
+    expect(punctuation.letterSpacing).toBe('-10px');
+    expect(punctuation.x - first.x).toBeCloseTo(20, 5);
+    expect(following.x - first.x).toBeCloseTo(30, 5);
   });
 
   it('does not collapse middle-punctuation advance into the following glyph', async () => {

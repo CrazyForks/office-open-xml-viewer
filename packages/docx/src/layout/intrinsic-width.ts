@@ -103,7 +103,6 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.fontRoute ?? null,
     segment.charScale ?? 1,
     segment.charSpacing ?? 0,
-    punctuationCompressionTotalPt(segment),
     segment.fitTextPerGapPx ?? null,
     segment.fitTextTrailingPadPx ?? null,
     segment.fitTextRegionIndex ?? null,
@@ -137,10 +136,21 @@ function mergeCompatibleTextSegments(segments: readonly LayoutSeg[]): LayoutSeg[
       && 'text' in segment
       && compatibleTextKey(previous) === compatibleTextKey(segment)
     ) {
+      const previousTextLength = previous.text.length;
       const text = previous.text + segment.text;
+      const punctuationCompressions = [
+        ...(previous.punctuationCompressions ?? []),
+        ...(segment.punctuationCompressions ?? []).map((compression) => ({
+          end: previousTextLength + compression.end,
+          adjustmentPt: compression.adjustmentPt,
+        })),
+      ];
       merged[merged.length - 1] = {
         ...previous,
         text,
+        punctuationCompressions: punctuationCompressions.length > 0
+          ? punctuationCompressions
+          : undefined,
         textShapeRequest: previous.textShapeRequest
           ? { ...previous.textShapeRequest, text }
           : undefined,

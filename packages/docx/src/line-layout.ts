@@ -3703,6 +3703,11 @@ export function layoutLines(
                 text,
                 measuredWidth: 0,
                 src: { ...startBoundary },
+                punctuationCompressions: slicedPunctuationCompressions(
+                  first,
+                  startBoundary.charOffset,
+                  first.text.length,
+                ),
                 // Rebase the SEA break offsets onto the resumed (sliced) text so
                 // a paginated Thai paragraph still breaks at word boundaries.
                 seaBreaks: rebaseSeaBreaks(first.seaBreaks, startBoundary.charOffset),
