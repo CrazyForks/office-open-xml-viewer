@@ -1064,6 +1064,108 @@ export function slicedPunctuationCompressions(
   return sliced && sliced.length > 0 ? Object.freeze(sliced) : undefined;
 }
 
+function tightHorizontalGraphemeInk(
+  segment: LayoutTextSeg,
+  grapheme: string,
+): Readonly<{ advancePt: number; xMinPt: number; xMaxPt: number }> | undefined {
+  if (!segment.textLayoutService || !segment.textShapeRequest || grapheme.length === 0) {
+    return undefined;
+  }
+  const shaped = segment.textLayoutService.shape({
+    ...segment.textShapeRequest,
+    text: grapheme,
+    measure: true,
+    clusterGeometry: false,
+  });
+  if (
+    shaped.horizontalInkBoundsAreTight !== true
+    || !shaped.inkBounds
+    || !Number.isFinite(shaped.advancePt)
+    || !Number.isFinite(shaped.inkBounds.xMinPt)
+    || !Number.isFinite(shaped.inkBounds.xMaxPt)
+  ) {
+    return undefined;
+  }
+  const scale = segment.charScale ?? 1;
+  return {
+    advancePt: shaped.advancePt * scale,
+    xMinPt: shaped.inkBounds.xMinPt * scale,
+    xMaxPt: shaped.inkBounds.xMaxPt * scale,
+  };
+}
+
+/**
+ * Bound document-level punctuation compression by the adjacent glyphs' tight
+ * horizontal ink. The punctuation's own trailing sidebearing is not the whole
+ * collision equation: a following glyph may extend left of its advance origin.
+ * Resolve this after all source runs have been segmented so a formatting seam
+ * cannot reintroduce the overlap.
+ */
+function retainHorizontalPunctuationInkClearance(segs: LayoutSeg[]): void {
+  let pending: Readonly<{
+    segment: LayoutTextSeg;
+    compressionIndex: number;
+    ink: Readonly<{ advancePt: number; xMinPt: number; xMaxPt: number }>;
+  }> | undefined;
+  const adjustedBySegment = new Map<
+    LayoutTextSeg,
+    Array<{ end: number; adjustmentPt: number }>
+  >();
+  for (const candidate of segs) {
+    if (!('text' in candidate) || candidate.verticalRun) {
+      pending = undefined;
+      continue;
+    }
+    const segment = candidate;
+    const compressions = segment.punctuationCompressions ?? [];
+    const compressionIndexByEnd = new Map(
+      compressions.map((compression, index) => [compression.end, index]),
+    );
+    const boundaries = [0, ...graphemeClusterOffsets(segment.text), segment.text.length];
+    for (let index = 0; index < boundaries.length - 1; index += 1) {
+      const start = boundaries[index]!;
+      const end = boundaries[index + 1]!;
+      if (end <= start) continue;
+      const compressionIndex = compressionIndexByEnd.get(end);
+      const currentInk = pending || compressionIndex !== undefined
+        ? tightHorizontalGraphemeInk(segment, segment.text.slice(start, end))
+        : undefined;
+      if (pending && currentInk) {
+        const adjustments = adjustedBySegment.get(pending.segment)
+          ?? pending.segment.punctuationCompressions!.map((compression) => ({
+            ...compression,
+          }));
+        const compression = adjustments[pending.compressionIndex]!;
+        const collisionSafeAdjustmentPt = Math.min(
+          0,
+          pending.ink.xMaxPt
+            - currentInk.xMinPt
+            - pending.ink.advancePt,
+        );
+        const adjustmentPt = Math.max(
+          compression.adjustmentPt,
+          collisionSafeAdjustmentPt,
+        );
+        if (adjustmentPt !== compression.adjustmentPt) {
+          adjustments[pending.compressionIndex] = {
+            end: compression.end,
+            adjustmentPt,
+          };
+          adjustedBySegment.set(pending.segment, adjustments);
+        }
+      }
+      pending = compressionIndex !== undefined && currentInk
+        ? { segment, compressionIndex, ink: currentInk }
+        : undefined;
+    }
+  }
+  for (const [segment, adjusted] of adjustedBySegment) {
+    segment.punctuationCompressions = Object.freeze(
+      adjusted.map((compression) => Object.freeze(compression)),
+    );
+  }
+}
+
 /** ECMA-376 §17.3.2.43 `<w:w>` — the horizontal glyph-width scale fraction of a
  *  segment (0.67 = 67%). 1 when the run declares no `w:w`. Multiplies the
  *  natural `measureText` width; the paint pass reproduces it with `ctx.scale`. */
@@ -3083,6 +3185,8 @@ export function buildSegments(
       seenFitTextRegions.add(seg.fitTextRegionIndex);
     }
   }
+
+  retainHorizontalPunctuationInkClearance(segs);
 
   return segs;
 }
