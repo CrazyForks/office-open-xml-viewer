@@ -314,7 +314,10 @@ describe('table intrinsic content widths', () => {
       },
     );
 
-    expect(intrinsic.maxWidthPt).toBeCloseTo(15, 5);
+    expect(intrinsic).toEqual({
+      minWidthPt: 7.5,
+      maxWidthPt: 15,
+    });
   });
 
   it('does not acquire content widths for fixed-layout columns', () => {

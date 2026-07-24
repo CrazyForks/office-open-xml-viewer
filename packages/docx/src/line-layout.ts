@@ -1050,7 +1050,7 @@ export function punctuationCompressionTotalPt(seg: LayoutTextSeg): number {
   ) ?? 0;
 }
 
-function slicedPunctuationCompressions(
+export function slicedPunctuationCompressions(
   seg: LayoutTextSeg,
   start: number,
   end: number,

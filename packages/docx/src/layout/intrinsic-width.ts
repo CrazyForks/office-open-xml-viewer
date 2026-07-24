@@ -8,6 +8,7 @@ import {
   layoutLines,
   punctuationCompressionTotalPt,
   segAdvanceWidth,
+  slicedPunctuationCompressions,
   splitTextForLayout,
   type LayoutLine,
   type LayoutSeg,
@@ -176,7 +177,17 @@ function measureTextRange(
     const overlapEnd = Math.min(end, piece.end);
     if (overlapStart >= overlapEnd) continue;
     const text = joinedText.slice(overlapStart, overlapEnd);
-    const candidate = { ...piece.segment, text };
+    const localStart = overlapStart - piece.start;
+    const localEnd = overlapEnd - piece.start;
+    const candidate = {
+      ...piece.segment,
+      text,
+      punctuationCompressions: slicedPunctuationCompressions(
+        piece.segment,
+        localStart,
+        localEnd,
+      ),
+    };
     if (candidate.textLayoutService && candidate.textShapeRequest) {
       const shaped = candidate.textLayoutService.shape({
         ...candidate.textShapeRequest,
