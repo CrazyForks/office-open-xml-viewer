@@ -14,6 +14,7 @@ use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
 use zip::ZipArchive;
 
+use crate::drawing_compatibility::apply_word_direct_group_rect;
 use crate::numbering::{LevelDef, NumberingMap};
 use crate::styles::{
     apply_para, apply_run, merge_cond_layers, merge_tab_stops, merge_table_margin_layer,
@@ -7268,15 +7269,18 @@ fn parse_group_pic(
         / 60000.0;
     let leaf_flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
     let leaf_flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
-    let mapped = xform.apply_rect(DrawingRect {
-        x: ox,
-        y: oy,
-        width: cx,
-        height: cy,
-        rotation_degrees: leaf_rotation,
-        flip_h: leaf_flip_h,
-        flip_v: leaf_flip_v,
-    });
+    let mapped = apply_word_direct_group_rect(
+        xform,
+        DrawingRect {
+            x: ox,
+            y: oy,
+            width: cx,
+            height: cy,
+            rotation_degrees: leaf_rotation,
+            flip_h: leaf_flip_h,
+            flip_v: leaf_flip_v,
+        },
+    );
 
     if cx <= 0.0 || cy <= 0.0 {
         return None;
@@ -7717,15 +7721,18 @@ fn parse_wsp_shape(
     // child's original centre to determine translation.
     let (width_pt, height_pt, local_x_pt, local_y_pt, rotation, flip_h, flip_v) =
         if let Some(transform) = group_transform {
-            let mapped = transform.apply_rect(DrawingRect {
-                x: ox,
-                y: oy,
-                width: cx,
-                height: cy,
-                rotation_degrees: rotation,
-                flip_h,
-                flip_v,
-            });
+            let mapped = apply_word_direct_group_rect(
+                transform,
+                DrawingRect {
+                    x: ox,
+                    y: oy,
+                    width: cx,
+                    height: cy,
+                    rotation_degrees: rotation,
+                    flip_h,
+                    flip_v,
+                },
+            );
             (
                 mapped.width / 12700.0,
                 mapped.height / 12700.0,
