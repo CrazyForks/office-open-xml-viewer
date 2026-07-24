@@ -32,6 +32,10 @@ A browser-based viewer for Office Open XML documents that renders to an HTML Can
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
 Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://ooxml.silurus.dev/storybook/).
 
+## Project scope: read-only viewing
+
+This project is intentionally a **read-only viewer**. Editing interfaces, mutation APIs, editable or lossless document models, saving / round-tripping, and partial editing of DOCX, XLSX, or PPTX files are out of scope. Read-only interactions such as selection, copy, search, shape IDs, hit testing, and annotation or external-tool integrations remain in scope, and editing-focused forks are welcome. See [#496](https://github.com/yukiyokotani/office-open-xml-viewer/issues/496) for the rationale.
+
 | DOCX | XLSX | PPTX |
 |:---:|:---:|:---:|
 | ![docx](docs/images/docx.png) | ![xlsx](docs/images/xlsx.png) | ![pptx](docs/images/pptx.png) |
